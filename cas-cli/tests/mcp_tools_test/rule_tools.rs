@@ -981,3 +981,124 @@ async fn test_rule_delete() {
     let text = extract_text(result);
     assert!(text.contains("Retired") && text.contains("history retained"));
 }
+
+/// cas-caae (skills audit M27): a Gabber Studio rule became the only proven
+/// rule in cas-src's store. A rule naming another registered project is now
+/// refused with an actionable message, unless tagged `project:<slug>`.
+#[tokio::test]
+async fn rule_create_refuses_rule_naming_another_registered_project_cas_caae() {
+    let (_temp, service) = setup_cas();
+    register_host_project("/nonexistent/zephyr-quokka");
+    let create = |tags: Option<&str>| RuleCreateRequest {
+        scope: "project".to_string(),
+        content: "Zephyr Quokka branching: ALWAYS cut new branches from `staging`".to_string(),
+        paths: None,
+        tags: tags.map(str::to_string),
+        source_ids: None,
+        auto_approve_tools: None,
+        auto_approve_paths: None,
+    };
+
+    let refusal = service
+        .cas_rule_create(Parameters(create(Some("git"))))
+        .await
+        .expect_err("a rule naming another registered project is refused");
+    assert!(refusal.message.contains("zephyr-quokka"), "{}", refusal.message);
+    assert!(
+        refusal.message.contains("`project:zephyr-quokka`"),
+        "the refusal names the opt-in marker: {}",
+        refusal.message
+    );
+
+    let text = extract_text(
+        service
+            .cas_rule_create(Parameters(create(Some("git,project:zephyr-quokka"))))
+            .await
+            .expect("an explicitly scoped rule is accepted"),
+    );
+    assert!(text.contains("Created rule"), "{text}");
+}
+
+/// Audit D11 (cas-228e): `promote` is the reviewer's explicit decision. It
+/// needs a reason, records it in history, never adds a helpful vote beyond
+/// the rule-file sync floor, and refuses rules with harmful reports.
+#[tokio::test]
+async fn rule_promote_is_a_recorded_decision_not_a_vote_cas_228e() {
+    let (temp, service) = setup_cas();
+    let create = |content: &str| RuleCreateRequest {
+        scope: "project".to_string(),
+        content: content.to_string(),
+        paths: None,
+        tags: None,
+        source_ids: None,
+        auto_approve_tools: None,
+        auto_approve_paths: None,
+    };
+    let id = extract_rule_id(&extract_text(
+        service
+            .cas_rule_create(Parameters(create("Set busy_timeout on every SQLite connection")))
+            .await
+            .unwrap(),
+    ))
+    .expect("rule ID");
+
+    let missing_reason = service
+        .cas_rule_promote(id.clone(), None, None)
+        .await
+        .expect_err("promote without change_note is refused");
+    assert!(missing_reason.message.contains("change_note"), "{}", missing_reason.message);
+
+    let text = extract_text(
+        service
+            .cas_rule_promote(
+                id.clone(),
+                Some("caught two lock-timeout rejections".to_string()),
+                Some("rule-reviewer".to_string()),
+            )
+            .await
+            .expect("promote with a reason succeeds"),
+    );
+    assert!(text.contains("Promoted"), "{text}");
+
+    let store = open_rule_store(&temp.path().join(".cas")).unwrap();
+    let rule = store.get(&id).unwrap();
+    assert_eq!(rule.status, RuleStatus::Proven);
+    assert_eq!(rule.helpful_count, 1, "raised only to the default sync floor");
+    let history = store.list_versions(&id).unwrap();
+    assert!(
+        history
+            .iter()
+            .any(|version| version.change_note.contains("caught two lock-timeout rejections")),
+        "the reason is recorded in rule history: {history:?}"
+    );
+    assert!(
+        temp.path().join(format!(".claude/rules/cas/{id}.md")).exists(),
+        "a promoted rule is synced to Claude Code"
+    );
+
+    let again = extract_text(
+        service
+            .cas_rule_promote(id.clone(), Some("again".to_string()), None)
+            .await
+            .unwrap(),
+    );
+    assert!(again.contains("already Proven"), "{again}");
+    assert_eq!(store.get(&id).unwrap().helpful_count, 1, "no vote added");
+
+    let harmful_id = extract_rule_id(&extract_text(
+        service
+            .cas_rule_create(Parameters(create("Prefer tabs in YAML")))
+            .await
+            .unwrap(),
+    ))
+    .expect("rule ID");
+    service
+        .cas_rule_harmful(Parameters(IdRequest { id: harmful_id.clone() }))
+        .await
+        .unwrap();
+    let refused = service
+        .cas_rule_promote(harmful_id, Some("looks fine".to_string()), None)
+        .await
+        .expect_err("a rule with harmful reports is not promoted");
+    assert!(refused.message.contains("harmful"), "{}", refused.message);
+}

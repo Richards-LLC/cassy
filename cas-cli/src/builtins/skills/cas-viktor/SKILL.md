@@ -1,7 +1,8 @@
 ---
 name: cas-viktor
 description: Use when a task needs long-horizon or parallel research, independent external verification, or a durable answer from Viktor through the managed CAS gateway.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Viktor delegation
@@ -13,9 +14,9 @@ gateway contract](references/gateway.md) before a paid or run-starting call.
 ## Gateway procedure
 
 1. Discover the currently connected Viktor surface with
-   `mcp__cas__mcp_search` using `server:viktor`.
+   `mcp_search` using `server:viktor`.
 2. Call only an advertised, allowlisted route through
-   `mcp__cas__mcp_execute`.
+   `mcp_execute`.
 3. Include the active task id and a bounded objective in the request.
 4. Let CAS watch the result and deliver it as an inbound notification; do not
    poll provider run endpoints yourself.
@@ -23,20 +24,24 @@ gateway contract](references/gateway.md) before a paid or run-starting call.
 The dispatch shape is a JSON string passed through the `code` parameter:
 
 ```text
-mcp__cas__mcp_search(code="server:viktor", max_length=4000)
-mcp__cas__mcp_execute(code="{\"server\":\"viktor\",\"tool\":\"whoami\",\"args\":{}}", max_length=4000)
-mcp__cas__mcp_execute(code="{\"server\":\"viktor\",\"tool\":\"ask_viktor\",\"args\":{\"question\":\"Review this bounded question\",\"cas_task_id\":\"<task-id>\"}}", max_length=8000)
+mcp_search(code="server:viktor", max_length=4000)
+mcp_execute(code="{\"server\":\"viktor\",\"tool\":\"whoami\",\"args\":{}}", max_length=4000)
+mcp_execute(code="{\"server\":\"viktor\",\"tool\":\"ask_viktor\",\"args\":{\"message\":\"Review this bounded question\",\"metadata\":{\"cas_task_id\":\"<task-id>\"},\"idempotency_key\":\"<task-id>-<n>\"}}", max_length=8000)
 ```
 
-The JSON dispatch form is equivalent to the proxy's dot-call form when that
-route advertises it. Never invent a tool name, send a key in `code`, or bypass
+`ask_viktor` requires `message`; `metadata` is optional context. CAS attributes
+the run to your active task from your lease, not from the arguments. The JSON
+dispatch form is equivalent to the proxy's dot-call form when that route
+advertises it. Never invent a tool name, send a key in `code`, or bypass
 the allowlist.
 
 ## Replies, cost, and timeout
 
 Run-starting calls can spend credits and outlive the client connection. Use a
-bounded question, never automatically retry an uncertain start, and reconcile
-the returned thread or run before attempting another call. CAS watches
+bounded question and pass an `idempotency_key` (for example `<task-id>-<n>`)
+on every start. A retry with the same key after an uncertain start is safe;
+never retry an uncertain start without one, and reconcile the returned thread
+or run before attempting a new call. CAS watches
 successful `ask_viktor`, `create_thread`, and `send_message` calls and queues
 completed results with `origin=viktor`. If a Viktor-originated question arrives,
 reply on its supplied thread rather than creating a replacement.

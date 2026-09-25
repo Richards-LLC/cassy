@@ -21,11 +21,9 @@ fn source(flavor: &str, relative: &str) -> &'static str {
 
 #[test]
 fn mcp_and_viktor_guidance_use_the_cassy_surface() {
-    for (flavor, prefix) in [
-        ("", "mcp__cas__"),
-        ("codex", "mcp__cs__"),
-        ("grok", "cas__"),
-    ] {
+    // Audit D1: every flavor names Cassy tools by bare name.
+    let prefix = "";
+    for flavor in ["", "codex", "grok"] {
         let mcp = source(flavor, "skills/mcp-integration/SKILL.md");
         for marker in [
             "cas mcp add",
@@ -75,7 +73,7 @@ fn mcp_and_viktor_guidance_use_the_cassy_surface() {
 #[test]
 fn release_notes_are_generic_procedure_and_rubric_driven() {
     for flavor in ["", "codex", "grok"] {
-        let skill = source(flavor, "skills/release-notes/SKILL.md");
+        let skill = source(flavor, "skills/cas-release-notes/SKILL.md");
         for marker in [
             "ensure the rubric exists",
             "gather the merge",
@@ -105,7 +103,7 @@ fn release_notes_are_generic_procedure_and_rubric_driven() {
         assert!(!skill.contains("exactly one threaded reply"));
     }
 
-    let rubric = source("", "skills/release-notes/references/RUBRIC-template.md");
+    let rubric = source("", "skills/cas-release-notes/references/RUBRIC-template.md");
     assert!(rubric.contains("Default: one threaded reply per thread"));
 
     let init = include_str!("../src/cli/init/docs_and_skill.rs");
@@ -129,9 +127,15 @@ fn fallow_examples_honor_machine_output_rule() {
                 command.contains("--quiet"),
                 "example lacks quiet output: {command}"
             );
+            // `|| true` forces status 0, so a missing binary or a failed
+            // `npx` looked like a clean pass; the status must stay visible.
             assert!(
-                command.contains("2>/dev/null || true"),
-                "example lacks safe exit handling: {command}"
+                command.contains("2>/dev/null; echo \"exit=$?\""),
+                "example must print its exit status: {command}"
+            );
+            assert!(
+                !command.contains("|| true"),
+                "example swallows the exit status: {command}"
             );
         }
     }
@@ -140,7 +144,18 @@ fn fallow_examples_honor_machine_output_rule() {
         "expected the workflow examples to be guarded"
     );
     assert!(skill.contains("## Procedure"));
-    assert!(skill.contains("91 framework plugins"));
+    assert!(skill.contains("Preserve and read the exit status"));
+    // Counts and tool tables drift between fallow releases; the skill points
+    // at `fallow schema` instead of copying them.
+    assert!(skill.contains("fallow schema"));
+    for stale in [
+        "91 framework plugins",
+        "90 auto-detecting",
+        "## Node.js Bindings",
+        "| `trace_clone` |",
+    ] {
+        assert!(!skill.contains(stale), "stale fallow content: {stale}");
+    }
 }
 
 #[test]

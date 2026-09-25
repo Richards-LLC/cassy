@@ -316,7 +316,7 @@ pub fn supervisor_verification_tool() -> &'static str {
 ///
 /// Use this whenever a hook handler is building "you" / "your" advisory text —
 /// a reminder telling the CURRENT agent what tool call *it itself* can make
-/// (e.g. "use `<prefix>coordination action=spawn_workers`"). Those sites need
+/// (e.g. "use `<prefix>factory action=spawn_workers`"). Those sites need
 /// the reader's own tool namespace, not the namespace of whichever other role
 /// happens to be recorded in `CAS_FACTORY_WORKER_CLI`.
 ///

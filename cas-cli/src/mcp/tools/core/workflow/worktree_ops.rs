@@ -452,7 +452,7 @@ fn assignee_task_is_merge_relevant(status: cas_types::TaskStatus) -> bool {
 fn merge_target_remediation(assignee: &str) -> String {
     format!(
         "Remediation:\n\
-         1. Prefer an explicit task: `coordination action=worktree_merge id={assignee} \
+         1. Prefer an explicit task: `factory action=worktree_merge id={assignee} \
          task_id=<task-id>` (or `id=factory/{assignee}`).\n\
          2. Standalone / trunk merges require explicit intent: pass `allow_trunk=true` \
          (and `task_id` when merging a non-epic task). `force=true` only bypasses dirty \
@@ -2304,7 +2304,7 @@ impl CasCore {
         {
             return Ok(Self::success(format!(
                 "Refused: {name} is still a live agent (status {:?}), and {} is its working \
-                 directory.\n\nShut the worker down first (`coordination action=shutdown_workers \
+                 directory.\n\nShut the worker down first (`factory action=shutdown_workers \
                  worker_names={name}`), then retry. `force=true` does NOT override this — it only \
                  bypasses the dirty-worktree check.",
                 agent.status,
@@ -2319,7 +2319,7 @@ impl CasCore {
         if !branch_is_reachable && !force {
             return Ok(Self::success(format!(
                 "Refused: {} has commits that exist on no other branch, and cleanup deletes the \
-                 branch.\n\nMerge it first (`coordination action=worktree_merge id={id}`), or pass \
+                 branch.\n\nMerge it first (`factory action=worktree_merge id={id}`), or pass \
                  force=true to discard the commits.\n\nWorktree: {}",
                 worktree.branch,
                 worktree.path.display()

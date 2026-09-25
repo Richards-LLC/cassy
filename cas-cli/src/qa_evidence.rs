@@ -697,7 +697,7 @@ pub fn producing_command(key: &str, bundle_dir: &Path) -> String {
             "cd {dir} && npx playwright trace open trace.zip && npx playwright trace actions > trace-actions.txt; npx playwright trace close"
         ),
         "polish_screenshots" | "visual_qa" | "visual_qa_json" | "visual_qa_stdout" => format!(
-            "node scripts/visual-qa.mjs --strict --artifact-dir {dir}/visual-qa <url> > {dir}/visual-qa.stdout 2>&1"
+            "node <skills-dir>/cas-ui-craft/scripts/visual-qa.mjs --strict --artifact-dir {dir}/visual-qa <url> > {dir}/visual-qa.stdout 2>&1"
         ),
         "critique" => format!(
             "score the surface with the cas-ui-craft rubric into {dir}/critique.md and bundle.json critique_score"
@@ -905,7 +905,7 @@ pub const TERMINAL_QA_PASS: &str = "terminal-qa: PASS";
 pub fn validate_terminal_qa(ctx: &EvidenceContext<'_>) -> Result<PathBuf, EvidenceRefusal> {
     let root = ctx.task_artifacts_dir.join("terminal-qa");
     let command = format!(
-        "node scripts/terminal-qa.mjs --label <command> --out {}/<command> -- <command> (cas-cli-craft step 7)",
+        "node <skills-dir>/cas-cli-craft/scripts/terminal-qa.mjs --label <command> --out {}/<command> -- <command> (cas-cli-craft step 7)",
         root.display()
     );
     let delivered = committer_time(ctx.repo, ctx.delivered_head);

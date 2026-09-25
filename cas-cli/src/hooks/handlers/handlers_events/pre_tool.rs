@@ -125,7 +125,7 @@ pub fn handle_pre_tool_use(
                 "deny",
                 &format!(
                     "🚫 Supervisors must not spawn isolated-worktree subagents.\n\
-                    Use {prefix}coordination action=spawn_workers — factory-managed worktrees get cleaned up; Agent(isolation=\"worktree\") ones leak.\n\
+                    Use {prefix}factory action=spawn_workers — factory-managed worktrees get cleaned up; Agent(isolation=\"worktree\") ones leak.\n\
                     If you genuinely need a throwaway subagent, drop `isolation` or run as a worker via `cas factory`."
                 ),
             ));
@@ -497,12 +497,14 @@ pub fn handle_pre_tool_use(
     }
 
     // ========================================================================
-    // WORKTREE MERGE JAIL: Block all tools except worktree-merger when pending
+    // WORKTREE MERGE JAIL: Block all tools except the worktree merge when pending
     //
     // When a task has pending_worktree_merge=true, block all tools except:
-    // 1. Task tool spawning worktree-merger - unjails by clearing pending_worktree_merge
+    // 1. `factory action=worktree_merge` (any harness prefix), or a
+    //    Task/Agent spawn of a project-defined `worktree-merger` agent —
+    //    either unjails by clearing pending_worktree_merge.
     //
-    // The unjail happens in PreToolUse when Task(worktree-merger) is detected.
+    // The unjail happens in PreToolUse when one of those calls is detected.
     //
     // NOTE: This entire system is EXPERIMENTAL and only active when worktrees.enabled=true
     //
@@ -532,17 +534,22 @@ pub fn handle_pre_tool_use(
                     .collect();
 
                 if !pending_merge_tasks.is_empty() {
-                    // Check if this is Task tool spawning worktree-merger
-                    let is_worktree_merger = if tool_name == "Task" {
+                    // cas-dc1b (M38): the sanctioned exit is the Cassy
+                    // `factory action=worktree_merge` call under any
+                    // harness prefix. No `worktree-merger` agent ships, so
+                    // the legacy Task/Agent spawn is only honoured for
+                    // projects that define one themselves.
+                    let tool_input_str = |key: &str| {
                         input
                             .tool_input
                             .as_ref()
-                            .and_then(|ti| ti.get("subagent_type").and_then(|v| v.as_str()))
-                            .map(|st| st == "worktree-merger")
-                            .unwrap_or(false)
-                    } else {
-                        false
+                            .and_then(|ti| ti.get(key).and_then(|v| v.as_str()))
                     };
+                    let is_worktree_merger = ((tool_name == "Task" || tool_name == "Agent")
+                        && tool_input_str("subagent_type") == Some("worktree-merger"))
+                        || ((tool_name.ends_with("factory")
+                            || tool_name.ends_with("coordination"))
+                            && tool_input_str("action") == Some("worktree_merge"));
 
                     if is_worktree_merger {
                         // Clear jail - worktree-merger agent will handle the merge
@@ -567,8 +574,11 @@ pub fn handle_pre_tool_use(
                             "deny",
                             &format!(
                                 "🔒 WORKTREE MERGE JAIL: Task(s) {task_list} require worktree merge before you can continue.\n\n\
-                            You MUST spawn the 'worktree-merger' agent to merge and clean up the worktree.\n\n\
-                            Example: Use the Task tool with subagent_type=\"worktree-merger\" and prompt describing the task to merge."
+                            Merge and clean up each task's worktree with \
+                            `{prefix}factory action=worktree_merge id=<worktree branch> task_id=<task-id> cleanup=true` \
+                            (the close rejection names the branch). That call is allowed through the jail and releases it; \
+                            then retry `{prefix}task action=close id=<task-id>`.",
+                                prefix = crate::harness_policy::own_tool_prefix()
                             ),
                         ));
                     }
@@ -812,16 +822,24 @@ pub fn handle_pre_tool_use(
             .and_then(|value| value.as_str())
             == Some("task-verifier")
     {
+        // cas-90e8: every denial names the next call the spawning agent
+        // can make, rendered once in close_ops::gate_text.
+        use crate::mcp::tools::core::task::lifecycle::close_ops::gate_text::{
+            VerifierSpawnDenial, verifier_spawn_denial,
+        };
+        let verifier_denial = |denial: VerifierSpawnDenial, task_id: Option<&str>| {
+            verifier_spawn_denial(denial, task_id, crate::harness_policy::own_tool_prefix())
+        };
         let Some(agent_store) = stores.agents() else {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
-                "Cannot establish verifier authority: agent registry is unavailable.",
+                &verifier_denial(VerifierSpawnDenial::RegistryUnavailable, None),
             ));
         };
         let Ok(parent) = agent_store.get(&current_agent_id) else {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
-                "Cannot establish verifier authority for an anonymous or orphan session.",
+                &verifier_denial(VerifierSpawnDenial::UnregisteredParent, None),
             ));
         };
         if !matches!(
@@ -830,14 +848,14 @@ pub fn handle_pre_tool_use(
         ) {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
-                "Cannot establish verifier authority for an inactive parent session.",
+                &verifier_denial(VerifierSpawnDenial::InactiveParent, None),
             ));
         }
 
         let Some(tool_input) = input.tool_input.as_ref() else {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
-                "task-verifier spawn requires a prompt naming exactly one Cassy task.",
+                &verifier_denial(VerifierSpawnDenial::MissingPrompt, None),
             ));
         };
         let prompt = tool_input
@@ -847,7 +865,7 @@ pub fn handle_pre_tool_use(
         let Some(task_id) = unique_existing_task_id(prompt, stores.tasks()) else {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
-                "task-verifier prompt must name exactly one existing Cassy task ID.",
+                &verifier_denial(VerifierSpawnDenial::NoUniqueTask, None),
             ));
         };
         let dispatch_id = match cas_store::get_latest_verification_dispatch(cas_root, &task_id) {
@@ -861,13 +879,19 @@ pub fn handle_pre_tool_use(
                 if dispatch.owner_agent_id != current_agent_id {
                     return Ok(HookOutput::with_pre_tool_permission(
                         "deny",
-                        "This task's verification dispatch is owned by another registered session.",
+                        &verifier_denial(
+                            VerifierSpawnDenial::DispatchOwnedElsewhere,
+                            Some(task_id.as_str()),
+                        ),
                     ));
                 }
                 if dispatch.deadline_at <= chrono::Utc::now() {
                     return Ok(HookOutput::with_pre_tool_permission(
                         "deny",
-                        "This task's verification dispatch deadline has elapsed; use the recorded recovery path.",
+                        &verifier_denial(
+                            VerifierSpawnDenial::DispatchDeadlineElapsed,
+                            Some(task_id.as_str()),
+                        ),
                     ));
                 }
                 dispatch.id
@@ -875,13 +899,13 @@ pub fn handle_pre_tool_use(
             Ok(_) => {
                 return Ok(HookOutput::with_pre_tool_permission(
                     "deny",
-                    "No active owned verification dispatch exists for this task; create the exact close proof cycle before spawning a verifier.",
+                    &verifier_denial(VerifierSpawnDenial::NoActiveDispatch, Some(task_id.as_str())),
                 ));
             }
             Err(_) => {
                 return Ok(HookOutput::with_pre_tool_permission(
                     "deny",
-                    "Could not validate task-scoped verification dispatch authority.",
+                    &verifier_denial(VerifierSpawnDenial::DispatchUnreadable, Some(task_id.as_str())),
                 ));
             }
         };
@@ -893,7 +917,7 @@ pub fn handle_pre_tool_use(
         else {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
-                "Cannot establish verifier authority: PreToolUse did not provide tool_use_id correlation.",
+                &verifier_denial(VerifierSpawnDenial::MissingToolUseId, Some(task_id.as_str())),
             ));
         };
         match issue_hook_verifier_handoff(
@@ -909,12 +933,15 @@ pub fn handle_pre_tool_use(
                 if message.contains("already awaiting SubagentStart") {
                     return Ok(HookOutput::with_pre_tool_permission(
                         "deny",
-                        "Another task-verifier spawn is already awaiting SubagentStart for this parent. Wait for it to bind, or retry after the failed spawn is cleaned up or expires.",
+                        &verifier_denial(
+                            VerifierSpawnDenial::SpawnAlreadyPending,
+                            Some(task_id.as_str()),
+                        ),
                     ));
                 }
                 return Ok(HookOutput::with_pre_tool_permission(
                     "deny",
-                    "Could not establish server-side task-verifier authority for the exact dispatch.",
+                    &verifier_denial(VerifierSpawnDenial::HandoffFailed, Some(task_id.as_str())),
                 ));
             }
         }
@@ -3863,8 +3890,11 @@ mod workspace_contract_tests {
 fn is_codemap_gated_tool_call(tool_name: &str, action: Option<&str>, tool_prefix: &str) -> bool {
     let task_tool = format!("{tool_prefix}task");
     let coordination_tool = format!("{tool_prefix}coordination");
+    // cas-8563b: spawn_workers lives on `factory`; the coordination alias
+    // still runs it for one release, so both names are gated.
+    let factory_tool = format!("{tool_prefix}factory");
     (tool_name == task_tool && action == Some("create"))
-        || (tool_name == coordination_tool
+        || ((tool_name == coordination_tool || tool_name == factory_tool)
             && matches!(action, Some("spawn_workers") | Some("spawn_worker")))
 }
 

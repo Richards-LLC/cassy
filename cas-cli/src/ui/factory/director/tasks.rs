@@ -418,7 +418,7 @@ fn empty_state_items(
             )])));
         }
         items.push(ListItem::new(Line::from(vec![Span::styled(
-            "Pin: coordination action=focus_epic id=<epic>".to_string(),
+            "Pin: factory action=focus_epic id=<epic>".to_string(),
             styles.text_muted.add_modifier(Modifier::ITALIC),
         )])));
         return items;

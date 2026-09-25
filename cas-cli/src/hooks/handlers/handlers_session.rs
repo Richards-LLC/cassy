@@ -1,15 +1,22 @@
 use crate::hooks::handlers::session_budget::{DegradationPriority, SessionContextAssembler};
 use crate::hooks::handlers::*;
 
+/// The banner is authored against the canonical `mcp__cas__` prefix and then
+/// remapped to the reader's own harness prefix (cas-dc1b, M36). It is added
+/// to the assembled context after the builder's end-of-function remap pass,
+/// so it must do its own remap: a hardcoded Codex `mcp__cs__` sent Claude
+/// supervisors to a tool they do not have.
 fn registered_role_mismatch_banner(
     configured_role: Option<AgentRole>,
     registered_role: Option<AgentRole>,
+    tool_prefix: &str,
 ) -> Option<String> {
     let (configured, registered) = configured_role.zip(registered_role)?;
     (configured != registered).then(|| {
         format!(
-            "\u{26a0}\u{fe0f} Cassy AGENT ROLE MISMATCH: `CAS_AGENT_ROLE={configured}` but the durable agent row was registered as `{registered}` at session start. Cassy attempted to repair the row; run `mcp__cs__coordination action=whoami` and `cas doctor` before assigning or closing factory work."
+            "\u{26a0}\u{fe0f} Cassy AGENT ROLE MISMATCH: `CAS_AGENT_ROLE={configured}` but the durable agent row was registered as `{registered}` at session start. Cassy attempted to repair the row; run `mcp__cas__coordination action=whoami` and `cas doctor` before assigning or closing factory work."
         )
+        .replace("mcp__cas__", tool_prefix)
     })
 }
 
@@ -26,6 +33,24 @@ pub fn handle_session_start(
 
     // Record session start for analytics and register agent
     if let Some(cas_root) = cas_root {
+        // cas-8563b (D4): prove per role and harness that SessionStart fired.
+        // Claude workers on a custom config dir were measured not to receive
+        // it (no `sessions` row after 2026-09-11 against 117 registrations),
+        // so the launch brief is the canonical worker contract. This event is
+        // the running check on that decision. No-op outside a factory session.
+        let custom_config_dir = std::env::var("CLAUDE_CONFIG_DIR")
+            .ok()
+            .filter(|dir| !dir.trim().is_empty())
+            .is_some();
+        let _ = crate::hooks::handlers::session_hygiene::append_factory_session_event(
+            cas_root,
+            "session_start_fired",
+            &[
+                ("session_id", input.session_id.as_str()),
+                ("tool_prefix", crate::harness_policy::own_tool_prefix()),
+                ("custom_config_dir", if custom_config_dir { "true" } else { "false" }),
+            ],
+        );
         let mut stores = HookStores::new(cas_root);
 
         if let Some(sqlite_store) = stores.sqlite() {
@@ -59,7 +84,11 @@ pub fn handle_session_start(
             .and_then(|store| store.get(&input.session_id).ok())
             .map(|agent| agent.role);
         registration_role_warning =
-            registered_role_mismatch_banner(configured_role, registered_role);
+            registered_role_mismatch_banner(
+                configured_role,
+                registered_role,
+                crate::harness_policy::own_tool_prefix(),
+            );
 
         // Helper to register agent directly in database
         let register_directly = |stores: &mut HookStores| {
@@ -681,6 +710,62 @@ mod large_artifact_staging_tests {
         );
     }
 
+    /// cas-8563b (D4): every factory SessionStart leaves a
+    /// `session_start_fired` record naming its role, so a role whose hook
+    /// never fires shows up as missing rows.
+    #[test]
+    fn session_start_records_that_it_fired_for_its_role() {
+        let tmp = tempfile::tempdir().unwrap();
+        crate::store::open_agent_store(tmp.path()).unwrap().init().unwrap();
+        let mut env = staging_env("worker");
+        env.set("CAS_FACTORY_SESSION", "d4-session");
+        env.set("CAS_AGENT_NAME", "d4-worker");
+        let input = session_input(tmp.path().to_str().unwrap());
+        let _ = handle_session_start(&input, Some(tmp.path()));
+        let logs: String = std::fs::read_dir(tmp.path().join("logs"))
+            .expect("factory session log dir")
+            .filter_map(Result::ok)
+            .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+            .collect();
+        let fired = logs
+            .lines()
+            .find(|line| line.contains("\"session_start_fired\""))
+            .unwrap_or_else(|| panic!("no session_start_fired record: {logs}"));
+        assert!(fired.contains("\"role\":\"worker\""), "{fired}");
+        assert!(fired.contains("\"agent\":\"d4-worker\""), "{fired}");
+        assert!(fired.contains("\"session_id\":\"staging-session\""), "{fired}");
+    }
+
+    /// cas-dc1b (M36): the banner names the reader's own coordination tool.
+    #[test]
+    fn role_mismatch_banner_uses_the_readers_tool_prefix() {
+        for (prefix, foreign) in [
+            ("mcp__cas__", "mcp__cs__"),
+            ("mcp__cs__", "mcp__cas__"),
+            ("cas__", "mcp__"),
+        ] {
+            let banner = registered_role_mismatch_banner(
+                Some(AgentRole::Supervisor),
+                Some(AgentRole::Standard),
+                prefix,
+            )
+            .expect("mismatched roles render a banner");
+            assert!(
+                banner.contains(&format!("`{prefix}coordination action=whoami`")),
+                "{prefix}: {banner}"
+            );
+            assert!(!banner.contains(foreign), "{prefix}: {banner}");
+        }
+        assert!(
+            registered_role_mismatch_banner(
+                Some(AgentRole::Supervisor),
+                Some(AgentRole::Supervisor),
+                "mcp__cas__",
+            )
+            .is_none()
+        );
+    }
+
     #[test]
     fn supervisor_session_start_warns_and_repairs_registered_role_mismatch() {
         let tmp = tempfile::tempdir().unwrap();
@@ -835,6 +920,108 @@ mod large_artifact_staging_tests {
                 context.contains(required),
                 "worker SessionStart lost mandatory protected guidance: {required:?}"
             );
+        }
+    }
+
+    /// WP2 (audit cas-1660 M30): the assembled SessionStart payload must fit
+    /// the 9,216 B budget — and so Claude Code's 10,000-character inline hook
+    /// cap — for every role, on a store that carries the sections that used
+    /// to overflow it: a near-maximum current handoff per role and a full
+    /// knowledge index. Before WP2 the worker payload was 11,820 B and the
+    /// supervisor 13,181 B, so the harness showed a ~2 KB preview instead.
+    #[test]
+    fn assembled_session_start_fits_the_budget_for_every_role() {
+        use crate::hooks::handlers::session_budget::SESSION_START_BUDGET_BYTES;
+        use cas_store::{
+            IngestBatch, KnowledgePage, KnowledgeStore, PageWrite, SqliteKnowledgeStore,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = crate::store::SqliteStore::open(tmp.path()).unwrap();
+        store.init().unwrap();
+        for index in 0..5 {
+            store
+                .add(&crate::types::Entry::new(
+                    format!("budget-memory-{index}"),
+                    format!("a representative learning captured in session {index} about the parser cache"),
+                ))
+                .unwrap();
+        }
+        let handoff_body = "## STATE\n".to_string()
+            + &"- epic cas-1660 lane merged; next step is assembly and the release train.\n"
+                .repeat(70);
+        for role in ["supervisor", "worker"] {
+            let mut handoff =
+                crate::types::Entry::new(format!("budget-handoff-{role}"), handoff_body.clone());
+            handoff.title = Some(format!("{role} handoff: audit fixes in flight"));
+            handoff.tags = vec!["handoff".to_string(), format!("role:{role}")];
+            store.add(&handoff).unwrap();
+        }
+        let knowledge = SqliteKnowledgeStore::open(tmp.path()).unwrap();
+        let pages: Vec<PageWrite> = (0..40)
+            .map(|index| {
+                let mut page = KnowledgePage::new(
+                    knowledge.generate_id().unwrap(),
+                    "architecture",
+                    format!("Representative subsystem page {index:02}"),
+                );
+                page.snippet = "How one subsystem is wired, which seams it exposes, and the decisions that shaped it.".to_string();
+                page.sources = vec!["docs/source.md".to_string()];
+                PageWrite {
+                    page,
+                    body: "body".to_string(),
+                }
+            })
+            .collect();
+        knowledge
+            .commit_ingest(&IngestBatch {
+                pages,
+                ..Default::default()
+            })
+            .unwrap();
+
+        for (label, role, worker_cli) in [
+            ("plain", None, None),
+            ("worker", Some("worker"), Some("claude")),
+            ("supervisor", Some("supervisor"), Some("codex")),
+            ("codex-worker", Some("worker"), Some("codex")),
+        ] {
+            let mut env = staging_env(role.unwrap_or("worker"));
+            if role.is_none() {
+                env.remove("CAS_AGENT_ROLE");
+            } else {
+                env.set("CAS_AGENT_NAME", "budget-agent-with-a-representative-name");
+                env.set("CAS_FACTORY_SESSION", "budget-factory-session");
+            }
+            env.remove("CLAUDE_CONFIG_DIR");
+            match worker_cli {
+                Some(cli) => env.set("CAS_FACTORY_WORKER_CLI", cli),
+                None => env.remove("CAS_FACTORY_WORKER_CLI"),
+            }
+            let input = HookInput {
+                session_id: format!("budget-session-{label}"),
+                cwd: tmp.path().to_string_lossy().into_owned(),
+                hook_event_name: "SessionStart".to_string(),
+                permission_mode: Some("default".to_string()),
+                ..HookInput::default()
+            };
+            let context =
+                additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
+            assert!(
+                context.len() <= SESSION_START_BUDGET_BYTES,
+                "{label} SessionStart payload is {} bytes, over the {SESSION_START_BUDGET_BYTES}B \
+                 budget; Claude Code would file it to disk and show a ~2 KB preview",
+                context.len()
+            );
+            assert!(
+                context.contains("Current Handoff"),
+                "{label} lost the handoff pointer entirely: {context}"
+            );
+            match role {
+                Some("worker") => assert!(context.contains("# Factory Worker"), "{label}"),
+                Some("supervisor") => assert!(context.contains("# Factory Supervisor"), "{label}"),
+                _ => {}
+            }
         }
     }
 }
@@ -1560,7 +1747,7 @@ pub(crate) fn extract_learnings_sync(
 
 /// Extract learnings from transcript using AI
 ///
-/// Reads the transcript, sends to Haiku to identify project conventions
+/// Reads the transcript, sends it to the model to identify project conventions
 /// that the user taught Claude during the session.
 async fn extract_learnings_async(
     transcript_path: &str,
@@ -1675,25 +1862,85 @@ If no clear learnings found, respond with: []"#
 
 // ─── session-learn: 7-signal memory classifier (cas-6156 / EPIC cas-ebea) ─────
 
-const SESSION_LEARN_SKILL_BODY: &str = include_str!("../../builtins/skills/session-learn/SKILL.md");
+/// The Stop-hook classifier prompt (skills audit M09, cas-228e).
+///
+/// This is a single-turn, tool-less model call, so it gets its own prompt:
+/// the signals, the output contract and one example. The `session-learn`
+/// skill is the human-facing procedure and is not sent here — it used to be
+/// (`include_str!`), which shipped maintainer sections and a "scan the store
+/// with `search`" step the call cannot run, and its "omit the rest of the
+/// body" advice produced drafts the parser rejected. Duplicate candidates are
+/// passed in instead (see `build_session_learn_prompt`). The prompt lives in
+/// `session_learn_classifier_prompt.txt` beside this file; the skill file is
+/// the human procedure and is owned separately.
+const SESSION_LEARN_CLASSIFIER_PROMPT: &str = include_str!("session_learn_classifier_prompt.txt");
 
-fn build_session_learn_prompt(transcript_excerpt: &str, file_context: &str) -> String {
+/// Existing memories offered to the classifier as duplicate candidates.
+const SESSION_LEARN_DEDUP_CANDIDATES: usize = 40;
+
+fn build_session_learn_prompt(
+    transcript_excerpt: &str,
+    file_context: &str,
+    existing: &[(String, String)],
+) -> String {
+    let existing = if existing.is_empty() {
+        "(none)".to_string()
+    } else {
+        existing
+            .iter()
+            .map(|(id, content)| {
+                let one_line = content.split_whitespace().collect::<Vec<_>>().join(" ");
+                format!("- {id}: {}", crate::hooks::handlers::handlers_middle::utils::truncate_str(&one_line, 160))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     format!(
-        "{SESSION_LEARN_SKILL_BODY}\n\n## Transcript\n{transcript_excerpt}{file_context}\n\nReturn only the JSON array, no prose, no markdown wrapper."
+        "{SESSION_LEARN_CLASSIFIER_PROMPT}\n\n## Existing memories (duplicate candidates)\n{existing}\n\n## Transcript\n{transcript_excerpt}{file_context}\n\nReturn only the JSON array."
     )
+}
+
+/// Parse the classifier's reply one element at a time, so a single malformed
+/// or partial draft is dropped on its own instead of failing the whole batch
+/// (audit M09: one `dedup_hits`-only draft used to lose every draft).
+fn parse_session_learn_drafts(response_text: &str) -> Result<Vec<SessionLearnDraft>, MemError> {
+    let json_str = response_text
+        .find('[')
+        .and_then(|start| {
+            response_text
+                .rfind(']')
+                .map(|end| &response_text[start..=end])
+        })
+        .unwrap_or("[]");
+    let items: Vec<serde_json::Value> = serde_json::from_str(json_str)
+        .map_err(|e| MemError::Parse(format!("session-learn: reply is not a JSON array: {e}")))?;
+    let total = items.len();
+    let drafts: Vec<SessionLearnDraft> = items
+        .into_iter()
+        .filter_map(|item| serde_json::from_value::<SessionLearnDraft>(item).ok())
+        .filter(|draft| !draft.content.trim().is_empty() || !draft.dedup_hits.is_empty())
+        .collect();
+    if drafts.len() < total {
+        eprintln!(
+            "cas: session-learn: dropped {} unusable draft(s) of {total}",
+            total - drafts.len()
+        );
+    }
+    Ok(drafts)
 }
 
 /// Run the session-learn 7-signal classifier against the transcript.
 ///
 /// Synchronous wrapper — creates a `tokio::Runtime`, calls `session_learn_async`
-/// with a 30-second timeout (longer than `extract_learnings_sync` because the
-/// 7-signal prompt is richer), and returns the draft list.
+/// with a 30-second timeout, and returns the draft list. `existing` is the
+/// `(id, content)` list of memories offered as duplicate candidates.
 ///
 /// Callers in `stop_flow.rs` apply the confidence gate and overlap-detection
 /// (`find_similar_entry`) before writing survivors to the store.
 pub(crate) fn session_learn_sync(
     transcript_path: &str,
     file_paths: &[String],
+    existing: &[(String, String)],
 ) -> Result<Vec<SessionLearnDraft>, MemError> {
     use std::time::Duration;
     use tokio::runtime::Runtime;
@@ -1704,18 +1951,33 @@ pub(crate) fn session_learn_sync(
     rt.block_on(async {
         tokio::time::timeout(
             Duration::from_secs(30),
-            session_learn_async(transcript_path, file_paths),
+            session_learn_async(transcript_path, file_paths, existing),
         )
         .await
         .map_err(|_| MemError::Other("session-learn timed out after 30s".to_string()))?
     })
 }
 
-/// Async implementation — reads transcript, builds the 7-signal prompt, calls
-/// Haiku, and parses the returned JSON array into `Vec<SessionLearnDraft>`.
+/// Pick the duplicate candidates offered to the classifier: the most recent
+/// project memories, capped at [`SESSION_LEARN_DEDUP_CANDIDATES`].
+pub(crate) fn session_learn_dedup_candidates(
+    store: &dyn crate::store::Store,
+) -> Vec<(String, String)> {
+    store
+        .recent(SESSION_LEARN_DEDUP_CANDIDATES)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|entry| (entry.id, entry.content))
+        .collect()
+}
+
+/// Async implementation — reads the transcript, builds the classifier prompt,
+/// makes one single-turn call (`claude-opus-5-5` at low effort), and parses
+/// the returned JSON array into `Vec<SessionLearnDraft>`.
 async fn session_learn_async(
     transcript_path: &str,
     file_paths: &[String],
+    existing: &[(String, String)],
 ) -> Result<Vec<SessionLearnDraft>, MemError> {
     use crate::tracing::claude_wrapper::traced_prompt;
     use claude_rs::QueryOptions;
@@ -1723,7 +1985,7 @@ async fn session_learn_async(
     let transcript = std::fs::read_to_string(transcript_path)
         .map_err(|e| MemError::Other(format!("session-learn: cannot read transcript: {e}")))?;
 
-    // Skip trivial transcripts — same guard the SKILL.md documents
+    // Skip trivial transcripts.
     if transcript.len() < 500 {
         return Ok(vec![]);
     }
@@ -1753,7 +2015,7 @@ async fn session_learn_async(
         )
     };
 
-    let prompt_text = build_session_learn_prompt(transcript_excerpt, &file_context);
+    let prompt_text = build_session_learn_prompt(transcript_excerpt, &file_context, existing);
 
     let result = traced_prompt(
         &prompt_text,
@@ -1767,22 +2029,7 @@ async fn session_learn_async(
     .await
     .map_err(|e| MemError::Other(format!("session-learn LLM call failed: {e}")))?;
 
-    let response_text = result.text();
-
-    // Extract JSON array from the response
-    let json_str = response_text
-        .find('[')
-        .and_then(|start| {
-            response_text
-                .rfind(']')
-                .map(|end| &response_text[start..=end])
-        })
-        .unwrap_or("[]");
-
-    let drafts: Vec<SessionLearnDraft> = serde_json::from_str(json_str)
-        .map_err(|e| MemError::Parse(format!("session-learn: failed to parse drafts: {e}")))?;
-
-    Ok(drafts)
+    parse_session_learn_drafts(&result.text())
 }
 
 #[cfg(test)]
@@ -1790,16 +2037,43 @@ mod session_learn_tests {
     use super::*;
 
     #[test]
-    fn session_learn_prompt_starts_with_the_canonical_skill_body() {
-        let prompt = build_session_learn_prompt("transcript excerpt", "");
-        assert!(
-            prompt.starts_with(SESSION_LEARN_SKILL_BODY),
-            "Stop hook classifier prompt must use the embedded session-learn skill body"
-        );
-        assert!(
-            prompt.contains("## Transcript\ntranscript excerpt"),
-            "dynamic transcript must be appended after the canonical skill body"
-        );
+    fn session_learn_prompt_is_the_dedicated_classifier_prompt() {
+        let existing = vec![("cas-e0a1".to_string(), "Epics branch\nfrom main.".to_string())];
+        let prompt = build_session_learn_prompt("transcript excerpt", "", &existing);
+        assert!(prompt.starts_with(SESSION_LEARN_CLASSIFIER_PROMPT));
+        assert!(prompt.contains("## Transcript\ntranscript excerpt"), "{prompt}");
+        // Duplicate candidates are passed in: the call cannot search.
+        assert!(prompt.contains("- cas-e0a1: Epics branch from main."), "{prompt}");
+        // The human skill (frontmatter, tool steps, maintainer notes) is not sent.
+        for absent in ["managed_by:", "mcp__cas__", "Kill switch", "omit the rest"] {
+            assert!(!prompt.contains(absent), "prompt must not carry {absent:?}");
+        }
+        let none = build_session_learn_prompt("t", "", &[]);
+        assert!(none.contains("## Existing memories (duplicate candidates)\n(none)"));
+    }
+
+    /// Audit M09: one partial draft (a `dedup_hits`-only object, as the old
+    /// prompt asked for) used to fail the whole `Vec` parse and drop every
+    /// draft. Now it parses with defaults, and a malformed element is dropped
+    /// on its own.
+    #[test]
+    fn a_partial_or_malformed_draft_does_not_drop_the_batch() {
+        let reply = r#"Here you go:
+        [
+          {"signal":"pattern","entry_type":"learning","scope":"project","tags":["git"],
+           "content":"Rebase worker branches onto the epic tip before a merge request.","confidence":0.8,"dedup_hits":[]},
+          {"dedup_hits":["cas-1234"]},
+          {"signal":"idea","confidence":"high"},
+          "not an object"
+        ]"#;
+        let drafts = parse_session_learn_drafts(reply).expect("array parses");
+        assert_eq!(drafts.len(), 2, "{drafts:?}");
+        assert_eq!(drafts[0].signal, "pattern");
+        assert_eq!(drafts[1].dedup_hits, ["cas-1234"]);
+        assert!(drafts[1].content.is_empty());
+        assert_eq!(drafts[1].confidence, 0.0);
+
+        assert!(parse_session_learn_drafts("no array at all").unwrap().is_empty());
     }
 
     /// Confirm `SessionLearnDraft` round-trips through JSON correctly.
@@ -1863,7 +2137,7 @@ mod session_learn_tests {
         writeln!(tmp, "short").expect("write");
         let path = tmp.path().to_str().unwrap().to_string();
 
-        let result = session_learn_sync(&path, &[]);
+        let result = session_learn_sync(&path, &[], &[]);
         assert!(
             result.is_ok(),
             "trivial transcript must return Ok, not Err: {result:?}"

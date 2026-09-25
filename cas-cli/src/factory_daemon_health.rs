@@ -160,7 +160,7 @@ pub fn take_reset(cas_dir: &Path, session: &str) -> Option<SpawnQueueResetReques
 
 /// The recovery instruction every warning ends with.
 pub const RESTART_HINT: &str = "Recover without restarting the session: \
-     `coordination action=restart_spawn_queue`.";
+     `factory action=restart_spawn_queue`.";
 
 /// Warnings for `worker_status`, or `None` when the spawn queue is healthy.
 ///

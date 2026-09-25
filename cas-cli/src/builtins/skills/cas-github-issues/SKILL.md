@@ -1,7 +1,8 @@
 ---
 name: cas-github-issues
 description: Use when sweeping, triaging, deduplicating, verifying, closing, or filing GitHub issues, or reconciling issues with Cassy tasks.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # GitHub Issues sweep
@@ -28,8 +29,8 @@ fall back to guessing from local files.
 Then load the Cassy side once, so every later step reads from the same picture:
 
 ```
-mcp__cas__task action=list limit=100
-mcp__cas__search action=search query="<the issue's subject in your own words>"
+task action=list limit=100
+search action=search query="<the issue's subject in your own words>"
 ```
 
 **Do not filter this list by `status=open`.** The status filter is a single
@@ -42,10 +43,10 @@ everything and ignore the closed ones yourself.
 
 The sweep must preserve component ownership. Resolve the four destinations
 with `cas config get issues.repo`, `cas config get issues.components.cassy`,
-`cas config get issues.components.mecha_cassy`, and
+`cas config get issues.components.violet`, and
 `cas config get issues.components.cloud`. Use `issues.repo` for the current
 project, the Cassy component key for runtime/hooks/MCP/factory/skill defects,
-the MechaCassy key for Slack hub defects, and the Cloud key for sync,
+the Violet key for Slack hub defects, and the Cloud key for sync,
 relay, or pairing defects. If you hit a bug during operation, file a ticket in the matching repo before moving on; do not infer a destination from git remotes.
 
 The code-history document index has a separate source setting. Configure
@@ -103,7 +104,7 @@ supervisor starts any of its subtasks, so `status=open` hides exactly the epics
 that are most alive:
 
 ```
-mcp__cas__task action=list task_type=epic limit=50
+task action=list task_type=epic limit=50
 ```
 
 - **An epic for this lane is not closed** (`open`, `in_progress`, `blocked`) →
@@ -113,18 +114,21 @@ mcp__cas__task action=list task_type=epic limit=50
   a closed epic is invisible to the ready queue and will never be picked up.
 
 ```
-mcp__cas__task action=create task_type=epic title="<intake> burn-down v<N>: <theme> (GH #<lo>–#<hi>)" priority=1
+task action=create task_type=epic title="<intake> burn-down v<N>: <theme> (GH #<lo>–#<hi>)" priority=1
 ```
 
 Then, for each new issue, one task:
 
 ```
-mcp__cas__task action=create title="<what will be true when this is done> (GH #<n>)" \
-  task_type=bug priority=<0-3> epic=<epic id> \
+task action=create title="<what will be true when this is done> (GH #<n>)" \
+  task_type=bug priority=<0-3> epic=<epic-id> \
   external_ref="https://github.com/<owner>/<repo>/issues/<n>" \
   description="<the reporter's symptom, the surface it fails on, and the repro>" \
-  acceptance_criteria="<the observable that proves it fixed>"
+  acceptance_criteria="<the observable that proves it fixed>" \
+  risk=<none|platform|concurrency|blast-radius>
 ```
+
+`risk` is required for a bug; `blast-radius` also needs `proof_targets=<test targets>`.
 
 Priority from user impact, not from filing order: data loss / agent-stuck / the
 factory cannot make progress → P0–P1; degraded-but-workable → P2; polish → P3.
@@ -135,8 +139,8 @@ Close the loop on GitHub so the reporter (and the next sweep) can see it:
 gh issue comment <n> --body "Tracked as \`cas-XXXX\`. <one line on the plan.>"
 ```
 
-**Issue-comment specificity.** Bad: `Tracked as \`cas-2a13\`.`
-Good: `Tracked as \`cas-2a13\`. I’ll add real bad/good pairs to the guidance writers use.`
+**Issue-comment specificity.** Bad: `Tracked as \`cas-1234\`.`
+Good: `Tracked as \`cas-1234\`. I’ll add real bad/good pairs to the guidance writers use.`
 Keep the tracker link, then state the concrete outcome; a bare ID leaves the reporter without an answer.
 
 The commit that fixes the issue should carry `Fixes #<n>` so GitHub closes it
@@ -148,7 +152,7 @@ Issues get tasked into lanes that block each other. When a lane merges, its
 dependents stay blocked until someone says so — that someone is this sweep.
 
 ```
-mcp__cas__task action=blocked
+task action=blocked
 ```
 
 For each blocked task, check whether its blocker actually landed:
@@ -161,7 +165,7 @@ gh pr list --state merged --limit 20 --json number,title,mergedAt
 If the blocker is closed **and merged**, drop the edge:
 
 ```
-mcp__cas__task action=dep_remove id=<blocked task> to_id=<merged blocker>
+task action=dep_remove id=<blocked task> to_id=<merged blocker>
 ```
 
 Merged is the bar, not closed. A closed-but-unmerged blocker still blocks —
@@ -198,7 +202,7 @@ shell. Then task it in step 4's format if it is actionable now.
 
 ## Why you may be here: the unfiled-reports banner
 
-`docs/requests/` is **deprecated for new outbound actionable requests**. Do not create a new file there: file directly on the receiving Richards-LLC team's issue board and save a Cassy memory receipt (issue URL, one-line ask, date). This skill still sweeps pre-existing staged legacy files so they are not lost; history and inbound `RESPONSE-*.md` files remain readable. Prose-heavy specifications and design documents may remain there until cross-project task proposals ship.
+`docs/requests/` is **deprecated for new outbound actionable requests**. Do not create a new file there: file directly on the receiving team's issue board and save a Cassy memory receipt (issue URL, one-line ask, date). This skill still sweeps pre-existing staged legacy files so they are not lost; history and inbound `RESPONSE-*.md` files remain readable. Prose-heavy specifications and design documents may remain there until cross-project task proposals ship.
 
 Cassy emits a SessionStart banner when `BUG-*.md` / `FEATURE-*.md` files are
 staged at the `docs/requests/` root — reports the write-first flow wrote but

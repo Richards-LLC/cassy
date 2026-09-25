@@ -1,7 +1,8 @@
 ---
 name: cas-technical-drawing
-description: Use when a project needs a technical or shop drawing of a physical object — an orthographic set, isometric, section, exploded view, joinery detail, part card, parts list or DXF for a build guide, plan, or review; renders every view from one parts-and-joints model with `scripts/draft.mjs`, enforces drafting conventions in code, and gates the result with mechanical checks plus a likeness critique.
-managed_by: cas
+description: Use when a project needs a technical or shop drawing of a physical object — orthographic set, isometric, section, exploded view, joinery detail, part card, parts list or DXF — rendered from one parts-and-joints model and checked mechanically.
+metadata:
+  managed_by: cas
 ---
 
 # Technical drawings
@@ -10,8 +11,8 @@ Never draw geometry by hand. Every view is a projection of one solid model; corr
 
 ## Steps
 
-1. **Write the concept brief into the model, before any render.** In `model.json` (schema: [model-schema.md](references/model-schema.md)) record the builder's contract: overall envelope, every part with its finished `size` and world placement, every joint with its stated width and depth, the assembly order (`explode`), the named visual `reference` with 3–5 identity features, and the print contract (`sheet`, `units`). Done when `node <skills-dir>/cas-technical-drawing/scripts/draft.mjs check model.json` reports the model checks (`cut-size`, `joints`, `interference`, and `cut-list` when a cut list exists) and every FAIL is either fixed or written down as a source-plan finding.
-2. **Render the set.** `draft.mjs render model.json --out drawings/ --png` writes an orthographic sheet (third-angle FRONT/TOP/RIGHT with an isometric inset, balloons, cutting-plane marks), an isometric sheet, one sheet per `sections` entry, an exploded sheet, one teaching sheet per distinct joint (separated / assembled / dimensioned section), part cards, and a parts list. Add `--variant name` for configurations (doors open), `--only ortho,iso,joints` to subset, `--grid` for a ¼-unit counting grid, `--dxf` for outline export. Done when every sheet exists and `draft.mjs check model.json` ends with `ALL CHECKS PASS` for the drawing checks (`projection`, `axis-scale`, `proportion`, `collision`, `dimensions`, `text-size`).
+1. **Write the concept brief into the model, before any render.** In `model.json` (schema: [model-schema.md](references/model-schema.md)) record the builder's contract: overall envelope, every part with its finished `size` and world placement, every joint with its stated width and depth, the assembly order (`explode`), the named visual `reference` with 3–5 identity features, and the print contract (`sheet`, `units`). Run the renderer, never read it: `node <skills-dir>/cas-technical-drawing/scripts/draft.mjs --help` lists every flag, and the 123 KB source is not documentation. Done when `node <skills-dir>/cas-technical-drawing/scripts/draft.mjs check model.json` reports the model checks (`cut-size`, `joints`, `interference`, and `cut-list` when a cut list exists) and every FAIL is either fixed or written down as a source-plan finding.
+2. **Render the set.** `node <skills-dir>/cas-technical-drawing/scripts/draft.mjs render model.json --out drawings/ --png` writes an orthographic sheet (third-angle FRONT/TOP/RIGHT with an isometric inset, balloons, cutting-plane marks), an isometric sheet, one sheet per `sections` entry, an exploded sheet, one teaching sheet per distinct joint (separated / assembled / dimensioned section), part cards, and a parts list. Add `--variant name` for configurations (doors open), `--only ortho,iso,joints` to subset, `--grid` for a ¼-unit counting grid, `--dxf` for outline export. Done when every sheet exists and `node <skills-dir>/cas-technical-drawing/scripts/draft.mjs check model.json` ends with `ALL CHECKS PASS` for the drawing checks (`projection`, `axis-scale`, `proportion`, `collision`, `dimensions`, `text-size`).
 3. **Choose views by what each must teach**, and drop the rest:
 
    | Question the reader has | View |
@@ -32,4 +33,4 @@ Line weights (object 0.7 mm, hidden 0.35 dashed, dimension/extension 0.25, centr
 
 ## Auditing a drawing you did not generate
 
-`draft.mjs check drawing.svg --print-width-mm 180` measures any SVG: the length-weighted angle histogram of a claimed isometric, text crossing strokes or other text, dimension values written inside an outline, and the smallest text height at the stated print width. Use it to review hand-drawn build-guide figures before rework; quote its summary line in the review.
+`node <skills-dir>/cas-technical-drawing/scripts/draft.mjs check drawing.svg --print-width-mm 180` measures any SVG: the length-weighted angle histogram of a claimed isometric, text crossing strokes or other text, dimension values written inside an outline, and the smallest text height at the stated print width. Use it to review hand-drawn build-guide figures before rework; quote its summary line in the review.

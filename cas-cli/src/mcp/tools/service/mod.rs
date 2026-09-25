@@ -175,6 +175,27 @@ impl CasService {
             .collect()
     }
 
+    /// Tool definitions exactly as `tools/list` publishes them, with compact
+    /// input schemas (see `tool_schema`).
+    pub fn tool_definitions(&self) -> Vec<rmcp::model::Tool> {
+        self.tool_router
+            .list_all()
+            .into_iter()
+            .map(tool_schema::compact_tool)
+            .collect()
+    }
+
+    /// [`Self::tool_definitions`] for this build, without opening a store.
+    /// Tests pin the published surface (description length, action enums,
+    /// schema size) against it.
+    pub fn tool_definitions_for_build() -> Vec<rmcp::model::Tool> {
+        Self::tool_router()
+            .list_all()
+            .into_iter()
+            .map(tool_schema::compact_tool)
+            .collect()
+    }
+
     #[allow(dead_code)]
     fn success(text: impl Into<String>) -> CallToolResult {
         CasCore::success(text)
@@ -246,7 +267,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Memory operations. Actions: remember (store new), get (by ID), list, update, delete, archive, unarchive, helpful, harmful, recent, set_tier (working/cold/archive), opinion_reinforce, opinion_weaken, opinion_contradict."
+        description = "Personal memory: learnings, preferences, context, observations and session handoffs, plus opinions with a confidence score."
     )]
     pub async fn memory(
         &self,
@@ -291,8 +312,9 @@ impl CasService {
                 _ => Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
-                        "Unknown memory action: {}. Valid: remember, get, list, update, delete, archive, unarchive, helpful, harmful, mark_reviewed, recent, set_tier, opinion_reinforce, opinion_weaken, opinion_contradict",
-                        req.action
+                        "Unknown memory action: {}. Valid: {}",
+                        req.action,
+                        cas_mcp::actions::MEMORY_ACTIONS.join(", ")
                     ),
                 )),
             };
@@ -315,7 +337,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Task operations. Actions: create (local, or cross-project proposal with explicit project), proposal_inbox, proposal_accept, proposal_reject, proposal_reconcile, show (also accepted as get), update, start, close, cancel, reopen, request_changes, delete, list, ready (actionable), blocked, notes, dep_add, dep_remove, dep_list, claim, release, reset, transfer, available, mine. For dep_add/dep_remove, blocked_by is accepted as an alias for to_id. For notes: pass only id to read that task's notes without the full task record; supply notes= to append, with optional note_type. For close, summary is accepted as an alias for notes. Pending proposals are a dedicated cloud inbox, never TaskStatus rows. cancel is the supervisor-authorized, reason-required terminal path for work intentionally ended without delivery; it preserves history and accepts an optional superseded_by pointer. Supervisors use request_changes as the sanctioned exit from AwaitingMerge whenever review fails — declined merge, amendment required after merge, or rejected work — reopening the task with its assignee preserved (use reset only for tasks orphaned by a dead session). Prefer `start` for normal worker execution; use `claim` for manual lease control/recovery; use `reset` to revive a task orphaned by a dead session (atomic: force-releases lease, clears assignee, forces status=open). IMPORTANT for 'close': verification must pass first. Workers should attempt close; if close returns verification-required guidance, follow the indicated verifier ownership workflow."
+        description = "Task lifecycle and dependencies. Workers run start, then close; if close returns verification-required guidance, follow it. Aliases: get means show; for dep_add/dep_remove, blocked_by means to_id; for close, summary means notes. notes with only id reads a task's notes; add notes= to append (optional note_type). create with an explicit project files a cross-project proposal; pending proposals live in a cloud inbox (proposal_*), never as task rows. cancel is the supervisor's reason-required terminal path for work ended without delivery (optional superseded_by). request_changes is the supervisor's exit from AwaitingMerge when review fails: it reopens the task and keeps its assignee."
     )]
     pub async fn task(
         &self,
@@ -391,8 +413,9 @@ impl CasService {
                 _ => Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
-                        "Unknown task action: {}. Valid: create, proposal_inbox, proposal_accept, proposal_reject, proposal_reconcile, show, update, start, close, cancel, reopen, request_changes, delete, list, ready, blocked, notes, dep_add, dep_remove, dep_list, claim, release, reset, transfer, available, mine",
-                        action
+                        "Unknown task action: {}. Valid: {}",
+                        action,
+                        cas_mcp::actions::TASK_ACTIONS.join(", ")
                     ),
                 )),
             };
@@ -428,7 +451,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Rule operations. Actions: create, show, update, delete (tombstone), list (proven only), list_all, history, restore, helpful (promotes to proven), harmful, sync (to .claude/rules/), check_similar (find similar existing rules)."
+        description = "Project rules. Draft rules become proven through helpful; list shows proven rules only, list_all shows every rule."
     )]
     pub async fn rule(
         &self,
@@ -440,7 +463,7 @@ impl CasService {
             let action = req.action.clone();
             let is_mutating = matches!(
                 req.action.as_str(),
-                "create" | "update" | "delete" | "restore" | "helpful" | "harmful" | "sync"
+                "create" | "update" | "delete" | "restore" | "helpful" | "promote" | "harmful" | "sync"
             );
 
             let result = match req.action.as_str() {
@@ -453,13 +476,14 @@ impl CasService {
                 "list" => this.rule_list(req).await,
                 "list_all" => this.rule_list_all(req).await,
                 "helpful" => this.rule_helpful(req).await,
+                "promote" => this.rule_promote(req).await,
                 "harmful" => this.rule_harmful(req).await,
                 "sync" => this.rule_sync(req).await,
                 "check_similar" => this.rule_check_similar(req).await,
                 _ => Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
-                        "Unknown rule action: {}. Valid: create, show, update, delete, list, list_all, history, restore, helpful, harmful, sync, check_similar",
+                        "Unknown rule action: {}. Valid: create, show, update, delete, list, list_all, history, restore, helpful, promote, harmful, sync, check_similar",
                         req.action
                     ),
                 )),
@@ -483,7 +507,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Skill operations. Actions: create, show, update, delete (tombstone), list (enabled), list_all, history, restore, enable, disable, sync (to .claude/skills/), use (record usage)."
+        description = "Skills. list shows enabled skills only, list_all shows every skill; sync writes enabled skills to .claude/skills/."
     )]
     pub async fn skill(
         &self,
@@ -538,11 +562,625 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Coordination operations combining agent, factory, and worktree management. Agent actions: register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll (also accepted as inbox), message, message_ack, message_status. Factory actions: spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity, sweep_tasks (preview or accept one fix task per integration failure class), clear_context (real harness context reset: types the recipient harness's own reset command into its pane and confirms it against the new session transcript — a reset Cassy cannot prove is returned as an error, never as success), my_context, sync_all_workers, gc_report, gc_cleanup, epic_status (per-child branch merge state for an epic), focus_epic, remind, remind_list, remind_cancel, server_start (run a long-lived server under Cassy instead of a raw `npm run dev &` — registered servers are the only ones that survive worker teardown), server_stop, server_list (what is listening and who started it), restart_spawn_queue (supervisor-only: recover a stalled spawn queue without restarting the session; the daemon drops its in-flight spawn and un-run dequeued actions and names them to re-issue), db_branch_create / db_branch_show / db_branch_delete (supervisor-only disposable Neon branch per task: task_id, optional branch=<non-production parent>, optional target=<worker>; writes DATABASE_URL to the worker worktree's .env.cas-db, never shows the connection string, and deletes the branch when the task closes; a worker asks with a blocker message). Aliases: shutdown_workers accepts target for worker_names and reason; hold_worker/release_worker accept worker_names for target. spawn_workers normally requires an open EPIC so workers are never summoned without stated work; passing task_id for a single open task satisfies that on its own, so post-epic follow-ups need no ceremonial epic. spawn_workers accepts config_dir for an account directory: explicit config_dir wins, otherwise the requesting supervisor's own account directory is captured at enqueue time (CLAUDE_CONFIG_DIR for Claude workers, CODEX_HOME for Codex workers — never crossed between providers); Grok has no account plumbing and reports that instead of silently dropping the value. Worktree actions: worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status. Only available in factory mode. For shutdown_workers, supervisor should verify worktree cleanliness/policy before issuing shutdown. sync_all_workers skips dirty or mid-task worktrees unless force=true, but always skips a supervision-live worker-owned worktree and refuses one already mid-rebase."
+        description = "Agent identity, messaging and reminders; only available in factory mode. Actions: whoami, heartbeat, register, unregister, session_start, session_end, message, interrupt (message with urgent=true), inbox_poll (alias inbox), message_ack, message_status, remind, remind_list, remind_cancel, my_context. Supervisor fleet, worktree, server, database, loop and queue control moved to the `factory` tool; those actions still work here for one release with a deprecation note. Per-action rules are on the parameters they govern."
     )]
     pub async fn coordination(
         &self,
         Parameters(req): Parameters<CoordinationRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let action = canonical_coordination_action(&req.action).to_string();
+        // cas-8563b (D2): agent actions only. The factory actions moved to the
+        // `factory` tool and stay accepted here for one release.
+        let result = match action.as_str() {
+            "register" | "unregister" | "whoami" | "heartbeat" | "session_start"
+            | "session_end" | "inbox_poll" | "message" | "interrupt" | "message_ack"
+            | "message_status" | "remind" | "remind_list" | "remind_cancel"
+            | "my_context" => self.coordination_dispatch(req).await,
+            moved if cas_mcp::actions::FACTORY_ACTIONS.contains(&moved) => {
+                let notice = moved_to_factory_notice(moved, self.inner.guidance_prefix());
+                Self::append_notice(self.coordination_dispatch(req).await, &notice)
+            }
+            _ => Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                format!(
+                    "Unknown coordination action: '{action}'. Valid: {}. Supervisor fleet control is on the factory tool: {}",
+                    cas_mcp::actions::COORDINATION_ACTIONS.join(", "),
+                    cas_mcp::actions::FACTORY_ACTIONS.join(", ")
+                ),
+            )),
+        };
+        result
+    }
+
+    #[tool(
+        description = "Supervisor factory control; only available in factory mode. Actions by group: fleet (spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity, epic_status, focus_epic, sweep_tasks, sync_all_workers, clear_context, gc_report, gc_cleanup, restart_spawn_queue, agent_list, agent_cleanup, lease_history); servers (server_start, server_stop, server_list); database, supervisor only (db_branch_create, db_branch_show, db_branch_delete: a disposable Neon branch per task, whose DATABASE_URL is written to the worker's .env.cas-db and never printed, deleted when the task closes; a worker asks for one with a blocker message); worktree (worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status); loops and queues (loop_start, loop_cancel, loop_status, queue_notify, queue_poll, queue_peek, queue_ack). clear_context types the recipient harness's own reset command and confirms it against the new transcript; a reset it cannot prove is an error. Messaging and reminders are on the `coordination` tool. Per-action rules are on the parameters they govern."
+    )]
+    pub async fn factory(
+        &self,
+        Parameters(req): Parameters<CoordinationRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let action = req.action.clone();
+        let result = match action.as_str() {
+            "spawn_workers" | "shutdown_workers" | "recycle_worker" | "hold_worker"
+            | "release_worker" | "worker_status" | "worker_activity" | "sweep_tasks"
+            | "clear_context" | "sync_all_workers" | "gc_report" | "gc_cleanup"
+            | "epic_status" | "focus_epic" | "restart_spawn_queue" | "agent_list"
+            | "agent_cleanup" | "lease_history" | "server_start" | "server_stop"
+            | "server_list" | "db_branch_create" | "db_branch_show" | "db_branch_delete"
+            | "worktree_create" | "worktree_list" | "worktree_show" | "worktree_cleanup"
+            | "worktree_merge" | "worktree_status" | "loop_start" | "loop_cancel"
+            | "loop_status" | "queue_notify" | "queue_poll" | "queue_peek" | "queue_ack" => {
+                self.coordination_dispatch(req).await
+            }
+            _ => Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                format!(
+                    "Unknown factory action: '{action}'. Valid: {}. Identity, messaging and reminders are on the coordination tool: {}",
+                    cas_mcp::actions::FACTORY_ACTIONS.join(", "),
+                    cas_mcp::actions::COORDINATION_ACTIONS.join(", ")
+                ),
+            )),
+        };
+        result
+    }
+
+    // ========================================================================
+    // cas_search - Search, context, and entity operations
+    // ========================================================================
+
+    #[tool(
+        description = "Search Cassy context (memories, tasks, rules, skills), code symbols, indexed git history and retrieval metrics. Use Grep for exact text in files."
+    )]
+    pub async fn search(
+        &self,
+        Parameters(req): Parameters<SearchContextRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let this = self.clone();
+        panic_catch::dispatch_with_catch("search", async move {
+            crate::ui::factory::record_supervisor_mcp_call();
+            let action = req.action.clone();
+            let result = match req.action.as_str() {
+                "search" => this.search_impl(req).await,
+                "retrieval_feedback" => this.retrieval_feedback_impl(req).await,
+                "retrieval_metrics" => this.retrieval_metrics_impl(req).await,
+                "skill_impact" | "impact_report" => this.skill_impact_impl(req).await,
+                "context" => this.context_impl(req).await,
+                "context_for_subagent" => this.context_for_subagent_impl(req).await,
+                "observe" => this.observe_impl(req).await,
+                "entity_list" => this.entity_list_impl(req).await,
+                "entity_show" => this.entity_show_impl(req).await,
+                "entity_extract" => this.entity_extract_impl(req).await,
+                "code_search" => this.code_search_impl(req).await,
+                "code_show" => this.code_show_impl(req).await,
+                "grep" => this.grep_impl(req).await,
+                "blame" => this.blame_impl(req).await,
+                "history" => this.history_search_impl(req).await,
+                _ => Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!(
+                        "Unknown search action: {}. Valid: search, retrieval_feedback, retrieval_metrics, skill_impact, context, context_for_subagent, observe, entity_list, entity_show, entity_extract, code_search, code_show, grep, blame, history",
+                        req.action
+                    ),
+                )),
+            };
+
+            // Track MCP tool usage
+            crate::telemetry::track_mcp_tool("search", &action, result.is_ok());
+
+            result
+        })
+        .await
+    }
+
+    // ========================================================================
+    // cas_system - System and maintenance operations
+    // ========================================================================
+
+    #[tool(
+        description = "Cassy version, diagnostics, stats, index maintenance, configuration reference, bug reports and upstream MCP proxy servers."
+    )]
+    pub async fn system(
+        &self,
+        Parameters(req): Parameters<SystemRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let this = self.clone();
+        panic_catch::dispatch_with_catch("system", async move {
+            crate::ui::factory::record_supervisor_mcp_call();
+            // cas-3b51 regression seam: double-underscore action cannot
+            // collide with real input; `#[cfg(test)]` strips in release.
+            #[cfg(test)]
+            if req.action == "__panic_for_test__" {
+                panic!("forced test panic from system handler (cas-3b51 regression)");
+            }
+
+            let action = req.action.clone();
+            let result = match req.action.as_str() {
+                "version" => this.system_version().await,
+                "preflight" => this.system_preflight().await,
+                "doctor" => this.system_doctor(req).await,
+                "stats" => this.system_stats(req).await,
+                "info" => this.system_info(req).await,
+                "reindex" => this.system_reindex(req).await,
+                "maintenance_run" => this.system_maintenance_run(req).await,
+                "maintenance_status" => this.system_maintenance_status(req).await,
+                "config_docs" => this.system_config_docs().await,
+                "config_search" => this.system_config_search(req).await,
+                "report_cas_bug" => this.system_report_cas_bug(req).await,
+                #[cfg(feature = "mcp-proxy")]
+                "proxy_add" => this.system_proxy_add(req).await,
+                #[cfg(feature = "mcp-proxy")]
+                "proxy_remove" => this.system_proxy_remove(req).await,
+                #[cfg(feature = "mcp-proxy")]
+                "proxy_list" => this.system_proxy_list(req).await,
+                #[cfg(feature = "mcp-proxy")]
+                "proxy_health" => this.system_proxy_health(req).await,
+                _ => Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!(
+                        "Unknown system action: {}. Valid: version, preflight, doctor, stats, info, reindex, maintenance_run, maintenance_status, config_docs, config_search, report_cas_bug{}",
+                        req.action,
+                        if cfg!(feature = "mcp-proxy") { ", proxy_add, proxy_remove, proxy_list, proxy_health" } else { "" }
+                    ),
+                )),
+            };
+
+            // Track MCP tool usage
+            crate::telemetry::track_mcp_tool("system", &action, result.is_ok());
+
+            result
+        })
+        .await
+    }
+
+    // ========================================================================
+    // cas_verification - Verification operations (task quality gates)
+    // ========================================================================
+
+    #[tool(
+        description = "Task quality gates: verification verdicts and the independent QA pass for parked user-facing deliveries."
+    )]
+    pub async fn verification(
+        &self,
+        Parameters(req): Parameters<VerificationRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let this = self.clone();
+        panic_catch::dispatch_with_catch("verification", async move {
+            crate::ui::factory::record_supervisor_mcp_call();
+            let action = req.action.clone();
+            let result = match req.action.as_str() {
+                "add" => this.verification_add(req).await,
+                "show" => this.verification_show(req).await,
+                "list" => this.verification_list(req).await,
+                "latest" => this.verification_latest(req).await,
+                "qa_record" => this.verification_qa_record(req).await,
+                "qa_waive" => this.verification_qa_waive(req).await,
+                "qa_status" => this.verification_qa_status(req).await,
+                #[cfg(feature = "mcp-proxy")]
+                "external_verify" => this.verification_external(req).await,
+                _ => Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!(
+                        "Unknown verification action: {}. Valid: add, show, list, latest, qa_record, qa_waive, qa_status{}",
+                        req.action,
+                        if cfg!(feature = "mcp-proxy") {
+                            ", external_verify"
+                        } else {
+                            ""
+                        }
+                    ),
+                )),
+            };
+
+            // Track MCP tool usage
+            crate::telemetry::track_mcp_tool("verification", &action, result.is_ok());
+
+            result
+        })
+        .await
+    }
+
+    // ========================================================================
+    // cas_artifact - Publish durable task artifacts (cassy#910)
+    // ========================================================================
+
+    #[tool(
+        description = "Published artifacts. Supply a local path; the runtime resolves it, hashes and measures the bytes, records the artifact and uploads it when Cloud storage is live. Never compute a digest or handle an upload URL yourself. publish returns a citable artifact_id even when Cloud storage is unreachable."
+    )]
+    pub async fn artifact(
+        &self,
+        Parameters(req): Parameters<ArtifactRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let this = self.clone();
+        panic_catch::dispatch_with_catch("artifact", async move {
+            crate::ui::factory::record_supervisor_mcp_call();
+            let action = req.action.clone();
+            let is_mutating = action == "publish";
+
+            let result = match action.as_str() {
+                "publish" => this.inner.artifact_publish(Parameters(req)).await,
+                "show" => this.inner.artifact_show(Parameters(req)).await,
+                "list" => this.inner.artifact_list(Parameters(req)).await,
+                _ => Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!("Unknown artifact action: {action}. Valid: publish, show, list"),
+                )),
+            };
+
+            if is_mutating && result.is_ok() {
+                this.inner.notify_resources_changed().await;
+            }
+
+            crate::telemetry::track_mcp_tool("artifact", &action, result.is_ok());
+
+            result
+        })
+        .await
+    }
+
+    // ========================================================================
+    // cas_knowledge - Distilled project wiki (pages, not opinions)
+    // ========================================================================
+
+    #[tool(
+        description = "Distilled project knowledge: the repo wiki built by `cas knowledge build`. This is repo knowledge, distinct from the memory tool's personal entries and opinions."
+    )]
+    pub async fn knowledge(
+        &self,
+        Parameters(req): Parameters<KnowledgeRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let this = self.clone();
+        panic_catch::dispatch_with_catch("knowledge", async move {
+            crate::ui::factory::record_supervisor_mcp_call();
+            let action = req.action.clone();
+            let is_mutating = action == "write";
+
+            let result = match action.as_str() {
+                "search" => this.inner.knowledge_search(Parameters(req)).await,
+                "read" => this.inner.knowledge_read(Parameters(req)).await,
+                "write" => this.inner.knowledge_write(Parameters(req)).await,
+                "list" => this.inner.knowledge_list(Parameters(req)).await,
+                "status" => this.inner.knowledge_status(Parameters(req)).await,
+                _ => Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!(
+                        "Unknown knowledge action: {action}. Valid: search, read, write, list, status"
+                    ),
+                )),
+            };
+
+            if is_mutating && result.is_ok() {
+                this.inner.notify_resources_changed().await;
+            }
+
+            crate::telemetry::track_mcp_tool("knowledge", &action, result.is_ok());
+
+            result
+        })
+        .await
+    }
+
+    // ========================================================================
+    // cas_team - Team operations for multi-user collaboration
+    // ========================================================================
+
+    #[tool(
+        description = "Team membership and sync: teams you belong to, team details, members and roles."
+    )]
+    pub async fn team(
+        &self,
+        Parameters(req): Parameters<TeamRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let this = self.clone();
+        panic_catch::dispatch_with_catch("team", async move {
+            crate::ui::factory::record_supervisor_mcp_call();
+            let action = req.action.clone();
+            let result = match req.action.as_str() {
+                "list" => this.team_list(req).await,
+                "show" => this.team_show(req).await,
+                "members" => this.team_members(req).await,
+                "sync" => this.team_sync(req).await,
+                _ => Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!(
+                        "Unknown team action: {}. Valid: list, show, members, sync",
+                        req.action
+                    ),
+                )),
+            };
+
+            // Track MCP tool usage
+            crate::telemetry::track_mcp_tool("team", &action, result.is_ok());
+
+            result
+        })
+        .await
+    }
+
+    // ========================================================================
+    // cas_pattern - Personal patterns (cross-project conventions)
+    // ========================================================================
+
+    #[tool(
+        description = "Personal patterns: cross-project conventions, plus team suggestions (team_* actions require team_id)."
+    )]
+    pub async fn pattern(
+        &self,
+        Parameters(req): Parameters<PatternRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let this = self.clone();
+        panic_catch::dispatch_with_catch("pattern", async move {
+            crate::ui::factory::record_supervisor_mcp_call();
+            let action = req.action.clone();
+            let result = match req.action.as_str() {
+                "create" => this.pattern_create(req).await,
+                "list" => this.pattern_list(req).await,
+                "show" => this.pattern_show(req).await,
+                "update" => this.pattern_update(req).await,
+                "archive" => this.pattern_archive(req).await,
+                "adopt" => this.pattern_adopt(req).await,
+                "helpful" => this.pattern_helpful(req).await,
+                "harmful" => this.pattern_harmful(req).await,
+                "team_suggestions" => this.team_suggestions(req).await,
+                "team_new_suggestions" => this.team_new_suggestions(req).await,
+                "team_create_suggestion" => this.team_create_suggestion(req).await,
+                "team_share" => this.team_share(req).await,
+                "team_adopt" => this.team_adopt_suggestion(req).await,
+                "team_dismiss" => this.team_dismiss_suggestion(req).await,
+                "team_recommend" => this.team_recommend_suggestion(req).await,
+                "team_archive_suggestion" => this.team_archive_suggestion(req).await,
+                "team_suggestion_analytics" => this.team_suggestion_analytics(req).await,
+                _ => Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!(
+                        "Unknown pattern action: {}. Valid: create, list, show, update, archive, adopt, helpful, harmful, team_suggestions, team_new_suggestions, team_create_suggestion, team_share, team_adopt, team_dismiss, team_recommend, team_archive_suggestion, team_suggestion_analytics",
+                        req.action
+                    ),
+                )),
+            };
+
+            // Track MCP tool usage
+            crate::telemetry::track_mcp_tool("pattern", &action, result.is_ok());
+
+            result
+        })
+        .await
+    }
+
+    // ========================================================================
+    // cas_spec - All spec operations
+    // ========================================================================
+
+    #[tool(
+        description = "Specs: create, review (approve, reject, supersede), link to tasks and sync."
+    )]
+    pub async fn spec(
+        &self,
+        Parameters(req): Parameters<SpecRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let this = self.clone();
+        panic_catch::dispatch_with_catch("spec", async move {
+            crate::ui::factory::record_supervisor_mcp_call();
+            let action = req.action.clone();
+            let is_mutating = matches!(
+                req.action.as_str(),
+                "create"
+                    | "update"
+                    | "delete"
+                    | "approve"
+                    | "reject"
+                    | "supersede"
+                    | "link"
+                    | "unlink"
+                    | "sync"
+            );
+
+            let result = match req.action.as_str() {
+                "create" => this.spec_create(req).await,
+                "show" => this.spec_show(req).await,
+                "update" => this.spec_update(req).await,
+                "delete" => this.spec_delete(req).await,
+                "list" => this.spec_list(req).await,
+                "approve" => this.spec_approve(req).await,
+                "reject" => this.spec_reject(req).await,
+                "supersede" => this.spec_supersede(req).await,
+                "link" => this.spec_link(req).await,
+                "unlink" => this.spec_unlink(req).await,
+                "sync" => this.spec_sync(req).await,
+                "get_for_task" => this.spec_get_for_task(req).await,
+                _ => Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!(
+                        "Unknown spec action: {}. Valid: create, show, update, delete, list, approve, reject, supersede, link, unlink, sync, get_for_task",
+                        req.action
+                    ),
+                )),
+            };
+
+            // Notify client of resource changes (Claude Code 2.1.0+)
+            if is_mutating && result.is_ok() {
+                this.inner.notify_resources_changed().await;
+            }
+
+            // Track MCP tool usage
+            crate::telemetry::track_mcp_tool("spec", &action, result.is_ok());
+
+            result
+        })
+        .await
+    }
+
+    // ========================================================================
+    // mcp_search - Search across all connected MCP servers
+    // ========================================================================
+
+    #[tool(
+        description = "Search across all tools from connected MCP servers. Pass a keyword query to filter by tool name and description (case-insensitive); use 'server:name' to filter by server. Builds without mcp-proxy return a rebuild instruction."
+    )]
+    pub async fn mcp_search(
+        &self,
+        #[allow(unused_variables)] Parameters(req): Parameters<ExecuteRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        crate::ui::factory::record_supervisor_mcp_call();
+        #[cfg(feature = "mcp-proxy")]
+        {
+            let proxy = self.proxy.as_ref().ok_or_else(|| {
+                Self::error(
+                    ErrorCode::INVALID_REQUEST,
+                    "MCP proxy not configured. Add upstream servers to .cas/proxy.toml",
+                )
+            })?;
+
+            match proxy.search(&req.code, req.max_length).await {
+                Ok(value) => {
+                    let text = serde_json::to_string_pretty(&value).unwrap_or_default();
+                    crate::telemetry::track_mcp_tool("mcp_proxy", "search", true);
+                    Ok(Self::success(text))
+                }
+                Err(e) => {
+                    crate::telemetry::track_mcp_tool("mcp_proxy", "search", false);
+                    Err(Self::error(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!("MCP search failed: {e}"),
+                    ))
+                }
+            }
+        }
+
+        #[cfg(not(feature = "mcp-proxy"))]
+        Err(Self::error(
+            ErrorCode::INVALID_REQUEST,
+            "MCP proxy requires mcp-proxy feature. Build with: cargo build --features mcp-proxy",
+        ))
+    }
+
+    // ========================================================================
+    // mcp_execute - Execute tool calls across connected MCP servers
+    // ========================================================================
+
+    #[tool(
+        description = "Execute calls across connected MCP servers after registered-caller policy enforcement. Use JSON dispatch: {\"server\":\"name\",\"tool\":\"tool_name\",\"args\":{...}} or dot-call syntax. Builds without mcp-proxy return a rebuild instruction."
+    )]
+    pub async fn mcp_execute(
+        &self,
+        Parameters(req): Parameters<ExecuteRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        crate::ui::factory::record_supervisor_mcp_call();
+        #[cfg(feature = "mcp-proxy")]
+        {
+            let proxy = self.proxy.as_ref().ok_or_else(|| {
+                Self::error(
+                    ErrorCode::INVALID_REQUEST,
+                    "MCP proxy not configured. Add upstream servers to .cas/proxy.toml",
+                )
+            })?;
+            let caller = self.proxy_caller()?;
+
+            match proxy.execute(&caller, &req.code, req.max_length).await {
+                Ok(result) => {
+                    crate::telemetry::track_mcp_tool("mcp_proxy", "execute", true);
+                    let mut content = vec![Content::text(result.text)];
+                    for img in result.images {
+                        content.push(Content::image(img.data, img.mime_type));
+                    }
+                    if result.is_error {
+                        Ok(CallToolResult::error(content))
+                    } else {
+                        Ok(CallToolResult::success(content))
+                    }
+                }
+                Err(e) => {
+                    crate::telemetry::track_mcp_tool("mcp_proxy", "execute", false);
+                    Err(McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::Owned(format!(
+                            "MCP execute failed: {}",
+                            cmcp_core::describe_upstream_call_error(&e)
+                        )),
+                        data: cmcp_core::upstream_mcp_error_data(&e),
+                    })
+                }
+            }
+        }
+
+        #[cfg(not(feature = "mcp-proxy"))]
+        Err(Self::error(
+            ErrorCode::INVALID_REQUEST,
+            "MCP proxy requires mcp-proxy feature. Build with: cargo build --features mcp-proxy",
+        ))
+    }
+}
+
+fn canonical_task_action(action: &str) -> &str {
+    cas_mcp::actions::canonical_action(cas_mcp::actions::TASK_ACTION_ALIASES, action)
+}
+
+/// Deprecation note for a factory action called through `coordination`
+/// (cas-8563b, D2). The alias works for one release.
+fn moved_to_factory_notice(action: &str, prefix: &str) -> String {
+    format!(
+        "Deprecated: `coordination action={action}` moved to the supervisor factory tool. \
+         Call `{prefix}factory action={action}`; this coordination alias is accepted for one \
+         release only."
+    )
+}
+
+fn canonical_coordination_action(action: &str) -> &str {
+    cas_mcp::actions::canonical_action(cas_mcp::actions::COORDINATION_ACTION_ALIASES, action)
+}
+
+fn normalize_coordination_aliases(req: &mut CoordinationRequest, action: &str) {
+    match action {
+        "shutdown_workers" if req.worker_names.is_none() => {
+            req.worker_names = req.target.take();
+        }
+        "hold_worker" | "release_worker" if req.target.is_none() => {
+            req.target = req.worker_names.take();
+        }
+        _ => {}
+    }
+}
+
+fn normalize_factory_aliases(req: &mut FactoryRequest) {
+    match req.action.as_str() {
+        "shutdown_workers" if req.worker_names.is_none() => {
+            req.worker_names = req.target.take();
+        }
+        "hold_worker" | "release_worker" if req.target.is_none() => {
+            req.target = req.worker_names.take();
+        }
+        _ => {}
+    }
+}
+
+/// Return explicitly supplied fields outside an action's allow-list.
+///
+/// Serialization keeps this fail-closed when a new union field is added: a
+/// destructive action must opt into that field deliberately before accepting
+/// it. `None` fields serialize as null and therefore do not count as supplied.
+fn coordination_params_not_in(req: &CoordinationRequest, allowed: &[&str]) -> Vec<String> {
+    let Ok(serde_json::Value::Object(fields)) = serde_json::to_value(req) else {
+        return vec!["<request serialization failed>".to_string()];
+    };
+    let mut unsupported: Vec<String> = fields
+        .into_iter()
+        .filter(|(name, value)| !value.is_null() && !allowed.contains(&name.as_str()))
+        .map(|(name, _)| name)
+        .collect();
+    unsupported.sort();
+    unsupported
+}
+
+// ============================================================================
+// Backwards-compatible wrapper methods for tests
+// These are not exposed as MCP tools; use `coordination` tool instead.
+// ============================================================================
+
+impl CasService {
+    /// Shared dispatch behind the `coordination` and `factory` tools. Each
+    /// tool decides which actions it accepts before calling this.
+    async fn coordination_dispatch(
+        &self,
+        req: CoordinationRequest,
     ) -> Result<CallToolResult, McpError> {
         let this = self.clone();
         panic_catch::dispatch_with_guidance("coordination", this.inner.clone(), async move {
@@ -556,7 +1194,7 @@ impl CasService {
             {
                 return Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
-                    "spawn_workers does not deliver `prompt` to the worker; no spawn was queued. `prompt` belongs to coordination action=loop_start. Spawn without `prompt`, then send the brief with coordination action=message target=<worker-name> after registration.",
+                    "spawn_workers does not deliver `prompt` to the worker; no spawn was queued. `prompt` belongs to factory action=loop_start. Spawn without `prompt`, then send the brief with coordination action=message target=<worker-name> summary=\"...\" message=\"...\" after registration.",
                 ));
             }
             let event_target = req.target.clone().unwrap_or_default();
@@ -819,12 +1457,8 @@ impl CasService {
                 _ => Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
-                        "Unknown coordination action: '{action}'. Valid actions:\n\
-                         Agent: register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll, message, message_ack, message_status\n\
-                         Factory: spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity, clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, epic_status, focus_epic, remind, remind_list, remind_cancel, restart_spawn_queue\n\
-                         Factory extra: sweep_tasks (preview or accept one fix task per integration failure class)
-                         Database branches (supervisor only): db_branch_create, db_branch_show, db_branch_delete
-                         Worktree: worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status"
+                        "Unknown coordination action: '{action}'. Valid: {}",
+                        cas_mcp::actions::coordination_request_actions().join(", ")
                     ),
                 )),
             };
@@ -892,557 +1526,10 @@ impl CasService {
         .await
     }
 
-    // ========================================================================
-    // cas_search - Search, context, and entity operations
-    // ========================================================================
-
-    #[tool(
-        description = "Search and context operations. Actions: search (BM25 full-text), retrieval_feedback (explicit retrieval outcome), retrieval_metrics (offline aggregation with a strict agent session filter, identity/judge availability, distinct retrieved/injected/opened/explicit-used/judge-helpful stages, resolved-outcome quality rates, and session-scoped rolling judge precision), skill_impact (surface and session-outcome impact report; impact_report alias), context (session context), context_for_subagent, observe (record observation), entity_list, entity_show, entity_extract, code_search (search code symbols), code_show (show symbol details), grep, blame, 'history' (search indexed git commits by text/path/time; every response carries an index_status block stating freshness and what is not yet supported)."
-    )]
-    pub async fn search(
-        &self,
-        Parameters(req): Parameters<SearchContextRequest>,
-    ) -> Result<CallToolResult, McpError> {
-        let this = self.clone();
-        panic_catch::dispatch_with_catch("search", async move {
-            crate::ui::factory::record_supervisor_mcp_call();
-            let action = req.action.clone();
-            let result = match req.action.as_str() {
-                "search" => this.search_impl(req).await,
-                "retrieval_feedback" => this.retrieval_feedback_impl(req).await,
-                "retrieval_metrics" => this.retrieval_metrics_impl(req).await,
-                "skill_impact" | "impact_report" => this.skill_impact_impl(req).await,
-                "context" => this.context_impl(req).await,
-                "context_for_subagent" => this.context_for_subagent_impl(req).await,
-                "observe" => this.observe_impl(req).await,
-                "entity_list" => this.entity_list_impl(req).await,
-                "entity_show" => this.entity_show_impl(req).await,
-                "entity_extract" => this.entity_extract_impl(req).await,
-                "code_search" => this.code_search_impl(req).await,
-                "code_show" => this.code_show_impl(req).await,
-                "grep" => this.grep_impl(req).await,
-                "blame" => this.blame_impl(req).await,
-                "history" => this.history_search_impl(req).await,
-                _ => Err(Self::error(
-                    ErrorCode::INVALID_PARAMS,
-                    format!(
-                        "Unknown search action: {}. Valid: search, retrieval_feedback, retrieval_metrics, skill_impact, context, context_for_subagent, observe, entity_list, entity_show, entity_extract, code_search, code_show, grep, blame, history",
-                        req.action
-                    ),
-                )),
-            };
-
-            // Track MCP tool usage
-            crate::telemetry::track_mcp_tool("search", &action, result.is_ok());
-
-            result
-        })
-        .await
-    }
-
-    // ========================================================================
-    // cas_system - System and maintenance operations
-    // ========================================================================
-
-    #[tool(
-        description = "System operations. Actions: version (Cassy version info), preflight (bounded unified factory readiness report), doctor (diagnostics), stats, info (system info), reindex (BM25 index), maintenance_run, maintenance_status, config_docs (full config reference), config_search (search configs by query), report_cas_bug (submit Cassy bug to GitHub - ANONYMIZE DATA: remove paths, credentials, proprietary code before submitting), proxy_add (add upstream MCP server), proxy_remove (remove server), proxy_list (list servers), proxy_health (credential-free upstream health/backoff state)."
-    )]
-    pub async fn system(
-        &self,
-        Parameters(req): Parameters<SystemRequest>,
-    ) -> Result<CallToolResult, McpError> {
-        let this = self.clone();
-        panic_catch::dispatch_with_catch("system", async move {
-            crate::ui::factory::record_supervisor_mcp_call();
-            // cas-3b51 regression seam: double-underscore action cannot
-            // collide with real input; `#[cfg(test)]` strips in release.
-            #[cfg(test)]
-            if req.action == "__panic_for_test__" {
-                panic!("forced test panic from system handler (cas-3b51 regression)");
-            }
-
-            let action = req.action.clone();
-            let result = match req.action.as_str() {
-                "version" => this.system_version().await,
-                "preflight" => this.system_preflight().await,
-                "doctor" => this.system_doctor(req).await,
-                "stats" => this.system_stats(req).await,
-                "info" => this.system_info(req).await,
-                "reindex" => this.system_reindex(req).await,
-                "maintenance_run" => this.system_maintenance_run(req).await,
-                "maintenance_status" => this.system_maintenance_status(req).await,
-                "config_docs" => this.system_config_docs().await,
-                "config_search" => this.system_config_search(req).await,
-                "report_cas_bug" => this.system_report_cas_bug(req).await,
-                #[cfg(feature = "mcp-proxy")]
-                "proxy_add" => this.system_proxy_add(req).await,
-                #[cfg(feature = "mcp-proxy")]
-                "proxy_remove" => this.system_proxy_remove(req).await,
-                #[cfg(feature = "mcp-proxy")]
-                "proxy_list" => this.system_proxy_list(req).await,
-                #[cfg(feature = "mcp-proxy")]
-                "proxy_health" => this.system_proxy_health(req).await,
-                _ => Err(Self::error(
-                    ErrorCode::INVALID_PARAMS,
-                    format!(
-                        "Unknown system action: {}. Valid: version, preflight, doctor, stats, info, reindex, maintenance_run, maintenance_status, config_docs, config_search, report_cas_bug{}",
-                        req.action,
-                        if cfg!(feature = "mcp-proxy") { ", proxy_add, proxy_remove, proxy_list, proxy_health" } else { "" }
-                    ),
-                )),
-            };
-
-            // Track MCP tool usage
-            crate::telemetry::track_mcp_tool("system", &action, result.is_ok());
-
-            result
-        })
-        .await
-    }
-
-    // ========================================================================
-    // cas_verification - Verification operations (task quality gates)
-    // ========================================================================
-
-    #[tool(
-        description = "Verification operations (task quality gates). Actions: add (record verification result), show (verification details), list (verifications for task), latest (most recent for task), qa_record (independent QA reviewer's verdict on a parked user-facing delivery: task_id, status approved|rejected, summary, issues, ledger_path; never the implementer), qa_waive (supervisor-only logged waiver of the independent QA pass), qa_status (QA rounds for a task), external_verify (registered-supervisor-only receipted external production verification)."
-    )]
-    pub async fn verification(
-        &self,
-        Parameters(req): Parameters<VerificationRequest>,
-    ) -> Result<CallToolResult, McpError> {
-        let this = self.clone();
-        panic_catch::dispatch_with_catch("verification", async move {
-            crate::ui::factory::record_supervisor_mcp_call();
-            let action = req.action.clone();
-            let result = match req.action.as_str() {
-                "add" => this.verification_add(req).await,
-                "show" => this.verification_show(req).await,
-                "list" => this.verification_list(req).await,
-                "latest" => this.verification_latest(req).await,
-                "qa_record" => this.verification_qa_record(req).await,
-                "qa_waive" => this.verification_qa_waive(req).await,
-                "qa_status" => this.verification_qa_status(req).await,
-                #[cfg(feature = "mcp-proxy")]
-                "external_verify" => this.verification_external(req).await,
-                _ => Err(Self::error(
-                    ErrorCode::INVALID_PARAMS,
-                    format!(
-                        "Unknown verification action: {}. Valid: add, show, list, latest, qa_record, qa_waive, qa_status{}",
-                        req.action,
-                        if cfg!(feature = "mcp-proxy") {
-                            ", external_verify"
-                        } else {
-                            ""
-                        }
-                    ),
-                )),
-            };
-
-            // Track MCP tool usage
-            crate::telemetry::track_mcp_tool("verification", &action, result.is_ok());
-
-            result
-        })
-        .await
-    }
-
-    // ========================================================================
-    // cas_artifact - Publish durable task artifacts (cassy#910)
-    // ========================================================================
-
-    #[tool(
-        description = "Published artifact operations. Actions: publish (turn a local file into a durable, citable artifact for a task — the runtime resolves the path, hashes and measures the bytes, enforces the 25 MiB ceiling, records the artifact, and uploads it when Cloud storage is live), show (one artifact record by id), list (a task's artifacts). Supply a local path; never compute a digest or handle an upload URL yourself. A publish succeeds and returns a citable artifact_id even when Cloud storage is unreachable."
-    )]
-    pub async fn artifact(
-        &self,
-        Parameters(req): Parameters<ArtifactRequest>,
-    ) -> Result<CallToolResult, McpError> {
-        let this = self.clone();
-        panic_catch::dispatch_with_catch("artifact", async move {
-            crate::ui::factory::record_supervisor_mcp_call();
-            let action = req.action.clone();
-            let is_mutating = action == "publish";
-
-            let result = match action.as_str() {
-                "publish" => this.inner.artifact_publish(Parameters(req)).await,
-                "show" => this.inner.artifact_show(Parameters(req)).await,
-                "list" => this.inner.artifact_list(Parameters(req)).await,
-                _ => Err(Self::error(
-                    ErrorCode::INVALID_PARAMS,
-                    format!("Unknown artifact action: {action}. Valid: publish, show, list"),
-                )),
-            };
-
-            if is_mutating && result.is_ok() {
-                this.inner.notify_resources_changed().await;
-            }
-
-            crate::telemetry::track_mcp_tool("artifact", &action, result.is_ok());
-
-            result
-        })
-        .await
-    }
-
-    // ========================================================================
-    // cas_knowledge - Distilled project wiki (pages, not opinions)
-    // ========================================================================
-
-    #[tool(
-        description = "Distilled project knowledge (the repo wiki built by `cas knowledge build`). Actions: search (full-text over page titles/snippets/bodies), read (one page + its markdown body, by id or rel_path), write (hand-author a page — always stored locked:true so distillation never overwrites it), list (the page index), status (page/source counts). This is repo knowledge, distinct from the `memory` tool's personal entries and opinions."
-    )]
-    pub async fn knowledge(
-        &self,
-        Parameters(req): Parameters<KnowledgeRequest>,
-    ) -> Result<CallToolResult, McpError> {
-        let this = self.clone();
-        panic_catch::dispatch_with_catch("knowledge", async move {
-            crate::ui::factory::record_supervisor_mcp_call();
-            let action = req.action.clone();
-            let is_mutating = action == "write";
-
-            let result = match action.as_str() {
-                "search" => this.inner.knowledge_search(Parameters(req)).await,
-                "read" => this.inner.knowledge_read(Parameters(req)).await,
-                "write" => this.inner.knowledge_write(Parameters(req)).await,
-                "list" => this.inner.knowledge_list(Parameters(req)).await,
-                "status" => this.inner.knowledge_status(Parameters(req)).await,
-                _ => Err(Self::error(
-                    ErrorCode::INVALID_PARAMS,
-                    format!(
-                        "Unknown knowledge action: {action}. Valid: search, read, write, list, status"
-                    ),
-                )),
-            };
-
-            if is_mutating && result.is_ok() {
-                this.inner.notify_resources_changed().await;
-            }
-
-            crate::telemetry::track_mcp_tool("knowledge", &action, result.is_ok());
-
-            result
-        })
-        .await
-    }
-
-    // ========================================================================
-    // cas_team - Team operations for multi-user collaboration
-    // ========================================================================
-
-    #[tool(
-        description = "Team operations. Actions: list (teams user belongs to), show (team details and stats), members (list team members with roles), sync (trigger team push + pull)."
-    )]
-    pub async fn team(
-        &self,
-        Parameters(req): Parameters<TeamRequest>,
-    ) -> Result<CallToolResult, McpError> {
-        let this = self.clone();
-        panic_catch::dispatch_with_catch("team", async move {
-            crate::ui::factory::record_supervisor_mcp_call();
-            let action = req.action.clone();
-            let result = match req.action.as_str() {
-                "list" => this.team_list(req).await,
-                "show" => this.team_show(req).await,
-                "members" => this.team_members(req).await,
-                "sync" => this.team_sync(req).await,
-                _ => Err(Self::error(
-                    ErrorCode::INVALID_PARAMS,
-                    format!(
-                        "Unknown team action: {}. Valid: list, show, members, sync",
-                        req.action
-                    ),
-                )),
-            };
-
-            // Track MCP tool usage
-            crate::telemetry::track_mcp_tool("team", &action, result.is_ok());
-
-            result
-        })
-        .await
-    }
-
-    // ========================================================================
-    // cas_pattern - Personal patterns (cross-project conventions)
-    // ========================================================================
-
-    #[tool(
-        description = "Personal pattern operations (cross-project conventions). Actions: create (new pattern), list (with filters), show (by ID), update (modify fields), archive (soft delete), adopt (from rule), helpful (increment), harmful (increment). Team actions (require team_id): team_suggestions (list), team_new_suggestions (pending only), team_create_suggestion, team_share (share personal pattern), team_adopt (adopt suggestion), team_dismiss, team_recommend, team_archive_suggestion, team_suggestion_analytics."
-    )]
-    pub async fn pattern(
-        &self,
-        Parameters(req): Parameters<PatternRequest>,
-    ) -> Result<CallToolResult, McpError> {
-        let this = self.clone();
-        panic_catch::dispatch_with_catch("pattern", async move {
-            crate::ui::factory::record_supervisor_mcp_call();
-            let action = req.action.clone();
-            let result = match req.action.as_str() {
-                "create" => this.pattern_create(req).await,
-                "list" => this.pattern_list(req).await,
-                "show" => this.pattern_show(req).await,
-                "update" => this.pattern_update(req).await,
-                "archive" => this.pattern_archive(req).await,
-                "adopt" => this.pattern_adopt(req).await,
-                "helpful" => this.pattern_helpful(req).await,
-                "harmful" => this.pattern_harmful(req).await,
-                "team_suggestions" => this.team_suggestions(req).await,
-                "team_new_suggestions" => this.team_new_suggestions(req).await,
-                "team_create_suggestion" => this.team_create_suggestion(req).await,
-                "team_share" => this.team_share(req).await,
-                "team_adopt" => this.team_adopt_suggestion(req).await,
-                "team_dismiss" => this.team_dismiss_suggestion(req).await,
-                "team_recommend" => this.team_recommend_suggestion(req).await,
-                "team_archive_suggestion" => this.team_archive_suggestion(req).await,
-                "team_suggestion_analytics" => this.team_suggestion_analytics(req).await,
-                _ => Err(Self::error(
-                    ErrorCode::INVALID_PARAMS,
-                    format!(
-                        "Unknown pattern action: {}. Valid: create, list, show, update, archive, adopt, helpful, harmful, team_suggestions, team_new_suggestions, team_create_suggestion, team_share, team_adopt, team_dismiss, team_recommend, team_archive_suggestion, team_suggestion_analytics",
-                        req.action
-                    ),
-                )),
-            };
-
-            // Track MCP tool usage
-            crate::telemetry::track_mcp_tool("pattern", &action, result.is_ok());
-
-            result
-        })
-        .await
-    }
-
-    // ========================================================================
-    // cas_spec - All spec operations
-    // ========================================================================
-
-    #[tool(
-        description = "Spec operations. Actions: create, show, update, delete, list, approve, reject, supersede, link, unlink, sync."
-    )]
-    pub async fn spec(
-        &self,
-        Parameters(req): Parameters<SpecRequest>,
-    ) -> Result<CallToolResult, McpError> {
-        let this = self.clone();
-        panic_catch::dispatch_with_catch("spec", async move {
-            crate::ui::factory::record_supervisor_mcp_call();
-            let action = req.action.clone();
-            let is_mutating = matches!(
-                req.action.as_str(),
-                "create"
-                    | "update"
-                    | "delete"
-                    | "approve"
-                    | "reject"
-                    | "supersede"
-                    | "link"
-                    | "unlink"
-                    | "sync"
-            );
-
-            let result = match req.action.as_str() {
-                "create" => this.spec_create(req).await,
-                "show" => this.spec_show(req).await,
-                "update" => this.spec_update(req).await,
-                "delete" => this.spec_delete(req).await,
-                "list" => this.spec_list(req).await,
-                "approve" => this.spec_approve(req).await,
-                "reject" => this.spec_reject(req).await,
-                "supersede" => this.spec_supersede(req).await,
-                "link" => this.spec_link(req).await,
-                "unlink" => this.spec_unlink(req).await,
-                "sync" => this.spec_sync(req).await,
-                "get_for_task" => this.spec_get_for_task(req).await,
-                _ => Err(Self::error(
-                    ErrorCode::INVALID_PARAMS,
-                    format!(
-                        "Unknown spec action: {}. Valid: create, show, update, delete, list, approve, reject, supersede, link, unlink, sync, get_for_task",
-                        req.action
-                    ),
-                )),
-            };
-
-            // Notify client of resource changes (Claude Code 2.1.0+)
-            if is_mutating && result.is_ok() {
-                this.inner.notify_resources_changed().await;
-            }
-
-            // Track MCP tool usage
-            crate::telemetry::track_mcp_tool("spec", &action, result.is_ok());
-
-            result
-        })
-        .await
-    }
-
-    // ========================================================================
-    // mcp_search - Search across all connected MCP servers
-    // ========================================================================
-
-    #[tool(
-        description = "Search across all tools from connected MCP servers. Pass a keyword query to filter by tool name and description (case-insensitive); use 'server:name' to filter by server. Builds without mcp-proxy return a rebuild instruction."
-    )]
-    pub async fn mcp_search(
-        &self,
-        #[allow(unused_variables)] Parameters(req): Parameters<ExecuteRequest>,
-    ) -> Result<CallToolResult, McpError> {
-        crate::ui::factory::record_supervisor_mcp_call();
-        #[cfg(feature = "mcp-proxy")]
-        {
-            let proxy = self.proxy.as_ref().ok_or_else(|| {
-                Self::error(
-                    ErrorCode::INVALID_REQUEST,
-                    "MCP proxy not configured. Add upstream servers to .cas/proxy.toml",
-                )
-            })?;
-
-            match proxy.search(&req.code, req.max_length).await {
-                Ok(value) => {
-                    let text = serde_json::to_string_pretty(&value).unwrap_or_default();
-                    crate::telemetry::track_mcp_tool("mcp_proxy", "search", true);
-                    Ok(Self::success(text))
-                }
-                Err(e) => {
-                    crate::telemetry::track_mcp_tool("mcp_proxy", "search", false);
-                    Err(Self::error(
-                        ErrorCode::INTERNAL_ERROR,
-                        format!("MCP search failed: {e}"),
-                    ))
-                }
-            }
-        }
-
-        #[cfg(not(feature = "mcp-proxy"))]
-        Err(Self::error(
-            ErrorCode::INVALID_REQUEST,
-            "MCP proxy requires mcp-proxy feature. Build with: cargo build --features mcp-proxy",
-        ))
-    }
-
-    // ========================================================================
-    // mcp_execute - Execute tool calls across connected MCP servers
-    // ========================================================================
-
-    #[tool(
-        description = "Execute calls across connected MCP servers after registered-caller policy enforcement. Use JSON dispatch: {\"server\":\"name\",\"tool\":\"tool_name\",\"args\":{...}} or dot-call syntax. Builds without mcp-proxy return a rebuild instruction."
-    )]
-    pub async fn mcp_execute(
-        &self,
-        Parameters(req): Parameters<ExecuteRequest>,
-    ) -> Result<CallToolResult, McpError> {
-        crate::ui::factory::record_supervisor_mcp_call();
-        #[cfg(feature = "mcp-proxy")]
-        {
-            let proxy = self.proxy.as_ref().ok_or_else(|| {
-                Self::error(
-                    ErrorCode::INVALID_REQUEST,
-                    "MCP proxy not configured. Add upstream servers to .cas/proxy.toml",
-                )
-            })?;
-            let caller = self.proxy_caller()?;
-
-            match proxy.execute(&caller, &req.code, req.max_length).await {
-                Ok(result) => {
-                    crate::telemetry::track_mcp_tool("mcp_proxy", "execute", true);
-                    let mut content = vec![Content::text(result.text)];
-                    for img in result.images {
-                        content.push(Content::image(img.data, img.mime_type));
-                    }
-                    if result.is_error {
-                        Ok(CallToolResult::error(content))
-                    } else {
-                        Ok(CallToolResult::success(content))
-                    }
-                }
-                Err(e) => {
-                    crate::telemetry::track_mcp_tool("mcp_proxy", "execute", false);
-                    Err(McpError {
-                        code: ErrorCode::INTERNAL_ERROR,
-                        message: Cow::Owned(format!(
-                            "MCP execute failed: {}",
-                            cmcp_core::describe_upstream_call_error(&e)
-                        )),
-                        data: cmcp_core::upstream_mcp_error_data(&e),
-                    })
-                }
-            }
-        }
-
-        #[cfg(not(feature = "mcp-proxy"))]
-        Err(Self::error(
-            ErrorCode::INVALID_REQUEST,
-            "MCP proxy requires mcp-proxy feature. Build with: cargo build --features mcp-proxy",
-        ))
-    }
-}
-
-fn canonical_task_action(action: &str) -> &str {
-    match action {
-        "get" => "show",
-        other => other,
-    }
-}
-
-fn canonical_coordination_action(action: &str) -> &str {
-    match action {
-        "inbox" => "inbox_poll",
-        other => other,
-    }
-}
-
-fn normalize_coordination_aliases(req: &mut CoordinationRequest, action: &str) {
-    match action {
-        "shutdown_workers" if req.worker_names.is_none() => {
-            req.worker_names = req.target.take();
-        }
-        "hold_worker" | "release_worker" if req.target.is_none() => {
-            req.target = req.worker_names.take();
-        }
-        _ => {}
-    }
-}
-
-fn normalize_factory_aliases(req: &mut FactoryRequest) {
-    match req.action.as_str() {
-        "shutdown_workers" if req.worker_names.is_none() => {
-            req.worker_names = req.target.take();
-        }
-        "hold_worker" | "release_worker" if req.target.is_none() => {
-            req.target = req.worker_names.take();
-        }
-        _ => {}
-    }
-}
-
-/// Return explicitly supplied fields outside an action's allow-list.
-///
-/// Serialization keeps this fail-closed when a new union field is added: a
-/// destructive action must opt into that field deliberately before accepting
-/// it. `None` fields serialize as null and therefore do not count as supplied.
-fn coordination_params_not_in(req: &CoordinationRequest, allowed: &[&str]) -> Vec<String> {
-    let Ok(serde_json::Value::Object(fields)) = serde_json::to_value(req) else {
-        return vec!["<request serialization failed>".to_string()];
-    };
-    let mut unsupported: Vec<String> = fields
-        .into_iter()
-        .filter(|(name, value)| !value.is_null() && !allowed.contains(&name.as_str()))
-        .map(|(name, _)| name)
-        .collect();
-    unsupported.sort();
-    unsupported
-}
-
-// ============================================================================
-// Backwards-compatible wrapper methods for tests
-// These are not exposed as MCP tools; use `coordination` tool instead.
-// ============================================================================
-
-impl CasService {
-    /// Wrapper for factory operations (used by tests). Delegates to coordination.
+    /// Wrapper for factory operations (used by tests). Takes the internal
+    /// `FactoryRequest` directly; the MCP surface is the `factory` tool.
     #[allow(dead_code)]
-    pub async fn factory(
+    pub async fn factory_request(
         &self,
         Parameters(req): Parameters<FactoryRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1506,6 +1593,7 @@ mod server_handler;
 /// cas-7c93 (GH #87): server_start / server_stop / server_list.
 mod server_ops;
 mod spec_ops;
+mod tool_schema;
 pub(crate) mod worker_liveness;
 mod worktree_verification_team_ops;
 
@@ -1668,6 +1756,7 @@ mod tests {
             "search",
             "system",
             "coordination",
+            "factory",
             "verification",
             "team",
             "pattern",

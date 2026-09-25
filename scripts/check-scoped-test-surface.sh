@@ -311,7 +311,8 @@ is_builtin_skill_or_agent_path() {
     [[ "$path" == cas-cli/src/builtins/skills/* \
         || "$path" == cas-cli/src/builtins/*/skills/* \
         || "$path" == cas-cli/src/builtins/agents/* \
-        || "$path" == cas-cli/src/builtins/*/agents/* ]]
+        || "$path" == cas-cli/src/builtins/*/agents/* \
+        || "$path" == cas-cli/src/builtins/jobs/* ]]
 }
 
 test_target_for_path() {

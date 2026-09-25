@@ -1352,6 +1352,11 @@ impl FactoryApp {
                     }
                 };
 
+            // cas-dc1b: worker-facing tool names come from the recipient
+            // worker's harness, not the session-wide spawn default.
+            let worker_cli = super::director::recipient_worker_cli(event, self.worker_cli, |w| {
+                self.harness_for(w)
+            });
             if let Some(mut prompt) = generate_prompt_at(
                 event,
                 &self.director_data,
@@ -1359,7 +1364,7 @@ impl FactoryApp {
                 &self.supervisor_name,
                 &self.auto_prompt,
                 self.supervisor_cli,
-                self.worker_cli,
+                worker_cli,
                 &gated_task_ids,
                 merge_alert_evidence.as_ref(),
                 snapshot_at,
@@ -1917,6 +1922,13 @@ impl FactoryApp {
     /// Remove a worker from the detector and its durable session hold set.
     /// This prevents a later worker that reuses the same friendly name from
     /// inheriting a hold it never received.
+    /// cas-8563b: record that a pre-assigned spawn's task brief already told
+    /// `worker` about `task_id`, so the director does not follow it with a
+    /// duplicate `TaskAssigned` prompt.
+    pub(crate) fn note_assignment_briefed(&mut self, task_id: &str, worker: &str) {
+        self.event_detector.note_assignment_briefed(task_id, worker);
+    }
+
     pub(crate) fn remove_worker_from_event_detector(&mut self, worker_name: &str) {
         self.event_detector.remove_worker(worker_name);
         let Some(session_name) = self.factory_session.as_deref() else {
@@ -2548,7 +2560,6 @@ pub(crate) fn queue_supervisor_intro_prompt(
             "Codex supervisor startup:\n\
 - Use skills: cas-supervisor, cas-codex-supervisor-checklist, cas-codebase-design\n\
 - No hooks: call MCP tools explicitly (tasks/memory/rules/search)\n\
-- Do NOT use /cas-start, /cas-context, or /cas-end\n\
 - Canonical current workers for this session: {worker_list}\n\
 - First steps: mcp__cs__coordination action=whoami; mcp__cs__task action=list task_type=epic; mcp__cs__task action=ready"
         ),

@@ -19,17 +19,26 @@ the other scores. They are the defects that recur on our surfaces; taste does no
   horizontal scroll — craft 0.
 - Content lost with JavaScript disabled or in print — accessibility 0.
 
-The receipt for this class is the visual-QA run: `node scripts/visual-qa.mjs <artifact>` renders
-the page headless in light and dark, checks every text node's contrast and every box for
-clipping, overlap, and phone-width overflow, and prints PASS or the failing nodes. Paste the
-PASS line into the critique table's craft evidence. Until the script exists in the project,
-perform the same checks by hand on the four renders in step 1 and say so in the evidence.
+The receipt for this class is the visual-QA run. The script ships with this skill; run it from
+the project root, with Playwright available:
 
-For a mergeable public surface, run `node scripts/visual-qa.mjs <artifact> --strict` and require a
-PASS receipt under `artifacts_root/<task-id>/visual-qa/` (`visual-qa.md`, JSON, and screenshots); if
-the production report is committed, commit only its small `visual-qa.md` beside it, never JSON or
-screenshots; review
-every allowlist entry for its finding type, selector, and specific reason.
+```bash
+npm exec --yes --package=playwright -- node <skills-dir>/cas-ui-craft/scripts/visual-qa.mjs \
+  --strict --artifact-dir <artifacts_root>/<task-id>/visual-qa <artifact-or-url>
+```
+
+It renders the page headless at 1280×800 and 390×800 in light and dark (add
+`--viewport 390x844` for the phone fold), checks every text node's contrast and every box for
+clipping, overlap, and phone-width overflow, and prints PASS or the failing nodes. Paste the PASS
+line into the critique table's craft evidence. A mergeable public surface needs the `--strict`
+PASS receipt (`visual-qa.md`, JSON, and screenshots) under `--artifact-dir`. If the production
+report is committed, commit only its small `visual-qa.md` beside it, never JSON or screenshots.
+Review every allowlist entry for its finding type, selector, and specific reason.
+
+**Fallback, stated once:** where Playwright or Chromium cannot run, make the same four checks by
+eye on the renders in Procedure step 1, in both schemes, and write "visual-QA unavailable:
+<reason>; checked by hand" in the craft evidence. A factory close gate that demands the receipt
+still needs a supervisor override for that.
 
 ## Dimensions and anchors
 
@@ -44,7 +53,7 @@ every allowlist entry for its finding type, selector, and specific reason.
 ## Procedure
 
 1. Render, then open the artifact at 1280×800, 390×844, print preview, and with JS disabled, in
-   light and in dark; run `node scripts/visual-qa.mjs <artifact>` where the project has it.
+   light and in dark; run the visual-QA script above.
 2. Score each dimension against the anchors; a score needs one sentence of evidence naming what
    on the page earned it. "Looks good" is not evidence.
 3. Append the table to the brief under `## Critique`, with the scorer and date.

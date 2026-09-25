@@ -88,7 +88,7 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 ## Builtins, tests, and supporting clients
 - `cas-cli/src/builtins/` — embedded managed prompts, agents, skills, harness mirrors, and `cas-cli/src/builtins/reference-history.json` sync manifest.
 - `cas-cli/src/builtins/agents/` — canonical duplicate, learning, rule, session, and task-verifier agent prompts.
-- `cas-cli/src/builtins/{codex,grok}/{agents,skills}/` — provider-specific prompt trees; `cas-cli/src/builtins/codex/` also carries factory-supervisor prompts.
+- `cas-cli/src/builtins/codex/` — the only per-harness files the prefix-neutral catalog cannot share (the Codex no-hooks checklist and two `openai.yaml` policies); every other catalog entry embeds the canonical file, and the task-verifier's `tools:` frontmatter is generated per harness around `agents/task-verifier.body.md`.
 - `cas-cli/src/builtins/skills/` — canonical shared skills, references, examples, scripts, and design/release assets rendered to harness mirrors.
 - `cas-cli/tests/` — integration targets for CLI, hooks, cloud, factory/MCP, hub, search, verification, e2e, and multi-agent behavior.
 - `cas-cli/tests/hooks_test/main.rs` — integration-test entrypoint that includes the hooks test module tree.

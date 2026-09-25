@@ -172,8 +172,8 @@ impl CasService {
 
         Ok(Self::success(format!(
             "Started server '{}' (id {})\n  pid: {}\n  pgid: {}\n  cwd: {}\n  cmd: {}\n  {}\n  logs: {}\n\n\
-             Query it with `coordination action=server_list`; stop it with \
-             `coordination action=server_stop id={}`.",
+             Query it with `factory action=server_list`; stop it with \
+             `factory action=server_stop id={}`.",
             record.name,
             record.id,
             record.pid,
@@ -222,7 +222,7 @@ impl CasService {
                     ErrorCode::INVALID_PARAMS,
                     format!(
                         "no registered server matches '{handle}' — \
-                         run `coordination action=server_list` to see the registry"
+                         run `factory action=server_list` to see the registry"
                     ),
                 )
             })?;
@@ -310,7 +310,7 @@ impl CasService {
             return Ok(Self::success(format!(
                 "No registered servers{}.\n\n\
                  Long-running servers belong in the registry: \
-                 `coordination action=server_start command=\"npm run dev\" port=5173` \
+                 `factory action=server_start command=\"npm run dev\" port=5173` \
                  (add shared=true when it must outlive the task). A raw `npm run dev &` is \
                  killed at worker teardown and is invisible here.",
                 task_filter.map(|t| format!(" for {t}")).unwrap_or_default()

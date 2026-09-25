@@ -410,3 +410,33 @@ async fn the_injected_pull_instruction_names_an_action_the_router_accepts() {
 
     drop(temp);
 }
+
+/// cas-caae (skills audit M83): a page naming another registered project is
+/// refused, unless a `project:<slug>` source declares the scope.
+#[tokio::test]
+async fn knowledge_write_refuses_page_naming_another_registered_project_cas_caae() {
+    let (_temp, core) = setup_cas();
+    register_host_project("/nonexistent/yonder-marmot");
+
+    let refusal = core
+        .knowledge_write(Parameters(write_req(
+            "PostHog environments",
+            "configuration",
+            "Yonder Marmot sends events to the staging PostHog project.",
+        )))
+        .await
+        .expect_err("a page naming another registered project is refused");
+    assert!(refusal.message.contains("yonder-marmot"), "{}", refusal.message);
+    assert!(refusal.message.contains("`sources`"), "{}", refusal.message);
+
+    core.knowledge_write(Parameters(KnowledgeRequest {
+        sources: Some("project:yonder-marmot".to_string()),
+        ..write_req(
+            "PostHog environments",
+            "configuration",
+            "Yonder Marmot sends events to the staging PostHog project.",
+        )
+    }))
+    .await
+    .expect("an explicitly scoped page is accepted");
+}

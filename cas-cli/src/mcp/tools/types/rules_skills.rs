@@ -138,8 +138,11 @@ pub struct SkillCreateRequest {
     #[serde(default)]
     pub allowed_tools: Option<String>,
 
-    /// Disallowed tools (comma-separated) — harness-enforced bans (Claude Code 2.1.152+)
-    #[schemars(description = "Disallowed tools (harness-enforced, Claude Code 2.1.152+)")]
+    /// Disallowed tools (comma-separated). Claude Code only, and turn-scoped:
+    /// removed while the skill is active, cleared at the next user message.
+    #[schemars(
+        description = "Disallowed tools (comma-separated). Claude Code only; removed while the skill is active and cleared at the next user message, so not a guard."
+    )]
     #[serde(default)]
     pub disallowed_tools: Option<String>,
 

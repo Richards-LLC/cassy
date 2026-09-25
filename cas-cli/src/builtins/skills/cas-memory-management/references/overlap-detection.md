@@ -1,10 +1,11 @@
 ---
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Memory Overlap Detection
 
-`mcp__cas__memory action=remember` runs an overlap check by default before
+`memory action=remember` runs an overlap check by default before
 writing a new SQLite entry. The check is part of the live memory API. It is
 best-effort: if the search index cannot be queried, the write proceeds and the
 failure is logged.
@@ -32,24 +33,25 @@ The checker selects a bounded candidate set and scores each candidate from 0 to
 | Tags | Shared specific tags |
 
 It subtracts one point for a module mismatch and one for a track mismatch,
-with a floor of zero. Score conservatively when a match is uncertain.
+with a floor of zero. Scoring is automatic; callers only read the result.
 
 ## Outcomes
 
 - **0–1, low overlap**: create the proposed entry normally.
 - **2–3, moderate overlap**: create the entry and add bidirectional
-  `related:<slug>` tags, up to the three-link cap. If a candidate is already at
-  the cap, retain the relationship on the new entry and surface the
-  `refresh_recommended` signal; consolidate through normal `update` and
-  `archive` operations as appropriate.
+  `related:<slug>` tags, up to the three-link cap. A candidate already at the
+  cap gets no link on either entry and is left out of `related_memories`; the
+  response sets `refresh_recommended` instead. Consolidate through normal
+  `update` and `archive` operations as appropriate.
 - **4–5, high overlap**: interactive mode returns a structured blocked result;
   do not create a duplicate. Use its `existing_slug` and
   `recommended_action` to update the existing entry or ask for a decision.
 
 ## Autofix and Concurrency
 
-Set `mode=autofix` on `remember` when an authorized headless caller should
-merge a high-overlap proposal into the existing entry. The existing entry ID
+Set `mode=autofix` on `remember` to merge a high-overlap proposal into the
+existing entry. Any caller may request it; there is no separate authorization
+check. The existing entry ID
 is preserved while its content, title, tags, `entry_type`, importance, and
 validity are replaced by the proposal.
 
@@ -67,7 +69,7 @@ option. Normal memory creation should leave it absent or false.
 ## Practical Workflow
 
 1. Search for the strongest reference symbol or error text with
-   `mcp__cas__search action=search ... doc_type=entry`.
+   `search action=search ... doc_type=entry`.
 2. Let `remember` perform its automatic check; do not duplicate an entry after
    a high-overlap response.
 3. For moderate overlap, inspect the returned related slugs and keep the

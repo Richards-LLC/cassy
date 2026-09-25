@@ -1,7 +1,8 @@
 ---
 name: project-overview
 description: Use when asked what a project is, to create or update PRODUCT_OVERVIEW.md, or when onboarding needs product intent after code structure is understood.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Project Overview
@@ -114,13 +115,13 @@ Follow [../codemap/references/doc-hygiene.md](../codemap/references/doc-hygiene.
 
 ### Seed the knowledge store
 
-`docs/PRODUCT_OVERVIEW.md` is a distillable source, so one build turns the doc you just wrote into a knowledge page plus a source-ledger entry:
+`docs/PRODUCT_OVERVIEW.md` is a distillable source. First plan the pass by running the build command below with `--dry-run` instead of its other flags (no model is called). A build distills pending sources in path order up to `--max-sources`, so on a stale ledger (many pending sources) the new doc may not be reached. If the plan does not include `docs/PRODUCT_OVERVIEW.md` within the first five sources, skip the build and note the dry-run count in the task notes. Otherwise build:
 
 ```bash
 cas knowledge build --max-sources 5
 ```
 
-Nothing else in the repo changed, so the ledger short-circuits every other source and this costs at most one model call. Rust bounds the build to 90 seconds and cleans up after itself, so this is one invocation observed once — do not detach it, background it, or poll. A non-zero exit is non-blocking: note the command and status and carry on, because the doc on disk is still the artifact. Confirm it landed:
+It costs at most five model calls. Rust bounds the build to 90 seconds and cleans up after itself, so this is one invocation observed once — do not detach it, background it, or poll. A non-zero exit is non-blocking: note the command and status and carry on, because the doc on disk is still the artifact. Confirm it landed:
 
 ```bash
 cas knowledge search "product overview"

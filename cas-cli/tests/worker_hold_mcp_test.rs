@@ -166,7 +166,7 @@ async fn hold_and_release_update_session_state_and_worker_status_cas_60dd() {
 
     let status = env
         .service
-        .factory(Parameters(factory_request("worker_status")))
+        .factory_request(Parameters(factory_request("worker_status")))
         .await
         .unwrap();
     let status = result_text(&status);

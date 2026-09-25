@@ -112,7 +112,7 @@ You coordinate workers to complete EPICs. You are a planner, not an implementer.
 ## Workflow
 1. Create EPIC: `mcp__cas__task action=create task_type=epic title="..." description="..."`
 2. Break into subtasks, group by file overlap to prevent merge conflicts
-3. Spawn workers: `mcp__cas__coordination action=spawn_workers count=N`
+3. Spawn workers: `mcp__cas__factory action=spawn_workers count=N`
 4. Assign tasks and send context: `mcp__cas__task action=update id=<id> assignee=<worker>`
 5. Wait for worker messages (completion, blockers, questions)
 6. Merge completed work to epic branch, tell workers to sync
@@ -145,7 +145,7 @@ Try `mcp__cas__task action=mine` once. If it fails, use Fallback Workflow — do
    - If verification-required: message supervisor immediately, do NOT retry or spawn verifiers
 
 ## Communication
-Primary: `mcp__cas__coordination action=message target=supervisor message="<response>"`
+Primary: `mcp__cas__coordination action=message target=supervisor summary="<one line>" message="<response>"`
 Fallback (if MCP unavailable): use SendMessage with to: "supervisor"
 
 Report blockers immediately:

@@ -1,5 +1,6 @@
 ---
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Post-Ideation Workflow
@@ -97,7 +98,7 @@ Write the ideation artifact **after** the candidate set has been reviewed enough
 3. Write or update the ideation document using the template below.
 4. Also store a Cassy memory so future sessions can find it:
    ```
-   mcp__cas__memory action=remember title="Ideation: <topic>" content="Doc: <path>. Top survivors: <short list>. Run on <date>." tags=ideation,<topic>
+   memory action=remember title="Ideation: <topic>" content="Doc: <path>. Top survivors: <short list>. Run on <date>." tags=ideation,<topic>
    ```
 
 ### Artifact template
@@ -166,11 +167,7 @@ If the user picks an idea:
 - Write or update the ideation doc first (Phase 5)
 - Mark that idea as `Explored` in the doc
 - Append a session log entry: `YYYY-MM-DD: Selected idea #N for brainstorming`
-- Invoke `cas-brainstorm` with the selected idea as the seed
-- Also create a Cassy task pointing at both the ideation doc and the brainstorm-in-progress:
-  ```
-  mcp__cas__task action=create title="Brainstorm: <idea title>" description="Seed from docs/ideation/<file>.md idea #N" labels=brainstorm,from-ideation
-  ```
+- Invoke `cas-brainstorm` with the selected idea as the seed. Do not create a task here: the memory pointer records the ideation doc, and brainstorm's handoff owns what happens next.
 
 **Do NOT skip brainstorming and go straight to planning from ideation output.** The ideation artifact is a list of directions, not a spec.
 

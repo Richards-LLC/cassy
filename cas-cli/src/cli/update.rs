@@ -15,7 +15,8 @@ use clap::Args;
 
 use crate::builtins::{
     SyncResult, ensure_builtin_gitignore, mark_missing_owned_references_for_replacement,
-    prune_stale_user_skills_for_harness, sync_all_builtins_for_harness,
+    harness_installed_for_user, prune_stale_user_skills_for_harness,
+    sync_all_builtins_for_harness,
     sync_all_builtins_for_project,
 };
 use crate::cli::Cli;
@@ -27,7 +28,7 @@ use crate::cli::hook::{
     configure_claude_hooks, configure_mcp_server, provision_codex_project,
     provision_codex_user_config,
 };
-use crate::cli::init::{generate_cas_skill, update_claude_md};
+use crate::cli::init::{generate_cas_skill, update_agents_md, update_claude_md};
 use crate::cli::update::preview::{build_update_transaction, show_enhanced_dry_run};
 use crate::cloud::{CloudConfig, FetchTeamsOutcome, fetch_and_cache_teams, maybe_adopt_team_scope};
 use crate::hybrid_search::{LegacyRepairLimits, LegacyRepairOutcome, repair_legacy_index_bounded};
@@ -105,6 +106,10 @@ fn report_builtin_sync(
         } else {
             fmt.write_raw("  ")?;
             fmt.success(&format!("{location}: built-ins up to date"))?;
+        }
+        for file in &result.pruned_files {
+            fmt.write_raw(&format!("    - {location}/{file} (no longer shipped; removed)"))?;
+            fmt.newline()?;
         }
 
         // cas-4900: surface silent skips so stale destinations stop
@@ -1794,7 +1799,15 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
     let codex_dir = project_root.join(".codex");
     let codex_enabled = codex_dir.exists();
     let grok_dir = project_root.join(".grok");
-    let grok_enabled = grok_dir.exists();
+    // cas-6b97 (audit M39/M40): an installed Grok or OpenCode ranks the
+    // project's own `.grok/skills` / `.opencode/skills` above `.claude/skills`,
+    // so write their projection whenever they are installed. Without it they
+    // load the Claude-spelled copies, whose tool names do not resolve for them.
+    let grok_enabled =
+        grok_dir.exists() || harness_installed_for_user(cas_mux::SupervisorCli::Grok);
+    let opencode_dir = project_root.join(".opencode");
+    let opencode_enabled =
+        opencode_dir.exists() || harness_installed_for_user(cas_mux::SupervisorCli::OpenCode);
 
     let theme = ActiveTheme::default();
 
@@ -1807,6 +1820,9 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
     }
     if grok_enabled {
         builtin_harnesses.push(cas_mux::SupervisorCli::Grok);
+    }
+    if opencode_enabled {
+        builtin_harnesses.push(cas_mux::SupervisorCli::OpenCode);
     }
     let builtin_gitignore = ensure_builtin_gitignore(project_root, &builtin_harnesses)?;
 
@@ -1909,6 +1925,29 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
         }
     }
 
+    // 3b. AGENTS.md directive: the harness-neutral block CLAUDE.md imports
+    // and Codex/Grok read directly (audit D3, M66).
+    match update_agents_md(project_root) {
+        Ok(true) => {
+            config_updated.push("AGENTS.md");
+            if !cli.json {
+                let mut out = io::stdout();
+                let mut fmt = Formatter::stdout(&mut out, theme.clone());
+                fmt.write_raw("  ")?;
+                fmt.success("Updated AGENTS.md")?;
+            }
+        }
+        Ok(false) => {}
+        Err(e) => {
+            if !cli.json {
+                let mut out = io::stdout();
+                let mut fmt = Formatter::stdout(&mut out, theme.clone());
+                fmt.write_raw("  ")?;
+                fmt.warning(&format!("Could not update AGENTS.md: {e}"))?;
+            }
+        }
+    }
+
     // 4. Main Cassy skill (.claude/skills/cas/SKILL.md)
     match generate_cas_skill(project_root) {
         Ok(true) => {
@@ -1933,7 +1972,11 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
 
     // Sync database rules
     let rule_store = open_rule_store(&cas_root)?;
-    let rules = rule_store.list()?;
+    let mut rules = rule_store.list()?;
+    // cas-caae (skills audit M27): keep rules naming another registered
+    // project out of this project's Claude Code rules.
+    crate::store::foreign_project_guard::ForeignProjectGuard::for_project_root(project_root)
+        .retain_syncable_rules(&mut rules);
     let rule_syncer = Syncer::with_defaults(project_root);
     let rule_report = rule_syncer.sync_all(&rules)?;
 
@@ -1946,6 +1989,12 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
     }
     if grok_enabled {
         mark_missing_owned_references_for_replacement(cas_mux::SupervisorCli::Grok, &grok_dir)?;
+    }
+    if opencode_enabled {
+        mark_missing_owned_references_for_replacement(
+            cas_mux::SupervisorCli::OpenCode,
+            &opencode_dir,
+        )?;
     }
 
     // Sync database skills (this may remove stale dirs)
@@ -2056,6 +2105,22 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
         0
     };
 
+    let opencode_builtins_updated = if opencode_enabled {
+        if !cli.json {
+            let mut out = io::stdout();
+            let mut fmt = Formatter::stdout(&mut out, theme.clone());
+            fmt.subheading("Syncing .opencode files")?;
+        }
+        let opencode_result =
+            sync_all_builtins_for_project(cas_mux::SupervisorCli::OpenCode, project_root)?;
+        if !cli.json {
+            report_builtin_sync(&opencode_result, ".opencode", &theme)?;
+        }
+        opencode_result.total_updated()
+    } else {
+        0
+    };
+
     if cli.json {
         let config_json: Vec<String> = config_updated.iter().map(|s| format!("\"{s}\"")).collect();
         let codex_config_json: Vec<String> = codex_config_updated
@@ -2063,7 +2128,7 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
             .map(|s| format!("\"{s}\""))
             .collect();
         println!(
-            r#"{{"config_updated":[{}],"builtins_updated":{},"builtin_reference_conflicts":{},"codex_config_updated":[{}],"codex_builtins_updated":{},"codex_builtin_reference_conflicts":{},"grok_builtins_updated":{},"grok_builtin_reference_conflicts":{},"rules_synced":{},"rules_removed":{},"skills_synced":{},"skills_removed":{},"factory_tooling":"{}","builtin_gitignore_updated":{},"builtin_gitignore_tracked":{}}}"#,
+            r#"{{"config_updated":[{}],"builtins_updated":{},"builtin_reference_conflicts":{},"codex_config_updated":[{}],"codex_builtins_updated":{},"codex_builtin_reference_conflicts":{},"grok_builtins_updated":{},"grok_builtin_reference_conflicts":{},"opencode_builtins_updated":{},"rules_synced":{},"rules_removed":{},"skills_synced":{},"skills_removed":{},"factory_tooling":"{}","builtin_gitignore_updated":{},"builtin_gitignore_tracked":{}}}"#,
             config_json.join(","),
             builtin_result.total_updated(),
             builtin_result.modified_reference_files.len(),
@@ -2072,6 +2137,7 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
             codex_modified_references,
             grok_builtins_updated,
             grok_modified_references,
+            opencode_builtins_updated,
             rule_report.synced,
             rule_report.removed,
             skill_report.synced,
@@ -2179,6 +2245,10 @@ fn sync_user_builtins(cli: &Cli) -> anyhow::Result<()> {
                 fmt.write_raw(&format!("    - skills/{name} (removed stale orphan)"))?;
                 fmt.newline()?;
             }
+            for file in &r.pruned_files {
+                fmt.write_raw(&format!("    - {file} (no longer shipped; removed)"))?;
+                fmt.newline()?;
+            }
             drop(fmt);
             report_modified_builtin_references(&r, "~/.claude", &theme)?;
         }
@@ -2216,6 +2286,10 @@ fn sync_user_builtins(cli: &Cli) -> anyhow::Result<()> {
                 fmt.write_raw(&format!("    - skills/{name} (removed stale orphan)"))?;
                 fmt.newline()?;
             }
+            for file in &r.pruned_files {
+                fmt.write_raw(&format!("    - {file} (no longer shipped; removed)"))?;
+                fmt.newline()?;
+            }
             drop(fmt);
             report_modified_builtin_references(&r, "~/.codex", &theme)?;
         }
@@ -2245,6 +2319,10 @@ fn sync_user_builtins(cli: &Cli) -> anyhow::Result<()> {
             }
             for name in &grok_pruned {
                 fmt.write_raw(&format!("    - skills/{name} (removed stale orphan)"))?;
+                fmt.newline()?;
+            }
+            for file in &r.pruned_files {
+                fmt.write_raw(&format!("    - {file} (no longer shipped; removed)"))?;
                 fmt.newline()?;
             }
             drop(fmt);
@@ -2285,8 +2363,14 @@ fn sync_user_builtins(cli: &Cli) -> anyhow::Result<()> {
             .as_ref()
             .map(|r| r.modified_reference_files.len())
             .unwrap_or(0);
+        let files_pruned = |result: &Option<SyncResult>| {
+            result.as_ref().map(|r| r.pruned_files.len()).unwrap_or(0)
+        };
+        let claude_files_pruned = files_pruned(&claude_result);
+        let codex_files_pruned = files_pruned(&codex_result);
+        let grok_files_pruned = files_pruned(&grok_result);
         println!(
-            r#"{{"claude_present":{claude_present},"claude_builtins_updated":{claude_total},"claude_builtin_reference_conflicts":{claude_conflicts},"claude_skills_pruned":{claude_pruned_n},"codex_present":{codex_present},"codex_builtins_updated":{codex_total},"codex_builtin_reference_conflicts":{codex_conflicts},"codex_skills_pruned":{codex_pruned_n},"grok_present":{grok_present},"grok_builtins_updated":{grok_total},"grok_builtin_reference_conflicts":{grok_conflicts},"grok_skills_pruned":{grok_pruned_n}}}"#
+            r#"{{"claude_present":{claude_present},"claude_builtins_updated":{claude_total},"claude_builtin_reference_conflicts":{claude_conflicts},"claude_skills_pruned":{claude_pruned_n},"claude_files_pruned":{claude_files_pruned},"codex_present":{codex_present},"codex_builtins_updated":{codex_total},"codex_builtin_reference_conflicts":{codex_conflicts},"codex_skills_pruned":{codex_pruned_n},"codex_files_pruned":{codex_files_pruned},"grok_present":{grok_present},"grok_builtins_updated":{grok_total},"grok_builtin_reference_conflicts":{grok_conflicts},"grok_skills_pruned":{grok_pruned_n},"grok_files_pruned":{grok_files_pruned}}}"#
         );
     }
 

@@ -670,14 +670,14 @@ pub fn open_rule_store(cas_dir: &Path) -> Result<Arc<dyn RuleStore>> {
                     config.sync.min_helpful,
                     queue,
                 )
-                .with_cloud_config(cloud_config),
+                .with_cloud_config(cloud_config)
+                .with_project_root(project_root.to_path_buf()),
             ));
         } else {
-            return Ok(Arc::new(SyncingRuleStore::new(
-                base_store,
-                target_dir,
-                config.sync.min_helpful,
-            )));
+            return Ok(Arc::new(
+                SyncingRuleStore::new(base_store, target_dir, config.sync.min_helpful)
+                    .with_project_root(project_root.to_path_buf()),
+            ));
         }
     }
 

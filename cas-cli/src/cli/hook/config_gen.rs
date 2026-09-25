@@ -622,6 +622,8 @@ pub fn get_cas_mcp_permissions() -> Vec<String> {
     vec![
         "mcp__cas__task".to_string(),
         "mcp__cas__coordination".to_string(),
+        // cas-8563b (D2): supervisor fleet control, split out of coordination.
+        "mcp__cas__factory".to_string(),
         "mcp__cas__memory".to_string(),
         "mcp__cas__search".to_string(),
         "mcp__cas__rule".to_string(),

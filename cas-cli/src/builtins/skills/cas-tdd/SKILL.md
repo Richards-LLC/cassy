@@ -1,14 +1,15 @@
 ---
 name: cas-tdd
 description: Use when a task requires test-first work, red-green-refactor, seam selection for tests, or integration-test design.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Test-Driven Development
 
 Imported and adapted from mattpocock/skills `tdd`, MIT © 2026 Matt Pocock.
 
-Use a red → green loop to produce tests worth keeping. Test behavior through public interfaces, name the observable capability, and choose seams before writing the test. Keep durable decisions and task evidence in Cassy through `mcp__cas__task`, `mcp__cas__spec`, and `mcp__cas__memory`; do not create parallel tracker or context files.
+Use a red → green loop to produce tests worth keeping. Test behavior through public interfaces, name the observable capability, and choose seams before writing the test. Keep durable decisions and task evidence in Cassy through `task`, `spec`, and `memory`; do not create parallel tracker or context files.
 
 ## Seams and slices
 
@@ -16,6 +17,7 @@ Use a red → green loop to produce tests worth keeping. Test behavior through p
 - Work vertical tracer bullets: one test, the smallest implementation that makes it pass, then the next learned slice. Do not write a horizontal wall of imagined tests.
 - Expected values come from an independent source of truth: a worked example, specification, known-good literal, or external contract.
 - Use the project’s scoped test command and record the actual proof result in the task. Do not treat a zero-test success as proof.
+- Factory workers never run Rust builds or tests: commit the failing test and the fix as separate commits, and cite the supervisor's `ASSEMBLY_PROOF` from epic assembly as the Rust red/green proof (see `cas-worker`). Non-Rust suites still run in the worker.
 
 When module shape or a seam is unclear, consult `cas-codebase-design` for module, interface, depth, seam, adapter, leverage, and locality vocabulary.
 

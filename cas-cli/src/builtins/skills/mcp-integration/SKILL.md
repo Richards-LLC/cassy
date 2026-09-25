@@ -1,7 +1,8 @@
 ---
 name: mcp-integration
 description: Use when installing, registering, verifying, debugging, or exposing an MCP server — including scope choice, credential handling, zero-scope keys, worktree visibility, and paid/third-party servers. Not for local dev servers (see cas-servers).
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Manage MCP servers through Cassy
@@ -21,12 +22,20 @@ Use Cassy's project-scoped MCP proxy as the source of truth. The procedure is:
    cas mcp add --scope user -e API_TOKEN='${API_TOKEN}' search -- npx search-mcp
    ```
 
-   Project/local configuration is stored in `.cas/proxy.toml`; a user-scoped
-   registration belongs to the machine-wide MCP configuration. A local
-   registration is keyed by its directory, so it does not follow a Cassy
-   worktree. Choose `user` for workers that must see the server in every
-   worktree, or configure the project proxy for a shared, credential-safe hop.
-3. **Import an existing registration when appropriate.** `cas mcp import`
+   For `cas mcp add`, `local` (the default) and `project` write the same file,
+   the project's `.cas/proxy.toml`, which every Cassy worktree of the project
+   already shares. Use `--scope user` only for a server every project on the
+   machine should see; it writes the machine-wide proxy configuration.
+3. **Allowlist the routes you will call.** Neither `cas mcp add` nor
+   `proxy_add` writes the proxy `allowlist`, and an empty allowlist is
+   fail-closed: the server connects and advertises tools, but every call is
+   denied by policy. Add each `"<server>.<tool>"` route (a glob such as
+   `"<server>.*"` also works) to the `allowlist` of the configuration that
+   wins. When the project has a `.cas/proxy.toml`, its allowlist **replaces**
+   the machine allowlist rather than merging with it, so creating a project
+   file silently drops the machine routes: list every route the project needs
+   there.
+4. **Import an existing registration when appropriate.** `cas mcp import`
    reads Claude and/or Codex configuration without requiring a hand-copy:
 
    ```bash
@@ -36,24 +45,25 @@ Use Cassy's project-scoped MCP proxy as the source of truth. The procedure is:
 
    Review the dry-run before using `--force`; never copy a plaintext secret
    into source control, a task, a prompt, or a worktree.
-4. **Use the MCP system actions for proxy administration.** These mutate
+5. **Use the MCP system actions for proxy administration.** These mutate
    `.cas/proxy.toml` or inspect the daemon's health cache. The four actions
    have explicit, auditable calls:
 
    ```text
-   mcp__cas__system action=proxy_add name=docs transport=http url=https://docs.example.test/mcp
-   mcp__cas__system action=proxy_remove name=docs
-   mcp__cas__system action=proxy_list
-   mcp__cas__system action=proxy_health
+   system action=proxy_add name=docs transport=http url=https://docs.example.test/mcp
+   system action=proxy_remove name=docs
+   system action=proxy_list
+   system action=proxy_health
    ```
 
    Restart `cas serve` after adding or removing a server. `proxy_list` shows
    the configured server count; `proxy_health` is credential-free and reports
    upstream connection/backoff state.
-5. **Verify capability, not just connectivity.** Discover the proxy surface
-   with `mcp__cas__mcp_search` using `server:<name>`, count the advertised
+6. **Verify capability, not just connectivity.** Discover the proxy surface
+   with `mcp_search` using `server:<name>`, count the advertised
    tools, compare them with the expected set, then make one cheap read-only
-   call through `mcp__cas__mcp_execute`. A green connection with zero or one
+   call through `mcp_execute`. A `denied by policy` answer means
+   step 3's allowlist is missing the route. A green connection with zero or one
    tool is a narrow-scope configuration, not a successful integration.
 
 ## Credential and scope rules

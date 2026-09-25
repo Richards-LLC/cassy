@@ -548,6 +548,10 @@ fn execute_json(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
             .unwrap_or(0);
     }
 
+    // AGENTS.md carries the harness-neutral Cassy directive every harness
+    // reads (audit D3); CLAUDE.md imports it.
+    let _ = update_agents_md(cwd);
+
     // Setup factory tooling
     let factory_tooling_result = factory_tooling::setup_factory_tooling(cwd).unwrap_or_default();
 
@@ -837,8 +841,7 @@ fn confirm_and_apply(
                 colors::GREEN,
             )?;
         }
-        print_file_item(".codex/agents/", "Built-in agents", colors::GREEN)?;
-        print_file_item(".codex/commands/", "Built-in commands", colors::GREEN)?;
+        print_file_item(".codex/skills/", "Built-in skills", colors::GREEN)?;
     }
 
     if config.agents.grok {
@@ -1025,6 +1028,13 @@ fn apply_configuration(
             Ok(format!("{total} files"))
         })?;
     }
+
+    // AGENTS.md carries the harness-neutral Cassy directive every harness
+    // reads (audit D3); CLAUDE.md imports it.
+    execute_step("Updating AGENTS.md", animate, || {
+        update_agents_md(cwd)?;
+        Ok("AGENTS.md".to_string())
+    })?;
 
     // Step 7: Setup factory tooling helper templates
     execute_step("Setting up factory tooling", animate, || {
@@ -1317,10 +1327,10 @@ fn ensure_gitignore(cwd: &Path) -> anyhow::Result<String> {
 mod docs_and_skill;
 
 pub(crate) use crate::cli::init::docs_and_skill::{
-    CAS_SECTION_BEGIN, CAS_SECTION_END, CAS_SKILL, build_cas_section, is_old_cas_skill,
-    is_skill_managed_by_cas,
+    CAS_SKILL, ClaudeMdPlan, is_old_cas_skill, is_skill_managed_by_cas, plan_agents_md,
+    plan_claude_md,
 };
-pub use crate::cli::init::docs_and_skill::{generate_cas_skill, update_claude_md};
+pub use crate::cli::init::docs_and_skill::{generate_cas_skill, update_agents_md, update_claude_md};
 
 #[cfg(test)]
 mod integration_flag_tests {

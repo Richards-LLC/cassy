@@ -9,6 +9,11 @@ license = "MIT"
 [lints]
 workspace = true
 
+[features]
+# Mirrors cas-cli's `mcp-proxy`: the proxy-only system/verification actions
+# are published in the action enums only when the dispatch includes them.
+mcp-proxy = []
+
 [dependencies]
 cas-types = { path = "../cas-types" }
 cas-store = { path = "../cas-store" }

@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
-# Regenerate the shipped-builtin-reference history ledger (cas-0c0a).
+# Regenerate the shipped-builtin skill-file history ledger (cas-0c0a, cas-57c02).
 #
 # `sync_owned_reference` preserves any destination whose content does not match
 # its recorded baseline, on the theory that it is a local customization. Files
 # installed before the baseline ledger existed (Jul 2026) have no baseline at
 # all, so pristine-but-old CAS content was misclassified as a local edit and
 # skipped forever. This script embeds the SHA-256 of every *previously shipped*
-# version of each builtin reference file so sync can tell "old CAS version"
-# (safe to replace) apart from "someone edited this" (must preserve).
+# version of every non-`SKILL.md` file under a builtin skill directory
+# (references, scripts, examples, templates) so sync can tell "old CAS
+# version" (safe to replace) apart from "someone edited this" (must preserve).
 #
-# Run after landing changes to any builtin reference file, and before cutting a
+# Files Cassy has since deleted stay in the ledger: that is how sync proves an
+# installed copy of a removed file is stale Cassy content and prunes it.
+#
+# Run after landing changes to any builtin skill file, and before cutting a
 # release:
 #
 #   ./scripts/gen-builtin-reference-history.sh
@@ -22,46 +26,110 @@ repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
 out="cas-cli/src/builtins/reference-history.json"
-tmp="$(mktemp)"
-trap 'rm -f "$tmp"' EXIT
 
-# Collect "<builtin path>\t<sha256>" for every revision of every reference file,
-# in every harness flavour (claude sources live directly under builtins/,
-# codex/grok under builtins/{codex,grok}/). Harness flavours share a builtin
-# path on purpose: a destination holding another harness's shipped copy is
-# still shipped CAS content, not a local edit.
-: >"$tmp"
-while IFS= read -r file; do
-  builtin_path="${file#cas-cli/src/builtins/}"
-  builtin_path="${builtin_path#codex/}"
-  builtin_path="${builtin_path#grok/}"
-  # `--raw` yields the post-image blob id per revision directly, so renamed
-  # ancestors resolve without re-deriving the historical path.
-  while IFS= read -r blob; do
-    case "$blob" in
-      0000000000000000000000000000000000000000) continue ;;  # deletion
-    esac
-    hash="$(git cat-file blob "$blob" 2>/dev/null | sha256sum | cut -d' ' -f1)"
-    [ -n "$hash" ] || continue
-    printf '%s\t%s\n' "$builtin_path" "$hash" >>"$tmp"
-  done < <(git log --follow --raw --no-abbrev --format= -- "$file" | awk '/^:/ {print $4}')
-done < <(git ls-files 'cas-cli/src/builtins/*references*')
+# Collect the SHA-256 of every revision of every skill-owned file, in every
+# harness flavour (claude sources live directly under builtins/, codex/grok
+# under builtins/{codex,grok}/). Harness flavours share a builtin path on
+# purpose: a destination holding another harness's shipped copy is still
+# shipped CAS content, not a local edit. Source paths under a skill directory
+# equal their install paths, so the flavour-stripped path is the key.
+# `SKILL.md` bodies and flat `skills/<name>.md` sources are excluded: they are
+# governed by their `managed_by: cas` frontmatter instead.
+#
+# Two history walks feed the ledger:
+#   1. One `git log -m --no-renames` pass over builtins/ lists the post-image
+#      blob of every path in every commit, merges included (a version produced
+#      by a conflict resolution exists in no ordinary commit, yet it shipped)
+#      and deleted files included.
+#   2. A `--follow` pass per current file adds the content it had under earlier
+#      names, as the ledger always has. It skips merges: `--follow -m` costs
+#      about 4x the runtime (the release gate runs this script) and a copy under
+#      a file's old name is installed at the old path, which pass 1 covers.
+# Blobs are hashed through one `git cat-file --batch`.
+python3 - "$out" <<'PY'
+import hashlib
+import json
+import re
+import subprocess
+import sys
 
-sort -u "$tmp" | python3 -c '
-import json, sys
-files = {}
-for line in sys.stdin:
-    line = line.rstrip("\n")
-    if not line:
+ROOT = "cas-cli/src/builtins/"
+OWNED = re.compile(r"^skills/[^/]+/.+")
+BODY = re.compile(r"^skills/[^/]+/SKILL\.md$")
+
+
+def git(*args):
+    return subprocess.run(["git", *args], capture_output=True, text=True, check=True).stdout
+
+
+def key(source_path):
+    path = source_path[len(ROOT):] if source_path.startswith(ROOT) else None
+    if path is None:
+        return None
+    for flavour in ("codex/", "grok/"):
+        if path.startswith(flavour):
+            path = path[len(flavour):]
+            break
+    if not OWNED.match(path) or BODY.match(path):
+        return None
+    return path
+
+
+def post_image_blobs(raw_log):
+    for line in raw_log.splitlines():
+        if not line.startswith(":"):
+            continue
+        meta, _, path = line.partition("\t")
+        blob = meta.split()[3]
+        if blob.strip("0"):
+            yield path, blob
+
+
+pairs = set()
+for path, blob in post_image_blobs(
+    git("log", "-m", "--no-renames", "--raw", "--no-abbrev", "--format=", "--", ROOT)
+):
+    builtin_path = key(path)
+    if builtin_path:
+        pairs.add((builtin_path, blob))
+
+for source_path in git("ls-files", "--", ROOT).splitlines():
+    builtin_path = key(source_path)
+    if not builtin_path:
         continue
-    path, digest = line.split("\t")
-    files.setdefault(path, set()).add(digest)
+    for _, blob in post_image_blobs(
+        git("log", "--follow", "--raw", "--no-abbrev", "--format=", "--", source_path)
+    ):
+        pairs.add((builtin_path, blob))
+
+blobs = sorted({blob for _, blob in pairs})
+batch = subprocess.run(
+    ["git", "cat-file", "--batch"],
+    input="".join(f"{blob}\n" for blob in blobs).encode(),
+    capture_output=True,
+    check=True,
+).stdout
+digests = {}
+offset = 0
+for blob in blobs:
+    newline = batch.index(b"\n", offset)
+    name, kind, size = batch[offset:newline].decode().split()
+    if name != blob or kind != "blob":
+        sys.exit(f"unexpected cat-file header for {blob}: {name} {kind}")
+    start = newline + 1
+    digests[blob] = hashlib.sha256(batch[start:start + int(size)]).hexdigest()
+    offset = start + int(size) + 1
+
+files = {}
+for builtin_path, blob in pairs:
+    files.setdefault(builtin_path, set()).add(digests[blob])
 doc = {
     "version": 1,
-    "comment": "Generated by scripts/gen-builtin-reference-history.sh - SHA-256 of every previously shipped version of each builtin reference file. Do not hand-edit.",
-    "files": {p: sorted(h) for p, h in sorted(files.items())},
+    "comment": "Generated by scripts/gen-builtin-reference-history.sh - SHA-256 of every previously shipped version of each non-SKILL.md builtin skill file. Do not hand-edit.",
+    "files": {path: sorted(hashes) for path, hashes in sorted(files.items())},
 }
-print(json.dumps(doc, indent=2))
-' >"$out"
+with open(sys.argv[1], "w") as handle:
+    handle.write(json.dumps(doc, indent=2) + "\n")
+PY
 
 echo "wrote $out ($(wc -c <"$out") bytes)"

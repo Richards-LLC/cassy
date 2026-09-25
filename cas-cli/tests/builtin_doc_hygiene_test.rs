@@ -10,8 +10,8 @@
 use std::path::PathBuf;
 
 use cas::builtins::{
-    BUILTIN_AGENTS, BUILTIN_SKILLS, CODEX_BUILTIN_AGENTS, CODEX_BUILTIN_SKILLS,
-    GROK_BUILTIN_AGENTS, GROK_BUILTIN_SKILLS, REQUIRED_FACTORY_AGENTS,
+    BUILTIN_AGENTS, BUILTIN_SKILLS, BUILTIN_WORKFLOWS, BuiltinFile, CODEX_BUILTIN_AGENTS,
+    CODEX_BUILTIN_SKILLS, GROK_BUILTIN_AGENTS, GROK_BUILTIN_SKILLS, REQUIRED_FACTORY_AGENTS,
 };
 
 #[path = "support/builtin_catalog.rs"]
@@ -106,11 +106,20 @@ fn doc_family_shares_one_hygiene_reference_instead_of_restating_it() {
 #[test]
 fn doc_hygiene_reference_is_registered_in_every_flavor() {
     let rel = "skills/codemap/references/doc-hygiene.md";
+    // Audit D1: one tree. The canonical file exists on disk, and every harness
+    // catalog registers it with exactly that content (no twin copy).
+    let canonical = std::fs::read_to_string(
+        checkout_builtins_root()
+            .map(|root| root.join(rel))
+            .unwrap_or_default(),
+    )
+    .ok();
     if let Some(root) = checkout_builtins_root() {
-        for flavor_rel in all_flavors(rel) {
+        assert!(root.join(rel).is_file(), "{rel} must exist on disk");
+        for twin in ["codex", "grok"] {
             assert!(
-                root.join(&flavor_rel).is_file(),
-                "{flavor_rel} must exist on disk"
+                !root.join(twin).join(rel).exists(),
+                "{twin}/{rel} must not reappear as a twin copy"
             );
         }
     }
@@ -119,10 +128,17 @@ fn doc_hygiene_reference_is_registered_in_every_flavor() {
         ("CODEX_BUILTIN_SKILLS", CODEX_BUILTIN_SKILLS),
         ("GROK_BUILTIN_SKILLS", GROK_BUILTIN_SKILLS),
     ] {
-        assert!(
-            catalog.iter().any(|b| b.path == rel),
-            "{name} must register {rel}; an unregistered reference is never installed"
+        let entry = catalog.iter().find(|b| b.path == rel).unwrap_or_else(|| {
+            panic!("{name} must register {rel}; an unregistered reference is never installed")
+        });
+        assert_eq!(
+            entry.content,
+            load(rel),
+            "{name} {rel} must embed the canonical file"
         );
+        if let Some(canonical) = &canonical {
+            assert_eq!(entry.content, canonical.as_str(), "{name} {rel} drifted from the file on disk");
+        }
     }
 }
 
@@ -181,11 +197,17 @@ fn codemap_states_the_real_missing_codemap_gate_behaviour() {
 
 /// Files removed by this wave: the merged skill and the sub-13-line references
 /// that sat behind a pointer, which the yardstick's own rule forbids.
-const REMOVED_BUILTIN_PATHS: [&str; 4] = [
+const REMOVED_BUILTIN_PATHS: [&str; 8] = [
     "skills/cas-domain-modeling/SKILL.md",
     "skills/cas-codebase-design/DEEPENING.md",
     "skills/cas-codebase-design/DESIGN-IT-TWICE.md",
     "skills/cas-writing-for-agents/SKILL-MECHANICS.md",
+    // The cas-html-reports before/after exemplar was a real operator report
+    // (e-mail identities, local account paths, costs, task ids).
+    "skills/cas-html-reports/references/examples/before-after/rubric-review-before.html",
+    "skills/cas-html-reports/references/examples/before-after/rubric-review-after.html",
+    "skills/cas-html-reports/references/examples/before-after/rubric-review.brief.md",
+    "skills/cas-html-reports/references/examples/before-after/rubric-review.why.md",
 ];
 
 #[test]
@@ -318,12 +340,19 @@ fn writing_for_agents_meets_the_bar_it_sets_for_other_skills() {
             body.contains("Use when"),
             "{flavor_rel} must pin the \"Use when …\" description convention"
         );
-        // The three-mirror rule.
-        assert!(
-            body.contains("codex") && body.contains("grok"),
-            "{flavor_rel} must state the three-mirror rule (claude canonical + codex + \
-             grok twins)"
-        );
+        // The one-tree rule (audit D1): one canonical copy with bare tool
+        // names, no codex/grok twin trees, and the named per-harness files.
+        for marker in [
+            "is the one copy",
+            "no `codex/` or `grok/` twin tree",
+            "Name Cassy tools by bare name",
+            "three Codex-only ones under `builtins/codex/`",
+        ] {
+            assert!(
+                body.contains(marker),
+                "{flavor_rel} must state the one-tree rule ({marker:?} missing)"
+            );
+        }
         // A line budget, and the absorbed skill mechanics.
         assert!(
             body.contains("80 lines"),
@@ -422,6 +451,198 @@ fn wizard_template_shows_the_safe_confirm_form_under_set_e() {
             body.lines().count() >= 24,
             "{flavor_rel} is truncated: the twins previously dropped the example block \
              because the drift guard compared only .md files"
+        );
+    }
+}
+
+// ============================================================================
+// Operator-data lint
+// ============================================================================
+
+/// Patterns that mark operator-private or cas-src-only data. Every builtin
+/// ships into every downstream project, so none of these may appear unless
+/// the file is allowlisted below with a reason.
+const OPERATOR_DATA_RULES: &[(&str, &str)] = &[
+    (
+        "e-mail",
+        r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}",
+    ),
+    ("home-path", r"/home/[a-z_][a-z0-9_-]*"),
+    ("codex-account-dir", r"~/\.codex-"),
+    ("task-id", r"\bcas-[0-9a-f]{4,5}\b"),
+    ("operator-org", r"Richards-LLC"),
+    ("operator-project", r"(?i)gabber"),
+    ("cas-src-test-command", r"nextest -p cas\b"),
+];
+
+/// Obvious placeholders are not operator data: documentation e-mail domains
+/// (RFC 2606 / RFC 6761) and synthetic task ids used in worked examples.
+fn is_synthetic(rule: &str, value: &str) -> bool {
+    match rule {
+        "e-mail" => {
+            regex::Regex::new(r"@(example\.(com|org|net)|[a-z0-9.-]+\.(test|example|invalid))$")
+                .unwrap()
+                .is_match(value)
+        }
+        "task-id" => {
+            let id = &value["cas-".len()..];
+            matches!(id, "1234" | "abcd" | "abc1" | "a1b2")
+                || id.chars().all(|c| Some(c) == id.chars().next())
+        }
+        _ => false,
+    }
+}
+
+/// `(catalog path, rule, reason)`. The path is flavour-agnostic: an entry
+/// covers the Claude, Codex and Grok copies of that file.
+const OPERATOR_DATA_ALLOWLIST: &[(&str, &str, &str)] = &[
+    (
+        "skills/cas-cut-release/references/failure-log.md",
+        "task-id",
+        "cas-src release-train failure log; each entry cites the ticket that fixed the failure. \
+         The release trio is cas-src-only content that moves out of universal builtins (audit M51).",
+    ),
+    (
+        "skills/cas-release-report/references/exemplar.md",
+        "operator-org",
+        "Links to the Cassy repo's own release-report sources the exemplar was rendered from; \
+         cas-src-only release content (audit M51).",
+    ),
+    (
+        "skills/cas-qa-craft/references/matrix-builder.md",
+        "operator-org",
+        "Attribution for the Cassy issue the matrix guidance was adapted from; pinned by the \
+         builtins and agent_definition_contract_test markers.",
+    ),
+    (
+        "skills/cas-worker/references/close-gate.md",
+        "task-id",
+        "Factory-core reference owned by the WP7 accuracy rewrite; ids tag the close gates it documents.",
+    ),
+    (
+        "skills/cas-supervisor/references/reference.md",
+        "task-id",
+        "Factory-core reference owned by the WP7 accuracy rewrite; ids tag the guards it documents.",
+    ),
+    (
+        "skills/cas-supervisor/references/worker-recovery.md",
+        "task-id",
+        "Factory-core reference owned by the WP7 accuracy rewrite; ids tag the recovery incidents it documents.",
+    ),
+    (
+        "skills/cas-supervisor/references/workflow.md",
+        "task-id",
+        "Factory-core reference owned by the WP7 accuracy rewrite; ids tag the guards it documents.",
+    ),
+];
+
+fn shipped_catalogs() -> [(&'static str, &'static [BuiltinFile]); 7] {
+    [
+        ("BUILTIN_AGENTS", BUILTIN_AGENTS),
+        ("CODEX_BUILTIN_AGENTS", CODEX_BUILTIN_AGENTS),
+        ("GROK_BUILTIN_AGENTS", GROK_BUILTIN_AGENTS),
+        ("BUILTIN_SKILLS", BUILTIN_SKILLS),
+        ("CODEX_BUILTIN_SKILLS", CODEX_BUILTIN_SKILLS),
+        ("GROK_BUILTIN_SKILLS", GROK_BUILTIN_SKILLS),
+        ("BUILTIN_WORKFLOWS", BUILTIN_WORKFLOWS),
+    ]
+}
+
+#[test]
+fn shipped_builtins_carry_no_operator_data() {
+    let rules: Vec<(&str, regex::Regex)> = OPERATOR_DATA_RULES
+        .iter()
+        .map(|(rule, pattern)| (*rule, regex::Regex::new(pattern).expect("valid rule")))
+        .collect();
+    let mut violations = Vec::new();
+    let mut allowlist_used = vec![false; OPERATOR_DATA_ALLOWLIST.len()];
+
+    for (catalog_name, catalog) in shipped_catalogs() {
+        for file in catalog {
+            for (rule, pattern) in &rules {
+                let hits: Vec<&str> = pattern
+                    .find_iter(file.content)
+                    .map(|m| m.as_str())
+                    .filter(|value| !is_synthetic(rule, value))
+                    .collect();
+                if hits.is_empty() {
+                    continue;
+                }
+                if let Some(index) = OPERATOR_DATA_ALLOWLIST
+                    .iter()
+                    .position(|(path, allowed, _)| *path == file.path && allowed == rule)
+                {
+                    allowlist_used[index] = true;
+                    continue;
+                }
+                violations.push(format!("{catalog_name} {}: {rule} {hits:?}", file.path));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "operator data in shipped builtins (replace with synthetic values such as acme-web, \
+         cas-1234 or user@example.com, or allowlist the file with a reason):\n{}",
+        violations.join("\n")
+    );
+    let stale: Vec<_> = OPERATOR_DATA_ALLOWLIST
+        .iter()
+        .zip(&allowlist_used)
+        .filter(|(_, used)| !**used)
+        .map(|((path, rule, _), _)| format!("{path} ({rule})"))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "operator-data allowlist entries no longer match anything; delete them: {stale:?}"
+    );
+    for (path, rule, reason) in OPERATOR_DATA_ALLOWLIST {
+        assert!(
+            reason.len() >= 40,
+            "allowlist entry {path} ({rule}) needs a stated reason"
+        );
+    }
+}
+
+#[test]
+fn operator_data_lint_catches_what_it_names() {
+    let rules: Vec<(&str, regex::Regex)> = OPERATOR_DATA_RULES
+        .iter()
+        .map(|(rule, pattern)| (*rule, regex::Regex::new(pattern).unwrap()))
+        .collect();
+    let caught = |text: &str| -> Vec<&'static str> {
+        rules
+            .iter()
+            .filter(|(rule, pattern)| {
+                pattern
+                    .find_iter(text)
+                    .any(|m| !is_synthetic(rule, m.as_str()))
+            })
+            .map(|(rule, _)| *rule)
+            .collect()
+    };
+    assert_eq!(caught("mail ops@acme-corp.io"), ["e-mail"]);
+    assert_eq!(caught("see /home/alice/.cas"), ["home-path"]);
+    assert_eq!(
+        caught("rollout at ~/.codex-work/sessions"),
+        ["codex-account-dir"]
+    );
+    assert_eq!(caught("fixed by cas-4df0"), ["task-id"]);
+    assert_eq!(caught("fixed by cas-5c02a"), ["task-id"]);
+    assert_eq!(caught("github.com/Richards-LLC/cassy"), ["operator-org"]);
+    assert_eq!(caught("project gabber-studio"), ["operator-project"]);
+    assert_eq!(caught("run cargo nextest -p cas"), ["cas-src-test-command"]);
+    for synthetic in [
+        "user@example.com",
+        "playwright@yourapp.test",
+        "task cas-1234",
+        "epic cas-4444",
+        "cas-cli and cas-core crates",
+        "acme-web",
+    ] {
+        assert!(
+            caught(synthetic).is_empty(),
+            "{synthetic:?} is not operator data"
         );
     }
 }

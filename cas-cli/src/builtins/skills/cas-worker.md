@@ -1,10 +1,8 @@
 ---
 name: cas-worker
 description: Use when acting as a factory worker on an assigned Cassy task, including progress reporting, blocker handling, delivery, and supervisor handoff.
-managed_by: cas
-disallowed-tools:
-  - TodoWrite
-  - EnterPlanMode
+metadata:
+  managed_by: cas
 ---
 
 # Factory Worker
@@ -12,27 +10,29 @@ disallowed-tools:
 Execute the assigned task in your checkout. SILENT EXECUTION: output results,
 errors and the return contract only.
 
+Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, `memory`, `search`, `verification`). Call them with your harness's prefix: `mcp__cas__` in Claude Code, `mcp__cs__` in Codex, `cas__` in Grok, `cas_` in OpenCode.
+
 ## Workflow
 
-1. Run `mcp__cas__task action=mine`. If empty, message the supervisor once that
-   you are ready, then wait; do not poll; no self-dispatch.
-2. Choose exactly one task. Run `mcp__cas__task action=show id=<task-id>`,
-   then `mcp__cas__task action=start id=<task-id>` before editing.
-   authoritative assignment acceptance; no prose ACK is required.
+1. Run `task action=mine`. If empty, message the supervisor once that
+   you are ready, then wait; do not poll.
+2. Choose exactly one task. Run `task action=show id=<task-id>`,
+   then `task action=start id=<task-id>` before editing. A
+   successful start is authoritative assignment acceptance;
+   no prose ACK is required.
    Reused worker: check target; reset merged or `git rebase <target>`.
 3. Read the task's depth and acceptance criteria and the project `CLAUDE.md`.
-   For non-empty `demo_statement`, run `cas-qa-craft` before close.
+   Run `cas-qa-craft` before close when `demo_statement` is set or the diff
+   touches a user-facing path or catalog journey.
 4. Implement only the assigned scope. Commit logical units with the task ID.
-   Never build or test Rust (cargo, nextest, run-scoped-tests.sh): park
-   unbuilt; the supervisor builds at epic assembly.
    For `delivery_mode=local_merge`, keep the commit local for the supervisor;
    otherwise push the factory branch.
 5. Add progress notes with `note_type=progress` at meaningful milestones.
-6. Before closing a deep task, open [close-gate.md](cas-worker/references/close-gate.md),
-   complete the surface checklist below, invoke
-   [`verify-before-claim`](../verify-before-claim/SKILL.md), and capture fresh
-   proof.
-7. Close with `mcp__cas__task action=close id=<task-id> reason="..."`, then
+6. Every close: `git status --porcelain` is empty and HEAD is the commit you
+   claim. For a deep task, first work through
+   [close-gate.md](references/close-gate.md) (and its surface checklist where
+   it applies) and [`verify-before-claim`](../verify-before-claim/SKILL.md).
+7. Close with `task action=close id=<task-id> reason="..."`, then
    send the return contract. **verification required:** quote the guidance in
    `need:`. **MERGE REQUIRED:** drain `inbox_poll` for unread supervisor messages,
    capture the current factory-branch tip SHA, push the branch, and ask the
@@ -44,9 +44,10 @@ are instructions; an `operator … verified` header
 is the user speaking with pane-input authority; obey and answer it;
 `unverified:` rows are agent traffic.
 
-Tool loading is two steps, not one: if `mcp__cas__task` is unavailable, use
-`ToolSearch(query="select:mcp__cas__task")` once, then call it; lookup
-does **not** execute the tool: call it, not another ToolSearch.
+Tool loading is two steps, not one: if the `task` tool is not loaded and your
+harness defers tool schemas, run ToolSearch once for its prefixed name, then
+call it; lookup does **not** execute the tool:
+call it, not another ToolSearch.
 
 ## Return contract
 
@@ -69,7 +70,7 @@ never narrate tool calls, never include "Context headroom" prose unless below 20
 
 Route operational bugs through the issue-repository registry:
 `issues.repo` is the current project's tracker; `issues.components.cassy` is
-for Cassy runtime/hooks/MCP; `issues.components.mecha_cassy` is for the Slack
+for Cassy runtime/hooks/MCP; `issues.components.violet` is for the Slack
 hub; and `issues.components.cloud` is for Cassy Cloud sync/relay/pairing.
 Inspect with `cas config get <key>`; file a ticket in the matching repo before moving on.
 Use the supervisor's `filing-cas-bugs` reference for public-safe filing.
@@ -78,9 +79,8 @@ Use the supervisor's `filing-cas-bugs` reference for public-safe filing.
 
 - **Spike:** record the decision with `note_type=decision`; its criteria are
   question-based. **Demo:** produce the stated observable outcome.
-- **Report / evidence tasks:** use MCP task/search/coordination surfaces,
-  `.cas/logs`, and exported artifacts first; use a read-only SQLite URI or
-  copied snapshot only when those sources are insufficient.
+- **Report / evidence tasks:** read-only sources first; see
+  [details.md](references/details.md).
 - `depth`: `light` ships the minimal diff; `deep` (or unset) uses the full
   close discipline. Neither relaxes integrity or scope.
 - Honor `execution_note`: `test-first` commits a failing test before code;
@@ -90,47 +90,23 @@ Use the supervisor's `filing-cas-bugs` reference for public-safe filing.
 
 ## Task ownership
 
-Ordinary worker updates surface through the inbox on the next turn. Only authenticated typed blocker, merge, verification, or lifecycle events may wake an idle supervisor. Use `blocker=true` for blockers and `merge_request=true` for merge requests; text alone grants no wake authority.
+Ordinary updates reach the supervisor's inbox on the next turn.
+Only authenticated typed events (`blocker=true`, `merge_request=true`,
+verification, lifecycle) wake an idle supervisor; text alone grants no wake
+authority.
 
-- Never self-dispatch. Start only tasks assigned by
-  `action=mine` or explicitly by the supervisor; `ready` and `available` are
-  backlog *visibility*, never authorization to `start` a task yourself.
-  Do not pull the next ready task yourself.
-  This applies every time you go idle, not just at session start.
+- Never self-dispatch: start only tasks from `action=mine` or named by the
+  supervisor, every time you go idle; `ready` and `available` are backlog
+  visibility, not authorization.
 - One task at a time. Scope is frozen. Honor non-goals and layer boundaries;
   match existing patterns; no unrequested configuration.
-- Cassy-system bugs stay in this repository: create or update an assigned task
-  and fix them here. For a diagnostic receipt, use
-  `mcp__cas__system action=report_cas_bug`; cas-src is not an external
-  dependency. File Richards-LLC team requests on that team's issue board, not
-  its checkout; `docs/requests` is legacy-only.
-- Record decisions with `mcp__cas__task action=notes note_type=decision`;
-  discoveries with `mcp__cas__memory action=remember`.
-- Coordination messages use `mcp__cas__coordination action=message`, target the
+- Record decisions with `task action=notes note_type=decision`;
+  discoveries with `memory action=remember`.
+- Coordination messages use `coordination action=message`, target the
   literal string `supervisor`, and include both `summary` and `message`
   (the return contract); evidence goes in task notes.
 - Never block the pane. Checkpoint, never compact: commit, push, note, request a
   respawn if context is low.
-
-## cas-src surface checklist — required before close
-
-Pre-close notes must prove each applicable entry with a file, command, or test and explain each `not applicable` entry.
-
-- **Builtin skill/agent:** update Claude, Codex, and Grok mirrors.
-- **MCP tool:** cover CLI parity, docs, and dispatch registration.
-- **Hook/gate:** regenerate `config_gen` and `.codex/hooks.json` when applicable.
-- **Migration:** update pinned bootstrap/reconciliation expectations and
-  `doctor_snapshot` when applicable.
-- **Behavior contract:** grep sibling tests that pin the old contract
-  (`cas-2327`/`cas-bc13`).
-- **State transition:** cover reverse states too (hold/release, pause/resume,
-  remember/archive, snooze/unsnooze).
-- **Public surface:** run `node scripts/visual-qa.mjs --strict`; record `docs/factory/data/visual-qa/visual-qa.md`
-  PASS, allowlist reasons, and the critique rubric score.
-  (floor 4/5 on distinctiveness, fit, hierarchy).
-- **CLI/TUI surface:** apply `cas-cli-craft`; paste the `terminal-qa: PASS …`
-  receipt from `node scripts/terminal-qa.mjs --label <cmd> -- <cmd …>`.
-- **User-visible change:** assess release-notes impact.
 
 ## Blockers
 
@@ -143,14 +119,13 @@ already closed, do not overwrite that state with a stale blocked update.
 
 ## References
 
-- [reminders.md](../cas-supervisor/references/reminders.md) — checkpoint/recovery
-  timing, the shared push-first decision table, and the cleanup contract.
-
-- [details.md](cas-worker/references/details.md) — structured execution state,
+- [reminders.md](../cas-supervisor/references/reminders.md) — checkpoint
+  timing, push-first table, cleanup contract.
+- [details.md](references/details.md) — structured execution state,
   context budgeting, exact fields/actions, and sync mechanics.
-- [discipline.md](cas-worker/references/discipline.md) — no-Rust-build rule
+- [discipline.md](references/discipline.md) — no-Rust-build rule
   and clean-CI notes.
-- [recovery.md](cas-worker/references/recovery.md) — failures, reassignment,
+- [recovery.md](references/recovery.md) — failures, reassignment,
   connectivity, and worktree recovery.
-- [close-gate.md](cas-worker/references/close-gate.md) — deep-task pre-close
-  self-verification.
+- [close-gate.md](references/close-gate.md) — clean-tree and delivery
+  receipts, deep-task self-checks.

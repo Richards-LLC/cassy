@@ -60,6 +60,10 @@ pub const KNOWLEDGE_ENTITY: &str = "knowledge_pages";
 /// separate from page records because the page row and body no longer exist.
 pub const KNOWLEDGE_TOMBSTONE_ENTITY: &str = "knowledge_tombstones";
 
+/// Entity type under which knowledge pages enter the unauthored-pull ledger
+/// (cas-42ee).
+const KNOWLEDGE_PAGE_AUTHORSHIP: &str = "knowledge_page";
+
 /// Percent-encode a query-string *value*.
 ///
 /// Conservative allow-list: anything outside unreserved characters is escaped,
@@ -107,6 +111,13 @@ pub struct KnowledgePageRecord {
     pub share: Option<ShareScope>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_canonical_id: Option<String>,
+    /// The project that authored the page, stamped by its author's push
+    /// (cas-42ee). `project_canonical_id` cannot serve as provenance: a pull
+    /// admits a page only when that field already names the pulling project,
+    /// so it is tautologically "this project". Absent on pages pushed by
+    /// older clients; such a pull is recorded as unauthored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_project: Option<String>,
 }
 
 impl KnowledgePageRecord {
@@ -139,6 +150,7 @@ impl KnowledgePageRecord {
             updated_at: page.updated_at,
             share: Some(share),
             project_canonical_id,
+            origin_project: None,
         }
     }
 
@@ -148,7 +160,12 @@ impl KnowledgePageRecord {
     /// machine lives in *their* local cache, so this machine has to embed the
     /// page itself before the semantic channel can retrieve it.
     pub fn into_page_write(self) -> PageWrite {
-        let origin_project_id = self.project_canonical_id.clone();
+        // The author's stamp wins; a legacy record falls back to the pushed
+        // scope, which the ingest guard has already matched to this project.
+        let origin_project_id = self
+            .origin_project
+            .clone()
+            .or_else(|| self.project_canonical_id.clone());
         let mut page = KnowledgePage::new(self.id, self.page_type, self.title);
         // Trust the sender's canonical path rather than recomputing it: a
         // future change to the slug rules must not silently fork a page into
@@ -283,11 +300,18 @@ impl CloudSyncer {
             // that published it. Re-pushing it would republish another
             // project's page under this one, so only pages this project owns
             // are sent.
+            // cas-42ee: a pulled page whose record carried no author stamp is
+            // recorded as unauthored; its scope-derived origin cannot prove it
+            // is this project's to republish.
             if page.origin == KnowledgePageOrigin::CloudPull
-                && !page
+                && (!page
                     .origin_project_id
                     .as_deref()
                     .is_some_and(|origin| crate::cloud::project_ids_match(origin, &push_project_id))
+                    || self
+                        .queue()
+                        .is_unauthored_pull(KNOWLEDGE_PAGE_AUTHORSHIP, &page.id)
+                        .unwrap_or(true))
             {
                 unauthored += 1;
                 continue;
@@ -301,14 +325,16 @@ impl CloudSyncer {
                     continue;
                 }
             };
-            records.push(serde_json::to_value(
-                KnowledgePageRecord::from_page_for_project(
-                    &page,
-                    body,
-                    share,
-                    Some(push_project_id.clone()),
-                ),
-            )?);
+            let mut record = KnowledgePageRecord::from_page_for_project(
+                &page,
+                body,
+                share,
+                Some(push_project_id.clone()),
+            );
+            // cas-42ee: only pages this project owns reach this point, so the
+            // push stamps it as their author.
+            record.origin_project = Some(push_project_id.clone());
+            records.push(serde_json::to_value(record)?);
         }
         if unauthored > 0 {
             warn!(
@@ -529,8 +555,16 @@ impl CloudSyncer {
                 continue;
             }
             let rel_path = record.rel_path.clone();
+            let page_id = record.id.clone();
+            let authored_here = record
+                .origin_project
+                .as_deref()
+                .map(|origin| crate::cloud::project_ids_match(origin, &project_id));
             match self.apply_knowledge_record(store, record) {
-                Ok(true) => report.applied += 1,
+                Ok(true) => {
+                    report.applied += 1;
+                    self.note_pulled_page_authorship(&page_id, authored_here, &mut report);
+                }
                 Ok(false) => report.locked_preserved += 1,
                 Err(e) => report.errors.push((rel_path, e.to_string())),
             }
@@ -620,6 +654,39 @@ impl CloudSyncer {
              this, as silence. Check the canonical id pin before assuming there is simply \
              nothing new."
         ))
+    }
+
+    /// Keep the unauthored-pull ledger honest for knowledge pages (cas-42ee),
+    /// as pulls already do for entries, rules and skills: a page that arrived
+    /// without its author's `origin_project` is recorded and never pushed from
+    /// here; a later copy stamped with this project clears the record.
+    fn note_pulled_page_authorship(
+        &self,
+        page_id: &str,
+        authored_here: Option<bool>,
+        report: &mut KnowledgePullReport,
+    ) {
+        let outcome = match authored_here {
+            Some(true) => self
+                .queue()
+                .forget_unauthored_pull(KNOWLEDGE_PAGE_AUTHORSHIP, page_id)
+                .map(|_| ()),
+            None => self
+                .queue()
+                .record_unauthored_pull(
+                    KNOWLEDGE_PAGE_AUTHORSHIP,
+                    page_id,
+                    "pulled without origin_project; the project scope echoes the request",
+                )
+                .map(|_| ()),
+            Some(false) => Ok(()),
+        };
+        if let Err(error) = outcome {
+            report.errors.push((
+                page_id.to_string(),
+                format!("could not record the page's authorship: {error}"),
+            ));
+        }
     }
 
     /// Apply one incoming page. `Ok(false)` means the local copy is locked and
@@ -937,6 +1004,93 @@ mod tests {
         assert_eq!(second, 0, "an unchanged page must not be re-pushed");
     }
 
+    /// cas-42ee: a pulled page's provenance comes from its author's
+    /// `origin_project` stamp. A legacy record without one is admitted (its
+    /// scope already matched this project) but recorded as unauthored and is
+    /// never pushed from here; a stamped record is not recorded.
+    #[tokio::test]
+    async fn legacy_pulled_pages_are_recorded_unauthored_and_never_pushed() {
+        use std::io::Read;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let own_project = get_project_canonical_id().expect("tests run in a Cassy project");
+        let legacy = remote_record("Legacy Page", "# Legacy", false);
+        assert!(legacy.get("origin_project").is_none(), "fixture is a legacy record");
+        let mut stamped = remote_record("Stamped Page", "# Stamped", false);
+        stamped["id"] = serde_json::json!("cas-kn902");
+        stamped["origin_project"] = serde_json::json!(own_project.clone());
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(super::super::pull::PULL_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "knowledge_pages": [legacy, stamped]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/sync/push"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+        let endpoint = server.uri();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let project = own_project.clone();
+        let (legacy_recorded, stamped_recorded, legacy_origin, pushed) =
+            tokio::task::spawn_blocking(move || {
+                let store = seeded_store(&root);
+                let syncer = syncer(Some(&endpoint), &root);
+                let report = syncer.pull_knowledge_pages(&store).unwrap();
+                assert_eq!(report.applied, 2, "errors: {:?}", report.errors);
+                assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+                let queue = syncer.queue();
+                let legacy_recorded = queue
+                    .is_unauthored_pull(KNOWLEDGE_PAGE_AUTHORSHIP, "cas-kn900")
+                    .unwrap();
+                let stamped_recorded = queue
+                    .is_unauthored_pull(KNOWLEDGE_PAGE_AUTHORSHIP, "cas-kn902")
+                    .unwrap();
+                let legacy_origin = store.get_page("cas-kn900").unwrap().origin_project_id;
+                (
+                    legacy_recorded,
+                    stamped_recorded,
+                    legacy_origin,
+                    syncer.push_knowledge_pages(&store).unwrap(),
+                )
+            })
+            .await
+            .unwrap();
+
+        assert!(legacy_recorded, "a page without an author stamp is recorded");
+        assert!(!stamped_recorded, "a page stamped with this project is its own");
+        assert_eq!(legacy_origin.as_deref(), Some(project.as_str()));
+        assert_eq!(pushed, 2, "the local page and the stamped page, not the legacy one");
+
+        let push = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|request| request.method.as_str() == "POST")
+            .expect("a push request");
+        let mut decoded = Vec::new();
+        flate2::read::GzDecoder::new(push.body.as_slice())
+            .read_to_end(&mut decoded)
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&decoded).unwrap();
+        let pages = payload[KNOWLEDGE_ENTITY].as_array().unwrap();
+        assert!(pages.iter().all(|page| page["id"] != "cas-kn900"), "{payload}");
+        assert!(
+            pages
+                .iter()
+                .all(|page| page["origin_project"] == serde_json::json!(own_project)),
+            "every pushed page carries its author stamp: {payload}"
+        );
+    }
+
     /// cas-3a90 (GH #909): a page pulled from another project keeps that
     /// origin and is never re-pushed under this one; a pulled page this
     /// project owns and a locally written page still go out.
@@ -1176,6 +1330,11 @@ mod tests {
             .as_str()
             .expect("push wire row must carry its project identity")
             .to_string();
+        assert_eq!(
+            pushed["origin_project"].as_str(),
+            Some(expected_origin_project_id.as_str()),
+            "the push stamps the page's author (cas-42ee)"
+        );
         assert_eq!(
             pushed["body"].as_str().unwrap(),
             body,

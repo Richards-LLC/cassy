@@ -238,25 +238,21 @@ fn references_document_research_and_unwired_provider_boundaries() {
 
 #[test]
 fn builtin_catalog_registers_all_mirror_entries() {
-    let builtins = include_str!("../src/builtins.rs");
-    for include_path in [
-        "builtins/skills/cas-image-generate/SKILL.md",
-        "builtins/codex/skills/cas-image-generate/SKILL.md",
-        "builtins/grok/skills/cas-image-generate/SKILL.md",
-        "builtins/skills/cas-image-generate/references/asset-playbook.md",
-        "builtins/codex/skills/cas-image-generate/references/asset-playbook.md",
-        "builtins/grok/skills/cas-image-generate/references/asset-playbook.md",
-        "builtins/skills/cas-image-generate/references/svg-web-assets.md",
-        "builtins/codex/skills/cas-image-generate/references/svg-web-assets.md",
-        "builtins/grok/skills/cas-image-generate/references/svg-web-assets.md",
-        "builtins/skills/cas-image-generate/scripts/generate-image.sh",
-        "builtins/codex/skills/cas-image-generate/scripts/generate-image.sh",
-        "builtins/grok/skills/cas-image-generate/scripts/generate-image.sh",
+    // Audit D1: every harness catalog embeds the one prefix-neutral copy.
+    for relative in [
+        "skills/cas-image-generate/SKILL.md",
+        "skills/cas-image-generate/references/asset-playbook.md",
+        "skills/cas-image-generate/references/svg-web-assets.md",
+        "skills/cas-image-generate/scripts/generate-image.sh",
     ] {
-        assert!(
-            builtins.contains(include_path),
-            "missing catalog include {include_path}"
-        );
+        let claude = builtin_catalog::find(builtin_catalog::Flavor::Claude, relative);
+        for flavor in [builtin_catalog::Flavor::Codex, builtin_catalog::Flavor::Grok] {
+            assert_eq!(
+                builtin_catalog::try_find(flavor, relative),
+                Some(claude),
+                "missing {flavor:?} catalog entry {relative}"
+            );
+        }
     }
 }
 

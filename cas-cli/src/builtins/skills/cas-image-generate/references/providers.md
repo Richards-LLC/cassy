@@ -18,88 +18,37 @@ header: x-goog-api-key: $GEMINI_API_KEY
 ```
 
 Use `gemini-3.1-flash-image` (Nano Banana 2) for drafts and ordinary raster
-work, or `gemini-3-pro-image` (Nano Banana Pro) for finals and dense copy. A
-minimal request uses a mode-600 temporary header file so the key is never
-placed in curl's command-line arguments:
+work, or `gemini-3-pro-image` (Nano Banana Pro) for finals and dense copy.
+`gemini-3.1-flash-lite-image` (Nano Banana 2 Lite) is a cheaper draft option the
+helper does not route to yet. The helper writes the key to a mode-600 header file,
+never to curl's arguments, and sends:
 
-```bash
-headers_file="$(mktemp)"
-trap 'rm -f "$headers_file"' EXIT
-(
-  umask 077
-  printf 'x-goog-api-key: %s\nContent-Type: application/json\n' "$GEMINI_API_KEY" > "$headers_file"
-)
-chmod 600 "$headers_file"
-curl -sS "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-image:generateContent" \
-  -H "@$headers_file" \
-  -d '{"contents":[{"parts":[{"text":"{prompt with style tokens}"}]}]}'
+```json
+{"contents":[{"parts":[{"text":"{prompt with style tokens}"}]}],
+ "generationConfig":{"responseModalities":["IMAGE"],
+   "imageConfig":{"aspectRatio":"16:9","imageSize":"2K"}}}
 ```
 
+`generationConfig` is present only when `--aspect` or `--size` is passed.
 The response carries base64 image data in an `inlineData` part. Reference
 images are additional `inlineData` parts. Nano Banana does not expose a
 first-class transparent-background flag; request isolation positively and
 verify alpha after decoding. All generated images carry Google's SynthID
 watermark. Imagen is retired as of 2026-08-17 and is not a valid fallback.
 
-## Optional and explicitly unwired add-ons
+## Explicitly unwired providers
 
-The following snippets preserve the research escape hatches for a future,
-separately authorized integration. They are documentation only: this skill
-does not read their keys, call their endpoints, or route around a missing
-`GEMINI_API_KEY`.
+Documentation only: this skill does not read these keys, call these endpoints,
+or route around a missing `GEMINI_API_KEY`. Wiring one is a separately
+authorized integration.
 
-### Recraft V4 / V4.1 — unwired SVG specialist
+| Provider | Key it would use | Strength | Why unwired |
+|---|---|---|---|
+| Recraft V4 / V4.1 | `RECRAFT_API_TOKEN` | production SVG/vector, saved styles, vectorization | no new paid services in scope |
+| OpenAI `gpt-image-2` | `OPENAI_API_KEY` | transparency, OG sizes | needs organization verification; no new paid services |
+| Ideogram 3.0 | `IDEOGRAM_API_KEY` | exact typography in logos | no new paid services |
+| Black Forest Labs FLUX.2 | `BFL_API_KEY` | hex-color control, multi-reference edits | async polling API; no new paid services |
+| FLUX.2 klein (local weights) | none | free local path | needs ~13GB VRAM and local setup |
 
-Recraft is the dossier's production-grade SVG/vector option and supports saved
-styles, vectorization, and background removal. It would use
-`RECRAFT_API_TOKEN` and an OpenAI-compatible endpoint, but it is intentionally
-unwired under the current no-new-paid-services scope:
-
-```bash
-curl -sS https://external.api.recraft.ai/v1/images/generations \
-  -H "Authorization: Bearer $RECRAFT_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"recraftv4_1_vector","style":"vector_illustration","prompt":"…"}'
-```
-
-### OpenAI GPT Image 2 — unwired transparency/OG option
-
-`gpt-image-2` is a strong raster and transparency option and would use
-`OPENAI_API_KEY`. It requires organization verification for image models. It
-is not called by this skill:
-
-```bash
-curl -sS https://api.openai.com/v1/images/generations \
-  -H "Authorization: Bearer $OPENAI_API_KEY" -H "Content-Type: application/json" \
-  -d '{"model":"gpt-image-2","prompt":"…","size":"1200x630","background":"transparent","output_format":"png"}'
-```
-
-### Ideogram 3.0 — unwired typography option
-
-Ideogram's `DESIGN` style, quoted copy, seed, palette, and style-reference
-parameters are useful for typography-heavy logos. It would use
-`IDEOGRAM_API_KEY` and multipart form data. It is not called by this skill:
-
-```bash
-curl -sS -X POST https://api.ideogram.ai/v1/ideogram-v3/generate \
-  -H "Api-Key: $IDEOGRAM_API_KEY" \
-  -F 'prompt=A logo with exact text "…"' -F style_type=DESIGN -F aspect_ratio=1x1
-```
-
-### Black Forest Labs FLUX.2 — unwired hosted option
-
-FLUX.2 offers strong hex-color control, seeds, and multi-reference editing;
-the hosted API would use `BFL_API_KEY`, submit asynchronously, and poll its
-`polling_url`. It is not called by this skill:
-
-```bash
-curl -sS -X POST https://api.bfl.ai/v1/flux-2-pro \
-  -H "x-key: $BFL_API_KEY" -H "Content-Type: application/json" \
-  -d '{"prompt":"…","width":1024,"height":1024}'
-```
-
-FLUX.2 klein's local open weights are a possible free path when a machine has
-roughly 13GB VRAM and the operator accepts local model setup. Hardware was not
-assumed or provisioned here, so this is documentation only. Midjourney has no
-official public API and Stability has pivoted away from a competitive image
-API; neither is a valid integration target.
+Midjourney has no official public API and Stability has pivoted away from a
+competitive image API; neither is a valid integration target.

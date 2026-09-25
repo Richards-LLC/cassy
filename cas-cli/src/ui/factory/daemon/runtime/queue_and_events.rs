@@ -3365,7 +3365,13 @@ impl FactoryDaemon {
                     &title,
                     self.app.harness_for(worker),
                 ) {
-                    Ok(_) => detail.push_str(" Task brief delivered to the worker."),
+                    Ok(_) => {
+                        // cas-8563b: the brief is the assignment notice for a
+                        // pre-assigned spawn; the director must not send a
+                        // second TaskAssigned for the same (task, worker).
+                        self.app.note_assignment_briefed(task_id, worker);
+                        detail.push_str(" Task brief delivered to the worker.");
+                    }
                     Err(e) => {
                         tracing::warn!(
                             worker = %worker,

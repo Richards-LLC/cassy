@@ -1,11 +1,12 @@
 ---
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Cassy Memory Content Templates
 
 Pass the complete template as the `content` value of
-`mcp__cas__memory action=remember`. The optional YAML block is frontmatter
+`memory action=remember`. The optional YAML block is frontmatter
 inside the content stored in the SQLite entry; it is not a separate file.
 
 ## Bug or Incident
@@ -81,8 +82,9 @@ track: knowledge
 
 - Make `name` and `description` specific enough for overlap search.
 - Put file paths, symbols, error text, and the actual explanation in the body.
-- Use one `entry_type` request value (`learning`, `preference`, `context`, or
-  `observation`) rather than inventing a second type vocabulary in content.
+- Use one `entry_type` request value (`learning`, `preference`, `context`,
+  `observation`, or `handoff`) rather than inventing a second type vocabulary
+  in content.
 - Keep frontmatter valid YAML. The search and overlap readers are
   best-effort; malformed frontmatter leaves the body searchable but loses
   structured matching.

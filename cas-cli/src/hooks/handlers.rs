@@ -7,11 +7,12 @@ use tracing::{info, warn};
 
 use crate::config::Config;
 use crate::error::MemError;
+use crate::hybrid_search::SearchIndex;
 use crate::otel::OtelContext;
 use crate::store::{
-    RuleStore, SqliteStore, Store, WorktreeStore, open_agent_store,
-    open_commit_link_store, open_file_change_store, open_loop_store, open_prompt_store,
-    open_rule_store, open_spec_store, open_store, open_task_store, open_worktree_store,
+    RuleStore, SqliteStore, Store, WorktreeStore, open_agent_store, open_commit_link_store,
+    open_file_change_store, open_loop_store, open_prompt_store, open_rule_store, open_spec_store,
+    open_store, open_task_store, open_worktree_store,
 };
 use crate::tracing::{DevTracer, ToolTrace, TraceTimer};
 use crate::types::RuleStatus;
@@ -19,7 +20,6 @@ use crate::types::{
     Agent, AgentRole, ChangeType, CommitLink, DependencyType, Entry, EntryType, FileChange,
     ObservationType, Prompt, Rule, Session, Task, TaskStatus, TaskType,
 };
-use crate::hybrid_search::SearchIndex;
 
 use crate::hooks::transcript::check_promise_in_transcript;
 
@@ -269,10 +269,10 @@ pub(crate) fn truncate_display(s: &str, max_len: usize) -> String {
 
 mod handlers_session;
 mod handlers_state;
-pub mod session_query;
 pub(crate) mod issue_triage;
 pub(crate) mod session_budget;
 pub(crate) mod session_hygiene;
+pub mod session_query;
 
 #[cfg(test)]
 pub(crate) use handlers_session::compute_session_title;
@@ -281,8 +281,9 @@ pub(crate) use handlers_session::detect_and_mark_skill_drift;
 #[cfg(test)]
 pub(crate) use handlers_session::estimate_tokens;
 pub(crate) use handlers_session::{
-    extract_learnings_sync, generate_session_summary_sync, session_learn_dedup_candidates,
-    session_learn_sync,
+    extract_learnings_sync, generate_session_summary_sync, session_learn_commit,
+    session_learn_dedup_candidates, session_learn_prepare, session_learn_sync,
+    session_learn_text_sync,
 };
 pub use handlers_session::{generate_session_title_sync, handle_session_end, handle_session_start};
 pub(crate) use handlers_state::{

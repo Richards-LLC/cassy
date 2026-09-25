@@ -352,7 +352,9 @@ impl Config {
                     .parse()
                     .map_err(|_| MemError::Parse(format!("Invalid round count: {value}")))?;
                 if rounds == 0 {
-                    return Err(MemError::Parse("qa.max_rounds must be at least 1".to_string()));
+                    return Err(MemError::Parse(
+                        "qa.max_rounds must be at least 1".to_string(),
+                    ));
                 }
                 qa.max_rounds = rounds;
             }
@@ -430,6 +432,20 @@ impl Config {
                 memory.session_learn_auto = value
                     .parse()
                     .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
+            }
+            "memory.session_learn_min_turns" => {
+                self.memory
+                    .get_or_insert_with(MemoryConfig::default)
+                    .session_learn_min_turns = value.parse::<usize>().map_err(|_| {
+                    MemError::Parse(format!("Invalid nonnegative integer value: {value}"))
+                })?;
+            }
+            "memory.session_learn_min_minutes" => {
+                self.memory
+                    .get_or_insert_with(MemoryConfig::default)
+                    .session_learn_min_minutes = value.parse::<u64>().map_err(|_| {
+                    MemError::Parse(format!("Invalid nonnegative integer value: {value}"))
+                })?;
             }
             "memory.decay.curated_importance_floor" => {
                 let floor: f32 = value

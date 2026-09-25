@@ -558,8 +558,10 @@ impl CasCore {
         QaCloseGate::Refuse(format!(
             "INDEPENDENT QA REQUIRED: {} is user-facing and no passed or waived QA round covers a tip \
              merged into {target_branch}. The close waits for the reviewer's verdict (or a logged \
-             supervisor waiver: verification action=qa_waive task_id={}).{dispatch}",
-            task.id, task.id,
+             supervisor waiver: `{}verification action=qa_waive task_id={} summary=\"...\"`).{dispatch}",
+            task.id,
+            crate::mcp::tools::core::guidance::supervisor_prefix(),
+            task.id,
         ))
     }
 
@@ -676,8 +678,9 @@ impl CasCore {
             &format!(
                 "Independent QA rejected {task} {failed_rounds} times (latest pass {pass}, ledger {ledger}). \
                  Cassy stopped opening rounds. Decide: a fix plan with the implementer, a logged waiver \
-                 (verification action=qa_waive), or cancel.",
+                 (`{prefix}verification action=qa_waive task_id={task} summary=\"...\"`), or cancel.",
                 task = task.id,
+                prefix = crate::mcp::tools::core::guidance::supervisor_prefix(),
                 pass = latest.id,
                 ledger = latest.ledger_path.as_deref().unwrap_or("-"),
             ),

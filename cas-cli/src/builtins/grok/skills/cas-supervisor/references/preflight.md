@@ -38,11 +38,10 @@ That invocation is itself live CAS-MCP evidence, so a missing project
 `.mcp.json` is reported as `configured=false`, `observed_via_mcp=true`, and is
 not critical by itself.
 
-The report never emits absolute paths, proxy endpoints, headers, credentials,
-raw upstream content/errors, environment values, or MCP session IDs. Each
-non-ready state includes a stable finding code, evidence time when available,
-and remediation. Deadline failures expose only typed component identifiers such
-as `repository` or `harness.codex`; probed paths and commands are never emitted.
+Nonzero exit → do not spawn; fix the finding named by its code (each non-ready
+state carries a stable finding code and its remediation), then rerun. A stale
+Cassy binary warning → stop and ask the operator to rebuild and reconnect MCP;
+never restart `cas serve` from the active session.
 If `repository.candidate_limit` is reported, preview safe registry-only cleanup
 with `cas known-repos prune-missing --dry-run`, then apply it without the flag.
 This removes only rows for paths that no longer exist; it never deletes repo files.

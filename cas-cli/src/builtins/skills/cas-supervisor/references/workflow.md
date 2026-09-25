@@ -1,11 +1,13 @@
 # Workflow — Worker Modes, Phases, Blockers
 
+Contents: [Worker modes](#worker-modes) · [Worker count](#worker-count-strategy) · [Phase 1: Plan](#phase-1-plan) · [Phase 2: Coordinate](#phase-2-coordinate) · [Phase 3: Merge and sync](#phase-3-merge-and-sync-isolated-mode) · [Blockers](#handling-blockers) · [Phase 4: Complete](#phase-4-complete)
+
 ## Worker Modes
 
 Workers can run in two modes:
 
-- **Isolated** (`isolate=true`): Each worker gets its own git worktree and branch. Use when workers will modify overlapping files or when you need clean branch-based merging.
-- **Shared** (`isolate=false` or omitted): Workers share the main working directory. Simpler setup, but workers must coordinate to avoid editing the same files simultaneously.
+- **Isolated** (`isolate=true`, the recommended mode): Each worker gets its own git worktree and branch, and lanes merge cleanly through `worktree_merge`.
+- **Shared** (`isolate=false` or omitted, the default): Workers share one mutable checkout and HEAD. It is contamination-prone — HEAD can switch between tool calls and commits can land on another worker's branch — and every spawn receipt warns about it. Use it only for a single worker or read-mostly work.
 
 ## Worker Count Strategy
 
@@ -33,7 +35,7 @@ In shared mode, file-overlap analysis is even more critical — two workers edit
    mcp__cas__search action=search query="<keywords>" doc_type=entry limit=10
 
    # Codebase for existing implementations you might duplicate or conflict with
-   Grep pattern="<feature-name>" or mcp__cas__search action=search query="<keywords>" scope=code
+   Grep pattern="<feature-name>" or mcp__cas__search action=search query="<keywords>" doc_type=code
    ```
 2. Create EPIC: `mcp__cas__task action=create task_type=epic title="..." description="..."`
 3. Gather the EPIC specification and task breakdown through the supervisor's task/spec workflow.
@@ -45,15 +47,13 @@ one-off — do NOT create a single-child epic to satisfy the spawn gate. Create 
 spawn straight onto it:
 
 ```
-mcp__cas__task action=create title="..." description="..."
+mcp__cas__task action=create title="..." description="..." risk=none
 mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-sol effort=medium task_id=<task-id>
 ```
 
-A concrete open, unassigned `task_id` authorizes the spawn on its own. It authorizes exactly
-one worker: a second spawn for the same still-queued task is refused, as is a task that is
-blocked, awaiting_merge, or already assigned to another worker — those state
-that no new worker can pick the task up. Ceremonial single-child epics distort epic reporting
-and the "all subtasks closed -> verify and close the epic" flow, so this is the preferred path.
+An open, unassigned `task_id` authorizes the spawn on its own; the refusal rules are in the
+[`spawn_workers` parameter table](reference.md). Ceremonial
+single-child epics distort epic reporting, so this is the preferred path.
 
 ## Phase 2: Coordinate
 
@@ -61,7 +61,6 @@ and the "all subtasks closed -> verify and close the epic" flow, so this is the 
    ```
    mcp__cas__coordination action=spawn_workers count=N isolate=true cli=codex model=gpt-6-sol effort=medium
    ```
-   Omit `isolate` for shared mode.
 
    **Worker GitHub access (GH #1005).** Workers never inherit your GitHub
    credentials. When a task cites an issue (a github.com issue URL,
@@ -72,13 +71,13 @@ and the "all subtasks closed -> verify and close the epic" flow, so this is the 
    fine-grained token as `CAS_WORKER_GITHUB_READ_TOKEN` before starting the
    factory; each worker gets it as its own `GH_TOKEN`.
 
-   **Hard rule:** every `spawn_workers` call MUST include explicit `cli=`,
-   `model=`, and `effort=`. The active registry matrix is Codex GPT-6 Luna/xhigh for light (Claude Opus 5.5/low fallback), Codex GPT-6 Sol/medium for standard (GPT-6 Luna/xhigh fallback), Claude Opus 5.5/high for taste (Claude Opus 5/high fallback), Claude Opus 5.5/high for supervisor (Claude Fable 5.1/high fallback), and Claude Opus 5.5/high for heavy (Codex GPT-6 Astra/high fallback). Use taste for judgment and public decisions and heavy for implementation risk; Terra is a standing suspension.
-   Omitted fields fall back through the factory config cascade and stock floor;
-   the spawn acknowledgement nags because supervisors should make worker tier
-   selection intentional and visible.
+   **Tier every spawn.** Pass `lane=<light|standard|taste|heavy>` (preferred: the
+   registry resolves the recipe and reports any fallback loudly) or a complete
+   explicit `cli=`/`model=`/`effort=` recipe to force one model — never both. An
+   untiered spawn falls back through the factory config cascade and its receipt
+   warns. Lane matrix and fallbacks: [model-selection.md](model-selection.md).
 
-   **Tiered mix example** — use the active registry lanes below; each command carries explicit controls:
+   **Tiered mix example** — the explicit recipe for each active registry lane:
 
 <!-- BEGIN GENERATED SPAWN RECIPES: cas-factory lane registry -->
 Copy-paste commands generated from the registry; every recipe pins `cli`, `model`, and `effort`:
@@ -101,11 +100,8 @@ mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=claude mode
 
 ```
 <!-- END GENERATED SPAWN RECIPES -->
-   `cli`, `model`, and `effort` are per-spawn controls for the workers spawned
-   by that call.
-   Spawn the tier mix the ready backlog needs — one `spawn_workers` call per tier; rubric
-   and routing in [model-selection.md](model-selection.md).
-   Full parameter table in [reference.md](reference.md#spawn_workers-parameters).
+   Spawn the tier mix the ready backlog needs — one `spawn_workers` call per tier.
+   Full parameter table in [reference.md](reference.md).
    **Build-load guard:** `spawn_workers` measures the one-minute host load and
    live Cargo builders before queueing. It refuses a request that would push
    past `[factory] max_concurrent_builders` (default `4`) or load above CPU
@@ -113,9 +109,8 @@ mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=claude mode
    records the effective per-worker `CARGO_BUILD_JOBS` (configure with
    `[factory] worker_build_jobs`, with `cargo_build_jobs` accepted as an alias), `nice -n` priority,
    load/cap measurements, and (after isolated provisioning) build-cache
-   snapshot hardlink counts. Refresh the quiescent baseline from the epic tip
-   with `scripts/refresh-worker-build-cache.sh` during a quiet window.
-2. Verify workers appear in TUI before assigning (stale DB records are not real workers)
+   snapshot hardlink counts.
+2. Confirm the workers are live before assigning (stale DB records are not real workers): `mcp__cas__coordination action=worker_status summary_mode=true`
 3. Assign tasks: `mcp__cas__task action=update id=<id> assignee=<worker>`
 4. Pin epic focus so the TUI shows it immediately: `mcp__cas__coordination action=focus_epic id=<epic-id>`. Without this, the TASKS/FACTORY panels stay empty until a worker's first `task action=start` on a subtask lets the panel infer the epic — and inference only fires once that subtask's `assignee` matches a live session agent (workers now get this for free: `task action=start` sets `assignee` automatically when unset, cas-6945). Clear with `action=focus_epic clear=true` when the epic wraps.
 5. Search for relevant context and send assignment message:
@@ -130,9 +125,9 @@ mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=claude mode
 
 Workers from previous sessions are gone. Stale DB records are not live processes.
 
-1. **Check for binary/source drift** — fixes merged to main since last session don't take effect until rebuild. Run `~/.cargo/bin/cargo build --release` if Cassy source changed, then restart `cas serve`. If a "fixed" bug reappears, this is the first thing to check.
+1. **Check for a stale binary** — run `cas factory preflight`. If it reports a stale Cassy binary, stop and ask the operator to rebuild and reconnect MCP ([preflight.md](preflight.md)). If a "fixed" bug reappears, this is the first thing to check.
 2. Spawn fresh workers
-3. Verify they appear in TUI
+3. Confirm they are live: `mcp__cas__coordination action=worker_status summary_mode=true`
 4. Assign open tasks to the new workers
 
 ## Phase 3: Merge and Sync (Isolated Mode)
@@ -154,14 +149,15 @@ base branch ────────────────────► (sta
 the merge target from task state, enforces the trunk guard, and keeps factory tracking,
 leases, and cleanup consistent.
 
-Run the canonical merge-time diff review in Phase 3 after a successful merge and before assigning the next task.
+Run the canonical merge-time diff review ([Required merge-review discipline](#required-merge-review-discipline)) before landing each lane.
 
 ```
 mcp__cas__coordination action=worktree_merge id=<worker> task_id=<task-id>
 ```
 
 After a successful merge into an `epic/` branch, the factory daemon launches a
-bounded `cargo nextest run --workspace --no-fail-fast` sweep in a reusable
+bounded sweep of the project's detected test runner (`cargo nextest run --workspace
+--no-fail-fast` for a Cargo project, the `test` script for a Node project) in a reusable
 detached merged-tip worktree. The sweep is asynchronous and capped by
 `[factory].merge_sweep_timeout_secs`; inspect the epic note and the durable
 `<cas-root>/merge-sweeps/` log before accepting another merge when it reports
@@ -222,7 +218,7 @@ end-of-lane, once the worker is done with that worktree.
    **User-facing delivery? Independent QA first (cas-619f).** When the park reports
    `INDEPENDENT QA DISPATCHED`, or a `<cas-qa-dispatch>` wakes you, spawn a reviewer who is
    not the implementer, on the taste recipe:
-   `mcp__cas__coordination action=spawn_workers cli=claude model=claude-opus-5-5 effort=high task_id=<qa-task>`.
+   `mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5-5 effort=high task_id=<qa-task>`.
    Merge only after that reviewer's `qa_record` approves the exact tip. `worktree_merge`, a raw
    `git merge factory/<worker>`, and the re-close all refuse until then. A rejection sends the
    task back to its implementer automatically. To skip the pass, waive it with a logged reason:
@@ -246,20 +242,20 @@ task with the assignee preserved, so the same worker resumes the rework.
 
 ### Keeping other workers current
 
-After the epic branch advances, rebase the other worktrees with one call rather than
-messaging each worker a `git rebase` recipe:
+After the epic branch advances, rebase idle or stale worktrees with one call:
 
 ```
 mcp__cas__coordination action=sync_all_workers branch=epic/<slug>
 ```
 
-It deliberately **skips** worktrees that are dirty or whose assignee is mid-task, and
-reports why. `force=true` is consent for exactly those two cases (WIP is stashed, rebased,
-and restored). A worktree already **mid-rebase is always refused**, `force` or not — sync
-did not create that state and rebasing on top of it destroys the resolution in progress;
-finish it or `git rebase --abort` in that worktree first.
+It rebases idle or stale worktrees only and reports every skip. A live worker's worktree
+is **always skipped**, `force` or not — tell each live worker to rebase at its next task
+start. `force=true` covers only a dirty tree or a stale worker record (WIP is stashed,
+rebased, and restored). A worktree already **mid-rebase is always refused** — rebasing on
+top of it destroys the resolution in progress; finish it or `git rebase --abort` in that
+worktree first.
 
-If `worktree_merge` cannot act, stop and ask the supervisor to resolve the merge; do not
+If `worktree_merge` cannot act, stop and ask the operator to resolve the merge; do not
 invent a second merge procedure.
 
 ## Phase 3: Review (Shared Mode)
@@ -275,25 +271,21 @@ When workers share the main directory, there's no branch merging — workers com
 
 - Workers set status to blocked and add a blocker note
 - Help resolve or reassign the task
-- **Race condition warning:** Task state updates are not atomic across supervisor and worker. After closing a task, verify it stayed closed before proceeding — a worker's stale `status=blocked` update can overwrite the close. If a worker resurrects a closed task, re-close with an audit trail noting the race.
+- **Race condition warning:** Task state updates are not atomic across supervisor and worker. After a worker's close, verify it stayed closed before proceeding — a stale `status=blocked` update can overwrite the close. If a closed task comes back, note the race on the task and message the worker to re-close.
 - **Stale outbox replays:** Workers may send duplicate stale messages due to outbox replay. Before acting on a blocker notification or status change, check the task's current state with `mcp__cas__task action=show` — the message may be outdated.
 
 **Multiple workers complete simultaneously:**
-- Run verification calls in parallel (single response turn)
-- Close approved tasks in a second parallel pass
+- Merge each parked lane (`worktree_merge`) in one response turn
+- Message each worker to re-close its own task
 - Reassign workers immediately
 
 ## Phase 4: Complete
 
-1. Verify all tasks closed: `mcp__cas__task action=list status=open epic=<epic-id>`
+1. Verify every child is closed and merged: `mcp__cas__coordination action=epic_status id=<epic-id>` (the same source as the epic close gate; a `status=open` list misses `in_progress`, `blocked`, and `awaiting_merge`).
 2. Hold the main merge. The epic branch is not ready for base until the assembled diff has passed review and the final gate.
-3. Run the final assembled-tree gate. This is the epic's single Rust build:
-   workers never build, so one full build + test of the epic tip proves every
-   child and checks cross-task integration (add `cargo test -p cas --doc` when
-   the epic touches doctests):
-   ```bash
-   cargo nextest run -p cas
-   ```
+3. Run the final assembled-tree gate. This is the epic's single build + test:
+   workers never build, so one full run of the project's assembly gate command
+   on the epic tip proves every child and checks cross-task integration.
    On exit 0, record a progress note on the epic:
    `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>`,
    with the log under `[factory] artifacts_root/<epic-id>/`. Child task closes
@@ -305,20 +297,19 @@ When workers share the main directory, there's no branch merging — workers com
 5. After the fix lands, rerun the final assembled-tree gate yourself on the new
    tip, capture the real exit code, and record a fresh `ASSEMBLY_PROOF` for it:
    ```bash
-   cargo nextest run -p cas > <artifacts_root>/<epic-id>/assembly-nextest.log 2>&1; echo $?
+   <assembly gate command> > <artifacts_root>/<epic-id>/assembly-gate.log 2>&1; echo $?
    ```
    Never pipe the test run to `tail`; that captures the pipe status, not the
-   nextest status.
-6. **Isolated mode only**: land the lanes and reclaim the worktrees (can be 10GB+ each) only after the review loop is clean and the full gate exits 0. This is the end-of-lane consume, so `cleanup=true` is correct here:
+   test status.
+6. **Isolated mode only**: every lane already landed on the epic branch in Phase 3, before the gate ran. Once the review loop is clean and the gate exits 0, reclaim each lane's worktree (can be 10GB+ each); this end-of-lane consume is where `cleanup=true` is correct:
    ```
    # One per worker lane — removes the worktree and deletes factory/<worker>
    mcp__cas__coordination action=worktree_merge id=<worker> task_id=<task-id> cleanup=true
-   mcp__cas__coordination action=shutdown_workers count=0
    ```
    Then merge the epic branch to base. A standalone task with a declared WorkTarget
    needs no trunk flag. Only a missing-target fallback to trunk needs `allow_trunk=true`;
    its refusal names the destination and its success receipt carries a loud trunk-push warning.
    `force=true` will not authorize trunk.
-   If the tracked merge cannot act, stop and ask the supervisor to resolve it; do not use an untracked merge path.
+   If the tracked merge cannot act, stop and ask the operator to resolve it; do not use an untracked merge path.
 7. Close the epic and post release notes.
-8. Shutdown workers: `mcp__cas__coordination action=shutdown_workers count=0`
+8. Shut down the epic's workers by name: `mcp__cas__coordination action=shutdown_workers worker_names=<worker>[,<worker>...]`

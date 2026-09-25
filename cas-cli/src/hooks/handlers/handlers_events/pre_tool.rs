@@ -821,16 +821,24 @@ pub fn handle_pre_tool_use(
             .and_then(|value| value.as_str())
             == Some("task-verifier")
     {
+        // cas-90e8: every denial names the next call the spawning agent
+        // can make, rendered once in close_ops::gate_text.
+        use crate::mcp::tools::core::task::lifecycle::close_ops::gate_text::{
+            VerifierSpawnDenial, verifier_spawn_denial,
+        };
+        let verifier_denial = |denial: VerifierSpawnDenial, task_id: Option<&str>| {
+            verifier_spawn_denial(denial, task_id, crate::harness_policy::own_tool_prefix())
+        };
         let Some(agent_store) = stores.agents() else {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
-                "Cannot establish verifier authority: agent registry is unavailable.",
+                &verifier_denial(VerifierSpawnDenial::RegistryUnavailable, None),
             ));
         };
         let Ok(parent) = agent_store.get(&current_agent_id) else {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
-                "Cannot establish verifier authority for an anonymous or orphan session.",
+                &verifier_denial(VerifierSpawnDenial::UnregisteredParent, None),
             ));
         };
         if !matches!(
@@ -839,14 +847,14 @@ pub fn handle_pre_tool_use(
         ) {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
-                "Cannot establish verifier authority for an inactive parent session.",
+                &verifier_denial(VerifierSpawnDenial::InactiveParent, None),
             ));
         }
 
         let Some(tool_input) = input.tool_input.as_ref() else {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
-                "task-verifier spawn requires a prompt naming exactly one Cassy task.",
+                &verifier_denial(VerifierSpawnDenial::MissingPrompt, None),
             ));
         };
         let prompt = tool_input
@@ -856,7 +864,7 @@ pub fn handle_pre_tool_use(
         let Some(task_id) = unique_existing_task_id(prompt, stores.tasks()) else {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
-                "task-verifier prompt must name exactly one existing Cassy task ID.",
+                &verifier_denial(VerifierSpawnDenial::NoUniqueTask, None),
             ));
         };
         let dispatch_id = match cas_store::get_latest_verification_dispatch(cas_root, &task_id) {
@@ -870,13 +878,19 @@ pub fn handle_pre_tool_use(
                 if dispatch.owner_agent_id != current_agent_id {
                     return Ok(HookOutput::with_pre_tool_permission(
                         "deny",
-                        "This task's verification dispatch is owned by another registered session.",
+                        &verifier_denial(
+                            VerifierSpawnDenial::DispatchOwnedElsewhere,
+                            Some(task_id.as_str()),
+                        ),
                     ));
                 }
                 if dispatch.deadline_at <= chrono::Utc::now() {
                     return Ok(HookOutput::with_pre_tool_permission(
                         "deny",
-                        "This task's verification dispatch deadline has elapsed; use the recorded recovery path.",
+                        &verifier_denial(
+                            VerifierSpawnDenial::DispatchDeadlineElapsed,
+                            Some(task_id.as_str()),
+                        ),
                     ));
                 }
                 dispatch.id
@@ -884,13 +898,13 @@ pub fn handle_pre_tool_use(
             Ok(_) => {
                 return Ok(HookOutput::with_pre_tool_permission(
                     "deny",
-                    "No active owned verification dispatch exists for this task; create the exact close proof cycle before spawning a verifier.",
+                    &verifier_denial(VerifierSpawnDenial::NoActiveDispatch, Some(task_id.as_str())),
                 ));
             }
             Err(_) => {
                 return Ok(HookOutput::with_pre_tool_permission(
                     "deny",
-                    "Could not validate task-scoped verification dispatch authority.",
+                    &verifier_denial(VerifierSpawnDenial::DispatchUnreadable, Some(task_id.as_str())),
                 ));
             }
         };
@@ -902,7 +916,7 @@ pub fn handle_pre_tool_use(
         else {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
-                "Cannot establish verifier authority: PreToolUse did not provide tool_use_id correlation.",
+                &verifier_denial(VerifierSpawnDenial::MissingToolUseId, Some(task_id.as_str())),
             ));
         };
         match issue_hook_verifier_handoff(
@@ -918,12 +932,15 @@ pub fn handle_pre_tool_use(
                 if message.contains("already awaiting SubagentStart") {
                     return Ok(HookOutput::with_pre_tool_permission(
                         "deny",
-                        "Another task-verifier spawn is already awaiting SubagentStart for this parent. Wait for it to bind, or retry after the failed spawn is cleaned up or expires.",
+                        &verifier_denial(
+                            VerifierSpawnDenial::SpawnAlreadyPending,
+                            Some(task_id.as_str()),
+                        ),
                     ));
                 }
                 return Ok(HookOutput::with_pre_tool_permission(
                     "deny",
-                    "Could not establish server-side task-verifier authority for the exact dispatch.",
+                    &verifier_denial(VerifierSpawnDenial::HandoffFailed, Some(task_id.as_str())),
                 ));
             }
         }

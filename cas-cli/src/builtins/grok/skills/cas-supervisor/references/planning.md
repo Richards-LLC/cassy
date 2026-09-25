@@ -1,9 +1,3 @@
----
-name: planning
-description: Supervisor planning reference — gates, templates, EPIC sizing.
-managed_by: cas
----
-
 # Planning — Gates, Templates, EPIC Sizing
 
 ## Planning Gates
@@ -74,11 +68,11 @@ Field purposes (write decisions, not code — "Approach" is 1–3 sentences of s
 - **Goal** — one sentence the worker can restate back to you. If you can't state it in one sentence, the unit is too big.
 - **Requirements** — stable R-IDs from the linked brainstorm doc at `docs/brainstorms/YYYY-MM-DD-<topic>-requirements.md`. Convention only, no new field. Omit when no brainstorm exists.
 - **Dependencies** — hard blockers go in `blocked_by`; soft ordering or "after X lands" notes stay as prose.
-- **Files** — the layer boundary. What the worker owns and must not touch outside of. Boundary violation is a rejection condition.
+- **Files** — the layer boundary from Spec Requirements, as paths.
 - **Approach** — the sequencing or design decision already made. Not a code sketch, not a pseudocode draft. If you find yourself writing pseudocode, you are doing the worker's job.
 - **Execution note** — maps 1:1 to the task `execution_note` field. One of `test-first`, `characterization-first`, `additive-only`, `value-only`, or omitted. **Warning:** `additive-only` hard-blocks close on ANY file modification (M/D/R in git status). Only use for truly new-file-only tasks. Use `value-only` for copy/i18n edits to existing values; it permits M but rejects A/C/D/R and still goes through normal review. For broader edits, omit the field.
 - **Patterns to follow** — pointer to existing code or a prior commit the worker should mirror. Reduces stylistic drift.
-- **Test scenarios** — name the scenarios, including at least one error path. Don't leave test design entirely to the worker.
+- **Test scenarios** — the Spec Requirements test guidance, as named scenarios.
 - **Verification** — observable outcome. What can be demonstrated when done. Maps to `demo_statement`.
 
 EPIC subtasks only — standalone bugs/chores/spikes stay freeform. Fields can be `N/A` or omitted when not applicable.
@@ -106,7 +100,7 @@ EPIC subtasks only — standalone bugs/chores/spikes stay freeform. Fields can b
 
 Supervisor has rejection authority. Work is sent back with specific, actionable reasons.
 
-- **Tests exist and pass** — No untested code ships
+- **Tests added or updated** — No untested code ships; the tests run once at Phase 4 assembly
 - **Failure paths tested** — Test suite covers error states and edge cases, not just happy path
 - **DRY violation scan** — Duplication flagged and sent back; "clean up later" is not accepted
 - **SRP violation scan** — Multi-responsibility modules or functions are sent back
@@ -115,15 +109,15 @@ Supervisor has rejection authority. Work is sent back with specific, actionable 
 - **Config compliance** — No magic numbers or hardcoded values that should be configurable
 - **Test quality** — Tests must verify behavior, not just pass
 - **Flag obvious SOLID violations** — with specifics; don't rubber-stamp "SOLID compliance verified"
-- **Verify, don't trust** — Read the actual diff or run tests yourself before accepting. Worker self-reports are inputs, not verdicts.
+- **Verify, don't trust** — Read the actual diff and delivery evidence before accepting. Worker self-reports are inputs, not verdicts.
 - **Rejection format** — Every rejection names: (1) which gate failed, (2) the specific code/file, (3) what needs to change. "SRP violation" alone is not actionable; "SRP violation: `handle_request()` in `router.rs` handles both auth and routing — split into two functions" is.
-- **Review cadence** — Every worker merge receives the canonical merge-time diff review in `workflow.md` Phase 3: read the diff against the task spec and acceptance criteria, check ownership boundaries, tests, and receipts, re-run touched modules on the merged tree, and record a verification receipt. Phase 4 runs the full final-tree nextest gate for cross-task integration. Do not dispatch a separate review workflow or require worker-supplied review output.
+- **Review cadence** — Every worker merge receives the canonical merge-time diff review in [workflow.md](workflow.md#required-merge-review-discipline): read the diff against the task spec and acceptance criteria, check ownership boundaries, contracts, lane CI, and receipts, and record a verification receipt. Nothing is rebuilt at merge; Phase 4 runs the project's full final-tree assembly gate once for cross-task integration. Do not dispatch a separate review workflow or require worker-supplied review output.
 
 ## Ongoing Discipline
 
 - **Pattern consistency** — New work matches established conventions; deviations require explicit justification
 - **Debt tagging** — Log deliberate shortcuts with reason and remediation plan; unlogged shortcuts are violations
-- **Search before planning** — Use `cas__search` for semantic search across memories and tasks, `cas__memory` for storing learnings. Always search before creating new work to avoid duplicating prior solutions or contradicting past decisions.
+- **Search before planning** — see [workflow.md Phase 1](workflow.md#phase-1-plan).
 
 ## EPIC Sizing
 

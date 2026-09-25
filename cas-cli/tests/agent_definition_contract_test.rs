@@ -254,7 +254,6 @@ fn epic_walk_is_one_concurrent_pass_in_every_harness() {
             "every child demo",
             "across children",
             "Contradictions",
-            "Richards-LLC/cassy/issues/759",
             "NOT EXERCISED",
             "one task per defect",
             "exactly one epic note",

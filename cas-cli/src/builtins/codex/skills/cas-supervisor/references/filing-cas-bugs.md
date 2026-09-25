@@ -12,7 +12,7 @@ the three Cassy component repositories have compiled defaults and can be
 overridden for a fork or alternate deployment:
 
 - **Project bug or feature:** `issues.repo` — the current project's own issue
-  tracker. In cas-src, create the corresponding in-repo task.
+  tracker.
 - **Cassy-system defect:** `issues.components.cassy` — Cassy runtime, hooks,
   MCP, factory, and builtin skills. Downstream repositories consume Cassy and
   must not patch it locally.
@@ -21,12 +21,10 @@ overridden for a fork or alternate deployment:
 - **Cassy Cloud defect:** `issues.components.cloud` — cloud sync, hub relay,
   pairing, and related services.
 
-If you hit a bug during operation, file a ticket in the matching repo before moving on. Actionable requests for a Richards-LLC-controlled team belong on
-that component's issue board; never write, commit, or push in that team's
-checkout from this repository.
-- **Receipt:** after every cross-team filing, save a Cassy memory with the issue
-  URL, one-line ask, and date. Recent examples are cloud-to-Cassy GH #215 and
-  Cassy-to-cloud `Richards-LLC/petra-stella-cloud#44`.
+If you hit a bug during operation, file a ticket in the matching repo before moving on. Actionable requests for another team belong on that component's issue
+board; never write, commit, or push in that team's checkout from this repository.
+After every cross-team filing, save a Cassy memory with the issue URL, one-line
+ask, and date.
 
 Inspect all four resolved destinations with:
 `cas config get issues.repo`, `cas config get issues.components.cassy`,

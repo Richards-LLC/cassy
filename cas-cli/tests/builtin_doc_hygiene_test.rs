@@ -492,29 +492,9 @@ const OPERATOR_DATA_ALLOWLIST: &[(&str, &str, &str)] = &[
          builtins and agent_definition_contract_test markers.",
     ),
     (
-        "skills/cas-supervisor/references/epic-flow-walk.md",
-        "operator-org",
-        "Same attribution link as matrix-builder.md, in the supervisor's QA walk-through.",
-    ),
-    (
-        "skills/cas-supervisor/references/filing-cas-bugs.md",
-        "operator-org",
-        "Names the Cassy and Cloud trackers a supervisor files Cassy bugs against, from any project.",
-    ),
-    (
         "skills/cas-worker/references/close-gate.md",
         "task-id",
         "Factory-core reference owned by the WP7 accuracy rewrite; ids tag the close gates it documents.",
-    ),
-    (
-        "skills/cas-worker/references/recovery.md",
-        "task-id",
-        "Factory-core reference owned by the WP7 accuracy rewrite; ids tag the recovery paths it documents.",
-    ),
-    (
-        "skills/cas-supervisor/references/model-selection.md",
-        "task-id",
-        "Factory-core reference owned by the WP7 accuracy rewrite (model-selection.md is rewritten there).",
     ),
     (
         "skills/cas-supervisor/references/reference.md",

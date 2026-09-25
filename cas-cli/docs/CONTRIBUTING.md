@@ -81,6 +81,7 @@ key inheritance.
 ## Testing
 
 Integration tests are in `cas-cli/tests/`. Key test files:
+
 - `cli_test.rs` — CLI command integration tests
 - `mcp_tools_test.rs` — MCP tool handler tests
 - `mcp_protocol_test.rs` — MCP protocol compliance
@@ -116,6 +117,8 @@ Dev dependencies include: `insta` (snapshot testing), `wiremock` (HTTP mocking),
 ## Skill & Rule Sync
 
 Cassy auto-syncs rules to `.claude/rules/` and skills to `.claude/skills/` as SKILL.md files with YAML frontmatter. The sync logic lives in `cas-cli/src/sync/`. Rule promotion uses configurable outcome evidence: `sync.promotion_threshold` defaults to 2 and `sync.promotion_evidence` accepts `helpful` and/or `retrieval`; one `mcp__cas__rule action=helpful` call never promotes. Retrieval promotion requires useful outcomes across at least two distinct privacy-preserving sessions. Harmful feedback and negative retrieval outcomes require `sync.demotion_threshold` (default 2) before demoting Proven rules to Stale and removing their synced files. Existing Proven rules are grandfathered until new evidence crosses the configured threshold.
+
+Built-in skills ship to every project, so they carry no cas-src-only procedure. This repository's own factory guidance (release prebuild, worker build-cache refresh, the assembly gate command, cargo triage) lives in [docs/factory/cas-src-factory-notes.md](../../docs/factory/cas-src-factory-notes.md) and [docs/factory/cas-src-worker-notes.md](../../docs/factory/cas-src-worker-notes.md).
 
 ### Skill validation contract
 
@@ -206,6 +209,7 @@ direct registry test so the source cannot exist without reaching all three downs
 ### Breaking changes
 
 These require a major version bump:
+
 - Cloud sync protocol changes (push/pull shape, endpoint paths)
 - CLI flag or subcommand removals/renames
 - MCP tool parameter schema changes (field renames, type changes)

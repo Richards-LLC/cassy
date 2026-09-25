@@ -656,6 +656,7 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-wizard/SKILL.md", content: include_str!("builtins/skills/cas-wizard/SKILL.md") },
     BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/skills/cas-wizard/template.sh") },
     BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/skills/cas-resolving-merge-conflicts/SKILL.md") },
+    BuiltinFile { path: "skills/cas-why/SKILL.md", content: include_str!("builtins/skills/cas-why/SKILL.md") },
     BuiltinFile { path: "skills/cas-to-questionnaire/SKILL.md", content: include_str!("builtins/skills/cas-to-questionnaire/SKILL.md") },
     BuiltinFile { path: "skills/cas-image-generate/SKILL.md", content: include_str!("builtins/skills/cas-image-generate/SKILL.md") },
     BuiltinFile { path: "skills/cas-image-generate/references/asset-playbook.md", content: include_str!("builtins/skills/cas-image-generate/references/asset-playbook.md") },
@@ -1234,6 +1235,7 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-wizard/SKILL.md", content: include_str!("builtins/skills/cas-wizard/SKILL.md") },
     BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/skills/cas-wizard/template.sh") },
     BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/skills/cas-resolving-merge-conflicts/SKILL.md") },
+    BuiltinFile { path: "skills/cas-why/SKILL.md", content: include_str!("builtins/skills/cas-why/SKILL.md") },
     BuiltinFile { path: "skills/cas-to-questionnaire/SKILL.md", content: include_str!("builtins/skills/cas-to-questionnaire/SKILL.md") },
     BuiltinFile { path: "skills/cas-to-questionnaire/agents/openai.yaml", content: include_str!("builtins/codex/skills/cas-to-questionnaire/agents/openai.yaml") },
     BuiltinFile { path: "skills/cas-image-generate/SKILL.md", content: include_str!("builtins/skills/cas-image-generate/SKILL.md") },
@@ -1820,6 +1822,7 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-wizard/SKILL.md", content: include_str!("builtins/skills/cas-wizard/SKILL.md") },
     BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/skills/cas-wizard/template.sh") },
     BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/skills/cas-resolving-merge-conflicts/SKILL.md") },
+    BuiltinFile { path: "skills/cas-why/SKILL.md", content: include_str!("builtins/skills/cas-why/SKILL.md") },
     BuiltinFile { path: "skills/cas-to-questionnaire/SKILL.md", content: include_str!("builtins/skills/cas-to-questionnaire/SKILL.md") },
     BuiltinFile { path: "skills/cas-image-generate/SKILL.md", content: include_str!("builtins/skills/cas-image-generate/SKILL.md") },
     BuiltinFile { path: "skills/cas-image-generate/references/asset-playbook.md", content: include_str!("builtins/skills/cas-image-generate/references/asset-playbook.md") },
@@ -5167,6 +5170,34 @@ This is the body content."#;
             include_str!("builtins/skills/cas-diagnosing-bugs/SKILL.md"),
         ] {
             assert!(skill.contains("principles.md"), "missing principles link");
+        }
+    }
+
+    /// cas-8e23: the `why` workflow ships in every harness catalog and
+    /// cas-search routes to it.
+    #[test]
+    fn cas_why_is_installed_and_routed_from_search() {
+        const WHY: &str = include_str!("builtins/skills/cas-why/SKILL.md");
+        for (label, catalog) in [
+            ("claude", BUILTIN_SKILLS),
+            ("codex", CODEX_BUILTIN_SKILLS),
+            ("grok", GROK_BUILTIN_SKILLS),
+        ] {
+            let get = |path: &str| {
+                catalog
+                    .iter()
+                    .find(|file| file.path == path)
+                    .unwrap_or_else(|| panic!("{label} missing {path}"))
+                    .content
+            };
+            let why = get("skills/cas-why/SKILL.md");
+            assert_eq!(why, WHY, "{label} cas-why drifted");
+            assert!(is_managed_by_cas(why), "{label} cas-why is unmanaged");
+            assert!(why.contains("name: cas-why"), "{label} cas-why name");
+            assert!(
+                get("skills/cas-search/SKILL.md").contains("`cas-why`"),
+                "{label} cas-search does not route to cas-why"
+            );
         }
     }
 

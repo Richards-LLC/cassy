@@ -33,6 +33,8 @@ and every tag must match.
 
 **`history`** — search the indexed git commit history. Use `query`, optionally `path`, `symbol`, `since`, `until`, and `include_merges`; every response includes index freshness information.
 
+To answer why code was built a certain way, use the `cas-why` skill: it combines `blame`, `history` and task and memory search into a tiered answer with a coverage map.
+
 **`retrieval_feedback`** — record an outcome for a provenance result. Pass `query_id`, `result_id`, `outcome`, and `actor_id`; add `correction_ref` when the outcome is `corrected`.
 
 **`retrieval_metrics`** — aggregate recorded retrieval outcomes. An optional `session_id` limits the report.

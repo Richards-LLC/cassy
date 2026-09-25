@@ -20,6 +20,7 @@ Use a red → green loop to produce tests worth keeping. Test behavior through p
 - Factory workers never run Rust builds or tests: commit the failing test and the fix as separate commits, and cite the supervisor's `ASSEMBLY_PROOF` from epic assembly as the Rust red/green proof (see `cas-worker`). Non-Rust suites still run in the worker.
 
 When module shape or a seam is unclear, consult `cas-codebase-design` for module, interface, depth, seam, adapter, leverage, and locality vocabulary.
+For a test that passes without exercising behavior, use [principles.md](../cas-codebase-design/references/principles.md).
 
 ## Tests worth keeping
 

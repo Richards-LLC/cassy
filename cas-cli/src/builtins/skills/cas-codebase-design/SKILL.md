@@ -51,6 +51,9 @@ or decision file that competes with CAS memory/spec storage.
 
 ## Principles
 
+For a stuck design or repeated patch, use [principles.md](references/principles.md)
+to reassess the premise, scope, tests, and types.
+
 - Depth is a property of the interface, not implementation size.
 - Apply the deletion test: if deleting a module merely removes a pass-through,
   it was shallow; if complexity reappears at many callers, it earned its keep.

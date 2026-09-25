@@ -12,6 +12,7 @@ metadata:
 # Diagnosing bugs
 
 Use a feedback-loop-first discipline. Skip a phase only with an explicit reason.
+For a repeated failed fix, use [principles.md](../cas-codebase-design/references/principles.md) to challenge the premise.
 Redact every secret in commands, output, and artifacts; retain the signal and ask
 for a redacted artifact or access when redaction prevents diagnosis.
 

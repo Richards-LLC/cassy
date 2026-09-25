@@ -145,7 +145,7 @@ Try `mcp__cas__task action=mine` once. If it fails, use Fallback Workflow — do
    - If verification-required: message supervisor immediately, do NOT retry or spawn verifiers
 
 ## Communication
-Primary: `mcp__cas__coordination action=message target=supervisor message="<response>"`
+Primary: `mcp__cas__coordination action=message target=supervisor summary="<one line>" message="<response>"`
 Fallback (if MCP unavailable): use SendMessage with to: "supervisor"
 
 Report blockers immediately:

@@ -845,12 +845,16 @@ impl CasCore {
         );
 
         let rule_store = self.open_rule_store()?;
-        let rules = rule_store.list().map_err(|e| {
+        let mut rules = rule_store.list().map_err(|e| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,
                 format!("Failed to list rules: {e}"),
             )
         })?;
+        // cas-caae (skills audit M27): a rule naming another registered
+        // project never reaches this project's Claude Code rules.
+        crate::store::foreign_project_guard::ForeignProjectGuard::for_project_root(project_root)
+            .retain_syncable_rules(&mut rules);
 
         let report = syncer.sync_all(&rules).map_err(|e| {
             Self::error(

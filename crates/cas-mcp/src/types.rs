@@ -17,7 +17,8 @@ use serde::{Deserialize, Serialize};
 pub struct MemoryRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: 'remember', 'get', 'list', 'update', 'delete', 'archive', 'unarchive', 'helpful', 'harmful', 'recent', 'set_tier', 'opinion_reinforce', 'opinion_weaken', 'opinion_contradict'"
+        schema_with = "crate::actions::memory_action_schema",
+        description = "Operation. set_tier moves an entry between working, cold and archive; opinion_* reinforce, weaken or contradict an opinion with `content` as the evidence."
     )]
     pub action: String,
 
@@ -33,7 +34,8 @@ pub struct MemoryRequest {
 
     /// Entry type (for remember): learning, preference, context, observation, handoff
     #[schemars(
-        description = "Entry type for remember: 'learning' (default), 'preference', 'context', 'observation', 'handoff' (a session handoff: supersedes the previous current handoff for your role and is injected at session start)"
+        schema_with = "crate::actions::memory_entry_type_schema",
+        description = "Entry type for remember (default learning). handoff stores a session handoff: it supersedes the previous current handoff for your role and is injected at session start. Unknown values are rejected."
     )]
     #[serde(default)]
     pub entry_type: Option<String>,
@@ -144,7 +146,8 @@ pub struct MemoryRequest {
 pub struct TaskRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: 'create', 'proposal_inbox', 'proposal_accept', 'proposal_reject', 'proposal_reconcile', 'show' (also accepted as 'get'), 'update', 'start', 'close', 'cancel', 'reopen', 'delete', 'list', 'ready', 'blocked', 'notes', 'dep_add', 'dep_remove', 'dep_list', 'claim', 'release', 'transfer', 'available', 'mine'"
+        schema_with = "crate::actions::task_action_schema",
+        description = "Operation. `get` is an alias of `show`. Use `start` for normal work; `claim` is manual lease control; `reset` revives a task orphaned by a dead session (force-releases the lease, clears the assignee, sets status=open)."
     )]
     pub action: String,
 
@@ -268,9 +271,10 @@ pub struct TaskRequest {
     #[serde(default)]
     pub note_type: Option<String>,
 
-    /// Close reason (for close action). IMPORTANT: Verification must pass before close.
+    /// Reason for close, cancel, or request_changes. Close succeeds only once
+    /// verification passes; the close response says what to do otherwise.
     #[schemars(
-        description = "Reason for closing. IMPORTANT: Verification must pass BEFORE close. Workers should attempt close first; if close returns verification-required guidance, follow the indicated verifier ownership workflow."
+        description = "Reason for close, cancel or request_changes. Close succeeds only after verification passes; if close returns verification-required guidance, follow it."
     )]
     #[serde(default)]
     pub reason: Option<String>,
@@ -591,7 +595,8 @@ pub struct TaskRequest {
 pub struct RuleRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: 'create', 'show', 'update', 'delete', 'list', 'list_all', 'history', 'restore', 'helpful', 'harmful', 'sync', 'check_similar'"
+        schema_with = "crate::actions::rule_action_schema",
+        description = "Operation. `list` returns proven rules only; `helpful` promotes a rule to proven; `delete` tombstones; `sync` writes .claude/rules/; `check_similar` finds similar existing rules."
     )]
     pub action: String,
 
@@ -667,7 +672,8 @@ pub struct RuleRequest {
 pub struct SkillRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: 'create', 'show', 'update', 'delete', 'list', 'list_all', 'history', 'restore', 'enable', 'disable', 'sync', 'use'"
+        schema_with = "crate::actions::skill_action_schema",
+        description = "Operation. `list` returns enabled skills only; `delete` tombstones; `sync` writes .claude/skills/; `use` records usage."
     )]
     pub action: String,
 
@@ -811,7 +817,8 @@ pub struct SkillRequest {
 pub struct SpecRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: 'create', 'show', 'update', 'delete', 'list', 'approve', 'reject', 'supersede', 'link', 'unlink', 'sync', 'get_for_task'"
+        schema_with = "crate::actions::spec_action_schema",
+        description = "Operation. `get_for_task` returns the spec linked to a task."
     )]
     pub action: String,
 
@@ -1079,7 +1086,7 @@ pub struct AgentRequest {
 
     /// Short summary of the message (shown in UI notifications)
     #[schemars(
-        description = "A short one-line summary of the message, shown as a preview in the UI"
+        description = "Required for action=message (rejected without it): a short one-line summary of the message, shown as a preview in the UI"
     )]
     #[serde(default)]
     pub summary: Option<String>,
@@ -1097,7 +1104,8 @@ pub struct AgentRequest {
 pub struct PatternRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: 'create', 'list', 'show', 'update', 'archive', 'adopt', 'helpful', 'harmful', 'team_suggestions', 'team_new_suggestions', 'team_create_suggestion', 'team_share', 'team_adopt', 'team_dismiss', 'team_recommend', 'team_archive_suggestion', 'team_suggestion_analytics'"
+        schema_with = "crate::actions::pattern_action_schema",
+        description = "Operation. team_* actions require team_id: `team_share` shares a personal pattern, `team_adopt` adopts a team suggestion. `adopt` creates a pattern from a rule."
     )]
     pub action: String,
 

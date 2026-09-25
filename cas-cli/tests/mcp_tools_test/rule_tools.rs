@@ -981,3 +981,40 @@ async fn test_rule_delete() {
     let text = extract_text(result);
     assert!(text.contains("Retired") && text.contains("history retained"));
 }
+
+/// cas-caae (skills audit M27): a Gabber Studio rule became the only proven
+/// rule in cas-src's store. A rule naming another registered project is now
+/// refused with an actionable message, unless tagged `project:<slug>`.
+#[tokio::test]
+async fn rule_create_refuses_rule_naming_another_registered_project_cas_caae() {
+    let (_temp, service) = setup_cas();
+    register_host_project("/nonexistent/zephyr-quokka");
+    let create = |tags: Option<&str>| RuleCreateRequest {
+        scope: "project".to_string(),
+        content: "Zephyr Quokka branching: ALWAYS cut new branches from `staging`".to_string(),
+        paths: None,
+        tags: tags.map(str::to_string),
+        source_ids: None,
+        auto_approve_tools: None,
+        auto_approve_paths: None,
+    };
+
+    let refusal = service
+        .cas_rule_create(Parameters(create(Some("git"))))
+        .await
+        .expect_err("a rule naming another registered project is refused");
+    assert!(refusal.message.contains("zephyr-quokka"), "{}", refusal.message);
+    assert!(
+        refusal.message.contains("`project:zephyr-quokka`"),
+        "the refusal names the opt-in marker: {}",
+        refusal.message
+    );
+
+    let text = extract_text(
+        service
+            .cas_rule_create(Parameters(create(Some("git,project:zephyr-quokka"))))
+            .await
+            .expect("an explicitly scoped rule is accepted"),
+    );
+    assert!(text.contains("Created rule"), "{text}");
+}

@@ -270,7 +270,7 @@ impl CasService {
                     ErrorCode::INVALID_PARAMS,
                     format!(
                         "title required for create — pass a short descriptive title. \
-                     Example: {}task action=create title=\"Fix login bug\" priority=1",
+                     Example: {}task action=create title=\"Fix login bug\" risk=none priority=1",
                         self.inner.guidance_prefix()
                     ),
                 )

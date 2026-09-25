@@ -36,7 +36,7 @@ pub(crate) use events::MergedCloseBlockedTask;
 pub use panel::PanelRegistry;
 pub use prompts::{
     check_merge_alert_freshness, check_merge_alert_freshness_for_task, compute_gated_task_ids,
-    generate_prompt_at, revalidate_event_for_delivery_with_context,
+    generate_prompt_at, recipient_worker_cli, revalidate_event_for_delivery_with_context,
     revalidate_event_for_delivery_with_focus, with_response_instructions,
     worker_now_has_real_assignment, MergeAlertFreshness, Prompt,
 };

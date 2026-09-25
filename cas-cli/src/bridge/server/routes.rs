@@ -386,7 +386,7 @@ pub(crate) fn handle_session_routes(
                 msg.message
             } else {
                 let response_hint = format!(
-                    "To respond, use: coordination action=message target={} message=\"...\"\n\nDO NOT USE SENDMESSAGE.",
+                    "To respond, use: coordination action=message target={} summary=\"...\" message=\"...\"\n\nDO NOT USE SENDMESSAGE.",
                     from.trim()
                 );
                 format!("{}\n\n{}", msg.message.trim_end(), response_hint)

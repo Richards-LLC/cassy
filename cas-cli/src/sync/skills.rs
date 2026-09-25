@@ -810,7 +810,7 @@ Use these MCP tools:
 ### 2. After Plan Approval
 
 Create tasks using MCP tools:
-- `mcp__cas__task action=create task_type=epic` - Create epic
+- `mcp__cas__task action=create title="..." task_type=epic` - Create epic
 - `mcp__cas__task action=create` - Create subtasks
 - `mcp__cas__task action=dep_add` - Link dependencies
 

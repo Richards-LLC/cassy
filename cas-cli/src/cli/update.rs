@@ -1937,7 +1937,11 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
 
     // Sync database rules
     let rule_store = open_rule_store(&cas_root)?;
-    let rules = rule_store.list()?;
+    let mut rules = rule_store.list()?;
+    // cas-caae (skills audit M27): keep rules naming another registered
+    // project out of this project's Claude Code rules.
+    crate::store::foreign_project_guard::ForeignProjectGuard::for_project_root(project_root)
+        .retain_syncable_rules(&mut rules);
     let rule_syncer = Syncer::with_defaults(project_root);
     let rule_report = rule_syncer.sync_all(&rules)?;
 

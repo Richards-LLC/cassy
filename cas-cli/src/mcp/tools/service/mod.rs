@@ -175,6 +175,27 @@ impl CasService {
             .collect()
     }
 
+    /// Tool definitions exactly as `tools/list` publishes them, with compact
+    /// input schemas (see `tool_schema`).
+    pub fn tool_definitions(&self) -> Vec<rmcp::model::Tool> {
+        self.tool_router
+            .list_all()
+            .into_iter()
+            .map(tool_schema::compact_tool)
+            .collect()
+    }
+
+    /// [`Self::tool_definitions`] for this build, without opening a store.
+    /// Tests pin the published surface (description length, action enums,
+    /// schema size) against it.
+    pub fn tool_definitions_for_build() -> Vec<rmcp::model::Tool> {
+        Self::tool_router()
+            .list_all()
+            .into_iter()
+            .map(tool_schema::compact_tool)
+            .collect()
+    }
+
     #[allow(dead_code)]
     fn success(text: impl Into<String>) -> CallToolResult {
         CasCore::success(text)
@@ -246,7 +267,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Memory operations. Actions: remember (store new), get (by ID), list, update, delete, archive, unarchive, helpful, harmful, recent, set_tier (working/cold/archive), opinion_reinforce, opinion_weaken, opinion_contradict."
+        description = "Personal memory: learnings, preferences, context, observations and session handoffs, plus opinions with a confidence score."
     )]
     pub async fn memory(
         &self,
@@ -291,8 +312,9 @@ impl CasService {
                 _ => Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
-                        "Unknown memory action: {}. Valid: remember, get, list, update, delete, archive, unarchive, helpful, harmful, mark_reviewed, recent, set_tier, opinion_reinforce, opinion_weaken, opinion_contradict",
-                        req.action
+                        "Unknown memory action: {}. Valid: {}",
+                        req.action,
+                        cas_mcp::actions::MEMORY_ACTIONS.join(", ")
                     ),
                 )),
             };
@@ -315,7 +337,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Task operations. Actions: create (local, or cross-project proposal with explicit project), proposal_inbox, proposal_accept, proposal_reject, proposal_reconcile, show (also accepted as get), update, start, close, cancel, reopen, request_changes, delete, list, ready (actionable), blocked, notes, dep_add, dep_remove, dep_list, claim, release, reset, transfer, available, mine. For dep_add/dep_remove, blocked_by is accepted as an alias for to_id. For notes: pass only id to read that task's notes without the full task record; supply notes= to append, with optional note_type. For close, summary is accepted as an alias for notes. Pending proposals are a dedicated cloud inbox, never TaskStatus rows. cancel is the supervisor-authorized, reason-required terminal path for work intentionally ended without delivery; it preserves history and accepts an optional superseded_by pointer. Supervisors use request_changes as the sanctioned exit from AwaitingMerge whenever review fails — declined merge, amendment required after merge, or rejected work — reopening the task with its assignee preserved (use reset only for tasks orphaned by a dead session). Prefer `start` for normal worker execution; use `claim` for manual lease control/recovery; use `reset` to revive a task orphaned by a dead session (atomic: force-releases lease, clears assignee, forces status=open). IMPORTANT for 'close': verification must pass first. Workers should attempt close; if close returns verification-required guidance, follow the indicated verifier ownership workflow."
+        description = "Task lifecycle and dependencies. Workers run start, then close; if close returns verification-required guidance, follow it. Aliases: get means show; for dep_add/dep_remove, blocked_by means to_id; for close, summary means notes. notes with only id reads a task's notes; add notes= to append (optional note_type). create with an explicit project files a cross-project proposal; pending proposals live in a cloud inbox (proposal_*), never as task rows. cancel is the supervisor's reason-required terminal path for work ended without delivery (optional superseded_by). request_changes is the supervisor's exit from AwaitingMerge when review fails: it reopens the task and keeps its assignee."
     )]
     pub async fn task(
         &self,
@@ -391,8 +413,9 @@ impl CasService {
                 _ => Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
-                        "Unknown task action: {}. Valid: create, proposal_inbox, proposal_accept, proposal_reject, proposal_reconcile, show, update, start, close, cancel, reopen, request_changes, delete, list, ready, blocked, notes, dep_add, dep_remove, dep_list, claim, release, reset, transfer, available, mine",
-                        action
+                        "Unknown task action: {}. Valid: {}",
+                        action,
+                        cas_mcp::actions::TASK_ACTIONS.join(", ")
                     ),
                 )),
             };
@@ -428,7 +451,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Rule operations. Actions: create, show, update, delete (tombstone), list (proven only), list_all, history, restore, helpful (promotes to proven), harmful, sync (to .claude/rules/), check_similar (find similar existing rules)."
+        description = "Project rules. Draft rules become proven through helpful; list shows proven rules only, list_all shows every rule."
     )]
     pub async fn rule(
         &self,
@@ -483,7 +506,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Skill operations. Actions: create, show, update, delete (tombstone), list (enabled), list_all, history, restore, enable, disable, sync (to .claude/skills/), use (record usage)."
+        description = "Skills. list shows enabled skills only, list_all shows every skill; sync writes enabled skills to .claude/skills/."
     )]
     pub async fn skill(
         &self,
@@ -538,7 +561,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Coordination operations combining agent, factory, and worktree management. Agent actions: register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll (also accepted as inbox), message, message_ack, message_status. Factory actions: spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity, sweep_tasks (preview or accept one fix task per integration failure class), clear_context (real harness context reset: types the recipient harness's own reset command into its pane and confirms it against the new session transcript — a reset Cassy cannot prove is returned as an error, never as success), my_context, sync_all_workers, gc_report, gc_cleanup, epic_status (per-child branch merge state for an epic), focus_epic, remind, remind_list, remind_cancel, server_start (run a long-lived server under Cassy instead of a raw `npm run dev &` — registered servers are the only ones that survive worker teardown), server_stop, server_list (what is listening and who started it), restart_spawn_queue (supervisor-only: recover a stalled spawn queue without restarting the session; the daemon drops its in-flight spawn and un-run dequeued actions and names them to re-issue), db_branch_create / db_branch_show / db_branch_delete (supervisor-only disposable Neon branch per task: task_id, optional branch=<non-production parent>, optional target=<worker>; writes DATABASE_URL to the worker worktree's .env.cas-db, never shows the connection string, and deletes the branch when the task closes; a worker asks with a blocker message). Aliases: shutdown_workers accepts target for worker_names and reason; hold_worker/release_worker accept worker_names for target. spawn_workers normally requires an open EPIC so workers are never summoned without stated work; passing task_id for a single open task satisfies that on its own, so post-epic follow-ups need no ceremonial epic. spawn_workers accepts config_dir for an account directory: explicit config_dir wins, otherwise the requesting supervisor's own account directory is captured at enqueue time (CLAUDE_CONFIG_DIR for Claude workers, CODEX_HOME for Codex workers — never crossed between providers); Grok has no account plumbing and reports that instead of silently dropping the value. Worktree actions: worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status. Only available in factory mode. For shutdown_workers, supervisor should verify worktree cleanliness/policy before issuing shutdown. sync_all_workers skips dirty or mid-task worktrees unless force=true, but always skips a supervision-live worker-owned worktree and refuses one already mid-rebase."
+        description = "Agent messaging and factory control; only available in factory mode. Actions by group: agent (whoami, heartbeat, message, interrupt, inbox_poll, message_ack, message_status, remind, remind_list, remind_cancel, register, session_start, session_end, loop_*, queue_*, lease_history, agent_list, agent_cleanup); factory (spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity, epic_status, focus_epic, sweep_tasks, sync_all_workers, clear_context, my_context, gc_report, gc_cleanup, restart_spawn_queue); servers (server_start, server_stop, server_list); database, supervisor only (db_branch_create, db_branch_show, db_branch_delete: a disposable Neon branch per task, whose DATABASE_URL is written to the worker's .env.cas-db and never printed, deleted when the task closes; a worker asks for one with a blocker message); worktree (worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status). clear_context types the recipient harness's own reset command and confirms it against the new transcript; a reset it cannot prove is an error. Per-action rules are on the parameters they govern."
     )]
     pub async fn coordination(
         &self,
@@ -556,7 +579,7 @@ impl CasService {
             {
                 return Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
-                    "spawn_workers does not deliver `prompt` to the worker; no spawn was queued. `prompt` belongs to coordination action=loop_start. Spawn without `prompt`, then send the brief with coordination action=message target=<worker-name> after registration.",
+                    "spawn_workers does not deliver `prompt` to the worker; no spawn was queued. `prompt` belongs to coordination action=loop_start. Spawn without `prompt`, then send the brief with coordination action=message target=<worker-name> summary=\"...\" message=\"...\" after registration.",
                 ));
             }
             let event_target = req.target.clone().unwrap_or_default();
@@ -819,12 +842,8 @@ impl CasService {
                 _ => Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
-                        "Unknown coordination action: '{action}'. Valid actions:\n\
-                         Agent: register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll, message, message_ack, message_status\n\
-                         Factory: spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity, clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, epic_status, focus_epic, remind, remind_list, remind_cancel, restart_spawn_queue\n\
-                         Factory extra: sweep_tasks (preview or accept one fix task per integration failure class)
-                         Database branches (supervisor only): db_branch_create, db_branch_show, db_branch_delete
-                         Worktree: worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status"
+                        "Unknown coordination action: '{action}'. Valid: {}",
+                        cas_mcp::actions::COORDINATION_ACTIONS.join(", ")
                     ),
                 )),
             };
@@ -897,7 +916,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Search and context operations. Actions: search (BM25 full-text), retrieval_feedback (explicit retrieval outcome), retrieval_metrics (offline aggregation with a strict agent session filter, identity/judge availability, distinct retrieved/injected/opened/explicit-used/judge-helpful stages, resolved-outcome quality rates, and session-scoped rolling judge precision), skill_impact (surface and session-outcome impact report; impact_report alias), context (session context), context_for_subagent, observe (record observation), entity_list, entity_show, entity_extract, code_search (search code symbols), code_show (show symbol details), grep, blame, 'history' (search indexed git commits by text/path/time; every response carries an index_status block stating freshness and what is not yet supported)."
+        description = "Search Cassy context (memories, tasks, rules, skills), code symbols, indexed git history and retrieval metrics. Use Grep for exact text in files."
     )]
     pub async fn search(
         &self,
@@ -945,7 +964,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "System operations. Actions: version (Cassy version info), preflight (bounded unified factory readiness report), doctor (diagnostics), stats, info (system info), reindex (BM25 index), maintenance_run, maintenance_status, config_docs (full config reference), config_search (search configs by query), report_cas_bug (submit Cassy bug to GitHub - ANONYMIZE DATA: remove paths, credentials, proprietary code before submitting), proxy_add (add upstream MCP server), proxy_remove (remove server), proxy_list (list servers), proxy_health (credential-free upstream health/backoff state)."
+        description = "Cassy version, diagnostics, stats, index maintenance, configuration reference, bug reports and upstream MCP proxy servers."
     )]
     pub async fn system(
         &self,
@@ -1005,7 +1024,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Verification operations (task quality gates). Actions: add (record verification result), show (verification details), list (verifications for task), latest (most recent for task), qa_record (independent QA reviewer's verdict on a parked user-facing delivery: task_id, status approved|rejected, summary, issues, ledger_path; never the implementer), qa_waive (supervisor-only logged waiver of the independent QA pass), qa_status (QA rounds for a task), external_verify (registered-supervisor-only receipted external production verification)."
+        description = "Task quality gates: verification verdicts and the independent QA pass for parked user-facing deliveries."
     )]
     pub async fn verification(
         &self,
@@ -1052,7 +1071,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Published artifact operations. Actions: publish (turn a local file into a durable, citable artifact for a task — the runtime resolves the path, hashes and measures the bytes, enforces the 25 MiB ceiling, records the artifact, and uploads it when Cloud storage is live), show (one artifact record by id), list (a task's artifacts). Supply a local path; never compute a digest or handle an upload URL yourself. A publish succeeds and returns a citable artifact_id even when Cloud storage is unreachable."
+        description = "Published artifacts. Supply a local path; the runtime resolves it, hashes and measures the bytes, records the artifact and uploads it when Cloud storage is live. Never compute a digest or handle an upload URL yourself. publish returns a citable artifact_id even when Cloud storage is unreachable."
     )]
     pub async fn artifact(
         &self,
@@ -1090,7 +1109,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Distilled project knowledge (the repo wiki built by `cas knowledge build`). Actions: search (full-text over page titles/snippets/bodies), read (one page + its markdown body, by id or rel_path), write (hand-author a page — always stored locked:true so distillation never overwrites it), list (the page index), status (page/source counts). This is repo knowledge, distinct from the `memory` tool's personal entries and opinions."
+        description = "Distilled project knowledge: the repo wiki built by `cas knowledge build`. This is repo knowledge, distinct from the memory tool's personal entries and opinions."
     )]
     pub async fn knowledge(
         &self,
@@ -1132,7 +1151,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Team operations. Actions: list (teams user belongs to), show (team details and stats), members (list team members with roles), sync (trigger team push + pull)."
+        description = "Team membership and sync: teams you belong to, team details, members and roles."
     )]
     pub async fn team(
         &self,
@@ -1169,7 +1188,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Personal pattern operations (cross-project conventions). Actions: create (new pattern), list (with filters), show (by ID), update (modify fields), archive (soft delete), adopt (from rule), helpful (increment), harmful (increment). Team actions (require team_id): team_suggestions (list), team_new_suggestions (pending only), team_create_suggestion, team_share (share personal pattern), team_adopt (adopt suggestion), team_dismiss, team_recommend, team_archive_suggestion, team_suggestion_analytics."
+        description = "Personal patterns: cross-project conventions, plus team suggestions (team_* actions require team_id)."
     )]
     pub async fn pattern(
         &self,
@@ -1219,7 +1238,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Spec operations. Actions: create, show, update, delete, list, approve, reject, supersede, link, unlink, sync."
+        description = "Specs: create, review (approve, reject, supersede), link to tasks and sync."
     )]
     pub async fn spec(
         &self,
@@ -1379,17 +1398,11 @@ impl CasService {
 }
 
 fn canonical_task_action(action: &str) -> &str {
-    match action {
-        "get" => "show",
-        other => other,
-    }
+    cas_mcp::actions::canonical_action(cas_mcp::actions::TASK_ACTION_ALIASES, action)
 }
 
 fn canonical_coordination_action(action: &str) -> &str {
-    match action {
-        "inbox" => "inbox_poll",
-        other => other,
-    }
+    cas_mcp::actions::canonical_action(cas_mcp::actions::COORDINATION_ACTION_ALIASES, action)
 }
 
 fn normalize_coordination_aliases(req: &mut CoordinationRequest, action: &str) {
@@ -1506,6 +1519,7 @@ mod server_handler;
 /// cas-7c93 (GH #87): server_start / server_stop / server_list.
 mod server_ops;
 mod spec_ops;
+mod tool_schema;
 pub(crate) mod worker_liveness;
 mod worktree_verification_team_ops;
 

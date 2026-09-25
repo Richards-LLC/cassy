@@ -765,7 +765,7 @@ pub(super) fn execute_message(
         message.to_string()
     } else {
         let response_hint = format!(
-            "To respond, use: coordination action=message target={} message=\"...\"\n\nDO NOT USE SENDMESSAGE.",
+            "To respond, use: coordination action=message target={} summary=\"...\" message=\"...\"\n\nDO NOT USE SENDMESSAGE.",
             from.trim()
         );
         format!("{}\n\n{}", message.trim_end(), response_hint)

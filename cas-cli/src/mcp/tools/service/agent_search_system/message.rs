@@ -163,7 +163,7 @@ pub(crate) fn queued_message_provenance(message: &cas_store::QueuedPrompt) -> St
 pub(crate) fn commander_reply_command(message: &cas_store::QueuedPrompt) -> Option<String> {
     matches!(operator_class(message), Some(OperatorClass::Verified { .. })).then(|| {
         format!(
-            "coordination action=message target=operator in_reply_to={} message=…",
+            "coordination action=message target=operator in_reply_to={} summary=… message=…",
             message.id
         )
     })
@@ -4371,12 +4371,12 @@ mod cas_89e1_post_merge_message_type_tests {
         };
         assert_eq!(
             commander_reply_command(&row).as_deref(),
-            Some("coordination action=message target=operator in_reply_to=3139 message=…")
+            Some("coordination action=message target=operator in_reply_to=3139 summary=… message=…")
         );
         assert_eq!(
             super::commander_reply_framing(&row).as_deref(),
             Some(
-                "Reply with: `coordination action=message target=operator in_reply_to=3139 message=…`\nPhone reply contract: see `cas-supervisor/references/operator-reply.md`.\n",
+                "Reply with: `coordination action=message target=operator in_reply_to=3139 summary=… message=…`\nPhone reply contract: see `cas-supervisor/references/operator-reply.md`.\n",
             )
         );
         row.origin = None;

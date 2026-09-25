@@ -356,6 +356,7 @@
     ],
     "skills/cas-memory-management/references/body-templates.md": [
       "1f4e4f8739271932bf6e89400ffde8d38b63da093571b39df1e3bc0e5a76f8a8",
+      "26c880a2e172c7c1846b817ea4b844e6476b26d694a7de3f812b678b256fdfd4",
       "3fe2d2947926bc1987a0052d20a21317c72219844f6357c8a32685cb9c4b1bcf",
       "6a39f5b5fce6eabb452058cfc016ed9eb398178307df3b667d793ef48d45bcd0",
       "8bcc6cb2efa5aa085b9c5ce1275aa0869db6bc7f6ca551644da9a29674e1adad",
@@ -446,6 +447,9 @@
       "65deca3f0ee06b6358c6c392565fa2117473037016fcb30c9345ea73e471daa5",
       "c901c898d9e29eea66d970c20668762c291f43a1cb6158eaa4b699ea83e7fe55"
     ],
+    "skills/cas-qa-craft/references/feature-template.md": [
+      "9490a7a46802fa880141e5d1bcc8f0b04147499824f7ee681e25faf979d11e5c"
+    ],
     "skills/cas-qa-craft/references/independent-pass.md": [
       "132deb6bf61ffc4643d93bf11f06d325c70ffd0f29d1a4d098057e5da155542f",
       "267a6ade031287b20f3cb141d98dd9340abf12799e6980173adfe5173593a022",
@@ -457,6 +461,9 @@
     "skills/cas-qa-craft/references/journeys.md": [
       "b6259eaaefa9bd98023d4905de71451c88040fa47b6cc6c67d70853ac4a61240",
       "c2b89fc33e7943317c8af178a05a06bf7a99ee35f380a58470dc396be667f8f9"
+    ],
+    "skills/cas-qa-craft/references/maintain.md": [
+      "def9ba57bd66af1e6f230e7592d2e153e551f6cea4b993b002876431747eaf25"
     ],
     "skills/cas-qa-craft/references/matrix-builder.md": [
       "b259edd54251c807929e68f52685653346abff1fd440c3324b7b87869f56393e"
@@ -471,7 +478,14 @@
       "a8e846ca75fc25c606c00b18c04070468ed065c37c9786ab6a89476f4eab40c8",
       "af67d38312c2445f278702e05e26e3b5a4baac96b5ea95a657915d747f3478c8",
       "b85621320c7191237504aa6687943b36237d9f24918c1fbdad20e018a3a42df3",
-      "cb2a10132e1fe1151cacaf2f2b72b9d61bea23caddd2a8c1c0de5d3a2455d438"
+      "cb2a10132e1fe1151cacaf2f2b72b9d61bea23caddd2a8c1c0de5d3a2455d438",
+      "ef0573ccdf97ec145ee9d4b3edce439bc2dcb202dfc52b0a80ad41bad7e57088"
+    ],
+    "skills/cas-qa-craft/references/verify-harness.md": [
+      "f6285715732d5c2ca17f15bd9d133f7b05ec400eab9aea0e3a8250e989386982"
+    ],
+    "skills/cas-qa-craft/scripts/check-feature-map.mjs": [
+      "04b9d4ec0f7f73a1dbeeffeed4f67844c8647ece286b3830dcb6b5d32d3beb55"
     ],
     "skills/cas-release-notes/references/RUBRIC-template.md": [
       "1d114e9b6f61cefa40566ca0bdd20e6cde2c8c28c283c53ece11485231243e29",
@@ -938,6 +952,7 @@
       "9bd36a917873c3547f6032e1111719492e45ea172e688e71d8c55f67adc97b6f",
       "9e28d03e914283863978392ded8c00eca2113d65f005f60e568edfe5e9165b4d",
       "a1771deb472d75fa6664ab14849aa56b8199d6a1f4f0f7ce22e755d6891228cb",
+      "a79b5ff8b3be4ed88af5fd6f25737efb5135a5d1297992b93da6d9e35ec2a12a",
       "acc8124fe09886e6cf358ac91cafe393ae8ba8feb8268b016f9de88483a2f4a3",
       "b2abb19da5f85053ca712cc7d72f038b47554a259f32ff3f42d3a0c54a4adbeb",
       "bc4c0d46284311b2e155055f2e78553ea8771f87eeddd9edc44a1ca85e0f5508",
@@ -950,6 +965,7 @@
       "f08315864dfa5346d22ddb004989fb0507e0a7a5183b498ca3427331807e7d5c"
     ],
     "skills/cas-supervisor/references/workflow.md": [
+      "0071d5216c33b6699b7b5dc33d1fc70316971d772f38bf37dc5ca9b604e99746",
       "0101817ce1c8ab4170b1f9e1ebd00f4686f5045d88a5cdf1a09b9f82c1889dd6",
       "0586499a990248bc9ac9b5fb43c02e54ed1a5f903bd0eb2c043f1b099e7b1066",
       "0bee2e30b2d359568723b9a37f1160443e2c9fce4ea015dba0ea09ca928e04fa",
@@ -1077,6 +1093,7 @@
       "f11ffcaf9cbaf28f8835b0b76bf7729fc2945607da1d3b74f47b096f5c5f22f9",
       "f3e4c550f33f49dd93c48348e4f402cd6cfba630bc5c848a45d691ca883fdf8c",
       "f6c478e955349bd838e01d8dd8d6d8cb80e2017e3b58c0d22ae6602d586b21e9",
+      "f84aac4c2bba607e52ec4f623e66b9744ceafa490201c375eef9c295a4d6554a",
       "f86bae7c3c1cd3fcb9320d2837ddf9ab1d77622b12ea47a47141e6c19192f360",
       "fc39c6919c9741537b91e60d1516ca6394ad4e50cfe0358812cf43da19103c6c",
       "ff4e8fb59dd7dcbcdc46a7aae58a2995726f27fa981d15e3dc4b03c4d9222510"

@@ -72,6 +72,47 @@ pub(crate) const COORDINATION_FIELDS: &[&str] = &[
     "cross_session",
 ];
 
+/// Descriptions `coordination` publishes in place of the shared
+/// `CoordinationRequest` text, which is written for every action of both
+/// tools. Each names only what the parameter does for coordination's own
+/// actions.
+pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
+    ("id", "Agent id (heartbeat, unregister, session_end); defaults to the caller."),
+    (
+        "target",
+        "message/interrupt recipient: agent name, 'supervisor', 'all_workers' or \
+         'commander:<label>'; remind: who receives it (default self).",
+    ),
+    ("message", "message: the full message body."),
+    ("urgent", "message: interrupt the recipient's turn and inject this next. Discards its in-flight work."),
+    ("blocker", "message: a blocker escalation; wakes an idle supervisor."),
+    ("merge_request", "message: a merge request for the parked task named by task_id."),
+    ("in_reply_to", "message: notification_id of the direct message this answers."),
+    ("kind", "Commander turn kind: answer, status, receipt, ask or blocker."),
+    ("attachment", "Published artifact id to attach to a Commander turn."),
+    (
+        "task_id",
+        "message with merge_request=true: the parked task; remind: bind the reminder to this task.",
+    ),
+    ("notification_id", "message_ack / message_status: the notification id."),
+    ("limit", "inbox_poll: maximum rows to return."),
+    ("name", "register / session_start: agent name."),
+    ("agent_type", "register / session_start: primary, sub_agent, worker or ci."),
+    ("parent_id", "register / session_start: parent agent id for a sub-agent."),
+    ("session_id", "register / session_start / session_end: harness session id."),
+    ("remind_message", "remind: the text delivered when it fires (required)."),
+    ("remind_delay_secs", "remind: fire after this many seconds."),
+    (
+        "remind_event",
+        "remind: fire on task_completed, task_blocked, worker_idle, epic_completed, \
+         branch_contained_in or tag_exists instead of a delay.",
+    ),
+    ("remind_filter", "remind: JSON filter for the event, e.g. {\"task_id\":\"cas-a1b2\"}."),
+    ("remind_id", "remind_cancel: the reminder id."),
+    ("remind_ttl_secs", "remind: seconds an undelivered reminder lives (default 3600, 0 = never)."),
+    ("cross_session", "remind: keep the reminder across session end and task close."),
+];
+
 /// Messaging and reminder parameters the supervisor `factory` tool does not
 /// publish: they belong to `coordination`.
 pub(crate) const FACTORY_HIDDEN_FIELDS: &[&str] = &[
@@ -116,6 +157,16 @@ fn narrow_split_tool(tool_name: &str, schema: &mut JsonObject) {
         .collect();
     for name in hidden {
         properties.remove(&name);
+    }
+    if tool_name == "coordination" {
+        for (name, description) in COORDINATION_DESCRIPTIONS {
+            if let Some(Value::Object(property)) = properties.get_mut(*name) {
+                property.insert(
+                    "description".to_string(),
+                    Value::String((*description).to_string()),
+                );
+            }
+        }
     }
     if let Some(Value::Object(action)) = properties.get_mut("action") {
         action.insert(
@@ -271,10 +322,20 @@ mod tests {
                 "factory still publishes {messaging}"
             );
         }
+        // Every coordination param carries coordination-only wording.
+        for param in &coordination_params {
+            if param.as_str() == "action" || param.as_str() == "summary" {
+                continue;
+            }
+            assert!(
+                COORDINATION_DESCRIPTIONS.iter().any(|(name, _)| name == param),
+                "{param} has no coordination description"
+            );
+        }
         let bytes = |schema: &JsonObject| serde_json::to_string(schema).unwrap().len();
         assert!(
-            bytes(&factory) - bytes(&coordination) >= 6_000,
-            "the worker tool must shed the supervisor params: coordination {} B, factory {} B",
+            bytes(&coordination) <= 3_600,
+            "the worker tool must stay small: coordination {} B (factory {} B)",
             bytes(&coordination),
             bytes(&factory)
         );

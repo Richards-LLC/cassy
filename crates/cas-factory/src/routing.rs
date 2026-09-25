@@ -1226,7 +1226,7 @@ pub fn render_route_table() -> Result<String, RoutingError> {
     }
 
     output.push_str(
-        "\nLane request mode: call `factory action=spawn_workers` with `lane=<lane>`. The registry resolves the ordered candidates; any fallback selection is reported loudly as `fallback: <recipe> (primary <recipe> unavailable: <reason>)` in the spawn receipt and launch summary. Lanes marked `disabled` fail closed when their primary is unavailable.\n",
+        "\nLane request mode: call the `factory` tool with `action=spawn_workers lane=<lane>`. The registry resolves the ordered candidates; any fallback selection is reported loudly as `fallback: <recipe> (primary <recipe> unavailable: <reason>)` in the spawn receipt and launch summary. Lanes marked `disabled` fail closed when their primary is unavailable.\n",
     );
 
     output.push_str(GENERATED_ROUTE_TABLE_END);

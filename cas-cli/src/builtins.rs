@@ -5109,9 +5109,10 @@ This is the body content."#;
                 );
             }
             // The tool calls must be spelled the way this harness resolves them.
+            // cas-8563b: server_* moved from coordination to factory.
             assert!(
-                entry.content.contains(&format!("{prefix}coordination")),
-                "{label} cas-servers SKILL.md must call {prefix}coordination"
+                entry.content.contains(&format!("{prefix}factory action=server_start")),
+                "{label} cas-servers SKILL.md must call {prefix}factory"
             );
             bodies.push((label, entry.content.replace(prefix, "<PREFIX>")));
         }

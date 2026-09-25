@@ -4542,23 +4542,26 @@ This is the body content."#;
         }
     }
 
-    // cas-5be8: disallowed-tools frontmatter in builtin skills
+    /// `disallowed-tools` is not a guard: Claude Code clears it when the user
+    /// sends the next message (turn-scoped), and Codex, Grok and OpenCode
+    /// ignore it. cas-5be8's TodoWrite/EnterPlanMode ban on cas-worker lapsed
+    /// at the first supervisor message and never applied outside Claude, so
+    /// it was dropped rather than presented as enforcement.
     #[test]
-    fn test_builtin_cas_worker_disallowed_tools() {
+    fn test_builtin_cas_worker_does_not_pose_disallowed_tools_as_a_guard() {
         for (label, skills) in [
             ("BUILTIN_SKILLS", BUILTIN_SKILLS),
             ("CODEX_BUILTIN_SKILLS", CODEX_BUILTIN_SKILLS),
+            ("GROK_BUILTIN_SKILLS", GROK_BUILTIN_SKILLS),
         ] {
             let entry = skills
                 .iter()
                 .find(|b| b.path == "skills/cas-worker/SKILL.md")
                 .unwrap_or_else(|| panic!("{label}: cas-worker SKILL.md missing"));
-            for required in ["disallowed-tools:", "- TodoWrite", "- EnterPlanMode"] {
-                assert!(
-                    entry.content.contains(required),
-                    "{label}: cas-worker SKILL.md missing disallowed-tools entry: {required:?}"
-                );
-            }
+            assert!(
+                !entry.content.contains("disallowed-tools:"),
+                "{label}: cas-worker must not rely on turn-scoped, Claude-only disallowed-tools"
+            );
         }
     }
 

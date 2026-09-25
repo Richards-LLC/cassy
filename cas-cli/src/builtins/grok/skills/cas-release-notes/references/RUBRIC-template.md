@@ -6,7 +6,8 @@
 
 ## Where to post
 
-- **Channel:** `<#channel-name>` (`<CHANNEL_ID>`)
+- **Channel:** `<#channel-name>` (`<CHANNEL_ID>`). The MechaCassy hub posts only to a
+  channel matching `*-internal` or one it allowlists, and the bot must be a member.
 - **Deploy targets:**
   - merged to `<staging-branch>` → label **`Staging`**
   - merged to `<production-branch>` → label **`Live on production`**
@@ -61,19 +62,9 @@ Lead with the user-visible before/after; an implementation inventory is not a re
 
 ## Published version report
 
-After every published version release, before its Slack announcement, run
-`cas-release-report`. Commit the Markdown source, concept brief, standalone HTML,
-verified PDF and QA receipt under `docs/release-reports/`; link the HTML and PDF
-in the announcement draft. The PDF is a required file upload attached to the
-User thread, and the HTML must be linked from the Dev thread. Save
-`release-report.receipt` in the release-train run directory with both report
-paths, both SHA-256 values, both Slack file ids, User/Dev thread timestamps, the
-PDF file permalink and page count; do not mark the release announced without
-it.
-Verify continuous A4 and Letter pagination, source fidelity and the brief's
-rubric. Carry these post-publication artifacts into the next release-prep commit
-without rewriting the published tag. A branch merge without a published version
-continues to use the normal release-note draft.
+After a published version release, run `cas-release-report` and link its HTML
+and PDF from the announcement (PDF attached to the User thread, HTML linked
+from the Dev thread).
 
 ## Artifact
 
@@ -81,15 +72,38 @@ Save the postable draft as `docs/release-notes/<date>-<topic>-slack.md`
 (date `YYYY-MM-DD`, topic kebab-case) before posting.
 
 Immediately after posting, before ending the task or turn, annotate that saved
-draft with a `## POSTED` block containing the UTC timestamp, channel, and a
-permalink for every top-level post and reply. This is the searchable receipt
+draft with a `## POSTED` block containing the UTC timestamp, channel, and the
+`message_id` and permalink of every top-level post and reply. This is the searchable receipt
 that the announcement happened.
 
 ## Example shape
 
-- **User (top-level):** `Live on production` · **User** — Saved filters now survive a reload.
-- **User (reply):** Was → you re-applied filters every time you came back to the list.
-  Now → the list reopens exactly as you left it.
-- **Dev (top-level):** `Live on production` · **Dev** — Filter state persisted per user instead of per session.
-- **Dev (reply):** Was → filter state lived in in-memory session store, dropped on reload (#123).
-  Now → persisted server-side keyed by user id, restored on list mount.
+Slack renders mrkdwn, not Markdown: single `*bold*`, `_italic_`, backtick code
+and `•` bullets. The MechaCassy transport refuses a body containing `**`, a
+`#` heading or a `- ` bullet, so write the draft in mrkdwn from the start.
+
+User top-level:
+
+```text
+*Live on production — User*
+Saved filters now survive a reload.
+```
+
+User reply:
+
+```text
+• *Saved filters* — Was: you re-applied your filters every time you came back to the list. Now: the list reopens exactly as you left it.
+```
+
+Dev top-level:
+
+```text
+*Live on production — Dev*
+Filter state is persisted per user instead of per session.
+```
+
+Dev reply:
+
+```text
+• *Filter persistence* — Was: filter state lived in the in-memory session store and was dropped on reload (#123). Now: it is persisted server-side, keyed by user id, and restored when the list mounts.
+```

@@ -32,7 +32,7 @@ strict Codex output schemas, and the account-gate procedure.
 ## Release-note posting
 
 Every merge to `main` or `staging` needs the existing
-[release-notes](../release-notes/SKILL.md) flow and the project's content/channel
+[cas-release-notes](../cas-release-notes/SKILL.md) flow and the project's content/channel
 rubric. Slack uses only the MechaCassy hub/bot through
 [mecha-cassy](../mecha-cassy/SKILL.md); never use Claude.ai Slack or a personal
 connector. The account gate above authorizes non-Slack CLI work only. If the

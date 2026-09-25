@@ -75,7 +75,7 @@ fn mcp_and_viktor_guidance_use_the_cassy_surface() {
 #[test]
 fn release_notes_are_generic_procedure_and_rubric_driven() {
     for flavor in ["", "codex", "grok"] {
-        let skill = source(flavor, "skills/release-notes/SKILL.md");
+        let skill = source(flavor, "skills/cas-release-notes/SKILL.md");
         for marker in [
             "ensure the rubric exists",
             "gather the merge",
@@ -105,7 +105,7 @@ fn release_notes_are_generic_procedure_and_rubric_driven() {
         assert!(!skill.contains("exactly one threaded reply"));
     }
 
-    let rubric = source("", "skills/release-notes/references/RUBRIC-template.md");
+    let rubric = source("", "skills/cas-release-notes/references/RUBRIC-template.md");
     assert!(rubric.contains("Default: one threaded reply per thread"));
 
     let init = include_str!("../src/cli/init/docs_and_skill.rs");

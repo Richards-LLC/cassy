@@ -81,7 +81,7 @@ report blocked with both captured receipts.
 ## Posting release notes
 
 The trigger is automatic on every merge to `main` or `staging`. Use
-[release-notes](../../release-notes/SKILL.md) and the project's rubric for
+[cas-release-notes](../../cas-release-notes/SKILL.md) and the project's rubric for
 channel, message shape and ordering; a project with no rubric and no channel
 posts nowhere.
 

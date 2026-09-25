@@ -4270,7 +4270,12 @@ This is the body content."#;
         let guide = supervisor_guidance();
         assert!(!guide.is_empty());
         assert!(!guide.contains("managed_by:"));
-        assert_eq!(guide, extract_body(include_str!("builtins/skills/cas-supervisor.md")));
+        assert_eq!(
+            guide,
+            extract_body(include_str!("builtins/skills/cas-supervisor.md"))
+                .replacen(TOOL_NAMING_LINE, SESSION_TOOL_NAMING_LINE, 1)
+        );
+        assert!(guide.contains(SESSION_TOOL_NAMING_LINE) && !guide.contains(TOOL_NAMING_LINE));
     }
 
     /// Keep the callable coordination surfaces in the model-visible briefing.
@@ -4494,7 +4499,12 @@ This is the body content."#;
         let guide = worker_guidance();
         assert!(!guide.is_empty());
         assert!(!guide.contains("managed_by:"));
-        assert_eq!(guide, extract_body(include_str!("builtins/skills/cas-worker.md")));
+        assert_eq!(
+            guide,
+            extract_body(include_str!("builtins/skills/cas-worker.md"))
+                .replacen(TOOL_NAMING_LINE, SESSION_TOOL_NAMING_LINE, 1)
+        );
+        assert!(guide.contains(SESSION_TOOL_NAMING_LINE) && !guide.contains(TOOL_NAMING_LINE));
         for (label, details) in [
             (
                 "claude",

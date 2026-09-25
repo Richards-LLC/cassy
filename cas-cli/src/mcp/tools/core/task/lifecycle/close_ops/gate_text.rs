@@ -75,9 +75,9 @@ pub(crate) fn verification_timeout_message(
 pub(crate) fn repeated_close_refusal_stop(task_id: &str, caller_prefix: &str) -> String {
     format!(
         "If this gate has now refused you twice, stop fixing. Write down the premise you are \
-         working from as a task note: `{caller_prefix}task action=notes id={task_id} \
-         note_type=decision notes=\"<premise>\"`. Take a census of what the gate actually \
-         checks versus what you changed, then act."
+         working from as a task note, take a census of what the gate actually checks versus what \
+         you changed, then act. To record the premise, run `{caller_prefix}task action=notes \
+         id={task_id} note_type=decision notes=\"<premise>\"`."
     )
 }
 

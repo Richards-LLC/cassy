@@ -539,7 +539,7 @@ const MAX_FLUSH_NOTE_CHARS: usize = 2000;
 ///
 /// Returns an empty Vec on any session-learn error (best-effort).
 fn extract_compact_findings(transcript_path: &str) -> Result<Vec<String>, MemError> {
-    let drafts = match session_learn_sync(transcript_path, &[]) {
+    let drafts = match session_learn_sync(transcript_path, &[], &[]) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("cas: PreCompact flush: session-learn failed: {e} (no findings written)");
@@ -555,6 +555,7 @@ fn extract_compact_findings(transcript_path: &str) -> Result<Vec<String>, MemErr
                     "decision" | "correction" | "concept" | "pattern"
                 )
                 && d.dedup_hits.is_empty()
+                && !d.content.trim().is_empty()
         })
         .take(MAX_FLUSH_FINDINGS)
         .map(|d| truncate_display(&d.content, MAX_FLUSH_FINDING_LEN))

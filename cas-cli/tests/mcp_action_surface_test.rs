@@ -463,11 +463,6 @@ const CALL_SHAPE_ALLOWLIST: &[(&str, &str, &str)] = &[
         "task action=create: missing risk",
         "M12",
     ),
-    (
-        "agents/task-verifier.md",
-        "verification action=add: unknown field files_reviewed",
-        "M10",
-    ),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -783,6 +778,16 @@ fn builtin_call_shape_offenders(surface: &CallSurface) -> Vec<CallShapeOffender>
                 &mut offenders,
             );
         }
+    }
+    // Stop-hook job bodies ship outside the catalogs (cas-228e) but are sent
+    // to a model verbatim apart from the tool prefix.
+    for job in cas::maintenance_jobs::MAINTENANCE_JOBS {
+        lint_call_shapes(
+            job.body,
+            &format!("job:jobs/{}.md", job.name),
+            surface,
+            &mut offenders,
+        );
     }
     offenders
 }

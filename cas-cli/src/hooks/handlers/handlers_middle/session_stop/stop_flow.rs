@@ -392,7 +392,7 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
         // session-learn: 7-signal memory classifier (cas-6156 / EPIC cas-ebea)
         // Gated on [memory] session_learn_auto = true in .cas/config.toml.
         // The obs_count >= 5 guard mirrors the SKILL.md "< 5 tool calls = skip"
-        // floor so we never pay a Haiku call on a trivial session.
+        // floor so we never pay a model call on a trivial session.
         let session_learn_auto = config.memory.as_ref().is_some_and(|m| m.session_learn_auto);
 
         if session_learn_auto && obs_count >= 5 {
@@ -409,7 +409,10 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
                     })
                     .collect();
 
-                match session_learn_sync(transcript_path, &sl_file_paths) {
+                // The classifier cannot search, so offer it the recent
+                // memories as duplicate candidates.
+                let dedup_candidates = session_learn_dedup_candidates(store.as_ref());
+                match session_learn_sync(transcript_path, &sl_file_paths, &dedup_candidates) {
                     Ok(drafts) if !drafts.is_empty() => {
                         eprintln!(
                             "cas: session-learn: {} draft(s) from transcript",
@@ -427,7 +430,11 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
                         let mut stored = 0usize;
                         for draft in drafts
                             .iter()
-                            .filter(|d| confidence_floor(d) && d.dedup_hits.is_empty())
+                            .filter(|d| {
+                                confidence_floor(d)
+                                    && d.dedup_hits.is_empty()
+                                    && !d.content.trim().is_empty()
+                            })
                         {
                             // BM25 overlap-detection gate
                             if find_similar_entry(cas_root, &draft.content) {
@@ -617,40 +624,46 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
         .unwrap_or(false);
 
     if !stop_is_reentrant && std::env::var_os("CAS_MAINTENANCE_JOB").is_none() {
+        // One body per job, remapped to the light lane's tool prefix (audit
+        // D12). A Claude lane sees mcp__cas__, a Codex lane mcp__cs__.
         let mut jobs = Vec::new();
         if let Some(context) = build_learning_review_context(store.as_ref(), &config) {
-            jobs.push((
-                "learning-reviewer",
-                context,
-                include_str!("../../../../builtins/codex/agents/learning-reviewer.md"),
-            ));
+            jobs.push(("learning-reviewer", context));
         }
         if let Ok(rule_store) = open_rule_store(cas_root) {
             if let Some(context) = build_rule_review_context(rule_store.as_ref(), &config) {
-                jobs.push((
-                    "rule-reviewer",
-                    context,
-                    include_str!("../../../../builtins/codex/agents/rule-reviewer.md"),
-                ));
+                jobs.push(("rule-reviewer", context));
             }
         }
         if let Some(context) = build_duplicate_detection_context(store.as_ref(), &config) {
-            jobs.push((
-                "duplicate-detector",
-                context,
-                include_str!("../../../../builtins/codex/agents/duplicate-detector.md"),
-            ));
+            jobs.push(("duplicate-detector", context));
         }
         if let Some(context) =
             build_session_summary_context(store.as_ref(), &config, &input.session_id)
         {
-            jobs.push((
-                "session-summarizer",
-                context,
-                include_str!("../../../../builtins/codex/agents/session-summarizer.md"),
-            ));
+            jobs.push(("session-summarizer", context));
         }
-        for (name, context, body) in jobs {
+        let tool_prefix = if jobs.is_empty() {
+            None
+        } else {
+            match crate::light_lane::tool_prefix() {
+                Ok(prefix) => Some(prefix),
+                Err(error) => {
+                    eprintln!("cas: maintenance jobs not queued: {error}");
+                    None
+                }
+            }
+        };
+        let jobs = if tool_prefix.is_some() { jobs } else { Vec::new() };
+        for (name, context) in jobs {
+            let Some(body) = crate::maintenance_jobs::job_body(name) else {
+                eprintln!("cas: {name} has no job body");
+                continue;
+            };
+            let body = crate::maintenance_jobs::render_job_prompt_body(
+                body,
+                tool_prefix.unwrap_or(crate::maintenance_jobs::CANONICAL_TOOL_PREFIX),
+            );
             if context.contains("-error>") {
                 eprintln!("cas: {name} could not be queued: {context}");
                 continue;

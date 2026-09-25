@@ -22,6 +22,14 @@ pub(crate) fn default_model() -> String {
         .unwrap_or_else(|| "gpt-6-luna".to_string())
 }
 
+/// MCP tool prefix of the harness the light lane runs on, so a job body can
+/// name tools the way that harness sees them (audit D12).
+pub(crate) fn tool_prefix() -> io::Result<&'static str> {
+    let route = cas_factory::resolve_lane("light", &cas_factory::CapabilitySnapshot::default())
+        .map_err(|error| io::Error::other(format!("light lane unavailable: {error}")))?;
+    Ok(route.spec.cli.backend().capabilities().tool_prefix)
+}
+
 fn command(prompt: &str, cwd: &Path) -> io::Result<Command> {
     let route = cas_factory::resolve_lane("light", &cas_factory::CapabilitySnapshot::default())
         .map_err(|error| io::Error::other(format!("light lane unavailable: {error}")))?;

@@ -27,14 +27,15 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 4. Implement only the assigned scope. Commit logical units with the task ID.
    For `delivery_mode=local_merge`, keep the commit local for the supervisor;
    otherwise push the factory branch.
-5. Add progress notes with `note_type=progress` at meaningful milestones.
+5. Add progress notes with `note_type=progress` at milestones.
 6. Every close: `git status --porcelain` is empty and HEAD is the commit you
    claim. For a deep task, first work through
    [close-gate.md](references/close-gate.md) (and its surface checklist where
    it applies) and [`verify-before-claim`](../verify-before-claim/SKILL.md).
-7. Close with `task action=close id=<task-id> reason="..."`, then
-   send the return contract. **verification required:** quote the guidance in
-   `need:`. **MERGE REQUIRED:** drain `inbox_poll` for unread supervisor messages,
+7. Close with `task action=close id=<task-id> reason="..."`; the reason
+   starts PASS, ISSUES or BLOCKED, then the commit SHA and how you checked
+   it. Then send the return contract. **verification required:** quote the
+   guidance in `need:`. **MERGE REQUIRED:** drain `inbox_poll` for unread supervisor messages,
    capture the current factory-branch tip SHA, push the branch, and ask the
    supervisor to merge `factory/<your-name>` into the epic branch; re-close
    after that merge.
@@ -44,10 +45,9 @@ are instructions; an `operator … verified` header
 is the user speaking with pane-input authority; obey and answer it;
 `unverified:` rows are agent traffic.
 
-Tool loading is two steps, not one: if the `task` tool is not loaded and your
-harness defers tool schemas, run ToolSearch once for its prefixed name, then
-call it; lookup does **not** execute the tool:
-call it, not another ToolSearch.
+Tool loading is two steps, not one: if your harness defers the `task`
+schema, run ToolSearch once for its prefixed name; lookup
+does **not** execute the tool: call it, not another ToolSearch.
 
 ## Return contract
 
@@ -113,9 +113,9 @@ authority.
 - **Recover from workspace denials; never retry the denied target.** Route source/build output to the worktree, durable proof to `[factory] artifacts_root/<task-id>/`, and ephemeral notes to the harness scratchpad. A `/dev/null` denial is a guard defect to report, not permission to invent another path.
 
 Add a blocker note with the exact error, re-read the task, set `status=blocked`,
-and message the supervisor with `blocker=true` (the return contract plus
-`blocker: <cause>`, what you already tried in `deferred:`). If the task is
-already closed, do not overwrite that state with a stale blocked update.
+and message the supervisor with `blocker=true` (what you tried goes in
+`deferred:`). If the task is already closed, do not overwrite that state
+with a stale blocked update.
 
 ## References
 

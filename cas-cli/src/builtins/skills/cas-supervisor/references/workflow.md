@@ -1,6 +1,6 @@
 # Workflow — Worker Modes, Phases, Blockers
 
-Contents: [Worker modes](#worker-modes) · [Worker count](#worker-count-strategy) · [Phase 1: Plan](#phase-1-plan) · [Phase 2: Coordinate](#phase-2-coordinate) · [Phase 3: Merge and sync](#phase-3-merge-and-sync-isolated-mode) · [Blockers](#handling-blockers) · [Phase 4: Complete](#phase-4-complete)
+Contents: [Worker modes](#worker-modes) · [Worker count](#worker-count-strategy) · [Phase 1: Plan](#phase-1-plan) · [Phase 2: Coordinate](#phase-2-coordinate) · [Brief fields](#brief-fields-no-spawn-without-them) · [Phase 3: Merge and sync](#phase-3-merge-and-sync-isolated-mode) · [Re-verify after a rebase](#re-verify-a-rebased-lane-by-patch-id) · [Blockers](#handling-blockers) · [Phase 4: Complete](#phase-4-complete)
 
 ## Worker Modes
 
@@ -54,6 +54,25 @@ factory action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-sol effo
 An open, unassigned `task_id` authorizes the spawn on its own; the refusal rules are in the
 [`spawn_workers` parameter table](reference.md). Ceremonial
 single-child epics distort epic reporting, so this is the preferred path.
+
+### Brief fields: no spawn without them
+
+Before you spawn onto a task or assign it, its task record must carry four
+fields. A missing field means no spawn: fill it with `task action=update`
+first. A worker cannot recover a goal or a proof method the brief never named.
+
+| Field | Where it lives |
+|---|---|
+| Goal: what is true when the task is done | `description` |
+| Scope: files to edit, and what is off-limits | `description` (or `design`) |
+| Acceptance: the observable pass condition | `acceptance_criteria` |
+| Proof expected: how the result will be checked | `proof_targets`, `demo_statement`, or the named command or grep in `acceptance_criteria` |
+
+Workers report in one shape: the close reason starts `PASS`, `ISSUES` or
+`BLOCKED`, then the commit SHA and how it was checked. `ISSUES` lists every
+known defect. A report without the SHA or the check the brief named is a gap,
+not a pass: ask for it once, and a second miss goes through the
+[retry policy](worker-recovery.md#retry-policy-by-failure-mode).
 
 ## Phase 2: Coordinate
 
@@ -257,6 +276,29 @@ worktree first.
 
 If `worktree_merge` cannot act, stop and ask the operator to resolve the merge; do not
 invent a second merge procedure.
+
+### Re-verify a rebased lane by patch-id
+
+A review verdict belongs to a diff, not to a SHA. When a lane you already
+reviewed is rebased (by `sync_all_workers` or by the worker), compare
+patch-ids instead of re-reviewing from scratch. At review, record the base
+SHA, the tip SHA and the lane's patch-id in the task note:
+
+```bash
+git diff <base>...factory/<worker> | git patch-id --stable
+```
+
+After the rebase, run the same command against the new base.
+
+- **Same patch-id:** the diff did not change, so the verdict still holds.
+  Merge without a second review.
+- **Different patch-id:** the rebase changed content (a conflict resolution
+  or new commits). Review only what changed:
+  `git range-diff <old-base>..<old-tip> <new-base>..factory/<worker>`.
+
+A matching patch-id proves the diff is the same. It does not prove the diff
+still integrates with the new base: the merge sweep and the Phase 4 assembly
+gate still run. A green CI run is not a review verdict.
 
 ## Phase 3: Review (Shared Mode)
 

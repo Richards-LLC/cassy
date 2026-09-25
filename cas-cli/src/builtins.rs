@@ -3377,7 +3377,7 @@ fn stale_cas_agent_files(agents_dir: &Path, keep: &HashSet<String>) -> Vec<Strin
 ///
 /// Mirrors [`prune_stale_cas_skill_dirs`]: a file is removed only when it is
 /// not in `keep` (the harness catalog) and carries `managed_by: cas` (see
-/// [`stale_cas_agent_files`]). Before this, agents dropped from the catalog
+/// `stale_cas_agent_files`). Before this, agents dropped from the catalog
 /// (`code-reviewer`, `git-history-analyzer`, `issue-intelligence-analyst`)
 /// stayed installed and listed in every session. Returns the removed names.
 pub fn prune_stale_cas_agent_files(

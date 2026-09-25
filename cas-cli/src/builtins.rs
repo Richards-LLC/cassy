@@ -1107,6 +1107,12 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
             "builtins/codex/skills/cas-nuxt-playwright/references/auth-fixture-template.md"
         ),
     },
+    // Codex ignores `disable-model-invocation`; `agents/openai.yaml` is its
+    // opt-out from implicit invocation.
+    BuiltinFile {
+        path: "skills/cas-nuxt-playwright/agents/openai.yaml",
+        content: include_str!("builtins/codex/skills/cas-nuxt-playwright/agents/openai.yaml"),
+    },
     // cas-playwright-debug skill (cas-5e54) — codex mirror, byte-identical.
     BuiltinFile {
         path: "skills/cas-playwright-debug/SKILL.md",
@@ -1194,6 +1200,7 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/codex/skills/cas-wizard/template.sh") },
     BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/codex/skills/cas-resolving-merge-conflicts/SKILL.md") },
     BuiltinFile { path: "skills/cas-to-questionnaire/SKILL.md", content: include_str!("builtins/codex/skills/cas-to-questionnaire/SKILL.md") },
+    BuiltinFile { path: "skills/cas-to-questionnaire/agents/openai.yaml", content: include_str!("builtins/codex/skills/cas-to-questionnaire/agents/openai.yaml") },
     BuiltinFile { path: "skills/cas-image-generate/SKILL.md", content: include_str!("builtins/codex/skills/cas-image-generate/SKILL.md") },
     BuiltinFile { path: "skills/cas-image-generate/references/asset-playbook.md", content: include_str!("builtins/codex/skills/cas-image-generate/references/asset-playbook.md") },
     BuiltinFile { path: "skills/cas-image-generate/references/svg-web-assets.md", content: include_str!("builtins/codex/skills/cas-image-generate/references/svg-web-assets.md") },

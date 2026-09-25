@@ -197,6 +197,41 @@ fn every_builtin_frontmatter_is_yaml_with_metadata_managed_by() {
     assert!(problems.is_empty(), "\n  {}\n", problems.join("\n  "));
 }
 
+/// Codex ignores `disable-model-invocation`, so every user-invoked-only skill
+/// ships the Codex opt-out `agents/openai.yaml` in the codex flavor.
+#[test]
+fn codex_opt_out_skills_ship_agents_openai_yaml() {
+    let codex = builtin_catalog::skills(builtin_catalog::Flavor::Codex);
+    let mut checked = 0;
+    for builtin in codex {
+        let Some(skill_dir) = builtin.path.strip_suffix("/SKILL.md") else {
+            continue;
+        };
+        let opted_out = frontmatter(builtin.content).is_some_and(|block| {
+            block
+                .lines()
+                .any(|line| line.trim() == "disable-model-invocation: true")
+        });
+        if !opted_out {
+            continue;
+        }
+        checked += 1;
+        let yaml_path = format!("{skill_dir}/agents/openai.yaml");
+        let yaml = codex
+            .iter()
+            .find(|candidate| candidate.path == yaml_path)
+            .unwrap_or_else(|| panic!("codex {skill_dir} opts out but ships no {yaml_path}"));
+        let parsed: serde_yaml::Value =
+            serde_yaml::from_str(yaml.content).expect("agents/openai.yaml parses");
+        assert_eq!(
+            parsed["policy"]["allow_implicit_invocation"],
+            serde_yaml::Value::Bool(false),
+            "{yaml_path} must set policy.allow_implicit_invocation: false"
+        );
+    }
+    assert!(checked >= 2, "expected the opt-out skills to be checked");
+}
+
 /// The routing convention: the description opens with the trigger, not with an
 /// identity sentence, a provider name, or a shouted opt-in.
 #[test]

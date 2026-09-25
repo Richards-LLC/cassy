@@ -1,0 +1,4 @@
+# Codex ignores `disable-model-invocation` in SKILL.md; this is its opt-out.
+# The skill runs only when the user invokes it explicitly.
+policy:
+  allow_implicit_invocation: false

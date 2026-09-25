@@ -75,4 +75,4 @@ Configurations carry environment-variable names only. Never print, log, or commi
 
 This transport changes nothing about the message. The project rubric owns wording, labels, thread order and reply count (for a release note that is **Was → Now** for every item, no ticket labels, no process narration).
 
-Set this machine up once with `cas integrate violet` (see [references/registration.md](references/registration.md)), then dispatch from a Cassy-connected harness with `mcp__cas__mcp_execute`. A bounded one-shot process with no live proxy uses the proxy-less route in that same reference instead.
+Set this machine up once with `cas integrate violet` (see [references/registration.md](references/registration.md)), then dispatch from a Cassy-connected harness with `mcp_execute`. A bounded one-shot process with no live proxy uses the proxy-less route in that same reference instead.

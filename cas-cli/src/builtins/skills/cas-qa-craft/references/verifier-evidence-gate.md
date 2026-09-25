@@ -6,10 +6,10 @@ reason. Workers produce the ledger with this skill; the verifier consumes it.
 
 ## Demo-statement evidence mode
 
-Fetch the task with `mcp__cas__task action=show` and inspect fields and notes
+Fetch the task with `task action=show` and inspect fields and notes
 before reading the close reason. A non-empty `demo_statement` requires Step
 0A. For `task_type=epic`, first enumerate ParentChild children with
-`mcp__cas__task action=dep_list id=<epic-id>` and fetch every child, including
+`task action=dep_list id=<epic-id>` and fetch every child, including
 closed children: **any child** with a non-empty `demo_statement` requires the
 epic evidence gate below, even when the epic's own demo is empty. Only tasks
 with no demo and epics with neither their own nor any child demo skip Step 0A.
@@ -36,7 +36,7 @@ from the close verifier or substitute the children's ledgers for the epic walk.
    close reason should cite this same path; do not use a close reason as a
    substitute for the ledger. If the file is absent, reject with this exact
    summary: `QA evidence required: task has a demo_statement but no LEDGER.md`.
-   Record that rejection with `mcp__cas__verification action=add` and stop.
+   Record that rejection with `verification action=add` and stop.
 2. Parse the ledger's row grammar exactly:
    `id | cell | expected | observed | verdict | label | evidence path | defect task`.
    Ignore prose and the required Constants vs expectation, Contradictions, and

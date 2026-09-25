@@ -2,7 +2,7 @@
 
 Wrong field names and invalid actions waste dispatch cycles. This section covers exact valid actions and field names.
 
-**Valid `mcp__cas__task` actions** (do not invent others): `create`, `proposal_inbox`, `proposal_accept`, `proposal_reject`, `proposal_reconcile`, `show`, `update`, `start`, `close`, `cancel`, `reopen`, `request_changes`, `delete`, `list`, `ready`, `blocked`, `notes`, `dep_add`, `dep_remove`, `dep_list`, `claim`, `release`, `reset`, `transfer`, `available`, `mine`.
+**Valid `task` actions** (do not invent others): `create`, `proposal_inbox`, `proposal_accept`, `proposal_reject`, `proposal_reconcile`, `show`, `update`, `start`, `close`, `cancel`, `reopen`, `request_changes`, `delete`, `list`, `ready`, `blocked`, `notes`, `dep_add`, `dep_remove`, `dep_list`, `claim`, `release`, `reset`, `transfer`, `available`, `mine`.
 
 ## Task risk declarations
 
@@ -28,7 +28,7 @@ Two of those are supervisor-specific and easy to confuse:
 When an inbound Commander message is stamped `operator … verified` and includes `notification_id=N`, answer it with:
 
 ```
-mcp__cas__coordination action=message target=operator in_reply_to=N summary="..." message="..."
+coordination action=message target=operator in_reply_to=N summary="..." message="..."
 ```
 
 The hub routes `operator` to the originating paired device and reports `queued for <device>` while offline; do not redirect this response to `supervisor`.
@@ -38,9 +38,9 @@ For phone-sized replies, follow the [phone reply contract](operator-reply.md).
 
 `supervisor_override=true` is the documented override for supervisor-only close and transfer operations. It is accepted only when the caller is a **registered supervisor**, the request supplies a **non-empty reason**, and the accepted decision is recorded as a **task decision note**. Review the task state and delivery evidence first; this flag does not waive data-integrity or merge-state checks.
 
-**Valid `mcp__cas__coordination` actions** (agent identity, messaging, reminders; an unknown action is rejected with the current list): `register`, `unregister`, `whoami`, `heartbeat`, `session_start`, `session_end`, `inbox_poll` (alias `inbox`), `message`, `interrupt`, `message_ack`, `message_status`, `remind`, `remind_list`, `remind_cancel`, `my_context`.
+**Valid `coordination` actions** (agent identity, messaging, reminders; an unknown action is rejected with the current list): `register`, `unregister`, `whoami`, `heartbeat`, `session_start`, `session_end`, `inbox_poll` (alias `inbox`), `message`, `interrupt`, `message_ack`, `message_status`, `remind`, `remind_list`, `remind_cancel`, `my_context`.
 
-**Valid `mcp__cas__factory` actions** (supervisor fleet control; `coordination` still accepts these for one release with a deprecation note):
+**Valid `factory` actions** (supervisor fleet control; `coordination` still accepts these for one release with a deprecation note):
 - *Fleet*: `spawn_workers`, `shutdown_workers`, `recycle_worker`, `restart_spawn_queue`, `hold_worker`, `release_worker`, `worker_status`, `worker_activity`, `sweep_tasks`, `clear_context`, `sync_all_workers`, `gc_report`, `gc_cleanup`, `epic_status`, `focus_epic`, `agent_list`, `agent_cleanup`, `lease_history`
 - *Servers*: `server_start`, `server_stop`, `server_list`
 - *Database branches (supervisor only)*: `db_branch_create`, `db_branch_show`, `db_branch_delete`
@@ -54,9 +54,9 @@ For phone-sized replies, follow the [phone reply contract](operator-reply.md).
 **`server_start` / `server_stop` / `server_list` — the sanctioned way to run a long-lived server.** A raw `npm run dev &` from a worker dies with the worker and leaves no record of what is listening. Register it instead:
 
 ```
-mcp__cas__factory action=server_start command="npm run dev" cwd=<path> port=3000 shared=true
-mcp__cas__factory action=server_list
-mcp__cas__factory action=server_stop ...
+factory action=server_start command="npm run dev" cwd=<path> port=3000 shared=true
+factory action=server_list
+factory action=server_stop ...
 ```
 
 `shared=true` places the server outside worker containment so it outlives worker teardown; the default (`false`) ties its lifetime to the worker that started it. `port` is advisory — `server_list` reports the ports actually bound, plus who started each server. stdout/stderr are captured to a log file, never inherited.
@@ -64,9 +64,9 @@ mcp__cas__factory action=server_stop ...
 **`db_branch_create` / `db_branch_show` / `db_branch_delete` — a disposable database for one task (supervisor only).** When a worker needs a database to reproduce a bug, it asks with a blocker message; it cannot create a Neon branch itself and never sees a credential. Provision one:
 
 ```
-mcp__cas__factory action=db_branch_create task_id=<task> [branch=<dev|staging|branch id>] [target=<worker>]
-mcp__cas__factory action=db_branch_show [task_id=<task>]
-mcp__cas__factory action=db_branch_delete task_id=<task> [id=<branch id>]
+factory action=db_branch_create task_id=<task> [branch=<dev|staging|branch id>] [target=<worker>]
+factory action=db_branch_show [task_id=<task>]
+factory action=db_branch_delete task_id=<task> [id=<branch id>]
 ```
 
 Your `cas serve` creates `cas-<task-id>-<n>` through the proxy's `neon.*` tools. The project and parent come from the repository's `neon-database` skill file: `dev` by default, else `staging`, and a production parent is always refused. It writes `DATABASE_URL` to `.env.cas-db` in the worker's worktree (mode 600, git-excluded) and records the branch in `.cas/db-branches/<task>.json` and a task note. The connection string is never shown. Closing or cancelling the task deletes the branch; a worker's own close queues the deletion, and your next coordination call performs it. A task has at most 3 branches, each with a 72-hour TTL and a small compute ceiling, and `gc_report` flags any that outlive their task, worktree or TTL.
@@ -87,7 +87,7 @@ Your `cas serve` creates `cas-<task-id>-<n>` through the proxy's `neon.*` tools.
 
 Pass `lane=` or a complete `cli=`/`model=`/`effort=` recipe on every `spawn_workers` call, never both; these controls apply to the workers spawned by this call only. Omitted controls resolve through the config cascade and the acknowledgement warns. Copy-paste recipes: [workflow.md](workflow.md#phase-2-coordinate).
 
-**On `mcp__cas__task`, the task ID is always `id`** — not `task_id`, `taskId`, or `_id`. The exceptions are coordination actions that reference a task belonging to *another* object: `spawn_workers task_id=`, `worktree_merge task_id=`, and `worktree_create task_id=` all take `task_id` (their `id` means worker/worktree). Rule of thumb: `id` names the thing the action operates on; `task_id` names a task the action merely points at.
+**On `task`, the task ID is always `id`** — not `task_id`, `taskId`, or `_id`. The exceptions are coordination actions that reference a task belonging to *another* object: `spawn_workers task_id=`, `worktree_merge task_id=`, and `worktree_create task_id=` all take `task_id` (their `id` means worker/worktree). Rule of thumb: `id` names the thing the action operates on; `task_id` names a task the action merely points at.
 
 **Priority** is `0=Critical, 1=High, 2=Medium (default), 3=Low, 4=Backlog`. Accepts numeric OR named alias: `priority=1` ≡ `priority="high"`. Other aliases: `critical`, `medium`, `low`, `backlog`, `p0`-`p4`.
 
@@ -95,12 +95,12 @@ Pass `lane=` or a complete `cli=`/`model=`/`effort=` recipe on every `spawn_work
 
 ```
 # CORRECT — initial assignment of an unclaimed task
-mcp__cas__task action=update id=cas-abc1 assignee=<worker-name>
+task action=update id=cas-abc1 assignee=<worker-name>
 
 # WRONG — transfer requires an ALREADY-CLAIMED lease, otherwise errors
 # with "No active lease found". Use transfer only to reassign between
 # workers after one has claimed.
-mcp__cas__task action=transfer id=cas-abc1 to_agent=<worker>
+task action=transfer id=cas-abc1 to_agent=<worker>
 ```
 
 The `transfer` action's target field is `to_agent` (not `assignee`). The `update` action's target field is `assignee` (not `to_agent`). Yes, they disagree. Remember: `update assignee=...` for initial assignment; `transfer to_agent=...` only when reassigning a claimed task.
@@ -111,7 +111,7 @@ When a task is claimed by a live worker and you need to reassign it without shut
 
 ```
 # Force-transfer from a live worker to another agent (single atomic step)
-mcp__cas__task action=transfer id=cas-abc1 to_agent=<new-worker> supervisor_override=true \
+task action=transfer id=cas-abc1 to_agent=<new-worker> supervisor_override=true \
   notes="Reassigned due to <reason>"
 ```
 
@@ -121,13 +121,13 @@ Two-step alternative (if the atomic path errors):
 
 ```
 # Step 1: Drop the live lease and reset the task to Open
-mcp__cas__task action=reset id=cas-abc1
+task action=reset id=cas-abc1
 
 # Step 2: Assign to the new worker
-mcp__cas__task action=update id=cas-abc1 assignee=<new-worker>
+task action=update id=cas-abc1 assignee=<new-worker>
 
 # Step 3: Notify the new worker
-mcp__cas__coordination action=message target=<new-worker> summary="..." message="..."
+coordination action=message target=<new-worker> summary="..." message="..."
 ```
 
 `reset` does NOT require you to own the lease — it is safe to call on any non-closed task regardless of who holds the current lease.
@@ -136,14 +136,14 @@ mcp__cas__coordination action=message target=<new-worker> summary="..." message=
 
 ```
 # 1. Create
-mcp__cas__task action=create title="Fix login bug" priority=high risk=none \
+task action=create title="Fix login bug" priority=high risk=none \
   description="..." acceptance_criteria="..."
 
 # 2. Assign (this is what causes the worker to pick it up)
-mcp__cas__task action=update id=cas-abc1 assignee=<worker>
+task action=update id=cas-abc1 assignee=<worker>
 
 # 3. (optional) Provide extra context as a separate message
-mcp__cas__coordination action=message target=<worker> \
+coordination action=message target=<worker> \
   summary="cas-abc1 briefing" \
   message="Extra context for cas-abc1: ..."
 ```
@@ -153,7 +153,7 @@ Skipping step 2 leaves the task unassigned — the worker will go idle regardles
 **Coordination messages require BOTH `message` and `summary`:**
 
 ```
-mcp__cas__coordination action=message target=worker-1 \
+coordination action=message target=worker-1 \
   summary="c29a ready for review" \
   message="Please verify cas-c29a. Commit dfe824b on main."
 ```
@@ -168,11 +168,11 @@ Normal messages land only *between* turns: a worker that is mid-turn going down 
 
 ```
 # Urgent flag on the normal message action
-mcp__cas__coordination action=message target=<worker> urgent=true \
+coordination action=message target=<worker> urgent=true \
   summary="..." message="Stop — you're editing the wrong file. Switch to ..."
 
 # Shorthand — forces urgent even without the flag
-mcp__cas__coordination action=interrupt target=<worker> \
+coordination action=interrupt target=<worker> \
   summary="..." message="Stop — wrong approach. Do ... instead."
 ```
 
@@ -183,7 +183,7 @@ When urgent, the message: breaks the target's in-flight turn (Esc), waits a boun
 **Task notes** parameter is `notes` (plural), not `note`:
 
 ```
-mcp__cas__task action=notes id=cas-abc1 notes="Progress update" note_type=progress
+task action=notes id=cas-abc1 notes="Progress update" note_type=progress
 ```
 
 **Booleans** accept native bool, string `"true"`/`"false"`, or numeric `1`/`0`.

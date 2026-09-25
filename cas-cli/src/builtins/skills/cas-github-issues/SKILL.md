@@ -29,8 +29,8 @@ fall back to guessing from local files.
 Then load the Cassy side once, so every later step reads from the same picture:
 
 ```
-mcp__cas__task action=list limit=100
-mcp__cas__search action=search query="<the issue's subject in your own words>"
+task action=list limit=100
+search action=search query="<the issue's subject in your own words>"
 ```
 
 **Do not filter this list by `status=open`.** The status filter is a single
@@ -104,7 +104,7 @@ supervisor starts any of its subtasks, so `status=open` hides exactly the epics
 that are most alive:
 
 ```
-mcp__cas__task action=list task_type=epic limit=50
+task action=list task_type=epic limit=50
 ```
 
 - **An epic for this lane is not closed** (`open`, `in_progress`, `blocked`) →
@@ -114,13 +114,13 @@ mcp__cas__task action=list task_type=epic limit=50
   a closed epic is invisible to the ready queue and will never be picked up.
 
 ```
-mcp__cas__task action=create task_type=epic title="<intake> burn-down v<N>: <theme> (GH #<lo>–#<hi>)" priority=1
+task action=create task_type=epic title="<intake> burn-down v<N>: <theme> (GH #<lo>–#<hi>)" priority=1
 ```
 
 Then, for each new issue, one task:
 
 ```
-mcp__cas__task action=create title="<what will be true when this is done> (GH #<n>)" \
+task action=create title="<what will be true when this is done> (GH #<n>)" \
   task_type=bug priority=<0-3> epic=<epic-id> \
   external_ref="https://github.com/<owner>/<repo>/issues/<n>" \
   description="<the reporter's symptom, the surface it fails on, and the repro>" \
@@ -152,7 +152,7 @@ Issues get tasked into lanes that block each other. When a lane merges, its
 dependents stay blocked until someone says so — that someone is this sweep.
 
 ```
-mcp__cas__task action=blocked
+task action=blocked
 ```
 
 For each blocked task, check whether its blocker actually landed:
@@ -165,7 +165,7 @@ gh pr list --state merged --limit 20 --json number,title,mergedAt
 If the blocker is closed **and merged**, drop the edge:
 
 ```
-mcp__cas__task action=dep_remove id=<blocked task> to_id=<merged blocker>
+task action=dep_remove id=<blocked task> to_id=<merged blocker>
 ```
 
 Merged is the bar, not closed. A closed-but-unmerged blocker still blocks —

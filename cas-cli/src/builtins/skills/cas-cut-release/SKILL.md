@@ -18,7 +18,7 @@ version and worktree, never a version-keyed path.
    `scripts/release-gate.sh --learn "<symptom>" "<cause>" "<check-id>"`; it
    writes all three log mirrors and regenerates the builtin reference ledger,
    so commit them with the new check. Store the same text with
-   `mcp__cas__memory action=remember entry_type=learning tags=release`.
+   `memory action=remember entry_type=learning tags=release`.
 2. Before merging a release-bound lane, run `scripts/release-train.sh <version>
    <epic-worktree> --check-lane <branch>`. Require the exact branch-tip,
    push-triggered `Scoped Validation` job to be green; missing, skipped, red,

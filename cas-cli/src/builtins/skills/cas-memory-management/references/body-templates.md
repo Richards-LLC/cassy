@@ -6,7 +6,7 @@ metadata:
 # Cassy Memory Content Templates
 
 Pass the complete template as the `content` value of
-`mcp__cas__memory action=remember`. The optional YAML block is frontmatter
+`memory action=remember`. The optional YAML block is frontmatter
 inside the content stored in the SQLite entry; it is not a separate file.
 
 ## Bug or Incident

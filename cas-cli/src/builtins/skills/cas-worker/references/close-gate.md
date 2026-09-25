@@ -5,11 +5,11 @@ metadata:
 
 # Close Gate — Self-Verification
 
-Run all 6 self-verification checks before `mcp__cas__task action=close`. They apply to every task type — but a few types add a gate on top of them (see "Task-type extras" below), so the close path is not identical everywhere. Skip the checks and you eat a verifier rejection round-trip.
+Run all 6 self-verification checks before `task action=close`. They apply to every task type — but a few types add a gate on top of them (see "Task-type extras" below), so the close path is not identical everywhere. Skip the checks and you eat a verifier rejection round-trip.
 
 ## Clean-tree receipt — applies to EVERY close, including `depth=light`
 
-Before `mcp__cas__task action=close`, run these two commands in your own worktree and read the output:
+Before `task action=close`, run these two commands in your own worktree and read the output:
 
 ```bash
 git status --porcelain    # must print nothing
@@ -42,7 +42,7 @@ When `delivery_mode=local_merge`, await supervisor local merge: the supervisor m
 
 **Your branch is frozen for a parked delivery under QA?** Start the next task on your per-task branch instead of holding commits locally: `git switch -c factory/<name>-<task-id>` from the epic tip, then commit and `git push -u origin factory/<name>-<task-id>`. The commit and push guards accept exactly that branch, pushed to its own name, and never let it move the frozen `factory/<name>`. Close and `merge_request=true` measure that branch for that task. Name it in your merge request.
 
-**Crossed-message freshness handshake.** After any push, `MERGE REQUIRED`, or late amendment—and before any corrective commit—run `mcp__cas__coordination action=inbox_poll` repeatedly to `No unread messages` so unread supervisor messages cannot cross the delivery, re-read the task, check `git merge-base --is-ancestor <delivered-tip> <target-tip>`, and inspect whether the task is already closed/merged. If the delivery already landed or the task closed, re-close or stop; do not edit stale state.
+**Crossed-message freshness handshake.** After any push, `MERGE REQUIRED`, or late amendment—and before any corrective commit—run `coordination action=inbox_poll` repeatedly to `No unread messages` so unread supervisor messages cannot cross the delivery, re-read the task, check `git merge-base --is-ancestor <delivered-tip> <target-tip>`, and inspect whether the task is already closed/merged. If the delivery already landed or the task closed, re-close or stop; do not edit stale state.
 
 Bad (observed): start a corrective commit from an old rejection while the merge/amendment crosses the worker. Good: drain, re-read, ancestor-check, then edit only if the current state still requires it.
 
@@ -50,7 +50,7 @@ Bad (observed): start a corrective commit from an old rejection while the merge/
 - **Parent is `main`/`master`/`staging`** — push and complete the project's PR/merge flow (or the merge flow the supervisor stated at assignment), then close.
 - **Guard still fires after a confirmed merge?** Squash-merges rewrite SHAs, so the guard can count already-merged commits as missing. Re-close with `commit_receipt=<sha>` (see "Delivery receipts" below). If the receipt is rejected, send the supervisor the exact guard text plus the rejection reason — they fix the stale branch ref. Do not retry-loop.
 
-**Never bypass the close path.** Setting `status=closed` via `action=update` and hand-writing a `mcp__cas__verification action=add` record forges the verification audit trail — the task looks verified when nobody verified it. If close keeps rejecting, that is a supervisor conversation, not a workaround opportunity.
+**Never bypass the close path.** Setting `status=closed` via `action=update` and hand-writing a `verification action=add` record forges the verification audit trail — the task looks verified when nobody verified it. If close keeps rejecting, that is a supervisor conversation, not a workaround opportunity.
 
 ## Delivery receipts (worker-supplied close evidence)
 
@@ -171,7 +171,7 @@ Only close after all checks pass. The verifier will catch what you miss — but 
 After closing your **third** task in the current EPIC — and again after the 6th, 9th, 12th, etc. — invoke the `simplify` skill on your own recent work in that EPIC before picking up the next task.
 
 - **Counter is per-worker-per-EPIC.** It resets when you move to a different EPIC.
-- **Counter is stateless** — derive it at close time by querying `mcp__cas__task action=list assignee=<self> epic=<current-epic> status=closed` and checking whether `(count + 1) % 3 == 0` (the `+1` is for the task you're about to close).
+- **Counter is stateless** — derive it at close time by querying `task action=list assignee=<self> epic=<current-epic> status=closed` and checking whether `(count + 1) % 3 == 0` (the `+1` is for the task you're about to close).
 - **Scope of simplification** = your own committed and staged work within the current EPIC only. Not cross-worker. Not cross-EPIC. Not code you haven't touched.
 - **If the EPIC has fewer than 3 of your tasks total**, simplify-as-you-go never fires for you in that EPIC. That is intentional — the trigger exists to catch pattern accumulation, and <3 tasks is below the accumulation threshold.
 

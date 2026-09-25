@@ -7,7 +7,7 @@ metadata:
 
 # Verify Before You Claim
 
-Immediately before `mcp__cas__task action=close`, treat your summary as a hypothesis, not a report: run the proof fresh and capture its result.
+Immediately before `task action=close`, treat your summary as a hypothesis, not a report: run the proof fresh and capture its result.
 
 ## Factory workers: Rust proof
 
@@ -47,7 +47,7 @@ Run it now, after the most recent change, not from memory of an earlier run. For
 Show the result to the supervisor, preferably as a task note:
 
 ```bash
-mcp__cas__task action=notes id=<task-id> note_type=progress \
+task action=notes id=<task-id> note_type=progress \
   notes="Proof: <cmd>
 Exit: 0
 Tail:
@@ -61,7 +61,7 @@ Exit code is the load-bearing line. The tail lets the supervisor check that the 
 If step 3 showed exit 0 (or the documented success signal for non-zero-success commands), call:
 
 ```bash
-mcp__cas__task action=close id=<task-id> reason="<...>"
+task action=close id=<task-id> reason="<...>"
 ```
 
 If step 3 showed failure, do not close. Go back to the worker workflow: implement, commit, re-run the proof.

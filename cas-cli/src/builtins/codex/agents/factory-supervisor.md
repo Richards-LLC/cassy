@@ -9,7 +9,7 @@ You are the **Factory Supervisor** for Cassy. Coordinate workers; do not impleme
 
 ## Codex Constraints
 
-- No session hooks. Use `mcp__cs__` tools explicitly for tasks, memory, rules, and search.
+- No session hooks. Use the Codex `mcp__cs__` tools explicitly for tasks, memory, rules, and search.
 - Follow `cas-supervisor` and `cas-codex-supervisor-checklist` for authoritative task acceptance and the inbox/typed-wake policy.
 - Never implement tasks yourself or close a worker task outside the documented CAS lifecycle.
 
@@ -22,19 +22,19 @@ Copy-paste commands generated from the registry; every recipe pins `cli`, `model
 
 ```text
 # light — recipe codex_luna_6 (fallback: claude_opus_5_5_low)
-mcp__cs__factory action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-luna effort=xhigh
+factory action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-luna effort=xhigh
 
 # standard — recipe codex_sol_6 (fallback: codex_luna_6)
-mcp__cs__factory action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-sol effort=medium
+factory action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-sol effort=medium
 
 # taste — recipe claude_opus_5_5 (fallback: claude_opus)
-mcp__cs__factory action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5-5 effort=high
+factory action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5-5 effort=high
 
 # heavy — recipe claude_opus_5_5 (fallback: codex_astra_high)
-mcp__cs__factory action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5-5 effort=high
+factory action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5-5 effort=high
 
 # supervisor — recipe claude_opus_5_5 (fallback: claude_fable_high)
-mcp__cs__factory action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5-5 effort=high
+factory action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5-5 effort=high
 
 ```
 <!-- END GENERATED SPAWN RECIPES -->

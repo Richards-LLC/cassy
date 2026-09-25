@@ -6,10 +6,10 @@ Pick the right tool for the job:
 
 | Need | Tool | Example |
 |------|------|---------|
-| Conceptual/exploratory query | `mcp__cas__search action=search` | "how does auth work?", "where is X handled?" |
+| Conceptual/exploratory query | `search action=search` | "how does auth work?", "where is X handled?" |
 | Exact symbol or string match | `Grep` | find all callers of `process_task()` |
 | Complex codebase investigation | `Agent` with `subagent_type=Explore` | tracing a data flow across multiple modules |
-| Record a learning or bugfix | `mcp__cas__memory action=remember` | root cause found, pattern discovered |
+| Record a learning or bugfix | `memory action=remember` | root cause found, pattern discovered |
 | Find files by name/pattern | `Glob` | `**/*.rs`, `src/**/mod.rs` |
 
 See the `cas-search` skill for detailed search guidance including code symbol search and hybrid queries.
@@ -49,34 +49,34 @@ If the rebase has conflicts, resolve them and `git rebase --continue` before tou
 
 Wrong field names are rejected. These are the **exact** names for the calls workers make most often.
 
-**`mcp__cas__task`** — the task ID field is always `id` (NOT `task_id`, `taskId`, `_id`). Notes parameter is `notes` (plural, NOT `note`).
+**`task`** — the task ID field is always `id` (NOT `task_id`, `taskId`, `_id`). Notes parameter is `notes` (plural, NOT `note`).
 
 ```
 # Start / show / close
-mcp__cas__task action=start id=cas-abc1
-mcp__cas__task action=show id=cas-abc1
-mcp__cas__task action=close id=cas-abc1 reason="Implemented X, tests pass"
+task action=start id=cas-abc1
+task action=show id=cas-abc1
+task action=close id=cas-abc1 reason="Implemented X, tests pass"
 
 # Progress notes (note_type ∈ progress|blocker|decision|discovery|question|platform_proof)
-mcp__cas__task action=notes id=cas-abc1 notes="Found root cause in Y" note_type=progress
+task action=notes id=cas-abc1 notes="Found root cause in Y" note_type=progress
 
 # Mark blocked
-mcp__cas__task action=update id=cas-abc1 status=blocked
-mcp__cas__task action=notes id=cas-abc1 notes="Blocked: <reason>" note_type=blocker
+task action=update id=cas-abc1 status=blocked
+task action=notes id=cas-abc1 notes="Blocked: <reason>" note_type=blocker
 ```
 
 `platform_proof` is the note the close gate reads for `risk=platform`.
 
-**Need a database?** You cannot create a Neon branch or hold a Neon credential. Ask the supervisor: `mcp__cas__coordination action=message target=supervisor blocker=true summary="db branch for <task-id>" message="db branch for <task-id>: <why>"`. Its `db_branch_create` writes `DATABASE_URL` to `.env.cas-db` in your worktree. Source that file; never commit it or print it. The branch is deleted when your task closes.
+**Need a database?** You cannot create a Neon branch or hold a Neon credential. Ask the supervisor: `coordination action=message target=supervisor blocker=true summary="db branch for <task-id>" message="db branch for <task-id>: <why>"`. Its `db_branch_create` writes `DATABASE_URL` to `.env.cas-db` in your worktree. Source that file; never commit it or print it. The branch is deleted when your task closes.
 
 **Priority** accepts numeric (0–4) OR named alias: `critical`/`high`/`medium`/`low`/`backlog`. `priority="high"` is the same as `priority=1`.
 
 **Booleans** on `with_deps`, etc. accept `true`/`false`, `"true"`/`"false"`, or `1`/`0`.
 
-**`mcp__cas__coordination action=message`** requires BOTH `message` and `summary`:
+**`coordination action=message`** requires BOTH `message` and `summary`:
 
 ```
-mcp__cas__coordination action=message target=supervisor \
+coordination action=message target=supervisor \
   summary="task blocked on verification" \
   message="cas-abc1 needs schema review before I can proceed"
 ```
@@ -85,13 +85,13 @@ Sending `message` alone without `summary` is rejected. `summary` is the one-line
 
 Factory traffic is hard-capped: ordinary message bodies default to 1,200 characters, blocker/merge-request bodies to 2,500, and appended task notes to 1,500; put longer evidence in `[factory] artifacts_root/<task-id>/<name>.md` and send its path with a one-paragraph summary.
 
-**Valid `mcp__cas__task` actions** (do not invent others): `create`, `proposal_inbox`, `proposal_accept`, `proposal_reject`, `proposal_reconcile`, `show`, `update`, `start`, `close`, `cancel`, `reopen`, `request_changes`, `delete`, `list`, `ready`, `blocked`, `notes`, `dep_add`, `dep_remove`, `dep_list`, `claim`, `release`, `reset`, `transfer`, `available`, `mine`.
+**Valid `task` actions** (do not invent others): `create`, `proposal_inbox`, `proposal_accept`, `proposal_reject`, `proposal_reconcile`, `show`, `update`, `start`, `close`, `cancel`, `reopen`, `request_changes`, `delete`, `list`, `ready`, `blocked`, `notes`, `dep_add`, `dep_remove`, `dep_list`, `claim`, `release`, `reset`, `transfer`, `available`, `mine`.
 
 `request_changes` and `reset` exist but are supervisor moves, not yours: `request_changes` is the sanctioned exit from `AwaitingMerge` when review fails (it reopens the task with the assignee preserved), and `reset` revives a task orphaned by a dead session (force-releases the lease, clears the assignee, forces `status=open`). Know them so you can read what happened to your task; don't run them on yourself.
 
 **`ready` and `available` are read-only backlog visibility — not self-dispatch.** They exist for supervisors planning work and for you to sanity-check task state after an explicit assignment. Seeing a task there is never grounds to `start` it yourself; see "Never self-dispatch" in the main skill.
 
-**`mcp__cas__coordination` actions workers routinely use**: `message`, `message_ack`, `message_status`, `inbox_poll`, `whoami`, `heartbeat`, `remind`. Load only `mcp__cas__task` and `mcp__cas__coordination`; the supervisor `mcp__cas__factory` tool (fleet, worktree, server, database, loop and queue control) is not yours, apart from `server_start`/`server_list` when a task needs a long-lived server (see cas-servers).
+**`coordination` actions workers routinely use**: `message`, `message_ack`, `message_status`, `inbox_poll`, `whoami`, `heartbeat`, `remind`. Load only `task` and `coordination`; the supervisor `factory` tool (fleet, worktree, server, database, loop and queue control) is not yours, apart from `server_start`/`server_list` when a task needs a long-lived server (see cas-servers).
 
 Only `hold_worker` and `release_worker` are hard role-gated to supervisors (`only supervisors may change a worker's director hold state`). The rest of the factory/worktree surface — `spawn_workers`, `worktree_merge`, `gc_cleanup force=true` — is not blocked by a role check, which is exactly why you must not call it: those actions dispatch or destroy work across *every* worker on the host, and they are the supervisor's to run. Ask, don't invoke.
 
@@ -104,7 +104,7 @@ bounded to `phase`, `receipts` (each `{command, exit_status}`), `files_touched`,
 `decisions`, and `next_step`:
 
 ```
-mcp__cas__task action=update id=<task-id> \
+task action=update id=<task-id> \
   state_patch='{"phase":"verify","receipts":[{"command":"npx vitest run","exit_status":0}],"files_touched":["src/app.ts"],"next_step":"push branch"}'
 ```
 

@@ -657,50 +657,50 @@ pub const BUILTIN_WORKFLOWS: &[BuiltinFile] = &[
 pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-memory-management/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-memory-management/SKILL.md"),
+        content: include_str!("builtins/skills/cas-memory-management/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-memory-management/references/schema.yaml",
-        content: include_str!("builtins/codex/skills/cas-memory-management/references/schema.yaml"),
+        content: include_str!("builtins/skills/cas-memory-management/references/schema.yaml"),
     },
     BuiltinFile {
         path: "skills/cas-memory-management/references/body-templates.md",
         content: include_str!(
-            "builtins/codex/skills/cas-memory-management/references/body-templates.md"
+            "builtins/skills/cas-memory-management/references/body-templates.md"
         ),
     },
     BuiltinFile {
         path: "skills/cas-memory-management/references/overlap-detection.md",
         content: include_str!(
-            "builtins/codex/skills/cas-memory-management/references/overlap-detection.md"
+            "builtins/skills/cas-memory-management/references/overlap-detection.md"
         ),
     },
     BuiltinFile {
         path: "skills/cas-memory-management/references/lifecycle-and-storage.md",
         content: include_str!(
-            "builtins/codex/skills/cas-memory-management/references/lifecycle-and-storage.md"
+            "builtins/skills/cas-memory-management/references/lifecycle-and-storage.md"
         ),
     },
     BuiltinFile {
         path: "skills/cas-memory-management/references/response-shapes.md",
         content: include_str!(
-            "builtins/codex/skills/cas-memory-management/references/response-shapes.md"
+            "builtins/skills/cas-memory-management/references/response-shapes.md"
         ),
     },
     BuiltinFile {
         path: "skills/cas-search/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-search.md"),
+        content: include_str!("builtins/skills/cas-search.md"),
     },
     BuiltinFile {
         path: "skills/cas-task-tracking/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-task-tracking.md"),
+        content: include_str!("builtins/skills/cas-task-tracking.md"),
     },
     // session-learn (cas-39f5, EPIC cas-ebea) — Codex mirror. Kept
     // byte-identical to the .claude copy by regression test in
     // `test_session_learn_mirrors_are_identical`.
     BuiltinFile {
         path: "skills/session-learn/SKILL.md",
-        content: include_str!("builtins/codex/skills/session-learn/SKILL.md"),
+        content: include_str!("builtins/skills/session-learn/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/SKILL.md",
@@ -708,96 +708,96 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     },
     BuiltinFile {
         path: "skills/cas-release-report/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-release-report/SKILL.md"),
+        content: include_str!("builtins/skills/cas-release-report/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-release-report/references/brief-template.md",
-        content: include_str!("builtins/codex/skills/cas-release-report/references/brief-template.md"),
+        content: include_str!("builtins/skills/cas-release-report/references/brief-template.md"),
     },
     BuiltinFile {
         path: "skills/cas-release-report/references/default-tokens.json",
-        content: include_str!("builtins/codex/skills/cas-release-report/references/default-tokens.json"),
+        content: include_str!("builtins/skills/cas-release-report/references/default-tokens.json"),
     },
     BuiltinFile {
         path: "skills/cas-release-report/references/exemplar.md",
-        content: include_str!("builtins/codex/skills/cas-release-report/references/exemplar.md"),
+        content: include_str!("builtins/skills/cas-release-report/references/exemplar.md"),
     },
     BuiltinFile {
         path: "skills/cas-release-report/references/pdf.md",
-        content: include_str!("builtins/codex/skills/cas-release-report/references/pdf.md"),
+        content: include_str!("builtins/skills/cas-release-report/references/pdf.md"),
     },
     BuiltinFile {
         path: "skills/cas-release-report/references/template.html",
-        content: include_str!("builtins/codex/skills/cas-release-report/references/template.html"),
+        content: include_str!("builtins/skills/cas-release-report/references/template.html"),
     },
     BuiltinFile {
         path: "skills/cas-release-report/scripts/render.py",
-        content: include_str!("builtins/codex/skills/cas-release-report/scripts/render.py"),
+        content: include_str!("builtins/skills/cas-release-report/scripts/render.py"),
     },
     BuiltinFile {
         path: "skills/cas-release-report/scripts/check-pdf.py",
-        content: include_str!("builtins/codex/skills/cas-release-report/scripts/check-pdf.py"),
+        content: include_str!("builtins/skills/cas-release-report/scripts/check-pdf.py"),
     },
     BuiltinFile {
         path: "skills/cas-cut-release/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-cut-release/SKILL.md"),
+        content: include_str!("builtins/skills/cas-cut-release/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-cut-release/references/failure-log.md",
-        content: include_str!("builtins/codex/skills/cas-cut-release/references/failure-log.md"),
+        content: include_str!("builtins/skills/cas-cut-release/references/failure-log.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/preflight.md",
-        content: include_str!("builtins/codex/skills/cas-supervisor/references/preflight.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/preflight.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/intake.md",
-        content: include_str!("builtins/codex/skills/cas-supervisor/references/intake.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/intake.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/planning.md",
-        content: include_str!("builtins/codex/skills/cas-supervisor/references/planning.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/planning.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/workflow.md",
-        content: include_str!("builtins/codex/skills/cas-supervisor/references/workflow.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/workflow.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/worker-recovery.md",
-        content: include_str!("builtins/codex/skills/cas-supervisor/references/worker-recovery.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/worker-recovery.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/reference.md",
-        content: include_str!("builtins/codex/skills/cas-supervisor/references/reference.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/reference.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/operator-reply.md",
-        content: include_str!("builtins/codex/skills/cas-supervisor/references/operator-reply.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/operator-reply.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/filing-cas-bugs.md",
-        content: include_str!("builtins/codex/skills/cas-supervisor/references/filing-cas-bugs.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/filing-cas-bugs.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/model-selection.md",
-        content: include_str!("builtins/codex/skills/cas-supervisor/references/model-selection.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/model-selection.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/reminders.md",
-        content: include_str!("builtins/codex/skills/cas-supervisor/references/reminders.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/reminders.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/epic-driving.md",
-        content: include_str!("builtins/codex/skills/cas-supervisor/references/epic-driving.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/epic-driving.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/epic-flow-walk.md",
-        content: include_str!("builtins/codex/skills/cas-supervisor/references/epic-flow-walk.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/epic-flow-walk.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/reporting-and-routing.md",
         content: include_str!(
-            "builtins/codex/skills/cas-supervisor/references/reporting-and-routing.md"
+            "builtins/skills/cas-supervisor/references/reporting-and-routing.md"
         ),
     },
     BuiltinFile {
@@ -806,305 +806,305 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     },
     BuiltinFile {
         path: "skills/cas-worker/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-worker.md"),
+        content: include_str!("builtins/skills/cas-worker.md"),
     },
     BuiltinFile {
         path: "skills/cas-worker/references/close-gate.md",
-        content: include_str!("builtins/codex/skills/cas-worker/references/close-gate.md"),
+        content: include_str!("builtins/skills/cas-worker/references/close-gate.md"),
     },
     BuiltinFile {
         path: "skills/cas-worker/references/recovery.md",
-        content: include_str!("builtins/codex/skills/cas-worker/references/recovery.md"),
+        content: include_str!("builtins/skills/cas-worker/references/recovery.md"),
     },
     BuiltinFile {
         path: "skills/cas-worker/references/details.md",
-        content: include_str!("builtins/codex/skills/cas-worker/references/details.md"),
+        content: include_str!("builtins/skills/cas-worker/references/details.md"),
     },
     BuiltinFile {
         path: "skills/cas-worker/references/discipline.md",
-        content: include_str!("builtins/codex/skills/cas-worker/references/discipline.md"),
+        content: include_str!("builtins/skills/cas-worker/references/discipline.md"),
     },
     // verify-before-claim skill (cas-5b2a) — codex mirror. See claude-side
     // entry above for context.
     BuiltinFile {
         path: "skills/verify-before-claim/SKILL.md",
-        content: include_str!("builtins/codex/skills/verify-before-claim/SKILL.md"),
+        content: include_str!("builtins/skills/verify-before-claim/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-codex-exec/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-codex-exec/SKILL.md"),
+        content: include_str!("builtins/skills/cas-codex-exec/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cli-routing/SKILL.md",
-        content: include_str!("builtins/codex/skills/cli-routing/SKILL.md"),
+        content: include_str!("builtins/skills/cli-routing/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cli-routing/references/routing.md",
-        content: include_str!("builtins/codex/skills/cli-routing/references/routing.md"),
+        content: include_str!("builtins/skills/cli-routing/references/routing.md"),
     },
     BuiltinFile {
         path: "skills/cas-brainstorm/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-brainstorm/SKILL.md"),
+        content: include_str!("builtins/skills/cas-brainstorm/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-brainstorm/references/handoff.md",
-        content: include_str!("builtins/codex/skills/cas-brainstorm/references/handoff.md"),
+        content: include_str!("builtins/skills/cas-brainstorm/references/handoff.md"),
     },
     BuiltinFile {
         path: "skills/cas-brainstorm/references/requirements-capture.md",
         content: include_str!(
-            "builtins/codex/skills/cas-brainstorm/references/requirements-capture.md"
+            "builtins/skills/cas-brainstorm/references/requirements-capture.md"
         ),
     },
     BuiltinFile {
         path: "skills/cas-ideate/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-ideate/SKILL.md"),
+        content: include_str!("builtins/skills/cas-ideate/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-ideate/references/post-ideation-workflow.md",
         content: include_str!(
-            "builtins/codex/skills/cas-ideate/references/post-ideation-workflow.md"
+            "builtins/skills/cas-ideate/references/post-ideation-workflow.md"
         ),
     },
     // project-overview skill (EPIC cas-19a2b) — codex mirror.
     BuiltinFile {
         path: "skills/project-overview/SKILL.md",
-        content: include_str!("builtins/codex/skills/project-overview/SKILL.md"),
+        content: include_str!("builtins/skills/project-overview/SKILL.md"),
     },
     // codemap skill (cas-4d84) — codex mirror.
     BuiltinFile {
         path: "skills/codemap/SKILL.md",
-        content: include_str!("builtins/codex/skills/codemap/SKILL.md"),
+        content: include_str!("builtins/skills/codemap/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/codemap/references/doc-hygiene.md",
-        content: include_str!("builtins/codex/skills/codemap/references/doc-hygiene.md"),
+        content: include_str!("builtins/skills/codemap/references/doc-hygiene.md"),
     },
     // cas-servers skill (cas-7c93, GH #87) — codex mirror. Kept byte-identical
     // to the .claude copy by `test_builtin_skills_contains_cas_servers`.
     BuiltinFile {
         path: "skills/cas-servers/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-servers/SKILL.md"),
+        content: include_str!("builtins/skills/cas-servers/SKILL.md"),
     },
     // cas-1219: byte-identical Codex mirror of the field-tested MCP guidance.
     BuiltinFile {
         path: "skills/mcp-integration/SKILL.md",
-        content: include_str!("builtins/codex/skills/mcp-integration/SKILL.md"),
+        content: include_str!("builtins/skills/mcp-integration/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/mcp-integration/references/diagnosis.md",
-        content: include_str!("builtins/codex/skills/mcp-integration/references/diagnosis.md"),
+        content: include_str!("builtins/skills/mcp-integration/references/diagnosis.md"),
     },
     BuiltinFile {
         path: "skills/cas-viktor/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-viktor/SKILL.md"),
+        content: include_str!("builtins/skills/cas-viktor/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-viktor/references/gateway.md",
-        content: include_str!("builtins/codex/skills/cas-viktor/references/gateway.md"),
+        content: include_str!("builtins/skills/cas-viktor/references/gateway.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-html-reports/SKILL.md"),
+        content: include_str!("builtins/skills/cas-html-reports/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/report-types.md",
-        content: include_str!("builtins/codex/skills/cas-html-reports/references/report-types.md"),
+        content: include_str!("builtins/skills/cas-html-reports/references/report-types.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/presentation-rules.md",
-        content: include_str!("builtins/codex/skills/cas-html-reports/references/presentation-rules.md"),
+        content: include_str!("builtins/skills/cas-html-reports/references/presentation-rules.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/technical-contract.md",
-        content: include_str!("builtins/codex/skills/cas-html-reports/references/technical-contract.md"),
+        content: include_str!("builtins/skills/cas-html-reports/references/technical-contract.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/review-checklist.md",
-        content: include_str!("builtins/codex/skills/cas-html-reports/references/review-checklist.md"),
+        content: include_str!("builtins/skills/cas-html-reports/references/review-checklist.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/sources.md",
-        content: include_str!("builtins/codex/skills/cas-html-reports/references/sources.md"),
+        content: include_str!("builtins/skills/cas-html-reports/references/sources.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/examples/investigation-annotated-timeline.html",
-        content: include_str!("builtins/codex/skills/cas-html-reports/references/examples/investigation-annotated-timeline.html"),
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/investigation-annotated-timeline.html"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/examples/investigation-annotated-timeline.why.md",
-        content: include_str!("builtins/codex/skills/cas-html-reports/references/examples/investigation-annotated-timeline.why.md"),
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/investigation-annotated-timeline.why.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/examples/executive-variance-brief.html",
-        content: include_str!("builtins/codex/skills/cas-html-reports/references/examples/executive-variance-brief.html"),
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/executive-variance-brief.html"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/examples/executive-variance-brief.why.md",
-        content: include_str!("builtins/codex/skills/cas-html-reports/references/examples/executive-variance-brief.why.md"),
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/executive-variance-brief.why.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/examples/benchmark-small-multiples.html",
-        content: include_str!("builtins/codex/skills/cas-html-reports/references/examples/benchmark-small-multiples.html"),
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/benchmark-small-multiples.html"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/examples/benchmark-small-multiples.why.md",
-        content: include_str!("builtins/codex/skills/cas-html-reports/references/examples/benchmark-small-multiples.why.md"),
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/benchmark-small-multiples.why.md"),
     },
     BuiltinFile {
         path: "skills/cas-dataviz/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-dataviz/SKILL.md"),
+        content: include_str!("builtins/skills/cas-dataviz/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-dataviz/references/design-review.md",
-        content: include_str!("builtins/codex/skills/cas-dataviz/references/design-review.md"),
+        content: include_str!("builtins/skills/cas-dataviz/references/design-review.md"),
     },
     BuiltinFile {
         path: "skills/cas-dataviz/references/quality-checklist.md",
-        content: include_str!("builtins/codex/skills/cas-dataviz/references/quality-checklist.md"),
+        content: include_str!("builtins/skills/cas-dataviz/references/quality-checklist.md"),
     },
     BuiltinFile {
         path: "skills/cas-dataviz/scripts/validate_palette.js",
-        content: include_str!("builtins/codex/skills/cas-dataviz/scripts/validate_palette.js"),
+        content: include_str!("builtins/skills/cas-dataviz/scripts/validate_palette.js"),
     },
     BuiltinFile {
         path: "skills/cas-dataviz/examples/send-backs-dot-strip.html",
-        content: include_str!("builtins/codex/skills/cas-dataviz/examples/send-backs-dot-strip.html"),
+        content: include_str!("builtins/skills/cas-dataviz/examples/send-backs-dot-strip.html"),
     },
     BuiltinFile {
         path: "skills/cas-dataviz/examples/send-backs-dot-strip.why.md",
-        content: include_str!("builtins/codex/skills/cas-dataviz/examples/send-backs-dot-strip.why.md"),
+        content: include_str!("builtins/skills/cas-dataviz/examples/send-backs-dot-strip.why.md"),
     },
     // design-spec skill (GH #64) — codex mirror.
     BuiltinFile {
         path: "skills/design-spec/SKILL.md",
-        content: include_str!("builtins/codex/skills/design-spec/SKILL.md"),
+        content: include_str!("builtins/skills/design-spec/SKILL.md"),
     },
     // cas-d967: the Petrastella design language every project inherits through
     // design-spec and overrides in DESIGN.md; tokens are the machine-readable twin.
     BuiltinFile {
         path: "skills/design-spec/references/petrastella-design-language.md",
-        content: include_str!("builtins/codex/skills/design-spec/references/petrastella-design-language.md"),
+        content: include_str!("builtins/skills/design-spec/references/petrastella-design-language.md"),
     },
     BuiltinFile {
         path: "skills/design-spec/references/design-tokens.json",
-        content: include_str!("builtins/codex/skills/design-spec/references/design-tokens.json"),
+        content: include_str!("builtins/skills/design-spec/references/design-tokens.json"),
     },
     BuiltinFile {
         path: "skills/design-spec/references/tokens.css",
-        content: include_str!("builtins/codex/skills/design-spec/references/tokens.css"),
+        content: include_str!("builtins/skills/design-spec/references/tokens.css"),
     },
     // cas-ui-craft skill (cas-d967) — codex mirror: concept brief before any render,
     // first-three-seconds rule, form vocabulary, scored critique rubric with a
     // merge floor, and four annotated exemplars.
     BuiltinFile {
         path: "skills/cas-ui-craft/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-ui-craft/SKILL.md"),
+        content: include_str!("builtins/skills/cas-ui-craft/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-ui-craft/references/concept-brief.md",
-        content: include_str!("builtins/codex/skills/cas-ui-craft/references/concept-brief.md"),
+        content: include_str!("builtins/skills/cas-ui-craft/references/concept-brief.md"),
     },
     BuiltinFile {
         path: "skills/cas-ui-craft/references/form-vocabulary.md",
-        content: include_str!("builtins/codex/skills/cas-ui-craft/references/form-vocabulary.md"),
+        content: include_str!("builtins/skills/cas-ui-craft/references/form-vocabulary.md"),
     },
     BuiltinFile {
         path: "skills/cas-ui-craft/references/critique-rubric.md",
-        content: include_str!("builtins/codex/skills/cas-ui-craft/references/critique-rubric.md"),
+        content: include_str!("builtins/skills/cas-ui-craft/references/critique-rubric.md"),
     },
     BuiltinFile {
         path: "skills/cas-ui-craft/references/exemplars/report.html",
-        content: include_str!("builtins/codex/skills/cas-ui-craft/references/exemplars/report.html"),
+        content: include_str!("builtins/skills/cas-ui-craft/references/exemplars/report.html"),
     },
     BuiltinFile {
         path: "skills/cas-ui-craft/references/exemplars/dashboard.html",
-        content: include_str!("builtins/codex/skills/cas-ui-craft/references/exemplars/dashboard.html"),
+        content: include_str!("builtins/skills/cas-ui-craft/references/exemplars/dashboard.html"),
     },
     BuiltinFile {
         path: "skills/cas-ui-craft/references/exemplars/product-page.html",
-        content: include_str!("builtins/codex/skills/cas-ui-craft/references/exemplars/product-page.html"),
+        content: include_str!("builtins/skills/cas-ui-craft/references/exemplars/product-page.html"),
     },
     BuiltinFile {
         path: "skills/cas-ui-craft/references/exemplars/before-after.html",
-        content: include_str!("builtins/codex/skills/cas-ui-craft/references/exemplars/before-after.html"),
+        content: include_str!("builtins/skills/cas-ui-craft/references/exemplars/before-after.html"),
     },
     BuiltinFile {
         path: "skills/cas-ui-craft/scripts/visual-qa.mjs",
-        content: include_str!("builtins/codex/skills/cas-ui-craft/scripts/visual-qa.mjs"),
+        content: include_str!("builtins/skills/cas-ui-craft/scripts/visual-qa.mjs"),
     },
     // cas-21dc: Codex mirror of the demo-statement QA skill.
     BuiltinFile {
         path: "skills/cas-qa-craft/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-qa-craft/SKILL.md"),
+        content: include_str!("builtins/skills/cas-qa-craft/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-qa-craft/references/journeys.md",
-        content: include_str!("builtins/codex/skills/cas-qa-craft/references/journeys.md"),
+        content: include_str!("builtins/skills/cas-qa-craft/references/journeys.md"),
     },
     BuiltinFile {
         path: "skills/cas-qa-craft/references/matrix-builder.md",
-        content: include_str!("builtins/codex/skills/cas-qa-craft/references/matrix-builder.md"),
+        content: include_str!("builtins/skills/cas-qa-craft/references/matrix-builder.md"),
     },
     BuiltinFile {
         path: "skills/cas-qa-craft/references/evidence-ledger.md",
-        content: include_str!("builtins/codex/skills/cas-qa-craft/references/evidence-ledger.md"),
+        content: include_str!("builtins/skills/cas-qa-craft/references/evidence-ledger.md"),
     },
     BuiltinFile {
         path: "skills/cas-qa-craft/references/verifier-evidence-gate.md",
-        content: include_str!("builtins/codex/skills/cas-qa-craft/references/verifier-evidence-gate.md"),
+        content: include_str!("builtins/skills/cas-qa-craft/references/verifier-evidence-gate.md"),
     },
     BuiltinFile {
         path: "skills/cas-qa-craft/references/exemplar.md",
-        content: include_str!("builtins/codex/skills/cas-qa-craft/references/exemplar.md"),
+        content: include_str!("builtins/skills/cas-qa-craft/references/exemplar.md"),
     },
     BuiltinFile {
         path: "skills/cas-qa-craft/references/telemetry-sweep.md",
-        content: include_str!("builtins/codex/skills/cas-qa-craft/references/telemetry-sweep.md"),
+        content: include_str!("builtins/skills/cas-qa-craft/references/telemetry-sweep.md"),
     },
     BuiltinFile {
         path: "skills/cas-qa-craft/references/evidence-bundle.md",
-        content: include_str!("builtins/codex/skills/cas-qa-craft/references/evidence-bundle.md"),
+        content: include_str!("builtins/skills/cas-qa-craft/references/evidence-bundle.md"),
     },
     // cas-619f: the independent reviewer's procedure for a qa-pass task.
     BuiltinFile {
         path: "skills/cas-qa-craft/references/independent-pass.md",
-        content: include_str!("builtins/codex/skills/cas-qa-craft/references/independent-pass.md"),
+        content: include_str!("builtins/skills/cas-qa-craft/references/independent-pass.md"),
     },
     // cas-release-notes skill (GH #65) — codex mirror.
     BuiltinFile {
         path: "skills/cas-release-notes/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-release-notes/SKILL.md"),
+        content: include_str!("builtins/skills/cas-release-notes/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-release-notes/references/RUBRIC-template.md",
-        content: include_str!("builtins/codex/skills/cas-release-notes/references/RUBRIC-template.md"),
+        content: include_str!("builtins/skills/cas-release-notes/references/RUBRIC-template.md"),
     },
     // mecha-cassy skill (cas-945f, GH #687) — codex mirror. Byte-identical to
     // the claude copy except for the harness tool prefix.
     BuiltinFile {
         path: "skills/mecha-cassy/SKILL.md",
-        content: include_str!("builtins/codex/skills/mecha-cassy/SKILL.md"),
+        content: include_str!("builtins/skills/mecha-cassy/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/mecha-cassy/references/registration.md",
-        content: include_str!("builtins/codex/skills/mecha-cassy/references/registration.md"),
+        content: include_str!("builtins/skills/mecha-cassy/references/registration.md"),
     },
     // cas-github-issues skill (cas-ff2f, GH #94) — codex mirror. Byte-identical
     // to the claude copy except for the harness tool prefix.
     BuiltinFile {
         path: "skills/cas-github-issues/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-github-issues/SKILL.md"),
+        content: include_str!("builtins/skills/cas-github-issues/SKILL.md"),
     },
     // cas-nuxt-playwright skill — codex mirror.
     BuiltinFile {
         path: "skills/cas-nuxt-playwright/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-nuxt-playwright/SKILL.md"),
+        content: include_str!("builtins/skills/cas-nuxt-playwright/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-nuxt-playwright/references/auth-fixture-template.md",
         content: include_str!(
-            "builtins/codex/skills/cas-nuxt-playwright/references/auth-fixture-template.md"
+            "builtins/skills/cas-nuxt-playwright/references/auth-fixture-template.md"
         ),
     },
     // Codex ignores `disable-model-invocation`; `agents/openai.yaml` is its
@@ -1116,104 +1116,104 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     // cas-playwright-debug skill (cas-5e54) — codex mirror, byte-identical.
     BuiltinFile {
         path: "skills/cas-playwright-debug/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-playwright-debug/SKILL.md"),
+        content: include_str!("builtins/skills/cas-playwright-debug/SKILL.md"),
     },
     // cas-frontend-engineering skill — codex mirror.
     BuiltinFile {
         path: "skills/cas-frontend-engineering/SKILL.md",
         content: include_str!(
-            "builtins/codex/skills/cas-frontend-engineering/SKILL.md"
+            "builtins/skills/cas-frontend-engineering/SKILL.md"
         ),
     },
     BuiltinFile {
         path: "skills/cas-frontend-engineering/references/playwright-acceptance.md",
-        content: include_str!("builtins/codex/skills/cas-frontend-engineering/references/playwright-acceptance.md"),
+        content: include_str!("builtins/skills/cas-frontend-engineering/references/playwright-acceptance.md"),
     },
     // fallow skill — codex mirror. See the claude-side entry above for the
     // upstream attribution (fallow-rs/fallow-skills, MIT).
     BuiltinFile {
         path: "skills/fallow/SKILL.md",
-        content: include_str!("builtins/codex/skills/fallow/SKILL.md"),
+        content: include_str!("builtins/skills/fallow/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/fallow/references/cli-reference.md",
-        content: include_str!("builtins/codex/skills/fallow/references/cli-reference.md"),
+        content: include_str!("builtins/skills/fallow/references/cli-reference.md"),
     },
     BuiltinFile {
         path: "skills/fallow/references/gotchas.md",
-        content: include_str!("builtins/codex/skills/fallow/references/gotchas.md"),
+        content: include_str!("builtins/skills/fallow/references/gotchas.md"),
     },
     BuiltinFile {
         path: "skills/fallow/references/patterns.md",
-        content: include_str!("builtins/codex/skills/fallow/references/patterns.md"),
+        content: include_str!("builtins/skills/fallow/references/patterns.md"),
     },
     // cas-writing-for-agents: Codex mirror of the MIT Matt Pocock import above.
     BuiltinFile {
         path: "skills/cas-writing-for-agents/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-writing-for-agents/SKILL.md"),
+        content: include_str!("builtins/skills/cas-writing-for-agents/SKILL.md"),
     },
     // cas-cli-craft: terminal and text design craft (cas-4df0). No CAS tool
     // calls, so the codex and grok twins are byte-identical to this source.
     BuiltinFile {
         path: "skills/cas-cli-craft/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-cli-craft/SKILL.md"),
+        content: include_str!("builtins/skills/cas-cli-craft/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-cli-craft/references/concept-brief.md",
-        content: include_str!("builtins/codex/skills/cas-cli-craft/references/concept-brief.md"),
+        content: include_str!("builtins/skills/cas-cli-craft/references/concept-brief.md"),
     },
     BuiltinFile {
         path: "skills/cas-cli-craft/references/output-contract.md",
-        content: include_str!("builtins/codex/skills/cas-cli-craft/references/output-contract.md"),
+        content: include_str!("builtins/skills/cas-cli-craft/references/output-contract.md"),
     },
     BuiltinFile {
         path: "skills/cas-cli-craft/references/critique-rubric.md",
-        content: include_str!("builtins/codex/skills/cas-cli-craft/references/critique-rubric.md"),
+        content: include_str!("builtins/skills/cas-cli-craft/references/critique-rubric.md"),
     },
     BuiltinFile {
         path: "skills/cas-cli-craft/references/exemplars/status-screen.md",
-        content: include_str!("builtins/codex/skills/cas-cli-craft/references/exemplars/status-screen.md"),
+        content: include_str!("builtins/skills/cas-cli-craft/references/exemplars/status-screen.md"),
     },
     BuiltinFile {
         path: "skills/cas-cli-craft/references/exemplars/doctor-report.md",
-        content: include_str!("builtins/codex/skills/cas-cli-craft/references/exemplars/doctor-report.md"),
+        content: include_str!("builtins/skills/cas-cli-craft/references/exemplars/doctor-report.md"),
     },
     BuiltinFile {
         path: "skills/cas-cli-craft/references/exemplars/long-running.md",
-        content: include_str!("builtins/codex/skills/cas-cli-craft/references/exemplars/long-running.md"),
+        content: include_str!("builtins/skills/cas-cli-craft/references/exemplars/long-running.md"),
     },
     BuiltinFile {
         path: "skills/cas-cli-craft/references/exemplars/before-after.md",
-        content: include_str!("builtins/codex/skills/cas-cli-craft/references/exemplars/before-after.md"),
+        content: include_str!("builtins/skills/cas-cli-craft/references/exemplars/before-after.md"),
     },
     BuiltinFile {
         path: "skills/cas-cli-craft/scripts/terminal-qa.mjs",
-        content: include_str!("builtins/codex/skills/cas-cli-craft/scripts/terminal-qa.mjs"),
+        content: include_str!("builtins/skills/cas-cli-craft/scripts/terminal-qa.mjs"),
     },
     BuiltinFile {
         path: "skills/cas-diagnosing-bugs/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-diagnosing-bugs/SKILL.md"),
+        content: include_str!("builtins/skills/cas-diagnosing-bugs/SKILL.md"),
     },
-    BuiltinFile { path: "skills/cas-codebase-design/SKILL.md", content: include_str!("builtins/codex/skills/cas-codebase-design/SKILL.md") },
-    BuiltinFile { path: "skills/cas-tdd/SKILL.md", content: include_str!("builtins/codex/skills/cas-tdd/SKILL.md") },
-    BuiltinFile { path: "skills/cas-wizard/SKILL.md", content: include_str!("builtins/codex/skills/cas-wizard/SKILL.md") },
-    BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/codex/skills/cas-wizard/template.sh") },
-    BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/codex/skills/cas-resolving-merge-conflicts/SKILL.md") },
-    BuiltinFile { path: "skills/cas-to-questionnaire/SKILL.md", content: include_str!("builtins/codex/skills/cas-to-questionnaire/SKILL.md") },
+    BuiltinFile { path: "skills/cas-codebase-design/SKILL.md", content: include_str!("builtins/skills/cas-codebase-design/SKILL.md") },
+    BuiltinFile { path: "skills/cas-tdd/SKILL.md", content: include_str!("builtins/skills/cas-tdd/SKILL.md") },
+    BuiltinFile { path: "skills/cas-wizard/SKILL.md", content: include_str!("builtins/skills/cas-wizard/SKILL.md") },
+    BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/skills/cas-wizard/template.sh") },
+    BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/skills/cas-resolving-merge-conflicts/SKILL.md") },
+    BuiltinFile { path: "skills/cas-to-questionnaire/SKILL.md", content: include_str!("builtins/skills/cas-to-questionnaire/SKILL.md") },
     BuiltinFile { path: "skills/cas-to-questionnaire/agents/openai.yaml", content: include_str!("builtins/codex/skills/cas-to-questionnaire/agents/openai.yaml") },
-    BuiltinFile { path: "skills/cas-image-generate/SKILL.md", content: include_str!("builtins/codex/skills/cas-image-generate/SKILL.md") },
-    BuiltinFile { path: "skills/cas-image-generate/references/asset-playbook.md", content: include_str!("builtins/codex/skills/cas-image-generate/references/asset-playbook.md") },
-    BuiltinFile { path: "skills/cas-image-generate/references/svg-web-assets.md", content: include_str!("builtins/codex/skills/cas-image-generate/references/svg-web-assets.md") },
-    BuiltinFile { path: "skills/cas-image-generate/references/style-harvest.md", content: include_str!("builtins/codex/skills/cas-image-generate/references/style-harvest.md") },
-    BuiltinFile { path: "skills/cas-image-generate/references/output-checklist.md", content: include_str!("builtins/codex/skills/cas-image-generate/references/output-checklist.md") },
-    BuiltinFile { path: "skills/cas-image-generate/references/providers.md", content: include_str!("builtins/codex/skills/cas-image-generate/references/providers.md") },
-    BuiltinFile { path: "skills/cas-image-generate/scripts/generate-image.sh", content: include_str!("builtins/codex/skills/cas-image-generate/scripts/generate-image.sh") },
-    BuiltinFile { path: "skills/cas-technical-drawing/SKILL.md", content: include_str!("builtins/codex/skills/cas-technical-drawing/SKILL.md") },
-    BuiltinFile { path: "skills/cas-technical-drawing/references/model-schema.md", content: include_str!("builtins/codex/skills/cas-technical-drawing/references/model-schema.md") },
-    BuiltinFile { path: "skills/cas-technical-drawing/references/drafting-conventions.md", content: include_str!("builtins/codex/skills/cas-technical-drawing/references/drafting-conventions.md") },
-    BuiltinFile { path: "skills/cas-technical-drawing/references/likeness-critique.md", content: include_str!("builtins/codex/skills/cas-technical-drawing/references/likeness-critique.md") },
-    BuiltinFile { path: "skills/cas-technical-drawing/scripts/draft.mjs", content: include_str!("builtins/codex/skills/cas-technical-drawing/scripts/draft.mjs") },
-    BuiltinFile { path: "skills/cas-technical-drawing/examples/shelf-box.json", content: include_str!("builtins/codex/skills/cas-technical-drawing/examples/shelf-box.json") },
+    BuiltinFile { path: "skills/cas-image-generate/SKILL.md", content: include_str!("builtins/skills/cas-image-generate/SKILL.md") },
+    BuiltinFile { path: "skills/cas-image-generate/references/asset-playbook.md", content: include_str!("builtins/skills/cas-image-generate/references/asset-playbook.md") },
+    BuiltinFile { path: "skills/cas-image-generate/references/svg-web-assets.md", content: include_str!("builtins/skills/cas-image-generate/references/svg-web-assets.md") },
+    BuiltinFile { path: "skills/cas-image-generate/references/style-harvest.md", content: include_str!("builtins/skills/cas-image-generate/references/style-harvest.md") },
+    BuiltinFile { path: "skills/cas-image-generate/references/output-checklist.md", content: include_str!("builtins/skills/cas-image-generate/references/output-checklist.md") },
+    BuiltinFile { path: "skills/cas-image-generate/references/providers.md", content: include_str!("builtins/skills/cas-image-generate/references/providers.md") },
+    BuiltinFile { path: "skills/cas-image-generate/scripts/generate-image.sh", content: include_str!("builtins/skills/cas-image-generate/scripts/generate-image.sh") },
+    BuiltinFile { path: "skills/cas-technical-drawing/SKILL.md", content: include_str!("builtins/skills/cas-technical-drawing/SKILL.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/references/model-schema.md", content: include_str!("builtins/skills/cas-technical-drawing/references/model-schema.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/references/drafting-conventions.md", content: include_str!("builtins/skills/cas-technical-drawing/references/drafting-conventions.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/references/likeness-critique.md", content: include_str!("builtins/skills/cas-technical-drawing/references/likeness-critique.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/scripts/draft.mjs", content: include_str!("builtins/skills/cas-technical-drawing/scripts/draft.mjs") },
+    BuiltinFile { path: "skills/cas-technical-drawing/examples/shelf-box.json", content: include_str!("builtins/skills/cas-technical-drawing/examples/shelf-box.json") },
 ];
 
 /// All built-in agents managed by Cassy for Grok (EPIC cas-8888, Phase 5 /
@@ -1253,27 +1253,27 @@ pub const GROK_BUILTIN_AGENTS: &[BuiltinFile] = &[
 pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-worker/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-worker.md"),
+        content: include_str!("builtins/skills/cas-worker.md"),
     },
     BuiltinFile {
         path: "skills/cas-worker/references/close-gate.md",
-        content: include_str!("builtins/grok/skills/cas-worker/references/close-gate.md"),
+        content: include_str!("builtins/skills/cas-worker/references/close-gate.md"),
     },
     BuiltinFile {
         path: "skills/cas-worker/references/recovery.md",
-        content: include_str!("builtins/grok/skills/cas-worker/references/recovery.md"),
+        content: include_str!("builtins/skills/cas-worker/references/recovery.md"),
     },
     BuiltinFile {
         path: "skills/cas-worker/references/details.md",
-        content: include_str!("builtins/grok/skills/cas-worker/references/details.md"),
+        content: include_str!("builtins/skills/cas-worker/references/details.md"),
     },
     BuiltinFile {
         path: "skills/cas-worker/references/discipline.md",
-        content: include_str!("builtins/grok/skills/cas-worker/references/discipline.md"),
+        content: include_str!("builtins/skills/cas-worker/references/discipline.md"),
     },
     BuiltinFile {
         path: "skills/verify-before-claim/SKILL.md",
-        content: include_str!("builtins/grok/skills/verify-before-claim/SKILL.md"),
+        content: include_str!("builtins/skills/verify-before-claim/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/SKILL.md",
@@ -1281,136 +1281,136 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/preflight.md",
-        content: include_str!("builtins/grok/skills/cas-supervisor/references/preflight.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/preflight.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/intake.md",
-        content: include_str!("builtins/grok/skills/cas-supervisor/references/intake.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/intake.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/planning.md",
-        content: include_str!("builtins/grok/skills/cas-supervisor/references/planning.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/planning.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/workflow.md",
-        content: include_str!("builtins/grok/skills/cas-supervisor/references/workflow.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/workflow.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/model-selection.md",
-        content: include_str!("builtins/grok/skills/cas-supervisor/references/model-selection.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/model-selection.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/reminders.md",
-        content: include_str!("builtins/grok/skills/cas-supervisor/references/reminders.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/reminders.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/epic-driving.md",
-        content: include_str!("builtins/grok/skills/cas-supervisor/references/epic-driving.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/epic-driving.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/epic-flow-walk.md",
-        content: include_str!("builtins/grok/skills/cas-supervisor/references/epic-flow-walk.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/epic-flow-walk.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/reporting-and-routing.md",
         content: include_str!(
-            "builtins/grok/skills/cas-supervisor/references/reporting-and-routing.md"
+            "builtins/skills/cas-supervisor/references/reporting-and-routing.md"
         ),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/worker-recovery.md",
-        content: include_str!("builtins/grok/skills/cas-supervisor/references/worker-recovery.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/worker-recovery.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/reference.md",
-        content: include_str!("builtins/grok/skills/cas-supervisor/references/reference.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/reference.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/operator-reply.md",
-        content: include_str!("builtins/grok/skills/cas-supervisor/references/operator-reply.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/operator-reply.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/filing-cas-bugs.md",
-        content: include_str!("builtins/grok/skills/cas-supervisor/references/filing-cas-bugs.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/filing-cas-bugs.md"),
     },
     BuiltinFile {
         path: "skills/cas-release-report/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-release-report/SKILL.md"),
+        content: include_str!("builtins/skills/cas-release-report/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-release-report/references/brief-template.md",
-        content: include_str!("builtins/grok/skills/cas-release-report/references/brief-template.md"),
+        content: include_str!("builtins/skills/cas-release-report/references/brief-template.md"),
     },
     BuiltinFile {
         path: "skills/cas-release-report/references/default-tokens.json",
-        content: include_str!("builtins/grok/skills/cas-release-report/references/default-tokens.json"),
+        content: include_str!("builtins/skills/cas-release-report/references/default-tokens.json"),
     },
     BuiltinFile {
         path: "skills/cas-release-report/references/exemplar.md",
-        content: include_str!("builtins/grok/skills/cas-release-report/references/exemplar.md"),
+        content: include_str!("builtins/skills/cas-release-report/references/exemplar.md"),
     },
     BuiltinFile {
         path: "skills/cas-release-report/references/pdf.md",
-        content: include_str!("builtins/grok/skills/cas-release-report/references/pdf.md"),
+        content: include_str!("builtins/skills/cas-release-report/references/pdf.md"),
     },
     BuiltinFile {
         path: "skills/cas-release-report/references/template.html",
-        content: include_str!("builtins/grok/skills/cas-release-report/references/template.html"),
+        content: include_str!("builtins/skills/cas-release-report/references/template.html"),
     },
     BuiltinFile {
         path: "skills/cas-release-report/scripts/render.py",
-        content: include_str!("builtins/grok/skills/cas-release-report/scripts/render.py"),
+        content: include_str!("builtins/skills/cas-release-report/scripts/render.py"),
     },
     BuiltinFile {
         path: "skills/cas-release-report/scripts/check-pdf.py",
-        content: include_str!("builtins/grok/skills/cas-release-report/scripts/check-pdf.py"),
+        content: include_str!("builtins/skills/cas-release-report/scripts/check-pdf.py"),
     },
     BuiltinFile {
         path: "skills/cas-cut-release/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-cut-release/SKILL.md"),
+        content: include_str!("builtins/skills/cas-cut-release/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-cut-release/references/failure-log.md",
-        content: include_str!("builtins/grok/skills/cas-cut-release/references/failure-log.md"),
+        content: include_str!("builtins/skills/cas-cut-release/references/failure-log.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor-checklist/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-supervisor-checklist.md"),
+        content: include_str!("builtins/skills/cas-supervisor-checklist.md"),
     },
     BuiltinFile {
         path: "skills/cas-task-tracking/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-task-tracking.md"),
+        content: include_str!("builtins/skills/cas-task-tracking.md"),
     },
     BuiltinFile {
         path: "skills/cas-memory-management/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-memory-management/SKILL.md"),
+        content: include_str!("builtins/skills/cas-memory-management/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-memory-management/references/schema.yaml",
-        content: include_str!("builtins/grok/skills/cas-memory-management/references/schema.yaml"),
+        content: include_str!("builtins/skills/cas-memory-management/references/schema.yaml"),
     },
     BuiltinFile {
         path: "skills/cas-memory-management/references/body-templates.md",
         content: include_str!(
-            "builtins/grok/skills/cas-memory-management/references/body-templates.md"
+            "builtins/skills/cas-memory-management/references/body-templates.md"
         ),
     },
     BuiltinFile {
         path: "skills/cas-memory-management/references/overlap-detection.md",
         content: include_str!(
-            "builtins/grok/skills/cas-memory-management/references/overlap-detection.md"
+            "builtins/skills/cas-memory-management/references/overlap-detection.md"
         ),
     },
     BuiltinFile {
         path: "skills/cas-memory-management/references/lifecycle-and-storage.md",
         content: include_str!(
-            "builtins/grok/skills/cas-memory-management/references/lifecycle-and-storage.md"
+            "builtins/skills/cas-memory-management/references/lifecycle-and-storage.md"
         ),
     },
     BuiltinFile {
         path: "skills/cas-memory-management/references/response-shapes.md",
         content: include_str!(
-            "builtins/grok/skills/cas-memory-management/references/response-shapes.md"
+            "builtins/skills/cas-memory-management/references/response-shapes.md"
         ),
     },
     // cas-cc8c: required-capability parity — a Grok factory session must resolve
@@ -1421,30 +1421,30 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     // skills above.
     BuiltinFile {
         path: "skills/cas-search/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-search.md"),
+        content: include_str!("builtins/skills/cas-search.md"),
     },
     BuiltinFile {
         path: "skills/cas-brainstorm/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-brainstorm/SKILL.md"),
+        content: include_str!("builtins/skills/cas-brainstorm/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-brainstorm/references/handoff.md",
-        content: include_str!("builtins/grok/skills/cas-brainstorm/references/handoff.md"),
+        content: include_str!("builtins/skills/cas-brainstorm/references/handoff.md"),
     },
     BuiltinFile {
         path: "skills/cas-brainstorm/references/requirements-capture.md",
         content: include_str!(
-            "builtins/grok/skills/cas-brainstorm/references/requirements-capture.md"
+            "builtins/skills/cas-brainstorm/references/requirements-capture.md"
         ),
     },
     BuiltinFile {
         path: "skills/cas-ideate/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-ideate/SKILL.md"),
+        content: include_str!("builtins/skills/cas-ideate/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-ideate/references/post-ideation-workflow.md",
         content: include_str!(
-            "builtins/grok/skills/cas-ideate/references/post-ideation-workflow.md"
+            "builtins/skills/cas-ideate/references/post-ideation-workflow.md"
         ),
     },
     // cas-20f2: full GENERAL-skill parity — Grok now owns twins for every
@@ -1455,354 +1455,354 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     // cas-codex-exec make no CAS MCP calls so their twins are byte-identical.
     BuiltinFile {
         path: "skills/session-learn/SKILL.md",
-        content: include_str!("builtins/grok/skills/session-learn/SKILL.md"),
+        content: include_str!("builtins/skills/session-learn/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/codemap/SKILL.md",
-        content: include_str!("builtins/grok/skills/codemap/SKILL.md"),
+        content: include_str!("builtins/skills/codemap/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/codemap/references/doc-hygiene.md",
-        content: include_str!("builtins/grok/skills/codemap/references/doc-hygiene.md"),
+        content: include_str!("builtins/skills/codemap/references/doc-hygiene.md"),
     },
     BuiltinFile {
         path: "skills/project-overview/SKILL.md",
-        content: include_str!("builtins/grok/skills/project-overview/SKILL.md"),
+        content: include_str!("builtins/skills/project-overview/SKILL.md"),
     },
     // cas-servers skill (cas-7c93, GH #87) — grok twin.
     BuiltinFile {
         path: "skills/cas-servers/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-servers/SKILL.md"),
+        content: include_str!("builtins/skills/cas-servers/SKILL.md"),
     },
     // cas-1219: byte-identical Grok mirror of the field-tested MCP guidance.
     BuiltinFile {
         path: "skills/mcp-integration/SKILL.md",
-        content: include_str!("builtins/grok/skills/mcp-integration/SKILL.md"),
+        content: include_str!("builtins/skills/mcp-integration/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/mcp-integration/references/diagnosis.md",
-        content: include_str!("builtins/grok/skills/mcp-integration/references/diagnosis.md"),
+        content: include_str!("builtins/skills/mcp-integration/references/diagnosis.md"),
     },
     BuiltinFile {
         path: "skills/cas-viktor/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-viktor/SKILL.md"),
+        content: include_str!("builtins/skills/cas-viktor/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-viktor/references/gateway.md",
-        content: include_str!("builtins/grok/skills/cas-viktor/references/gateway.md"),
+        content: include_str!("builtins/skills/cas-viktor/references/gateway.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-html-reports/SKILL.md"),
+        content: include_str!("builtins/skills/cas-html-reports/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/report-types.md",
-        content: include_str!("builtins/grok/skills/cas-html-reports/references/report-types.md"),
+        content: include_str!("builtins/skills/cas-html-reports/references/report-types.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/presentation-rules.md",
-        content: include_str!("builtins/grok/skills/cas-html-reports/references/presentation-rules.md"),
+        content: include_str!("builtins/skills/cas-html-reports/references/presentation-rules.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/technical-contract.md",
-        content: include_str!("builtins/grok/skills/cas-html-reports/references/technical-contract.md"),
+        content: include_str!("builtins/skills/cas-html-reports/references/technical-contract.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/review-checklist.md",
-        content: include_str!("builtins/grok/skills/cas-html-reports/references/review-checklist.md"),
+        content: include_str!("builtins/skills/cas-html-reports/references/review-checklist.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/sources.md",
-        content: include_str!("builtins/grok/skills/cas-html-reports/references/sources.md"),
+        content: include_str!("builtins/skills/cas-html-reports/references/sources.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/examples/investigation-annotated-timeline.html",
-        content: include_str!("builtins/grok/skills/cas-html-reports/references/examples/investigation-annotated-timeline.html"),
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/investigation-annotated-timeline.html"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/examples/investigation-annotated-timeline.why.md",
-        content: include_str!("builtins/grok/skills/cas-html-reports/references/examples/investigation-annotated-timeline.why.md"),
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/investigation-annotated-timeline.why.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/examples/executive-variance-brief.html",
-        content: include_str!("builtins/grok/skills/cas-html-reports/references/examples/executive-variance-brief.html"),
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/executive-variance-brief.html"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/examples/executive-variance-brief.why.md",
-        content: include_str!("builtins/grok/skills/cas-html-reports/references/examples/executive-variance-brief.why.md"),
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/executive-variance-brief.why.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/examples/benchmark-small-multiples.html",
-        content: include_str!("builtins/grok/skills/cas-html-reports/references/examples/benchmark-small-multiples.html"),
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/benchmark-small-multiples.html"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/examples/benchmark-small-multiples.why.md",
-        content: include_str!("builtins/grok/skills/cas-html-reports/references/examples/benchmark-small-multiples.why.md"),
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/benchmark-small-multiples.why.md"),
     },
     BuiltinFile {
         path: "skills/cas-dataviz/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-dataviz/SKILL.md"),
+        content: include_str!("builtins/skills/cas-dataviz/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-dataviz/references/design-review.md",
-        content: include_str!("builtins/grok/skills/cas-dataviz/references/design-review.md"),
+        content: include_str!("builtins/skills/cas-dataviz/references/design-review.md"),
     },
     BuiltinFile {
         path: "skills/cas-dataviz/references/quality-checklist.md",
-        content: include_str!("builtins/grok/skills/cas-dataviz/references/quality-checklist.md"),
+        content: include_str!("builtins/skills/cas-dataviz/references/quality-checklist.md"),
     },
     BuiltinFile {
         path: "skills/cas-dataviz/scripts/validate_palette.js",
-        content: include_str!("builtins/grok/skills/cas-dataviz/scripts/validate_palette.js"),
+        content: include_str!("builtins/skills/cas-dataviz/scripts/validate_palette.js"),
     },
     BuiltinFile {
         path: "skills/cas-dataviz/examples/send-backs-dot-strip.html",
-        content: include_str!("builtins/grok/skills/cas-dataviz/examples/send-backs-dot-strip.html"),
+        content: include_str!("builtins/skills/cas-dataviz/examples/send-backs-dot-strip.html"),
     },
     BuiltinFile {
         path: "skills/cas-dataviz/examples/send-backs-dot-strip.why.md",
-        content: include_str!("builtins/grok/skills/cas-dataviz/examples/send-backs-dot-strip.why.md"),
+        content: include_str!("builtins/skills/cas-dataviz/examples/send-backs-dot-strip.why.md"),
     },
     // design-spec skill (GH #64) — grok twin.
     BuiltinFile {
         path: "skills/design-spec/SKILL.md",
-        content: include_str!("builtins/grok/skills/design-spec/SKILL.md"),
+        content: include_str!("builtins/skills/design-spec/SKILL.md"),
     },
     // cas-d967: the Petrastella design language every project inherits through
     // design-spec and overrides in DESIGN.md; tokens are the machine-readable twin.
     BuiltinFile {
         path: "skills/design-spec/references/petrastella-design-language.md",
-        content: include_str!("builtins/grok/skills/design-spec/references/petrastella-design-language.md"),
+        content: include_str!("builtins/skills/design-spec/references/petrastella-design-language.md"),
     },
     BuiltinFile {
         path: "skills/design-spec/references/design-tokens.json",
-        content: include_str!("builtins/grok/skills/design-spec/references/design-tokens.json"),
+        content: include_str!("builtins/skills/design-spec/references/design-tokens.json"),
     },
     BuiltinFile {
         path: "skills/design-spec/references/tokens.css",
-        content: include_str!("builtins/grok/skills/design-spec/references/tokens.css"),
+        content: include_str!("builtins/skills/design-spec/references/tokens.css"),
     },
     // cas-ui-craft skill (cas-d967) — grok twin: concept brief before any render,
     // first-three-seconds rule, form vocabulary, scored critique rubric with a
     // merge floor, and four annotated exemplars.
     BuiltinFile {
         path: "skills/cas-ui-craft/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-ui-craft/SKILL.md"),
+        content: include_str!("builtins/skills/cas-ui-craft/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-ui-craft/references/concept-brief.md",
-        content: include_str!("builtins/grok/skills/cas-ui-craft/references/concept-brief.md"),
+        content: include_str!("builtins/skills/cas-ui-craft/references/concept-brief.md"),
     },
     BuiltinFile {
         path: "skills/cas-ui-craft/references/form-vocabulary.md",
-        content: include_str!("builtins/grok/skills/cas-ui-craft/references/form-vocabulary.md"),
+        content: include_str!("builtins/skills/cas-ui-craft/references/form-vocabulary.md"),
     },
     BuiltinFile {
         path: "skills/cas-ui-craft/references/critique-rubric.md",
-        content: include_str!("builtins/grok/skills/cas-ui-craft/references/critique-rubric.md"),
+        content: include_str!("builtins/skills/cas-ui-craft/references/critique-rubric.md"),
     },
     BuiltinFile {
         path: "skills/cas-ui-craft/references/exemplars/report.html",
-        content: include_str!("builtins/grok/skills/cas-ui-craft/references/exemplars/report.html"),
+        content: include_str!("builtins/skills/cas-ui-craft/references/exemplars/report.html"),
     },
     BuiltinFile {
         path: "skills/cas-ui-craft/references/exemplars/dashboard.html",
-        content: include_str!("builtins/grok/skills/cas-ui-craft/references/exemplars/dashboard.html"),
+        content: include_str!("builtins/skills/cas-ui-craft/references/exemplars/dashboard.html"),
     },
     BuiltinFile {
         path: "skills/cas-ui-craft/references/exemplars/product-page.html",
-        content: include_str!("builtins/grok/skills/cas-ui-craft/references/exemplars/product-page.html"),
+        content: include_str!("builtins/skills/cas-ui-craft/references/exemplars/product-page.html"),
     },
     BuiltinFile {
         path: "skills/cas-ui-craft/references/exemplars/before-after.html",
-        content: include_str!("builtins/grok/skills/cas-ui-craft/references/exemplars/before-after.html"),
+        content: include_str!("builtins/skills/cas-ui-craft/references/exemplars/before-after.html"),
     },
     BuiltinFile {
         path: "skills/cas-ui-craft/scripts/visual-qa.mjs",
-        content: include_str!("builtins/grok/skills/cas-ui-craft/scripts/visual-qa.mjs"),
+        content: include_str!("builtins/skills/cas-ui-craft/scripts/visual-qa.mjs"),
     },
     // cas-21dc: Grok mirror of the demo-statement QA skill.
     BuiltinFile {
         path: "skills/cas-qa-craft/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-qa-craft/SKILL.md"),
+        content: include_str!("builtins/skills/cas-qa-craft/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-qa-craft/references/journeys.md",
-        content: include_str!("builtins/grok/skills/cas-qa-craft/references/journeys.md"),
+        content: include_str!("builtins/skills/cas-qa-craft/references/journeys.md"),
     },
     BuiltinFile {
         path: "skills/cas-qa-craft/references/matrix-builder.md",
-        content: include_str!("builtins/grok/skills/cas-qa-craft/references/matrix-builder.md"),
+        content: include_str!("builtins/skills/cas-qa-craft/references/matrix-builder.md"),
     },
     BuiltinFile {
         path: "skills/cas-qa-craft/references/evidence-ledger.md",
-        content: include_str!("builtins/grok/skills/cas-qa-craft/references/evidence-ledger.md"),
+        content: include_str!("builtins/skills/cas-qa-craft/references/evidence-ledger.md"),
     },
     BuiltinFile {
         path: "skills/cas-qa-craft/references/verifier-evidence-gate.md",
-        content: include_str!("builtins/grok/skills/cas-qa-craft/references/verifier-evidence-gate.md"),
+        content: include_str!("builtins/skills/cas-qa-craft/references/verifier-evidence-gate.md"),
     },
     BuiltinFile {
         path: "skills/cas-qa-craft/references/exemplar.md",
-        content: include_str!("builtins/grok/skills/cas-qa-craft/references/exemplar.md"),
+        content: include_str!("builtins/skills/cas-qa-craft/references/exemplar.md"),
     },
     BuiltinFile {
         path: "skills/cas-qa-craft/references/telemetry-sweep.md",
-        content: include_str!("builtins/grok/skills/cas-qa-craft/references/telemetry-sweep.md"),
+        content: include_str!("builtins/skills/cas-qa-craft/references/telemetry-sweep.md"),
     },
     BuiltinFile {
         path: "skills/cas-qa-craft/references/evidence-bundle.md",
-        content: include_str!("builtins/grok/skills/cas-qa-craft/references/evidence-bundle.md"),
+        content: include_str!("builtins/skills/cas-qa-craft/references/evidence-bundle.md"),
     },
     // cas-619f: the independent reviewer's procedure for a qa-pass task.
     BuiltinFile {
         path: "skills/cas-qa-craft/references/independent-pass.md",
-        content: include_str!("builtins/grok/skills/cas-qa-craft/references/independent-pass.md"),
+        content: include_str!("builtins/skills/cas-qa-craft/references/independent-pass.md"),
     },
     // cas-release-notes skill (GH #65) — grok twin.
     BuiltinFile {
         path: "skills/cas-release-notes/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-release-notes/SKILL.md"),
+        content: include_str!("builtins/skills/cas-release-notes/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-release-notes/references/RUBRIC-template.md",
-        content: include_str!("builtins/grok/skills/cas-release-notes/references/RUBRIC-template.md"),
+        content: include_str!("builtins/skills/cas-release-notes/references/RUBRIC-template.md"),
     },
     // mecha-cassy skill (cas-945f, GH #687) — grok twin. Byte-identical to the
     // claude copy except for the harness tool prefix.
     BuiltinFile {
         path: "skills/mecha-cassy/SKILL.md",
-        content: include_str!("builtins/grok/skills/mecha-cassy/SKILL.md"),
+        content: include_str!("builtins/skills/mecha-cassy/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/mecha-cassy/references/registration.md",
-        content: include_str!("builtins/grok/skills/mecha-cassy/references/registration.md"),
+        content: include_str!("builtins/skills/mecha-cassy/references/registration.md"),
     },
     BuiltinFile {
         path: "skills/fallow/SKILL.md",
-        content: include_str!("builtins/grok/skills/fallow/SKILL.md"),
+        content: include_str!("builtins/skills/fallow/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/fallow/references/cli-reference.md",
-        content: include_str!("builtins/grok/skills/fallow/references/cli-reference.md"),
+        content: include_str!("builtins/skills/fallow/references/cli-reference.md"),
     },
     BuiltinFile {
         path: "skills/fallow/references/gotchas.md",
-        content: include_str!("builtins/grok/skills/fallow/references/gotchas.md"),
+        content: include_str!("builtins/skills/fallow/references/gotchas.md"),
     },
     BuiltinFile {
         path: "skills/fallow/references/patterns.md",
-        content: include_str!("builtins/grok/skills/fallow/references/patterns.md"),
+        content: include_str!("builtins/skills/fallow/references/patterns.md"),
     },
     // cas-github-issues skill (cas-ff2f, GH #94) — grok twin.
     BuiltinFile {
         path: "skills/cas-github-issues/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-github-issues/SKILL.md"),
+        content: include_str!("builtins/skills/cas-github-issues/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-nuxt-playwright/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-nuxt-playwright/SKILL.md"),
+        content: include_str!("builtins/skills/cas-nuxt-playwright/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-nuxt-playwright/references/auth-fixture-template.md",
         content: include_str!(
-            "builtins/grok/skills/cas-nuxt-playwright/references/auth-fixture-template.md"
+            "builtins/skills/cas-nuxt-playwright/references/auth-fixture-template.md"
         ),
     },
     // cas-playwright-debug skill (cas-5e54) — grok mirror, byte-identical.
     BuiltinFile {
         path: "skills/cas-playwright-debug/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-playwright-debug/SKILL.md"),
+        content: include_str!("builtins/skills/cas-playwright-debug/SKILL.md"),
     },
     // cas-frontend-engineering skill — grok mirror.
     BuiltinFile {
         path: "skills/cas-frontend-engineering/SKILL.md",
         content: include_str!(
-            "builtins/grok/skills/cas-frontend-engineering/SKILL.md"
+            "builtins/skills/cas-frontend-engineering/SKILL.md"
         ),
     },
     BuiltinFile {
         path: "skills/cas-frontend-engineering/references/playwright-acceptance.md",
-        content: include_str!("builtins/grok/skills/cas-frontend-engineering/references/playwright-acceptance.md"),
+        content: include_str!("builtins/skills/cas-frontend-engineering/references/playwright-acceptance.md"),
     },
     BuiltinFile {
         path: "skills/cas-codex-exec/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-codex-exec/SKILL.md"),
+        content: include_str!("builtins/skills/cas-codex-exec/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cli-routing/SKILL.md",
-        content: include_str!("builtins/grok/skills/cli-routing/SKILL.md"),
+        content: include_str!("builtins/skills/cli-routing/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cli-routing/references/routing.md",
-        content: include_str!("builtins/grok/skills/cli-routing/references/routing.md"),
+        content: include_str!("builtins/skills/cli-routing/references/routing.md"),
     },
     // cas-writing-for-agents: Grok mirror of the MIT Matt Pocock import above.
     BuiltinFile {
         path: "skills/cas-writing-for-agents/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-writing-for-agents/SKILL.md"),
+        content: include_str!("builtins/skills/cas-writing-for-agents/SKILL.md"),
     },
     // cas-cli-craft: terminal and text design craft (cas-4df0). No CAS tool
     // calls, so the codex and grok twins are byte-identical to this source.
     BuiltinFile {
         path: "skills/cas-cli-craft/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-cli-craft/SKILL.md"),
+        content: include_str!("builtins/skills/cas-cli-craft/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-cli-craft/references/concept-brief.md",
-        content: include_str!("builtins/grok/skills/cas-cli-craft/references/concept-brief.md"),
+        content: include_str!("builtins/skills/cas-cli-craft/references/concept-brief.md"),
     },
     BuiltinFile {
         path: "skills/cas-cli-craft/references/output-contract.md",
-        content: include_str!("builtins/grok/skills/cas-cli-craft/references/output-contract.md"),
+        content: include_str!("builtins/skills/cas-cli-craft/references/output-contract.md"),
     },
     BuiltinFile {
         path: "skills/cas-cli-craft/references/critique-rubric.md",
-        content: include_str!("builtins/grok/skills/cas-cli-craft/references/critique-rubric.md"),
+        content: include_str!("builtins/skills/cas-cli-craft/references/critique-rubric.md"),
     },
     BuiltinFile {
         path: "skills/cas-cli-craft/references/exemplars/status-screen.md",
-        content: include_str!("builtins/grok/skills/cas-cli-craft/references/exemplars/status-screen.md"),
+        content: include_str!("builtins/skills/cas-cli-craft/references/exemplars/status-screen.md"),
     },
     BuiltinFile {
         path: "skills/cas-cli-craft/references/exemplars/doctor-report.md",
-        content: include_str!("builtins/grok/skills/cas-cli-craft/references/exemplars/doctor-report.md"),
+        content: include_str!("builtins/skills/cas-cli-craft/references/exemplars/doctor-report.md"),
     },
     BuiltinFile {
         path: "skills/cas-cli-craft/references/exemplars/long-running.md",
-        content: include_str!("builtins/grok/skills/cas-cli-craft/references/exemplars/long-running.md"),
+        content: include_str!("builtins/skills/cas-cli-craft/references/exemplars/long-running.md"),
     },
     BuiltinFile {
         path: "skills/cas-cli-craft/references/exemplars/before-after.md",
-        content: include_str!("builtins/grok/skills/cas-cli-craft/references/exemplars/before-after.md"),
+        content: include_str!("builtins/skills/cas-cli-craft/references/exemplars/before-after.md"),
     },
     BuiltinFile {
         path: "skills/cas-cli-craft/scripts/terminal-qa.mjs",
-        content: include_str!("builtins/grok/skills/cas-cli-craft/scripts/terminal-qa.mjs"),
+        content: include_str!("builtins/skills/cas-cli-craft/scripts/terminal-qa.mjs"),
     },
     BuiltinFile {
         path: "skills/cas-diagnosing-bugs/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-diagnosing-bugs/SKILL.md"),
+        content: include_str!("builtins/skills/cas-diagnosing-bugs/SKILL.md"),
     },
-    BuiltinFile { path: "skills/cas-codebase-design/SKILL.md", content: include_str!("builtins/grok/skills/cas-codebase-design/SKILL.md") },
-    BuiltinFile { path: "skills/cas-tdd/SKILL.md", content: include_str!("builtins/grok/skills/cas-tdd/SKILL.md") },
-    BuiltinFile { path: "skills/cas-wizard/SKILL.md", content: include_str!("builtins/grok/skills/cas-wizard/SKILL.md") },
-    BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/grok/skills/cas-wizard/template.sh") },
-    BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/grok/skills/cas-resolving-merge-conflicts/SKILL.md") },
-    BuiltinFile { path: "skills/cas-to-questionnaire/SKILL.md", content: include_str!("builtins/grok/skills/cas-to-questionnaire/SKILL.md") },
-    BuiltinFile { path: "skills/cas-image-generate/SKILL.md", content: include_str!("builtins/grok/skills/cas-image-generate/SKILL.md") },
-    BuiltinFile { path: "skills/cas-image-generate/references/asset-playbook.md", content: include_str!("builtins/grok/skills/cas-image-generate/references/asset-playbook.md") },
-    BuiltinFile { path: "skills/cas-image-generate/references/svg-web-assets.md", content: include_str!("builtins/grok/skills/cas-image-generate/references/svg-web-assets.md") },
-    BuiltinFile { path: "skills/cas-image-generate/references/style-harvest.md", content: include_str!("builtins/grok/skills/cas-image-generate/references/style-harvest.md") },
-    BuiltinFile { path: "skills/cas-image-generate/references/output-checklist.md", content: include_str!("builtins/grok/skills/cas-image-generate/references/output-checklist.md") },
-    BuiltinFile { path: "skills/cas-image-generate/references/providers.md", content: include_str!("builtins/grok/skills/cas-image-generate/references/providers.md") },
-    BuiltinFile { path: "skills/cas-image-generate/scripts/generate-image.sh", content: include_str!("builtins/grok/skills/cas-image-generate/scripts/generate-image.sh") },
-    BuiltinFile { path: "skills/cas-technical-drawing/SKILL.md", content: include_str!("builtins/grok/skills/cas-technical-drawing/SKILL.md") },
-    BuiltinFile { path: "skills/cas-technical-drawing/references/model-schema.md", content: include_str!("builtins/grok/skills/cas-technical-drawing/references/model-schema.md") },
-    BuiltinFile { path: "skills/cas-technical-drawing/references/drafting-conventions.md", content: include_str!("builtins/grok/skills/cas-technical-drawing/references/drafting-conventions.md") },
-    BuiltinFile { path: "skills/cas-technical-drawing/references/likeness-critique.md", content: include_str!("builtins/grok/skills/cas-technical-drawing/references/likeness-critique.md") },
-    BuiltinFile { path: "skills/cas-technical-drawing/scripts/draft.mjs", content: include_str!("builtins/grok/skills/cas-technical-drawing/scripts/draft.mjs") },
-    BuiltinFile { path: "skills/cas-technical-drawing/examples/shelf-box.json", content: include_str!("builtins/grok/skills/cas-technical-drawing/examples/shelf-box.json") },
+    BuiltinFile { path: "skills/cas-codebase-design/SKILL.md", content: include_str!("builtins/skills/cas-codebase-design/SKILL.md") },
+    BuiltinFile { path: "skills/cas-tdd/SKILL.md", content: include_str!("builtins/skills/cas-tdd/SKILL.md") },
+    BuiltinFile { path: "skills/cas-wizard/SKILL.md", content: include_str!("builtins/skills/cas-wizard/SKILL.md") },
+    BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/skills/cas-wizard/template.sh") },
+    BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/skills/cas-resolving-merge-conflicts/SKILL.md") },
+    BuiltinFile { path: "skills/cas-to-questionnaire/SKILL.md", content: include_str!("builtins/skills/cas-to-questionnaire/SKILL.md") },
+    BuiltinFile { path: "skills/cas-image-generate/SKILL.md", content: include_str!("builtins/skills/cas-image-generate/SKILL.md") },
+    BuiltinFile { path: "skills/cas-image-generate/references/asset-playbook.md", content: include_str!("builtins/skills/cas-image-generate/references/asset-playbook.md") },
+    BuiltinFile { path: "skills/cas-image-generate/references/svg-web-assets.md", content: include_str!("builtins/skills/cas-image-generate/references/svg-web-assets.md") },
+    BuiltinFile { path: "skills/cas-image-generate/references/style-harvest.md", content: include_str!("builtins/skills/cas-image-generate/references/style-harvest.md") },
+    BuiltinFile { path: "skills/cas-image-generate/references/output-checklist.md", content: include_str!("builtins/skills/cas-image-generate/references/output-checklist.md") },
+    BuiltinFile { path: "skills/cas-image-generate/references/providers.md", content: include_str!("builtins/skills/cas-image-generate/references/providers.md") },
+    BuiltinFile { path: "skills/cas-image-generate/scripts/generate-image.sh", content: include_str!("builtins/skills/cas-image-generate/scripts/generate-image.sh") },
+    BuiltinFile { path: "skills/cas-technical-drawing/SKILL.md", content: include_str!("builtins/skills/cas-technical-drawing/SKILL.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/references/model-schema.md", content: include_str!("builtins/skills/cas-technical-drawing/references/model-schema.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/references/drafting-conventions.md", content: include_str!("builtins/skills/cas-technical-drawing/references/drafting-conventions.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/references/likeness-critique.md", content: include_str!("builtins/skills/cas-technical-drawing/references/likeness-critique.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/scripts/draft.mjs", content: include_str!("builtins/skills/cas-technical-drawing/scripts/draft.mjs") },
+    BuiltinFile { path: "skills/cas-technical-drawing/examples/shelf-box.json", content: include_str!("builtins/skills/cas-technical-drawing/examples/shelf-box.json") },
 ];
 
 /// OpenCode does not load a filesystem skill/agent home for its generated
@@ -4176,12 +4176,12 @@ This is the body content."#;
             (
                 "codex",
                 CODEX_BUILTIN_SKILLS,
-                include_str!("builtins/codex/skills/cas-supervisor/references/operator-reply.md"),
+                include_str!("builtins/skills/cas-supervisor/references/operator-reply.md"),
             ),
             (
                 "grok",
                 GROK_BUILTIN_SKILLS,
-                include_str!("builtins/grok/skills/cas-supervisor/references/operator-reply.md"),
+                include_str!("builtins/skills/cas-supervisor/references/operator-reply.md"),
             ),
         ] {
             let contract = catalog
@@ -4430,11 +4430,11 @@ This is the body content."#;
             ),
             (
                 "codex",
-                include_str!("builtins/codex/skills/cas-worker/references/details.md"),
+                include_str!("builtins/skills/cas-worker/references/details.md"),
             ),
             (
                 "grok",
-                include_str!("builtins/grok/skills/cas-worker/references/details.md"),
+                include_str!("builtins/skills/cas-worker/references/details.md"),
             ),
         ] {
             for required in ["## Structured execution state", "state_patch", "## Context budgeting"] {
@@ -4496,11 +4496,11 @@ This is the body content."#;
             ),
             (
                 "codex cas-supervisor reference.md",
-                include_str!("builtins/codex/skills/cas-supervisor/references/reference.md"),
+                include_str!("builtins/skills/cas-supervisor/references/reference.md"),
             ),
             (
                 "grok cas-supervisor reference.md",
-                include_str!("builtins/grok/skills/cas-supervisor/references/reference.md"),
+                include_str!("builtins/skills/cas-supervisor/references/reference.md"),
             ),
         ];
         let worker_files = [
@@ -4510,11 +4510,11 @@ This is the body content."#;
             ),
             (
                 "codex cas-worker details.md",
-                include_str!("builtins/codex/skills/cas-worker/references/details.md"),
+                include_str!("builtins/skills/cas-worker/references/details.md"),
             ),
             (
                 "grok cas-worker details.md",
-                include_str!("builtins/grok/skills/cas-worker/references/details.md"),
+                include_str!("builtins/skills/cas-worker/references/details.md"),
             ),
         ];
         for (label, content) in supervisor_files {
@@ -4575,8 +4575,8 @@ This is the body content."#;
             ),
             (
                 "codex",
-                include_str!("builtins/codex/skills/cas-worker.md"),
-                include_str!("builtins/codex/skills/cas-worker/references/details.md"),
+                include_str!("builtins/skills/cas-worker.md"),
+                include_str!("builtins/skills/cas-worker/references/details.md"),
             ),
         ] {
             for required in [
@@ -4605,7 +4605,7 @@ This is the body content."#;
             ),
             (
                 "codex",
-                include_str!("builtins/codex/skills/cas-supervisor/references/planning.md"),
+                include_str!("builtins/skills/cas-supervisor/references/planning.md"),
             ),
         ] {
             for required in [
@@ -4798,13 +4798,13 @@ This is the body content."#;
             ),
             (
                 "codex",
-                include_str!("builtins/codex/skills/cas-worker.md"),
-                include_str!("builtins/codex/skills/cas-worker/references/discipline.md"),
+                include_str!("builtins/skills/cas-worker.md"),
+                include_str!("builtins/skills/cas-worker/references/discipline.md"),
             ),
             (
                 "grok",
-                include_str!("builtins/grok/skills/cas-worker.md"),
-                include_str!("builtins/grok/skills/cas-worker/references/discipline.md"),
+                include_str!("builtins/skills/cas-worker.md"),
+                include_str!("builtins/skills/cas-worker/references/discipline.md"),
             ),
         ] {
             // These launch-contract rules are intentionally absent from both
@@ -4884,13 +4884,13 @@ This is the body content."#;
             ),
             (
                 "codex",
-                include_str!("builtins/codex/skills/cas-worker.md"),
-                include_str!("builtins/codex/skills/cas-worker/references/close-gate.md"),
+                include_str!("builtins/skills/cas-worker.md"),
+                include_str!("builtins/skills/cas-worker/references/close-gate.md"),
             ),
             (
                 "grok",
-                include_str!("builtins/grok/skills/cas-worker.md"),
-                include_str!("builtins/grok/skills/cas-worker/references/close-gate.md"),
+                include_str!("builtins/skills/cas-worker.md"),
+                include_str!("builtins/skills/cas-worker/references/close-gate.md"),
             ),
         ] {
             for required in [
@@ -4940,8 +4940,8 @@ This is the body content."#;
     fn test_worker_skills_pin_return_contract_and_silent_execution_cas_0de3() {
         for (label, content) in [
             ("claude", include_str!("builtins/skills/cas-worker.md")),
-            ("codex", include_str!("builtins/codex/skills/cas-worker.md")),
-            ("grok", include_str!("builtins/grok/skills/cas-worker.md")),
+            ("codex", include_str!("builtins/skills/cas-worker.md")),
+            ("grok", include_str!("builtins/skills/cas-worker.md")),
         ] {
             for required in [
                 "## Return contract",
@@ -5000,13 +5000,13 @@ This is the body content."#;
             ),
             (
                 "codex",
-                include_str!("builtins/codex/skills/cas-worker.md"),
-                include_str!("builtins/codex/skills/cas-worker/references/discipline.md"),
+                include_str!("builtins/skills/cas-worker.md"),
+                include_str!("builtins/skills/cas-worker/references/discipline.md"),
             ),
             (
                 "grok",
-                include_str!("builtins/grok/skills/cas-worker.md"),
-                include_str!("builtins/grok/skills/cas-worker/references/discipline.md"),
+                include_str!("builtins/skills/cas-worker.md"),
+                include_str!("builtins/skills/cas-worker/references/discipline.md"),
             ),
         ] {
             // The hot body keeps only the pointer; the rule's detail is on
@@ -5054,8 +5054,8 @@ This is the body content."#;
             ),
             (
                 "codex",
-                include_str!("builtins/codex/skills/cas-worker.md"),
-                include_str!("builtins/codex/skills/cas-worker/references/close-gate.md"),
+                include_str!("builtins/skills/cas-worker.md"),
+                include_str!("builtins/skills/cas-worker/references/close-gate.md"),
             ),
         ] {
             // SKILL.md points workers at the gate (via close-gate.md).
@@ -7721,12 +7721,12 @@ This is the body content."#;
             ),
             (
                 "codex",
-                include_str!("builtins/codex/skills/cas-supervisor/references/workflow.md"),
+                include_str!("builtins/skills/cas-supervisor/references/workflow.md"),
                 "mcp__cs__",
             ),
             (
                 "grok",
-                include_str!("builtins/grok/skills/cas-supervisor/references/workflow.md"),
+                include_str!("builtins/skills/cas-supervisor/references/workflow.md"),
                 "cas__",
             ),
         ] {
@@ -7796,15 +7796,15 @@ This is the body content."#;
             ),
             (
                 "codex model-selection",
-                include_str!("builtins/codex/skills/cas-supervisor/references/model-selection.md"),
+                include_str!("builtins/skills/cas-supervisor/references/model-selection.md"),
             ),
             (
                 "codex workflow",
-                include_str!("builtins/codex/skills/cas-supervisor/references/workflow.md"),
+                include_str!("builtins/skills/cas-supervisor/references/workflow.md"),
             ),
             (
                 "codex reference",
-                include_str!("builtins/codex/skills/cas-supervisor/references/reference.md"),
+                include_str!("builtins/skills/cas-supervisor/references/reference.md"),
             ),
             (
                 "grok body",
@@ -7812,15 +7812,15 @@ This is the body content."#;
             ),
             (
                 "grok model-selection",
-                include_str!("builtins/grok/skills/cas-supervisor/references/model-selection.md"),
+                include_str!("builtins/skills/cas-supervisor/references/model-selection.md"),
             ),
             (
                 "grok workflow",
-                include_str!("builtins/grok/skills/cas-supervisor/references/workflow.md"),
+                include_str!("builtins/skills/cas-supervisor/references/workflow.md"),
             ),
             (
                 "grok reference",
-                include_str!("builtins/grok/skills/cas-supervisor/references/reference.md"),
+                include_str!("builtins/skills/cas-supervisor/references/reference.md"),
             ),
         ] {
             assert!(
@@ -7875,18 +7875,18 @@ This is the body content."#;
             include_str!("builtins/skills/cas-supervisor/references/reference.md");
         let codex_body = include_str!("builtins/codex/skills/cas-supervisor.md");
         let codex_model =
-            include_str!("builtins/codex/skills/cas-supervisor/references/model-selection.md");
+            include_str!("builtins/skills/cas-supervisor/references/model-selection.md");
         let codex_workflow =
-            include_str!("builtins/codex/skills/cas-supervisor/references/workflow.md");
+            include_str!("builtins/skills/cas-supervisor/references/workflow.md");
         let codex_reference =
-            include_str!("builtins/codex/skills/cas-supervisor/references/reference.md");
+            include_str!("builtins/skills/cas-supervisor/references/reference.md");
         let grok_body = include_str!("builtins/grok/skills/cas-supervisor.md");
         let grok_model =
-            include_str!("builtins/grok/skills/cas-supervisor/references/model-selection.md");
+            include_str!("builtins/skills/cas-supervisor/references/model-selection.md");
         let grok_workflow =
-            include_str!("builtins/grok/skills/cas-supervisor/references/workflow.md");
+            include_str!("builtins/skills/cas-supervisor/references/workflow.md");
         let grok_reference =
-            include_str!("builtins/grok/skills/cas-supervisor/references/reference.md");
+            include_str!("builtins/skills/cas-supervisor/references/reference.md");
 
         assert_eq!(
             claude_reference.replace("mcp__cas__", "mcp__cs__"),
@@ -8112,11 +8112,11 @@ This is the body content."#;
             ("claude cas-worker.md", WORKER_GUIDE),
             (
                 "codex cas-worker.md",
-                include_str!("builtins/codex/skills/cas-worker.md"),
+                include_str!("builtins/skills/cas-worker.md"),
             ),
             (
                 "grok cas-worker.md",
-                include_str!("builtins/grok/skills/cas-worker.md"),
+                include_str!("builtins/skills/cas-worker.md"),
             ),
         ] {
             for required in [
@@ -8146,7 +8146,7 @@ This is the body content."#;
             ("claude cas-worker.md", WORKER_GUIDE),
             (
                 "codex cas-worker.md",
-                include_str!("builtins/codex/skills/cas-worker.md"),
+                include_str!("builtins/skills/cas-worker.md"),
             ),
         ] {
             for required in [
@@ -8219,11 +8219,11 @@ This is the body content."#;
             ("claude cas-worker.md", WORKER_GUIDE),
             (
                 "codex cas-worker.md",
-                include_str!("builtins/codex/skills/cas-worker.md"),
+                include_str!("builtins/skills/cas-worker.md"),
             ),
             (
                 "grok cas-worker.md",
-                include_str!("builtins/grok/skills/cas-worker.md"),
+                include_str!("builtins/skills/cas-worker.md"),
             ),
         ] {
             // WP2 (audit cas-1660 L2 P2-73): the rule is stated once in the

@@ -2,7 +2,7 @@
 managed_by: cas
 ---
 
-# Schema for memory content and the unified mcp__cas__memory request.
+# Schema for memory content and the unified `memory` tool request.
 #
 # Memory content is stored in a SQLite entry row. Optional YAML frontmatter is
 # embedded at the beginning of that content, followed by the Markdown body.

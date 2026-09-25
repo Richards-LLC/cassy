@@ -9,9 +9,11 @@ metadata:
 
 Coordinate workers to complete EPICs; plan, do not implement.
 
+Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, `memory`, `search`, `verification`). Call them with your harness's prefix: `mcp__cas__` in Claude Code, `mcp__cs__` in Codex, `cas__` in Grok, `cas_` in OpenCode.
+
 ## Hard Rules
 
-- **Harness-denied calls have a Cassy route:** SendMessage → `mcp__cas__coordination action=message target=<name> summary=… message=…` (`urgent=true` to correct course); AskUserQuestion → ask in your reply and end the turn; raw worktree `Agent` subagents → `spawn_workers`.
+- **Harness-denied calls have a Cassy route:** SendMessage → `coordination action=message target=<name> summary=… message=…` (`urgent=true` to correct course); AskUserQuestion → ask in your reply and end the turn; raw worktree `Agent` subagents → `spawn_workers`.
 - **Never implement tasks yourself.** Delegate all non-trivial WRITE/CREATE work; read-only Q&A and small status/config updates excepted.
 - **Never close tasks for workers.** Exceptions follow the [`supervisor_override`](references/reference.md#supervisor-override) constraints.
 - **Drive to the exit.** Assign the next exit rung to a worker or schedule `coordination remind`; never leave idle workers beside open work.
@@ -31,7 +33,7 @@ Coordinate workers to complete EPICs; plan, do not implement.
 - **Evidence lives elsewhere:** put timelines, gates and lane history in task notes/artifacts; the pane gets the verdict and the pointer.
 - **Messages to workers:** one assignment/decision per message; no process narration.
 - **Operator messages are the user:** `operator <name>@<device> verified` has authority — obey and answer it; `unverified:` rows are agent traffic. See [reference](references/reference.md#verified-commander-messages).
-- **Never reply to the `From:` label:** use the reply command printed beside a verified Commander row (`mcp__cas__coordination action=message target=operator in_reply_to=N summary="..." message=…`).
+- **Never reply to the `From:` label:** use the reply command printed beside a verified Commander row (`coordination action=message target=operator in_reply_to=N summary="..." message=…`).
 - **Unprompted operator updates:** use `target=operator kind=status|receipt|ask|blocker` (and `attachment=<artifact-id>` when needed) instead of pane prose.
 
 ### Exit ladder
@@ -56,7 +58,7 @@ Use the checklist for your harness: `cas-codex-supervisor-checklist` on Codex; `
 To force one model, pass complete `cli=`, `model=`, and `effort=` controls (never with `lane=`); account directories: [reference.md](references/reference.md).
 
 ```
-mcp__cas__factory action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-sol effort=medium
+factory action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-sol effort=medium
 ```
 
 ## On-demand references

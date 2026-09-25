@@ -22,14 +22,14 @@ hand-edit is a trust breaker — the keep-block check is not optional.
 
 ## 2. Write a thin pointer memory
 
-Invoke `mcp__cas__memory` with `action=remember` to create or update one pointer
+Invoke `memory` with `action=remember` to create or update one pointer
 memory, using the title the parent skill specifies.
 
 - **Body:** ONE line. A repo-relative link to the doc plus a single-sentence hook.
 - **No content duplication.** Do not inline the doc's contents. The point is that
   search surfaces the pointer and the reader opens the doc.
 
-Find an existing pointer first: `mcp__cas__search action=search query="<title>" doc_type=entry`.
+Find an existing pointer first: `search action=search query="<title>" doc_type=entry`.
 If one exists, update it with `memory action=update id=<id>`; otherwise remember a new
 one. Do not create duplicates.
 

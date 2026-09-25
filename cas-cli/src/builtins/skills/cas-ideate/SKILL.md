@@ -53,7 +53,7 @@ Look at `docs/ideation/` for ideation documents created within the last 30 days,
 ls docs/ideation/ 2>/dev/null
 ```
 ```
-mcp__cas__search action=search query="ideation <focus>" doc_type=entry limit=5
+search action=search query="ideation <focus>" doc_type=entry limit=5
 ```
 
 A prior ideation doc is relevant when:
@@ -103,8 +103,8 @@ Run two grounding steps in parallel (in the **foreground** — results are neede
 **2. Cassy memory/learnings search** — run directly (not via sub-agent):
 
 ```
-mcp__cas__search action=search query="<focus or general pain points>" doc_type=entry limit=15
-mcp__cas__search action=search query="<focus>" doc_type=rule limit=10
+search action=search query="<focus or general pain points>" doc_type=entry limit=15
+search action=search query="<focus>" doc_type=rule limit=10
 ```
 
 Pull out any bugfix memories, architecture notes, or feedback entries that suggest known friction, fragile subsystems, or recurring problems.

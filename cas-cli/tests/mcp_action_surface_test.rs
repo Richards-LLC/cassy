@@ -455,15 +455,7 @@ const TEMPLATE_TOOL_VARIABLES: &[(&str, &str)] = &[
 
 /// Known skill-text offenders, owned by Wave B. Key: builtin-relative path
 /// (applies to every flavor that ships it), defect, audit master ID.
-const CALL_SHAPE_ALLOWLIST: &[(&str, &str, &str)] = &[
-    ("skills/cas-brainstorm/references/handoff.md", "task action=create: missing risk", "M12"),
-    ("skills/cas-github-issues/SKILL.md", "task action=create: missing risk", "M12"),
-    (
-        "skills/cas-ideate/references/post-ideation-workflow.md",
-        "task action=create: missing risk",
-        "M12",
-    ),
-];
+const CALL_SHAPE_ALLOWLIST: &[(&str, &str, &str)] = &[];
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct CallShapeOffender {

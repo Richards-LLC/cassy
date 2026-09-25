@@ -457,7 +457,7 @@ fn release_slack_routes_are_mecha_cassy_only() {
             "mecha-cassy",
             "cas-cut-release",
             "cli-routing",
-            "release-notes",
+            "cas-release-notes",
         ] {
             let prefix = format!("skills/{skill}/");
             for builtin in builtin_catalog::skills(flavor) {

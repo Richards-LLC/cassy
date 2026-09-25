@@ -46,8 +46,9 @@ supervisor SessionStart. Reply with `send_message` on the supplied thread ID.
 
 ## Cost and security
 
-Viktor starts can cost money or outlive a client timeout. Do not automatically retry a start;
-reconcile the returned thread/run first. Keep questions bounded and use the existing thread for
+Viktor starts can cost money or outlive a client timeout. Pass an `idempotency_key` on every
+start so a retry of an uncertain start is safe; without one, do not retry, and reconcile the
+returned thread/run first. Keep questions bounded and use the existing thread for
 follow-ups. The CAS proxy records caller/task attribution and applies the exact allowlist.
 Credentials remain environment references at the proxy boundary: never pass a key in tool
 arguments, source control, artifacts, or agent context.

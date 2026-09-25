@@ -82,7 +82,8 @@ impl SyncingRuleStore {
 
     /// Enable the foreign-project sync guard for the project at
     /// `project_root` (cas-caae): a rule naming another registered project is
-    /// kept out of (and removed from) this project's rule files.
+    /// kept out of (and removed from) this project's rule files, and is never
+    /// queued for personal or team push (cas-42ee).
     #[must_use]
     pub fn with_project_root(mut self, project_root: PathBuf) -> Self {
         self.project_root = Some(project_root);
@@ -124,6 +125,15 @@ impl SyncingRuleStore {
         let Some(queue) = &self.cloud_queue else {
             return;
         };
+        // cas-42ee: a rule naming another registered project is not this
+        // project's to publish. A personal or team push would stamp it with
+        // this project's origin, and every pull elsewhere would accept it as
+        // ours (the cas-caae Gabber rules). Drop anything queued earlier for
+        // it as well, so an older payload cannot publish it either.
+        if self.names_foreign_project(rule) {
+            let _ = queue.drop_queued_pushes_for(EntityType::Rule.as_str(), &rule.id);
+            return;
+        }
         let payload = match serde_json::to_string(rule) {
             Ok(p) => p,
             Err(_) => return,
@@ -346,6 +356,47 @@ mod tests {
         scoped.tags = vec!["project:gabber-studio".to_string()];
         store.update(&scoped).unwrap();
         assert!(target.join("rule-002.md").exists());
+    }
+
+    /// cas-42ee: the guard that keeps a foreign rule out of rule files also
+    /// keeps it out of the personal and team push queues, including a payload
+    /// queued before the rule turned foreign.
+    #[test]
+    fn foreign_project_rule_is_never_queued_for_push() {
+        let (temp, store) = create_team_store(None);
+        let store = store.with_project_guard(ForeignProjectGuard::new(
+            "cas-src",
+            ["gabber-studio".to_string()],
+        ));
+        let queue = SyncQueue::open(temp.path()).unwrap();
+
+        let own = make_rule("rule-001", Scope::Project);
+        store.add(&own).unwrap();
+        assert_eq!(queue_counts(&queue), (1, 1), "an own rule is queued as before");
+        queue.clear().unwrap();
+
+        let mut rule = make_rule("rule-002", Scope::Project);
+        store.add(&rule).unwrap();
+        assert_eq!(queue_counts(&queue), (1, 1));
+
+        rule.content = "Gabber Studio branching: ALWAYS cut new branches from `staging`.".into();
+        store.update(&rule).unwrap();
+        assert_eq!(
+            queue_counts(&queue),
+            (0, 0),
+            "a rule naming another project is not pushed, and its earlier payload is dropped"
+        );
+
+        store.add(&make_rule("rule-003", Scope::Global)).unwrap();
+        let mut foreign = make_rule("rule-004", Scope::Project);
+        foreign.content = "Deploy gabber-studio from staging.".into();
+        store.add(&foreign).unwrap();
+        assert_eq!(queue_counts(&queue), (1, 0), "only the own global rule is queued");
+
+        // An explicit `project:<slug>` tag declares the scope, as for rule files.
+        foreign.tags = vec!["project:gabber-studio".to_string()];
+        store.update(&foreign).unwrap();
+        assert_eq!(queue_counts(&queue), (2, 1));
     }
 
     fn queue_counts(queue: &SyncQueue) -> (usize, usize) {

@@ -37,6 +37,7 @@ This is the single most important guardrail in the skill. Workers downstream of 
   - Scope boundaries are clear
   - No meaningful technical or research questions remain
 - **Ask more questions** — Continue clarifying scope, preferences, or edge cases.
+- **Ask someone else** — Only when a blocking question needs a third party's answer: hand it to `/cas-to-questionnaire`.
 - **Done for now** — Return later. The requirements doc (if written) is durable.
 
 If the direct-to-work gate is not satisfied, **omit that option entirely** — do not offer it as a "yes but with caveats" choice.
@@ -46,24 +47,21 @@ If the direct-to-work gate is not satisfied, **omit that option entirely** — d
 ### "Proceed to planning"
 
 1. Make sure the requirements doc is committed/saved.
-2. Create a Cassy task (or epic) referencing the requirements doc:
-   ```
-   cas__task action=create task_type=epic title="<topic>" description="See docs/brainstorms/YYYY-MM-DD-<topic>-requirements.md for full requirements." labels=brainstormed
-   ```
-3. Hand off to the supervisor/planner with the requirements doc path. Do not print the closing summary yet.
+2. Hand the requirements doc path to the supervisor (cas-supervisor intake creates the epic and its tasks; creating one here makes a duplicate). Do not print the closing summary yet.
 
 ### "Proceed directly to work"
 
 1. Make sure the requirements doc (if any) is committed/saved.
 2. Create a Cassy task referencing the requirements doc, with explicit acceptance criteria copied from the Success Criteria section:
    ```
-   cas__task action=create title="<topic>" description="<scope summary>" acceptance_criteria="<from doc>"
+   cas__task action=create title="<topic>" description="<scope summary>" acceptance_criteria="<from doc>" risk=<none|platform|concurrency|blast-radius>
    ```
+   `risk` is required; `blast-radius` also needs `proof_targets=<test targets>`.
 3. Begin execution. Do not print the closing summary yet.
 
 ### "Ask more questions"
 
-Return to Phase 1.3 (Collaborative Dialogue). Probe deeper into edge cases, constraints, preferences, or areas not yet explored. Continue one question at a time until the user is satisfied, then return to Phase 4. Do not show the closing summary yet.
+Return to Phase 1.3 (Collaborative Dialogue). Probe deeper into edge cases, constraints, preferences, or areas not yet explored. Continue one frontier per round until the user is satisfied, then return to Phase 4. Do not show the closing summary yet.
 
 ### "Done for now"
 

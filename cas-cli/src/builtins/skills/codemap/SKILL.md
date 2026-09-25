@@ -101,13 +101,13 @@ When in doubt, **name a concrete module or filename** that lives there.
 Follow [references/doc-hygiene.md](references/doc-hygiene.md) for the three steps this skill shares with `project-overview` and `design-spec`: keep-block preservation on re-runs, the thin pointer memory, and the commit. This skill's specifics:
 
 - **Keep-blocks** most often wrap `## Cross-cutting` notes (hot paths, migration gotchas). Put them back in the section they came from.
-- **Pointer memory title:** `project_<slug>_codemap.md` (slug = lowercase kebab-case of project name). Body example: `See [.claude/CODEMAP.md](.claude/CODEMAP.md) — Rust workspace + TS frontend; CLI lives in `cas-cli/`, hooks in `crates/cas-core/`.`
+- **Pointer memory title:** `project_<slug>_codemap` (slug = lowercase kebab-case of project name). Body example: `See [.claude/CODEMAP.md](.claude/CODEMAP.md) — Rust workspace + TS frontend; CLI lives in `cas-cli/`, hooks in `crates/cas-core/`.`
 - **Commit** `.claude/CODEMAP.md`. The freshness gate (SessionStart hook + `cas codemap status`) uses **git history** as the sole authority, so the commit is what resets the signal. Verify with `cas codemap status` → `Status: up to date`. No manual `cas codemap clear` is required.
 - **Report back:** (a) total line count, (b) how many top-level subsystems are mapped, (c) anything notable about the layout (workspace? monorepo? polyglot?).
 
 ### Seed the knowledge store
 
-`.claude/CODEMAP.md` is a distillable source, so one build turns the doc you just wrote into a knowledge page plus a source-ledger entry:
+`.claude/CODEMAP.md` is a distillable source. First plan the pass by running the build command below with `--dry-run` instead of its other flags (no model is called). A build distills pending sources in path order up to `--max-sources`, so on a stale ledger (many pending sources) the new doc may not be reached. If the plan does not include `.claude/CODEMAP.md` within the first five sources, skip the build and note the dry-run count in the task notes. Otherwise build:
 
 ```bash
 if cas knowledge build --timeout-secs 90 --max-sources 5; then
@@ -119,7 +119,7 @@ fi
 
 The command is deliberately best effort. If it returns a non-zero exit status, record the durable receipt in task notes with the command and exit status, then continue with the CODEMAP commit and `cas codemap status` proof; a failed build is non-blocking and may leave the knowledge page stale or missing. Rust enforces one 90-second wall-clock deadline across the complete build, stops later completions after exhaustion, and terminates/reaps the active provider process group, so a stalled build leaves no ordinary orphan descendant.
 
-Do not detach or background the build, run a manual polling loop, or wait beyond the 90-second bound. This is one bounded invocation observed once. Nothing else in the repo changed, so the ledger short-circuits every other source and this costs at most one model call. Confirm it landed:
+Do not detach or background the build, run a manual polling loop, or wait beyond the 90-second bound. This is one bounded invocation observed once. It costs at most five model calls. Confirm it landed:
 
 ```bash
 cas knowledge search "codemap"

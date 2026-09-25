@@ -6,7 +6,7 @@ set -euo pipefail
 TOTAL_STAGES=0
 _stage=0
 ENV_FILE="${ENV_FILE:-.env}"
-open_url() { command -v xdg-open >/dev/null && xdg-open "$1" || command -v open >/dev/null && open "$1" || printf 'Open manually: %s\n' "$1"; }
+open_url() { if command -v xdg-open >/dev/null; then xdg-open "$1"; elif [ "$(uname)" = Darwin ] && command -v open >/dev/null; then open "$1"; else printf 'Open manually: %s\n' "$1"; fi; }
 pause() { read -r -p "${1:-Press Enter to continue} " _ || true; }
 confirm() { local answer; read -r -p "$1 [y/N] " answer || true; [[ "$answer" =~ ^[Yy]$ ]]; }
 stage() { _stage=$((_stage + 1)); printf '\nStage %s/%s: %s\n' "$_stage" "$TOTAL_STAGES" "$1"; }

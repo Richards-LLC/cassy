@@ -4,27 +4,37 @@ pub(crate) const CAS_SECTION_BEGIN: &str =
     "<!-- CAS:BEGIN - This section is managed by CAS. Do not edit manually. -->";
 pub(crate) const CAS_SECTION_END: &str = "<!-- CAS:END -->";
 
-/// Cassy directive content (MCP tools)
-const CAS_DIRECTIVE_CONTENT: &str = r#"# IMPORTANT: USE Cassy FOR TASK AND MEMORY MANAGEMENT
+/// The harness-neutral Cassy directive (skills audit D3, M44, M66). It lives
+/// in the project's AGENTS.md, which Codex and Grok read directly and Claude
+/// Code reads through the `@AGENTS.md` import in CLAUDE.md, so every harness
+/// loads it once. Tool names are bare, with the prefix table stated once
+/// (audit D1).
+const AGENTS_DIRECTIVE_CONTENT: &str = r#"## Cassy: tasks, memory and context
 
-**DO NOT USE BUILT-IN TOOLS (TodoWrite, EnterPlanMode) FOR TASK TRACKING.**
+Track work and knowledge in Cassy rather than in harness-local todo lists; Cassy tasks and memories persist across sessions.
+Cassy's MCP tools are `task`, `memory` and `search`, named with your harness's prefix: `mcp__cas__` in Claude Code, `mcp__cs__` in Codex, `cas__` in Grok, `cas_` in OpenCode. Call them directly.
 
-Use CAS MCP tools instead:
-First use each session — load MCP schemas: ToolSearch(query="select:mcp__cas__task,mcp__cas__memory,mcp__cas__search"). ToolSearch only loads the schema — it does not call the tool. Once it succeeds, call `mcp__cas__task` etc. directly; never re-run ToolSearch for a tool already resolved.
-- `mcp__cas__task` with action: create - Create tasks (NOT TodoWrite)
-- `mcp__cas__task` with action: start/close - Manage task status
-- `mcp__cas__task` with action: ready - See ready tasks
-- `mcp__cas__memory` with action: remember - Store memories and learnings
-- `mcp__cas__search` with action: search - Search all context
+- `task`: action=create, start, close, ready.
+- `memory`: action=remember.
+- `search`: action=search.
 
-Cassy provides persistent context across sessions. Built-in tools are ephemeral.
+Bug routing: `cas config get issues.repo` names this project's tracker, and `issues.components.{cassy,violet,cloud}` name the Cassy, Violet and Cloud trackers. File an operational bug in the matching tracker before moving on; in the Cassy source repo itself, a Cassy bug becomes a task there. If `issues.repo` is unset, record the bug as a task note.
+Release notes: if docs/release-notes/RUBRIC.md exists, follow it for every merge to `staging` or `main`, using the `cas-release-notes` skill."#;
 
-Bug routing: `cas config get issues.repo` / `issues.components.{cassy,violet,cloud}` name the project, Cassy, Violet and Cloud trackers; file operational bugs in the matching repo before moving on.
-Release notes: when a merge reaches `staging` or `main`, use the `release-notes` skill and follow docs/release-notes/RUBRIC.md."#;
+/// The Claude Code directive: import the neutral AGENTS.md block, plus the
+/// one Claude-only instruction (the ToolSearch schema bootstrap).
+const CLAUDE_DIRECTIVE_CONTENT: &str = r#"@AGENTS.md
 
-/// Build the full Cassy section with markers
+Claude Code: load the Cassy tool schemas once per session with ToolSearch(query="select:mcp__cas__task,mcp__cas__memory,mcp__cas__search"). ToolSearch only loads the schema — it does not call the tool. Once it succeeds, call `mcp__cas__task` etc. directly; never re-run ToolSearch for a tool already resolved."#;
+
+/// Build the CLAUDE.md managed section with markers.
 pub(crate) fn build_cas_section() -> String {
-    format!("{CAS_SECTION_BEGIN}\n{CAS_DIRECTIVE_CONTENT}\n{CAS_SECTION_END}")
+    format!("{CAS_SECTION_BEGIN}\n{CLAUDE_DIRECTIVE_CONTENT}\n{CAS_SECTION_END}")
+}
+
+/// Build the AGENTS.md managed section with markers.
+pub(crate) fn build_agents_section() -> String {
+    format!("{CAS_SECTION_BEGIN}\n{AGENTS_DIRECTIVE_CONTENT}\n{CAS_SECTION_END}")
 }
 
 /// What the nearest-to-root ancestors of a project carry.
@@ -270,6 +280,57 @@ pub fn update_claude_md(project_root: &Path) -> anyhow::Result<bool> {
     }
 }
 
+/// Decide what should happen to `project_root/AGENTS.md`: create it with the
+/// neutral directive, refresh an existing managed block, or prepend the block
+/// to a file that has none. Unlike CLAUDE.md there is no ancestor rule: Codex
+/// and Grok read AGENTS.md only from the repository root down, so each project
+/// carries its own copy (audit M66), and Claude reaches it only through a
+/// CLAUDE.md import.
+pub(crate) fn plan_agents_md(project_root: &Path) -> anyhow::Result<ClaudeMdPlan> {
+    let path = project_root.join("AGENTS.md");
+    let new_section = build_agents_section();
+    if !path.exists() {
+        return Ok(ClaudeMdPlan::Create {
+            content: format!("{new_section}\n"),
+        });
+    }
+    let content = std::fs::read_to_string(&path)?;
+    if let Some((begin, end)) = managed_block_range(&content) {
+        let refreshed = replace_managed_block(&content, begin, end, &new_section);
+        if refreshed == content {
+            return Ok(ClaudeMdPlan::Unchanged);
+        }
+        return Ok(ClaudeMdPlan::Modify {
+            old: content,
+            new: refreshed,
+            description: "Update Cassy section in AGENTS.md",
+        });
+    }
+    let new_content = format!("{new_section}\n\n{content}");
+    Ok(ClaudeMdPlan::Modify {
+        old: content,
+        new: new_content,
+        description: "Add Cassy section to AGENTS.md",
+    })
+}
+
+/// Create or refresh the managed block in `project_root/AGENTS.md`.
+/// Returns Ok(true) if the file was modified.
+pub fn update_agents_md(project_root: &Path) -> anyhow::Result<bool> {
+    let path = project_root.join("AGENTS.md");
+    match plan_agents_md(project_root)? {
+        ClaudeMdPlan::Unchanged => Ok(false),
+        ClaudeMdPlan::Create { content } | ClaudeMdPlan::Modify { new: content, .. } => {
+            std::fs::write(&path, content)?;
+            Ok(true)
+        }
+        ClaudeMdPlan::Delete { .. } => {
+            std::fs::remove_file(&path)?;
+            Ok(true)
+        }
+    }
+}
+
 // ============================================================================
 // Cassy skill generation
 // ============================================================================
@@ -385,7 +446,7 @@ mod tests {
     /// CLAUDE.md.
     #[test]
     fn template_breadcrumbs_release_notes_rubric() {
-        let section = build_cas_section();
+        let section = build_agents_section();
         assert!(
             section.contains("docs/release-notes/RUBRIC.md"),
             "Managed block must point at the release-notes rubric; got:\n{section}"
@@ -401,13 +462,66 @@ mod tests {
     /// the block; this bounds its cost when it *does* appear).
     #[test]
     fn managed_block_line_count_within_budget() {
-        let section = build_cas_section();
-        let line_count = section.lines().count();
+        for section in [build_cas_section(), build_agents_section()] {
+            let line_count = section.lines().count();
+            assert!(
+                line_count <= 18,
+                "Managed block must be ≤ 18 lines (current: {line_count});\
+                 if you added content, trim elsewhere"
+            );
+        }
+    }
+
+    /// Audit D3/M44 (cas-6930d): AGENTS.md carries one harness-neutral
+    /// directive; CLAUDE.md imports it and adds only the Claude-only
+    /// ToolSearch bootstrap. No harness sees another harness's tool spelling
+    /// as its own, and nothing names tools current models may not have.
+    #[test]
+    fn agents_block_is_harness_neutral_and_claude_block_imports_it() {
+        let agents = build_agents_section();
+        for claude_only in ["ToolSearch", "TodoWrite", "EnterPlanMode", "# IMPORTANT"] {
+            assert!(!agents.contains(claude_only), "{claude_only}: {agents}");
+        }
+        for prefix in ["`mcp__cas__`", "`mcp__cs__`", "`cas__`", "`cas_`"] {
+            assert!(agents.contains(prefix), "prefix table lacks {prefix}");
+        }
         assert!(
-            line_count <= 18,
-            "Managed CLAUDE.md block must be ≤ 18 lines (current: {line_count});\
-             if you added content, trim elsewhere"
+            !agents.contains("mcp__cas__task") && !agents.contains("mcp__cs__task"),
+            "tool names are bare in the neutral block: {agents}"
         );
+
+        let claude = build_cas_section();
+        assert!(claude.lines().any(|line| line == "@AGENTS.md"), "{claude}");
+        assert!(!claude.contains("Bug routing"), "the directive is not duplicated");
+        assert!(!claude.contains("TodoWrite"), "{claude}");
+    }
+
+    /// AGENTS.md: created when missing, block refreshed in place, block
+    /// prepended to an unmanaged file, and idempotent.
+    #[test]
+    fn agents_md_block_is_created_refreshed_and_prepended() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+
+        assert!(update_agents_md(root).unwrap());
+        assert_eq!(
+            fs::read_to_string(root.join("AGENTS.md")).unwrap(),
+            format!("{}\n", build_agents_section())
+        );
+        assert!(!update_agents_md(root).unwrap(), "idempotent");
+
+        let stale = format!("# Repo\n\n{CAS_SECTION_BEGIN}\nold\n{CAS_SECTION_END}\n\nKeep me.\n");
+        fs::write(root.join("AGENTS.md"), &stale).unwrap();
+        assert!(update_agents_md(root).unwrap());
+        let content = fs::read_to_string(root.join("AGENTS.md")).unwrap();
+        assert!(content.starts_with("# Repo\n"), "{content}");
+        assert!(content.contains(&build_agents_section()), "{content}");
+        assert!(content.ends_with("Keep me.\n"), "{content}");
+
+        fs::write(root.join("AGENTS.md"), "# Unmanaged\n").unwrap();
+        assert!(update_agents_md(root).unwrap());
+        let content = fs::read_to_string(root.join("AGENTS.md")).unwrap();
+        assert_eq!(content, format!("{}\n\n# Unmanaged\n", build_agents_section()));
     }
 
     /// No ancestor has the managed block → injection proceeds.
@@ -608,7 +722,7 @@ mod tests {
     /// GH #963: the managed block names the current registry key only.
     #[test]
     fn template_names_violet_not_deprecated_mecha_cassy_key() {
-        let section = build_cas_section();
+        let section = build_agents_section();
         assert!(
             section.contains("issues.components.{cassy,violet,cloud}"),
             "{section}"

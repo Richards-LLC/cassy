@@ -120,11 +120,14 @@ Then, for each new issue, one task:
 
 ```
 mcp__cs__task action=create title="<what will be true when this is done> (GH #<n>)" \
-  task_type=bug priority=<0-3> epic=<epic id> \
+  task_type=bug priority=<0-3> epic=<epic-id> \
   external_ref="https://github.com/<owner>/<repo>/issues/<n>" \
   description="<the reporter's symptom, the surface it fails on, and the repro>" \
-  acceptance_criteria="<the observable that proves it fixed>"
+  acceptance_criteria="<the observable that proves it fixed>" \
+  risk=<none|platform|concurrency|blast-radius>
 ```
+
+`risk` is required for a bug; `blast-radius` also needs `proof_targets=<test targets>`.
 
 Priority from user impact, not from filing order: data loss / agent-stuck / the
 factory cannot make progress → P0–P1; degraded-but-workable → P2; polish → P3.

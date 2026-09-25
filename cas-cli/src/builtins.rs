@@ -484,20 +484,20 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-qa-craft/references/independent-pass.md",
         content: include_str!("builtins/skills/cas-qa-craft/references/independent-pass.md"),
     },
-    // release-notes skill (GH #65): drafts/posts the user + dev Slack threads
+    // cas-release-notes skill (GH #65): drafts/posts the user + dev Slack threads
     // for every staging/main merge and installs the canonical rubric template
     // at docs/release-notes/RUBRIC.md when a project has none.
     BuiltinFile {
-        path: "skills/release-notes/SKILL.md",
-        content: include_str!("builtins/skills/release-notes/SKILL.md"),
+        path: "skills/cas-release-notes/SKILL.md",
+        content: include_str!("builtins/skills/cas-release-notes/SKILL.md"),
     },
     BuiltinFile {
-        path: "skills/release-notes/references/RUBRIC-template.md",
-        content: include_str!("builtins/skills/release-notes/references/RUBRIC-template.md"),
+        path: "skills/cas-release-notes/references/RUBRIC-template.md",
+        content: include_str!("builtins/skills/cas-release-notes/references/RUBRIC-template.md"),
     },
     // mecha-cassy skill (cas-945f, GH #687): the default Slack transport for
     // every harness. The MechaCassy hub holds the Slack bot credential
-    // server-side and exposes four tools over one authenticated MCP endpoint,
+    // server-side and exposes two tools (mecha_read, mecha_post) over one authenticated MCP endpoint,
     // so a Codex or Grok worker posts on the same footing as Claude. The skill
     // owns channel resolution, the two-check preflight, ordered thread posting
     // with 1s pacing, the POSTED receipt, and the env-only credential rules;
@@ -1071,14 +1071,14 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-qa-craft/references/independent-pass.md",
         content: include_str!("builtins/codex/skills/cas-qa-craft/references/independent-pass.md"),
     },
-    // release-notes skill (GH #65) — codex mirror.
+    // cas-release-notes skill (GH #65) — codex mirror.
     BuiltinFile {
-        path: "skills/release-notes/SKILL.md",
-        content: include_str!("builtins/codex/skills/release-notes/SKILL.md"),
+        path: "skills/cas-release-notes/SKILL.md",
+        content: include_str!("builtins/codex/skills/cas-release-notes/SKILL.md"),
     },
     BuiltinFile {
-        path: "skills/release-notes/references/RUBRIC-template.md",
-        content: include_str!("builtins/codex/skills/release-notes/references/RUBRIC-template.md"),
+        path: "skills/cas-release-notes/references/RUBRIC-template.md",
+        content: include_str!("builtins/codex/skills/cas-release-notes/references/RUBRIC-template.md"),
     },
     // mecha-cassy skill (cas-945f, GH #687) — codex mirror. Byte-identical to
     // the claude copy except for the harness tool prefix.
@@ -1652,14 +1652,14 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-qa-craft/references/independent-pass.md",
         content: include_str!("builtins/grok/skills/cas-qa-craft/references/independent-pass.md"),
     },
-    // release-notes skill (GH #65) — grok twin.
+    // cas-release-notes skill (GH #65) — grok twin.
     BuiltinFile {
-        path: "skills/release-notes/SKILL.md",
-        content: include_str!("builtins/grok/skills/release-notes/SKILL.md"),
+        path: "skills/cas-release-notes/SKILL.md",
+        content: include_str!("builtins/grok/skills/cas-release-notes/SKILL.md"),
     },
     BuiltinFile {
-        path: "skills/release-notes/references/RUBRIC-template.md",
-        content: include_str!("builtins/grok/skills/release-notes/references/RUBRIC-template.md"),
+        path: "skills/cas-release-notes/references/RUBRIC-template.md",
+        content: include_str!("builtins/grok/skills/cas-release-notes/references/RUBRIC-template.md"),
     },
     // mecha-cassy skill (cas-945f, GH #687) — grok twin. Byte-identical to the
     // claude copy except for the harness tool prefix.
@@ -1995,11 +1995,12 @@ pub const GENERAL_PARITY_CAPABILITIES: &[RequiredCapability] = &[
         note: "",
     },
     RequiredCapability {
-        // GH #65: release-notes rubric + Slack announcement workflow.
-        id: "release-notes",
-        claude: Some("skills/release-notes"),
-        codex: Some("skills/release-notes"),
-        grok: Some("skills/release-notes"),
+        // GH #65: release-notes rubric + Slack announcement workflow. Named
+        // cas-release-notes: Grok ships a built-in /release-notes command.
+        id: "cas-release-notes",
+        claude: Some("skills/cas-release-notes"),
+        codex: Some("skills/cas-release-notes"),
+        grok: Some("skills/cas-release-notes"),
         note: "",
     },
     RequiredCapability {
@@ -3296,6 +3297,8 @@ pub const SHIPPED_NON_CAS_SKILL_DIRS: &[&str] = &[
     "mcp-integration",
     "mecha-cassy",
     "project-overview",
+    // Retired: renamed cas-release-notes (it collided with Grok's built-in
+    // /release-notes). Kept so old installs are pruned.
     "release-notes",
     "session-learn",
     "verify-before-claim",
@@ -6034,16 +6037,16 @@ This is the body content."#;
         ] {
             let skill = catalog
                 .iter()
-                .find(|b| b.path == "skills/release-notes/SKILL.md")
+                .find(|b| b.path == "skills/cas-release-notes/SKILL.md")
                 .unwrap_or_else(|| {
-                    panic!("skills/release-notes/SKILL.md missing from {label} catalog")
+                    panic!("skills/cas-release-notes/SKILL.md missing from {label} catalog")
                 });
             assert!(
                 is_managed_by_cas(skill.content),
                 "{label} release-notes SKILL.md must be managed_by: cas"
             );
             for required in [
-                "name: release-notes",
+                "name: cas-release-notes",
                 "docs/release-notes/RUBRIC.md",
                 "references/RUBRIC-template.md",
                 "Was → Now",
@@ -6062,10 +6065,10 @@ This is the body content."#;
 
             let template = catalog
                 .iter()
-                .find(|b| b.path == "skills/release-notes/references/RUBRIC-template.md")
+                .find(|b| b.path == "skills/cas-release-notes/references/RUBRIC-template.md")
                 .unwrap_or_else(|| {
                     panic!(
-                        "skills/release-notes/references/RUBRIC-template.md missing from \
+                        "skills/cas-release-notes/references/RUBRIC-template.md missing from \
                          {label} catalog"
                     )
                 });
@@ -9027,7 +9030,14 @@ This is the body content."#;
                 .unwrap_or_else(|| panic!("{label} cas-cut-release skill is not registered"));
             assert!(is_managed_by_cas(skill.content));
             assert!(skill.content.contains("description: Use when"));
-            assert!(skill.content.contains("references/failure-log.md in full"));
+            // Only the manual:* hazards are read up front; the rest of the
+            // log is enforced by gate rows and grepped on a failure.
+            assert!(
+                skill
+                    .content
+                    .contains("`manual:*` entries in `references/failure-log.md`")
+            );
+            assert!(!skill.content.contains("failure-log.md in full"));
             assert!(skill.content.contains("release-gate.sh --learn"));
             assert!(skill.content.contains(&format!("{prefix}memory")));
             for marker in [

@@ -11,7 +11,8 @@ repro, then the fix, then flake proof. Do not edit a test before step 1 names
 the failing action.
 
 Check the version first with `npx playwright --version`. The trace CLI and
-`--debug=cli` need 1.59+, `retryStrategy` needs 1.62+, and test locks and
+`--debug=cli` need 1.59+, but `npx playwright cli attach` (the stepping in
+section 2) ships only from 1.62; `retryStrategy` needs 1.62+, and test locks and
 `locator.visible()` need 1.63+. On an older version, use
 `npx playwright show-trace <trace.zip>` and recommend upgrading.
 

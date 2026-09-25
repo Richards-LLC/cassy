@@ -27,6 +27,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- A team pull no longer replaces one of this project's rules with a legacy
+  team rule that shares its id but names no project.
+- Rules that name another project are no longer pushed to the cloud from
+  this one.
+- Pulled knowledge pages record the project that wrote them; pages from
+  older clients are kept locally but never pushed back out.
 - `cas update` now refreshes every file a built-in skill ships, including
   scripts, examples and templates, which previously stayed at their first
   installed version. Local edits are still preserved.

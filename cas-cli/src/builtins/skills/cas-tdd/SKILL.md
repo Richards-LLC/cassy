@@ -9,7 +9,7 @@ metadata:
 
 Imported and adapted from mattpocock/skills `tdd`, MIT © 2026 Matt Pocock.
 
-Use a red → green loop to produce tests worth keeping. Test behavior through public interfaces, name the observable capability, and choose seams before writing the test. Keep durable decisions and task evidence in Cassy through `mcp__cas__task`, `mcp__cas__spec`, and `mcp__cas__memory`; do not create parallel tracker or context files.
+Use a red → green loop to produce tests worth keeping. Test behavior through public interfaces, name the observable capability, and choose seams before writing the test. Keep durable decisions and task evidence in Cassy through `task`, `spec`, and `memory`; do not create parallel tracker or context files.
 
 ## Seams and slices
 

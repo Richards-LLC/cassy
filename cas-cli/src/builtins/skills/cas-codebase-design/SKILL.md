@@ -43,7 +43,7 @@ relationships with concrete edge cases, and verify claims about behavior
 against the code before treating them as domain truth.
 
 When a term is settled, store its concise definition with
-`mcp__cas__memory action=remember`, using project scope and tags that make it
+`memory action=remember`, using project scope and tags that make it
 retrievable: the term, its boundaries, synonyms to avoid, and the scenario that
 disambiguated it. Search existing project memories first so the entry refines
 rather than duplicates the canonical language. Never open a parallel glossary
@@ -123,10 +123,10 @@ checks.
 
 ## Completion
 
-Done when a task note (`mcp__cas__task action=notes note_type=decision`) lists:
+Done when a task note (`task action=notes note_type=decision`) lists:
 the chosen seam, the interface facts callers must learn, what complexity stays
 hidden behind it, the deletion-test result, and two rejected alternatives with
 the reason each lost. If the choice is hard to reverse, surprising without
 context, and the result of a real trade-off, also record it with
-`mcp__cas__spec action=create` — never in a parallel architecture-record
+`spec action=create` — never in a parallel architecture-record
 directory.

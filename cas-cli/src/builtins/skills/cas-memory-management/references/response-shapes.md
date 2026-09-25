@@ -5,7 +5,7 @@ metadata:
 
 # `remember` Response Shapes
 
-`mcp__cas__memory action=remember` returns human-readable text plus a tagged
+`memory action=remember` returns human-readable text plus a tagged
 `structured_content` payload. The operation itself can return successfully
 while a blocked response sets `is_error: true`; inspect the tagged `status`
 field instead of parsing the text.

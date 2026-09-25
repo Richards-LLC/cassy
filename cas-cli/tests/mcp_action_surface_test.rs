@@ -366,9 +366,12 @@ fn memory_guidance_uses_content_frontmatter_and_live_names() {
 // ============================================================================
 // Call-shape lint (cas-dc1b; audit SYNTHESIS §4, theme T5)
 //
-// Every suggested `<prefix><tool> action=<a> key=value …` call in the shipped
+// Every suggested `<tool> action=<a> key=value …` call in the shipped
 // builtins (all three flavors) and in the runtime template strings of the Rust
-// sources is checked against the live MCP surface:
+// sources is checked against the live MCP surface. Shipped skill text names
+// tools by bare name (audit D1); the lint also accepts any harness prefix
+// (`mcp__cas__`, `mcp__cs__`, `cas__`, `cas_`) and the `{prefix}`-style
+// template variables of runtime strings, so both forms are checked the same way:
 //   * the action must be in the tool's accepted list in
 //     `cas_mcp::actions` (the lists the published `action` enums are built
 //     from and that `published_action_enums_equal_their_dispatch_tables`
@@ -862,6 +865,24 @@ fn call_shape_lint_flags_known_bad_shapes() {
             "task action=create: missing risk",
         ),
         ("`system action=status`", "system action=status: unknown action"),
+        // Audit D1: bare tool names are the shipped form and are linted like
+        // prefixed ones.
+        (
+            "`coordination action=message target=supervisor message=\"x\"`",
+            "coordination action=message: missing summary",
+        ),
+        (
+            "task action=create title=\"x\" priority=2",
+            "task action=create: missing risk",
+        ),
+        (
+            "Report via `factory action=message target=x summary=\"s\" message=\"m\"`.",
+            "factory action=message: unknown action",
+        ),
+        (
+            "(`verification action=add task_id=x status=approved`)",
+            "verification action=add: missing dispatch_id",
+        ),
         (
             "`mcp__cas__coordination action=spawn_workers count=1`",
             "coordination action=spawn_workers: unknown action",
@@ -883,6 +904,13 @@ fn call_shape_lint_flags_known_bad_shapes() {
         "use coordination action=message after the worker registers",
         "the subtask action=create flow",
         "`mcp__cs__factory action=worktree_merge id=factory/x task_id=cas-1 cleanup=true`",
+        // Audit D1: bare names, the naming line, and non-tool words that end in
+        // a tool name.
+        "`coordination action=message target=supervisor summary=\"s\" message=\"m\"`",
+        "task action=create title=\"e\" task_type=epic",
+        "`search action=code_search query=\"x\"`",
+        cas::builtins::TOOL_NAMING_LINE,
+        "the code_search action=grep fallback",
     ] {
         let mut offenders = Vec::new();
         lint_call_shapes(clean, "fixture", &surface, &mut offenders);

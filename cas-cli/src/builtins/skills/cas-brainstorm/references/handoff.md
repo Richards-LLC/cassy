@@ -55,7 +55,7 @@ If the direct-to-work gate is not satisfied, **omit that option entirely** — d
 1. Make sure the requirements doc (if any) is committed/saved.
 2. Create a Cassy task referencing the requirements doc, with explicit acceptance criteria copied from the Success Criteria section:
    ```
-   mcp__cas__task action=create title="<topic>" description="<scope summary>" acceptance_criteria="<from doc>" risk=<none|platform|concurrency|blast-radius>
+   task action=create title="<topic>" description="<scope summary>" acceptance_criteria="<from doc>" risk=<none|platform|concurrency|blast-radius>
    ```
    `risk` is required; `blast-radius` also needs `proof_targets=<test targets>`.
 3. Begin execution. Do not print the closing summary yet.
@@ -103,5 +103,5 @@ Resume by re-invoking cas-brainstorm when ready to resolve these before planning
 Also store a Cassy memory pointing at the doc and the blockers, so future sessions can find them:
 
 ```
-mcp__cas__memory action=remember title="Brainstorm paused: <topic>" content="Doc: <path>. Blocked by: <list>." tags=brainstorm,blocked,<topic>
+memory action=remember title="Brainstorm paused: <topic>" content="Doc: <path>. Blocked by: <list>." tags=brainstorm,blocked,<topic>
 ```

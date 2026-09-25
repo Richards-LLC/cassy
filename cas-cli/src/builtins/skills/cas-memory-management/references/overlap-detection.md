@@ -5,7 +5,7 @@ metadata:
 
 # Memory Overlap Detection
 
-`mcp__cas__memory action=remember` runs an overlap check by default before
+`memory action=remember` runs an overlap check by default before
 writing a new SQLite entry. The check is part of the live memory API. It is
 best-effort: if the search index cannot be queried, the write proceeds and the
 failure is logged.
@@ -69,7 +69,7 @@ option. Normal memory creation should leave it absent or false.
 ## Practical Workflow
 
 1. Search for the strongest reference symbol or error text with
-   `mcp__cas__search action=search ... doc_type=entry`.
+   `search action=search ... doc_type=entry`.
 2. Let `remember` perform its automatic check; do not duplicate an entry after
    a high-overlap response.
 3. For moderate overlap, inspect the returned related slugs and keep the

@@ -14,9 +14,9 @@ gateway contract](references/gateway.md) before a paid or run-starting call.
 ## Gateway procedure
 
 1. Discover the currently connected Viktor surface with
-   `mcp__cas__mcp_search` using `server:viktor`.
+   `mcp_search` using `server:viktor`.
 2. Call only an advertised, allowlisted route through
-   `mcp__cas__mcp_execute`.
+   `mcp_execute`.
 3. Include the active task id and a bounded objective in the request.
 4. Let CAS watch the result and deliver it as an inbound notification; do not
    poll provider run endpoints yourself.
@@ -24,9 +24,9 @@ gateway contract](references/gateway.md) before a paid or run-starting call.
 The dispatch shape is a JSON string passed through the `code` parameter:
 
 ```text
-mcp__cas__mcp_search(code="server:viktor", max_length=4000)
-mcp__cas__mcp_execute(code="{\"server\":\"viktor\",\"tool\":\"whoami\",\"args\":{}}", max_length=4000)
-mcp__cas__mcp_execute(code="{\"server\":\"viktor\",\"tool\":\"ask_viktor\",\"args\":{\"message\":\"Review this bounded question\",\"metadata\":{\"cas_task_id\":\"<task-id>\"},\"idempotency_key\":\"<task-id>-<n>\"}}", max_length=8000)
+mcp_search(code="server:viktor", max_length=4000)
+mcp_execute(code="{\"server\":\"viktor\",\"tool\":\"whoami\",\"args\":{}}", max_length=4000)
+mcp_execute(code="{\"server\":\"viktor\",\"tool\":\"ask_viktor\",\"args\":{\"message\":\"Review this bounded question\",\"metadata\":{\"cas_task_id\":\"<task-id>\"},\"idempotency_key\":\"<task-id>-<n>\"}}", max_length=8000)
 ```
 
 `ask_viktor` requires `message`; `metadata` is optional context. CAS attributes

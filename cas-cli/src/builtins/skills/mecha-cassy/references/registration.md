@@ -69,7 +69,7 @@ Dispatch through the proxy. `mcp_execute` takes a single `code` string holding
 the JSON dispatch; it has no `server`, `tool` or `args` parameters:
 
 ```text
-mcp__cas__mcp_execute code='{"server":"mecha-cassy","tool":"mecha_read","args":{"channel":"<name>","since":"<RFC3339>","max_messages":50}}'
+mcp_execute code='{"server":"mecha-cassy","tool":"mecha_read","args":{"channel":"<name>","since":"<RFC3339>","max_messages":50}}'
 ```
 
 A project `allowlist` replaces the machine allowlist entirely, so list every
@@ -81,7 +81,7 @@ factory workers are refused with a named reason. `cas serve` logs one
 `mcp_search` marks such tools "supervisors only".
 
 The proxy resolves its bearer when `cas serve` starts, so a variable exported
-after startup stays invisible until the next restart. `mcp__cas__system
+after startup stays invisible until the next restart. `system
 action=proxy_health` is credential-free: the healthy record for `mecha-cassy`
 reports `tool_count=2` and no error code. `.cas/proxy_catalog.json` is a
 generated cache, not source configuration.

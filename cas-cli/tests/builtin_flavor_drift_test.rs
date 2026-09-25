@@ -1,55 +1,51 @@
-//! Flavor drift guard (cas-703a).
+//! Catalog drift guard (cas-703a, redesigned for audit D1 in cas-a638).
 //!
-//! The builtin skills/agents ship in four harness flavors that are meant to be
-//! the SAME document under a small set of mechanical per-harness spellings:
+//! Builtin skill and agent text is prefix-neutral: it names Cassy tools by bare
+//! name (`task`, `coordination`, …), and the role guidance states each
+//! harness's prefix once (`cas::builtins::TOOL_NAMING_LINE`). One canonical
+//! file therefore serves every harness:
 //!
-//!   claude  cas-cli/src/builtins/<path>          tools `mcp__cas__*`
-//!   codex   cas-cli/src/builtins/codex/<path>    tools `mcp__cs__*`
-//!   grok    cas-cli/src/builtins/grok/<path>     tools `cas__*`
-//!   opencode process-local projection            tools `cas_*`
+//!   claude   cas-cli/src/builtins/<path>          the canonical catalog
+//!   codex    CODEX_BUILTIN_*   embed the canonical files
+//!   grok     GROK_BUILTIN_*    embed the canonical files
+//!   opencode process-local projection of the canonical catalog
 //!
-//! Before this guard, coverage was spot checks only (keyword bans, marker
-//! presence, catalog-presence parity). That let real contradictions live for
-//! months with the whole suite green: the codex task-verifier kept a
-//! close-reason keyword blacklist that claude had deleted in April 2026 and was
-//! missing its entire Epic Verification section (cas-48aa), the codex
-//! supervisor checklist froze in April (cas-59ee), and the "Valid Actions"
-//! sections never propagated to the twins at all (fixed in the commit preceding
-//! this one).
+//! Per-harness differences are kept out of shared text (pstack D1 note):
+//!   - `TAILORED` lists entries whose content is the canonical text after
+//!     exact replacements. Today that is only the Grok task-verifier, whose
+//!     `tools:` frontmatter builtins.rs generates around the one shared body.
+//!   - `ALLOWED_FLAVOR_ONLY` lists files with no canonical counterpart, which
+//!     are the only files left under `builtins/codex/`: the Codex no-hooks
+//!     checklist and two `agents/openai.yaml` policies.
 //!
-//! This test normalizes the sanctioned per-harness spellings and then asserts
-//! full content equality, section by section. A substantive edit landing in one
-//! flavor but not its twins fails here with a readable diff.
+//! This test asserts:
+//!   1. every other twin-catalog entry is byte-identical to the canonical one;
+//!   2. every tailored entry equals its canonical text after exactly its
+//!      listed replacements, and each replacement still applies;
+//!   3. every file under `builtins/{codex,grok}/` is sanctioned, so the twin
+//!      trees cannot grow back;
+//!   4. no catalog spells a harness prefix (`mcp__cas__`, `mcp__cs__`,
+//!      `cas__`) outside the single naming line and generated agent `tools:`
+//!      frontmatter (`cas::builtins::unsanctioned_prefixed_tool_lines`);
+//!   5. the OpenCode projection differs from the canonical catalog only in
+//!      agent `tools:` allowlists.
 //!
-//! HOW TO RESOLVE A FAILURE — in order of preference:
-//!   1. The divergence is unintentional drift (the common case): port the
-//!      change to the other flavors. Pure prefix substitution from the claude
-//!      flavor is the established way to do it.
-//!   2. The divergence is a NEW mechanical per-harness spelling that applies
-//!      corpus-wide: add a rule to `canonicalize`, so the rest of the file
-//!      stays guarded.
-//!   3. The divergence is genuinely intentional and local: add an
-//!      `ALLOWED_SECTION_DIVERGENCE` entry naming the file, flavor, section and
-//!      a rationale. Entries are section-level on purpose — exempting a whole
-//!      file blinds the guard to everything else in it.
-//!
-//! Runs under `cargo test --test builtin_flavor_drift_test` (and in any full
-//! integration-test run). Repo-local filesystem reads only; no network.
-//!
-//! Coverage note (cas-5787): `test_skills_document_context_budgeting_cas_5787`
-//! in `cas-cli/src/builtins.rs` asserts context-budgeting markers for claude and
-//! codex only. Grok is covered here instead, and more strictly: cas-supervisor.md
-//! and cas-worker.md are guarded triples, so every marker required of the claude
-//! body must appear verbatim in the grok body or this test fails. That test was
-//! also extended to name grok directly, so the two mechanisms overlap rather
-//! than leaving grok to a single point of failure.
+//! HOW TO RESOLVE A FAILURE:
+//!   - A twin catalog entry differs from the canonical file: point its
+//!     `include_str!` at the canonical file and delete the twin.
+//!   - A tool name carries a prefix: use the bare name; the role guidance
+//!     states each harness's prefix.
+//!   - A per-harness difference is genuinely needed: generate it in
+//!     builtins.rs and add a `TAILORED` entry with a rationale, or add an
+//!     `ALLOWED_FLAVOR_ONLY` file.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 use cas::builtins::{
-    BUILTIN_AGENTS, BUILTIN_SKILLS, agent_catalog_for_harness, skill_catalog_for_harness,
+    BUILTIN_AGENTS, BUILTIN_SKILLS, TOOL_NAMING_LINE, agent_catalog_for_harness,
+    skill_catalog_for_harness, unsanctioned_prefixed_tool_lines,
 };
 use cas_mux::SupervisorCli;
 use serde_json::Value;
@@ -58,72 +54,44 @@ use tempfile::TempDir;
 #[path = "support/builtin_catalog.rs"]
 mod builtin_catalog;
 
+use builtin_catalog::Flavor;
+
+/// Twin catalogs compared against the canonical (Claude) catalog.
+const TWINS: [(Flavor, &str); 2] = [(Flavor::Codex, "codex"), (Flavor::Grok, "grok")];
+
 // ---------------------------------------------------------------------------
-// Flavors
+// Sanctioned per-harness files
 // ---------------------------------------------------------------------------
 
-struct Flavor {
-    /// Human label used in assertion messages.
-    name: &'static str,
-    /// Subdirectory under `cas-cli/src/builtins` ("" for the claude baseline).
-    subdir: &'static str,
+/// A per-harness variant of a canonical entry: (flavor, catalog path, source
+/// file under `builtins/` if the variant has its own file, replacements
+/// applied to the canonical text, rationale). The variant must equal the
+/// canonical text after exactly these replacements. Prefer generated
+/// frontmatter over a source file.
+struct Tailored {
+    flavor: &'static str,
+    path: &'static str,
+    source: Option<&'static str>,
+    replacements: &'static [(&'static str, &'static str)],
+    rationale: &'static str,
 }
 
-const CLAUDE: Flavor = Flavor {
-    name: "claude",
-    subdir: "",
-};
-const CODEX: Flavor = Flavor {
-    name: "codex",
-    subdir: "codex",
-};
-const GROK: Flavor = Flavor {
-    name: "grok",
-    subdir: "grok",
-};
+const TAILORED: &[Tailored] = &[Tailored {
+    flavor: "grok",
+    path: "agents/task-verifier.md",
+    source: None,
+    replacements: &[("mcp__cas__", "cas__")],
+    rationale: "An agent `tools:` allowlist must spell the harness's own tool names. The \
+                body is shared (`agents/task-verifier.body.md`); builtins.rs generates \
+                the frontmatter per harness.",
+}];
 
-/// Flavors compared against the claude baseline.
-const TWINS: [&Flavor; 2] = [&CODEX, &GROK];
-
-// ---------------------------------------------------------------------------
-// Sanctioned divergences
-// ---------------------------------------------------------------------------
-
-/// Section-level exemptions: (claude-relative path, flavor, section heading, rationale).
-///
-/// The heading is matched exactly as it appears in the file (after
-/// canonicalization). Sections listed here may differ in body OR be absent in
-/// that flavor. Everything else in the file is still compared.
-const ALLOWED_SECTION_DIVERGENCE: &[(&str, &str, &str, &str)] = &[
-    (
-        "skills/cas-worker/references/recovery.md",
-        "codex",
-        "## Close requires task-scoped verification",
-        "The claude body enumerates the per-CLI tool spellings as an audience-facing \
-     list ('Claude workers: ... / Codex workers: ...') because a claude worker may \
-     be reading on behalf of either. A codex worker has exactly one spelling, so \
-     the list collapses to a single inline sentence. Both were written in the same \
-     commit; this is presentation, not content.",
-    ),
-    (
-        "skills/cas-worker/references/recovery.md",
-        "grok",
-        "## Close requires task-scoped verification",
-        "Same rationale as the codex entry above: the per-CLI enumeration collapses to \
-     one line for a single-spelling harness.",
-    ),
-];
-
-/// Claude files with no counterpart in a given flavor: (path, flavor, rationale).
+/// Canonical files a twin catalog deliberately omits: (catalog path, flavor, rationale).
 const ALLOWED_MISSING_TWIN: &[(&str, &str, &str)] = &[(
-    "skills/cas-supervisor-checklist.md",
+    "skills/cas-supervisor-checklist/SKILL.md",
     "codex",
-    "Codex ships a deliberately renamed variant, skills/cas-codex-supervisor-checklist.md, \
-     whose 'Session Start (No Hooks)' adaptation exists because Codex has no SessionStart \
-     hook banner (cas-59ee). Whole-file divergence is sanctioned, so it is compared to \
-     nothing rather than to the claude checklist. The grok twin IS held identical to \
-     claude, and is guarded normally by this test plus \
-     test_grok_supervisor_checklist_is_not_the_no_hooks_variant in builtins.rs.",
+    "Codex ships the renamed no-hooks variant skills/cas-codex-supervisor-checklist instead \
+     (cas-59ee): Codex has no SessionStart hook banner.",
 ), (
     "agents/task-verifier.md",
     "codex",
@@ -131,303 +99,131 @@ const ALLOWED_MISSING_TWIN: &[(&str, &str, &str)] = &[(
      Codex ignores .codex/agents/*.md, so Cassy installs no .md agents for Codex.",
 )];
 
-/// Files that exist only in a twin flavor: (flavor, flavor-relative path, rationale).
-const ALLOWED_FLAVOR_ONLY: &[(&str, &str, &str)] = &[
+/// Files only a twin catalog ships: (flavor, catalog path, source path, rationale).
+const ALLOWED_FLAVOR_ONLY: &[(&str, &str, &str, &str)] = &[
     (
         "codex",
-        "skills/cas-codex-supervisor-checklist.md",
-        "The renamed No-Hooks checklist variant; see the ALLOWED_MISSING_TWIN entry \
-         for skills/cas-supervisor-checklist.md.",
+        "skills/cas-codex-supervisor-checklist/SKILL.md",
+        "codex/skills/cas-codex-supervisor-checklist.md",
+        "The renamed no-hooks checklist; see ALLOWED_MISSING_TWIN.",
+    ),
+    (
+        "codex",
+        "skills/cas-nuxt-playwright/agents/openai.yaml",
+        "codex/skills/cas-nuxt-playwright/agents/openai.yaml",
+        "Codex's implicit-invocation policy; only Codex reads agents/openai.yaml.",
+    ),
+    (
+        "codex",
+        "skills/cas-to-questionnaire/agents/openai.yaml",
+        "codex/skills/cas-to-questionnaire/agents/openai.yaml",
+        "Codex's implicit-invocation policy; only Codex reads agents/openai.yaml.",
     ),
 ];
 
 // ---------------------------------------------------------------------------
-// Canonicalization of mechanical per-harness spellings
+// Helpers
 // ---------------------------------------------------------------------------
 
-const CANON_TOOL: &str = "<CAS_TOOL_PREFIX>";
-const CANON_CFG: &str = "<HARNESS_CFG_DIR>";
-const CANON_CATALOG: &str = "<AGENT_CATALOG_CONST>";
-const CANON_HETERO: &str = "## Heterogeneous Teams (<FLAVOR_MIX>)";
-
-/// Rewrite the sanctioned per-harness spellings to flavor-neutral tokens.
-///
-/// Every rule here is mechanical: the same sentence, spelled the way a given
-/// harness must spell it. Rules are applied longest-match-first where one
-/// pattern is a substring of another (`mcp__cas__` before `cas__`,
-/// `CODEX_BUILTIN_AGENTS` before `BUILTIN_AGENTS`) so a shorter rule cannot
-/// corrupt a longer match. Rules are applied to all flavors regardless of which
-/// one the content came from, which makes canonicalization idempotent and means
-/// a file that leaks another harness's spelling still normalizes to the same
-/// text (the dedicated prefix guardrails in factory_codex_skill_guardrails.rs
-/// are what catch leaked spellings; that is deliberately not this test's job).
-fn canonicalize(content: &str) -> String {
-    let mut out = content.to_string();
-
-    // Codex loads its dedicated checklist; the shared hook guide names each harness.
-    out = out.replace(
-        "Use the checklist for your harness: `cas-codex-supervisor-checklist` on Codex; `cas-supervisor-checklist` on Claude, Grok, or OpenCode",
-        "Use `cas-codex-supervisor-checklist`",
-    );
-
-    // CAS tool prefix. Longest first: `mcp__cas__` and `mcp__cs__` both end in
-    // a string containing `cas__`/`cs__`.
-    for pat in ["mcp__cas__", "mcp__cs__", "cas__"] {
-        out = out.replace(pat, CANON_TOOL);
-    }
-
-    // Agent-catalog constant name. Longest first.
-    for pat in [
-        "CODEX_BUILTIN_AGENTS",
-        "GROK_BUILTIN_AGENTS",
-        "BUILTIN_AGENTS",
-    ] {
-        out = out.replace(pat, CANON_CATALOG);
-    }
-
-    // Per-harness config/skill directory.
-    for pat in [".claude/", ".codex/", ".grok/"] {
-        out = out.replace(pat, CANON_CFG);
-    }
-
-    // The Heterogeneous Teams heading names the supervisor/worker mix, which is
-    // necessarily per-flavor ("Claude supervisor + Codex workers" vs "Grok
-    // supervisor + Claude/Codex workers"). Canonicalize the heading line only —
-    // the section body stays under guard.
-    out = out
-        .lines()
-        .map(|line| {
-            if line.trim_start().starts_with("## Heterogeneous Teams") {
-                CANON_HETERO
-            } else {
-                line
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    out
+fn canonical(path: &str) -> Option<&'static str> {
+    builtin_catalog::try_find(Flavor::Claude, path)
 }
 
-/// OpenCode receives a process-local projection rather than a filesystem
-/// mirror. Normalize its server-sanitized `cas_<tool>` calls to the same token
-/// used by the three source trees before comparing content.
-fn canonicalize_opencode(content: &str) -> String {
-    canonicalize(content).replace("cas_", CANON_TOOL)
-}
-
-// ---------------------------------------------------------------------------
-// Section splitting
-// ---------------------------------------------------------------------------
-
-const PREAMBLE: &str = "<preamble/frontmatter>";
-
-/// Collapse blank-line-delimited prose blocks into single logical lines so that
-/// pure line-wrapping differences are not mistaken for content differences.
-///
-/// This is necessary because canonicalized tokens have different lengths in
-/// different flavors: `CODEX_BUILTIN_AGENTS` is six characters longer than
-/// `BUILTIN_AGENTS`, so a hand-wrapped paragraph mentioning it reflows around
-/// the substitution. The words are identical; only the line breaks moved.
-///
-/// Every word still participates in the comparison — a dropped sentence, a
-/// removed bullet or a changed action name all change the joined text — so this
-/// widens tolerance for layout without weakening the content guard. Fenced code
-/// blocks are preserved verbatim, since line structure is meaningful there.
-fn reflow(body: &[String]) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut paragraph: Vec<String> = Vec::new();
-    let mut in_fence = false;
-
-    for line in body {
-        let trimmed = line.trim();
-        let is_fence = trimmed.starts_with("```") || trimmed.starts_with("~~~");
-
-        if is_fence || in_fence {
-            if !paragraph.is_empty() {
-                out.push(paragraph.join(" "));
-                paragraph.clear();
-            }
-            if is_fence {
-                in_fence = !in_fence;
-            }
-            out.push(line.trim_end().to_string());
-            continue;
-        }
-
-        if trimmed.is_empty() {
-            if !paragraph.is_empty() {
-                out.push(paragraph.join(" "));
-                paragraph.clear();
-            }
-            continue;
-        }
-
-        // Normalize runs of internal whitespace too, so a double space or a
-        // tab/space swap doesn't register as drift.
-        paragraph.push(trimmed.split_whitespace().collect::<Vec<_>>().join(" "));
-    }
-
-    if !paragraph.is_empty() {
-        out.push(paragraph.join(" "));
-    }
-    out
-}
-
-struct Section {
-    heading: String,
-    body: Vec<String>,
-}
-
-fn is_heading(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    trimmed.starts_with('#')
-        && trimmed
-            .trim_start_matches('#')
-            .starts_with(|c: char| c == ' ' || c == '\t')
-}
-
-/// Split into sections keyed by heading line. Content before the first heading
-/// (YAML frontmatter, intro prose) becomes the PREAMBLE section.
-fn split_sections(content: &str) -> Vec<Section> {
-    let mut sections = vec![Section {
-        heading: PREAMBLE.to_string(),
-        body: Vec::new(),
-    }];
-    for line in content.lines() {
-        if is_heading(line) {
-            sections.push(Section {
-                heading: line.trim_end().to_string(),
-                body: Vec::new(),
-            });
-        } else {
-            sections
-                .last_mut()
-                .expect("sections always has the preamble")
-                .body
-                .push(line.trim_end().to_string());
-        }
-    }
-    // Drop an empty preamble so a file starting immediately with a heading
-    // doesn't report a phantom section.
-    if sections[0].body.iter().all(|l| l.is_empty()) {
-        sections.remove(0);
-    }
-    sections
-}
-
-// ---------------------------------------------------------------------------
-// Diff rendering
-// ---------------------------------------------------------------------------
-
-/// Trim the common prefix/suffix and render the differing middle from both
-/// sides, capped so a large divergence stays readable.
-fn render_diff(claude: &[String], twin: &[String], claude_label: &str, twin_label: &str) -> String {
-    const MAX: usize = 12;
-
-    let mut start = 0;
-    while start < claude.len() && start < twin.len() && claude[start] == twin[start] {
-        start += 1;
-    }
-    let mut back = 0;
-    while back < claude.len() - start
-        && back < twin.len() - start
-        && claude[claude.len() - 1 - back] == twin[twin.len() - 1 - back]
-    {
-        back += 1;
-    }
-
-    let c_mid = &claude[start..claude.len() - back];
-    let t_mid = &twin[start..twin.len() - back];
-
-    let mut out = String::new();
-    out.push_str(&format!(
-        "\n    (first divergence at line {} of the section)\n",
-        start + 1
-    ));
-    for (label, lines, marker) in [(claude_label, c_mid, '-'), (twin_label, t_mid, '+')] {
-        if lines.is_empty() {
-            out.push_str(&format!("    {label}: (nothing here)\n"));
-            continue;
-        }
-        out.push_str(&format!("    {label}:\n"));
-        for line in lines.iter().take(MAX) {
-            out.push_str(&format!("      {marker} {line}\n"));
-        }
-        if lines.len() > MAX {
-            out.push_str(&format!("      ... {} more line(s)\n", lines.len() - MAX));
-        }
-    }
-    out
-}
-
-// ---------------------------------------------------------------------------
-// Discovery
-// ---------------------------------------------------------------------------
-
-/// Non-markdown builtin payloads that ship alongside the skill bodies. These
-/// are mirrored per flavor exactly like the `.md` files, but until cas-ef87a
-/// the walk below hard-filtered `extension == "md"`, so
-/// `skills/cas-wizard/template.sh` sat six lines short in both twins
-/// (the whole `# Example:` block was missing) without the guard noticing.
-const ASSET_EXTENSIONS: &[&str] = &["sh", "js", "yaml", "yml"];
-
-/// These legacy skill bodies remain flat in the source tree while their
-/// catalog destination uses the conventional `<skill>/SKILL.md` path.
-fn source_relative(catalog_path: &str) -> String {
-    match catalog_path {
-        "skills/cas-search/SKILL.md"
-        | "skills/cas-task-tracking/SKILL.md"
-        | "skills/cas-supervisor/SKILL.md"
-        | "skills/cas-supervisor-checklist/SKILL.md"
-        | "skills/cas-codex-supervisor-checklist/SKILL.md"
-        | "skills/cas-worker/SKILL.md" => {
-            let stem = catalog_path
-                .strip_prefix("skills/")
-                .and_then(|path| path.strip_suffix("/SKILL.md"))
-                .expect("flat legacy skill path");
-            format!("skills/{stem}.md")
-        }
-        _ => catalog_path.to_string(),
-    }
-}
-
-/// All files under `dir` whose extension is in `extensions`, returned as paths
-/// relative to `dir`. `skip_top_level` names immediate subdirectories to
-/// exclude (the twin trees).
-fn files_with_extensions(dir: &Path, skip_top_level: &[&str], extensions: &[&str]) -> Vec<String> {
-    let mut found = Vec::new();
-    let flavor = catalog_flavor(dir);
-    for builtin in builtin_catalog::skills(flavor)
+fn tailored(flavor: &str, path: &str) -> Option<&'static Tailored> {
+    TAILORED
         .iter()
-        .chain(builtin_catalog::agents(flavor))
-    {
-        let Some(extension) = builtin.path.rsplit('.').next() else {
+        .find(|entry| entry.flavor == flavor && entry.path == path)
+}
+
+fn flavor_only(flavor: &str, path: &str) -> bool {
+    ALLOWED_FLAVOR_ONLY
+        .iter()
+        .any(|(f, p, _, _)| *f == flavor && *p == path)
+}
+
+/// Apply a tailoring's replacements, reporting any that no longer match.
+fn apply_tailoring(canonical: &str, entry: &Tailored) -> Result<String, String> {
+    let mut out = canonical.to_string();
+    for (from, to) in entry.replacements {
+        if !out.contains(from) {
+            return Err(format!(
+                "TAILORED {} {}: replacement source {from:?} no longer occurs in the canonical \
+                 file — update or remove the entry",
+                entry.flavor, entry.path
+            ));
+        }
+        out = out.replace(from, to);
+    }
+    Ok(out)
+}
+
+/// The first differing line of two texts, for a readable failure.
+fn first_difference(expected: &str, actual: &str) -> String {
+    for (index, (e, a)) in expected.lines().zip(actual.lines()).enumerate() {
+        if e != a {
+            return format!("line {}:\n      - {e}\n      + {a}", index + 1);
+        }
+    }
+    format!(
+        "length differs ({} vs {} lines)",
+        expected.lines().count(),
+        actual.lines().count()
+    )
+}
+
+/// Catalog failures for one twin catalog. Separated from the test so the guard
+/// can be exercised against injected drift.
+fn twin_catalog_failures(
+    flavor_name: &str,
+    entries: &[(&'static str, &'static str)],
+    canonical_of: &dyn Fn(&str) -> Option<&'static str>,
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    for &(path, content) in entries {
+        if flavor_only(flavor_name, path) {
+            continue;
+        }
+        let Some(source) = canonical_of(path) else {
+            failures.push(format!(
+                "UNSANCTIONED FLAVOR-ONLY: {flavor_name} ships {path} with no canonical file; \
+                 add it to the canonical catalog or to ALLOWED_FLAVOR_ONLY"
+            ));
             continue;
         };
-        if extensions.contains(&extension) {
-            found.push(source_relative(builtin.path));
+        match tailored(flavor_name, path) {
+            Some(entry) => match apply_tailoring(source, entry) {
+                Ok(expected) if expected == content => {}
+                Ok(expected) => failures.push(format!(
+                    "TAILORED DRIFT: {flavor_name} {path} is more than its listed replacements \
+                     away from the canonical file; {}",
+                    first_difference(&expected, content)
+                )),
+                Err(stale) => failures.push(stale),
+            },
+            None if source == content => {}
+            None => failures.push(format!(
+                "TWIN DRIFT: {flavor_name} {path} differs from the canonical file; embed the \
+                 canonical file instead; {}",
+                first_difference(source, content)
+            )),
         }
     }
-    found.sort();
-    found
+    failures
 }
 
-/// All `.md` files under `dir`, returned as paths relative to `dir`.
-/// `skip_top_level` names immediate subdirectories to exclude (the twin trees).
-fn markdown_files(dir: &Path, skip_top_level: &[&str]) -> Vec<String> {
-    files_with_extensions(dir, skip_top_level, &["md"])
-}
-
-fn builtins_root() -> PathBuf {
-    PathBuf::from("cas-cli/src/builtins")
+fn twin_entries(flavor: Flavor) -> Vec<(&'static str, &'static str)> {
+    builtin_catalog::skills(flavor)
+        .iter()
+        .chain(builtin_catalog::agents(flavor))
+        .map(|builtin| (builtin.path, builtin.content))
+        .collect()
 }
 
 fn checkout_root() -> Option<PathBuf> {
     let root = cas::test_paths::workspace_root();
     if !root.join("cas-cli/src/builtins").is_dir() {
         eprintln!(
-            "SKIP root projection checks: source checkout is absent at {}",
+            "SKIP checkout checks: source checkout is absent at {}",
             root.display()
         );
         return None;
@@ -435,31 +231,347 @@ fn checkout_root() -> Option<PathBuf> {
     Some(root)
 }
 
-fn catalog_flavor(dir: &Path) -> builtin_catalog::Flavor {
-    match dir.to_string_lossy().as_ref() {
-        path if path.contains("cas-cli/src/builtins/codex") => builtin_catalog::Flavor::Codex,
-        path if path.contains("cas-cli/src/builtins/grok") => builtin_catalog::Flavor::Grok,
-        _ => builtin_catalog::Flavor::Claude,
+// ---------------------------------------------------------------------------
+// Catalog tests
+// ---------------------------------------------------------------------------
+
+/// Guard 1 and 2: twin catalogs embed the canonical files; tailored twins are
+/// exactly their listed replacements away from them.
+#[test]
+fn twin_catalogs_embed_the_canonical_catalog() {
+    let mut failures = Vec::new();
+    let mut identical = 0usize;
+    for (flavor, name) in TWINS {
+        let entries = twin_entries(flavor);
+        failures.extend(twin_catalog_failures(name, &entries, &canonical));
+        identical += entries
+            .iter()
+            .filter(|(path, content)| canonical(path) == Some(*content))
+            .count();
+
+        for builtin in BUILTIN_SKILLS.iter().chain(BUILTIN_AGENTS) {
+            let present = entries.iter().any(|(path, _)| *path == builtin.path);
+            let exempt = ALLOWED_MISSING_TWIN
+                .iter()
+                .any(|(p, f, _)| *p == builtin.path && *f == name);
+            if !present && !exempt {
+                failures.push(format!(
+                    "MISSING: {name} catalog lacks {}; register the canonical file or add an \
+                     ALLOWED_MISSING_TWIN entry",
+                    builtin.path
+                ));
+            }
+            if present && exempt {
+                failures.push(format!(
+                    "STALE EXEMPTION: ALLOWED_MISSING_TWIN says {name} omits {}, but it ships",
+                    builtin.path
+                ));
+            }
+        }
     }
+    assert!(
+        identical > 2 * 130,
+        "expected both twin catalogs to embed well over 130 canonical files each; got {identical}"
+    );
+    assert!(
+        failures.is_empty(),
+        "\n\nBuiltin catalog drift ({} issue(s)):\n\n{}\n",
+        failures.len(),
+        failures.join("\n\n")
+    );
 }
 
-fn catalog_for(flavor: &Flavor) -> builtin_catalog::Flavor {
-    match flavor.name {
-        "claude" => builtin_catalog::Flavor::Claude,
-        "codex" => builtin_catalog::Flavor::Codex,
-        "grok" => builtin_catalog::Flavor::Grok,
-        other => panic!("unknown builtin flavor {other}"),
+/// Guard 3: the per-harness source trees hold only tailored and flavor-only
+/// files, and every exemption names a real catalog entry.
+#[test]
+fn twin_source_trees_hold_only_sanctioned_files() {
+    for entry in TAILORED {
+        let (flavor, _) = TWINS
+            .iter()
+            .find(|(_, name)| *name == entry.flavor)
+            .unwrap_or_else(|| panic!("unknown TAILORED flavor {}", entry.flavor));
+        assert!(
+            builtin_catalog::try_find(*flavor, entry.path).is_some(),
+            "TAILORED names {} {} but the catalog does not ship it",
+            entry.flavor,
+            entry.path
+        );
+        assert!(!entry.rationale.is_empty() && !entry.replacements.is_empty());
     }
-}
+    for (flavor_name, path, _, rationale) in ALLOWED_FLAVOR_ONLY {
+        let (flavor, _) = TWINS
+            .iter()
+            .find(|(_, name)| name == flavor_name)
+            .unwrap_or_else(|| panic!("unknown ALLOWED_FLAVOR_ONLY flavor {flavor_name}"));
+        assert!(
+            builtin_catalog::try_find(*flavor, path).is_some(),
+            "ALLOWED_FLAVOR_ONLY names {flavor_name} {path} but the catalog does not ship it"
+        );
+        assert!(
+            canonical(path).is_none(),
+            "ALLOWED_FLAVOR_ONLY {flavor_name} {path} now has a canonical file; tailor or collapse it"
+        );
+        assert!(!rationale.is_empty());
+    }
 
-fn section_is_allowed(rel: &str, flavor: &str, heading: &str) -> bool {
-    ALLOWED_SECTION_DIVERGENCE
+    let Some(root) = checkout_root() else {
+        return;
+    };
+    let builtins = root.join("cas-cli/src/builtins");
+    let mut sanctioned: Vec<String> = TAILORED
         .iter()
-        .any(|(p, f, h, _)| *p == rel && *f == flavor && *h == heading)
+        .filter_map(|t| t.source.map(str::to_string))
+        .collect();
+    sanctioned.extend(ALLOWED_FLAVOR_ONLY.iter().map(|(_, _, source, _)| source.to_string()));
+    let mut on_disk = Vec::new();
+    for (_, name) in TWINS {
+        for entry in walkdir::WalkDir::new(builtins.join(name))
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file())
+        {
+            let relative = entry
+                .path()
+                .strip_prefix(&builtins)
+                .expect("walked path is under builtins")
+                .to_string_lossy()
+                .replace('\\', "/");
+            on_disk.push(relative);
+        }
+    }
+    let unexpected: Vec<&String> = on_disk.iter().filter(|p| !sanctioned.contains(p)).collect();
+    assert!(
+        unexpected.is_empty(),
+        "per-harness source files outside TAILORED/ALLOWED_FLAVOR_ONLY: {unexpected:?} — \
+         twins of canonical files are embedded from the canonical tree, not copied"
+    );
+    for source in &sanctioned {
+        assert!(
+            on_disk.contains(source),
+            "sanctioned per-harness source {source} is missing from the checkout"
+        );
+    }
+    assert!(
+        on_disk.len() <= 3,
+        "the per-harness source trees must stay small; found {} files",
+        on_disk.len()
+    );
+}
+
+/// Guard 4: no catalog spells a harness prefix outside the naming rule, and
+/// both role files carry the naming line.
+#[test]
+fn every_catalog_names_tools_by_bare_name() {
+    let mut failures = Vec::new();
+    for harness in [
+        SupervisorCli::Claude,
+        SupervisorCli::Codex,
+        SupervisorCli::Grok,
+        SupervisorCli::OpenCode,
+    ] {
+        for builtin in skill_catalog_for_harness(harness)
+            .iter()
+            .chain(agent_catalog_for_harness(harness))
+        {
+            for (line, text) in unsanctioned_prefixed_tool_lines(builtin.content) {
+                failures.push(format!("{harness:?} {}:{line}: {text}", builtin.path));
+            }
+        }
+        let skills = skill_catalog_for_harness(harness);
+        for role in ["skills/cas-worker/SKILL.md", "skills/cas-supervisor/SKILL.md"] {
+            let body = skills
+                .iter()
+                .find(|b| b.path == role)
+                .unwrap_or_else(|| panic!("{harness:?} catalog lacks {role}"));
+            assert_eq!(
+                body.content.matches(TOOL_NAMING_LINE).count(),
+                1,
+                "{harness:?} {role} must state the per-harness prefix exactly once"
+            );
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "shipped text spells a harness tool prefix outside the naming line (use the bare \
+         name):\n  {}",
+        failures.join("\n  ")
+    );
+}
+
+/// Guard 5: the OpenCode projection is the canonical catalog with only agent
+/// `tools:` allowlists respelled.
+#[test]
+fn opencode_projection_is_the_canonical_catalog() {
+    let mut compared = 0usize;
+    for (catalog, projected) in [
+        (BUILTIN_SKILLS, skill_catalog_for_harness(SupervisorCli::OpenCode)),
+        (BUILTIN_AGENTS, agent_catalog_for_harness(SupervisorCli::OpenCode)),
+    ] {
+        assert_eq!(catalog.len(), projected.len());
+        for builtin in catalog {
+            let projection = projected
+                .iter()
+                .find(|candidate| candidate.path == builtin.path)
+                .unwrap_or_else(|| panic!("missing OpenCode projection {}", builtin.path));
+            let expected: Vec<String> = builtin
+                .content
+                .split('\n')
+                .map(|line| {
+                    if line.starts_with("tools:") {
+                        line.replace("mcp__cas__", "cas_")
+                    } else {
+                        line.to_string()
+                    }
+                })
+                .collect();
+            assert_eq!(
+                projection.content,
+                expected.join("\n"),
+                "OpenCode {} drifted",
+                builtin.path
+            );
+            compared += 1;
+        }
+    }
+    assert!(compared > 130, "expected over 130 OpenCode projections, got {compared}");
+}
+
+/// The guard must fail on injected drift: an edited twin, a tailored twin
+/// with an extra change, a stale tailoring, and an unsanctioned twin-only file.
+#[test]
+fn guard_detects_injected_drift() {
+    let canonical_of = |path: &str| -> Option<&'static str> {
+        match path {
+            "skills/x/SKILL.md" => Some("# X\ncall `task action=close`\n"),
+            "agents/task-verifier.md" => Some("---\ntools: Read, mcp__cas__task\n---\nbody\n"),
+            "agents/stale.md" => Some("---\ntools: Read\n---\nbody\n"),
+            _ => None,
+        }
+    };
+
+    let edited = twin_catalog_failures(
+        "codex",
+        &[("skills/x/SKILL.md", "# X\ncall `task action=reopen`\n")],
+        &canonical_of,
+    );
+    assert!(edited.iter().any(|f| f.starts_with("TWIN DRIFT")), "{edited:?}");
+
+    let identical = twin_catalog_failures(
+        "codex",
+        &[("skills/x/SKILL.md", "# X\ncall `task action=close`\n")],
+        &canonical_of,
+    );
+    assert!(identical.is_empty(), "{identical:?}");
+
+    let tailored_ok = twin_catalog_failures(
+        "grok",
+        &[("agents/task-verifier.md", "---\ntools: Read, cas__task\n---\nbody\n")],
+        &canonical_of,
+    );
+    assert!(tailored_ok.is_empty(), "{tailored_ok:?}");
+
+    let tailored_extra = twin_catalog_failures(
+        "grok",
+        &[("agents/task-verifier.md", "---\ntools: Read, cas__task\n---\nother body\n")],
+        &canonical_of,
+    );
+    assert!(
+        tailored_extra.iter().any(|f| f.starts_with("TAILORED DRIFT")),
+        "{tailored_extra:?}"
+    );
+
+    // A tailoring whose replacement no longer applies is stale.
+    let stale_entry = Tailored {
+        flavor: "grok",
+        path: "agents/stale.md",
+        source: None,
+        replacements: &[("mcp__cas__", "cas__")],
+        rationale: "fixture",
+    };
+    let stale = apply_tailoring(canonical_of("agents/stale.md").unwrap(), &stale_entry);
+    assert!(
+        stale.as_ref().is_err_and(|e| e.contains("no longer occurs")),
+        "{stale:?}"
+    );
+
+    let orphan = twin_catalog_failures("grok", &[("skills/y/SKILL.md", "y")], &canonical_of);
+    assert!(
+        orphan.iter().any(|f| f.starts_with("UNSANCTIONED FLAVOR-ONLY")),
+        "{orphan:?}"
+    );
+
+    // The naming rule itself.
+    assert!(unsanctioned_prefixed_tool_lines("run `mcp__cas__task action=show`").len() == 1);
+    assert!(unsanctioned_prefixed_tool_lines("run `mcp__cs__task action=show`").len() == 1);
+    assert!(unsanctioned_prefixed_tool_lines("run `cas__task action=show`").len() == 1);
+    assert!(unsanctioned_prefixed_tool_lines("run `task action=show`").is_empty());
+    assert!(unsanctioned_prefixed_tool_lines(TOOL_NAMING_LINE).is_empty());
+    // pstack denylist: naming the harness on the line does not excuse a prefix.
+    assert!(unsanctioned_prefixed_tool_lines("In Claude Code, call `mcp__cas__task`.").len() == 1);
+    assert!(unsanctioned_prefixed_tool_lines("run `ToolSearch(select:mcp__cas__task)`").len() == 1);
+    assert!(
+        unsanctioned_prefixed_tool_lines("tools: Read, mcp__cas__task").is_empty()
+    );
+}
+
+/// cas-c7c2: memory lifecycle guidance is a reference file so the always-loaded
+/// skill body stays compact. Keep its decision table present in every catalog.
+#[test]
+fn memory_lifecycle_reference_is_shared_by_every_harness() {
+    const REL: &str = "skills/cas-memory-management/references/lifecycle-and-storage.md";
+    let claude = builtin_catalog::find(Flavor::Claude, REL);
+    for required in [
+        "recent_at desc, id desc",
+        "valid_until",
+        "| Need | Use | Why |",
+        "**Memory**",
+        "**Task**",
+        "**Knowledge**",
+        "**Spec / ADR**",
+    ] {
+        assert!(
+            claude.contains(required),
+            "memory lifecycle reference missing required marker: {required:?}"
+        );
+    }
+    for (flavor, name) in TWINS {
+        assert_eq!(builtin_catalog::find(flavor, REL), claude, "{name}");
+    }
+}
+
+/// cas-462a: one-shot CLI routing is a cross-harness operational contract.
+#[test]
+fn cli_routing_skill_is_shared_by_every_harness() {
+    for rel in [
+        "skills/cli-routing/SKILL.md",
+        "skills/cli-routing/references/routing.md",
+    ] {
+        let claude = builtin_catalog::find(Flavor::Claude, rel);
+        for required in [
+            "codex exec",
+            "release.claude_account_allowlist",
+            "unapproved account",
+            "CLAUDE_CONFIG_DIR",
+        ] {
+            assert!(claude.contains(required), "{rel} missing {required:?}");
+        }
+        // cas-37f6: operator policy lives in config and the project rubric,
+        // never in the shipped skill text.
+        for banned in [
+            "@gmail.com",
+            "@petrastella.io",
+            "docs/SLACK_POSTING_RUNBOOK.md",
+        ] {
+            assert!(!claude.contains(banned), "{rel} ships operator-specific text: {banned:?}");
+        }
+        for (flavor, name) in TWINS {
+            assert_eq!(builtin_catalog::find(flavor, rel), claude, "{rel} drifted for {name}");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Tests
+// Codemap build contract
 // ---------------------------------------------------------------------------
 
 const CODEMAP_SKILL_REL: &str = "skills/codemap/SKILL.md";
@@ -586,14 +698,13 @@ fn codemap_build_contract_violations(content: &str) -> Vec<&'static str> {
 /// allowing a model/upstream stall to hold the commit and status proof.
 #[test]
 fn codemap_build_contract_is_bounded_non_blocking_and_non_detached() {
-    for flavor in [&CLAUDE, &CODEX, &GROK] {
+    for (flavor, name) in builtin_catalog::FLAVORS {
         let rel = CODEMAP_SKILL_REL;
-        let content = builtin_catalog::find(catalog_for(flavor), rel);
-        let violations = codemap_build_contract_violations(&content);
+        let content = builtin_catalog::find(*flavor, rel);
+        let violations = codemap_build_contract_violations(content);
         assert!(
             violations.is_empty(),
-            "{} {rel} violates codemap build contract: {violations:?}",
-            flavor.name
+            "{name} {rel} violates codemap build contract: {violations:?}"
         );
     }
 }
@@ -664,221 +775,10 @@ Do not detach or background the build, run a manual polling loop, or wait beyond
     );
 }
 
-/// The guard: normalized three-way content comparison across all filesystem
-/// flavor triples. OpenCode's process-local catalog is checked below.
-#[test]
-fn builtin_flavors_stay_content_identical_after_normalization() {
-    let root = builtins_root();
-    let claude_files = markdown_files(&root, &[CODEX.subdir, GROK.subdir]);
 
-    assert!(
-        claude_files.len() > 40,
-        "expected the claude builtin corpus to be discovered (found {}); \
-         the walk or the builtins path is wrong",
-        claude_files.len()
-    );
-
-    let mut failures: Vec<String> = Vec::new();
-    let mut compared = 0usize;
-
-    for rel in &claude_files {
-        let claude_raw = builtin_catalog::find(builtin_catalog::Flavor::Claude, rel);
-        let claude_sections = split_sections(&canonicalize(&claude_raw));
-
-        for twin in TWINS {
-            let Some(twin_raw) = builtin_catalog::try_find(catalog_for(twin), rel) else {
-                let exempt = ALLOWED_MISSING_TWIN
-                    .iter()
-                    .any(|(p, f, _)| *p == rel && *f == twin.name);
-                if !exempt {
-                    failures.push(format!(
-                        "MISSING TWIN: {rel} exists for claude but not for {}.\n    \
-                         Port it, or add an ALLOWED_MISSING_TWIN entry with a rationale.",
-                        twin.name
-                    ));
-                }
-                continue;
-            };
-            let twin_sections = split_sections(&canonicalize(&twin_raw));
-            compared += 1;
-
-            // Compare the heading sequence first — a wholly missing or added
-            // section is the most common drift shape (it is exactly how the
-            // "Valid Actions" gap and the task-verifier's absent Epic
-            // Verification section presented).
-            let claude_headings: Vec<&str> = claude_sections
-                .iter()
-                .map(|s| s.heading.as_str())
-                .filter(|h| !section_is_allowed(rel, twin.name, h))
-                .collect();
-            let twin_headings: Vec<&str> = twin_sections
-                .iter()
-                .map(|s| s.heading.as_str())
-                .filter(|h| !section_is_allowed(rel, twin.name, h))
-                .collect();
-
-            if claude_headings != twin_headings {
-                let only_claude: Vec<&&str> = claude_headings
-                    .iter()
-                    .filter(|h| !twin_headings.contains(h))
-                    .collect();
-                let only_twin: Vec<&&str> = twin_headings
-                    .iter()
-                    .filter(|h| !claude_headings.contains(h))
-                    .collect();
-                failures.push(format!(
-                    "SECTION SET DIFFERS: {rel} (claude vs {})\n    \
-                     only in claude: {:?}\n    only in {}: {:?}\n    \
-                     (if the order changed but the set matches, the sections were reordered \
-                     in one flavor only)",
-                    twin.name, only_claude, twin.name, only_twin
-                ));
-                continue;
-            }
-
-            // Heading sequences match: compare bodies pairwise.
-            for (c_sec, t_sec) in claude_sections.iter().zip(twin_sections.iter()) {
-                if section_is_allowed(rel, twin.name, &c_sec.heading) {
-                    continue;
-                }
-                let c_body = reflow(&c_sec.body);
-                let t_body = reflow(&t_sec.body);
-                if c_body != t_body {
-                    failures.push(format!(
-                        "CONTENT DRIFT: {rel} (claude vs {}) in section {:?}{}",
-                        twin.name,
-                        c_sec.heading,
-                        render_diff(&c_body, &t_body, "claude", twin.name)
-                    ));
-                }
-            }
-        }
-    }
-
-    assert!(
-        compared > 80,
-        "expected to compare well over 80 flavor pairs, only compared {compared}"
-    );
-
-    assert!(
-        failures.is_empty(),
-        "\n\nBuiltin flavor drift detected ({} issue(s)) across {} compared pairs.\n\
-         The claude/codex/grok flavors must stay content-identical apart from the \
-         mechanical per-harness spellings normalized by this test.\n\n{}\n\n\
-         Fix by porting the change to the other flavors (pure prefix substitution from \
-         the claude flavor is the established method). If the divergence is genuinely \
-         intentional, add an ALLOWED_SECTION_DIVERGENCE entry naming the file, flavor, \
-         section and rationale — see the module docs in this file.\n",
-        failures.len(),
-        compared,
-        failures.join("\n\n")
-    );
-}
-
-/// The same guard for the non-markdown payloads (`.sh`, `.js`, `.yaml`).
-///
-/// These have no markdown section structure, so the comparison is whole-file
-/// after the same canonicalization the markdown guard uses — `schema.yaml`
-/// legitimately spells the tool prefix per harness (`mcp__cas__` / `mcp__cs__`
-/// / `cas__`), and nothing else in these files may differ.
-#[test]
-fn non_markdown_builtin_twins_stay_identical_after_normalization() {
-    let root = builtins_root();
-    let claude_files = files_with_extensions(&root, &[CODEX.subdir, GROK.subdir], ASSET_EXTENSIONS);
-
-    assert!(
-        !claude_files.is_empty(),
-        "expected the claude builtin corpus to contain non-markdown payloads; \
-         the walk or the builtins path is wrong"
-    );
-
-    let mut failures: Vec<String> = Vec::new();
-    let mut compared = 0usize;
-
-    for rel in &claude_files {
-        let claude_raw = builtin_catalog::find(builtin_catalog::Flavor::Claude, rel);
-        let claude_body = canonicalize(&claude_raw);
-
-        for twin in TWINS {
-            let Some(twin_raw) = builtin_catalog::try_find(catalog_for(twin), rel) else {
-                let exempt = ALLOWED_MISSING_TWIN
-                    .iter()
-                    .any(|(p, f, _)| *p == rel && *f == twin.name);
-                if !exempt {
-                    failures.push(format!(
-                        "MISSING TWIN: {rel} exists for claude but not for {}.\n    \
-                         Port it, or add an ALLOWED_MISSING_TWIN entry with a rationale.",
-                        twin.name
-                    ));
-                }
-                continue;
-            };
-            let twin_body = canonicalize(&twin_raw);
-            compared += 1;
-
-            if claude_body != twin_body {
-                let claude_lines: Vec<String> = claude_body.lines().map(str::to_string).collect();
-                let twin_lines: Vec<String> = twin_body.lines().map(str::to_string).collect();
-                failures.push(format!(
-                    "CONTENT DRIFT: {rel} (claude vs {}){}",
-                    twin.name,
-                    render_diff(&claude_lines, &twin_lines, "claude", twin.name)
-                ));
-            }
-        }
-    }
-
-    assert!(
-        compared >= 2 * claude_files.len(),
-        "expected to compare both twins for every non-markdown payload \
-         ({} files), only compared {compared} pairs",
-        claude_files.len()
-    );
-
-    assert!(
-        failures.is_empty(),
-        "\n\nBuiltin non-markdown flavor drift detected ({} issue(s)) across {} compared \
-         pairs.\nScripts, palettes and schemas shipped with a skill are mirrored exactly \
-         like its prose; only the per-harness tool prefix may differ.\n\n{}\n",
-        failures.len(),
-        compared,
-        failures.join("\n\n")
-    );
-}
-
-/// Flavor-only non-markdown payloads must be sanctioned too, for the same
-/// reason as their markdown counterparts: an extra twin-only script is drift
-/// the claude-rooted walk would otherwise never visit.
-#[test]
-fn flavor_only_non_markdown_builtin_files_are_explicitly_sanctioned() {
-    let root = builtins_root();
-    let claude_files = files_with_extensions(&root, &[CODEX.subdir, GROK.subdir], ASSET_EXTENSIONS);
-
-    let mut unexpected = Vec::new();
-    for twin in TWINS {
-        let twin_root = root.join(twin.subdir);
-        for rel in files_with_extensions(&twin_root, &[], ASSET_EXTENSIONS) {
-            if claude_files.contains(&rel) {
-                continue;
-            }
-            let sanctioned = ALLOWED_FLAVOR_ONLY
-                .iter()
-                .any(|(f, p, _)| *f == twin.name && *p == rel);
-            if !sanctioned {
-                unexpected.push(format!("{}/{rel}", twin.name));
-            }
-        }
-    }
-
-    assert!(
-        unexpected.is_empty(),
-        "\n\nFlavor-only non-markdown builtin file(s) with no claude counterpart and no \
-         exemption:\n  {}\n\nEither add the claude (and other-flavor) twin, or add an \
-         ALLOWED_FLAVOR_ONLY entry explaining why this file is intentionally \
-         single-flavor.\n",
-        unexpected.join("\n  ")
-    );
-}
+// ---------------------------------------------------------------------------
+// Root projections and bundled resources
+// ---------------------------------------------------------------------------
 
 /// The files checked into the cas-src root are the committed projections that
 /// keep the authoring checkout clean after `cas update`. Skills are deliberately
@@ -1092,419 +992,9 @@ fn root_managed_projections_stay_synced_and_project_skills_stay_ignored() {
     );
 }
 
-/// The fourth flavor is generated in-process, not written under a user-level
-/// `.opencode` tree. Compare every projected catalog entry to the Claude
-/// source after normalizing OpenCode's `cas_<tool>` sanitizer spelling.
-#[test]
-fn opencode_projection_stays_content_identical_after_normalization() {
-    let skills = skill_catalog_for_harness(SupervisorCli::OpenCode);
-    let agents = agent_catalog_for_harness(SupervisorCli::OpenCode);
-    let mut compared = 0usize;
-    let mut failures = Vec::new();
-
-    for (kind, catalog) in [("skill", BUILTIN_SKILLS), ("agent", BUILTIN_AGENTS)] {
-        for builtin in catalog {
-            let rel = builtin.path;
-            let source = builtin_catalog::find(builtin_catalog::Flavor::Claude, rel);
-            let projection = if kind == "skill" {
-                skills.iter().find(|candidate| candidate.path == rel)
-            } else {
-                agents.iter().find(|candidate| candidate.path == rel)
-            };
-            let Some(projection) = projection else {
-                failures.push(format!("MISSING OPENCODE {kind} PROJECTION: {rel}"));
-                continue;
-            };
-            compared += 1;
-            let source_sections = split_sections(&canonicalize_opencode(&source));
-            let projection_sections = split_sections(&canonicalize_opencode(projection.content));
-            if source_sections.len() != projection_sections.len() {
-                failures.push(format!("SECTION SET DIFFERS: {rel} (claude vs opencode)"));
-                continue;
-            }
-            for (source_section, projection_section) in
-                source_sections.iter().zip(projection_sections.iter())
-            {
-                if source_section.heading != projection_section.heading
-                    || reflow(&source_section.body) != reflow(&projection_section.body)
-                {
-                    failures.push(format!(
-                        "CONTENT DRIFT: {rel} (claude vs opencode) in section {:?}",
-                        source_section.heading
-                    ));
-                }
-            }
-        }
-    }
-
-    assert!(
-        compared > 80,
-        "expected over 80 OpenCode projections, got {compared}"
-    );
-    assert!(
-        failures.is_empty(),
-        "OpenCode builtin projection drifted ({} issue(s)):\n{}",
-        failures.len(),
-        failures.join("\n")
-    );
-}
-
-/// cas-c7c2: memory lifecycle guidance is intentionally a reference file so
-/// the always-loaded skill body stays compact. Keep that file's decision table
-/// present and normalized across Claude, Codex, and Grok rather than relying on
-/// the broad corpus walk alone to make its contract visible.
-#[test]
-fn memory_lifecycle_reference_stays_three_way_synchronized() {
-    const REL: &str = "skills/cas-memory-management/references/lifecycle-and-storage.md";
-    let claude = canonicalize(builtin_catalog::find(builtin_catalog::Flavor::Claude, REL));
-
-    for required in [
-        "recent_at desc, id desc",
-        "valid_until",
-        "| Need | Use | Why |",
-        "**Memory**",
-        "**Task**",
-        "**Knowledge**",
-        "**Spec / ADR**",
-    ] {
-        assert!(
-            claude.contains(required),
-            "memory lifecycle reference missing required marker: {required:?}"
-        );
-    }
-
-    for twin in TWINS {
-        let twin_content = canonicalize(builtin_catalog::find(catalog_for(twin), REL));
-        assert_eq!(
-            twin_content, claude,
-            "memory lifecycle reference drifted between claude and {}",
-            twin.name
-        );
-    }
-}
-
-/// cas-462a: one-shot CLI routing is a cross-harness operational contract.
-/// Keep the compact body and detailed routing reference explicitly guarded,
-/// in addition to the broad corpus walk above.
-#[test]
-fn cli_routing_skill_stays_three_way_synchronized() {
-    for rel in [
-        "skills/cli-routing/SKILL.md",
-        "skills/cli-routing/references/routing.md",
-    ] {
-        let claude = canonicalize(builtin_catalog::find(builtin_catalog::Flavor::Claude, rel));
-        for required in [
-            "codex exec",
-            "release.claude_account_allowlist",
-            "unapproved account",
-            "CLAUDE_CONFIG_DIR",
-        ] {
-            assert!(
-                claude.contains(required),
-                "claude {rel} missing {required:?}"
-            );
-        }
-        // cas-37f6: operator policy lives in config and the project rubric,
-        // never in the shipped skill text.
-        for banned in [
-            "@gmail.com",
-            "@petrastella.io",
-            "docs/SLACK_POSTING_RUNBOOK.md",
-        ] {
-            assert!(
-                !claude.contains(banned),
-                "claude {rel} ships operator-specific text: {banned:?}"
-            );
-        }
-        for twin in TWINS {
-            let body = canonicalize(builtin_catalog::find(catalog_for(twin), rel));
-            assert_eq!(claude, body, "{rel} drifted for {}", twin.name);
-        }
-    }
-}
-
-/// A file present only in a twin flavor must be an explicitly sanctioned
-/// flavor-only file. Without this, drift could hide by adding a codex-only or
-/// grok-only document that the claude-rooted walk never visits.
-#[test]
-fn flavor_only_builtin_files_are_explicitly_sanctioned() {
-    let root = builtins_root();
-    let claude_files = markdown_files(&root, &[CODEX.subdir, GROK.subdir]);
-
-    let mut unexpected = Vec::new();
-    for twin in TWINS {
-        let twin_root = root.join(twin.subdir);
-        for rel in markdown_files(&twin_root, &[]) {
-            if claude_files.contains(&rel) {
-                continue;
-            }
-            let sanctioned = ALLOWED_FLAVOR_ONLY
-                .iter()
-                .any(|(f, p, _)| *f == twin.name && *p == rel);
-            if !sanctioned {
-                unexpected.push(format!("{}/{rel}", twin.name));
-            }
-        }
-    }
-
-    assert!(
-        unexpected.is_empty(),
-        "\n\nFlavor-only builtin file(s) with no claude counterpart and no exemption:\n  {}\n\n\
-         Either add the claude (and other-flavor) twin, or add an ALLOWED_FLAVOR_ONLY entry \
-         explaining why this file is intentionally single-flavor.\n",
-        unexpected.join("\n  ")
-    );
-}
-
-/// Guard the guard: every exemption must point at a file that actually exists,
-/// so entries cannot silently outlive the divergence they were written for and
-/// quietly widen coverage gaps.
-#[test]
-fn drift_guard_exemptions_are_live() {
-    let mut stale = Vec::new();
-
-    for (rel, flavor, heading, _) in ALLOWED_SECTION_DIVERGENCE {
-        if builtin_catalog::try_find(builtin_catalog::Flavor::Claude, rel).is_none() {
-            stale.push(format!(
-                "ALLOWED_SECTION_DIVERGENCE names missing claude file {rel}"
-            ));
-            continue;
-        }
-        let twin = TWINS
-            .iter()
-            .find(|f| f.name == *flavor)
-            .unwrap_or_else(|| panic!("unknown flavor {flavor} in ALLOWED_SECTION_DIVERGENCE"));
-        let Some(content) = builtin_catalog::try_find(catalog_for(twin), rel) else {
-            stale.push(format!(
-                "ALLOWED_SECTION_DIVERGENCE names missing {flavor} file {rel}"
-            ));
-            continue;
-        };
-        // The heading is stored canonicalized; compare against canonicalized content.
-        let has_heading = split_sections(&canonicalize(content))
-            .iter()
-            .any(|s| s.heading == *heading);
-        let claude_has_heading = builtin_catalog::try_find(builtin_catalog::Flavor::Claude, rel)
-            .map(|c| {
-                split_sections(&canonicalize(c))
-                    .iter()
-                    .any(|s| s.heading == *heading)
-            })
-            .unwrap_or(false);
-        if !has_heading && !claude_has_heading {
-            stale.push(format!(
-                "ALLOWED_SECTION_DIVERGENCE entry for {rel} ({flavor}) names section {heading:?}, \
-                 which no longer exists in either flavor — remove the entry"
-            ));
-        }
-    }
-
-    for (rel, flavor, _) in ALLOWED_MISSING_TWIN {
-        if builtin_catalog::try_find(builtin_catalog::Flavor::Claude, rel).is_none() {
-            stale.push(format!(
-                "ALLOWED_MISSING_TWIN names missing claude file {rel}"
-            ));
-            continue;
-        }
-        let twin = TWINS
-            .iter()
-            .find(|f| f.name == *flavor)
-            .unwrap_or_else(|| panic!("unknown flavor {flavor} in ALLOWED_MISSING_TWIN"));
-        if builtin_catalog::try_find(catalog_for(twin), rel).is_some() {
-            stale.push(format!(
-                "ALLOWED_MISSING_TWIN says {flavor} has no {rel}, but the file now exists — \
-                 remove the entry so the twin is compared"
-            ));
-        }
-    }
-
-    for (flavor, rel, _) in ALLOWED_FLAVOR_ONLY {
-        let twin = TWINS
-            .iter()
-            .find(|f| f.name == *flavor)
-            .unwrap_or_else(|| panic!("unknown flavor {flavor} in ALLOWED_FLAVOR_ONLY"));
-        if builtin_catalog::try_find(catalog_for(twin), rel).is_none() {
-            stale.push(format!(
-                "ALLOWED_FLAVOR_ONLY names missing file {flavor}/{rel} — remove the entry"
-            ));
-        }
-    }
-
-    assert!(
-        stale.is_empty(),
-        "\n\nStale drift-guard exemption(s):\n  {}\n",
-        stale.join("\n  ")
-    );
-}
-
-/// The normalization rules must be idempotent and must not collapse text that
-/// carries meaning. Guards against a future rule that over-normalizes and
-/// silently blinds the comparison.
-#[test]
-fn canonicalization_is_idempotent_and_prefix_safe() {
-    let claude =
-        "Call `mcp__cas__task action=show` and see `.claude/skills/x` in `BUILTIN_AGENTS`.";
-    let codex =
-        "Call `mcp__cs__task action=show` and see `.codex/skills/x` in `CODEX_BUILTIN_AGENTS`.";
-    let grok = "Call `cas__task action=show` and see `.grok/skills/x` in `GROK_BUILTIN_AGENTS`.";
-
-    let c = canonicalize(claude);
-    assert_eq!(
-        c,
-        canonicalize(codex),
-        "codex spelling must canonicalize to the claude form"
-    );
-    assert_eq!(
-        c,
-        canonicalize(grok),
-        "grok spelling must canonicalize to the claude form"
-    );
-    assert_eq!(c, canonicalize(&c), "canonicalization must be idempotent");
-
-    // The longest-first ordering must not let `cas__` corrupt `mcp__cas__`.
-    assert!(
-        !c.contains("mcp__") && !c.contains("cas__"),
-        "no raw tool prefix should survive canonicalization: {c}"
-    );
-    assert_eq!(
-        c.matches(CANON_TOOL).count(),
-        1,
-        "a single tool reference must produce exactly one canonical token: {c}"
-    );
-
-    // Substantive text must survive untouched.
-    assert!(
-        c.contains("action=show"),
-        "canonicalization must not eat surrounding content: {c}"
-    );
-    assert_ne!(
-        canonicalize("reject the close reason"),
-        canonicalize("accept the close reason"),
-        "canonicalization must not collapse genuinely different prose"
-    );
-}
-
-/// The section splitter must key on markdown headings and keep bodies intact —
-/// the drift comparison is only as granular as this.
-#[test]
-fn section_splitting_keys_on_markdown_headings() {
-    let doc = "---\nname: x\n---\n\nintro line\n\n## Alpha\na1\na2\n\n### Beta\nb1\n";
-    let sections = split_sections(doc);
-
-    let headings: Vec<&str> = sections.iter().map(|s| s.heading.as_str()).collect();
-    assert_eq!(headings, vec![PREAMBLE, "## Alpha", "### Beta"]);
-    assert!(sections[0].body.contains(&"intro line".to_string()));
-    assert!(sections[1].body.contains(&"a1".to_string()));
-    assert!(sections[2].body.contains(&"b1".to_string()));
-
-    // A '#' that is not a heading (no space after the hashes) must not split.
-    assert_eq!(split_sections("## Real\ntext\n#hashtag\nmore\n").len(), 1);
-}
-
-/// Reflow must absorb line-wrapping differences without absorbing content
-/// differences. This rule exists because canonicalized tokens differ in length
-/// between flavors and reflow the prose around them; if it ever over-collapsed,
-/// the whole guard would quietly stop catching drift.
-#[test]
-fn reflow_tolerates_rewrapping_but_not_content_change() {
-    let wrapped_a: Vec<String> = "This file remains in `X` solely so `cas sync` can overwrite any\nstale downstream copies. It will be removed\nin a future release."
-        .lines()
-        .map(str::to_string)
-        .collect();
-    let wrapped_b: Vec<String> = "This file remains in `X` solely so `cas sync` can overwrite\nany stale downstream copies. It will be\nremoved in a future release."
-        .lines()
-        .map(str::to_string)
-        .collect();
-    assert_eq!(
-        reflow(&wrapped_a),
-        reflow(&wrapped_b),
-        "identical prose wrapped differently must compare equal"
-    );
-
-    // A dropped sentence must still be caught.
-    let shortened: Vec<String> =
-        "This file remains in `X` solely so `cas sync` can overwrite any\nstale downstream copies."
-            .lines()
-            .map(str::to_string)
-            .collect();
-    assert_ne!(
-        reflow(&wrapped_a),
-        reflow(&shortened),
-        "dropped content must be detected"
-    );
-
-    // A dropped bullet must still be caught.
-    let three: Vec<String> = vec!["- a".into(), "- b".into(), "- c".into()];
-    let two: Vec<String> = vec!["- a".into(), "- b".into()];
-    assert_ne!(
-        reflow(&three),
-        reflow(&two),
-        "a removed bullet must be detected"
-    );
-
-    // Line structure inside fenced code blocks must be preserved verbatim.
-    let fenced: Vec<String> = vec![
-        "```bash".into(),
-        "cmd one".into(),
-        "cmd two".into(),
-        "```".into(),
-    ];
-    let joined: Vec<String> = vec!["```bash".into(), "cmd one cmd two".into(), "```".into()];
-    assert_ne!(
-        reflow(&fenced),
-        reflow(&joined),
-        "code-fence line structure is meaningful and must not be collapsed"
-    );
-
-    // Paragraph separation must not let text migrate between paragraphs unnoticed.
-    let two_paras: Vec<String> = vec!["alpha".into(), String::new(), "beta".into()];
-    let one_para: Vec<String> = vec!["alpha".into(), "beta".into()];
-    assert_ne!(
-        reflow(&two_paras),
-        reflow(&one_para),
-        "a paragraph break carries structure and must not be normalized away"
-    );
-}
-
-/// The guard must actually fail on injected drift — a comparison test that can
-/// only pass is worthless. Exercises the three shapes it is meant to catch.
-#[test]
-fn guard_detects_injected_drift() {
-    let claude = "# Doc\n\n## Alpha\nshared line\nclaude-only detail\n\n## Beta\nb\n";
-
-    // 1. A changed line inside a shared section.
-    let changed = "# Doc\n\n## Alpha\nshared line\ncodex-only detail\n\n## Beta\nb\n";
-    let c_sections = split_sections(&canonicalize(claude));
-    let t_sections = split_sections(&canonicalize(changed));
-    assert!(
-        c_sections
-            .iter()
-            .zip(t_sections.iter())
-            .any(|(a, b)| a.body != b.body),
-        "body drift must be detected"
-    );
-
-    // 2. A wholly missing section (the "Valid Actions" / Epic Verification shape).
-    let dropped = "# Doc\n\n## Alpha\nshared line\nclaude-only detail\n";
-    let d_headings: Vec<String> = split_sections(&canonicalize(dropped))
-        .iter()
-        .map(|s| s.heading.clone())
-        .collect();
-    let c_headings: Vec<String> = c_sections.iter().map(|s| s.heading.clone()).collect();
-    assert_ne!(c_headings, d_headings, "a missing section must be detected");
-
-    // 3. Drift that hides behind a legitimate prefix difference: same tool
-    //    prefix spelling, different action — must still fail.
-    let a = canonicalize("run `mcp__cas__task action=close`");
-    let b = canonicalize("run `mcp__cs__task action=reopen`");
-    assert_ne!(
-        a, b,
-        "prefix normalization must not mask a changed action name"
-    );
-}
 
 /// Release-report templates and Python helpers must be installed with the skill,
-/// including assets outside the general markdown/shell drift walker.
+/// including assets outside the markdown corpus.
 #[test]
 fn release_report_bundle_is_complete_for_every_harness() {
     let files = [
@@ -1519,21 +1009,16 @@ fn release_report_bundle_is_complete_for_every_harness() {
     let opencode = skill_catalog_for_harness(SupervisorCli::OpenCode);
     for file in files {
         let path = format!("skills/cas-release-report/{file}");
-        let source = builtin_catalog::find(builtin_catalog::Flavor::Claude, &path);
+        let source = builtin_catalog::find(Flavor::Claude, &path);
         assert!(!source.is_empty(), "empty report resource: {path}");
-        for twin in TWINS {
-            let mirror = builtin_catalog::find(catalog_for(twin), &path);
-            assert_eq!(canonicalize(source), canonicalize(mirror), "{path}");
+        for (flavor, name) in TWINS {
+            assert_eq!(builtin_catalog::find(flavor, &path), source, "{name} {path}");
         }
         let projected = opencode
             .iter()
             .find(|entry| entry.path == path)
             .unwrap_or_else(|| panic!("missing OpenCode resource: {path}"));
-        assert_eq!(
-            canonicalize_opencode(source),
-            canonicalize_opencode(projected.content),
-            "{path}"
-        );
+        assert_eq!(projected.content, source, "{path}");
     }
 }
 
@@ -1598,11 +1083,11 @@ fn supervisor_worker_liveness_contract_is_pinned_in_every_mirror() {
         ("", include_str!("../src/builtins/skills/cas-supervisor.md")),
         (
             "codex/",
-            include_str!("../src/builtins/codex/skills/cas-supervisor.md"),
+            include_str!("../src/builtins/skills/cas-supervisor.md"),
         ),
         (
             "grok/",
-            include_str!("../src/builtins/grok/skills/cas-supervisor.md"),
+            include_str!("../src/builtins/skills/cas-supervisor.md"),
         ),
     ] {
         for marker in [

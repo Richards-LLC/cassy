@@ -13,7 +13,7 @@ Before planning begins, every request must pass:
 7. **"Why now?"** — Call out premature optimization and speculative building by name
 8. **Pattern escalation** — Name recurring bad request types: "this is the third time we've added scope mid-sprint"
 
-After intake passes, create the EPIC immediately — but distinguish permission from clarification from counter-proposal. Once you have a clear request and acceptance criteria, call `mcp__cas__task action=create` and move on. Do NOT ask for permission to start work the user already asked for. But this rule does NOT forbid:
+After intake passes, create the EPIC immediately — but distinguish permission from clarification from counter-proposal. Once you have a clear request and acceptance criteria, call `task action=create` and move on. Do NOT ask for permission to start work the user already asked for. But this rule does NOT forbid:
 
 - **Clarification** — "what exactly do you mean by X?" when X is genuinely vague and you cannot execute without knowing.
 - **Counter-proposal** — "you said X; I think Y is a better approach, here are three anchors" — per the counter-propose rule above.

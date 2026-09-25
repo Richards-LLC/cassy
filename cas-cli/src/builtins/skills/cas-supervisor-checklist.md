@@ -11,22 +11,22 @@ metadata:
 
 0. **Preflight.** Run `cas factory preflight` ([preflight.md](../cas-supervisor/references/preflight.md)). Nonzero exit → fix the finding it names and rerun. If it reports a stale Cassy binary, stop here: **do not kill or restart `cas serve` from this active MCP session** — that stdio process is this session's Cassy-tool connection. Instead, ask the operator to rebuild Cassy and use the harness's MCP reconnect/restart control (or open a fresh supervisor session) to launch the new `cas serve`. Do not use `pkill` or any name-based process kill. Resume only after the Cassy tool list is restored, then rerun this checklist from step 0.
 
-1. Identify yourself: `mcp__cas__coordination action=whoami`
+1. Identify yourself: `coordination action=whoami`
 2. Load EPIC/task context:
    ```
-   mcp__cas__task action=list task_type=epic
-   mcp__cas__task action=ready
-   mcp__cas__task action=list status=blocked
+   task action=list task_type=epic
+   task action=ready
+   task action=list status=blocked
    ```
 3. Pull relevant memories and rules:
    ```
-   mcp__cas__search action=search query="<keywords>" doc_type=entry limit=5
+   search action=search query="<keywords>" doc_type=entry limit=5
    ```
 4. Check codemap freshness:
    - If `.claude/CODEMAP.md` is missing → run `/codemap` to generate it.
    - If it exists but is stale (structural changes since last update) → run `/codemap` to refresh.
    - Workers reference CODEMAP for codebase orientation — ensure it's current before spawning them.
-5. Check worker availability: `mcp__cas__factory action=worker_status`
+5. Check worker availability: `factory action=worker_status`
 6. **Session hygiene triage** — the SessionStart hook prepends a "⚠ Prior-factory
    WIP detected" banner to the supervisor context when the main worktree has
    uncommitted changes, with per-file attribution (last `cas-xxxx` commit)
@@ -36,7 +36,7 @@ metadata:
 
    For a full on-demand report (including stale agents and orphan worktrees):
    ```
-   mcp__cas__factory action=gc_report
+   factory action=gc_report
    ```
    The report's "Prior-factory WIP candidates" section mirrors the banner and
    is safe to re-run at any time; it never auto-deletes.
@@ -60,7 +60,7 @@ Reporting style: [reporting-and-routing.md](../cas-supervisor/references/reporti
 
 Record decisions as you go:
 ```
-mcp__cas__memory action=remember title="..." content="..." tags="decision"
+memory action=remember title="..." content="..." tags="decision"
 ```
 
 ## Epic Planning and Review
@@ -71,7 +71,7 @@ Supervisor close override constraints: [`supervisor_override`](../cas-supervisor
 
 ## Before Closing an EPIC
 
-- Run `mcp__cas__factory action=epic_status id=<epic-id>` — confirms every child task's `factory/<assignee>` branch is merged into the epic branch. `mcp__cas__task action=close` on the epic enforces the same check and refuses stranded branches unless a live registered supervisor passes `stranded_branch_override="<inspection narrative>"`; it never waives genuinely unmerged content. Run `epic_status` mid-flight to resolve merges before the close-time error.
+- Run `factory action=epic_status id=<epic-id>` — confirms every child task's `factory/<assignee>` branch is merged into the epic branch. `task action=close` on the epic enforces the same check and refuses stranded branches unless a live registered supervisor passes `stranded_branch_override="<inspection narrative>"`; it never waives genuinely unmerged content. Run `epic_status` mid-flight to resolve merges before the close-time error.
 - Confirm task deliverables exist on the epic branch
 - Launch the release gate detached on the assembled epic in its dedicated worktree, then run the [epic flow walk](../cas-supervisor/references/epic-flow-walk.md) concurrently when any child has a demo statement.
 - Require both gate receipts and the single epic evidence note before epic close verification; apply task-verifier Step 0A with `verification_type=epic`.

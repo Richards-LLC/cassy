@@ -193,7 +193,7 @@ fn test_init_force_reinit() {
 
 /// EPIC cas-8888 (cas-6f46, Phase 5): a pre-existing `.grok/` dir (the
 /// opt-in signal `detect_agent_defaults` looks for) must cause `cas init`
-/// to sync the Grok builtin skill twins, using the `cas__` tool prefix —
+/// to sync the Grok builtin skills, whose role guidance names Grok's `cas__` prefix —
 /// end-to-end proof that the config.agents.grok wiring actually runs,
 /// not just that the underlying sync function works in isolation.
 #[test]
@@ -215,12 +215,13 @@ fn test_init_json_syncs_grok_builtins_when_grok_dir_present() {
     );
     let content = std::fs::read_to_string(&worker_skill).unwrap();
     assert!(
-        content.contains("cas__task"),
-        "grok cas-worker skill must reference the cas__ tool prefix"
+        content.contains("`cas__` in Grok"),
+        "grok cas-worker skill must state the cas__ tool prefix"
     );
+    let offenders = cas::builtins::unsanctioned_prefixed_tool_lines(&content);
     assert!(
-        !content.contains("mcp__"),
-        "grok cas-worker skill must not reference any mcp__ wrapped tool name"
+        offenders.is_empty(),
+        "grok cas-worker skill spells a harness prefix outside the naming rule: {offenders:?}"
     );
 
     // .mcp.json is reused (no separate Grok config writer) — confirm it

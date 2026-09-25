@@ -50,19 +50,19 @@ Use Cassy's project-scoped MCP proxy as the source of truth. The procedure is:
    have explicit, auditable calls:
 
    ```text
-   mcp__cas__system action=proxy_add name=docs transport=http url=https://docs.example.test/mcp
-   mcp__cas__system action=proxy_remove name=docs
-   mcp__cas__system action=proxy_list
-   mcp__cas__system action=proxy_health
+   system action=proxy_add name=docs transport=http url=https://docs.example.test/mcp
+   system action=proxy_remove name=docs
+   system action=proxy_list
+   system action=proxy_health
    ```
 
    Restart `cas serve` after adding or removing a server. `proxy_list` shows
    the configured server count; `proxy_health` is credential-free and reports
    upstream connection/backoff state.
 6. **Verify capability, not just connectivity.** Discover the proxy surface
-   with `mcp__cas__mcp_search` using `server:<name>`, count the advertised
+   with `mcp_search` using `server:<name>`, count the advertised
    tools, compare them with the expected set, then make one cheap read-only
-   call through `mcp__cas__mcp_execute`. A `denied by policy` answer means
+   call through `mcp_execute`. A `denied by policy` answer means
    step 3's allowlist is missing the route. A green connection with zero or one
    tool is a narrow-scope configuration, not a successful integration.
 

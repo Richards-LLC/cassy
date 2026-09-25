@@ -7,7 +7,7 @@ metadata:
 
 # session-learn — 7-signal session classifier
 
-This skill is adapted from `third-brain-v5-skills/skills/session-learn` (MIT). The third-brain version writes to a wiki tree. This version writes to Cassy memory through `mcp__cas__memory action=remember`, so findings go through Cassy's dedup, embedding and recall.
+This skill is adapted from `third-brain-v5-skills/skills/session-learn` (MIT). The third-brain version writes to a wiki tree. This version writes to Cassy memory through `memory action=remember`, so findings go through Cassy's dedup, embedding and recall.
 
 ## When to use
 
@@ -31,10 +31,10 @@ A signal is the memory's *epistemic role*; `entry_type` is how Cassy recalls it.
 ## Procedure (manual)
 
 1. **Collect candidates.** Read the session and list findings that are project-, user- or session-specific. General programming advice is not a memory.
-2. **Dedupe.** For each candidate, run `mcp__cas__search action=search query="<the finding>"`. If a near-duplicate exists, do not draft it again; note the existing memory's ID in `dedup_hits`.
+2. **Dedupe.** For each candidate, run `search action=search query="<the finding>"`. If a near-duplicate exists, do not draft it again; note the existing memory's ID in `dedup_hits`.
 3. **Draft.** One signal per draft. Fill every field of the schema below and give an honest `confidence`.
 4. **Preview.** Show the drafts to the user and drop the ones they reject.
-5. **Store.** For each accepted draft with empty `dedup_hits` and `confidence ≥ 0.6` (≥ 0.5 for corrections), run `mcp__cas__memory action=remember content="<content>" entry_type=<entry_type> scope=<scope> tags="<tags>"`. The overlap gate there is the backstop.
+5. **Store.** For each accepted draft with empty `dedup_hits` and `confidence ≥ 0.6` (≥ 0.5 for corrections), run `memory action=remember content="<content>" entry_type=<entry_type> scope=<scope> tags="<tags>"`. The overlap gate there is the backstop.
 
 **Done when** every accepted draft is stored or deliberately skipped, and you have told the user which memory IDs were created.
 

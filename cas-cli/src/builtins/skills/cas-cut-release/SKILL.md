@@ -16,9 +16,9 @@ version and worktree, never a version-keyed path.
    that already enforces it, so on a gate failure grep the log for that row id
    instead of reading it all. Learn an absent failure with
    `scripts/release-gate.sh --learn "<symptom>" "<cause>" "<check-id>"`; it
-   writes all three log mirrors and regenerates the builtin reference ledger,
+   appends to the failure log and regenerates the builtin reference ledger,
    so commit them with the new check. Store the same text with
-   `mcp__cas__memory action=remember entry_type=learning tags=release`.
+   `memory action=remember entry_type=learning tags=release`.
 2. Before merging a release-bound lane, run `scripts/release-train.sh <version>
    <epic-worktree> --check-lane <branch>`. Require the exact branch-tip,
    push-triggered `Scoped Validation` job to be green; missing, skipped, red,

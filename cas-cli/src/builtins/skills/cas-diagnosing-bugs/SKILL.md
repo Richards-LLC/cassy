@@ -42,7 +42,7 @@ time until every remaining element is load-bearing.
 ## Phase 3 — Rank falsifiable hypotheses
 
 Produce 3–5 ranked hypotheses. Each must predict what changing one variable
-would do. Record them with `mcp__cas__task action=notes note_type=discovery` and
+would do. Record them with `task action=notes note_type=discovery` and
 invite domain correction without blocking on it; discard a hypothesis that
 cannot make a testable prediction.
 
@@ -64,4 +64,4 @@ the original loop.
 Before claiming done, rerun the original loop, confirm regression coverage (or
 the documented missing seam), remove tagged instrumentation and marked
 throwaways, and record the validated hypothesis in the commit message and with
-`mcp__cas__task action=notes note_type=discovery`.
+`task action=notes note_type=discovery`.

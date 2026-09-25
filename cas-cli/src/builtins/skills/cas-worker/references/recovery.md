@@ -5,11 +5,11 @@
 The most common close rejection: your `factory/<name>` branch has commits not yet on the task's parent branch. This is a **data-state guard** — supervisor overrides do not apply.
 
 1. **Read the guard text** — it names the parent branch and the unmerged commit count, and includes the correct remediation for your case.
-2. **Before any escalation, drain the inbox: run `mcp__cas__coordination action=inbox_poll` repeatedly until it returns `No unread messages`.** A poll returns at most 10 rows by default, so one call is not guaranteed to pull all unread supervisor messages. Polling marks messages seen for inbox polling without consuming daemon transport delivery, and the claim is at-most-once — if a poll response is lost those rows are not replayed, so also re-read any supervisor messages just delivered in your conversation. If a message says the branch was merged or requests more changes, follow it and do not send a stale merge request.
+2. **Before any escalation, drain the inbox: run `coordination action=inbox_poll` repeatedly until it returns `No unread messages`.** A poll returns at most 10 rows by default, so one call is not guaranteed to pull all unread supervisor messages. Polling marks messages seen for inbox polling without consuming daemon transport delivery, and the claim is at-most-once — if a poll response is lost those rows are not replayed, so also re-read any supervisor messages just delivered in your conversation. If a message says the branch was merged or requests more changes, follow it and do not send a stale merge request.
 3. **`delivery_mode=local_merge`**: run `git rev-parse factory/<name>` to capture the current tip, then send the supervisor a merge request with that SHA. Do **not** push origin; the supervisor merges your local factory branch.
 4. **Parent is `epic/<slug>` (`delivery_mode=push_branch`)**: run `git rev-parse factory/<name>` to capture the current tip, `git push origin factory/<name>`, then message the supervisor to merge your branch into the epic:
    ```
-   mcp__cas__coordination action=message target=supervisor \
+   coordination action=message target=supervisor \
      summary="factory/<name> pushed, needs epic merge before close" \
      message="Fresh after polling unread inbox messages: <task-id> factory/<name> tip <sha>. Please re-check reachability, then merge into epic/<slug> if still needed so close can pass."
    ```
@@ -20,9 +20,9 @@ The most common close rejection: your `factory/<name>` branch has commits not ye
 
 ## Close requires task-scoped verification
 
-1. **Forward ONCE** to supervisor via `mcp__cas__coordination action=message` — include task ID, brief summary of completion state, and exact error text. The close response names the affected task, dispatch owner, deadline, and recovery path; copy that guidance directly.
+1. **Forward ONCE** to supervisor via `coordination action=message` — include task ID, brief summary of completion state, and exact error text. The close response names the affected task, dispatch owner, deadline, and recovery path; copy that guidance directly.
 2. **Do not re-report.** The supervisor will verify and close asynchronously. Re-sending the same message does not speed this up.
-3. **Continue unrelated work.** Verification gates only the named task's transition to closed; unrelated MCP and other-task work remain available. When idle, re-check `mcp__cas__task action=show id=<your-task-id>`. If `Status: Closed`, trust the DB over messages.
+3. **Continue unrelated work.** Verification gates only the named task's transition to closed; unrelated MCP and other-task work remain available. When idle, re-check `task action=show id=<your-task-id>`. If `Status: Closed`, trust the DB over messages.
 4. **If still InProgress after 5 minutes of idle**, send ONE follow-up to the supervisor with note_type=blocker. Then continue to re-poll DB only.
 5. **Never spam idle notifications as a substitute for work.** If you are idle waiting on verification, stay silent until (a) the DB shows closed and you proceed to the next task, or (b) 5 minutes have elapsed and you send the one follow-up.
 
@@ -31,7 +31,7 @@ The most common close rejection: your `factory/<name>` branch has commits not ye
 If **every** MCP tool call fails with a jail/blocked error (not just the named task's close/update-to-closed), the running Cassy binary predates task-scoped verification enforcement.
 
 1. **Do NOT attempt workarounds** — no sqlite edits, no env var hacks, no retries.
-2. **Report to supervisor immediately** via `mcp__cas__coordination action=message` with the exact error message and your agent name.
+2. **Report to supervisor immediately** via `coordination action=message` with the exact error message and your agent name.
 3. **Supervisor will rebuild Cassy and respawn you.** This is not something you can fix from inside your session.
 
 ## Context Exhaustion
@@ -67,7 +67,7 @@ Only report to supervisor after completing at least steps 1–2. Include the err
 
 ## MCP Connectivity Failure
 
-If `mcp__cas__*` tools stop responding or return connection errors:
+If Cassy tools stop responding or return connection errors:
 
 1. **Check the symlink**: Worktrees get MCP config via symlink, not a copy.
    ```bash
@@ -82,30 +82,30 @@ If `mcp__cas__*` tools stop responding or return connection errors:
 
 3. **Do NOT attempt sqlite surgery.** Direct database edits from a worker session risk corrupting shared state.
 
-4. **Report to supervisor** via `mcp__cas__coordination action=message` with the error and diagnostic output. Supervisor will fix the MCP connection or respawn you.
+4. **Report to supervisor** via `coordination action=message` with the error and diagnostic output. Supervisor will fix the MCP connection or respawn you.
 
 ## ToolSearch resolved the tool but you still can't call it
 
-Symptom: `ToolSearch(query="select:mcp__cas__task")` returns a match for `mcp__cas__task` (or any `mcp__cas__*` tool), but you're unsure how to proceed and are tempted to run ToolSearch again "to make it callable."
+Symptom: a ToolSearch `select:` for the prefixed `task` tool returns a match (or one for any other Cassy tool), but you're unsure how to proceed and are tempted to run ToolSearch again "to make it callable."
 
-**Do not re-run ToolSearch for a tool it already resolved — that will not make it more callable.** A successful ToolSearch match means the tool is now loadable; the very next action is a *separate* tool call literally named `mcp__cas__task` (or whichever tool matched), passing your real arguments (e.g. `action=mine`). If that direct call then fails or the tool name is rejected as unknown, treat it as **Zero Cassy Tools Available** below and report to the supervisor — don't loop on ToolSearch, and don't fall back to `cas task ...` as a shell command (no such CLI subcommand exists).
+**Do not re-run ToolSearch for a tool it already resolved — that will not make it more callable.** A successful ToolSearch match means the tool is now loadable; the very next action is a *separate* call to that tool by its full prefixed name (or whichever tool matched), passing your real arguments (e.g. `action=mine`). If that direct call then fails or the tool name is rejected as unknown, treat it as **Zero Cassy Tools Available** below and report to the supervisor — don't loop on ToolSearch, and don't fall back to `cas task ...` as a shell command (no such CLI subcommand exists).
 
 ## Zero Cassy Tools Available
 
-(no `mcp__cas__*` tools surfaced at all — not one call errors, they simply do not exist in your tool set)
+(no Cassy tools surfaced at all — not one call errors, they simply do not exist in your tool set)
 
-This is different from connectivity failure above. Here the MCP handshake completed against *something*, but `cas serve` either crashed during startup or silently degraded before registering its tools. Symptom: `ToolSearch select:mcp__cas__task` returns `"No matching deferred tools found"` even though other MCP servers (e.g. Gmail, Calendar) are present.
+This is different from connectivity failure above. Here the MCP handshake completed against *something*, but `cas serve` either crashed during startup or silently degraded before registering its tools. Symptom: a ToolSearch `select:` for the prefixed `task` tool returns `"No matching deferred tools found"` even though other MCP servers (e.g. Gmail, Calendar) are present.
 
 **Do not** fall back to running `cas task` as a shell subcommand — it does not exist. **Do not** run `cas init` from inside the worktree (creates a duplicate `.cas/`). **Do not** kill/restart `cas serve` yourself.
 
 Report to supervisor immediately with:
 ```
-mcp__cas__coordination action=message target=supervisor \
+coordination action=message target=supervisor \
   summary="zero cas tools available" \
-  message="<your-name>: no mcp__cas__* tools in tool set. Need respawn."
+  message="<your-name>: no Cassy tools in tool set. Need respawn."
 ```
 
-If even `mcp__cas__coordination` is missing (so you cannot send that message), you are fully detached. Output a short plain-text report and stop — the supervisor polls your session and will detect the stall. Do not spin attempting workarounds.
+If even the `coordination` tool is missing (so you cannot send that message), you are fully detached. Output a short plain-text report and stop — the supervisor polls your session and will detect the stall. Do not spin attempting workarounds.
 
 ## Known-fixed Cassy bug reappears
 
@@ -115,7 +115,7 @@ If a bug that was supposedly fixed in the source code still manifests, the runni
 
 If the supervisor hasn't responded after 5 minutes on any blocking question:
 1. Re-read task state with `action=show` — supervisor may have acted without messaging back.
-2. Send ONE follow-up via `mcp__cas__coordination action=message`.
+2. Send ONE follow-up via `coordination action=message`.
 3. If still no response after another 5 minutes, focus on any non-blocked work or pause. Do not spam.
 
 ## Task Reassigned While Working
@@ -125,11 +125,11 @@ If the supervisor reassigns your current task to another worker:
 1. **Commit WIP immediately** (`git add <paths> && git commit -m "WIP: <task-id> handoff"`) — do not lose work in progress, and do not use `git stash`: the stash stack is shared by every worktree.
 2. **Post progress notes** summarizing what's done and what's left:
    ```
-   mcp__cas__task action=notes id=<task-id> notes="WIP: <what's done>, remaining: <what's left>" note_type=progress
+   task action=notes id=<task-id> notes="WIP: <what's done>, remaining: <what's left>" note_type=progress
    ```
 3. **Message supervisor** with the commit SHA of your WIP so the new assignee can pick it up.
-4. **Stop work on that task immediately** — do not finish "just one more thing." Move to your next assigned task or check `mcp__cas__task action=mine`.
+4. **Stop work on that task immediately** — do not finish "just one more thing." Move to your next assigned task or check `task action=mine`.
 
 ## Outbox replay
 
-Your outbox may replay stale messages after task state changes (delivery-layer artifact). Before re-sending a blocker or completion notification, re-check task state with `mcp__cas__task action=show` — the issue may already be resolved.
+Your outbox may replay stale messages after task state changes (delivery-layer artifact). Before re-sending a blocker or completion notification, re-check task state with `task action=show` — the issue may already be resolved.

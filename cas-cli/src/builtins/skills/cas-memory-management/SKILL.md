@@ -8,26 +8,26 @@ metadata:
 # Cassy Memory Management
 
 Cassy stores durable memory entries in its SQLite-backed entry store. Use the
-`mcp__cas__memory` tool for entry lifecycle operations, and use
-`mcp__cas__search` when you need to find a memory by topic. Store useful
+`memory` tool for entry lifecycle operations, and use
+`search` when you need to find a memory by topic. Store useful
 project facts proactively, especially after a non-trivial diagnosis or design
 decision.
 
 ## Valid Actions
 
-**Valid `mcp__cas__memory` actions** (exact list — do not invent others): `remember`, `get`, `list`, `update`, `delete`, `archive`, `unarchive`, `helpful`, `harmful`, `mark_reviewed`, `recent`, `set_tier`, `opinion_reinforce`, `opinion_weaken`, `opinion_contradict`.
+**Valid `memory` actions** (exact list — do not invent others): `remember`, `get`, `list`, `update`, `delete`, `archive`, `unarchive`, `helpful`, `harmful`, `mark_reviewed`, `recent`, `set_tier`, `opinion_reinforce`, `opinion_weaken`, `opinion_contradict`.
 
 ## Common Operations
 
-- **Remember**: `mcp__cas__memory action=remember title="..." content="..." entry_type=learning`
-- **Find**: `mcp__cas__search action=search query="..." doc_type=entry`
-- **Read**: `mcp__cas__memory action=get id=<entry-id>`
-- **List**: `mcp__cas__memory action=list scope=project limit=20`
-- **Revise**: `mcp__cas__memory action=update id=<entry-id> content="..."`
+- **Remember**: `memory action=remember title="..." content="..." entry_type=learning`
+- **Find**: `search action=search query="..." doc_type=entry`
+- **Read**: `memory action=get id=<entry-id>`
+- **List**: `memory action=list scope=project limit=20`
+- **Revise**: `memory action=update id=<entry-id> content="..."`
 - **Feedback**: use `helpful`, `harmful`, or `mark_reviewed` with `id`.
 - **Lifecycle**: use `archive` to remove an entry from normal retrieval and
   `unarchive` to restore it.
-- **Recent**: `mcp__cas__memory action=recent limit=10`
+- **Recent**: `memory action=recent limit=10`
 
 ## Request Fields
 

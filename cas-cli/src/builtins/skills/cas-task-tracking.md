@@ -7,22 +7,22 @@ metadata:
 
 # Cassy Task Tracking
 
-Use `mcp__cas__task` instead of built-in TodoWrite. Cassy tasks persist across sessions.
+Use `task` instead of built-in TodoWrite. Cassy tasks persist across sessions.
 
 ## Core Workflow
 
-1. **Create**: `mcp__cas__task action=create title="..." description="..." priority=2 risk=none`
+1. **Create**: `task action=create title="..." description="..." priority=2 risk=none`
    — `risk` is required for `task`, `bug` and `feature` types (`blast-radius`, `platform`, `concurrency` or `none`); `risk=blast-radius` also needs `proof_targets`.
-2. **Start**: `mcp__cas__task action=start id=<task-id>`
-3. **Progress**: `mcp__cas__task action=notes id=<task-id> notes="..." note_type=progress`
-4. **Close**: `mcp__cas__task action=close id=<task-id> reason="..."`
+2. **Start**: `task action=start id=<task-id>`
+3. **Progress**: `task action=notes id=<task-id> notes="..." note_type=progress`
+4. **Close**: `task action=close id=<task-id> reason="..."`
 
 ## Useful Actions
 
-- **Ready tasks**: `mcp__cas__task action=ready` — unblocked, actionable work
-- **My tasks**: `mcp__cas__task action=mine` — tasks assigned to you
-- **Blocked**: `mcp__cas__task action=blocked` — dependency-blocked work; `action=list status=blocked` shows only tasks explicitly set to blocked
-- **Add dependency**: `mcp__cas__task action=dep_add id=<task> to_id=<blocker> dep_type=blocks`
+- **Ready tasks**: `task action=ready` — unblocked, actionable work
+- **My tasks**: `task action=mine` — tasks assigned to you
+- **Blocked**: `task action=blocked` — dependency-blocked work; `action=list status=blocked` shows only tasks explicitly set to blocked
+- **Add dependency**: `task action=dep_add id=<task> to_id=<blocker> dep_type=blocks`
 
 ## Note Types
 
@@ -30,4 +30,4 @@ Use `mcp__cas__task` instead of built-in TodoWrite. Cassy tasks persist across s
 
 ## Valid Actions
 
-**Valid `mcp__cas__task` actions** (exact list — do not invent others): `create`, `proposal_inbox`, `proposal_accept`, `proposal_reject`, `proposal_reconcile`, `show`, `get`, `update`, `start`, `close`, `cancel`, `reopen`, `request_changes`, `delete`, `list`, `ready`, `blocked`, `notes`, `dep_add`, `dep_remove`, `dep_list`, `claim`, `release`, `reset`, `transfer`, `available`, `mine`.
+**Valid `task` actions** (exact list — do not invent others): `create`, `proposal_inbox`, `proposal_accept`, `proposal_reject`, `proposal_reconcile`, `show`, `get`, `update`, `start`, `close`, `cancel`, `reopen`, `request_changes`, `delete`, `list`, `ready`, `blocked`, `notes`, `dep_add`, `dep_remove`, `dep_list`, `claim`, `release`, `reset`, `transfer`, `available`, `mine`.

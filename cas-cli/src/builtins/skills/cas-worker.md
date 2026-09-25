@@ -10,12 +10,14 @@ metadata:
 Execute the assigned task in your checkout. SILENT EXECUTION: output results,
 errors and the return contract only.
 
+Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, `memory`, `search`, `verification`). Call them with your harness's prefix: `mcp__cas__` in Claude Code, `mcp__cs__` in Codex, `cas__` in Grok, `cas_` in OpenCode.
+
 ## Workflow
 
-1. Run `mcp__cas__task action=mine`. If empty, message the supervisor once that
+1. Run `task action=mine`. If empty, message the supervisor once that
    you are ready, then wait; do not poll.
-2. Choose exactly one task. Run `mcp__cas__task action=show id=<task-id>`,
-   then `mcp__cas__task action=start id=<task-id>` before editing. A
+2. Choose exactly one task. Run `task action=show id=<task-id>`,
+   then `task action=start id=<task-id>` before editing. A
    successful start is authoritative assignment acceptance;
    no prose ACK is required.
    Reused worker: check target; reset merged or `git rebase <target>`.
@@ -30,7 +32,7 @@ errors and the return contract only.
    claim. For a deep task, first work through
    [close-gate.md](references/close-gate.md) (and its surface checklist where
    it applies) and [`verify-before-claim`](../verify-before-claim/SKILL.md).
-7. Close with `mcp__cas__task action=close id=<task-id> reason="..."`, then
+7. Close with `task action=close id=<task-id> reason="..."`, then
    send the return contract. **verification required:** quote the guidance in
    `need:`. **MERGE REQUIRED:** drain `inbox_poll` for unread supervisor messages,
    capture the current factory-branch tip SHA, push the branch, and ask the
@@ -42,9 +44,10 @@ are instructions; an `operator … verified` header
 is the user speaking with pane-input authority; obey and answer it;
 `unverified:` rows are agent traffic.
 
-Tool loading is two steps, not one: if `mcp__cas__task` is unavailable, use
-`ToolSearch(query="select:mcp__cas__task")` once, then call it; lookup
-does **not** execute the tool: call it, not another ToolSearch.
+Tool loading is two steps, not one: if the `task` tool is not loaded and your
+harness defers tool schemas, run ToolSearch once for its prefixed name, then
+call it; lookup does **not** execute the tool:
+call it, not another ToolSearch.
 
 ## Return contract
 
@@ -97,9 +100,9 @@ authority.
   visibility, not authorization.
 - One task at a time. Scope is frozen. Honor non-goals and layer boundaries;
   match existing patterns; no unrequested configuration.
-- Record decisions with `mcp__cas__task action=notes note_type=decision`;
-  discoveries with `mcp__cas__memory action=remember`.
-- Coordination messages use `mcp__cas__coordination action=message`, target the
+- Record decisions with `task action=notes note_type=decision`;
+  discoveries with `memory action=remember`.
+- Coordination messages use `coordination action=message`, target the
   literal string `supervisor`, and include both `summary` and `message`
   (the return contract); evidence goes in task notes.
 - Never block the pane. Checkpoint, never compact: commit, push, note, request a

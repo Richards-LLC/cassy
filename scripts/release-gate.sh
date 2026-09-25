@@ -15,8 +15,6 @@ repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
 failure_log_rel='cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md'
-failure_log_codex_rel='cas-cli/src/builtins/codex/skills/cas-cut-release/references/failure-log.md'
-failure_log_grok_rel='cas-cli/src/builtins/grok/skills/cas-cut-release/references/failure-log.md'
 readonly -a gate_check_ids=(
     scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config assemble-stale-base
     version-literals fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
@@ -42,13 +40,13 @@ learn() {
     }
     date="$(date -u +%F)"
     entry="- $date — **$check_id** — Symptom: $symptom Root cause: $cause Release: operator-reported."
-    for path in "$failure_log_rel" "$failure_log_codex_rel" "$failure_log_grok_rel"; do
+    for path in "$failure_log_rel"; do
         [[ -f "$path" ]] || {
-            printf 'error: missing failure-log mirror %s\n' "$path" >&2
+            printf 'error: missing failure log %s\n' "$path" >&2
             return 1
         }
     done
-    for path in "$failure_log_rel" "$failure_log_codex_rel" "$failure_log_grok_rel"; do
+    for path in "$failure_log_rel"; do
         before="$(mktemp)"
         cp "$path" "$before"
         printf '%s\n' "$entry" >>"$path"
@@ -62,7 +60,7 @@ learn() {
         "$repo_root/scripts/gen-builtin-reference-history.sh"
         printf 'Regenerated builtin reference history after --learn; commit the ledger before starting a gate.\n'
     fi
-    printf 'Learned release failure in all three mirrors. Add or extend check %s and its fixture self-test in this same commit; record the same text with mcp__cas__memory action=remember tags=release before retrying.\n' "$check_id"
+    printf 'Learned release failure in the failure log (one copy serves every harness). Add or extend check %s and its fixture self-test in this same commit; record the same text with memory action=remember tags=release before retrying.\n' "$check_id"
 }
 
 if [[ "${1:-}" == '--learn' ]]; then
@@ -538,7 +536,7 @@ check_epic_worktree_zig() {
 
 check_failure_log() {
     local log="$failure_log_rel"
-    local mirror entry id
+    local entry id
     local entries=0 enforced=0 manual=0 invalid=0
     [[ -f "$log" ]] || {
         printf 'failure-log: missing %s\n' "$log"
@@ -562,12 +560,6 @@ check_failure_log() {
             printf 'failure-log: entry has no **check-id** or manual: marker: %s\n' "$entry"
         fi
     done <"$log"
-    for mirror in "$failure_log_codex_rel" "$failure_log_grok_rel"; do
-        if ! cmp -s "$log" "$mirror"; then
-            invalid=$((invalid + 1))
-            printf 'failure-log: mirror differs: %s\n' "$mirror"
-        fi
-    done
     printf 'failure-log: %d entries enforced; %d entries with no executable check (explicit manual markers); %d invalid\n' \
         "$enforced" "$manual" "$invalid"
     [[ "$entries" -gt 0 && "$invalid" -eq 0 ]]

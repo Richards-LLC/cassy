@@ -93,12 +93,14 @@ fn skill_is_registered_in_builtins_rs_for_both_harnesses() {
          (an `include_str!(\"builtins/skills/verify-before-claim/SKILL.md\")` entry)"
     );
 
-    // Codex variant must be wired into CODEX_BUILTIN_SKILLS via include_str!.
-    assert!(
-        builtins.contains("builtins/codex/skills/verify-before-claim/SKILL.md"),
-        "cas-cli/src/builtins.rs must include verify-before-claim in CODEX_BUILTIN_SKILLS \
-         (an `include_str!(\"builtins/codex/skills/verify-before-claim/SKILL.md\")` entry)"
-    );
+    // Codex and Grok embed the same prefix-neutral file (audit D1).
+    for flavor in [builtin_catalog::Flavor::Codex, builtin_catalog::Flavor::Grok] {
+        assert_eq!(
+            builtin_catalog::try_find(flavor, "skills/verify-before-claim/SKILL.md"),
+            Some(include_str!("../src/builtins/skills/verify-before-claim/SKILL.md")),
+            "{flavor:?} catalog must register verify-before-claim"
+        );
+    }
 
     // And the destination path the syncer writes to must be the canonical
     // `skills/verify-before-claim/SKILL.md` form.

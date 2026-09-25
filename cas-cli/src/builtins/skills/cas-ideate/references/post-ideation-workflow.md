@@ -98,7 +98,7 @@ Write the ideation artifact **after** the candidate set has been reviewed enough
 3. Write or update the ideation document using the template below.
 4. Also store a Cassy memory so future sessions can find it:
    ```
-   mcp__cas__memory action=remember title="Ideation: <topic>" content="Doc: <path>. Top survivors: <short list>. Run on <date>." tags=ideation,<topic>
+   memory action=remember title="Ideation: <topic>" content="Doc: <path>. Top survivors: <short list>. Run on <date>." tags=ideation,<topic>
    ```
 
 ### Artifact template

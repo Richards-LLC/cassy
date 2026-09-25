@@ -304,6 +304,17 @@ impl CasCore {
             })
             .unwrap_or_else(|| vec![MANUAL_SOURCE.to_string()]);
 
+        // cas-caae (skills audit M83): a page naming another registered
+        // project belongs in that project's store, unless a
+        // `project:<slug>` source declares the cross-project scope.
+        let project_root = self.cas_root.parent().unwrap_or(&self.cas_root);
+        if let Some(refusal) =
+            crate::store::foreign_project_guard::ForeignProjectGuard::for_project_root(project_root)
+                .check_knowledge_page(&title, body, &sources)
+        {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, refusal.to_string()));
+        }
+
         let snippet = req
             .snippet
             .as_deref()

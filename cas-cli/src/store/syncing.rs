@@ -6,9 +6,10 @@
 //! to both the personal queue and the team queue.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::cloud::{CloudConfig, EntityType, SyncOperation, SyncQueue};
+use crate::store::foreign_project_guard::ForeignProjectGuard;
 use crate::store::share_policy::{eligible_for_team_rule, resolve_team_id};
 use crate::store::{Result, RuleStore};
 use crate::types::Rule;
@@ -26,6 +27,11 @@ pub struct SyncingRuleStore {
     /// a config without a queue has nowhere to dual-enqueue, so the
     /// builder silently drops it (see `with_cloud_config` doc).
     team_id: Option<Arc<str>>,
+    /// Project root for the foreign-project sync guard (cas-caae). The guard
+    /// reads the host registry, so it is built on the first rule sync rather
+    /// than on every store open.
+    project_root: Option<PathBuf>,
+    project_guard: OnceLock<ForeignProjectGuard>,
 }
 
 impl SyncingRuleStore {
@@ -36,6 +42,8 @@ impl SyncingRuleStore {
             syncer: Syncer::new(target_dir, min_helpful),
             cloud_queue: None,
             team_id: None,
+            project_root: None,
+            project_guard: OnceLock::new(),
         }
     }
 
@@ -51,6 +59,8 @@ impl SyncingRuleStore {
             syncer: Syncer::new(target_dir, min_helpful),
             cloud_queue: Some(cloud_queue),
             team_id: None,
+            project_root: None,
+            project_guard: OnceLock::new(),
         }
     }
 
@@ -70,7 +80,38 @@ impl SyncingRuleStore {
         self
     }
 
+    /// Enable the foreign-project sync guard for the project at
+    /// `project_root` (cas-caae): a rule naming another registered project is
+    /// kept out of (and removed from) this project's rule files.
+    #[must_use]
+    pub fn with_project_root(mut self, project_root: PathBuf) -> Self {
+        self.project_root = Some(project_root);
+        self
+    }
+
+    /// Test seam: install a guard built from an explicit registry.
+    #[cfg(test)]
+    fn with_project_guard(mut self, guard: ForeignProjectGuard) -> Self {
+        self.project_root = Some(PathBuf::new());
+        let _ = self.project_guard.set(guard);
+        self
+    }
+
+    fn names_foreign_project(&self, rule: &Rule) -> bool {
+        let Some(project_root) = self.project_root.as_deref() else {
+            return false;
+        };
+        self.project_guard
+            .get_or_init(|| ForeignProjectGuard::for_project_root(project_root))
+            .check_rule(&rule.content, &rule.tags)
+            .is_some()
+    }
+
     fn try_sync(&self, rule: &Rule) {
+        if self.names_foreign_project(rule) {
+            self.try_remove(&rule.id);
+            return;
+        }
         // Ignore sync errors - syncing is best-effort
         let _ = self.syncer.sync_rule(rule);
     }
@@ -261,6 +302,50 @@ mod tests {
         r.scope = scope;
         r.content = format!("rule {id}");
         r
+    }
+
+    /// cas-caae (skills audit M27): a proven rule naming another registered
+    /// project is never written to this project's rule files, and an
+    /// existing file for it is removed on its next write.
+    #[test]
+    fn foreign_project_rule_is_not_synced_to_rule_files() {
+        let temp = TempDir::new().unwrap();
+        let inner = SqliteRuleStore::open(temp.path()).unwrap();
+        inner.init().unwrap();
+        let target = temp.path().join("rules");
+        let store = SyncingRuleStore::new(Arc::new(inner), target.clone(), 0).with_project_guard(
+            ForeignProjectGuard::new("cas-src", ["gabber-studio".to_string()]),
+        );
+        let proven = |id: &str, content: &str| {
+            let mut rule = make_rule(id, Scope::Project);
+            rule.content = content.to_string();
+            rule.status = cas_types::RuleStatus::Proven;
+            rule.helpful_count = 1;
+            rule
+        };
+
+        store
+            .add(&proven("rule-001", "Epics branch from main."))
+            .unwrap();
+        assert!(target.join("rule-001.md").exists());
+
+        let gabber = proven(
+            "rule-002",
+            "Gabber Studio branching: ALWAYS cut new branches from `staging`.",
+        );
+        store.add(&gabber).unwrap();
+        assert!(!target.join("rule-002.md").exists());
+
+        // A file synced before the guard existed is removed on the next write.
+        std::fs::write(target.join("rule-002.md"), "stale").unwrap();
+        store.update(&gabber).unwrap();
+        assert!(!target.join("rule-002.md").exists());
+
+        // Tagging it `project:gabber-studio` declares the scope explicitly.
+        let mut scoped = gabber.clone();
+        scoped.tags = vec!["project:gabber-studio".to_string()];
+        store.update(&scoped).unwrap();
+        assert!(target.join("rule-002.md").exists());
     }
 
     fn queue_counts(queue: &SyncQueue) -> (usize, usize) {

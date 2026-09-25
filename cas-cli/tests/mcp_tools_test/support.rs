@@ -270,3 +270,15 @@ mod tests {
         assert_eq!(extract_skill_id(response).as_deref(), Some("cas-skf7"));
     }
 }
+
+/// Register `path` in the sandboxed host known-repos registry, the list the
+/// cas-caae foreign-project write guard reads. Call after `setup_cas` so HOME
+/// already points at the sandbox.
+pub(crate) fn register_host_project(path: &str) {
+    use cas::store::KnownRepoStore;
+    cas::store::known_repos::ensure_host_schema().expect("sandbox host registry schema");
+    cas::store::known_repos::open_host_known_repo_store()
+        .expect("sandbox host registry")
+        .upsert(std::path::Path::new(path))
+        .expect("register sandbox host project");
+}

@@ -1,5 +1,6 @@
 use crate::config::{Config, parse_promotion_evidence};
 use crate::mcp::tools::core::imports::*;
+use crate::store::foreign_project_guard::ForeignProjectGuard;
 use cas_store::{RetrievalAggregate, SqliteRetrievalStore};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -338,14 +339,6 @@ impl CasCore {
         &self,
         Parameters(req): Parameters<RuleCreateRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let rule_store = self.open_rule_store()?;
-
-        let id = rule_store.generate_id().map_err(|e| McpError {
-            code: ErrorCode::INTERNAL_ERROR,
-            message: Cow::from(format!("Failed to generate ID: {e}")),
-            data: None,
-        })?;
-
         let tags: Vec<String> = req
             .tags
             .map(|t| {
@@ -355,6 +348,28 @@ impl CasCore {
                     .collect()
             })
             .unwrap_or_default();
+
+        // cas-caae (skills audit M27/M83): a rule naming another registered
+        // project belongs in that project's store, unless tagged
+        // `project:<slug>` as a deliberate cross-project rule.
+        let project_root = self.cas_root.parent().unwrap_or(&self.cas_root);
+        if let Some(refusal) =
+            ForeignProjectGuard::for_project_root(project_root).check_rule(&req.content, &tags)
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(refusal.to_string()),
+                data: None,
+            });
+        }
+
+        let rule_store = self.open_rule_store()?;
+
+        let id = rule_store.generate_id().map_err(|e| McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!("Failed to generate ID: {e}")),
+            data: None,
+        })?;
 
         // Validate auto_approve_tools if provided
         if let Some(ref tools) = req.auto_approve_tools {
@@ -612,6 +627,21 @@ impl CasCore {
 
         if changes.is_empty() {
             return Ok(Self::success("No changes specified"));
+        }
+
+        // cas-caae: the M27 rule reached its store as an edit of an existing
+        // row, so a content or tag edit gets the same guard as create.
+        if changes.contains(&"content") || changes.contains(&"tags") {
+            let project_root = self.cas_root.parent().unwrap_or(&self.cas_root);
+            if let Some(refusal) = ForeignProjectGuard::for_project_root(project_root)
+                .check_rule(&rule.content, &rule.tags)
+            {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(refusal.to_string()),
+                    data: None,
+                });
+            }
         }
 
         // cas-5372: an authorised caller's edit re-authorises the hard rule

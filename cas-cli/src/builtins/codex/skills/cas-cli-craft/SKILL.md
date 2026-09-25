@@ -1,6 +1,6 @@
 ---
 name: cas-cli-craft
-description: Use when designing, rewriting, or critiquing anything a CLI or TUI prints for a person — a status screen, doctor-style report, table, progress line, error, warning, receipt, or the human side of a --json command — before the first render and before it merges. Owns the concept brief, output hierarchy, the semantic colour set that survives light and dark terminals, width and Unicode fallbacks, the --json contract, and the scored critique that requires a terminal-qa PASS receipt; cas-ui-craft owns HTML surfaces.
+description: Use when designing or critiquing what a CLI or TUI prints for a person — status screens, doctor reports, tables, progress, errors, receipts, the human side of `--json`. HTML surfaces belong to cas-ui-craft.
 managed_by: cas
 ---
 
@@ -36,8 +36,9 @@ from one copyable command, and nothing wraps, clips, or disappears on a light or
    when stdout is a TTY; `--json` prints one document and nothing else on stdout; box drawing and
    glyphs fall back to ASCII when the locale is not UTF-8. Done when the piped, `NO_COLOR`, and
    `LC_ALL=C` runs each read cleanly.
-7. **Run the gate and critique.** `node scripts/terminal-qa.mjs --label <command> -- <command>`
-   (add `--escape-flag --verbose` or `--json-flag --json` as the command warrants) captures 80
+7. **Run the gate and critique.** `node <skills-dir>/cas-cli-craft/scripts/terminal-qa.mjs --label <command> -- <command>`
+   (add `--escape-flag --verbose` or `--json-flag --json` as the command warrants; full command
+   and fallback in the rubric) captures 80
    and 120 columns on four palettes plus the piped, `NO_COLOR`, and C-locale runs, and writes
    `report.md` whose first line is the receipt. Score the output with
    [references/critique-rubric.md](references/critique-rubric.md), paste the receipt line and

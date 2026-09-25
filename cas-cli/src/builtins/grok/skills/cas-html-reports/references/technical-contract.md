@@ -3,6 +3,9 @@
 Every report HTML obeys all of this, regardless of type, audience, or domain. If a rule below is
 violated, the artifact is not shippable — fix it before committing.
 
+Contents: 1 One file · 2 JavaScript · 3 Semantic HTML · 4 Theme and design language · 5 Print ·
+6 Provenance · 7 Copyability · 8 Source of truth · Anti-patterns.
+
 ## 1. One file, zero dependencies
 
 - **Exactly one `.html` file.** No sibling CSS, JS, font, or image files.
@@ -49,8 +52,8 @@ violated, the artifact is not shippable — fix it before committing.
 ## 4. Theme and design language
 
 - **The palette is the project's `DESIGN.md` or the Petrastella tokens.** Read `DESIGN.md` first when
-  it exists and take the tokens it names. Without one, declare the tokens from
-  `design-spec/references/design-tokens.json` (rationale in `petrastella-design-language.md`): warm
+  it exists and take the tokens it names. Without one, paste `design-spec/references/tokens.css`
+  (generated from `design-tokens.json`; rationale in `petrastella-design-language.md`): warm
   stone paper, a sandstone hero surface, serif display for the verdict and title, body sans, tabular
   mono for numbers, and semantic color roles. Neutral grey is the white-label fallback; a brief that
   chooses it names the brand reason in its *omitted* field.

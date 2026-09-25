@@ -102,3 +102,67 @@ printf '%s' '{"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"imag
         base64::engine::general_purpose::STANDARD.encode(reference_bytes)
     );
 }
+
+/// Audit L4 F8: the asset playbook asks for 16:9, 2K, A4 and OG sizes, so the
+/// helper must be able to request them instead of hoping the prompt is obeyed.
+#[cfg(unix)]
+#[test]
+fn helper_sends_aspect_and_size_as_image_config_only_when_asked() {
+    let project = TempDir::new().expect("temporary image-generation project");
+    let bin = project.path().join("bin");
+    fs::create_dir(&bin).expect("create fake provider bin");
+    cas::test_paths::warm_stub(
+        &bin.join("curl"),
+        r##"#!/usr/bin/env bash
+set -euo pipefail
+payload=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --data-binary) payload="${2#@}"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+cp "$payload" "$CURL_PAYLOAD_CAPTURE"
+printf '%s' '{"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"cG5n"}}]}}]}'
+"##,
+    );
+    let script = repo_root()
+        .join("cas-cli/src/builtins/skills/cas-image-generate/scripts/generate-image.sh");
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let run = |extra: &[&str], capture: &std::path::Path| {
+        let output = project.path().join("hero.png");
+        Command::new("bash")
+            .arg(&script)
+            .args(["--prompt", "hero", "--output", output.to_str().unwrap()])
+            .args(extra)
+            .env("GEMINI_API_KEY", "offline-test-key")
+            .env("CURL_PAYLOAD_CAPTURE", capture)
+            .env("PATH", &path)
+            .assert()
+            .success();
+        serde_json::from_slice::<Value>(&fs::read(capture).expect("captured payload"))
+            .expect("payload is JSON")
+    };
+
+    let sized = run(
+        &["--aspect", "16:9", "--size", "2K"],
+        &project.path().join("sized.json"),
+    );
+    assert_eq!(sized["generationConfig"]["responseModalities"][0], "IMAGE");
+    assert_eq!(sized["generationConfig"]["imageConfig"]["aspectRatio"], "16:9");
+    assert_eq!(sized["generationConfig"]["imageConfig"]["imageSize"], "2K");
+
+    let plain = run(&[], &project.path().join("plain.json"));
+    assert!(
+        plain.get("generationConfig").is_none(),
+        "without --aspect/--size the request keeps the model defaults: {plain}"
+    );
+
+    Command::new("bash")
+        .arg(&script)
+        .args(["--prompt", "hero", "--output", "x.png", "--size", "8K", "--dry-run"])
+        .env("GEMINI_API_KEY", "offline-test-key")
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("--size must be 1K, 2K or 4K"));
+}

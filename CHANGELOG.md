@@ -12,6 +12,18 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - `cas doctor` reports `host install parity`: installed skills and agents
   that differ from, are missing from, or are no longer in this binary's
   catalog.
+- The visual-QA and terminal-QA scripts now ship with the `cas-ui-craft` and
+  `cas-cli-craft` skills, so projects outside the Cassy repo can produce the
+  receipts their close gates ask for.
+- The design language ships a ready-to-paste `tokens.css`, and the image
+  helper takes `--aspect` and `--size`.
+
+### Changed
+
+- The release-report skill starts from `cas release report <version> --pdf`
+  instead of a hand-written render and pasted PDF programs.
+- Report, figure and screen skills share one form table, and `DESIGN.md`
+  follows the public DESIGN.md format and its linter.
 
 ### Fixed
 

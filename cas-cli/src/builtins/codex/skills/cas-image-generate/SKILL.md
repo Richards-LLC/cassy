@@ -1,6 +1,6 @@
 ---
 name: cas-image-generate
-description: Use when a project needs a hero, background, logo, icon, OG card, illustration, or report artwork that must match its existing design system; routes flat or geometric assets to agent-authored SVG and photographic or painterly work to Google Nano Banana via `GEMINI_API_KEY`.
+description: Use when a project needs a hero, background, logo, icon, OG card, illustration, or report artwork matching its design system; flat or geometric assets become agent-authored SVG, photographic or painterly work goes to Nano Banana.
 managed_by: cas
 ---
 
@@ -33,10 +33,12 @@ from the project root:
 
 ```bash
 bash <harness-config-dir>/skills/cas-image-generate/scripts/generate-image.sh \
-  --tier draft --prompt "$PROMPT" --output assets/generated/hero.png
+  --tier draft --aspect 16:9 --size 2K --prompt "$PROMPT" --output assets/generated/hero.png
 ```
 
-Use `--reference path/to/approved.png` once per reference image. Use
+`--aspect` (1:1, 2:3, 3:2, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 21:9) and `--size`
+(1K, 2K, 4K) set the shape; the asset playbook names them per asset. Use
+`--reference path/to/approved.png` once per reference image. Use
 `--dry-run` to validate routing and key presence without calling the API. The
 helper is a plain-curl adapter; see [providers.md](references/providers.md) for
 the request shape and the unwired alternatives.

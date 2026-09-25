@@ -30,8 +30,13 @@ Any of these sets the whole score to 0 until fixed; the gate detects each one:
 
 ## Procedure
 
-1. Run the gate: `node scripts/terminal-qa.mjs --label <command> [--json-flag --json] -- <command …>`.
+1. Run the gate, which ships with this skill (Node 18+ and the `script` pty utility):
+   `node <skills-dir>/cas-cli-craft/scripts/terminal-qa.mjs --label <command> --out <artifacts_root>/<task-id>/terminal-qa/<command> [--json-flag --json] -- <command …>`.
    Read `report.md`; fix every finding or allowlist it with a reason a reviewer would accept.
+   **Fallback, stated once:** where the script cannot run, capture the command yourself at 80
+   and 120 columns, piped, with `NO_COLOR=1`, and with `LC_ALL=C`, check each mechanical zero by
+   eye, and write "terminal-qa unavailable: <reason>; checked by hand" in place of the receipt. A
+   factory close gate that demands the receipt still needs a supervisor override for that.
 2. Open the 80-column HTML capture and read it on the light and the dark palette; then read the
    `.txt` capture as a pipe consumer would.
 3. Score each dimension against the anchors with one sentence of evidence naming a line of

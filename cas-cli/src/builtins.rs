@@ -141,6 +141,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-release-report/scripts/render.py"),
     },
     BuiltinFile {
+        path: "skills/cas-release-report/scripts/check-pdf.py",
+        content: include_str!("builtins/skills/cas-release-report/scripts/check-pdf.py"),
+    },
+    BuiltinFile {
         path: "skills/cas-cut-release/SKILL.md",
         content: include_str!("builtins/skills/cas-cut-release/SKILL.md"),
     },
@@ -399,6 +403,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/design-spec/references/design-tokens.json",
         content: include_str!("builtins/skills/design-spec/references/design-tokens.json"),
     },
+    BuiltinFile {
+        path: "skills/design-spec/references/tokens.css",
+        content: include_str!("builtins/skills/design-spec/references/tokens.css"),
+    },
     // cas-ui-craft skill (cas-d967) : concept brief before any render,
     // first-three-seconds rule, form vocabulary, scored critique rubric with a
     // merge floor, and four annotated exemplars.
@@ -433,6 +441,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-ui-craft/references/exemplars/before-after.html",
         content: include_str!("builtins/skills/cas-ui-craft/references/exemplars/before-after.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-ui-craft/scripts/visual-qa.mjs",
+        content: include_str!("builtins/skills/cas-ui-craft/scripts/visual-qa.mjs"),
     },
     // cas-21dc: demo-statement exploration matrix and durable evidence ledger.
     BuiltinFile {
@@ -535,6 +547,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-frontend-engineering/SKILL.md",
         content: include_str!("builtins/skills/cas-frontend-engineering/SKILL.md"),
     },
+    BuiltinFile {
+        path: "skills/cas-frontend-engineering/references/playwright-acceptance.md",
+        content: include_str!("builtins/skills/cas-frontend-engineering/references/playwright-acceptance.md"),
+    },
     // fallow skill: vendored from https://github.com/fallow-rs/fallow-skills
     // (MIT, Bart Waardenburg). Codebase intelligence for JS/TS — dead code,
     // duplication, complexity, boundaries, feature flags. SKILL.md +
@@ -594,6 +610,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-cli-craft/references/exemplars/before-after.md",
         content: include_str!("builtins/skills/cas-cli-craft/references/exemplars/before-after.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-cli-craft/scripts/terminal-qa.mjs",
+        content: include_str!("builtins/skills/cas-cli-craft/scripts/terminal-qa.mjs"),
     },
     BuiltinFile {
         path: "skills/cas-diagnosing-bugs/SKILL.md",
@@ -713,6 +733,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-release-report/scripts/render.py",
         content: include_str!("builtins/codex/skills/cas-release-report/scripts/render.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/scripts/check-pdf.py",
+        content: include_str!("builtins/codex/skills/cas-release-report/scripts/check-pdf.py"),
     },
     BuiltinFile {
         path: "skills/cas-cut-release/SKILL.md",
@@ -966,6 +990,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/design-spec/references/design-tokens.json",
         content: include_str!("builtins/codex/skills/design-spec/references/design-tokens.json"),
     },
+    BuiltinFile {
+        path: "skills/design-spec/references/tokens.css",
+        content: include_str!("builtins/codex/skills/design-spec/references/tokens.css"),
+    },
     // cas-ui-craft skill (cas-d967) — codex mirror: concept brief before any render,
     // first-three-seconds rule, form vocabulary, scored critique rubric with a
     // merge floor, and four annotated exemplars.
@@ -1000,6 +1028,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-ui-craft/references/exemplars/before-after.html",
         content: include_str!("builtins/codex/skills/cas-ui-craft/references/exemplars/before-after.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-ui-craft/scripts/visual-qa.mjs",
+        content: include_str!("builtins/codex/skills/cas-ui-craft/scripts/visual-qa.mjs"),
     },
     // cas-21dc: Codex mirror of the demo-statement QA skill.
     BuiltinFile {
@@ -1087,6 +1119,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
             "builtins/codex/skills/cas-frontend-engineering/SKILL.md"
         ),
     },
+    BuiltinFile {
+        path: "skills/cas-frontend-engineering/references/playwright-acceptance.md",
+        content: include_str!("builtins/codex/skills/cas-frontend-engineering/references/playwright-acceptance.md"),
+    },
     // fallow skill — codex mirror. See the claude-side entry above for the
     // upstream attribution (fallow-rs/fallow-skills, MIT).
     BuiltinFile {
@@ -1143,6 +1179,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-cli-craft/references/exemplars/before-after.md",
         content: include_str!("builtins/codex/skills/cas-cli-craft/references/exemplars/before-after.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-cli-craft/scripts/terminal-qa.mjs",
+        content: include_str!("builtins/codex/skills/cas-cli-craft/scripts/terminal-qa.mjs"),
     },
     BuiltinFile {
         path: "skills/cas-diagnosing-bugs/SKILL.md",
@@ -1313,6 +1353,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-release-report/scripts/render.py",
         content: include_str!("builtins/grok/skills/cas-release-report/scripts/render.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/scripts/check-pdf.py",
+        content: include_str!("builtins/grok/skills/cas-release-report/scripts/check-pdf.py"),
     },
     BuiltinFile {
         path: "skills/cas-cut-release/SKILL.md",
@@ -1527,6 +1571,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/design-spec/references/design-tokens.json",
         content: include_str!("builtins/grok/skills/design-spec/references/design-tokens.json"),
     },
+    BuiltinFile {
+        path: "skills/design-spec/references/tokens.css",
+        content: include_str!("builtins/grok/skills/design-spec/references/tokens.css"),
+    },
     // cas-ui-craft skill (cas-d967) — grok twin: concept brief before any render,
     // first-three-seconds rule, form vocabulary, scored critique rubric with a
     // merge floor, and four annotated exemplars.
@@ -1561,6 +1609,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-ui-craft/references/exemplars/before-after.html",
         content: include_str!("builtins/grok/skills/cas-ui-craft/references/exemplars/before-after.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-ui-craft/scripts/visual-qa.mjs",
+        content: include_str!("builtins/grok/skills/cas-ui-craft/scripts/visual-qa.mjs"),
     },
     // cas-21dc: Grok mirror of the demo-statement QA skill.
     BuiltinFile {
@@ -1663,6 +1715,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         ),
     },
     BuiltinFile {
+        path: "skills/cas-frontend-engineering/references/playwright-acceptance.md",
+        content: include_str!("builtins/grok/skills/cas-frontend-engineering/references/playwright-acceptance.md"),
+    },
+    BuiltinFile {
         path: "skills/cas-codex-exec/SKILL.md",
         content: include_str!("builtins/grok/skills/cas-codex-exec/SKILL.md"),
     },
@@ -1712,6 +1768,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-cli-craft/references/exemplars/before-after.md",
         content: include_str!("builtins/grok/skills/cas-cli-craft/references/exemplars/before-after.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-cli-craft/scripts/terminal-qa.mjs",
+        content: include_str!("builtins/grok/skills/cas-cli-craft/scripts/terminal-qa.mjs"),
     },
     BuiltinFile {
         path: "skills/cas-diagnosing-bugs/SKILL.md",
@@ -9020,6 +9080,378 @@ This is the body content."#;
                     failure_log.content.contains(marker),
                     "{label} cas-cut-release failure log missing lesson marker: {marker}"
                 );
+            }
+        }
+    }
+
+
+    // ---------------------------------------------------------------------
+    // cas-0fa1 (WP10): design and report skills
+    // ---------------------------------------------------------------------
+
+    const WP10_SKILLS: [&str; 9] = [
+        "cas-html-reports",
+        "cas-ui-craft",
+        "cas-dataviz",
+        "cas-image-generate",
+        "cas-technical-drawing",
+        "cas-release-report",
+        "design-spec",
+        "cas-cli-craft",
+        "cas-frontend-engineering",
+    ];
+
+    fn wp10_catalogs() -> [(&'static str, &'static [BuiltinFile]); 3] {
+        [
+            ("claude", BUILTIN_SKILLS),
+            ("codex", CODEX_BUILTIN_SKILLS),
+            ("grok", GROK_BUILTIN_SKILLS),
+        ]
+    }
+
+    fn wp10_get(label: &str, catalog: &'static [BuiltinFile], path: &str) -> &'static str {
+        catalog
+            .iter()
+            .find(|b| b.path == path)
+            .unwrap_or_else(|| panic!("{path} missing from {label} catalog"))
+            .content
+    }
+
+    /// D7: the public-surface gates need visual-qa.mjs and terminal-qa.mjs, which
+    /// used to exist only in the cas-src checkout. They ship with the skills now,
+    /// byte-identical to the repo scripts, and every invocation is skill-relative.
+    #[test]
+    fn design_qa_scripts_ship_with_their_skills_and_run_skill_relative() {
+        const VISUAL_QA: &str = include_str!("../../scripts/visual-qa.mjs");
+        const TERMINAL_QA: &str = include_str!("../../scripts/terminal-qa.mjs");
+        for (label, catalog) in wp10_catalogs() {
+            assert_eq!(
+                wp10_get(label, catalog, "skills/cas-ui-craft/scripts/visual-qa.mjs"),
+                VISUAL_QA,
+                "{label} visual-qa.mjs drifted from scripts/visual-qa.mjs; copy it again"
+            );
+            assert_eq!(
+                wp10_get(label, catalog, "skills/cas-cli-craft/scripts/terminal-qa.mjs"),
+                TERMINAL_QA,
+                "{label} terminal-qa.mjs drifted from scripts/terminal-qa.mjs; copy it again"
+            );
+            let ui_rubric = wp10_get(label, catalog, "skills/cas-ui-craft/references/critique-rubric.md");
+            let cli_rubric = wp10_get(label, catalog, "skills/cas-cli-craft/references/critique-rubric.md");
+            assert!(ui_rubric.contains("<skills-dir>/cas-ui-craft/scripts/visual-qa.mjs"));
+            assert!(ui_rubric.contains("--artifact-dir"));
+            assert!(cli_rubric.contains("<skills-dir>/cas-cli-craft/scripts/terminal-qa.mjs"));
+            for skill in WP10_SKILLS {
+                let prefix = format!("skills/{skill}/");
+                for builtin in catalog.iter().filter(|b| b.path.starts_with(&prefix)) {
+                    if !builtin.path.ends_with(".md") {
+                        continue;
+                    }
+                    for stale in ["node scripts/visual-qa.mjs", "node scripts/terminal-qa.mjs", "node scripts/validate_palette.js"] {
+                        assert!(
+                            !builtin.content.contains(stale),
+                            "{label} {}: {stale:?} is project-relative; use <skills-dir>/<skill>/scripts/",
+                            builtin.path
+                        );
+                    }
+                    let fallbacks = builtin.content.matches("Fallback, stated once").count();
+                    let is_rubric = builtin.path.ends_with("craft/references/critique-rubric.md");
+                    assert_eq!(
+                        fallbacks,
+                        usize::from(is_rubric),
+                        "{label} {}: the QA fallback is stated once, in the craft rubric",
+                        builtin.path
+                    );
+                }
+            }
+        }
+    }
+
+    fn wp10_css_value(value: &serde_json::Value) -> String {
+        match value {
+            serde_json::Value::String(text) => text.clone(),
+            other => other.to_string(),
+        }
+    }
+
+    fn wp10_entries(group: &serde_json::Value) -> Vec<(&String, &serde_json::Value)> {
+        group
+            .as_object()
+            .expect("token group is an object")
+            .iter()
+            .filter(|(name, _)| !name.starts_with('$'))
+            .collect()
+    }
+
+    fn wp10_expected_colors(color: &serde_json::Value, mode: &str) -> BTreeMap<String, String> {
+        let mut vars = BTreeMap::new();
+        for (role, token) in wp10_entries(&color[mode]) {
+            vars.insert(format!("--{role}"), wp10_css_value(&token["$value"]));
+        }
+        for group in ["series", "magnitude", "polarity"] {
+            let values = color[group][mode]["$value"].as_array().expect("color ramp");
+            for (index, value) in values.iter().enumerate() {
+                vars.insert(format!("--{group}-{}", index + 1), wp10_css_value(value));
+            }
+        }
+        vars.insert(
+            "--series-neutral".to_string(),
+            wp10_css_value(&color["series-neutral"][mode]["$value"]),
+        );
+        vars
+    }
+
+    fn wp10_css_vars(block: &str) -> BTreeMap<String, String> {
+        block
+            .lines()
+            .filter_map(|line| {
+                let (name, value) = line.trim().split_once(": ")?;
+                name.starts_with("--")
+                    .then(|| (name.to_string(), value.trim_end_matches(';').to_string()))
+            })
+            .collect()
+    }
+
+    /// Audit L4 F10: every render pasted from a 22 KB DTCG JSON. tokens.css is
+    /// generated from it (scripts/gen-design-tokens-css.py) and must say exactly
+    /// what the JSON says, in light and in dark.
+    #[test]
+    fn design_spec_tokens_css_matches_the_json() {
+        let generic = [
+            "serif", "sans-serif", "monospace", "cursive", "fantasy", "system-ui", "ui-serif",
+            "ui-sans-serif", "ui-monospace", "ui-rounded", "-apple-system",
+        ];
+        for (label, catalog) in wp10_catalogs() {
+            let tokens: serde_json::Value = serde_json::from_str(wp10_get(
+                label,
+                catalog,
+                "skills/design-spec/references/design-tokens.json",
+            ))
+            .expect("design tokens are JSON");
+            let css = wp10_get(label, catalog, "skills/design-spec/references/tokens.css");
+            let dark_at = css
+                .find("@media screen and (prefers-color-scheme: dark)")
+                .expect("tokens.css has a screen-only dark block");
+            let (root, dark) = css.split_at(dark_at);
+            assert!(root.contains(":root {"), "{label} tokens.css lacks :root");
+
+            let mut expected = wp10_expected_colors(&tokens["color"], "light");
+            let typography = &tokens["typography"];
+            for (name, token) in wp10_entries(&typography["family"]) {
+                let family = token["$value"]
+                    .as_array()
+                    .expect("font stack")
+                    .iter()
+                    .map(|font| {
+                        let font = font.as_str().expect("font name");
+                        if generic.contains(&font) || !font.contains(' ') {
+                            font.to_string()
+                        } else {
+                            format!("\"{font}\"")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                expected.insert(format!("--font-{name}"), family);
+            }
+            for (name, token) in wp10_entries(&typography["scale"]) {
+                let value = &token["$value"];
+                expected.insert(
+                    format!("--type-{name}"),
+                    format!(
+                        "{} {}/{} var(--font-{})",
+                        wp10_css_value(&value["fontWeight"]),
+                        wp10_css_value(&value["fontSize"]),
+                        wp10_css_value(&value["lineHeight"]),
+                        wp10_css_value(&value["fontFamily"]),
+                    ),
+                );
+            }
+            expected.insert(
+                "--measure".to_string(),
+                wp10_css_value(&typography["measure"]["$value"]),
+            );
+            for (step, token) in wp10_entries(&tokens["space"]) {
+                expected.insert(format!("--space-{step}"), wp10_css_value(&token["$value"]));
+            }
+            for name in ["container", "gutter", "margin-column"] {
+                expected.insert(
+                    format!("--{name}"),
+                    wp10_css_value(&tokens["layout"][name]["$value"]),
+                );
+            }
+            for (name, token) in wp10_entries(&tokens["radius"]) {
+                expected.insert(format!("--radius-{name}"), wp10_css_value(&token["$value"]));
+            }
+
+            assert_eq!(
+                wp10_css_vars(root),
+                expected,
+                "{label} tokens.css :root drifted from design-tokens.json; rerun \
+                 scripts/gen-design-tokens-css.py"
+            );
+            assert_eq!(
+                wp10_css_vars(dark),
+                wp10_expected_colors(&tokens["color"], "dark"),
+                "{label} tokens.css dark block drifted from design-tokens.json; rerun \
+                 scripts/gen-design-tokens-css.py"
+            );
+        }
+    }
+
+    /// Audit L4 F28: the release renderer's bundled defaults are a copy of the
+    /// Petrastella tokens; every value they carry must match design-spec's.
+    #[test]
+    fn release_report_default_tokens_match_the_design_spec_tokens() {
+        fn walk(
+            defaults: &serde_json::Value,
+            design: &serde_json::Value,
+            path: &str,
+            checked: &mut usize,
+            label: &str,
+        ) {
+            if let Some(value) = defaults.get("$value") {
+                *checked += 1;
+                assert_eq!(
+                    Some(value),
+                    design.get("$value"),
+                    "{label} default-tokens.json{path} differs from design-tokens.json"
+                );
+                return;
+            }
+            for (name, child) in wp10_entries(defaults) {
+                walk(child, &design[name.as_str()], &format!("{path}/{name}"), checked, label);
+            }
+        }
+        for (label, catalog) in wp10_catalogs() {
+            let defaults: serde_json::Value = serde_json::from_str(wp10_get(
+                label,
+                catalog,
+                "skills/cas-release-report/references/default-tokens.json",
+            ))
+            .expect("default tokens are JSON");
+            let design: serde_json::Value = serde_json::from_str(wp10_get(
+                label,
+                catalog,
+                "skills/design-spec/references/design-tokens.json",
+            ))
+            .expect("design tokens are JSON");
+            let mut checked = 0;
+            walk(&defaults, &design, "", &mut checked, label);
+            assert!(checked >= 30, "{label}: only {checked} default tokens compared");
+        }
+    }
+
+    /// Audit L4 F9 / L1 #8: design and report skill descriptions are loaded on
+    /// every turn in every harness; each fits 250 characters.
+    #[test]
+    fn design_and_report_skill_descriptions_fit_250_chars() {
+        for (label, catalog) in wp10_catalogs() {
+            for skill in WP10_SKILLS {
+                let body = wp10_get(label, catalog, &format!("skills/{skill}/SKILL.md"));
+                let description = body
+                    .lines()
+                    .find_map(|line| line.strip_prefix("description: "))
+                    .unwrap_or_else(|| panic!("{label} {skill} has no description"));
+                assert!(
+                    description.chars().count() <= 250,
+                    "{label} {skill} description is {} chars: {description}",
+                    description.chars().count()
+                );
+            }
+        }
+    }
+
+    /// Audit L4 F4: three contradictory form tables (pie, KPI cards) became one,
+    /// in cas-ui-craft's form vocabulary; the others point at it.
+    #[test]
+    fn one_form_table_lives_in_the_ui_craft_form_vocabulary() {
+        for (label, catalog) in wp10_catalogs() {
+            let forms = wp10_get(label, catalog, "skills/cas-ui-craft/references/form-vocabulary.md");
+            for marker in ["the one form table", "**Heatmap**", "**Scatter**", "**Distribution**", "**Stat strip**", "Pie, donut"] {
+                assert!(forms.contains(marker), "{label} form vocabulary missing {marker:?}");
+            }
+            for path in [
+                "skills/cas-dataviz/SKILL.md",
+                "skills/cas-html-reports/SKILL.md",
+                "skills/cas-html-reports/references/presentation-rules.md",
+            ] {
+                let body = wp10_get(label, catalog, path);
+                assert!(body.contains("form-vocabulary.md"), "{label} {path} must point at the form table");
+                for table in ["| Reader task |", "| Reader's task |", "| Message | Use |"] {
+                    assert!(!body.contains(table), "{label} {path} keeps its own form table ({table})");
+                }
+            }
+            for path in [
+                "skills/cas-dataviz/SKILL.md",
+                "skills/cas-html-reports/references/presentation-rules.md",
+                "skills/cas-html-reports/references/report-types.md",
+                "skills/cas-html-reports/references/review-checklist.md",
+            ] {
+                assert!(
+                    !wp10_get(label, catalog, path).contains("KPI cards"),
+                    "{label} {path} still prescribes KPI cards; the form is a stat strip"
+                );
+            }
+        }
+    }
+
+    /// Audit L4 F2/F3/F14 and decision D5: the release report is CLI-first, it
+    /// owns published releases, and the PDF check is a shipped script.
+    #[test]
+    fn release_report_is_cli_first_and_owns_published_releases() {
+        for (label, catalog) in wp10_catalogs() {
+            let skill = wp10_get(label, catalog, "skills/cas-release-report/SKILL.md");
+            let cli = skill
+                .find("`cas release report <version> --pdf`")
+                .unwrap_or_else(|| panic!("{label} release-report step 2 must run the CLI"));
+            let manual = skill.find("render.py <md>").expect("manual fallback stays documented");
+            assert!(cli < manual, "{label}: the CLI comes before the manual renderer");
+            let pdf = wp10_get(label, catalog, "skills/cas-release-report/references/pdf.md");
+            assert!(pdf.contains("check-pdf.py") && !pdf.contains("import fitz"));
+            assert!(!pdf.contains("chromium.launch"), "{label} pdf.md still pastes a render program");
+            let check = wp10_get(label, catalog, "skills/cas-release-report/scripts/check-pdf.py");
+            assert!(check.contains("import pymupdf") && !check.contains("import fitz"));
+
+            let html = wp10_get(label, catalog, "skills/cas-html-reports/SKILL.md");
+            let description = html.lines().find_map(|l| l.strip_prefix("description: ")).unwrap();
+            assert!(description.contains("cas-release-report"), "{label} html-reports must hand releases off");
+            let types = wp10_get(label, catalog, "skills/cas-html-reports/references/report-types.md");
+            assert!(types.contains("uses `cas-release-report`"));
+        }
+    }
+
+    /// Audit L4 F6/F7 and decision D8: DESIGN.md follows the public spec's keys,
+    /// maps project token names to roles, and is linted.
+    #[test]
+    fn design_spec_adopts_the_design_md_spec_and_its_linter() {
+        for (label, catalog) in wp10_catalogs() {
+            let skill = wp10_get(label, catalog, "skills/design-spec/SKILL.md");
+            for marker in [
+                "google-labs-code/design.md",
+                "`rounded`",
+                "`maps`",
+                "`omitted`",
+                "npx @google/design.md lint DESIGN.md",
+                "references/tokens.css",
+            ] {
+                assert!(skill.contains(marker), "{label} design-spec missing {marker:?}");
+            }
+            assert!(!skill.contains("IMPORTANT:"), "{label} design-spec shouts");
+            assert!(!skill.contains("`radius` —"), "{label} design-spec keeps the pre-spec radius key");
+        }
+    }
+
+    #[test]
+    fn wp10_shipped_files_are_registered_in_every_catalog() {
+        for (label, catalog) in wp10_catalogs() {
+            for path in [
+                "skills/cas-ui-craft/scripts/visual-qa.mjs",
+                "skills/cas-cli-craft/scripts/terminal-qa.mjs",
+                "skills/design-spec/references/tokens.css",
+                "skills/cas-release-report/scripts/check-pdf.py",
+                "skills/cas-frontend-engineering/references/playwright-acceptance.md",
+            ] {
+                assert!(!wp10_get(label, catalog, path).is_empty(), "{label} {path} is empty");
             }
         }
     }

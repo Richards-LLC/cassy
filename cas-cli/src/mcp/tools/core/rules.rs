@@ -2,6 +2,30 @@ use crate::config::{Config, parse_promotion_evidence};
 use crate::mcp::tools::core::imports::*;
 use crate::store::foreign_project_guard::ForeignProjectGuard;
 use cas_store::{RetrievalAggregate, SqliteRetrievalStore};
+use std::collections::HashSet;
+
+fn enforceable_mechanism(rule: &Rule) -> Option<&'static str> {
+    let sources: HashSet<_> = rule
+        .source_ids
+        .iter()
+        .map(String::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .collect();
+    if sources.len() < 2 {
+        return None;
+    }
+    ["lint", "hook", "gate", "type"]
+        .into_iter()
+        .find(|mechanism| {
+            rule.tags
+                .iter()
+                .any(|tag| tag == &format!("enforceable:{mechanism}"))
+        })
+}
+
+fn encode_chore_ref(rule_id: &str) -> String {
+    format!("rule-encode:{rule_id}")
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PromotionEvidence {
@@ -53,6 +77,60 @@ impl CasCore {
     // ========================================================================
     // Rule Tools (10)
     // ========================================================================
+
+    /// A durable external reference makes repeat promotion and a retry after
+    /// partial failure resolve to the same backlog item, including after the
+    /// original chore has closed.
+    fn ensure_encode_chore(&self, rule: &Rule) -> Result<Option<String>, McpError> {
+        let Some(mechanism) = enforceable_mechanism(rule) else {
+            return Ok(None);
+        };
+        let task_store = self.open_task_store()?;
+        let external_ref = encode_chore_ref(&rule.id);
+        if let Some(existing) = task_store
+            .list(None)
+            .map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Failed to list encode chores: {error}")),
+                data: None,
+            })?
+            .into_iter()
+            .find(|task| task.external_ref.as_deref() == Some(external_ref.as_str()))
+        {
+            return Ok(Some(existing.id));
+        }
+
+        let id = task_store.generate_id().map_err(|error| McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!("Failed to generate encode chore ID: {error}")),
+            data: None,
+        })?;
+        let mut chore = Task::new(id.clone(), format!("encode {} as {mechanism}", rule.id));
+        chore.task_type = TaskType::Chore;
+        chore.origin_project = task_store.project_id().map(str::to_owned);
+        chore.external_ref = Some(external_ref);
+        chore.description = format!(
+            "Encode rule {} as a {mechanism} mechanism. Rule content: {}\nSource entry IDs: {}",
+            rule.id,
+            rule.content,
+            rule.source_ids.join(", ")
+        );
+        chore.acceptance_criteria = format!(
+            "The {mechanism} enforces rule {} and has a regression check covering the cited sources.",
+            rule.id
+        );
+        task_store
+            .create_atomic(&chore, &[], None, Some("rule-promote"))
+            .map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!(
+                    "Failed to create encode chore for {}: {error}",
+                    rule.id
+                )),
+                data: None,
+            })?;
+        Ok(Some(id))
+    }
 
     fn retrieval_aggregates_for_rule(
         &self,
@@ -458,9 +536,12 @@ impl CasCore {
     /// supervisor, or the operator's own registered session outside a
     /// factory. Returns the author label, or why this caller may not.
     fn operator_hard_rule_author(&self) -> Result<String, String> {
-        let unregistered =
-            || "the operator hard-rule fast path is only for the operator or a registered supervisor, and this caller is not registered".to_string();
-        let id = self.get_registered_agent_id_read_only().map_err(|_| unregistered())?;
+        let unregistered = || {
+            "the operator hard-rule fast path is only for the operator or a registered supervisor, and this caller is not registered".to_string()
+        };
+        let id = self
+            .get_registered_agent_id_read_only()
+            .map_err(|_| unregistered())?;
         let agent = self
             .open_agent_store()
             .ok()
@@ -519,7 +600,11 @@ impl CasCore {
 
         match rule.status {
             RuleStatus::Proven => {
-                return Ok(Self::success(format!("{id} is already Proven; nothing changed")));
+                let chore = self.ensure_encode_chore(&rule)?;
+                return Ok(Self::success(match chore {
+                    Some(chore) => format!("{id} is already Proven; encode chore {chore} exists"),
+                    None => format!("{id} is already Proven; nothing changed"),
+                }));
             }
             RuleStatus::Retired => {
                 return Err(invalid(format!(
@@ -535,8 +620,8 @@ impl CasCore {
             )));
         }
         let project_root = self.cas_root.parent().unwrap_or(&self.cas_root);
-        if let Some(refusal) =
-            ForeignProjectGuard::for_project_root(project_root).check_rule(&rule.content, &rule.tags)
+        if let Some(refusal) = ForeignProjectGuard::for_project_root(project_root)
+            .check_rule(&rule.content, &rule.tags)
         {
             return Err(invalid(refusal.to_string()));
         }
@@ -555,12 +640,16 @@ impl CasCore {
                 data: None,
             })?;
         let _ = self.sync_rules();
+        let chore = self.ensure_encode_chore(&rule)?;
 
         let mut msg = format!("Promoted {id} to Proven (synced to Claude Code)");
         if raised_to_floor {
             msg.push_str(&format!(
                 "; helpful_count raised to the sync floor of {floor}"
             ));
+        }
+        if let Some(chore) = chore {
+            msg.push_str(&format!("; encode chore {chore} exists"));
         }
         Ok(Self::success(msg))
     }
@@ -580,8 +669,8 @@ impl CasCore {
         })?;
 
         rule.harmful_count += 1;
-        let demoted = rule.status == RuleStatus::Proven
-            && rule.harmful_count >= demotion_threshold(&config);
+        let demoted =
+            rule.status == RuleStatus::Proven && rule.harmful_count >= demotion_threshold(&config);
         if demoted {
             rule.status = RuleStatus::Stale;
         }
@@ -870,5 +959,75 @@ impl CasCore {
         }
 
         Ok(Self::success(output))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn promote_with_sources(tags: &[&str], sources: &[&str], repeat: bool) -> Vec<Task> {
+        let temp = tempfile::tempdir().expect("temporary project");
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let rule_store = core.open_rule_store().expect("rule store");
+        rule_store.init().expect("initialize rule store");
+        let task_store = core.open_task_store().expect("task store");
+        task_store.init().expect("initialize task store");
+        let mut rule = Rule::new(
+            "cas-encode-example".to_string(),
+            "Every change to the parser must pass its grammar check".to_string(),
+        );
+        rule.tags = tags.iter().map(|tag| (*tag).to_string()).collect();
+        rule.source_ids = sources.iter().map(|id| (*id).to_string()).collect();
+        rule_store.add(&rule).expect("add draft rule");
+
+        core.cas_rule_promote(rule.id.clone(), Some("reviewed evidence".into()), None)
+            .await
+            .expect("promote rule");
+        if repeat {
+            core.cas_rule_promote(rule.id.clone(), Some("repeat review".into()), None)
+                .await
+                .expect("repeat promotion");
+        }
+        task_store.list(None).expect("list tasks")
+    }
+
+    #[tokio::test]
+    async fn tagged_rule_with_two_sources_files_one_encode_chore() {
+        let tasks = promote_with_sources(
+            &["from_learning", "enforceable:lint"],
+            &["mem-one", "mem-two"],
+            false,
+        )
+        .await;
+        assert_eq!(tasks.len(), 1);
+        let chore = &tasks[0];
+        assert_eq!(chore.task_type, TaskType::Chore);
+        assert_eq!(chore.title, "encode cas-encode-example as lint");
+        assert_eq!(
+            chore.external_ref.as_deref(),
+            Some("rule-encode:cas-encode-example")
+        );
+        assert!(chore.description.contains("cas-encode-example"));
+        assert!(chore.description.contains("mem-one, mem-two"));
+    }
+
+    #[tokio::test]
+    async fn untagged_rule_files_no_encode_chore() {
+        let tasks = promote_with_sources(&["from_learning"], &["mem-one", "mem-two"], false).await;
+        assert!(tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn one_distinct_source_files_no_encode_chore() {
+        let tasks = promote_with_sources(&["enforceable:gate"], &["mem-one"], false).await;
+        assert!(tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn repeat_promotion_does_not_duplicate_encode_chore() {
+        let tasks =
+            promote_with_sources(&["enforceable:type"], &["mem-one", "mem-two"], true).await;
+        assert_eq!(tasks.len(), 1);
     }
 }

@@ -3890,8 +3890,11 @@ mod workspace_contract_tests {
 fn is_codemap_gated_tool_call(tool_name: &str, action: Option<&str>, tool_prefix: &str) -> bool {
     let task_tool = format!("{tool_prefix}task");
     let coordination_tool = format!("{tool_prefix}coordination");
+    // cas-8563b: spawn_workers lives on `factory`; the coordination alias
+    // still runs it for one release, so both names are gated.
+    let factory_tool = format!("{tool_prefix}factory");
     (tool_name == task_tool && action == Some("create"))
-        || (tool_name == coordination_tool
+        || ((tool_name == coordination_tool || tool_name == factory_tool)
             && matches!(action, Some("spawn_workers") | Some("spawn_worker")))
 }
 

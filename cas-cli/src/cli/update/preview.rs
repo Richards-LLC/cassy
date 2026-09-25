@@ -37,6 +37,27 @@ pub(crate) fn compute_claude_md_change(project_root: &Path) -> Option<FileChange
     }
 }
 
+/// The AGENTS.md change `update_agents_md` would make, from the same plan.
+pub(crate) fn compute_agents_md_change(project_root: &Path) -> Option<FileChange> {
+    use crate::cli::init::{ClaudeMdPlan, plan_agents_md};
+
+    let path = std::path::PathBuf::from("AGENTS.md");
+    match plan_agents_md(project_root).ok()? {
+        ClaudeMdPlan::Unchanged => None,
+        ClaudeMdPlan::Create { content } => Some(FileChange::create(
+            path,
+            content,
+            "Create AGENTS.md with Cassy section",
+        )),
+        ClaudeMdPlan::Modify {
+            old,
+            new,
+            description,
+        } => Some(FileChange::modify(path, old, new, description)),
+        ClaudeMdPlan::Delete { old } => Some(FileChange::delete(path, old, "Delete AGENTS.md")),
+    }
+}
+
 /// Compute what Cassy skill changes would be made (without applying)
 pub(crate) fn compute_cas_skill_change(project_root: &Path) -> Option<FileChange> {
     use crate::cli::init::{CAS_SKILL, is_old_cas_skill, is_skill_managed_by_cas};
@@ -92,6 +113,9 @@ pub(crate) fn build_update_transaction(
 
     // Compute CLAUDE.md changes
     if let Some(change) = compute_claude_md_change(project_root) {
+        tx.add_file_change(change);
+    }
+    if let Some(change) = compute_agents_md_change(project_root) {
         tx.add_file_change(change);
     }
 

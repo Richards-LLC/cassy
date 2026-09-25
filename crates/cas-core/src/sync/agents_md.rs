@@ -66,8 +66,20 @@ pub fn sync_agents_md(
 
     let mut files = Vec::with_capacity(sources.len());
     for source in sources {
-        let generated = transform_agents_md(&fs::read_to_string(&source)?);
+        let source_text = fs::read_to_string(&source)?;
         let output = source.with_file_name("AGENTS.md");
+        // A CLAUDE.md that imports `@AGENTS.md` makes AGENTS.md the canonical
+        // file (skills audit D3): there is nothing to generate, and writing
+        // would overwrite the source of truth.
+        if imports_agents_md(&source_text) {
+            files.push(AgentsMdFileReport {
+                source,
+                output,
+                changed: false,
+            });
+            continue;
+        }
+        let generated = transform_agents_md(&source_text);
         let current = fs::read_to_string(&output).ok();
         let changed = current.as_deref() != Some(generated.as_str());
 
@@ -83,6 +95,11 @@ pub fn sync_agents_md(
     }
 
     Ok(AgentsMdSyncReport { files })
+}
+
+/// True when `claude_md` imports AGENTS.md with a bare `@AGENTS.md` line.
+pub fn imports_agents_md(claude_md: &str) -> bool {
+    claude_md.lines().any(|line| line.trim() == "@AGENTS.md")
 }
 
 fn discover_claude_md(dir: &Path, sources: &mut Vec<PathBuf>) -> Result<(), CoreError> {
@@ -205,5 +222,24 @@ mod tests {
         let check = sync_agents_md(project.path(), AgentsMdSyncMode::Check).unwrap();
         assert_eq!(check.stale_count(), 1);
         assert!(check.files[0].output.exists());
+    }
+
+    /// Audit D3: a CLAUDE.md that imports `@AGENTS.md` leaves the canonical
+    /// AGENTS.md alone in both modes.
+    #[test]
+    fn a_claude_md_importing_agents_md_marks_it_canonical() {
+        let project = tempdir().unwrap();
+        fs::write(project.path().join("CLAUDE.md"), "@AGENTS.md\n\nClaude-only line\n").unwrap();
+        let agents = project.path().join("AGENTS.md");
+        fs::write(&agents, "# Canonical, hand-written\n").unwrap();
+
+        for mode in [AgentsMdSyncMode::Check, AgentsMdSyncMode::Write] {
+            let report = sync_agents_md(project.path(), mode).unwrap();
+            assert_eq!(report.stale_count(), 0);
+            assert_eq!(report.files.len(), 1);
+        }
+        assert_eq!(fs::read_to_string(&agents).unwrap(), "# Canonical, hand-written\n");
+        assert!(imports_agents_md("  @AGENTS.md  \n"));
+        assert!(!imports_agents_md("see @AGENTS.md for details\n"));
     }
 }

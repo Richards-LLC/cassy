@@ -28,6 +28,7 @@ When promoting, rewriting or merging, keep the source entry IDs of every contrib
 ## Quality bar for promotion
 
 A rule deserves Proven when it:
+
 - states a clear constraint or pattern, not just advice;
 - would catch a real issue in code review;
 - does not duplicate an existing proven rule;

@@ -13,24 +13,24 @@ The queued job prompt names the Cassy session ID and its transcript path. This j
 3. **Recent memories:** `mcp__cas__memory action=recent limit=20`.
 4. **Write the summary** in this shape:
 
-```markdown
-## Session Summary - [Date]
+   ```markdown
+   ## Session Summary - [Date]
 
-### Completed
-- [task-id] [title]: [one-line outcome]
+   ### Completed
+   - [task-id] [title]: [one-line outcome]
 
-### In Progress
-- [task-id] [title]: [current state, what's left, where to resume]
+   ### In Progress
+   - [task-id] [title]: [current state, what's left, where to resume]
 
-### Blocked
-- [task-id] [title]: [blocker, and who or what can unblock it]
+   ### Blocked
+   - [task-id] [title]: [blocker, and who or what can unblock it]
 
-### Key Decisions
-- [decision and the reason for it]
+   ### Key Decisions
+   - [decision and the reason for it]
 
-### Next Session Should
-1. [most important first action]
-```
+   ### Next Session Should
+   1. [most important first action]
+   ```
 
 5. **Store it:** `mcp__cas__memory action=remember content="<summary>" title="Session Summary - [Date] ([session ID])" entry_type=context tags="session,summary"`.
 

@@ -1,8 +1,9 @@
 # Verifier evidence gate
 
-The task-verifier reads this file only when a task, or any child of an epic,
-has a non-empty `demo_statement`. It runs before the verifier reads the close
-reason. Workers produce the ledger with this skill; the verifier consumes it.
+The task-verifier reads this file when a task, or any child of an epic, has a
+non-empty `demo_statement`, and for any acceptance criterion that states a
+measurable claim (see Measurable claims below). It runs before the verifier
+reads the close reason. Workers produce the evidence; the verifier consumes it.
 
 ## Demo-statement evidence mode
 
@@ -82,3 +83,21 @@ the evidence gate otherwise passes and at least one row is `NOT EXERCISED`
 `SUPERVISOR CALL: <n> NOT EXERCISED row(s)` and lists each row ID, cell, and
 why it was not exercised, then say the same in your final output. The
 supervisor decides whether the owed rows block the close.
+
+## Measurable claims: same-command baseline and treatment
+
+When an acceptance criterion states a measurable claim (performance, size,
+count, rate), with or without a demo:
+
+1. Restate it as a check that could fail: metric, command, threshold.
+2. Require a baseline run on the delivery base and a treatment run on the
+   delivery, from the same command with the same inputs, both pasted in task
+   notes or saved under `~/.cas/artifacts/<task-id>/`. Different commands, a
+   missing baseline, or a remembered one make the delta unattributable.
+3. Record one line per claim in the verification summary: `VERIFIED` (the
+   pair shows the claimed delta), `NOT VERIFIED` (no pair; name what is
+   missing), or `INCONCLUSIVE` (the pair exists but variance or a changed
+   input hides the delta). `VERIFIED` meets the criterion, and so does
+   `NOT VERIFIED` when the close names an owner by design (a factory worker's
+   Rust measurement goes to the supervisor's `ASSEMBLY_PROOF`). Reject the
+   rest, naming the claim and the missing or ambiguous run.

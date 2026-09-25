@@ -78,6 +78,34 @@ track: knowledge
 - [Related entry IDs, commits, or docs]
 ```
 
+## Handoff Brief
+
+Use with `entry_type=handoff` to give the next session a short, current
+starting point. Check task and branch state before writing it. Keep these four
+parts in order:
+
+- **Capsule:** at most five lines stating where things stand.
+- **Threads:** one line per thread, with exactly one status tag. Use
+  `[SHIPPED]`, `[OPEN]`, `[BLOCKED]`, or `[WAITING-ON-OPERATOR]`; include a
+  task, commit, branch, or other pointer when useful.
+- **Problems:** at most five, including fixes that shipped and were reverted.
+- **Next move:** exactly one concrete action.
+
+```markdown
+## Capsule
+The import fix is merged; the backfill remains paused pending a data check.
+
+## Threads
+- [SHIPPED] Import guard merged in commit abc123.
+- [WAITING-ON-OPERATOR] Backfill needs approval for the production window.
+
+## Problems
+- The first backfill attempt was reverted after duplicate rows appeared.
+
+## Next move
+Compare duplicate counts in the staging snapshot before requesting the window.
+```
+
 ## Writing Guidance
 
 - Make `name` and `description` specific enough for overlap search.

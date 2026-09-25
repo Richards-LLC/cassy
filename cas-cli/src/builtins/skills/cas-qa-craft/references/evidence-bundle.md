@@ -147,17 +147,16 @@ cp "$QA"/test-results/*/trace.zip "$QA/trace.zip"
 cd "$QA" && npx playwright trace open trace.zip
 npx playwright trace actions > trace-actions.txt
 npx playwright trace close && rmdir .playwright-cli
-node <repo>/scripts/visual-qa.mjs --strict --artifact-dir "$QA/visual-qa" "$BASE_URL/" > "$QA/visual-qa.stdout" 2>&1
+npm exec --yes --package=playwright -- node <skills-dir>/cas-ui-craft/scripts/visual-qa.mjs --strict --artifact-dir "$QA/visual-qa" "$BASE_URL/" > "$QA/visual-qa.stdout" 2>&1
 ```
 
 For polish evidence, also score the surface with the cas-ui-craft
 `references/critique-rubric.md` into `critique.md`. Then write `bundle.json`.
 The floor is distinctiveness, fit, and hierarchy each ≥ 4, and no dimension at
-0. A score below the floor is a defect task, not a note. If the project has no
-`scripts/visual-qa.mjs`, run the copy that ships with the cas-ui-craft skill:
-`cas-ui-craft/scripts/visual-qa.mjs` in the harness skill directory
-(`.claude/skills/`, `.codex/skills/` or `.grok/skills/`). Only when neither
-exists, take the four renders at 1280×800 and 390×800 in light and dark with
+0. A score below the floor is a defect task, not a note. `<skills-dir>` is the
+harness skill directory (`.claude/skills`, `.codex/skills` or `.grok/skills`);
+the script ships with the cas-ui-craft skill. Only when it is missing (an
+install that predates it), take the four renders at 1280×800 and 390×800 in light and dark with
 `page.screenshot`, set `visual_qa_status: "unavailable"` and say so in the
 ledger's Honesty section. The close gate accepts only `"pass"` without a
 supervisor override, so ask for one with a `blocker=true` message before

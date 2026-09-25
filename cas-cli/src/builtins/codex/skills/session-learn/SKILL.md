@@ -69,7 +69,7 @@ A JSON array (possibly empty) of draft objects:
 ]
 ```
 
-`dedup_hits` is `[]` when this is a genuinely new finding. When you found a near-duplicate in the existing store, list the matching memory IDs there and keep the draft short, but **always emit every field**: `signal`, `entry_type`, `scope`, `confidence` and a one-line `content`. The handler parses the whole array at once, so one draft missing a required field drops every draft in the batch.
+`dedup_hits` is `[]` when this is a genuinely new finding. When you found a near-duplicate in the existing store, list the matching memory IDs there and keep the draft short, but **always emit every field**: `signal`, `entry_type`, `scope`, `confidence` and a one-line `content`.
 
 If no drafts, return `[]`. Do not return prose; do not wrap in markdown.
 

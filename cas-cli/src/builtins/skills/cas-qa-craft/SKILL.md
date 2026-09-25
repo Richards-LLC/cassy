@@ -61,7 +61,7 @@ instead of the procedure below.
    - `forcedColors`/`reducedMotion`/`contrast` captures when the change is
      visual
    - polish evidence: desktop and phone renders in light and dark,
-     `scripts/visual-qa.mjs --strict` output, and a cas-ui-craft critique
+     `<skills-dir>/cas-ui-craft/scripts/visual-qa.mjs --strict` output, and a cas-ui-craft critique
      score
    Cite its `bundle.json` in a `platform_proof` note and in the close reason.
 6. Grep the touched feature for `MIN_`, `MAX_`, `_MINUTES`, `_MS`, `_SECS`,
@@ -83,7 +83,10 @@ commit, record at least one passing `Expect`, and pass visual QA and the
 critique floor, including for a journey bundle. A demo-only change with no web
 surface needs a fresh `LEDGER.md` with a `PASS` / `real-build` row, plus a
 cas-cli-craft `terminal-qa: PASS` report under `<task-id>/terminal-qa/` when the
-diff touches `qa.terminal_render_paths`. Any delivery that adds `test.fixme`, `.skip` or `.only` is
+diff touches `qa.terminal_render_paths`
+(`node <skills-dir>/cas-cli-craft/scripts/terminal-qa.mjs --label <cmd> --out <dir> -- <cmd>`).
+`<skills-dir>` is the harness skill directory: `.claude/skills`, `.codex/skills`
+or `.grok/skills`. Any delivery that adds `test.fixme`, `.skip` or `.only` is
 refused unless the marker or the line above it carries `cas-allow-skip: <reason>`.
 Rejections name the exact command that produces what is missing.
 

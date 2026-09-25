@@ -507,6 +507,160 @@ fn has_recorded_gate_decision(notes: &str) -> bool {
     })
 }
 
+fn feature_map_unchanged_decision(notes: &str) -> bool {
+    notes.lines().any(|line| {
+        line.strip_prefix('[')
+            .and_then(|line| line.split_once("] ✅ DECISION "))
+            .and_then(|(_, decision)| decision.split_once("map unchanged:"))
+            .is_some_and(|(_, reason)| !reason.trim().is_empty())
+    })
+}
+
+/// Inspect only the already measured delivery paths. The caller runs this
+/// after MERGE REQUIRED has cleared; this function starts no processes.
+fn feature_map_drift(
+    repo: &std::path::Path,
+    changed_paths: &[String],
+    task_notes: &str,
+) -> Result<Vec<String>, String> {
+    let features_dir = repo.join("docs/qa/features");
+    if !features_dir.is_dir()
+        || changed_paths.is_empty()
+        || feature_map_unchanged_decision(task_notes)
+    {
+        return Ok(Vec::new());
+    }
+    let mut stale = Vec::new();
+    let entries = std::fs::read_dir(&features_dir)
+        .map_err(|error| format!("cannot read {}: {error}", features_dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("cannot read feature-map entry: {error}"))?;
+        let file = entry.path();
+        if file.extension().and_then(std::ffi::OsStr::to_str) != Some("md") || !file.is_file() {
+            continue;
+        }
+        let relative = format!("docs/qa/features/{}", entry.file_name().to_string_lossy());
+        if changed_paths.iter().any(|path| path == &relative) {
+            continue;
+        }
+        let source = std::fs::read_to_string(&file)
+            .map_err(|error| format!("cannot read {}: {error}", relative))?;
+        let mut in_touches = false;
+        let mut touched = false;
+        for line in source.lines() {
+            let line = line.trim();
+            if line == "## Touches" {
+                in_touches = true;
+                continue;
+            }
+            if line.starts_with("## ") {
+                in_touches = false;
+            }
+            if !in_touches {
+                continue;
+            }
+            let Some(pattern) = line.strip_prefix("- `").and_then(|line| line.strip_suffix('`'))
+            else {
+                continue;
+            };
+            let glob = glob::Pattern::new(pattern)
+                .map_err(|error| format!("invalid Touches glob in {relative}: {pattern}: {error}"))?;
+            if changed_paths.iter().any(|path| {
+                glob.matches_with(
+                    path,
+                    glob::MatchOptions {
+                        case_sensitive: true,
+                        require_literal_separator: true,
+                        require_literal_leading_dot: false,
+                    },
+                )
+            }) {
+                touched = true;
+            }
+        }
+        if touched {
+            stale.push(relative);
+        }
+    }
+    stale.sort();
+    Ok(stale)
+}
+
+#[cfg(test)]
+mod feature_map_tests {
+    use super::feature_map_drift;
+
+    fn fixture() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let features = dir.path().join("docs/qa/features");
+        std::fs::create_dir_all(&features).unwrap();
+        std::fs::write(
+            features.join("profile.md"),
+            "# Profile\n\n## Touches\n\n- `src/profile/**`\n\n## Gotchas\n\n- None.\n",
+        )
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn no_feature_folder_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            feature_map_drift(dir.path(), &["src/profile/edit.ts".into()], ""),
+            Ok(vec![])
+        );
+    }
+
+    #[test]
+    fn touched_glob_with_untouched_feature_file_refuses() {
+        let dir = fixture();
+        assert_eq!(
+            feature_map_drift(dir.path(), &["src/profile/edit.ts".into()], ""),
+            Ok(vec!["docs/qa/features/profile.md".into()]),
+        );
+    }
+
+    #[test]
+    fn updating_the_matching_feature_file_clears_drift() {
+        let dir = fixture();
+        assert_eq!(
+            feature_map_drift(
+                dir.path(),
+                &[
+                    "src/profile/edit.ts".into(),
+                    "docs/qa/features/profile.md".into(),
+                ],
+                "",
+            ),
+            Ok(vec![]),
+        );
+    }
+
+    #[test]
+    fn decision_note_with_reason_clears_drift() {
+        let dir = fixture();
+        let notes = "[2026-09-25 21:00] ✅ DECISION map unchanged: UI route still has the same steps";
+        assert_eq!(
+            feature_map_drift(dir.path(), &["src/profile/edit.ts".into()], notes),
+            Ok(vec![])
+        );
+    }
+
+    #[test]
+    fn empty_reason_does_not_clear_drift() {
+        let dir = fixture();
+        for notes in [
+            "[2026-09-25 21:00] ✅ DECISION map unchanged:  ",
+            "[2026-09-25 21:00] 📝 PROGRESS map unchanged: routine",
+        ] {
+            assert_eq!(
+                feature_map_drift(dir.path(), &["src/profile/edit.ts".into()], notes),
+                Ok(vec!["docs/qa/features/profile.md".into()]),
+            );
+        }
+    }
+}
+
 fn contains_word(text: &str, word: &str) -> bool {
     text.split(|character: char| !character.is_ascii_alphanumeric())
         .any(|token| token == word)
@@ -7287,7 +7441,7 @@ impl CasCore {
             let proof_repo = worker_worktree_path
                 .as_deref()
                 .unwrap_or(close_project_root.as_path());
-            let changed_paths = commit_receipt_window
+            let delivered_paths = commit_receipt_window
                 .as_ref()
                 .and_then(|window| {
                     task_attribution::paths(
@@ -7296,7 +7450,9 @@ impl CasCore {
                         window,
                         req.commit_receipt.as_deref(),
                     )
-                })
+                });
+            let changed_paths = delivered_paths
+                .clone()
                 .filter(|paths| !paths.is_empty())
                 .unwrap_or_else(|| task.deliverables.files_changed.clone());
             // cas-9c1e: take the baseline from the same delivery ranges that
@@ -7330,6 +7486,25 @@ impl CasCore {
                 .as_ref()
                 .map(|context| context.repo_root.as_path())
                 .unwrap_or(close_project_root.as_path());
+            match feature_map_drift(
+                target_repo,
+                delivered_paths.as_deref().unwrap_or(&[]),
+                &task.notes,
+            ) {
+                Ok(stale) if !stale.is_empty() => {
+                    return Ok(Self::tool_error(gate_text::feature_map_drift_message(
+                        &task.id,
+                        &stale,
+                        crate::mcp::tools::core::guidance::caller_prefix(),
+                    )));
+                }
+                Err(detail) => {
+                    return Ok(Self::tool_error(gate_text::feature_map_read_error(
+                        &task.id, &detail,
+                    )));
+                }
+                Ok(_) => {}
+            }
             let mut scoped_proof_cache = ScopedProofTargetCache::default();
             // The tip this close delivers: the named commit receipt, else the
             // proof checkout's HEAD (the worker's branch).

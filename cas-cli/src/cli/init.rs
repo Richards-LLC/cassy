@@ -841,8 +841,7 @@ fn confirm_and_apply(
                 colors::GREEN,
             )?;
         }
-        print_file_item(".codex/agents/", "Built-in agents", colors::GREEN)?;
-        print_file_item(".codex/commands/", "Built-in commands", colors::GREEN)?;
+        print_file_item(".codex/skills/", "Built-in skills", colors::GREEN)?;
     }
 
     if config.agents.grok {

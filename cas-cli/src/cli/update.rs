@@ -15,7 +15,8 @@ use clap::Args;
 
 use crate::builtins::{
     SyncResult, ensure_builtin_gitignore, mark_missing_owned_references_for_replacement,
-    prune_stale_user_skills_for_harness, sync_all_builtins_for_harness,
+    harness_installed_for_user, prune_stale_user_skills_for_harness,
+    sync_all_builtins_for_harness,
     sync_all_builtins_for_project,
 };
 use crate::cli::Cli;
@@ -1798,7 +1799,15 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
     let codex_dir = project_root.join(".codex");
     let codex_enabled = codex_dir.exists();
     let grok_dir = project_root.join(".grok");
-    let grok_enabled = grok_dir.exists();
+    // cas-6b97 (audit M39/M40): an installed Grok or OpenCode ranks the
+    // project's own `.grok/skills` / `.opencode/skills` above `.claude/skills`,
+    // so write their projection whenever they are installed. Without it they
+    // load the Claude-spelled copies, whose tool names do not resolve for them.
+    let grok_enabled =
+        grok_dir.exists() || harness_installed_for_user(cas_mux::SupervisorCli::Grok);
+    let opencode_dir = project_root.join(".opencode");
+    let opencode_enabled =
+        opencode_dir.exists() || harness_installed_for_user(cas_mux::SupervisorCli::OpenCode);
 
     let theme = ActiveTheme::default();
 
@@ -1811,6 +1820,9 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
     }
     if grok_enabled {
         builtin_harnesses.push(cas_mux::SupervisorCli::Grok);
+    }
+    if opencode_enabled {
+        builtin_harnesses.push(cas_mux::SupervisorCli::OpenCode);
     }
     let builtin_gitignore = ensure_builtin_gitignore(project_root, &builtin_harnesses)?;
 
@@ -1978,6 +1990,12 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
     if grok_enabled {
         mark_missing_owned_references_for_replacement(cas_mux::SupervisorCli::Grok, &grok_dir)?;
     }
+    if opencode_enabled {
+        mark_missing_owned_references_for_replacement(
+            cas_mux::SupervisorCli::OpenCode,
+            &opencode_dir,
+        )?;
+    }
 
     // Sync database skills (this may remove stale dirs)
     let skill_store = open_skill_store(&cas_root)?;
@@ -2087,6 +2105,22 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
         0
     };
 
+    let opencode_builtins_updated = if opencode_enabled {
+        if !cli.json {
+            let mut out = io::stdout();
+            let mut fmt = Formatter::stdout(&mut out, theme.clone());
+            fmt.subheading("Syncing .opencode files")?;
+        }
+        let opencode_result =
+            sync_all_builtins_for_project(cas_mux::SupervisorCli::OpenCode, project_root)?;
+        if !cli.json {
+            report_builtin_sync(&opencode_result, ".opencode", &theme)?;
+        }
+        opencode_result.total_updated()
+    } else {
+        0
+    };
+
     if cli.json {
         let config_json: Vec<String> = config_updated.iter().map(|s| format!("\"{s}\"")).collect();
         let codex_config_json: Vec<String> = codex_config_updated
@@ -2094,7 +2128,7 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
             .map(|s| format!("\"{s}\""))
             .collect();
         println!(
-            r#"{{"config_updated":[{}],"builtins_updated":{},"builtin_reference_conflicts":{},"codex_config_updated":[{}],"codex_builtins_updated":{},"codex_builtin_reference_conflicts":{},"grok_builtins_updated":{},"grok_builtin_reference_conflicts":{},"rules_synced":{},"rules_removed":{},"skills_synced":{},"skills_removed":{},"factory_tooling":"{}","builtin_gitignore_updated":{},"builtin_gitignore_tracked":{}}}"#,
+            r#"{{"config_updated":[{}],"builtins_updated":{},"builtin_reference_conflicts":{},"codex_config_updated":[{}],"codex_builtins_updated":{},"codex_builtin_reference_conflicts":{},"grok_builtins_updated":{},"grok_builtin_reference_conflicts":{},"opencode_builtins_updated":{},"rules_synced":{},"rules_removed":{},"skills_synced":{},"skills_removed":{},"factory_tooling":"{}","builtin_gitignore_updated":{},"builtin_gitignore_tracked":{}}}"#,
             config_json.join(","),
             builtin_result.total_updated(),
             builtin_result.modified_reference_files.len(),
@@ -2103,6 +2137,7 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
             codex_modified_references,
             grok_builtins_updated,
             grok_modified_references,
+            opencode_builtins_updated,
             rule_report.synced,
             rule_report.removed,
             skill_report.synced,

@@ -15,15 +15,15 @@ Your job is incomplete until you record exactly one verdict with `verification a
 
 If `verification action=add` returns a message starting `Verifier handoff rejected`, `Verifier capability rejected`, or `Verification authority rejected`, stop. Do not retry, and do not look for or fabricate authority. Quote the message verbatim in your final output.
 
-## Step 0: Evidence first when there is a demo
+## Step 0: Evidence first for demos and measurable claims
 
-Run `task action=show id=<task-id>`. If the task has a non-empty `demo_statement`, or it is an epic and **any child** (closed children included; enumerate them with `task action=dep_list id=<epic-id>`) has one, apply the evidence gate before you read the close reason. The gate is `references/verifier-evidence-gate.md` in the installed `cas-qa-craft` skill (for example `skills/cas-qa-craft/references/verifier-evidence-gate.md` under `.claude/` or `.grok/`). It holds the ledger REJECT table, capture judgments, the epic walk prerequisites, and the NOT EXERCISED policy: `NOT EXERCISED` rows go to the supervisor as a `SUPERVISOR CALL`, never a silent approve or reject. If the gate file cannot be found, record `status=error` with a summary naming the missing file and stop.
+Run `task action=show id=<task-id>`. If the task has a non-empty `demo_statement`, or it is an epic and **any child** (closed children included; enumerate them with `task action=dep_list id=<epic-id>`) has one, apply the evidence gate before you read the close reason. The gate is `references/verifier-evidence-gate.md` in the installed `cas-qa-craft` skill (for example `skills/cas-qa-craft/references/verifier-evidence-gate.md` under `.claude/` or `.grok/`). It holds the ledger REJECT table, capture judgments, the epic walk prerequisites, and the NOT EXERCISED policy: `NOT EXERCISED` rows go to the supervisor as a `SUPERVISOR CALL`, never a silent approve or reject. Apply the same gate's `Measurable claims` section, with or without a demo, when an acceptance criterion states a measurable claim (performance, size, count). If the gate file cannot be found, record `status=error` with a summary naming the missing file and stop.
 
 ## Phase 1: Completeness
 
 ### Step 1: Check the close reason against the acceptance criteria
 
-Reject a close reason only when it describes an acceptance-criteria item as not done. Do not reject on keywords. Accept roadmap notes, follow-ups outside the acceptance criteria, and "pending X" where X belongs to another task or team. Reject when the close reason says an acceptance-criteria item was skipped, stubbed, deferred, or only partly done, or when it gives vague "done enough" language with no mapping to the criteria.
+Give each acceptance-criteria item one verdict: **VERIFIED** (proof pasted in the close reason or notes, or reproduced by you), **NOT VERIFIED** (not checked; say why), or **INCONCLUSIVE** (checked, evidence ambiguous). "Looks good" and "should work" are not proof. Do not reject on keywords. Accept roadmap notes, follow-ups outside the acceptance criteria, "pending X" where X belongs to another task or team, and NOT VERIFIED where the proof is owned elsewhere by design and the close says so (a factory worker's Rust tests go to the supervisor's `ASSEMBLY_PROOF`). Reject when an item was skipped, stubbed, deferred, only partly done, INCONCLUSIVE, or NOT VERIFIED with no named owner, or when the close gives vague "done enough" language with no mapping to the criteria.
 
 ### Step 2: Check the parent epic
 
@@ -64,6 +64,7 @@ Back every finding with a command output or an exact line reference.
 - A changed signature, field, export or public API: search its callers (`rg '<name>'`) and confirm they were updated.
 - Every new function, route, handler, command, tool, migration or config field is reachable: it has a call site or registration outside its definition. Test helpers, derive-required impls and exported library items are exempt.
 - Files that change together did: tests for changed logic, a migration for a schema change, route registration for a new endpoint, defaults and docs for new config.
+- Proof matches blast radius (ladder in the `verify-before-claim` skill: read → targeted test → integration or real run → user-path walk). A `risk=blast-radius` task needs each `proof_targets` entry at rung 3 or owned by `ASSEMBLY_PROOF`, plus one safety fact: what could break and why it did not. A missing safety fact is `incomplete_close_reason`.
 
 ### Step 7: Honor the task's `execution_note`
 
@@ -96,7 +97,8 @@ One template; set `status`, `summary`, `confidence` and `issues` for the outcome
 verification action=add task_id=<id> status=<approved|rejected|error> confidence=<0.0-1.0> files="file1,file2" summary="<verdict>\n\nBlocking:\n- <file:line: what must be done>\n\nImprovements (non-blocking):\n- <file:line: suggestion>" issues='[{"file":"src/file","line":42,"severity":"blocking","category":"stub","code":"<snippet>","problem":"<what is missing>","suggestion":"<exact fix>"}]'
 ```
 
-- **Approve** when every acceptance-criteria item is met and nothing blocking remains. Improvements go in `issues` with `"severity":"warning"`; the task still closes.
+- After the overall verdict line, `summary` lists one `VERIFIED|NOT VERIFIED|INCONCLUSIVE: <criterion>` line per acceptance-criteria item.
+- **Approve** when every acceptance-criteria item is met (VERIFIED, or NOT VERIFIED with an owner by design) and nothing blocking remains. Improvements go in `issues` with `"severity":"warning"`; the task still closes.
 - **Reject** only by naming the unmet acceptance-criteria item or blocking defect. Describe the missing functionality, not the marker, and add: "Removing or rewording the comment without implementing the functionality will fail re-verification."
 - **Escalate** (`status=error`, summary starting `SUPERVISOR CALL:`) for `NOT EXERCISED` evidence rows or anything else only the supervisor can decide.
 - For an epic, add `verification_type=epic`.

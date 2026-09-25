@@ -71,6 +71,7 @@ pub const RULE_ACTIONS: &[&str] = &[
     "list",
     "list_all",
     "helpful",
+    "promote",
     "harmful",
     "sync",
     "check_similar",

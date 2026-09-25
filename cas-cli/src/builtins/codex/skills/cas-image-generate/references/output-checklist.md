@@ -28,11 +28,12 @@ note. Never commit an API key or a provider response containing credentials.
 - Logos and icons are raster in this wired path. Ask for a simple, flat master
   suitable for manual vectorization; manually create SVG/ICO derivatives from
   the approved mark when production requires them.
-- Use 1200x630 for OG/social cards. Keep copy inside a safe area and check the
-  rendered spelling at actual share-card size.
+- Use 1200x630 for OG/social cards (generate with `--aspect 16:9`, then crop).
+  Keep copy inside a safe area and check the rendered spelling at actual
+  share-card size.
 - Use 16:9 or wider for heroes with explicit negative space for UI copy; keep
   the focal subject away from the overlay region.
-- Use A4/Letter portrait and at least 2K for report covers; use 2K or larger
+- Use A4/Letter portrait and at least 2K (`--aspect 2:3 --size 2K`) for report covers; use 2K or larger
   for print-ish artwork after confirming the document's actual resolution.
 - Derive favicon.ico, favicon.svg, apple-touch-icon 180x180, and manifest
   icons 192x192/512x512 from one square logo master. Keep the glyph inside the

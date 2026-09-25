@@ -174,6 +174,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-release-report/scripts/render.py"),
     },
     BuiltinFile {
+        path: "skills/cas-release-report/scripts/check-pdf.py",
+        content: include_str!("builtins/skills/cas-release-report/scripts/check-pdf.py"),
+    },
+    BuiltinFile {
         path: "skills/cas-cut-release/SKILL.md",
         content: include_str!("builtins/skills/cas-cut-release/SKILL.md"),
     },
@@ -432,6 +436,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/design-spec/references/design-tokens.json",
         content: include_str!("builtins/skills/design-spec/references/design-tokens.json"),
     },
+    BuiltinFile {
+        path: "skills/design-spec/references/tokens.css",
+        content: include_str!("builtins/skills/design-spec/references/tokens.css"),
+    },
     // cas-ui-craft skill (cas-d967) : concept brief before any render,
     // first-three-seconds rule, form vocabulary, scored critique rubric with a
     // merge floor, and four annotated exemplars.
@@ -466,6 +474,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-ui-craft/references/exemplars/before-after.html",
         content: include_str!("builtins/skills/cas-ui-craft/references/exemplars/before-after.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-ui-craft/scripts/visual-qa.mjs",
+        content: include_str!("builtins/skills/cas-ui-craft/scripts/visual-qa.mjs"),
     },
     // cas-21dc: demo-statement exploration matrix and durable evidence ledger.
     BuiltinFile {
@@ -564,6 +576,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-frontend-engineering/SKILL.md",
         content: include_str!("builtins/skills/cas-frontend-engineering/SKILL.md"),
     },
+    BuiltinFile {
+        path: "skills/cas-frontend-engineering/references/playwright-acceptance.md",
+        content: include_str!("builtins/skills/cas-frontend-engineering/references/playwright-acceptance.md"),
+    },
     // fallow skill: vendored from https://github.com/fallow-rs/fallow-skills
     // (MIT, Bart Waardenburg). Codebase intelligence for JS/TS — dead code,
     // duplication, complexity, boundaries, feature flags. SKILL.md +
@@ -623,6 +639,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-cli-craft/references/exemplars/before-after.md",
         content: include_str!("builtins/skills/cas-cli-craft/references/exemplars/before-after.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-cli-craft/scripts/terminal-qa.mjs",
+        content: include_str!("builtins/skills/cas-cli-craft/scripts/terminal-qa.mjs"),
     },
     BuiltinFile {
         path: "skills/cas-diagnosing-bugs/SKILL.md",
@@ -742,6 +762,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-release-report/scripts/render.py",
         content: include_str!("builtins/codex/skills/cas-release-report/scripts/render.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/scripts/check-pdf.py",
+        content: include_str!("builtins/codex/skills/cas-release-report/scripts/check-pdf.py"),
     },
     BuiltinFile {
         path: "skills/cas-cut-release/SKILL.md",
@@ -995,6 +1019,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/design-spec/references/design-tokens.json",
         content: include_str!("builtins/codex/skills/design-spec/references/design-tokens.json"),
     },
+    BuiltinFile {
+        path: "skills/design-spec/references/tokens.css",
+        content: include_str!("builtins/codex/skills/design-spec/references/tokens.css"),
+    },
     // cas-ui-craft skill (cas-d967) — codex mirror: concept brief before any render,
     // first-three-seconds rule, form vocabulary, scored critique rubric with a
     // merge floor, and four annotated exemplars.
@@ -1029,6 +1057,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-ui-craft/references/exemplars/before-after.html",
         content: include_str!("builtins/codex/skills/cas-ui-craft/references/exemplars/before-after.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-ui-craft/scripts/visual-qa.mjs",
+        content: include_str!("builtins/codex/skills/cas-ui-craft/scripts/visual-qa.mjs"),
     },
     // cas-21dc: Codex mirror of the demo-statement QA skill.
     BuiltinFile {
@@ -1112,6 +1144,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
             "builtins/codex/skills/cas-frontend-engineering/SKILL.md"
         ),
     },
+    BuiltinFile {
+        path: "skills/cas-frontend-engineering/references/playwright-acceptance.md",
+        content: include_str!("builtins/codex/skills/cas-frontend-engineering/references/playwright-acceptance.md"),
+    },
     // fallow skill — codex mirror. See the claude-side entry above for the
     // upstream attribution (fallow-rs/fallow-skills, MIT).
     BuiltinFile {
@@ -1168,6 +1204,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-cli-craft/references/exemplars/before-after.md",
         content: include_str!("builtins/codex/skills/cas-cli-craft/references/exemplars/before-after.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-cli-craft/scripts/terminal-qa.mjs",
+        content: include_str!("builtins/codex/skills/cas-cli-craft/scripts/terminal-qa.mjs"),
     },
     BuiltinFile {
         path: "skills/cas-diagnosing-bugs/SKILL.md",
@@ -1354,6 +1394,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-release-report/scripts/render.py",
         content: include_str!("builtins/grok/skills/cas-release-report/scripts/render.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/scripts/check-pdf.py",
+        content: include_str!("builtins/grok/skills/cas-release-report/scripts/check-pdf.py"),
     },
     BuiltinFile {
         path: "skills/cas-cut-release/SKILL.md",
@@ -1568,6 +1612,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/design-spec/references/design-tokens.json",
         content: include_str!("builtins/grok/skills/design-spec/references/design-tokens.json"),
     },
+    BuiltinFile {
+        path: "skills/design-spec/references/tokens.css",
+        content: include_str!("builtins/grok/skills/design-spec/references/tokens.css"),
+    },
     // cas-ui-craft skill (cas-d967) — grok twin: concept brief before any render,
     // first-three-seconds rule, form vocabulary, scored critique rubric with a
     // merge floor, and four annotated exemplars.
@@ -1602,6 +1650,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-ui-craft/references/exemplars/before-after.html",
         content: include_str!("builtins/grok/skills/cas-ui-craft/references/exemplars/before-after.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-ui-craft/scripts/visual-qa.mjs",
+        content: include_str!("builtins/grok/skills/cas-ui-craft/scripts/visual-qa.mjs"),
     },
     // cas-21dc: Grok mirror of the demo-statement QA skill.
     BuiltinFile {
@@ -1700,6 +1752,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         ),
     },
     BuiltinFile {
+        path: "skills/cas-frontend-engineering/references/playwright-acceptance.md",
+        content: include_str!("builtins/grok/skills/cas-frontend-engineering/references/playwright-acceptance.md"),
+    },
+    BuiltinFile {
         path: "skills/cas-codex-exec/SKILL.md",
         content: include_str!("builtins/grok/skills/cas-codex-exec/SKILL.md"),
     },
@@ -1749,6 +1805,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-cli-craft/references/exemplars/before-after.md",
         content: include_str!("builtins/grok/skills/cas-cli-craft/references/exemplars/before-after.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-cli-craft/scripts/terminal-qa.mjs",
+        content: include_str!("builtins/grok/skills/cas-cli-craft/scripts/terminal-qa.mjs"),
     },
     BuiltinFile {
         path: "skills/cas-diagnosing-bugs/SKILL.md",

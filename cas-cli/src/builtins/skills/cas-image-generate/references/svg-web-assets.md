@@ -13,6 +13,11 @@ vector deliverable. Route to the existing
 license record; this reference adds vector and web-pipeline details without
 duplicating that checklist.
 
+Contents: decide the medium first · agent-authored SVG standards · worked
+examples (icon, divider, favicon) · raster-to-vector bridge (VTracer, Potrace,
+Inkscape, acceptance) · web-asset pipeline. The fallback hex values in the
+examples are the Petrastella tokens; use the project's harvested tokens instead.
+
 ## Decide the medium first
 
 Agent-authored SVG is a first-class output. Write the SVG directly for icons,
@@ -61,7 +66,7 @@ Apply these rules to every directly written SVG:
 
 Palette variables belong to the consuming stylesheet when possible. A
 self-contained asset may include fallback values in `var(--color-brand,
-#2563eb)`, but do not silently replace the project's harvested tokens with a
+#2E3A9F)`, but do not silently replace the project's harvested tokens with a
 new palette.
 
 ## Worked examples
@@ -76,7 +81,7 @@ This icon uses a 24px grid, a consistent 2px stroke, a palette variable, and a
 `currentColor` fallback. The path IDs are the only IDs needed.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" role="img" aria-labelledby="search-title" style="--color-foreground: #1f2937">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" role="img" aria-labelledby="search-title" style="--color-foreground: #1B1D24">
   <title id="search-title">Search</title>
   <path id="search" d="m10.75 4.5a6.25 6.25 0 1 0 0 12.5 6.25 6.25 0 0 0 0-12.5Zm4.42 10.67 4.33 4.33" fill="none" stroke="var(--color-foreground, currentColor)" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"/>
 </svg>
@@ -88,7 +93,7 @@ This divider is a reusable 1200x160 viewBox. The same harvested surface and
 accent tokens can be overridden by the page stylesheet without editing paths.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 160" role="img" aria-labelledby="wave-title" style="--color-surface: #f8fafc; --color-accent: #2563eb">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 160" role="img" aria-labelledby="wave-title" style="--color-surface: #F7F4EE; --color-accent: #2E3A9F">
   <title id="wave-title">Blue wave section divider</title>
   <path id="surface" d="M0 0h1200v160H0z" fill="var(--color-surface)"/>
   <path id="wave" d="M0 92c180-58 330-58 510 0s330 58 510 0c72-23 130-28 180-18v86H0Z" fill="var(--color-accent)"/>
@@ -102,10 +107,10 @@ make the standalone file useful to renderers that do not apply a page
 stylesheet; the variables still map one-to-one when a stylesheet is present.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="favicon-title" style="--color-background: #111827; --color-foreground: #f8fafc">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="favicon-title" style="--color-background: #12141A; --color-foreground: #E9E6E0">
   <title id="favicon-title">Cassy</title>
-  <rect id="background" width="64" height="64" rx="14" fill="var(--color-background, #111827)"/>
-  <path id="mark" d="M19 18h12.5a14 14 0 1 1 0 28H19l10-14-10-14Zm12.5 6h-1.13l5.71 8-5.71 8h1.13a8 8 0 1 0 0-16Z" fill="var(--color-foreground, #f8fafc)" fill-rule="evenodd"/>
+  <rect id="background" width="64" height="64" rx="14" fill="var(--color-background, #12141A)"/>
+  <path id="mark" d="M19 18h12.5a14 14 0 1 1 0 28H19l10-14-10-14Zm12.5 6h-1.13l5.71 8-5.71 8h1.13a8 8 0 1 0 0-16Z" fill="var(--color-foreground, #E9E6E0)" fill-rule="evenodd"/>
 </svg>
 ```
 

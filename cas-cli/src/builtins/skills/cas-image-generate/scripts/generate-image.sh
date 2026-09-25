@@ -4,7 +4,11 @@ set -euo pipefail
 usage() {
     cat >&2 <<'USAGE'
 Usage: generate-image.sh --prompt TEXT --output PATH [--tier draft|final]
+                         [--aspect RATIO] [--size 1K|2K|4K]
                          [--reference PATH]... [--dry-run]
+
+--aspect sets the aspect ratio (1:1, 2:3, 3:2, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9,
+21:9); --size sets the resolution tier. Both default to the model's own choice.
 
 Generates a Google Nano Banana image. The credential is read from
 GEMINI_API_KEY; use --dry-run to validate routing without an API request.
@@ -14,6 +18,8 @@ USAGE
 prompt=""
 output=""
 tier="draft"
+aspect=""
+size=""
 dry_run=false
 references=()
 
@@ -32,6 +38,16 @@ while [[ $# -gt 0 ]]; do
         --tier)
             [[ $# -ge 2 ]] || { echo "error: --tier needs a value" >&2; usage; exit 2; }
             tier="$2"
+            shift 2
+            ;;
+        --aspect)
+            [[ $# -ge 2 ]] || { echo "error: --aspect needs a value" >&2; usage; exit 2; }
+            aspect="$2"
+            shift 2
+            ;;
+        --size)
+            [[ $# -ge 2 ]] || { echo "error: --size needs a value" >&2; usage; exit 2; }
+            size="$2"
             shift 2
             ;;
         --reference)
@@ -70,6 +86,22 @@ case "$tier" in
         ;;
 esac
 
+case "$aspect" in
+    ""|1:1|2:3|3:2|3:4|4:3|4:5|5:4|9:16|16:9|21:9) ;;
+    *)
+        echo "error: --aspect must be one of 1:1 2:3 3:2 3:4 4:3 4:5 5:4 9:16 16:9 21:9" >&2
+        exit 2
+        ;;
+esac
+
+case "$size" in
+    ""|1K|2K|4K) ;;
+    *)
+        echo "error: --size must be 1K, 2K or 4K" >&2
+        exit 2
+        ;;
+esac
+
 if [[ -z "${GEMINI_API_KEY:-}" ]]; then
     cat >&2 <<'MISSING_KEY'
 error: GEMINI_API_KEY is not set; Nano Banana generation is unavailable.
@@ -81,8 +113,8 @@ MISSING_KEY
 fi
 
 if [[ "$dry_run" == true ]]; then
-    printf 'provider=google-nano-banana\nmodel=%s\ntier=%s\nreferences=%d\ndry_run=true\n' \
-        "$model" "$tier" "${#references[@]}"
+    printf 'provider=google-nano-banana\nmodel=%s\ntier=%s\naspect=%s\nsize=%s\nreferences=%d\ndry_run=true\n' \
+        "$model" "$tier" "${aspect:-default}" "${size:-default}" "${#references[@]}"
     exit 0
 fi
 
@@ -143,7 +175,18 @@ for reference in "${references[@]}"; do
     reference_index=$((reference_index + 1))
 done
 
-jq '{contents: [{parts: .}]}' "$work/parts.json" > "$work/payload.json"
+jq --arg aspect "$aspect" --arg size "$size" '
+    {contents: [{parts: .}]}
+    + if $aspect == "" and $size == "" then {} else
+        {generationConfig: {
+            responseModalities: ["IMAGE"],
+            imageConfig: (
+                (if $aspect == "" then {} else {aspectRatio: $aspect} end)
+                + (if $size == "" then {} else {imageSize: $size} end)
+            )
+        }}
+      end
+' "$work/parts.json" > "$work/payload.json"
 endpoint="https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent"
 curl_headers="$work/curl-headers.txt"
 (

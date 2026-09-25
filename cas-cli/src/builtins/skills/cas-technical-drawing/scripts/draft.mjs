@@ -8,7 +8,7 @@
  * drawn — every view is a projection of the same solid model.
  *
  *   node draft.mjs render model.json --out dir/ [--sheet letter|a4|tabloid|a3]
- *        [--variant name] [--plain] [--png] [--dxf] [--no-grid]
+ *        [--variant name] [--plain] [--png] [--dxf] [--grid]
  *   node draft.mjs check  model.json [--cutlist cutlist.json] [--json]
  *   node draft.mjs check  drawing.svg [--json] [--print-width-mm N] [--min-text-mm 2.5]
  *   node draft.mjs table  model.json [--format md|csv|json]

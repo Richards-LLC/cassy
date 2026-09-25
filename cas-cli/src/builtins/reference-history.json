@@ -401,7 +401,8 @@
       "1282dda4c40346713f8f44387baee1668f618e62b1e47d564d727728a4d28976",
       "6aade2cf1d447d11c3d0ef6d1d54aaef97cdf3d8a0e23ede1ae50ede8e8d48f4",
       "7f3b60f4bbb7080cdb600852731597dc51620b12d3129128f7c26d5ceb351adf",
-      "9bea392181f9bdb2d7a108337c72b73584346683bdfb7cd1ddb81c9492104f78"
+      "9bea392181f9bdb2d7a108337c72b73584346683bdfb7cd1ddb81c9492104f78",
+      "cb3fab4ad339e670718c19b8eb38fea11535e5c529752f36d0c879b9b8444ff5"
     ],
     "skills/cas-qa-craft/references/evidence-ledger.md": [
       "49b39e853bf2d23f7b7c13cf97d53bb5496a1e753fe9b25b76be64204b6d8e82",
@@ -418,6 +419,7 @@
       "267a6ade031287b20f3cb141d98dd9340abf12799e6980173adfe5173593a022",
       "74e4ff85822d8dc8577dadac26270a2aef201de8ee695e106646d86a3c33f865",
       "a8d322a0626426e0be95076db0b7a22f21e6f0630d5be977a73b8fec7351b433",
+      "d4ddf39e20fea3bf8ebc2e103e08752d0be1e90caf8cf4ad86757cfeb2806660",
       "df6ca1bf1635ca4f4855dfd8d707e0304a955d3a07dd4865fb37b1f1e474c6d0"
     ],
     "skills/cas-qa-craft/references/journeys.md": [
@@ -429,6 +431,14 @@
     ],
     "skills/cas-qa-craft/references/telemetry-sweep.md": [
       "6880d75c986a9588a541d84b9072ce3345c55096641a1951de33861bfc496f32"
+    ],
+    "skills/cas-qa-craft/references/verifier-evidence-gate.md": [
+      "259a99bdd4855f40f0467c117a8602d0923f0bce2ea79c0c0b00323a31d7ed26",
+      "5f9e11c5dd37ba59c9cea8cf662417cc3348e7ad6981546314a5b2b9eec2873b",
+      "85f06b178c3793ea41d42dbcb24c02a913d7eeade793b658cb319f4b7dbfd937",
+      "a8e846ca75fc25c606c00b18c04070468ed065c37c9786ab6a89476f4eab40c8",
+      "af67d38312c2445f278702e05e26e3b5a4baac96b5ea95a657915d747f3478c8",
+      "cb2a10132e1fe1151cacaf2f2b72b9d61bea23caddd2a8c1c0de5d3a2455d438"
     ],
     "skills/cas-release-notes/references/RUBRIC-template.md": [
       "1d114e9b6f61cefa40566ca0bdd20e6cde2c8c28c283c53ece11485231243e29",

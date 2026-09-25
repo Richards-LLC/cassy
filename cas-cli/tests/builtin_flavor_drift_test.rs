@@ -1010,6 +1010,27 @@ fn root_managed_projections_stay_synced_and_project_skills_stay_ignored() {
         managed_block(&generated_claude),
         "root CLAUDE.md managed block diverged from the generated template"
     );
+    // Audit D3 (cas-6930d): AGENTS.md carries the harness-neutral directive
+    // and CLAUDE.md imports it; the root copy is the repository's own
+    // projection of the same template.
+    let root_agents = fs::read_to_string(root.join("AGENTS.md")).expect("root AGENTS.md");
+    let generated_agents =
+        fs::read_to_string(project.join("AGENTS.md")).expect("generated AGENTS.md");
+    assert_eq!(
+        managed_block(&root_agents),
+        managed_block(&generated_agents),
+        "root AGENTS.md managed block diverged from the generated template"
+    );
+    assert!(
+        root_claude.lines().any(|line| line == "@AGENTS.md"),
+        "root CLAUDE.md must import AGENTS.md"
+    );
+    for (name, content) in [("AGENTS.md", &root_agents), ("CLAUDE.md", &root_claude)] {
+        assert!(
+            content.chars().count() < 10_000,
+            "root {name} must stay under Grok's 10,000-character cap"
+        );
+    }
 
     let gitignore = fs::read_to_string(root.join(".gitignore")).expect("root .gitignore");
     assert!(

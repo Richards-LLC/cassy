@@ -1,135 +1,50 @@
-<!-- Auto-generated from CLAUDE.md by `cas sync agents-md`. Do not edit directly. -->
 <!-- CAS:BEGIN - This section is managed by CAS. Do not edit manually. -->
-# IMPORTANT: USE Cassy FOR TASK AND MEMORY MANAGEMENT
+## Cassy: tasks, memory and context
 
-**DO NOT USE BUILT-IN TOOLS (TodoWrite, EnterPlanMode) FOR TASK TRACKING.**
+Track work and knowledge in Cassy rather than in harness-local todo lists; Cassy tasks and memories persist across sessions.
+Cassy's MCP tools are `task`, `memory` and `search`, named with your harness's prefix: `mcp__cas__` in Claude Code, `mcp__cs__` in Codex, `cas__` in Grok, `cas_` in OpenCode. Call them directly.
 
-Use CAS MCP tools instead:
-First use each session — load MCP schemas: ToolSearch(query="select:mcp__cs__task,mcp__cs__memory,mcp__cs__search"). ToolSearch only loads the schema — it does not call the tool. Once it succeeds, call `mcp__cs__task` etc. directly; never re-run ToolSearch for a tool already resolved.
-- `mcp__cs__task` with action: create - Create tasks (NOT TodoWrite)
-- `mcp__cs__task` with action: start/close - Manage task status
-- `mcp__cs__task` with action: ready - See ready tasks
-- `mcp__cs__memory` with action: remember - Store memories and learnings
-- `mcp__cs__search` with action: search - Search all context
+- `task`: action=create, start, close, ready.
+- `memory`: action=remember.
+- `search`: action=search.
 
-Cassy provides persistent context across sessions. Built-in tools are ephemeral.
-
-Bug routing: `cas config get issues.repo` / `issues.components.{cassy,violet,cloud}` name the project, Cassy, Violet and Cloud trackers; file operational bugs in the matching repo before moving on.
-Release notes: when a merge reaches `staging` or `main` and the project has docs/release-notes/RUBRIC.md, use the `cas-release-notes` skill and follow docs/release-notes/RUBRIC.md.
+Bug routing: `cas config get issues.repo` names this project's tracker, and `issues.components.{cassy,violet,cloud}` name the Cassy, Violet and Cloud trackers. File an operational bug in the matching tracker before moving on; in the Cassy source repo itself, a Cassy bug becomes a task there. If `issues.repo` is unset, record the bug as a task note.
+Release notes: when a merge reaches `staging` or `main` and docs/release-notes/RUBRIC.md exists, use the `cas-release-notes` skill and follow docs/release-notes/RUBRIC.md.
 <!-- CAS:END -->
 
-## Codex-specific notes
+# Cassy source repository (cas-src)
 
-- Use the `mcp__cs__` CAS MCP tools. Codex sessions do not run the Claude hook
-  prefix translator, so this generated AGENTS.md carries the Codex tool prefix
-  directly.
-- Codex does not support Claude hooks. Follow the factory worker lifecycle and
-  let the supervisor own verification and review flow.
+This file is canonical for every harness; `CLAUDE.md` imports it.
 
-# CLAUDE.md
+## Build and test
 
-## Build & Test
-
-```bash
-# Supervisor/operator only — factory workers never run these (see below)
-cargo build                          # Dev build
-cargo build --release                # Release build (LTO, strip)
-cargo build --profile release-fast   # Fast release (thin LTO, 16 codegen units)
-cargo check -p cas --lib --tests     # Compile feedback, no test linking/runs
-scripts/run-scoped-tests.sh -p cas --lib module_name
-scripts/run-scoped-tests.sh -p cas --test cli_test
-cargo nextest run -p cas             # Full suite: epic assembly and release gates
-cargo test -p cas --doc              # Doctests (nextest does not support them)
-cargo bench --bench code_indexing    # Benchmarks
-make test-release-panic              # Verify A2/A3/B3 panic isolation under release profiles
-```
-
-Install the standard local runner once with `cargo install cargo-nextest` (or
-`make -C cas-cli install-tools`). `scripts/run-scoped-tests.sh` defaults to
-nextest and rejects a silent zero-test success.
-
-**Factory workers never run Rust builds.** Workers edit and commit code, then
-park it without building or testing Rust; a PreToolUse guard denies them any
-`cargo` build/check/test/nextest/clippy/run, `rustc`,
-`scripts/run-scoped-tests.sh`, and `make test*`. Only the supervisor builds:
-once per epic at assembly it runs one full build + test of the epic tip and
-records `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd>
-log=<path>` on the epic. Child task closes reference that proof instead of
-carrying a scoped `--proof` receipt or `loaded_proof` note. Non-Rust work (for
-example hub-web npm/vitest/playwright) is unaffected.
-
-Gate evidence: PR #655/run 33430464567; PR #657/run 33435093275.
-
-Factory worker spawns use `sccache` automatically when it is installed, while
-keeping a separate target directory per worktree so concurrent Cargo builds do
-not serialize. An existing `RUSTC_WRAPPER` wins; set
-`CAS_FACTORY_DISABLE_SCCACHE=1` for the emergency opt-out. CI uses the GitHub
-cache-v2 backend and keeps the cold Build Benchmark explicitly uncached.
-
-New isolated workers also seed their private `target/` from compiled artifacts
-hardlinked out of the quiescent snapshot named by `.cas/build-cache/current`;
-small Cargo dep-info files are copied with their target root rebased. Refresh that
-baseline after an epic/main integration merge with
-`scripts/refresh-worker-build-cache.sh`; the script builds a new snapshot to
-completion and only then publishes its pointer, so no worker ever seeds from a
-live Cargo writer. Old snapshots remain valid for in-flight seeders and should
-only be removed during a maintenance window. Set
-`CAS_FACTORY_DISABLE_TARGET_SEED=1` to skip seeding. Do not replace this with a
-shared live `CARGO_TARGET_DIR`: its Cargo lock serializes the worker fleet.
-
-**Standing operator CI-load policy:** factory/* pushes run only Scoped
-Validation; protected-default PRs run only the required Fast Validation and
-macOS Check lanes. The merge queue validates its synthetic tree once; when its
-successful tree is pushed unchanged to main, the main-push Fast Validation and
-macOS lanes reuse that receipt and name the validating run. Direct pushes,
-bypass merges, receipt lookup failures, and changed trees still run those
-lanes. The non-required full/heavy tier (Clippy, Test Compile Guard, Build
-Benchmark, and both Panic Isolation profiles) belongs only to
-supervisor-controlled main pushes, schedules, or manual dispatches—never
-factory/*, epic/*, tags, or pull requests. Keep this policy pinned by
-`scripts/test-ci-test-tiers.sh`, rather than relying on convention. Docs-only
-diffs (paths under `docs/` or Markdown files outside embedded
-`cas-cli/src/` content) on pull-request, push, and merge-group events route
-only to the `Docs Lint` job; it runs Markdown lint and validates any changed
-release-note drafts. The existing required Fast Validation and macOS Check
-contexts remain present and skip their full work for that class. Mixed and
-code diffs keep the full required tier.
-
-Local sccache 0.10.0 does not produce cross-worktree Rust hits because absolute
-checkout paths remain in its cache keys (measured 0/45 hits even with
-`--remap-path-prefix`). Keep sccache enabled for same-path/CI reuse and for when
-[upstream path normalization](https://github.com/mozilla/sccache/pull/2678)
-lands; hardlink seeding is the current cross-worktree mechanism.
-
-The MCP server is always included because factory agents depend on `cas serve`; the optional `mcp-proxy` feature is enabled by default. Binary is `cas` (lib + bin in `cas-cli/`). Build script embeds git hash and build date.
-
-**Build profiles must use `panic = "unwind"`.** The MCP tool-dispatch panic catcher (EPIC cas-c351) relies on `tokio::spawn` + `JoinError::is_panic`, which only observes a panic if the worker thread unwinds. A compile-time guard in `cas-cli/src/lib.rs` refuses non-test builds with `panic = "abort"` — do not work around it; the entire point of that catcher is to keep `cas serve` alive across handler bugs.
-
-## Rust Version
+Only the supervisor builds Rust: once per epic, at assembly. Factory workers edit, commit and park code without running `cargo`, `rustc`, `scripts/run-scoped-tests.sh` or `make test*` (a PreToolUse hook enforces this in Claude Code and Codex). Build commands, the assembly proof, worker build caches, the CI-load policy and build profiles are in [cas-cli/docs/CONTRIBUTING.md](cas-cli/docs/CONTRIBUTING.md#build-assembly-and-ci-policy). Build profiles must keep `panic = "unwind"`; a compile-time guard in `cas-cli/src/lib.rs` enforces it.
 
 Minimum supported Rust version: **1.88** (edition 2024).
 
-## Architecture & Contributing
+## Architecture and contributing
 
-Module layout, crate purposes, store traits, CasCore, hook scoring:
--> See [cas-cli/docs/ARCHITECTURE.md](cas-cli/docs/ARCHITECTURE.md)
+- Module layout, crate purposes, store traits, CasCore, hook scoring: [cas-cli/docs/ARCHITECTURE.md](cas-cli/docs/ARCHITECTURE.md).
+- Adding CLI commands, MCP tools, migrations, testing setup, skill/rule sync, releasing: [cas-cli/docs/CONTRIBUTING.md](cas-cli/docs/CONTRIBUTING.md).
+- Codebase navigation map: [.claude/CODEMAP.md](.claude/CODEMAP.md).
 
-Adding CLI commands, MCP tools, migrations, testing setup, skill/rule sync:
--> See [cas-cli/docs/CONTRIBUTING.md](cas-cli/docs/CONTRIBUTING.md)
+## Hooks and verification
 
-Codebase navigation map (breadcrumb index of all modules):
--> See [.claude/CODEMAP.md](.claude/CODEMAP.md)
-
+CAS installs its hooks for Claude Code (`.claude/settings.json`) and Codex (`.codex/hooks.json`), including the PreToolUse guard that denies Rust builds to factory workers. Follow the factory worker lifecycle and let the supervisor own verification and review.
 
 ## Don't assume — always verify
 
-When diagnosing a bug or reasoning about behavior, **verify the claim against the actual code/data before acting on it.** Trace the real path, read the real handler, confirm the symptom maps to the line you think it does. Do not propose, implement, or ship a fix on a plausible-but-unconfirmed theory. A diagnosis is only "done" when you can point at the concrete evidence (the file:line, the test output, the reproduced behavior). Environment details the user gives (OS, terminal, hardware) are clues to verify against, not facts to wave away. This applies to root-cause analysis, "this already works", "that's the harness not us", and every other confident assertion.
+When diagnosing a bug or reasoning about behavior, verify the claim against the actual code or data before acting on it. Trace the real path, read the real handler, and confirm the symptom maps to the line you think it does. Do not propose, implement, or ship a fix on a plausible but unconfirmed theory. A diagnosis is done only when you can point at concrete evidence: the file:line, the test output, or the reproduced behavior. Environment details the user gives (OS, terminal, hardware) are clues to verify, not facts to wave away. This applies to root-cause analysis, "this already works", "that's the harness, not us", and every other confident assertion.
 
 ## CAS system bugs are in-repo fixes
 
-This repo **is** the CAS source. When a bug is reported in the verifier, hooks, factory orchestration, MCP dispatch, the task-verifier agent, worker prompts, or built-in skills — regardless of which downstream project (gabber-studio, OpenClaw, etc.) surfaced it — the fix lands here as a Rust or markdown change via a task assigned to a worker. Do not file the bug with team-lead, do not "report upstream", do not treat cas-src IS CAS as an external dependency. Other projects consume CAS; they do not modify it. If you catch yourself wanting to escalate a CAS bug, stop and create the fix task in this repo instead.
+This repository is the CAS source. When a bug is reported in the verifier, hooks, factory orchestration, MCP dispatch, the task-verifier agent, worker prompts, or built-in skills, whichever downstream project surfaced it, the fix lands here as a Rust or Markdown change through a task assigned to a worker. Do not file it with a team lead, do not report it upstream, and do not treat CAS as an external dependency: other projects consume CAS, they do not modify it. If you want to escalate a CAS bug, create the fix task in this repository instead.
 
 ## Releases and harness diaries → Slack (mandatory)
 
-Runtime releases and harness-diary updates have **separate** #cas-internal publication duties. A runtime release requires two distinct top-level posts (user and dev). A diary update requires one top-level cross-harness summary with exactly three replies ordered **Grok, Claude, Codex**. If one merge contains both, publish both workflows; a diary-only merge must not pose as a runtime release. All messages use impact-first prose with no ticket IDs or internal agent/factory narration.
--> See [docs/RELEASE_SLACK_RUBRIC.md](docs/RELEASE_SLACK_RUBRIC.md)
+- A runtime release needs two separate top-level #cas-internal posts: one for users and one for developers.
+- A harness-diary update needs one top-level cross-harness summary with exactly three replies, in the order Grok, Claude, Codex.
+- When a merge contains both, publish both. A merge that only updates the diary must not be presented as a release.
+- Every message leads with impact and contains no ticket ids and no agent or factory narration.
+
+→ See [docs/RELEASE_SLACK_RUBRIC.md](docs/RELEASE_SLACK_RUBRIC.md)

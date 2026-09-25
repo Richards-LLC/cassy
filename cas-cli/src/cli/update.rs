@@ -27,7 +27,7 @@ use crate::cli::hook::{
     configure_claude_hooks, configure_mcp_server, provision_codex_project,
     provision_codex_user_config,
 };
-use crate::cli::init::{generate_cas_skill, update_claude_md};
+use crate::cli::init::{generate_cas_skill, update_agents_md, update_claude_md};
 use crate::cli::update::preview::{build_update_transaction, show_enhanced_dry_run};
 use crate::cloud::{CloudConfig, FetchTeamsOutcome, fetch_and_cache_teams, maybe_adopt_team_scope};
 use crate::hybrid_search::{LegacyRepairLimits, LegacyRepairOutcome, repair_legacy_index_bounded};
@@ -1909,6 +1909,29 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
                 let mut fmt = Formatter::stdout(&mut out, theme.clone());
                 fmt.write_raw("  ")?;
                 fmt.warning(&format!("Could not update CLAUDE.md: {e}"))?;
+            }
+        }
+    }
+
+    // 3b. AGENTS.md directive: the harness-neutral block CLAUDE.md imports
+    // and Codex/Grok read directly (audit D3, M66).
+    match update_agents_md(project_root) {
+        Ok(true) => {
+            config_updated.push("AGENTS.md");
+            if !cli.json {
+                let mut out = io::stdout();
+                let mut fmt = Formatter::stdout(&mut out, theme.clone());
+                fmt.write_raw("  ")?;
+                fmt.success("Updated AGENTS.md")?;
+            }
+        }
+        Ok(false) => {}
+        Err(e) => {
+            if !cli.json {
+                let mut out = io::stdout();
+                let mut fmt = Formatter::stdout(&mut out, theme.clone());
+                fmt.write_raw("  ")?;
+                fmt.warning(&format!("Could not update AGENTS.md: {e}"))?;
             }
         }
     }

@@ -393,7 +393,7 @@ impl Config {
     }
 
     /// Merge two explicit paths. Public so a caller that owns both locations
-    /// — `cas integrate mecha-cassy` and its doctor row, which must reason
+    /// — `cas integrate violet` and its doctor row, which must reason
     /// about the machine file *and* the project file by hand — can ask the
     /// same question the runtime asks, and so tests never depend on the real
     /// user config directory.
@@ -505,7 +505,7 @@ impl Config {
     /// credentials by environment-variable name only.
     ///
     /// Unlike [`Self::ensure_viktor_managed_default`], a pre-existing server
-    /// entry is *replaced*: the operator ran `cas integrate mecha-cassy` with
+    /// entry is *replaced*: the operator ran `cas integrate violet` with
     /// explicit variable names, so those names are authoritative. The
     /// allowlist keeps every non-MechaCassy route untouched while the
     /// MechaCassy routes are reduced to exactly [`MECHA_CASSY_TOOLS`], which

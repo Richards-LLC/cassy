@@ -7,6 +7,12 @@ metadata:
 
 # Codex Supervisor Checklist
 
+## Codex constraints
+
+- Codex has no session hooks and loads no `.md` agents, so call the Cassy tools (`task`, `memory`, `rule`, `search`) explicitly with the Codex prefix, and follow `cas-supervisor` for everything below.
+- Coordinate workers; never implement a worker's task yourself or close one outside the documented Cassy lifecycle.
+- Every spawn names `cli=`, `model=`, and `effort=`; copy a generated recipe from [workflow.md](../cas-supervisor/references/workflow.md).
+
 ## Session Start (No Hooks)
 
 0. **Preflight.** Run `cas factory preflight` ([preflight.md](../cas-supervisor/references/preflight.md)). Nonzero exit → fix the finding it names and rerun. If it reports a stale Cassy binary, stop here: **do not kill or restart `cas serve` from this active MCP session** — that stdio process is this session's Cassy-tool connection. Instead, ask the operator to rebuild Cassy and use the harness's MCP reconnect/restart control (or open a fresh supervisor session) to launch the new `cas serve`. Do not use `pkill` or any name-based process kill. Resume only after the Cassy tool list is restored, then rerun this checklist from step 0.

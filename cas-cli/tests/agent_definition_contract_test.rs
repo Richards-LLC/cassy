@@ -28,9 +28,9 @@ fn load(relative: &str) -> &'static str {
     }
 }
 
-const VERIFIER_PATHS: [&str; 3] = [
+/// Codex ships no `.md` agents: it ignores them (audit D6, cas-6b97).
+const VERIFIER_PATHS: [&str; 2] = [
     "cas-cli/src/builtins/agents/task-verifier.md",
-    "cas-cli/src/builtins/codex/agents/task-verifier.md",
     "cas-cli/src/builtins/grok/agents/task-verifier.md",
 ];
 
@@ -57,8 +57,8 @@ fn every_agent_definition() -> Vec<(String, &'static str)> {
     }
     found.sort_by(|left, right| left.0.cmp(&right.0));
     assert!(
-        found.len() >= 4,
-        "expected the three agent catalogs to be discovered, found {}",
+        found.len() >= 2,
+        "expected the Claude and Grok agent catalogs to be discovered, found {}",
         found.len()
     );
     for maintenance in cas::maintenance_jobs::MAINTENANCE_JOBS {

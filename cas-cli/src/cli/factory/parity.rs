@@ -37,8 +37,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::builtins::{
-    GENERAL_PARITY_CAPABILITIES, REQUIRED_FACTORY_AGENTS, REQUIRED_FACTORY_CAPABILITIES,
-    agent_catalog_for_harness, required_dir_for, skill_catalog_for_harness,
+    GENERAL_PARITY_CAPABILITIES, REQUIRED_FACTORY_CAPABILITIES, agent_catalog_for_harness,
+    required_dir_for, required_factory_agents_for, skill_catalog_for_harness,
 };
 
 /// Stable lowercase harness name used by `cas_mux::rendered_contract_surface`.
@@ -256,7 +256,8 @@ pub fn evaluate_cell(harness: SupervisorCli, role: ContractRole) -> ParityCell {
                 }
             }
         }
-        for agent in REQUIRED_FACTORY_AGENTS {
+        let required_agents = required_factory_agents_for(harness);
+        for agent in required_agents {
             if !agents.iter().any(|b| &b.path == agent) {
                 missing.push(format!("agent:{agent}"));
             }
@@ -267,7 +268,7 @@ pub fn evaluate_cell(harness: SupervisorCli, role: ContractRole) -> ParityCell {
                 format!(
                     "{} required+general skills and {} required agents discoverable in own catalog",
                     REQUIRED_FACTORY_CAPABILITIES.len() + GENERAL_PARITY_CAPABILITIES.len(),
-                    REQUIRED_FACTORY_AGENTS.len()
+                    required_agents.len()
                 ),
             )
         } else {

@@ -483,16 +483,26 @@ fn supervisor_reference_tree_uses_current_lifecycle_contract() {
         "builtins.rs must not register deleted code-review-queue.md"
     );
 
-    let factory_supervisor =
-        load(&root.join("cas-cli/src/builtins/codex/agents/factory-supervisor.md"));
+    // Audit D6 (cas-6b97): Codex ignores `.md` agents, so the inert
+    // factory-supervisor agent is gone and its constraints live in the
+    // Codex supervisor checklist.
     assert!(
-        factory_supervisor.lines().count() < 60,
-        "Codex factory-supervisor.md exceeds the 60-line prompt budget"
+        !builtins.contains("builtins/codex/agents/"),
+        "builtins.rs must not register Codex .md agents"
     );
-    for required in ["Codex Constraints", "cli=codex", "cas-supervisor"] {
+    let checklist = load(
+        &root.join("cas-cli/src/builtins/codex/skills/cas-codex-supervisor-checklist.md"),
+    );
+    for required in [
+        "## Codex constraints",
+        "no session hooks",
+        "never implement a worker's task yourself",
+        "`cli=`, `model=`, and `effort=`",
+        "cas-supervisor/references/workflow.md",
+    ] {
         assert!(
-            factory_supervisor.contains(required),
-            "factory-supervisor.md missing {required:?}"
+            checklist.contains(required),
+            "cas-codex-supervisor-checklist missing {required:?}"
         );
     }
 }

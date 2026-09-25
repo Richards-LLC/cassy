@@ -48,6 +48,8 @@ node_modules/
 # copy dirties the tree on every upstream skill change.
 /.claude/skills/*
 /.codex/skills/
+/.grok/skills/
+/.opencode/skills/
 
 # Codex/agent rollout session logs — debugging artifacts, not source
 docs/requests/**/*.codex-rollout*.jsonl

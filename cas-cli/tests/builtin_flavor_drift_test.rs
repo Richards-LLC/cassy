@@ -93,17 +93,6 @@ const TAILORED: &[Tailored] = &[
         rationale: "The Heterogeneous Teams heading names the fleet a Grok supervisor leads.",
     },
     Tailored {
-        flavor: "codex",
-        path: "agents/task-verifier.md",
-        source: "codex/agents/task-verifier.md",
-        replacements: &[
-            ("mcp__cas__", "mcp__cs__"),
-            (".claude/skills/cas-qa-craft", ".codex/skills/cas-qa-craft"),
-        ],
-        rationale: "An agent `tools:` allowlist must use the harness's own tool names; the \
-                    installed-skill example path names the Codex home.",
-    },
-    Tailored {
         flavor: "grok",
         path: "agents/task-verifier.md",
         source: "grok/agents/task-verifier.md",
@@ -122,17 +111,15 @@ const ALLOWED_MISSING_TWIN: &[(&str, &str, &str)] = &[(
     "codex",
     "Codex ships the renamed no-hooks variant skills/cas-codex-supervisor-checklist instead \
      (cas-59ee): Codex has no SessionStart hook banner.",
+), (
+    "agents/task-verifier.md",
+    "codex",
+    "Audit D6 (cas-6b97): Codex custom agents are TOML with developer_instructions, and \
+     Codex ignores .codex/agents/*.md, so Cassy installs no .md agents for Codex.",
 )];
 
 /// Files only a twin catalog ships: (flavor, catalog path, source path, rationale).
 const ALLOWED_FLAVOR_ONLY: &[(&str, &str, &str, &str)] = &[
-    (
-        "codex",
-        "agents/factory-supervisor.md",
-        "codex/agents/factory-supervisor.md",
-        "Codex-only supervisor agent; Claude and Grok supervise through the cas-supervisor \
-         skill.",
-    ),
     (
         "codex",
         "skills/cas-codex-supervisor-checklist/SKILL.md",
@@ -835,6 +822,20 @@ fn root_managed_projections_stay_synced_and_project_skills_stay_ignored() {
             path.display()
         );
     }
+    // Audit D6: Codex installs no .md agents, so the root projection has none.
+    let stray_codex_agents: Vec<String> = fs::read_dir(root.join(".codex").join("agents"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.ends_with(".md"))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        stray_codex_agents.is_empty(),
+        "root .codex/agents still carries .md agents: {stray_codex_agents:?}"
+    );
     for builtin in cas::builtins::CODEX_BUILTIN_AGENTS {
         let path = root.join(".codex").join(builtin.path);
         let actual = fs::read_to_string(&path).unwrap_or_else(|error| {

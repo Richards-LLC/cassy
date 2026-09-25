@@ -27,6 +27,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- On machines with Grok or OpenCode installed, `cas update` now writes their
+  own skill copies into `.grok/skills` and `.opencode/skills`. Both load a
+  project's own copy ahead of `.claude/skills`, whose tool names do not work
+  for them.
+- Codex no longer receives `.md` agent files, which it ignores; the old copies
+  are removed on the next `cas update`, and the Codex supervisor guidance
+  lives in its checklist.
 - A team pull no longer replaces one of this project's rules with a legacy
   team rule that shares its id but names no project.
 - Rules that name another project are no longer pushed to the cloud from

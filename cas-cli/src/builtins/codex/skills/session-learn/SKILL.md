@@ -18,7 +18,9 @@ Borrowed from `third-brain-v5-skills/skills/session-learn` (MIT, reference_third
 
 Exactly one batched output: a JSON array of memory drafts, each with the 7-signal classification, the proposed Cassy entry_type / tags / scope, and a confidence score. The caller (Rust handler or interactive user) routes them through `mcp__cs__memory action=remember` so the standard overlap-detection gate decides whether each draft lands.
 
-**You do NOT write to the store directly.** Return drafts only; the caller writes. This separation lets the user preview drafts in interactive mode and lets the hook handler apply the overlap gate.
+**In hook mode you do not write to the store.** Return drafts only; the Stop handler writes them after its own filters.
+
+**When a user invoked you, you are the caller.** Show the drafts, let the user accept or drop each one, then store every accepted draft with `mcp__cs__memory action=remember` (its `content`, `entry_type`, `tags` and `scope`); the overlap gate decides whether each lands. Done when every accepted draft is stored or reported as blocked by the overlap gate.
 
 ---
 
@@ -41,7 +43,7 @@ Exactly one batched output: a JSON array of memory drafts, each with the 7-signa
 ## Quality rules
 
 - **Skip floor.** If the session has < 5 tool calls, return `[]`. Trivial sessions produce noisy memories. (The Rust hook handler enforces this same floor before invoking the classifier so we never spend a model call on noise.)
-- **Dedupe at the source.** Before drafting, scan the existing memory store via `mcp__cs__search` for each candidate finding. If a near-duplicate exists, do not draft a new one — instead include the existing memory's ID in your output's `dedup_hits` field so the caller can record the corroboration without creating a duplicate. The overlap-detection gate downstream is a second backstop, not the first one.
+- **Dedupe at the source (interactive only).** In hook mode you get one turn and no tools, so skip this step; the handler dedupes. When a user invoked you, scan the existing memory store via `mcp__cs__search` for each candidate finding before drafting. If a near-duplicate exists, do not draft a new one — instead include the existing memory's ID in your output's `dedup_hits` field so the caller can record the corroboration without creating a duplicate. The overlap-detection gate downstream is a second backstop, not the first one.
 - **Confidence honesty.** Each draft must carry `confidence ∈ [0.0, 1.0]`. The Rust handler suppresses drafts with `confidence < 0.6` unless they're tagged `correction` (corrections fire at `≥ 0.5` because user pushbacks are high-signal even when terse).
 - **One signal per draft.** A finding that arguably fits two signal types is two drafts, not one merged "mixed" draft — the downstream entry_type routing depends on the signal being unambiguous.
 - **No general programming knowledge.** Only emit what was project-, user-, or session-specific. "Always close file handles" is not a memory; "this codebase uses `tracing::warn!` in cloud/syncer/pull.rs but `eprintln!` in cloud/syncer/push.rs" is.
@@ -67,7 +69,7 @@ A JSON array (possibly empty) of draft objects:
 ]
 ```
 
-`dedup_hits` is `[]` when this is a genuinely new finding. When the classifier found a near-duplicate in the existing store, list the matching memory IDs there and **omit the rest of the body** — the caller treats `dedup_hits` ≠ [] as "no new memory, record corroboration" and the verbose body is wasted bandwidth.
+`dedup_hits` is `[]` when this is a genuinely new finding. When you found a near-duplicate in the existing store, list the matching memory IDs there and keep the draft short, but **always emit every field**: `signal`, `entry_type`, `scope`, `confidence` and a one-line `content`. The handler parses the whole array at once, so one draft missing a required field drops every draft in the batch.
 
 If no drafts, return `[]`. Do not return prose; do not wrap in markdown.
 

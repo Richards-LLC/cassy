@@ -17,8 +17,8 @@ import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-export const PORT_FLOOR = 20_000;
-export const PORT_CEILING = 32_767;
+const PORT_FLOOR = 20_000;
+const PORT_CEILING = 32_767;
 
 /**
  * The fixture and journey ports for the checkout at `dir` (the hub-web directory).

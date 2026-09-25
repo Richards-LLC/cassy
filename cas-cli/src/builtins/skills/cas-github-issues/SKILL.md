@@ -45,7 +45,7 @@ with `cas config get issues.repo`, `cas config get issues.components.cassy`,
 `cas config get issues.components.violet`, and
 `cas config get issues.components.cloud`. Use `issues.repo` for the current
 project, the Cassy component key for runtime/hooks/MCP/factory/skill defects,
-the MechaCassy key for Slack hub defects, and the Cloud key for sync,
+the Violet key for Slack hub defects, and the Cloud key for sync,
 relay, or pairing defects. If you hit a bug during operation, file a ticket in the matching repo before moving on; do not infer a destination from git remotes.
 
 The code-history document index has a separate source setting. Configure

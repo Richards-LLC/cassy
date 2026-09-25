@@ -98,6 +98,12 @@ fn every_issue_filing_builtin_names_the_component_registry() {
                     "{harness:?} {relative} is missing registry key {key}"
                 );
             }
+            // GH #963: the `mecha_cassy` alias expires after one release, so
+            // shipped guidance must name only the current `violet` key.
+            assert!(
+                !content.contains("issues.components.mecha_cassy"),
+                "{harness:?} {relative} still names the deprecated issues.components.mecha_cassy key"
+            );
             assert!(
                 content.contains("file a ticket in the matching repo before moving on"),
                 "{harness:?} {relative} is missing the standing issue-filing directive"

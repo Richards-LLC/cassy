@@ -16,7 +16,7 @@ overridden for a fork or alternate deployment:
 - **Cassy-system defect:** `issues.components.cassy` — Cassy runtime, hooks,
   MCP, factory, and builtin skills. Downstream repositories consume Cassy and
   must not patch it locally.
-- **MechaCassy defect:** `issues.components.violet` — the Slack hub and
+- **Violet (formerly MechaCassy) defect:** `issues.components.violet` — the Slack hub and
   message-delivery component.
 - **Cassy Cloud defect:** `issues.components.cloud` — cloud sync, hub relay,
   pairing, and related services.

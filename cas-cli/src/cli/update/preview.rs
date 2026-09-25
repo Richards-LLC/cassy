@@ -11,76 +11,30 @@ use crate::ui::components::Formatter;
 use crate::ui::theme::ActiveTheme;
 
 pub(crate) fn compute_claude_md_change(project_root: &Path) -> Option<FileChange> {
-    use crate::cli::init::{CAS_SECTION_BEGIN, CAS_SECTION_END, build_cas_section};
+    use crate::cli::init::{ClaudeMdPlan, plan_claude_md};
 
-    let claude_md_path = project_root.join("CLAUDE.md");
-    let new_section = build_cas_section();
-
-    if claude_md_path.exists() {
-        let content = std::fs::read_to_string(&claude_md_path).ok()?;
-
-        // Check for marked section
-        if let (Some(begin_pos), Some(end_pos)) = (
-            content.find(CAS_SECTION_BEGIN),
-            content.find(CAS_SECTION_END),
-        ) {
-            let before = &content[..begin_pos];
-            let after = &content[end_pos + CAS_SECTION_END.len()..];
-            let new_content = format!(
-                "{}{}{}",
-                before.trim_end(),
-                if before.is_empty() { "" } else { "\n" },
-                new_section
-            );
-            let new_content = format!("{new_content}{after}");
-
-            if new_content != content {
-                return Some(FileChange::modify(
-                    std::path::PathBuf::from("CLAUDE.md"),
-                    content,
-                    new_content,
-                    "Update Cassy section in CLAUDE.md",
-                ));
-            }
-        } else if content.contains("IMPORTANT: USE Cassy FOR TASK AND MEMORY MANAGEMENT") {
-            // Migration from old format
-            let new_content = if content.starts_with("# IMPORTANT: USE Cassy") {
-                if let Some(pos) = content.find("---\n\n") {
-                    format!("{}\n\n{}", new_section, &content[pos + 5..])
-                } else if let Some(pos) = content.find("---\n") {
-                    format!("{}\n\n{}", new_section, &content[pos + 4..])
-                } else {
-                    format!("{new_section}\n\n{content}")
-                }
-            } else {
-                format!("{new_section}\n\n{content}")
-            };
-            return Some(FileChange::modify(
-                std::path::PathBuf::from("CLAUDE.md"),
-                content,
-                new_content,
-                "Migrate Cassy section format in CLAUDE.md",
-            ));
-        } else {
-            // Prepend new section
-            let new_content = format!("{new_section}\n\n{content}");
-            return Some(FileChange::modify(
-                std::path::PathBuf::from("CLAUDE.md"),
-                content,
-                new_content,
-                "Add Cassy section to CLAUDE.md",
-            ));
-        }
-    } else {
-        // Create new file
-        return Some(FileChange::create(
-            std::path::PathBuf::from("CLAUDE.md"),
-            format!("{new_section}\n"),
+    // Same decision `update_claude_md` applies, so the dry run cannot promise
+    // a change (e.g. adding a block below an ancestor that has it) that apply
+    // will not make.
+    let path = std::path::PathBuf::from("CLAUDE.md");
+    match plan_claude_md(project_root).ok()? {
+        ClaudeMdPlan::Unchanged => None,
+        ClaudeMdPlan::Create { content } => Some(FileChange::create(
+            path,
+            content,
             "Create CLAUDE.md with Cassy section",
-        ));
+        )),
+        ClaudeMdPlan::Modify {
+            old,
+            new,
+            description,
+        } => Some(FileChange::modify(path, old, new, description)),
+        ClaudeMdPlan::Delete { old } => Some(FileChange::delete(
+            path,
+            old,
+            "Delete CLAUDE.md: it held only a Cassy section an ancestor CLAUDE.md already carries",
+        )),
     }
-
-    None
 }
 
 /// Compute what Cassy skill changes would be made (without applying)
@@ -400,4 +354,56 @@ pub(crate) fn show_enhanced_dry_run(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod claude_md_preview_tests {
+    use super::compute_claude_md_change;
+    use crate::cli::init::update_claude_md;
+    use crate::test_support::TestEnvGuard;
+    use std::fs;
+
+    /// Skills audit L6 F6: `cas update --dry-run` promised to add a block below
+    /// an ancestor that already had one, which apply never did. The preview
+    /// and apply now share one plan; pin that they agree.
+    #[test]
+    fn dry_run_matches_apply_below_an_ancestor_block() {
+        TestEnvGuard::run_with_temp_home(|home| {
+            update_claude_md(home).unwrap();
+
+            // No CLAUDE.md below the ancestor: neither side creates one.
+            let bare = home.join("bare");
+            fs::create_dir_all(&bare).unwrap();
+            assert!(compute_claude_md_change(&bare).is_none());
+            assert!(!update_claude_md(&bare).unwrap());
+            assert!(!bare.join("CLAUDE.md").exists());
+
+            // A duplicate block with other content: both prune it.
+            let dup = home.join("dup");
+            fs::create_dir_all(&dup).unwrap();
+            let original = format!(
+                "{}\n\n# Dup\n",
+                fs::read_to_string(home.join("CLAUDE.md"))
+                    .unwrap()
+                    .trim_end()
+            );
+            fs::write(dup.join("CLAUDE.md"), &original).unwrap();
+            let change = compute_claude_md_change(&dup).expect("preview prunes");
+            assert_eq!(change.new_content.as_deref(), Some("# Dup\n"));
+            assert!(update_claude_md(&dup).unwrap());
+            assert_eq!(
+                fs::read_to_string(dup.join("CLAUDE.md")).unwrap(),
+                "# Dup\n"
+            );
+
+            // A block-only duplicate: both delete the file.
+            let only = home.join("only");
+            fs::create_dir_all(&only).unwrap();
+            fs::copy(home.join("CLAUDE.md"), only.join("CLAUDE.md")).unwrap();
+            let change = compute_claude_md_change(&only).expect("preview deletes");
+            assert!(change.new_content.is_none(), "preview must plan a delete");
+            assert!(update_claude_md(&only).unwrap());
+            assert!(!only.join("CLAUDE.md").exists());
+        });
+    }
 }

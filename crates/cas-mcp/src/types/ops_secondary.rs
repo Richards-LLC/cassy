@@ -296,7 +296,7 @@ pub struct SystemRequest {
 
     /// Bug description (for report_cas_bug)
     #[schemars(
-        description = "Detailed description including steps to reproduce. IMPORTANT: Anonymize paths, remove credentials, avoid proprietary code"
+        description = "Detailed description including steps to reproduce. Anonymize paths, remove credentials and leave out proprietary code."
     )]
     #[serde(default)]
     pub description: Option<String>,

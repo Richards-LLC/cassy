@@ -30,7 +30,7 @@ How rows are referenced:
 ## 1. Verdict (one screen)
 
 The six lanes reported **48 P0s and 99 P1s**. After deduplication they come to **27 P0 and 39
-P1 master rows** (§2). **Every P0 was re-checked against the current code:**
+P1 master rows**, plus 1 process finding raised during synthesis (M69) (§2). **Every P0 was re-checked against the current code:**
 
 - 47 are confirmed.
 - 1 is partly confirmed (L2 P0-21, where the fix scope is wider than reported).
@@ -85,7 +85,7 @@ around them.
 **What I need from the operator.**
 
 - **Approve Wave A now:** WP1–WP4, the deprecated-name sweep (the M17 part of WP5), the `start=`
-  fix (WP14a) and the store clean-up (WP15) (§4).
+  fix (WP14a), the store clean-up (WP15) and verification anchoring (WP16) (§4).
   None of these changes the architecture. Together they:
   - fix the runtime-envelope P0s;
   - bring SessionStart back under the hook cap;
@@ -183,6 +183,7 @@ master row (column "Lane refs") or in the duplicate list (§2.4).
 | M66 | Codex guidance says "Codex does not support Claude hooks", but CAS installs Codex hooks. Codex outside cas-src gets **no** Cassy directive (no AGENTS.md block, no Codex SessionStart). | L6 F8 | T1 |
 | M67 | Non-builtin `accounting-client-report` competes with cas-html-reports on every "write a report" request, contradicts its layout rules, and lists client names in a non-accounting home. | L6 F10 | T4/T6 |
 | M68 | `macos-onboarding-reviewer` hard-codes Sonoma/Sequoia baselines; macOS 27 is Apple-silicon-only. | L6 F11 | T5 |
+| M69 | **Process (observed in this epic).** Merging one sibling lane invalidates every other pending verification dispatch. The dispatch's repository proof has **no anchor commits** when the worker's delivery is already merged and no `commit_receipt` is passed, which is the normal merged-before-close factory flow. The whole epic head then becomes the proof, and any sibling merge breaks it. | supervisor report; `verification_dispatches` | T4/T5 |
 
 ### 2.3 P2 / P3 (grouped; full detail is in the lane reports)
 
@@ -243,6 +244,46 @@ sub-audit against the tree at `ca73bb591`; the rest were checked directly.
 | L2 P0-01…25 (other 22), L5 P0-1…14 (other 13) | CONFIRMED | Each checked at the cited file:line plus the cited code. For example: `ops_secondary.rs:354-395` has `files` and no `deny_unknown_fields`; `factory_ops.rs:2778-2785` treats `limit==0` as all workers; `types/task.rs:131-138` rejects a create without `risk`; `hooks/handlers.rs:207-227` has no `serde(default)`. |
 | L1#1, L3 P0.1–P0.4, L4 F1, F2 | CONFIRMED | Checked directly for this synthesis. Examples: `builtins.rs:2318-2339,2534-2549`; installed `template.sh` ≠ source; 7+7 identity hits; `grep -c 'release report'` = 0; the four L3 literals re-grepped. |
 | L6 F1, F2 | CONFIRMED | `docs_and_skill.rs:177` has "`start` - Set to true to start immediately (RECOMMENDED)"; `TaskRequest` is `deny_unknown_fields` and the live schema has no `start` with `additionalProperties:false`. `rule-002.md` is present in the cas-src main checkout, and `git branch -r` has no `staging`. |
+
+### 2.6 Process finding M69: evidence
+
+The table below is the `verification_dispatches` history for this epic's six lanes (read-only query of
+the cas-src store):
+
+| Task | Dispatch state | Bound epic head | Anchor commits |
+|---|---|---|---|
+| cas-a4d8 (L4) | **invalidated** | `4836e56f7` | none |
+| cas-a4d8 (L4) | resolved | `0dd62c2cc` | none |
+| cas-63c5 (L1) | **invalidated** | `4836e56f7` | none |
+| cas-988a (L3) | resolved | `4d631a9ef` | none |
+| cas-63c5 (L1) | resolved | `5766b5c72` | none |
+| cas-9233 (L5) | **invalidated** | `3ec2759ee` (L5 merge) | none, then L2 merged → `ca73bb591` |
+| cas-3e02 (L2) | resolved | `ca73bb591` | none |
+| cas-9233 (L5) | resolved | `ca73bb591` | none |
+| cas-ea56 (L6) | resolved | `1cf1a6836` | none |
+
+Three invalidations match the supervisor's count. The mechanism:
+
+- `delivered_anchor_commits` (`cas-cli/src/mcp/tools/core/task/lifecycle/repository_proof.rs:249-267`)
+  anchors only the `commit_receipt` or a worker HEAD that is still *ahead* of the integration branch.
+- After the supervisor merges the lane, HEAD is no longer ahead. With no receipt passed, the anchors are
+  empty.
+- `evaluate_repository_proof` (`:399-408`) then treats any head change as "repository proof changed after
+  dispatch; request a fresh verification cycle".
+- `verification_tools.rs:484` rejects the verdict as "superseded or invalidated", and the whole close
+  cycle repeats.
+
+The drift tolerance added by cas-5c33 (content intact → verdict stays valid) never engages, because it
+needs anchors.
+
+Fix (WP16), either of:
+
+- anchor the task's own delivered commits even when already merged (commits between the task's
+  claim base and the merge, or the `external_ref` SHA for no-code tasks);
+- make close pass a `commit_receipt` automatically when the task's branch tip is already contained in
+  the target.
+
+Workaround until then: workers pass `commit_receipt=<sha>` on the close that follows a merge.
 
 ## 3. Themes (root causes that span lanes)
 
@@ -372,6 +413,7 @@ Run the whole set in one pass with no fail-fast.
 | **WP12** Harness projection | M39, M40, M41, M44, L1#13 | sync paths, `cli/sync/agents_md.rs`, `docs_and_skill.rs`, Codex agents | R-build, large (drift-test redesign if D1 = neutral) | `builtin_flavor_drift_test`, `factory_parity_test`, AGENTS.md sync tests | −450 always (Grok), −60 per harness | **D1, D3, D6** |
 | **WP13** Startup single source and coordination split | M31, M35 (contract side), M72 renderer, optional `coordination`/`factory` split | `pty.rs`, `app/mod.rs`, `cas-worker.md`, `ops_secondary.rs`, `service/mod.rs`, every skill naming supervisor actions | R-build, R-pins (P-L2) | Contract markers; add "SessionStart fired" telemetry | −790 per spawn; −2–3k per worker session if split | **D2, D4**; WP2 |
 | **WP14** Instruction files | **14a (Wave A):** M26 (drop `start`; reduce `CAS_SKILL` to a pointer), M64 (descendant-block prune + `preview.rs` parity), M65 (`agents-md --check` in Docs Lint). **14b (Wave D):** M44, M66 projection per D3; M82 block and `CAS_SKILL` wording; M67, M68 (operator/repo files, R-docs) | `cli/init/docs_and_skill.rs`, `cli/update.rs`, `update/preview.rs`, `cas-core/src/sync/agents_md.rs`, CI Docs Lint job | R-build (14a, 14b); repo CLAUDE.md trims are R-docs (operator-owned, D13) | `agents_md_sync_test`, init/update CLAUDE.md tests, `issue_intake_directive_test` (block carries the registry line) | −600 always per Petrastella session; −600 per `cas` invoke; −2.1k always (Grok) with 14b | 14b: D1, D3 |
+| **WP16** Verification dispatch anchoring | M69 | `task/lifecycle/repository_proof.rs` (`delivered_anchor_commits`), `close_ops.rs:6462-6492` | R-build | Add: sibling merge after dispatch keeps a merged lane's verdict valid (content-intact path) | Removes one close/verify round-trip per sibling merge (3 today, in a 6-lane epic) | — |
 | **WP15** Store hygiene | M27, M83 | one-off store clean-up (no-code operation, operator-approved); write guard in rule/knowledge sync | ops + R-build (guard) | Add: rule/knowledge write naming another registered project is refused; confirm `test-real-store-untouched` covers rule writes | −91 always; removes wrong facts from every cas-src session | — |
 
 M81 (polish) rides with whichever package touches the file. Cross-cutting test to add early (WP1 or WP3), for T5: a call-shape lint that extracts every
@@ -383,7 +425,7 @@ single test would have caught M02, M04, M10, M12, M13 (`scope=code`, release) an
 
 | Wave | Packages | When |
 |---|---|---|
-| A (parallel) | WP1, WP2, WP3, WP4, WP14a, WP15, and the M17 part of WP5 | Now. Deprecated names expire next release. |
+| A (parallel) | WP1, WP2, WP3, WP4, WP14a, WP15, WP16, and the M17 part of WP5 | Now. Deprecated names expire next release. |
 | B | WP5 remainder, WP6, WP7, WP8 | After WP4 and WP2 |
 | C | WP9, WP10, WP11 | After D5/D7/D8/D10 |
 | D | WP12, WP13, WP14b | After D1–D4, D6, D13 |

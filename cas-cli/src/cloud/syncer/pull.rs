@@ -2660,15 +2660,33 @@ impl CloudSyncer {
         }
     }
 
-    /// Upsert rule with configurable conflict resolution for team sync
+    /// Upsert rule with configurable conflict resolution for team sync.
+    ///
+    /// cas-42ee: a pulled row without `origin_project` never replaces a local
+    /// rule this project authored. Rule ids are per-store `rule-NNN` sequence
+    /// numbers, so they collide across projects, and the row's project scope
+    /// only echoes the request: before this, a legacy Gabber rule overwrote
+    /// cas-src's own `rule-002`. The row still creates a rule when the id is
+    /// free (recorded as an unauthored pull, so it is never pushed back), and
+    /// it may update a local rule that was itself an unauthored pull.
     fn upsert_rule_with_strategy(
         &self,
         store: &dyn RuleStore,
         rule: Rule,
+        row_origin: Option<&str>,
         strategy: ConflictResolution,
     ) -> Result<UpsertResult, CasError> {
         match store.get(&rule.id) {
             Ok(local) => {
+                if row_origin.is_none()
+                    && !self
+                        .queue
+                        .is_unauthored_pull(EntityType::Rule.as_str(), &rule.id)
+                        .unwrap_or(false)
+                {
+                    self.keep_local_rule_over_unattributed_row(&rule)?;
+                    return Ok(UpsertResult::Skipped);
+                }
                 let local_time = local.last_accessed.unwrap_or(local.created);
                 let remote_time = rule.last_accessed.unwrap_or(rule.created);
 
@@ -2696,6 +2714,36 @@ impl CloudSyncer {
             }
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Journal a team-pulled rule row that was refused because it carries no
+    /// origin and would replace a rule this project authored (cas-42ee).
+    fn keep_local_rule_over_unattributed_row(&self, rule: &Rule) -> Result<(), CasError> {
+        record_project_warning(
+            "rule",
+            "<missing>",
+            &format!(
+                "keeping local rule '{}' — the pulled row has no origin_project, and rule ids \
+                 are per-store sequence numbers that collide across projects",
+                rule.id
+            ),
+        );
+        let discarded_row_json = serde_json::to_string(&serde_json::json!({
+            "rejected_remote": rule,
+            "reason": "unattributed_rule_keeps_local",
+        }))
+        .map_err(|error| {
+            CasError::Other(format!("Could not serialize rule sync conflict: {error}"))
+        })?;
+        self.queue.record_conflict(
+            EntityType::Rule.as_str(),
+            &rule.id,
+            &discarded_row_json,
+            "local",
+            "unattributed_rule_keeps_local",
+            None,
+            None,
+        )
     }
 
     /// Upsert skill with configurable conflict resolution for team sync
@@ -3175,7 +3223,12 @@ impl CloudSyncer {
                 }
             };
             let remote_rule_id = remote_rule.id.clone();
-            match self.upsert_rule_with_strategy(rule_store, remote_rule, strategy) {
+            match self.upsert_rule_with_strategy(
+                rule_store,
+                remote_rule,
+                row_origin.as_deref(),
+                strategy,
+            ) {
                 Ok(outcome @ (UpsertResult::Created | UpsertResult::Updated)) => {
                     result.pulled_rules += 1;
                     self.note_pulled_authorship(

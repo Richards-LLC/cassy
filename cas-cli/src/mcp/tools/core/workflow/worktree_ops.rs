@@ -18,9 +18,8 @@ struct GhApiOutput {
 
 /// A best-effort verdict for the CI checks associated with a factory lane.
 ///
-/// This is deliberately not a merge gate. The lookup gives supervisors the
-/// signal that GitHub has, but a missing token, an offline checkout, or a run
-/// that has not completed must never change the merge's Git semantics.
+/// A known red result gates merges. Missing or unfinished receipts remain
+/// advisory, so GitHub availability never introduces a wait.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum BranchCiState {
     Green {
@@ -54,6 +53,49 @@ enum BranchCiState {
 const BRANCH_CI_ENDPOINT: &str = "repos/{owner}/{repo}/commits/{sha}/check-runs";
 const BRANCH_CI_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
 const CI_ADVISORY_POLICY_NOTICE: &str = "Merge policy: merge proceeded because CI is advisory.\n\n";
+const CI_OVERRIDE_POLICY_NOTICE: &str =
+    "Merge policy: red CI was explicitly overridden by a registered supervisor.\n\n";
+
+/// Decide admission from the one bounded lookup; never poll for pending CI.
+fn admit_branch_ci(
+    state: &BranchCiState,
+    override_requested: bool,
+    reason: Option<&str>,
+) -> Result<bool, String> {
+    if override_requested && reason.is_none_or(|reason| reason.trim().is_empty()) {
+        return Err(
+            "SUPERVISOR OVERRIDE REJECTED: supervisor_override=true requires a non-empty reason."
+                .to_string(),
+        );
+    }
+    if let BranchCiState::Red { sha, url } = state {
+        if !override_requested {
+            return Err(format!(
+                "CI RED: refusing worktree_merge for {sha}. Failing run: {}. A registered supervisor may retry with supervisor_override=true, task_id=<task>, and a non-empty reason. No merge was attempted.",
+                url.as_deref().unwrap_or("unavailable")
+            ));
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn red_ci_override_note(
+    supervisor_id: &str,
+    branch: &str,
+    state: &BranchCiState,
+    reason: &str,
+) -> String {
+    let BranchCiState::Red { sha, url } = state else {
+        unreachable!("override note requires red CI");
+    };
+    format!(
+        "[{}] ✅ DECISION Supervisor {supervisor_id} overrode red lane CI for {branch} (sha {sha}, failing run {}) before worktree_merge: {}",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+        url.as_deref().unwrap_or("unavailable"),
+        reason.trim(),
+    )
+}
 
 /// Query CI checks for the exact source-branch tip that is about to merge.
 ///
@@ -174,7 +216,10 @@ fn classify_branch_ci_response(_branch: &str, sha: &str, output: GhApiOutput) ->
         ) {
             return BranchCiState::Red {
                 sha: sha.to_string(),
-                url,
+                url: run
+                    .get("html_url")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
             };
         }
         if status.is_some_and(|status| status != "completed") || conclusion.is_none() {
@@ -294,7 +339,7 @@ fn describe_branch_ci_state(branch: &str, state: &BranchCiState) -> String {
                     .map(|url| format!(": {url}"))
                     .unwrap_or_default()
             ),
-            "CI check-run (red; advisory)",
+            "CI check-run (red; merge gated)",
             url.as_deref().unwrap_or("unavailable"),
         ),
         BranchCiState::Pending { sha, url } => (
@@ -344,8 +389,7 @@ fn describe_branch_ci_state(branch: &str, state: &BranchCiState) -> String {
     format!(
         "gh endpoint queried: GET {}\nCI SHA: {sha}\n{detail}\n\
          Branch: {branch}\nAdmission path: {admission_path}\nReceipt id: {receipt_id}\n\
-         Merge policy: CI is advisory; this lookup does not block \
-         worktree_merge.\n\n",
+         Merge policy: red CI requires an explicit supervisor override; pending and unavailable receipts remain advisory.\n\n",
         BRANCH_CI_ENDPOINT.replace("{sha}", sha)
     )
 }
@@ -442,10 +486,7 @@ fn is_git_worktree(path: &Path) -> bool {
 /// for merge-target inference when the supervisor omits `task_id` (cas-0b32).
 fn assignee_task_is_merge_relevant(status: cas_types::TaskStatus) -> bool {
     use cas_types::TaskStatus::*;
-    matches!(
-        status,
-        Open | InProgress | Blocked | AwaitingMerge
-    )
+    matches!(status, Open | InProgress | Blocked | AwaitingMerge)
 }
 
 /// Remediation block shared by merge-target rejections (cas-0b32).
@@ -2413,6 +2454,8 @@ impl CasCore {
         task_id: Option<&str>,
         allow_trunk: bool,
         cleanup: Option<bool>,
+        supervisor_override: bool,
+        reason: Option<&str>,
     ) -> Result<CallToolResult, McpError> {
         use crate::config::Config;
         use crate::store::open_worktree_store;
@@ -2870,11 +2913,61 @@ impl CasCore {
         let do_cleanup =
             resolve_worktree_merge_cleanup(cleanup, is_system_b, wt_config.cleanup_on_close);
 
-        // GH #209 / cas-bc13: inspect the lane before Git changes the target.
-        // This is advisory only: all lookup failures are rendered as an
-        // explicit diagnostic verdict below, never as a refusal to merge.
+        // Inspect the exact source tip before Git changes the target. A red
+        // receipt is a gate; pending and unavailable receipts never wait.
         let branch_ci_state = lookup_branch_ci(&worktree.branch, &cwd);
         let ci_prefix = describe_branch_ci_state(&worktree.branch, &branch_ci_state);
+        let red_override =
+            admit_branch_ci(&branch_ci_state, supervisor_override, reason).map_err(|message| {
+                McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!("{ci_prefix}{message}")),
+                    data: None,
+                }
+            })?;
+        let override_authority = if supervisor_override {
+            Some(self.resolve_live_supervisor_authority().map_err(|error| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!("SUPERVISOR OVERRIDE REJECTED: a live registered supervisor is required ({error:?}).")),
+                data: None,
+            })?)
+        } else {
+            None
+        };
+        let ci_policy_notice = if red_override {
+            let supervisor = override_authority
+                .as_ref()
+                .expect("red override has authority");
+            let task_id = task_id.ok_or_else(|| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(
+                    "SUPERVISOR OVERRIDE REJECTED: task_id is required to log the CI decision.",
+                ),
+                data: None,
+            })?;
+            let task_store = self.open_task_store()?;
+            task_store.get(task_id).map_err(|error| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!(
+                    "SUPERVISOR OVERRIDE REJECTED: task {task_id} not found: {error}"
+                )),
+                data: None,
+            })?;
+            let note = red_ci_override_note(
+                &supervisor.id,
+                &worktree.branch,
+                &branch_ci_state,
+                reason.unwrap_or_default(),
+            );
+            task_store.append_note(task_id, &note).map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("SUPERVISOR OVERRIDE REJECTED: failed to log decision on task {task_id}: {error}")),
+                data: None,
+            })?;
+            CI_OVERRIDE_POLICY_NOTICE
+        } else {
+            CI_ADVISORY_POLICY_NOTICE
+        };
         let observed_source_tip = transactional_delivery
             .is_none()
             .then(|| manager.git().resolve_commit(&worktree.branch))
@@ -3402,7 +3495,10 @@ impl CasCore {
                     if task.task_type == cas_types::TaskType::Epic {
                         return Some(task.id);
                     }
-                    return task_store.get_parent_epic(task_id).ok()?.map(|epic| epic.id);
+                    return task_store
+                        .get_parent_epic(task_id)
+                        .ok()?
+                        .map(|epic| epic.id);
                 }
                 task_store
                     .list(None)
@@ -3445,9 +3541,7 @@ impl CasCore {
             // content block so the gate's own text stays verbatim.
             close_result.content.insert(
                 0,
-                Content::text(format!(
-                    "{ci_prefix}{trunk_notice}{CI_ADVISORY_POLICY_NOTICE}"
-                )),
+                Content::text(format!("{ci_prefix}{trunk_notice}{ci_policy_notice}")),
             );
             if !push_outcome.is_published() {
                 close_result.content.push(Content::text(push_note));
@@ -3460,7 +3554,7 @@ impl CasCore {
             if let Ok(count) = self.promote_branch_entries(&worktree.branch) {
                 if count > 0 {
                     return Ok(Self::success(format!(
-                        "{ci_prefix}{trunk_notice}{CI_ADVISORY_POLICY_NOTICE}Merged worktree {} to {}.{} Commit: {}{}{}{}\nPromoted {} entries from branch scope.",
+                        "{ci_prefix}{trunk_notice}{ci_policy_notice}Merged worktree {} to {}.{} Commit: {}{}{}{}\nPromoted {} entries from branch scope.",
                         worktree.id,
                         worktree.parent_branch,
                         target_suffix,
@@ -3475,7 +3569,7 @@ impl CasCore {
         }
 
         Ok(Self::success(format!(
-            "{ci_prefix}{trunk_notice}{CI_ADVISORY_POLICY_NOTICE}Merged worktree {} to {}.{} Commit: {}{}{}{}",
+            "{ci_prefix}{trunk_notice}{ci_policy_notice}Merged worktree {} to {}.{} Commit: {}{}{}{}",
             worktree.id,
             worktree.parent_branch,
             target_suffix,
@@ -3599,13 +3693,13 @@ impl CasCore {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeliveryMergePreflight, GhApiOutput, authorize_explicit_task_for_system_b_worker,
-        classify_delivery_merge_preflight, declared_system_b_merge_target,
-        derive_delivery_supervisor_authority, describe_branch_ci_state, describe_target_push_state,
+        CI_ADVISORY_POLICY_NOTICE, DeliveryMergePreflight, GhApiOutput, admit_branch_ci,
+        authorize_explicit_task_for_system_b_worker, classify_delivery_merge_preflight,
+        declared_system_b_merge_target, derive_delivery_supervisor_authority,
+        describe_branch_ci_state, describe_target_push_state, describe_target_reconcile,
         is_cas_pattern_worktree, is_factory_style_worktree, is_git_worktree, lookup_branch_ci_with,
-        describe_target_reconcile, path_is_under, protected_default_branch_pr_error,
+        path_is_under, protected_default_branch_pr_error, red_ci_override_note,
         resolve_worktree_merge_cleanup, target_diverged_error, worktree_merge_mcp_error,
-        CI_ADVISORY_POLICY_NOTICE,
     };
     use crate::worktree::git::{TargetPushOutcome, TargetReconcile};
     use crate::worktree::{GitError, WorktreeError};
@@ -3644,7 +3738,10 @@ mod tests {
             no_pr_receipt.contains("Admission path: no CI receipt (advisory)"),
             "{no_pr_receipt}"
         );
-        assert!(no_pr_receipt.contains("Receipt id: none"), "{no_pr_receipt}");
+        assert!(
+            no_pr_receipt.contains("Receipt id: none"),
+            "{no_pr_receipt}"
+        );
         assert!(
             no_pr_receipt.contains("HTTP 404: Not Found"),
             "{no_pr_receipt}"
@@ -3745,7 +3842,69 @@ mod tests {
             pending_receipt.contains("CI state: pending"),
             "{pending_receipt}"
         );
-        assert!(pending_receipt.contains("actions/runs/44"), "{pending_receipt}");
+        assert!(
+            pending_receipt.contains("actions/runs/44"),
+            "{pending_receipt}"
+        );
+    }
+
+    #[test]
+    fn red_ci_refuses_merge_with_failing_run_and_override_instruction() {
+        let red = lookup_branch_ci_with("factory/fox", "abc123", |_, _| {
+            gh_output(true, "exit status: 0", br#"{"check_runs":[{"status":"completed","conclusion":"failure","html_url":"https://github.com/acme/cas/actions/runs/42"}]}"#, "")
+        });
+        let refusal = admit_branch_ci(&red, false, None).unwrap_err();
+        assert!(
+            refusal.contains("https://github.com/acme/cas/actions/runs/42"),
+            "{refusal}"
+        );
+        assert!(refusal.contains("supervisor_override=true"), "{refusal}");
+        assert!(refusal.contains("No merge was attempted"), "{refusal}");
+    }
+
+    #[test]
+    fn pending_green_and_no_receipt_remain_admitted_without_wait() {
+        for response in [
+            br#"{"check_runs":[{"status":"in_progress","conclusion":null}]}"#.as_slice(),
+            br#"{"check_runs":[{"status":"completed","conclusion":"success"}]}"#.as_slice(),
+            br#"{"check_runs":[]}"#.as_slice(),
+        ] {
+            let state = lookup_branch_ci_with("factory/fox", "abc123", |_, _| {
+                gh_output(true, "exit status: 0", response, "")
+            });
+            assert_eq!(admit_branch_ci(&state, false, None), Ok(false));
+        }
+        let unavailable = lookup_branch_ci_with("factory/fox", "abc123", |_, _| {
+            gh_output(false, "timed out", b"", "gh api timed out")
+        });
+        assert_eq!(admit_branch_ci(&unavailable, false, None), Ok(false));
+    }
+
+    #[test]
+    fn red_ci_override_requires_nonempty_reason() {
+        let red = lookup_branch_ci_with("factory/fox", "abc123", |_, _| {
+            gh_output(
+                true,
+                "exit status: 0",
+                br#"{"check_runs":[{"status":"completed","conclusion":"failure"}]}"#,
+                "",
+            )
+        });
+        assert_eq!(
+            admit_branch_ci(&red, true, Some("incident reviewed")),
+            Ok(true)
+        );
+        let note = red_ci_override_note("supervisor-1", "factory/fox", &red, " incident reviewed ");
+        assert!(
+            note.contains("✅ DECISION Supervisor supervisor-1"),
+            "{note}"
+        );
+        assert!(note.contains("sha abc123"), "{note}");
+        assert!(note.ends_with("incident reviewed"), "{note}");
+        for reason in [None, Some(" ")] {
+            let refusal = admit_branch_ci(&red, true, reason).unwrap_err();
+            assert!(refusal.contains("non-empty reason"), "{refusal}");
+        }
     }
 
     #[test]
@@ -3889,7 +4048,10 @@ mod tests {
 
         assert!(error.starts_with("TARGET_DIVERGED_FROM_ORIGIN"), "{error}");
         assert!(error.contains("NO MERGE WAS ATTEMPTED"), "{error}");
-        assert!(error.contains("2 commit(s) origin does not have"), "{error}");
+        assert!(
+            error.contains("2 commit(s) origin does not have"),
+            "{error}"
+        );
         assert!(error.contains("3 commit(s) you do not have"), "{error}");
         // Here the fetch/merge/retry recipe is the recovery that works.
         assert!(error.contains("git fetch origin main"), "{error}");
@@ -4426,11 +4588,17 @@ mod stale_checkout_receipt_tests {
         let mut receipt = String::from("Target sync: fast-forwarded.");
         append_stale_checkout_notes(&mut receipt, &manager);
 
-        assert!(receipt.contains("Target sync: fast-forwarded."), "{receipt}");
+        assert!(
+            receipt.contains("Target sync: fast-forwarded."),
+            "{receipt}"
+        );
         assert!(receipt.contains("/tmp/stranded-checkout"), "{receipt}");
         assert!(receipt.contains("111111111111"), "{receipt}");
         assert!(receipt.contains("222222222222"), "{receipt}");
-        assert!(receipt.contains("Nothing there was overwritten"), "{receipt}");
+        assert!(
+            receipt.contains("Nothing there was overwritten"),
+            "{receipt}"
+        );
         assert!(
             !receipt.to_lowercase().contains("read-tree") && !receipt.contains(" reset "),
             "the receipt must not hand over a recovery that erases work: {receipt}"

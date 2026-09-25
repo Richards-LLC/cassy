@@ -223,6 +223,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         force: None,
         allow_trunk: None,
         cleanup: None,
+        supervisor_override: None,
         clear: None,
         limit: None,
         offset: None,

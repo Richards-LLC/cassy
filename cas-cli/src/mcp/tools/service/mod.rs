@@ -110,6 +110,8 @@ pub struct WorktreeRequest {
     pub allow_trunk: Option<bool>,
     /// cas-369f: remove worktree after merge (independent of force=dirty).
     pub cleanup: Option<bool>,
+    pub supervisor_override: Option<bool>,
+    pub reason: Option<String>,
 }
 
 // ============================================================================
@@ -1442,6 +1444,8 @@ impl CasService {
                         force: req.force,
                         allow_trunk: req.allow_trunk,
                         cleanup: req.cleanup,
+                        supervisor_override: req.supervisor_override,
+                        reason: req.reason,
                     };
                     match wt_action {
                         "create" => this.worktree_create(wt_req).await,

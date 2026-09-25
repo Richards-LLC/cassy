@@ -153,7 +153,9 @@ fn compact_section(lines: &[&str], remediation: &str, prefix: &str) -> String {
         ));
         return out.join(SEP);
     }
-    format!("{heading}\n(omitted to fit the session-start size budget — run `{prefix}{remediation}`)")
+    format!(
+        "{heading}\n(omitted to fit the session-start size budget — run `{prefix}{remediation}`)"
+    )
 }
 
 /// Split the base context into budget segments at its `## ` headings.
@@ -886,6 +888,29 @@ mod tests {
         assert!(payload.contains("action=ready"));
         assert!(!payload.contains("cas-0007"));
         assert!(payload.contains("header"), "protected header survives");
+    }
+
+    /// WP2 (audit cas-1660 M30): Knowledge and Handoff are degradable, and the
+    /// handoff's compact form keeps its id and title so it can be pulled back.
+    #[test]
+    fn knowledge_and_handoff_compact_to_pull_stubs() {
+        let base = format!(
+            "## 📋 CAS Context\nheader\n\n## 🔁 Current Handoff (worker)\n\n\
+             ### handoff-42 — saved 2026-09-25 14:20Z\n**Audit fixes in flight**\n\n{}\n\n\
+             ## 📚 Project Knowledge (11/148 pages indexed)\n\n{}",
+            "- a long handoff body line\n".repeat(80),
+            "- cas-kn001 [architecture] A page title — a snippet\n".repeat(40),
+        );
+        let payload = SessionContextAssembler::new(base).with_budget(600).render();
+        assert!(payload.len() <= 600, "payload {} bytes", payload.len());
+        assert!(payload.contains("header"), "protected header survives");
+        assert!(payload.contains("### handoff-42 — saved 2026-09-25 14:20Z"));
+        assert!(payload.contains("**Audit fixes in flight**"));
+        assert!(payload.contains("memory action=get id=handoff-42"));
+        assert!(!payload.contains("a long handoff body line"));
+        assert!(payload.contains("## 📚 Project Knowledge (11/148 pages indexed)"));
+        assert!(payload.contains("knowledge action=search"));
+        assert!(!payload.contains("cas-kn001"));
     }
 
     #[test]

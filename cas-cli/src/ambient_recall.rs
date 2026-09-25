@@ -3876,14 +3876,23 @@ mod tests {
         };
         let query = RecallQuery::build(&identity(RecallRole::Worker), &request).unwrap();
         assert!(query.canonical.contains("Refactor the parser cache"));
-        for envelope in ["director", "green", "teammate_id", "agent-authored", "34968"] {
+        for envelope in [
+            "director",
+            "green",
+            "teammate_id",
+            "agent-authored",
+            "34968",
+        ] {
             assert!(
                 !query.canonical.contains(envelope),
                 "envelope text {envelope:?} leaked into the recall query: {}",
                 query.canonical
             );
         }
-        assert_eq!(strip_envelope("[cas #1 supervisor-authored 0s first]"), None);
+        assert_eq!(
+            strip_envelope("[cas #1 supervisor-authored 0s first]"),
+            None
+        );
         assert_eq!(strip_envelope("plain line"), Some("plain line"));
     }
 
@@ -3898,9 +3907,15 @@ mod tests {
         let query = RecallQuery::build(&identity(RecallRole::Worker), &request).unwrap();
         assert!(query.turn_names("cas-988a"));
         assert!(query.turn_names("CAS-988A"));
-        assert!(!query.turn_names("cas-988"), "a prefix of a named id is a different id");
+        assert!(
+            !query.turn_names("cas-988"),
+            "a prefix of a named id is a different id"
+        );
         assert!(!query.turn_names("cas-988ab"));
-        assert!(!query.turn_names("pars"), "ids shorter than five chars never match");
+        assert!(
+            !query.turn_names("pars"),
+            "ids shorter than five chars never match"
+        );
     }
 
     #[test]

@@ -837,6 +837,108 @@ mod large_artifact_staging_tests {
             );
         }
     }
+
+    /// WP2 (audit cas-1660 M30): the assembled SessionStart payload must fit
+    /// the 9,216 B budget — and so Claude Code's 10,000-character inline hook
+    /// cap — for every role, on a store that carries the sections that used
+    /// to overflow it: a near-maximum current handoff per role and a full
+    /// knowledge index. Before WP2 the worker payload was 11,820 B and the
+    /// supervisor 13,181 B, so the harness showed a ~2 KB preview instead.
+    #[test]
+    fn assembled_session_start_fits_the_budget_for_every_role() {
+        use crate::hooks::handlers::session_budget::SESSION_START_BUDGET_BYTES;
+        use cas_store::{
+            IngestBatch, KnowledgePage, KnowledgeStore, PageWrite, SqliteKnowledgeStore,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = crate::store::SqliteStore::open(tmp.path()).unwrap();
+        store.init().unwrap();
+        for index in 0..5 {
+            store
+                .add(&crate::types::Entry::new(
+                    format!("budget-memory-{index}"),
+                    format!("a representative learning captured in session {index} about the parser cache"),
+                ))
+                .unwrap();
+        }
+        let handoff_body = "## STATE\n".to_string()
+            + &"- epic cas-1660 lane merged; next step is assembly and the release train.\n"
+                .repeat(70);
+        for role in ["supervisor", "worker"] {
+            let mut handoff =
+                crate::types::Entry::new(format!("budget-handoff-{role}"), handoff_body.clone());
+            handoff.title = Some(format!("{role} handoff: audit fixes in flight"));
+            handoff.tags = vec!["handoff".to_string(), format!("role:{role}")];
+            store.add(&handoff).unwrap();
+        }
+        let knowledge = SqliteKnowledgeStore::open(tmp.path()).unwrap();
+        let pages: Vec<PageWrite> = (0..40)
+            .map(|index| {
+                let mut page = KnowledgePage::new(
+                    knowledge.generate_id().unwrap(),
+                    "architecture",
+                    format!("Representative subsystem page {index:02}"),
+                );
+                page.snippet = "How one subsystem is wired, which seams it exposes, and the decisions that shaped it.".to_string();
+                page.sources = vec!["docs/source.md".to_string()];
+                PageWrite {
+                    page,
+                    body: "body".to_string(),
+                }
+            })
+            .collect();
+        knowledge
+            .commit_ingest(&IngestBatch {
+                pages,
+                ..Default::default()
+            })
+            .unwrap();
+
+        for (label, role, worker_cli) in [
+            ("plain", None, None),
+            ("worker", Some("worker"), Some("claude")),
+            ("supervisor", Some("supervisor"), Some("codex")),
+            ("codex-worker", Some("worker"), Some("codex")),
+        ] {
+            let mut env = staging_env(role.unwrap_or("worker"));
+            if role.is_none() {
+                env.remove("CAS_AGENT_ROLE");
+            } else {
+                env.set("CAS_AGENT_NAME", "budget-agent-with-a-representative-name");
+                env.set("CAS_FACTORY_SESSION", "budget-factory-session");
+            }
+            env.remove("CLAUDE_CONFIG_DIR");
+            match worker_cli {
+                Some(cli) => env.set("CAS_FACTORY_WORKER_CLI", cli),
+                None => env.remove("CAS_FACTORY_WORKER_CLI"),
+            }
+            let input = HookInput {
+                session_id: format!("budget-session-{label}"),
+                cwd: tmp.path().to_string_lossy().into_owned(),
+                hook_event_name: "SessionStart".to_string(),
+                permission_mode: Some("default".to_string()),
+                ..HookInput::default()
+            };
+            let context =
+                additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
+            assert!(
+                context.len() <= SESSION_START_BUDGET_BYTES,
+                "{label} SessionStart payload is {} bytes, over the {SESSION_START_BUDGET_BYTES}B \
+                 budget; Claude Code would file it to disk and show a ~2 KB preview",
+                context.len()
+            );
+            assert!(
+                context.contains("Current Handoff"),
+                "{label} lost the handoff pointer entirely: {context}"
+            );
+            match role {
+                Some("worker") => assert!(context.contains("# Factory Worker"), "{label}"),
+                Some("supervisor") => assert!(context.contains("# Factory Supervisor"), "{label}"),
+                _ => {}
+            }
+        }
+    }
 }
 
 // ─── Session title computation (cas-ae09) ─────────────────────────────────

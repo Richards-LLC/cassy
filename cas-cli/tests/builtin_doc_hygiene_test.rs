@@ -13,6 +13,7 @@ use cas::builtins::{
     BUILTIN_AGENTS, BUILTIN_SKILLS, BUILTIN_WORKFLOWS, BuiltinFile, CODEX_BUILTIN_AGENTS,
     CODEX_BUILTIN_SKILLS, GROK_BUILTIN_AGENTS, GROK_BUILTIN_SKILLS, REQUIRED_FACTORY_AGENTS,
 };
+use cas::maintenance_jobs::MAINTENANCE_JOBS;
 
 #[path = "support/builtin_catalog.rs"]
 mod builtin_catalog;
@@ -137,7 +138,11 @@ fn doc_hygiene_reference_is_registered_in_every_flavor() {
             "{name} {rel} must embed the canonical file"
         );
         if let Some(canonical) = &canonical {
-            assert_eq!(entry.content, canonical.as_str(), "{name} {rel} drifted from the file on disk");
+            assert_eq!(
+                entry.content,
+                canonical.as_str(),
+                "{name} {rel} drifted from the file on disk"
+            );
         }
     }
 }
@@ -645,4 +650,229 @@ fn operator_data_lint_catches_what_it_names() {
             "{synthetic:?} is not operator data"
         );
     }
+}
+
+// ============================================================================
+// AI-vocabulary and abstract-metaphor lint
+// ============================================================================
+
+/// This is a word-list lint over shipped Markdown, not a collection of
+/// sentence pins. Review a hit in context before adding a file/phrase
+/// exception: `leverage` can be an architecture noun, `journey` a named QA
+/// flow, and `landscape` a physical page orientation.
+const AI_VOCABULARY_RULES: &[(&str, &str)] = &[
+    ("delve", r"\bdelv(?:e|es|ed|ing)\b"),
+    ("leverage", r"\bleverag(?:e|es|ed|ing)\b"),
+    ("seamless", r"\bseamless(?:ly)?\b"),
+    ("robust", r"\brobust(?:ly)?\b"),
+    ("tapestry", r"\btapestr(?:y|ies)\b"),
+    ("landscape", r"\blandscapes?\b"),
+    ("realm", r"\brealms?\b"),
+    ("journey", r"\bjourneys?\b"),
+    ("serves as", r"\bserves?\s+as\b"),
+    ("it's worth noting", r"\bit['’]s\s+worth\s+noting\b"),
+    ("unlock", r"\bunlock(?:s|ed|ing)?\b"),
+    ("empower", r"\bempower(?:s|ed|ing)?\b"),
+    ("transformative", r"\btransformative\b"),
+    ("game-changer", r"\bgame[ -]chang(?:er|ers|ing)\b"),
+];
+
+/// Exact catalog path, phrase name, and why that use is literal or a term of
+/// art. A file-level exception is intentionally visible and checked for drift.
+const AI_VOCABULARY_ALLOWLIST: &[(&str, &str, &str)] = &[
+    (
+        "skills/cas-codebase-design/SKILL.md",
+        "leverage",
+        "Architecture term for caller benefit from a deeper module interface.",
+    ),
+    (
+        "skills/cas-tdd/SKILL.md",
+        "leverage",
+        "Names the architecture vocabulary taught by cas-codebase-design.",
+    ),
+    (
+        "skills/cas-cut-release/SKILL.md",
+        "journey",
+        "Names the journey-eval QA command and required release evidence.",
+    ),
+    (
+        "skills/cas-frontend-engineering/SKILL.md",
+        "journey",
+        "A Playwright journey is a concrete end-to-end test scenario.",
+    ),
+    (
+        "skills/cas-html-reports/references/report-types.md",
+        "journey",
+        "Product journey is a defined report diagram type and reader path.",
+    ),
+    (
+        "skills/cas-html-reports/references/review-checklist.md",
+        "journey",
+        "Journey diagram is a specific visual checked for print legibility.",
+    ),
+    (
+        "skills/cas-qa-craft/SKILL.md",
+        "journey",
+        "User journey is the QA evidence unit defined by this skill.",
+    ),
+    (
+        "skills/cas-qa-craft/references/evidence-bundle.md",
+        "journey",
+        "Names the journey evidence bundle and its producer field.",
+    ),
+    (
+        "skills/cas-qa-craft/references/independent-pass.md",
+        "journey",
+        "Names the journey suite and its scored QA path.",
+    ),
+    (
+        "skills/cas-qa-craft/references/journeys.md",
+        "journey",
+        "Defines the project's end-to-end user-flow terminology and file names.",
+    ),
+    (
+        "skills/cas-worker.md",
+        "journey",
+        "Refers to the catalog journey QA trigger in the worker contract.",
+    ),
+    (
+        "skills/cas-worker/references/close-gate.md",
+        "journey",
+        "Names a catalog journey as a user-facing QA evidence trigger.",
+    ),
+    (
+        "skills/codemap/SKILL.md",
+        "journey",
+        "Identifies product journeys as content owned by project-overview.",
+    ),
+    (
+        "skills/project-overview/SKILL.md",
+        "journey",
+        "A journey is a named product user flow in the overview template.",
+    ),
+    (
+        "skills/project-overview/SKILL.md",
+        "empower",
+        "Appears only as a marked bad example of vague product copy.",
+    ),
+    (
+        "skills/verify-before-claim/SKILL.md",
+        "journey",
+        "Refers to the end-to-end user-path verification rung.",
+    ),
+    (
+        "skills/cas-technical-drawing/SKILL.md",
+        "landscape",
+        "Landscape means a physical page orientation for the drawing sheet.",
+    ),
+    (
+        "skills/cas-technical-drawing/references/drafting-conventions.md",
+        "landscape",
+        "Landscape means a physical page orientation in drafting conventions.",
+    ),
+    (
+        "skills/cas-technical-drawing/references/model-schema.md",
+        "landscape",
+        "Landscape is a literal value of the drawing sheet schema.",
+    ),
+];
+
+#[test]
+fn shipped_builtin_markdown_has_no_unapproved_ai_vocabulary() {
+    let rules: Vec<(&str, regex::Regex)> = AI_VOCABULARY_RULES
+        .iter()
+        .map(|(phrase, pattern)| {
+            (
+                *phrase,
+                regex::RegexBuilder::new(pattern)
+                    .case_insensitive(true)
+                    .build()
+                    .unwrap(),
+            )
+        })
+        .collect();
+    let mut violations = Vec::new();
+    let mut allowlist_used = vec![false; AI_VOCABULARY_ALLOWLIST.len()];
+
+    let mut inspect =
+        |source: &str, path: &str, content: &str| {
+            for (line_number, line) in content.lines().enumerate() {
+                for (phrase, pattern) in &rules {
+                    if !pattern.is_match(line) {
+                        continue;
+                    }
+                    if let Some(index) = AI_VOCABULARY_ALLOWLIST.iter().position(
+                        |(allowed_path, allowed_phrase, _)| {
+                            *allowed_path == path && allowed_phrase == phrase
+                        },
+                    ) {
+                        allowlist_used[index] = true;
+                    } else {
+                        violations.push(format!("{path}:{}:{phrase} ({source})", line_number + 1));
+                    }
+                }
+            }
+        };
+
+    for (catalog_name, catalog) in shipped_catalogs() {
+        for file in catalog.iter().filter(|file| file.path.ends_with(".md")) {
+            inspect(catalog_name, file.path, file.content);
+        }
+    }
+    for job in MAINTENANCE_JOBS {
+        inspect(
+            "MAINTENANCE_JOBS",
+            &format!("jobs/{}.md", job.name),
+            job.body,
+        );
+    }
+
+    assert!(
+        violations.is_empty(),
+        "AI-vocabulary hits in shipped builtin Markdown; rewrite plainly or add an exact (file, phrase, reason) exception to AI_VOCABULARY_ALLOWLIST:\n{}",
+        violations.join("\n")
+    );
+    let stale: Vec<_> = AI_VOCABULARY_ALLOWLIST
+        .iter()
+        .zip(&allowlist_used)
+        .filter(|(_, used)| !**used)
+        .map(|((path, phrase, _), _)| format!("{path}: {phrase}"))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "stale AI-vocabulary allowlist entries: {stale:?}"
+    );
+    for (path, phrase, reason) in AI_VOCABULARY_ALLOWLIST {
+        assert!(
+            !reason.trim().is_empty(),
+            "{path}: {phrase} needs an allowlist reason"
+        );
+    }
+}
+
+#[test]
+fn ai_vocabulary_word_list_matches_case_insensitively_and_at_word_boundaries() {
+    let patterns: Vec<_> = AI_VOCABULARY_RULES
+        .iter()
+        .map(|(phrase, regex)| {
+            (
+                *phrase,
+                regex::RegexBuilder::new(regex)
+                    .case_insensitive(true)
+                    .build()
+                    .unwrap(),
+            )
+        })
+        .collect();
+    let catches = |text: &str, phrase: &str| {
+        patterns
+            .iter()
+            .any(|(name, pattern)| *name == phrase && pattern.is_match(text))
+    };
+    assert!(catches("DELVE into this", "delve"));
+    assert!(catches("Leverage the API", "leverage"));
+    assert!(catches("user journeys", "journey"));
+    assert!(catches("It's worth noting", "it's worth noting"));
+    assert!(!catches("unleveraged", "leverage"));
+    assert!(!catches("subrealm", "realm"));
 }

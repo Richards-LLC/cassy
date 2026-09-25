@@ -37,6 +37,7 @@ This is the single most important guardrail in the skill. Workers downstream of 
   - Scope boundaries are clear
   - No meaningful technical or research questions remain
 - **Ask more questions** — Continue clarifying scope, preferences, or edge cases.
+- **Ask someone else** — Only when a blocking question needs a third party's answer: hand it to `/cas-to-questionnaire`.
 - **Done for now** — Return later. The requirements doc (if written) is durable.
 
 If the direct-to-work gate is not satisfied, **omit that option entirely** — do not offer it as a "yes but with caveats" choice.

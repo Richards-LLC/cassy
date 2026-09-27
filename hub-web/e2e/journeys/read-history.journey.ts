@@ -12,8 +12,10 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
     paired: ["atlas"],
     history: {
       [PELICAN]: [
-        { has_earlier: true, next_before: 20, messages: [you(21, "Is the release ready to cut?", 2)], replies: [sup(22, 21, "Yes. The gate is green on the release branch.", 1.9, [file("art-report", "Release report card.pdf"), file("art-local-draft", "Draft notes.pdf"), file("art-cloud-down", "Gate log.pdf"), file("art-offline", "Bench results.pdf")])] },
-        { has_earlier: false, messages: [you(11, "Start the QA epic tomorrow morning.", 30)], replies: [sup(12, 11, "Scheduled for 09:00 with three workers.", 29.9)] },
+        // Enough of today to fill the thread, as a real one is when it has an earlier page.
+        { has_earlier: true, next_before: 20, messages: [you(21, "Is the release ready to cut?", 2), you(23, "Post the notes when it's out.", 1.5), you(25, "And close the epic.", 1.2)], replies: [sup(22, 21, "Yes. The gate is green on the release branch.", 1.9, [file("art-report", "Release report card.pdf"), file("art-local-draft", "Draft notes.pdf"), file("art-cloud-down", "Gate log.pdf"), file("art-offline", "Bench results.pdf")]), sup(24, 23, "Will do once the tag is pushed.", 1.4), sup(26, 25, "Closing it after the notes go out.", 1.1)] },
+        { has_earlier: true, next_before: 10, messages: [you(11, "Start the QA epic tomorrow morning.", 30)], replies: [sup(12, 11, "Scheduled for 09:00 with three workers.", 29.9)] },
+        { has_earlier: false, messages: [you(1, "Draft the QA epic plan.", 54), you(3, "Keep it to three lanes.", 53.5)], replies: [sup(2, 1, "Drafted: three lanes, one gate.", 53.9), sup(4, 3, "Three lanes it is.", 53.4)] },
       ],
     },
   });
@@ -26,9 +28,34 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
     await expect(log.getByText("Is the release ready to cut?")).toBeVisible();
   });
 
-  await journey.stage("Load earlier turns", async () => {
+  /** Top of the first thread item on screen: the line the reader is on. */
+  const reading = () => page.evaluate(() => {
+    const thread = document.querySelector<HTMLElement>(".conversation-reading.thread")!;
+    const top = thread.getBoundingClientRect().top;
+    const node = [...thread.querySelectorAll<HTMLElement>(".msgs [data-key]")].find((item) => item.getBoundingClientRect().height > 0 && item.getBoundingClientRect().bottom > top)!;
+    return { key: node.dataset.key!, y: Math.round(node.getBoundingClientRect().top) };
+  });
+  /** Load earlier keeps the reading position (journey F7): the turn the reader was on stays put. */
+  const loadEarlierKeepsPlace = async (arrived: string) => {
+    // The reader scrolls up to the button first, as a person does.
+    await page.getByRole("button", { name: "Load earlier" }).scrollIntoViewIfNeeded();
+    await page.evaluate(() => new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(ok))));
+    const before = await reading();
     await page.getByRole("button", { name: "Load earlier" }).click();
-    await expect(log.getByText("Scheduled for 09:00 with three workers.")).toBeVisible();
+    await expect(log.getByText(arrived)).toBeAttached();
+    const y = () => page.evaluate((key) => {
+      const node = [...document.querySelectorAll<HTMLElement>(".msgs [data-key]")].find((item) => item.dataset.key === key);
+      return node ? Math.round(node.getBoundingClientRect().top) : NaN;
+    }, before.key);
+    await expect.poll(y, { message: `"${before.key}" stays where the reader left it` }).toBeGreaterThanOrEqual(before.y - 3);
+    expect(await y()).toBeLessThanOrEqual(before.y + 3);
+    // The older turns are above, off screen until the reader scrolls up.
+    expect(await page.locator(".conversation-reading.thread").evaluate((thread) => thread.scrollTop)).toBeGreaterThan(0);
+  };
+
+  await journey.stage("Load earlier turns", async () => {
+    await loadEarlierKeepsPlace("Scheduled for 09:00 with three workers.");
+    await expect(log.getByText("Scheduled for 09:00 with three workers.")).toBeAttached();
     // The pointer now rests on the thread: its surface stays the cream canvas,
     // not brightened to white by the main-action button hover (journey F11).
     await log.hover();
@@ -37,6 +64,9 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
   });
 
   await journey.stage("Reach the start of the conversation", async () => {
+    // A second page, from further back: the place holds again.
+    await loadEarlierKeepsPlace("Drafted: three lanes, one gate.");
+    expect(hub.historyRequests.at(-1)).toMatchObject({ before: 10 });
     await expect(page.getByText("No earlier history")).toBeVisible();
     await expect(page.getByRole("button", { name: "Load earlier" })).toBeHidden();
     await expect(log.getByText("Yesterday")).toBeVisible();
@@ -58,16 +88,50 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
     expect(hub.artifactRequests).toEqual(["art-report"]);
     expect(page.url()).not.toContain("#artifact:");
 
-    await log.locator('a[data-artifact-id="art-local-draft"]').click();
-    await expect(page.locator("#toast")).toHaveText("This file was only saved on Atlas · Linux. It was never uploaded to Cloud, so it can't open here.");
+    // Journey F6: every failure is said on the card that was pressed, not in
+    // a toast at the top of the thread, and no tab is left open.
+    const toast = page.locator("#toast.visible");
+    const note = (id: string) => log.locator(`a[data-artifact-id="${id}"] .fnote`);
+    const local = log.locator('a[data-artifact-id="art-local-draft"]');
+    await local.click();
+    await expect(note("art-local-draft")).toHaveText("This file was only saved on Atlas · Linux. It was never uploaded to Cloud, so it can't open here.");
+    await expect(local).toHaveAccessibleName(/never uploaded to Cloud/);
     expect(hub.artifactRequests).toEqual(["art-report", "art-local-draft"]);
+    // Known now: opening it again opens no tab at all.
+    let popups = 0;
+    const countPopup = () => { popups += 1; };
+    page.on("popup", countPopup);
+    await local.click();
+    await expect.poll(() => hub.artifactRequests.length).toBe(3);
+    await expect(note("art-local-draft")).toContainText("only saved on Atlas · Linux");
+    expect(popups, "no tab for a file known to be only on the machine").toBe(0);
+    page.off("popup", countPopup);
 
-    // cas-e503: Cloud failing and the machine not answering each say what to do.
-    const toast = page.locator("#toast");
+    // cas-e503: Cloud failing says what to do, and a connected machine that
+    // sends nothing is not called unreachable while the header says Live.
     await log.locator('a[data-artifact-id="art-cloud-down"]').click();
-    await expect(toast).toHaveText("Cassy Cloud couldn't open the file right now. Wait a minute, then tap it again.");
+    await expect(note("art-cloud-down")).toHaveText("Cassy Cloud couldn't open the file right now. Wait a minute, then open it again.");
+    await expect(page.locator("#conversation-connection")).toContainText("Live");
     await log.locator('a[data-artifact-id="art-offline"]').click();
-    await expect(toast).toHaveText("Couldn't reach Atlas · Linux. Check that it's on and connected, then tap the file again.");
+    await expect(note("art-offline")).toHaveText("Atlas · Linux is connected but didn't send the file. Try again in a moment.");
+    await expect(toast).toHaveCount(0);
+    await expect(log).not.toContainText(/\btap\b/i);
+    expect(page.context().pages()).toHaveLength(1);
+
+    // cas-c808 QA F01: a note about reaching the machine does not outlive the
+    // outage. Once the connection is back it leaves the card; a note about
+    // the file itself stays.
+    const header = page.locator("#conversation-connection");
+    hub.hold(PELICAN);
+    hub.drop(PELICAN);
+    await expect(header).toContainText("Reconnecting");
+    await log.locator('a[data-artifact-id="art-offline"]').click();
+    await expect(note("art-offline")).toHaveText("Couldn't reach Atlas · Linux. Check that it's on and connected, then open the file again.");
+    hub.release(PELICAN);
+    await expect(header).toHaveText(" · Live", { timeout: 30_000 });
+    await expect(note("art-offline")).toHaveCount(0);
+    await expect(note("art-cloud-down")).toHaveCount(0);
+    await expect(note("art-local-draft")).toContainText("only saved on Atlas · Linux");
     expect(page.context().pages()).toHaveLength(1);
   });
 });

@@ -37,7 +37,7 @@ merge. The pass has to live there.
 | Trigger | A Cassy **QA dispatch** created when a user-facing task parks for merge. It is not a supervisor habit and not a task-verifier step. |
 | Who runs it | A separate factory worker on the **taste** lane (`claude-opus-5-5`/high). It is never the implementer, and the rule is enforced in the store. |
 | What it produces | A typed QA verdict (`qa_passes` row: passed/failed/waived) bound to the reviewed branch tip, plus a ledger with evidence. |
-| What it blocks | `worktree_merge`, a supervisor's raw `git merge factory/<w>` (pre-tool guard), and the re-close (backstop). |
+| What it blocks | `worktree_merge`, a supervisor's raw `git merge factory/<w>` (pre-tool guard), a raw GitHub merge by any agent (`gh pr merge`, the merge API; pre-tool guard), a GitHub merge from any client once the `cassy/independent-qa` check is required, and the re-close (backstop). |
 | Failure | A rejected QA verdict fires `request_changes` automatically, citing the ledger. The implementer keeps the task. |
 | Cost cap | 45 min per round, 1 active pass per task, 3 rounds before escalation. Journeys are limited to those the diff touches. |
 
@@ -76,6 +76,23 @@ non-empty reason. The waiver is:
 - recorded on the pass as `state=waived` with the supervisor as issuer;
 - listed with its reason in `coordination action=epic_status`.
 
+The opposite request exists too (cas-74284). A supervisor can ask for a pass
+on a parked delivery that the park did not judge user-facing, for example
+a UI change parked with no demo_statement, whose field the delivery-proof
+scope lock no longer lets anyone set. Use `verification action=qa_request
+task_id=<parked task> summary="<why>"`. It opens a round for the parked
+tip exactly as the park would, records `requested by supervisor: <why>` as
+the reason, and appends a `✅ DECISION` note. From then on every merge gate
+waits for that round. It is supervisor-only and needs a reason. It refuses
+a task that is not parked awaiting merge.
+
+The park measures the task's own delivery branch, including a per-task
+`factory/<name>-<task>` branch. Before GH #1040 it measured
+`factory/<name>`, which is frozen for another parked task in that shape.
+That missed cas-470e's hub-web change until after its merge.
+`qa.user_facing_labels` includes `hub-web` by default, so such a task
+also cannot be created without a demo_statement.
+
 ## 2. Trigger: the QA dispatch
 
 When `park_task_awaiting_merge` parks an eligible task, Cassy does three
@@ -110,6 +127,28 @@ the implementer.
 
 The worker's own close output changes too. MERGE REQUIRED now adds:
 "Independent QA pass `<id>` dispatched. The merge waits for its verdict."
+
+### Reviewer preflight (cas-d5c1)
+
+A project can declare what its reviewers need before a round is claimed
+(GH #1023 finding 6). In the reported session, missing `gh` authentication,
+a missing backend env file, and an empty staging QA account each stalled a
+round partway through. The `[qa]` keys are:
+
+| Key | Check |
+| --- | --- |
+| `preflight_gh_token` | `GH_TOKEN` or `GITHUB_TOKEN` is set, or `gh auth status` succeeds. The value is never shown. |
+| `preflight_env_files` | Each named variable points at a readable file. The path is reported; the file is never read. |
+| `preflight_hook` | A project command run in the repository root with `CAS_QA_DELIVERY_TASK`, `CAS_QA_TASK` and `CAS_QA_HEAD` set. It checks, and may top up, test-account capacity. Exit 0 means ready; any other exit is a blocker whose first output line is the reason. It is bounded by `preflight_hook_timeout_secs` (120 by default). Cassy assumes no billing API. |
+
+Starting the QA work item runs the preflight after the no-self-review
+check. If anything is missing, the start is refused with `QA PREFLIGHT
+BLOCKED`, the lines above, and the blocker message to send the supervisor.
+The round stays unclaimed, so its deadline is not spent. A ready preflight
+is appended to the start response. Every run is recorded as a note on the QA
+work item. Hook output is truncated and redacted: values of `GH_TOKEN`,
+`GITHUB_TOKEN` and any variable named like a token, secret, password or key
+are replaced with `[redacted]`.
 
 ## 3. No self-review (enforced, not advised)
 
@@ -262,6 +301,85 @@ dispatches use for repository proof drift.
    `waived` pass whose `bound_head` is an ancestor of the target branch. This catches merges made outside a Claude Code hook, such as
    another harness or a shell. The rejection message carries the exact
    command to dispatch a pass.
+4. **Raw GitHub merge guard (cas-2ee2, every role).** The same pre-tool
+   hook denies `gh pr merge` (by number, URL, branch, or the checked-out
+   branch, including `--auto`), a `PUT …/pulls/<n>/merge` through `gh api`
+   or `curl`, and the GraphQL `mergePullRequest` /
+   `enablePullRequestAutoMerge` mutations. The PR maps to its delivery
+   through the PR number the worker reported (`delivery_pr_number`) or a
+   bounded `gh pr view --json headRefName,headRefOid`. The gate is then
+   checked at the PR's head commit, so a push after the verdict is not
+   covered. GitHub is only asked while some unclosed delivery has a
+   recorded round. A PR Cassy cannot map while a round is open is refused
+   rather than let through.
+5. **GitHub required check (repository side, opt-in).** This covers
+   merges no Cassy hook sees: the web UI, another machine, or a person.
+   See "GitHub required check" below.
+
+The merge request a worker sends (`merge_request=true`) leads with a
+`⏸ QA HOLD` block while its tip has no passed or waived round, so the
+supervisor reads the QA state before any merge guidance in the same batch
+(GH #1023: PR #2546 merged before its `cas-qa-dispatch` was read).
+
+### GitHub required check
+
+With `qa.github_status = true`, Cassy publishes the commit status
+`cassy/independent-qa` on each delivered head through `gh api` from the
+delivery's checkout. The status is:
+
+| Round | Status |
+| --- | --- |
+| open (pending or claimed) | `pending` |
+| passed | `success` |
+| waived by the supervisor | `success`, with the waiver reason as the description |
+| rejected, or timed out | `failure` |
+| delivery needs no independent QA | `success` ("not required") |
+
+Publishing runs in the background with a time limit, so it never delays a
+park, verdict or waiver. A publication that fails leaves the check missing
+or pending, which GitHub treats as not mergeable, so a failure errs toward
+blocking.
+
+To enforce it:
+
+1. Enable publishing: `cas config set qa.github_status true`. The
+   supervisor's `gh` needs commit-status write access (`repo:status`, or
+   the fine-grained "Commit statuses: write").
+2. Require the context on the integration branch, for example staging:
+
+   ```sh
+   gh api -X PUT repos/OWNER/REPO/branches/staging/protection \
+     -F required_status_checks[strict]=false \
+     -f 'required_status_checks[contexts][]=cassy/independent-qa' \
+     -F enforce_admins=true -F required_pull_request_reviews=null \
+     -F restrictions=null
+   ```
+
+   This call replaces the branch's existing protection. Merge the new
+   context into any existing rules, or add it in the repository settings
+   under Branches or Rules.
+3. Pull requests that do not come from factory deliveries also need the
+   context, or they can never merge. Either set it on those PRs by hand, or
+   add a workflow that marks non-factory heads as not requiring the check:
+
+   ```yaml
+   # .github/workflows/cassy-qa-gate.yml
+   on: pull_request
+   permissions: { statuses: write }
+   jobs:
+     non-factory:
+       runs-on: ubuntu-latest
+       steps:
+         - if: ${{ !startsWith(github.head_ref, 'factory/') }}
+           run: >
+             gh api -X POST repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha }}
+             -f state=success -f context=cassy/independent-qa
+             -f description="Not a factory delivery"
+           env: { GH_TOKEN: "${{ github.token }}" }
+   ```
+
+   Use a step-level condition, as above, not a job-level `if:`. A skipped
+   job produces no status, and the factory PRs must carry only Cassy's.
 
 The task-verifier's Step 0A ledger check stays as it is. It governs the
 implementer's own evidence, which cas-0cd5 enforces. The independent pass is

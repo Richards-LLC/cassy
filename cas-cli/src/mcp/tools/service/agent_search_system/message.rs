@@ -1707,6 +1707,18 @@ impl CasService {
                                     }
                                 }
                             }
+                            // cas-2ee2 (GH #1023): the supervisor merged a
+                            // PR before reading the QA dispatch that arrived
+                            // in the same batch. Lead with the QA state, so
+                            // the request is not actionable merge guidance
+                            // while its tip has no passed or waived round.
+                            if let Some(hold) = crate::qa_pass::merge_request_qa_hold(
+                                &self.inner.cas_root,
+                                &task,
+                                &branch_tip,
+                            ) {
+                                message = format!("{hold}\n\n{message}");
+                            }
                             message = attach_merge_request_envelope(
                                 &message,
                                 &MergeRequestEnvelope {

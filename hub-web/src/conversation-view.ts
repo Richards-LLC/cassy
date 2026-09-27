@@ -208,7 +208,9 @@ export class ConversationView {
     this.loadEarlier.className = "conversation-load-earlier";
     this.loadEarlier.textContent = "Load earlier";
     this.loadEarlier.hidden = true;
-    this.loadEarlier.onclick = () => this.options.loadEarlier?.();
+    // Asking for older turns is reading, not following the tail: the page
+    // lands above and the turn on screen stays put (journey F7).
+    this.loadEarlier.onclick = () => { this.following = false; this.options.loadEarlier?.(); };
     this.msgs = document.createElement("div"); this.msgs.className = "msgs";
     this.msgs.setAttribute("role", "log");
     this.empty = document.createElement("div"); this.empty.className = "empty"; this.empty.hidden = true;
@@ -236,6 +238,9 @@ export class ConversationView {
   /** Re-derive the thread from the history; nodes are keyed so grouping survives. */
   update(): void {
     if (this.disposed) return;
+    // Turns added above the reader (Load earlier) must not move what they are
+    // reading (journey F7): remember the first turn on screen and where it sat.
+    const anchor = this.following ? undefined : this.readingAnchor();
     const hasEarlier = this.options.hasEarlier?.() === true;
     const loadingEarlier = this.options.loadingEarlier?.() === true;
     this.loadEarlier.hidden = !hasEarlier;
@@ -260,7 +265,42 @@ export class ConversationView {
     if (!same) this.msgs.replaceChildren(...children);
     this.renderPinned(document);
     this.renderEmpty(model.length === 0, this.options.loadingHistory?.() === true);
+    const held = anchor && this.anchorNode(anchor);
+    if (anchor && held) {
+      // The button sits above every turn, so the browser's own scroll
+      // anchoring has nothing to hold on to; hold the turn ourselves.
+      const drift = held.getBoundingClientRect().top - anchor.top;
+      if (Math.abs(drift) >= 1) this.element.scrollTop += drift;
+    }
     if (this.following && document.getSelection()?.isCollapsed !== false) this.pin();
+  }
+
+  /**
+   * The first turn still on screen (by its key), and its top edge, before a
+   * repaint. Keyed bubbles, not top-level items: an older page's turns from
+   * the same sender join the reader's group, which is rebuilt, and an older
+   * page from the same day slots in under the day line, which stays put.
+   */
+  private readingAnchor(): { key?: string; node: HTMLElement; top: number } | undefined {
+    if (this.msgs.hidden) return undefined;
+    const top = this.element.getBoundingClientRect().top;
+    const visible = (node: HTMLElement) => { const box = node.getBoundingClientRect(); return box.height > 0 && box.bottom > top ? box.top : undefined; };
+    for (const node of this.msgs.querySelectorAll<HTMLElement>("[data-key]")) {
+      const at = visible(node);
+      if (at !== undefined) return { key: node.dataset.key, node, top: at };
+    }
+    for (const child of this.msgs.children) {
+      const at = visible(child as HTMLElement);
+      if (at !== undefined) return { node: child as HTMLElement, top: at };
+    }
+    return undefined;
+  }
+
+  private anchorNode(anchor: { key?: string; node: HTMLElement }): HTMLElement | undefined {
+    if (anchor.key !== undefined) {
+      for (const node of this.msgs.querySelectorAll<HTMLElement>("[data-key]")) if (node.dataset.key === anchor.key) return node;
+    }
+    return anchor.node.isConnected ? anchor.node : undefined;
   }
 
   /**
@@ -319,11 +359,13 @@ export class ConversationView {
     const waiting = reply?.kind === "blocker" ? this.history.waiting().some((item) => item.notification_id === reply.notification_id) : undefined;
     // The pinned ask's flow copy is collapsed; it expands again when a newer ask takes the pin.
     const pinned = reply?.kind === "ask" ? this.history.pinnedAsk()?.notification_id === reply.notification_id : undefined;
-    const delivered = turn.event.kind === "send" ? this.history.delivered() === turn.event.value : undefined;
+    const delivered = turn.event.kind === "send" ? this.history.showsDelivered(turn.event.value) : undefined;
     // A refused send repaints when control changes hands (cas-8e0a).
     const held = turn.event.kind === "send" && turn.event.value.state === "error" ? this.options.controlHeld?.() === true : undefined;
     const holder = turn.event.kind === "send" && turn.event.value.state === "error" ? this.options.controlHolder?.() : undefined;
-    return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting, pinned, delivered, held, holder]);
+    // An unconfirmed send settles once the supervisor speaks after it (journey F10).
+    const settled = turn.event.kind === "send" && turn.event.value.state === "unconfirmed" ? this.history.repliedSince(turn.event.value) : undefined;
+    return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting, pinned, delivered, held, holder, settled]);
   }
 
   /**
@@ -506,28 +548,53 @@ export class ConversationView {
       state.className = "conversation-delivery"; state.setAttribute("role", "status");
       state.textContent = "Sending…";
       bubble.append(state);
-    } else if (send.state === "acknowledged" && this.history.delivered() === send) {
-      // F5: the hub's receipt is the difference between a delivered message
-      // and a lost one, so the latest delivered send says so until the reply
-      // lands (then the answer itself is the evidence).
+    } else if (this.history.showsDelivered(send)) {
+      // F5: the receipt is the difference between a delivered message and a
+      // lost one, so a delivered send says so until the reply linked to it
+      // lands (then the answer itself is the evidence). Journey F4: an
+      // unrelated supervisor turn crossing it no longer hides the tick.
       const state = document.createElement("span");
       state.className = "conversation-delivery conversation-delivered"; state.setAttribute("role", "status");
       const tick = document.createElement("template"); tick.innerHTML = TICK;
       const label = document.createElement("span"); label.textContent = "Delivered";
       state.append(tick.content.firstElementChild!, label);
       bubble.append(state);
+    } else if (send.state === "unconfirmed" && this.history.repliedSince(send)) {
+      // Journey F10: the supervisor has spoken since, so this send most
+      // likely arrived. The card settles to a quiet record: no warning and no
+      // primary Retry inviting a duplicate. cas-470e: the copy says to send
+      // it again only if it was missed, so a quiet text-weight "Send again"
+      // is right there; the operator never has to retype the message.
+      bubble.dataset.settled = "true";
+      const state = document.createElement("span");
+      state.className = "conversation-delivery conversation-refused conversation-unconfirmed conversation-settled"; state.setAttribute("role", "status");
+      const label = document.createElement("b"); label.textContent = "Not confirmed";
+      const separator = document.createElement("span"); separator.className = "sr-only"; separator.textContent = " · ";
+      const reason = document.createElement("span"); reason.className = "conversation-refused-reason";
+      reason.textContent = "The supervisor has replied since; send it again only if it missed this.";
+      state.append(label, separator, reason);
+      bubble.append(state);
+      if (this.options.retryMessage) {
+        const actions = document.createElement("div"); actions.className = "conversation-actions conversation-actions-quiet";
+        const again = document.createElement("button"); again.type = "button"; again.className = "conversation-send-again"; again.textContent = "Send again";
+        again.setAttribute("aria-label", "Send this message again");
+        again.onclick = () => this.options.retryMessage?.(send);
+        actions.append(again);
+        bubble.append(actions);
+      }
     } else if (send.state === "unconfirmed") {
-      // cas-1622: the hub never sent this send's receipt. It is not refused —
+      // cas-1622: the receipt for this send never came. It is not refused —
       // it may well have arrived — so it does not claim "Not sent". It stops
-      // saying "Sending…" forever, says what is unknown, and offers Retry,
-      // warning that a retry may reach the supervisor twice.
+      // saying "Sending…" forever, says what is unknown in the operator's
+      // words (Cassy, not "the hub": journey F10), and offers Retry, warning
+      // that a retry may reach the supervisor twice.
       const state = document.createElement("span");
       state.className = "conversation-delivery conversation-refused conversation-unconfirmed"; state.setAttribute("role", "status");
       const glyph = document.createElement("template"); glyph.innerHTML = WARN;
       const label = document.createElement("b"); label.textContent = "Not confirmed";
       const separator = document.createElement("span"); separator.className = "sr-only"; separator.textContent = " · ";
       const reason = document.createElement("span"); reason.className = "conversation-refused-reason";
-      reason.textContent = `The hub never confirmed this reached ${this.options.supervisor}.`;
+      reason.textContent = `Cassy couldn't confirm delivery to ${this.options.supervisor}.`;
       const next = document.createElement("span"); next.className = "conversation-refused-next"; next.textContent = " Retry sends it again.";
       reason.append(next);
       state.append(glyph.content.firstElementChild!, label, separator, reason);

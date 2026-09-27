@@ -52,11 +52,11 @@ fn qa_user_facing_labels_default_and_round_trip() {
 
     assert_eq!(
         config.qa().user_facing_labels,
-        vec!["ui", "hub", "cli-ux", "commander", "frontend"]
+        vec!["ui", "hub", "hub-web", "cli-ux", "commander", "frontend"]
     );
     assert_eq!(
         config.get("qa.user_facing_labels"),
-        Some("ui,hub,cli-ux,commander,frontend".to_string())
+        Some("ui,hub,hub-web,cli-ux,commander,frontend".to_string())
     );
     assert!(meta::registry().get("qa.user_facing_labels").is_some());
 
@@ -76,6 +76,40 @@ fn qa_user_facing_labels_default_and_round_trip() {
     config.save(temp.path()).unwrap();
     let loaded = Config::load(temp.path()).unwrap();
     assert_eq!(loaded.qa().user_facing_labels, vec!["mobile", "public-api"]);
+}
+
+#[test]
+fn qa_preflight_keys_default_off_and_round_trip_cas_d5c1() {
+    let temp = TempDir::new().unwrap();
+    let mut config = Config::default();
+    assert!(!crate::qa_pass::preflight::is_configured(&config.qa()));
+    for key in [
+        "qa.preflight_gh_token",
+        "qa.preflight_env_files",
+        "qa.preflight_hook",
+        "qa.preflight_hook_timeout_secs",
+    ] {
+        assert!(meta::registry().get(key).is_some(), "{key}");
+    }
+    assert_eq!(config.get("qa.preflight_hook_timeout_secs"), Some("120".to_string()));
+
+    config.set("qa.preflight_gh_token", "true").unwrap();
+    config
+        .set("qa.preflight_env_files", "GABBER_BACKEND_ENV_FILE, ")
+        .unwrap();
+    config
+        .set("qa.preflight_hook", "scripts/qa-topup-credits.sh")
+        .unwrap();
+    config.set("qa.preflight_hook_timeout_secs", "30").unwrap();
+    assert!(config.set("qa.preflight_hook_timeout_secs", "0").is_err());
+    config.save(temp.path()).unwrap();
+
+    let qa = Config::load(temp.path()).unwrap().qa();
+    assert!(qa.preflight_gh_token);
+    assert_eq!(qa.preflight_env_files, vec!["GABBER_BACKEND_ENV_FILE"]);
+    assert_eq!(qa.preflight_hook.as_deref(), Some("scripts/qa-topup-credits.sh"));
+    assert_eq!(qa.preflight_hook_timeout_secs, 30);
+    assert!(crate::qa_pass::preflight::is_configured(&qa));
 }
 
 #[test]
@@ -881,4 +915,41 @@ fn code_review_owner_is_unknown_after_dispatch_layer_removal() {
     );
     assert!(meta::registry().get("code_review.owner").is_none());
     assert!(config.set("code_review.owner", "supervisor").is_err());
+}
+
+/// cas-8d54 (GH #1011): `cas config get/set factory.epic_base_branch` used to
+/// say "Unknown config key" although the runtime reads the key. It is
+/// registered, readable, listable, and a set value round-trips to the reader
+/// the factory uses.
+#[test]
+fn factory_epic_base_branch_is_registered_and_round_trips_cas_8d54() {
+    let temp = TempDir::new().unwrap();
+    let cas_dir = temp.path().join(".cas");
+    std::fs::create_dir_all(&cas_dir).unwrap();
+    let mut config = Config::default();
+
+    assert!(meta::registry().get("factory.epic_base_branch").is_some());
+    assert_eq!(config.get("factory.epic_base_branch"), Some(String::new()));
+    assert!(config.list().contains(&("factory.epic_base_branch".to_string(), String::new())));
+
+    config.set("factory.epic_base_branch", " staging ").unwrap();
+    assert_eq!(config.get("factory.epic_base_branch"), Some("staging".to_string()));
+    assert_eq!(config.factory().epic_base_branch.as_deref(), Some("staging"));
+    assert!(config.list().contains(&(
+        "factory.epic_base_branch".to_string(),
+        "staging".to_string()
+    )));
+
+    config.save(&cas_dir).unwrap();
+    let loaded = Config::load(&cas_dir).unwrap();
+    assert_eq!(loaded.get("factory.epic_base_branch"), Some("staging".to_string()));
+    assert_eq!(
+        Config::configured_epic_base_branch(temp.path()).as_deref(),
+        Some("staging"),
+        "the runtime reader sees the value `cas config set` wrote"
+    );
+
+    config.set("factory.epic_base_branch", "  ").unwrap();
+    assert_eq!(config.factory().epic_base_branch, None);
+    assert_eq!(config.get("factory.epic_base_branch"), Some(String::new()));
 }

@@ -1855,6 +1855,60 @@ fn proof_targets_scope_fix_command(task: &Task, uncovered: &[String]) -> String 
     )
 }
 
+/// File kinds that are web or documentation content. A delivery made only
+/// of these cannot need a macOS native-command platform proof (cas-b4cc).
+const WEB_ONLY_EXTENSIONS: &[&str] = &[
+    "css", "scss", "sass", "less", "html", "htm", "js", "jsx", "mjs", "cjs", "ts", "tsx", "mts",
+    "cts", "vue", "svelte", "astro", "json", "svg", "png", "jpg", "jpeg", "gif", "webp", "avif",
+    "ico", "woff", "woff2", "md", "mdx", "rst", "adoc", "txt", "snap",
+];
+
+fn is_web_only_path(path: &str) -> bool {
+    let file = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+    file.rsplit_once('.')
+        .is_some_and(|(_, extension)| WEB_ONLY_EXTENSIONS.contains(&extension))
+}
+
+/// cas-b4cc (GH #1023 finding 5): `risk=platform` declared on a delivery
+/// whose every changed path is web or documentation content. cas-7d62, a web
+/// CSS test, was asked for a macOS native-command receipt. The declared risk
+/// is kept; this only says it looks wrong and names the logged supervisor
+/// correction (cas-8d38). `None` when the risk is not platform, the diff is
+/// unknown, or any path could be native.
+pub(crate) fn platform_risk_implausibility(
+    task: &Task,
+    changed_paths: &[String],
+) -> Option<String> {
+    if !task.risk.contains(&TaskRisk::Platform)
+        || changed_paths.is_empty()
+        || !changed_paths.iter().all(|path| is_web_only_path(path))
+    {
+        return None;
+    }
+    let shown = changed_paths
+        .iter()
+        .take(3)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let more = changed_paths.len().saturating_sub(3);
+    Some(format!(
+        "⚠️ PLATFORM RISK LOOKS IMPLAUSIBLE: task {id} declares risk=platform, but every one of its \
+         {count} changed path(s) is web or documentation content ({shown}{more}). A platform proof is a \
+         macOS native-command receipt and does not apply to web-only work. The declared risk stays in \
+         force until a supervisor corrects it: `{supervisor}task action=update id={id} risk=none \
+         proof_scope_fix=true reason=\"web-only delivery; platform risk declared in error\"`.",
+        id = task.id,
+        count = changed_paths.len(),
+        more = if more > 0 {
+            format!(", and {more} more")
+        } else {
+            String::new()
+        },
+        supervisor = crate::mcp::tools::core::guidance::supervisor_prefix(),
+    ))
+}
+
 fn declared_risk_close_gaps(task: &Task, changed_paths: &[String]) -> Vec<String> {
     let mut gaps = Vec::new();
     if task.risk.contains(&TaskRisk::Platform) && !has_platform_proof_note(&task.notes) {
@@ -2024,8 +2078,13 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
              the missing evidence is recorded on the task.",
             id = task.id,
         );
+        // cas-b4cc: lead with the mismatch when the diff is web-only, so the
+        // correction is read before anyone chases a macOS receipt.
+        let implausible = platform_risk_implausibility(task, changed_paths)
+            .map(|warning| format!("{warning}\n\n"))
+            .unwrap_or_default();
         return Err(format!(
-            "TASK CLOSE REJECTED: task {id} declares risk=platform but its platform_proof receipt is incomplete (missing evidence: {missing}). \
+            "{implausible}TASK CLOSE REJECTED: task {id} declares risk=platform but its platform_proof receipt is incomplete (missing evidence: {missing}). \
              Add one with `{caller}task action=notes id={id} note_type=platform_proof notes=\"...\"` containing macOS, a platform command, and a passing result, \
              then retry `{caller}task action=close id={id}`. {correction}",
             id = task.id,
@@ -2306,6 +2365,72 @@ mod risk_proof_tests {
         task.notes = "[2026-09-10] 🧪 PLATFORM_PROOF macOS command: cargo test -p cas --lib; result: PASS\n[2026-09-10] 🧪 LOADED_PROOF whole target under -j16, 3 loops; result: PASS".into();
         validate_risk_close_proofs(&task, &[], std::path::Path::new("."))
             .expect("complete proof notes should pass");
+    }
+
+    fn paths(items: &[&str]) -> Vec<String> {
+        items.iter().map(|item| item.to_string()).collect()
+    }
+
+    /// cas-b4cc (GH #1023 finding 5): cas-7d62, a web CSS test declared
+    /// risk=platform, is told the risk looks wrong and how a supervisor
+    /// corrects it. The risk itself is not downgraded, and the platform proof
+    /// is still owed until that correction.
+    #[test]
+    fn web_only_platform_risk_warns_and_names_the_supervisor_correction_cas_b4cc() {
+        let mut task = Task::new("cas-7d62".into(), "composer spacing test".into());
+        task.risk = vec![TaskRisk::Platform];
+        let web = paths(&[
+            "web/src/composer.css",
+            "web/e2e/composer.spec.ts",
+            "docs/qa/notes.md",
+        ]);
+
+        let error = validate_risk_close_proofs(&task, &web, std::path::Path::new("."))
+            .expect_err("platform proof is still owed until a supervisor corrects the risk");
+        assert!(
+            error.starts_with("⚠️ PLATFORM RISK LOOKS IMPLAUSIBLE: task cas-7d62"),
+            "{error}"
+        );
+        assert!(error.contains("web/src/composer.css"), "{error}");
+        assert!(
+            error.contains("task action=update id=cas-7d62 risk=none proof_scope_fix=true"),
+            "{error}"
+        );
+        assert!(error.contains("TASK CLOSE REJECTED"), "{error}");
+        assert_eq!(task.risk, vec![TaskRisk::Platform], "the declared risk is never downgraded");
+
+        // A satisfied platform proof still closes; the warning is advisory.
+        task.notes = "[2026-09-10] 🧪 PLATFORM_PROOF macOS command: cargo test -p cas --lib; result: PASS".into();
+        validate_risk_close_proofs(&task, &web, std::path::Path::new("."))
+            .expect("a complete receipt still satisfies the declared risk");
+    }
+
+    #[test]
+    fn native_platform_risk_keeps_its_proof_without_the_warning_cas_b4cc() {
+        let mut task = Task::new("cas-native".into(), "macOS keychain".into());
+        task.risk = vec![TaskRisk::Platform];
+        for native in [
+            paths(&["crates/cas-mux/src/pty.rs", "web/src/a.css"]),
+            paths(&["macos/App/KeychainStore.swift"]),
+            paths(&["macos/App/Info.plist"]),
+        ] {
+            assert_eq!(
+                platform_risk_implausibility(&task, &native),
+                None,
+                "{native:?}"
+            );
+            let error = validate_risk_close_proofs(&task, &native, std::path::Path::new("."))
+                .expect_err("native work keeps its platform proof");
+            assert!(error.starts_with("TASK CLOSE REJECTED"), "{error}");
+            assert!(!error.contains("IMPLAUSIBLE"), "{error}");
+        }
+        // Unknown diff, or no platform risk: nothing to say.
+        assert_eq!(platform_risk_implausibility(&task, &[]), None);
+        task.risk = vec![TaskRisk::None];
+        assert_eq!(
+            platform_risk_implausibility(&task, &paths(&["web/src/a.css"])),
+            None
+        );
     }
 
     #[test]
@@ -7639,6 +7764,14 @@ impl CasCore {
                         format!("{}\n\n{}", task.notes, note)
                     };
                 }
+                // cas-b4cc: a deferred platform proof would otherwise surface
+                // only at the supervisor's close. Record the mismatch now, on
+                // the task the supervisor reviews, without touching the risk.
+                if let Some(warning) = platform_risk_implausibility(&task, &changed_paths)
+                    && !task.notes.contains("PLATFORM RISK LOOKS IMPLAUSIBLE")
+                {
+                    task.notes = format!("{}\n\n[{ts}] {warning}", task.notes);
+                }
             }
             if let Err(message) = validate_risk_close_proofs_with_base_and_target_and_cache(
                 &task,
@@ -8540,16 +8673,10 @@ impl CasCore {
                 .assignee
                 .as_deref()
                 .expect("System B requires assignee");
-            // cas-73b8: a worktree on the worker's per-task branch for this
-            // task is the task's worktree too.
-            let task_branch = crate::factory_isolation::worker_task_branch(assignee, &task.id);
-            let expected_branch = if crate::factory_isolation::branch_at(path).as_deref()
-                == Some(task_branch.as_str())
-            {
-                task_branch
-            } else {
-                format!("factory/{assignee}")
-            };
+            let expected_branch = system_b_expected_branch(
+                assignee,
+                crate::factory_isolation::branch_at(path).as_deref(),
+            );
             validate_pre_close_worktree(path, expected, Some(&expected_branch))
                 .map_err(|error| error.to_string())?;
         }
@@ -12117,7 +12244,22 @@ pub(crate) fn check_factory_branch_merge_reality_with_delivery_mode(
     delivery_mode: cas_types::DeliveryMode,
     task_id: Option<&str>,
 ) -> MergeRealityOutcome {
-    let factory_branch = format!("factory/{assignee}");
+    // cas-8606: a per-task delivery lives on `factory/<assignee>-<task>`, not
+    // on the worker's base branch. Measuring `factory/<assignee>` refused
+    // every merged, verified per-task delivery whose worker never pushed its
+    // base branch (it sits at the epic tip with no commits of its own).
+    // `worker_task_branch_ref` answers `origin/<branch>` when only the pushed
+    // copy remains; that is a published delivery, so the local-ref check
+    // below lets it through.
+    let factory_branch = task_id
+        .and_then(|task_id| worker_task_branch_ref(repo_path, assignee, task_id))
+        .map(|branch| {
+            branch
+                .strip_prefix("origin/")
+                .map(str::to_string)
+                .unwrap_or(branch)
+        })
+        .unwrap_or_else(|| format!("factory/{assignee}"));
 
     // Branch absent locally → push+merge+prune path; treat as merged.
     if !git_ref_exists(repo_path, &factory_branch) {
@@ -12293,7 +12435,9 @@ fn scoped_proof_base_for_work_target(
 /// layouts bound to the owning repository while refusing roots that are not
 /// contained in a git checkout at all. A `.git` file is accepted as well as a
 /// directory so linked worktrees use the same path.
-fn resolve_close_gate_repo_root(cas_root: &std::path::Path) -> Result<std::path::PathBuf, String> {
+pub(crate) fn resolve_close_gate_repo_root(
+    cas_root: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
     use std::process::Command;
 
     for ancestor in cas_root.ancestors() {
@@ -12409,7 +12553,7 @@ fn resolve_standalone_merge_target(repo_path: &std::path::Path) -> Result<String
 /// worker-spawn normalization, so a late parent link cannot leave close
 /// checking the stale trunk. A distinct task target remains explicit
 /// supervisor authority and is never overwritten.
-fn effective_close_work_target(
+pub(crate) fn effective_close_work_target(
     task: &Task,
     parent_epic: Option<&Task>,
 ) -> Option<cas_types::WorkTarget> {
@@ -12928,6 +13072,26 @@ fn resolve_system_b_worktree_path_for_repo(
     }
     let path = system_b_worktree_base_for_repo(cas_root, repo_root).join(assignee);
     path.join(".git").exists().then_some(path)
+}
+
+/// The branch a System-B worker worktree must be on for a close to run its
+/// gates there. cas-73b8 accepted the worker's per-task branch for *this*
+/// task; cas-8606 accepts any of the worker's own branches. A worker whose
+/// `factory/<name>` is frozen commits each task on `factory/<name>-<task>`,
+/// so re-closing a merged, verified task A while checked out on task B's
+/// branch is ordinary, and was refused for cas-ac390, cas-bf07 and five
+/// cas-459b deliveries. A sibling worker's branch, trunk, or a detached HEAD
+/// is still refused.
+fn system_b_expected_branch(assignee: &str, current: Option<&str>) -> String {
+    match current {
+        Some(branch)
+            if crate::factory_isolation::classify_worker_binding(assignee, Some(branch))
+                == crate::factory_isolation::WorkerBinding::Own =>
+        {
+            branch.to_string()
+        }
+        _ => format!("factory/{}", assignee.trim()),
+    }
 }
 
 fn supervisor_merged_anchor_close(
@@ -30927,6 +31091,116 @@ mod merge_reality_tests {
         assert!(msg.contains("task action=close id=<task-id>`"), "{msg}");
     }
 
+    /// cas-8606: the cas-459b shape. The worker's base `factory/test-worker`
+    /// sits at the target with no commits and was never pushed. Task
+    /// cas-8606 was delivered on `factory/test-worker-cas-8606`, pushed, and
+    /// merged. Re-closing it measures its own branch and proceeds.
+    #[test]
+    fn merged_per_task_delivery_closes_while_the_base_branch_is_unpushed_cas_8606() {
+        let dir = init_repo_worker_branch_empty();
+        let p = dir.path();
+        git(
+            p,
+            &[
+                "checkout",
+                "-q",
+                "-b",
+                "factory/test-worker-cas-8606",
+                "main",
+            ],
+        );
+        std::fs::write(p.join("delivery.rs"), "fn delivered() {}\n").unwrap();
+        git(p, &["add", "delivery.rs"]);
+        git(p, &["commit", "-q", "-m", "cas-8606 delivery"]);
+        let tip = git_output(p, &["rev-parse", "HEAD"]);
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "-m",
+                "merge cas-8606",
+                "factory/test-worker-cas-8606",
+            ],
+        );
+        git(
+            p,
+            &[
+                "update-ref",
+                "refs/remotes/origin/factory/test-worker-cas-8606",
+                &tip,
+            ],
+        );
+
+        let own = check_factory_branch_merge_reality_with_delivery_mode(
+            p,
+            "test-worker",
+            "main",
+            cas_types::DeliveryMode::PushBranch,
+            Some("cas-8606"),
+        );
+        assert!(
+            matches!(own, MergeRealityOutcome::Proceed),
+            "a merged, pushed per-task delivery must not be judged by the unpushed base branch"
+        );
+
+        // Only the pushed copy remains (local per-task branch pruned).
+        git(p, &["branch", "-D", "factory/test-worker-cas-8606"]);
+        let pruned = check_factory_branch_merge_reality_with_delivery_mode(
+            p,
+            "test-worker",
+            "main",
+            cas_types::DeliveryMode::PushBranch,
+            Some("cas-8606"),
+        );
+        assert!(matches!(pruned, MergeRealityOutcome::Proceed));
+
+        // A task with no per-task branch is still measured on the base
+        // branch, so the cas-762e wrong-branch guard keeps its bite.
+        let base = check_factory_branch_merge_reality_with_delivery_mode(
+            p,
+            "test-worker",
+            "main",
+            cas_types::DeliveryMode::PushBranch,
+            Some("cas-other"),
+        );
+        let MergeRealityOutcome::Refuse(message) = base else {
+            panic!("the unpushed empty base branch must still be refused for a base-branch task");
+        };
+        assert!(
+            message.contains("factory/test-worker has no commits"),
+            "{message}"
+        );
+    }
+
+    /// cas-8606: the pre-close worktree check accepts any of the worker's own
+    /// branches, including another task's per-task branch, and still refuses
+    /// a sibling worker's branch, trunk or a detached HEAD.
+    #[test]
+    fn pre_close_worktree_accepts_any_own_worker_branch_cas_8606() {
+        for own in [
+            "factory/happy-octopus-83",
+            "factory/happy-octopus-83-cas-2ee2",
+            "factory/happy-octopus-83-cas-8606",
+        ] {
+            assert_eq!(system_b_expected_branch("happy-octopus-83", Some(own)), own);
+        }
+        for foreign in [
+            Some("factory/wild-heron-20"),
+            Some("factory/wild-heron-20-cas-470e"),
+            Some("main"),
+            Some("epic/consolidated-burn-down-v34"),
+            None,
+        ] {
+            assert_eq!(
+                system_b_expected_branch("happy-octopus-83", foreign),
+                "factory/happy-octopus-83",
+                "{foreign:?}"
+            );
+        }
+    }
     // -------------------------------------------------------------------------
     // AC3a: branch has ≥1 unmerged commit → PROCEED
     // (cas-95ce already guards this; B2 must not double-reject)

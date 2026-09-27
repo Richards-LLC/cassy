@@ -756,13 +756,14 @@ impl CasService {
                 "latest" => this.verification_latest(req).await,
                 "qa_record" => this.verification_qa_record(req).await,
                 "qa_waive" => this.verification_qa_waive(req).await,
+                "qa_request" => this.verification_qa_request(req).await,
                 "qa_status" => this.verification_qa_status(req).await,
                 #[cfg(feature = "mcp-proxy")]
                 "external_verify" => this.verification_external(req).await,
                 _ => Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
-                        "Unknown verification action: {}. Valid: add, show, list, latest, qa_record, qa_waive, qa_status{}",
+                        "Unknown verification action: {}. Valid: add, show, list, latest, qa_record, qa_waive, qa_request, qa_status{}",
                         req.action,
                         if cfg!(feature = "mcp-proxy") {
                             ", external_verify"

@@ -8,8 +8,8 @@ import { ConversationHistory } from "./conversation-history";
 import { ConversationView } from "./conversation-view";
 import { REFUSED_SEE_ABOVE, refusalSentence, refusal } from "./refusal";
 import { installAttentionObjects } from "./attention-objects";
-import { installAttachmentSheet } from "./attachment-sheet";
-import { artifactIdFromHref, artifactLinkFor, openArtifact } from "./artifact-open";
+import { clearTransientAttachmentNotes, installAttachmentSheet, setAttachmentNote } from "./attachment-sheet";
+import { artifactFailureIsAboutTheFile, artifactIdFromHref, artifactIsLocalOnly, artifactLinkFor, openArtifact } from "./artifact-open";
 import { arrangeConversationShell, bindKeyboardViewport, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY, paletteShortcutLabel } from "./conversation-shell";
 import { clockLabel } from "./thread-model";
 import { syncContextRail } from "./context-rail";
@@ -34,7 +34,7 @@ import { DEFAULT_PAIRING_SCOPES, PairingRelayError, acknowledgePairing, createPa
 import { browserSupport, unsupportedBrowserNotice } from "./browser-support";
 import { attentionStore, catalog } from "./storage";
 import { createTerminalSurface, type TerminalSurface } from "./terminal";
-import { machineConnection, sessionConnection } from "./session-connection";
+import { firstAttachRetry, machineConnection, sessionConnection } from "./session-connection";
 import { toastPlacementInThread, toastTopClearOfBanner } from "./toast-placement";
 import { absoluteTimestamp, relativeTimestamp } from "./time";
 import { loadPaneLayout, movePane, normalizePaneLayout, orderedPaneIds, promotePane, savePaneLayout, type PaneLayout, type PaneLayoutStorage } from "./pane-layout";
@@ -138,7 +138,16 @@ let contextProgress = false;
 let contextAttention = 0;
 function syncConversationContext(): void {
   if (hubPresentation !== "conversation") return;
-  const history = selectedMachineId && selectedSession ? conversationHistories.get(sessionKey(selectedMachineId, selectedSession)) : undefined;
+  // With no thread open there is nothing for the rail to hold: the last
+  // thread's progress and attention must not keep it open as an empty column
+  // (journey F15, cas-9225).
+  if (!selectedMachineId || !selectedSession) {
+    contextProgress = false;
+    contextAttention = 0;
+    syncContextRail(document, { history: undefined, progress: false, attention: 0 });
+    return;
+  }
+  const history = conversationHistories.get(sessionKey(selectedMachineId, selectedSession));
   syncContextRail(document, { history, progress: contextProgress, attention: contextAttention });
 }
 let workingRefresh: ReturnType<typeof setTimeout> | undefined;
@@ -184,6 +193,7 @@ const mobileCollapsedPaneGeometry = "freeze";
  * the buttons keep their accessible names (cas-3400 QA round 2 F01).
  */
 const HEADER_CONTROL_ICON = '<svg class="action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h10"/></svg>';
+const HEADER_PALETTE_ICON = '<svg class="action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M9 6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3z"/></svg>';
 const HEADER_INTERRUPT_ICON = '<svg class="action-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
 let attention: AttentionItem[] = [];
 const newCriticalAttentionIds = new Set<string>();
@@ -640,10 +650,14 @@ watchPairingFragment(window, pendingPairingStore, (fragment) => {
 function createConnection(machine: StoredMachine): HubConnectionSupervisor {
   return new HubConnectionSupervisor(machine, {
     onState: (state) => {
+      const wasLive = connectionStates.get(machine.id)?.phase === "live";
       connectionStates.set(machine.id, state);
       // Anchor staleness to the last live moment: retry transitions rewrite
       // snapshot.since, which would report a ten-minute outage as "just now".
       if (state.phase === "live") lastLiveAt.set(machine.id, Date.now());
+      // cas-c808 QA F01: a card that said the machine couldn't be reached
+      // must not keep saying so once it is back.
+      if (state.phase === "live" && !wasLive) clearTransientAttachmentNotes(document, machine.id);
       const connectedNotice = firstConnections.observe(machine.id, machine.label, state);
       if (connectedNotice) toast(connectedNotice);
       if (state.phase === "failed" || state.phase === "backoff") invalidateMachineLeases(machine.id);
@@ -673,10 +687,12 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
     },
     onAttachState: (session, state) => {
       const key = sessionKey(machine.id, session);
+      const attachWasLive = attachStates.get(key)?.phase === "live";
       attachStates.set(key, state);
       if (state.phase === "live") {
         sessionsEverLive.add(key);
         clearTransportStatus(key);
+        if (!attachWasLive) clearTransientAttachmentNotes(document, machine.id);
         // The socket is back: its transport alarm is history, not attention.
         resolveAttention(`${machine.id}:${session}:session_transport`);
       }
@@ -1383,7 +1399,10 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
     retry: () => { void connections.get(machineId)?.attach(session); },
     diagnose: () => openConnectionLog(machineId),
     repair: () => openRepairDialog(machineId),
-  }, now, hubPresentation === "conversation" ? { openingTitle: CONVERSATION_OPENING } : {});
+  }, now, {
+    ...(hubPresentation === "conversation" ? { openingTitle: CONVERSATION_OPENING } : {}),
+    quietRetry: "session" in snapshot && firstAttachRetry(snapshot as AttachSnapshot, sessionsEverLive.has(sessionKey(machineId, session))),
+  });
 }
 
 function syncConnectionViewTicker(): void {
@@ -1409,6 +1428,10 @@ function renderTerminalFailure(machineId: string, session: string, detail: strin
   if (grid?.dataset.sessionKey !== sessionKey(machineId, session)) return;
   const placeholder = grid.querySelector<HTMLElement>(":scope > .empty");
   if (!placeholder) return;
+  // cas-28df: a never-live conversation's first retry is still opening; the
+  // connection surface shows it calmly, with this detail behind "Details".
+  const key = sessionKey(machineId, session);
+  if (firstAttachRetry(attachStates.get(key), sessionsEverLive.has(key))) return;
   const message = document.createElement("p");
   message.textContent = `Terminal unavailable: ${detail}`;
   const retry = document.createElement("button");
@@ -2725,17 +2748,17 @@ function render(captureDraft = true): void {
           <header class="drawer-header">${cloudBrand()}<button id="machine-drawer-close" type="button" aria-label="Close machines and sessions">×</button></header>
           ${compatibility ? `<div class="compatibility-warning" role="alert">${escapeHtml(compatibility)}</div>` : ""}
           <nav id="machine-tree" aria-label="Machine sessions"></nav>
-          ${selected ? '<button id="remove-machine" class="remove-machine">Remove selected machine</button>' : ""}
+          ${selected ? `<button id="remove-machine" class="remove-machine">Remove ${escapeHtml(selected.label)} from this browser</button>` : ""}
         </div>
       </aside>
       <main>
         <header class="session-header">
           <div class="session-identity">
-            ${backTarget ? `<button id="session-back" class="session-back" type="button" aria-label="${escapeAttr(backText)}" title="${escapeAttr(backText)}"><span aria-hidden="true">‹</span></button>` : ""}
+            ${backTarget ? `<button id="session-back" class="session-back" type="button" aria-label="${escapeAttr(backText)}" title="${escapeAttr(backText)}"><span aria-hidden="true">‹</span><span class="session-back-label" aria-hidden="true">Back</span></button>` : ""}
             <h1 class="${selectedSession ? "toolbar-session-title" : ""}"><button id="session-picker-toggle" class="session-picker-toggle" type="button" aria-haspopup="dialog" aria-expanded="${sessionPickerOpen}" aria-label="${escapeAttr(sessionPickerLabel)}" title="${escapeAttr(sessionPickerTooltip)}"><span class="session-picker-name">${escapeHtml(sessionTitleLead)}</span>${sessionTitleCodename ? `<span class="session-picker-codename codename">${escapeHtml(sessionTitleCodename)}</span>` : ""}<span class="session-picker-caret" aria-hidden="true">▾</span></button></h1>
           </div>
           ${selected ? `<span class="machine-chip" data-compact-label="${escapeAttr(compactMachineLabel)}" title="${escapeAttr(machineLabel)}">${escapeHtml(machineLabel)}</span><span class="mode-badge ${mode.toLowerCase()}" data-compact-label="${lease?.held_by_me ? "CTL" : "OBS"}"${sessionDown ? " hidden" : ""}>${mode}</span><span class="connection-summary ${connectionState}" title="${escapeAttr(compatibility ?? connectionText)}"><span class="connection-dot"></span><span data-machine-latency="${escapeAttr(selected.id)}">${latencyText}</span></span>` : ""}
-          <div class="actions"><button id="command-palette-toggle" class="command-palette-trigger" type="button" aria-label="Open command palette (${escapeAttr(paletteShortcutLabel())})" aria-keyshortcuts="Control+K Meta+K" title="Command palette (${escapeAttr(paletteShortcutLabel())})">${escapeHtml(paletteShortcutLabel())}</button>${showSessionControls ? `<span class="control-action" title="${escapeAttr(takeControlReason ?? controlActionLabel)}"><button id="lease" data-compact-label="${lease?.held_by_me ? "Rel" : "Ctrl"}" aria-label="${escapeAttr(controlActionLabel)}"${takeControlReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(takeControlReason)}" aria-describedby="control-disabled-reason"` : ""}>${HEADER_CONTROL_ICON}<span class="action-label">${controlActionLabel}</span></button>${takeControlReason ? `<span id="control-disabled-reason" class="sr-only">${escapeHtml(takeControlReason)}</span>` : ""}</span><button id="interrupt" class="danger" data-compact-label="Int" aria-label="Interrupt selected pane" title="${escapeAttr(interruptReason ?? "Interrupt selected pane")}"${interruptReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(interruptReason)}"` : ""}>${HEADER_INTERRUPT_ICON}<span class="action-label">Interrupt</span></button>` : ""}</div>
+          <div class="actions"><button id="command-palette-toggle" class="command-palette-trigger" type="button" aria-label="Open command palette (${escapeAttr(paletteShortcutLabel())})" aria-keyshortcuts="Control+K Meta+K" title="Command palette (${escapeAttr(paletteShortcutLabel())})">${HEADER_PALETTE_ICON}<span class="action-label">${escapeHtml(paletteShortcutLabel())}</span></button>${showSessionControls ? `<span class="control-action" title="${escapeAttr(takeControlReason ?? controlActionLabel)}"><button id="lease" data-compact-label="${lease?.held_by_me ? "Rel" : "Ctrl"}" aria-label="${escapeAttr(controlActionLabel)}"${takeControlReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(takeControlReason)}" aria-describedby="control-disabled-reason"` : ""}>${HEADER_CONTROL_ICON}<span class="action-label">${controlActionLabel}</span></button>${takeControlReason ? `<span id="control-disabled-reason" class="sr-only">${escapeHtml(takeControlReason)}</span>` : ""}</span><button id="interrupt" class="danger" data-compact-label="Int" aria-label="Interrupt selected pane" title="${escapeAttr(interruptReason ?? "Interrupt selected pane")}"${interruptReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(interruptReason)}"` : ""}>${HEADER_INTERRUPT_ICON}<span class="action-label">Interrupt</span></button>` : ""}</div>
         </header>
         ${showSessionControls ? `<p id="session-controls-reason" class="session-controls-reason" role="note"${controlsNotice ? "" : " hidden"}>${escapeHtml(controlsNotice ?? "")}</p>` : ""}
         <section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}>${selectedSession ? '<div class="empty">Connecting to terminal…</div>' : showFleetBoard ? '<div id="fleet-board" class="fleet-board" aria-label="Fleet"></div>' : `<div class="empty empty-pane-slot">${emptyCanvasMarkup()}</div>`}</section>
@@ -3846,13 +3869,27 @@ app.addEventListener("click", (event) => {
     toast("Open the conversation this file came from to view it.");
     return;
   }
+  // Journey F6: a file the machine said never left it opens no tab again,
+  // and every outcome is said on the card that was pressed.
+  const localKey = `${machineId}:${artifactId}`;
+  const onCard = link.matches("a.sheet");
   void openArtifact({
     fetchView: () => connection.artifactView(session, artifactId),
     openWindow: () => window.open("about:blank", "_blank"),
-    notify: toast,
+    notify: (message, result) => {
+      if (artifactIsLocalOnly(result)) localOnlyArtifacts.add(localKey);
+      else if (result?.ok) localOnlyArtifacts.delete(localKey);
+      if (onCard && setAttachmentNote(document, artifactId, message, { machineId, transient: !artifactFailureIsAboutTheFile(result) }) > 0) return;
+      toast(message);
+    },
     machineLabel: machines.get(machineId)?.label ?? "that machine",
-  });
+    machineLive: () => machineFooterConnection(machineId)?.phase === "live",
+    knownLocalOnly: localOnlyArtifacts.has(localKey),
+    fileName: link.querySelector(".fname")?.textContent?.trim() || undefined,
+  }).then((opened) => { if (opened) setAttachmentNote(document, artifactId, undefined); });
 });
+/** Files a machine said were never uploaded to Cloud, by machine and artifact (journey F6). */
+const localOnlyArtifacts = new Set<string>();
 
 window.addEventListener("keydown", globalShortcut, true);
 // Rotation changes the layout in CSS instantly, but which panes mount a

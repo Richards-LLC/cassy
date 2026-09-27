@@ -505,8 +505,8 @@ pub(crate) fn standalone_work_target(
     let unresolved_warning = |reason: &str| {
         format!(
             "\n\n⚠️ WORK TARGET UNRESOLVED: no target could be detected or persisted ({reason}). \
-             This task has no work target. Set [factory] epic_base_branch in \
-             .cas/config.toml or pass target_branch when creating the task."
+             This task has no work target. Run `cas config set factory.epic_base_branch <branch>` \
+             or pass target_branch when creating the task."
         )
     };
     let configured = crate::config::Config::configured_epic_base_branch(&checkout_root);
@@ -529,8 +529,9 @@ pub(crate) fn standalone_work_target(
         format!(
             "\n\n⚠️ WORK TARGET DEFAULTED: no [factory] epic_base_branch is configured. \
              This task is explicitly targeted to detected trunk `{branch}`. \
-             If your integration branch differs, set [factory] epic_base_branch in \
-             .cas/config.toml or pass target_branch when creating the task."
+             If your integration branch differs, run \
+             `cas config set factory.epic_base_branch <branch>` or pass target_branch when \
+             creating the task."
         )
     });
     Ok((target, warning))

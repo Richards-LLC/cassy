@@ -61,12 +61,24 @@ impl Config {
             "tasks.block_exit_on_open" => Some(tasks.block_exit_on_open.to_string()),
             "qa.user_facing_labels" => Some(qa.user_facing_labels.join(",")),
             "qa.telemetry_sweep" => Some(qa.telemetry_sweep.unwrap_or_default()),
+            "factory.epic_base_branch" => Some(
+                self.factory
+                    .as_ref()
+                    .and_then(|factory| factory.epic_base_branch.clone())
+                    .unwrap_or_default(),
+            ),
             "qa.independent_pass" => Some(qa.independent_pass.to_string()),
             "qa.evidence_gate" => Some(qa.evidence_gate.to_string()),
             "qa.terminal_render_paths" => Some(qa.terminal_render_paths.join(",")),
             "qa.user_facing_paths" => Some(qa.user_facing_paths.join(",")),
             "qa.pass_timeout_mins" => Some(qa.pass_timeout_mins.to_string()),
             "qa.max_rounds" => Some(qa.max_rounds.to_string()),
+            "qa.github_status" => Some(qa.github_status.to_string()),
+            "qa.preflight_gh_token" => Some(qa.preflight_gh_token.to_string()),
+            "qa.deployed_origins" => Some(qa.deployed_origins.join(",")),
+            "qa.preflight_env_files" => Some(qa.preflight_env_files.join(",")),
+            "qa.preflight_hook" => Some(qa.preflight_hook.clone().unwrap_or_default()),
+            "qa.preflight_hook_timeout_secs" => Some(qa.preflight_hook_timeout_secs.to_string()),
             // Dev section
             "dev.dev_mode" => Some(dev.dev_mode.to_string()),
             "dev.trace_commands" => Some(dev.trace_commands.to_string()),

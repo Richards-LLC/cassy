@@ -85,7 +85,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** `/commander/` with two paired machines, each running one supervisor
 - **Goal:** I can tell which conversation has something new and get to it quickly
-- **Touches:** `hub-web/src/conversation-list.ts`, `hub-web/src/palette-commands.ts`, `hub-web/src/worker-visibility.ts`, `hub-web/src/dormant-visibility.ts`, `hub-web/src/session-selection.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/attention*.ts`, `hub-web/src/time.ts`
+- **Touches:** `hub-web/src/conversation-list.ts`, `hub-web/src/palette-commands.ts`, `hub-web/src/worker-visibility.ts`, `hub-web/src/dormant-visibility.ts`, `hub-web/src/session-selection.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/attention*.ts`, `hub-web/src/time.ts`, `hub-web/src/session-connection.ts`, `hub-web/src/connection-state-view.ts`
 - **Suite:** `hub-web/e2e/journeys/find-conversation.journey.ts`
 - **Gaps:** none
 
@@ -100,6 +100,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 5. Jump to a supervisor by name — the command palette ("Type a command or conversation"; grouped Conversations / This conversation / Machines / Appearance / Advanced, Advanced collapsed; "Dismiss all info" only when something is outstanding) filters by supervisor or project and opens the conversation; each "Jump to" row leads with the project, the codename first in its description (right of the title on a desktop, on the line beneath on a phone); the control command names what the device can do ("Let other devices type here"), the control term as its hint; a filter that matches nothing says "No commands or conversations match"
 6. Jump to a supervisor from the keyboard — Ctrl+K twice opens the palette, type the name, Enter: the palette closes, the conversation is open and the reply box has focus
    - Open Paired machines from the palette, then a conversation — the palette gives way to Paired machines and stays closed afterwards; it never comes back over the next conversation opened
+7. Open a conversation over a slow relay: one calm line, and the footer stays Connected — "Opening the conversation…", the attempt and relay stage only behind a closed Details
+   - A first open that misses the 3-second mark retries calmly, and the footer stays Connected — the first retry of a conversation that has never opened still reads "Opening the conversation…" with the retry behind Details; no "Terminal unavailable", no retry timeline, and the footer never drops to "1 connected"; a second failure shows as a real one
 
 **Expected experience**
 
@@ -126,7 +128,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 1. Open the conversation and see the recent turns — the latest exchange is on screen at once
 2. Load earlier turns — "Load earlier" fetches the previous page
 3. Reach the start of the conversation — "No earlier history" appears, with day separators
-4. Open a report the supervisor sent — tapping the file opens the hosted copy in a new tab through a short-lived signed link from the machine; a file that was never uploaded to Cloud says so instead of opening a blank tab; Cloud failing ("wait a minute, then tap it again") and the machine not answering ("check that it's on and connected") each say what to do
+4. Open a report the supervisor sent — opening the file shows the hosted copy in a new tab through a short-lived signed link from the machine; every failure is said on the file card itself, never in a toast far from it, and leaves no tab open; a file that was never uploaded to Cloud says so, and opening it again opens no tab at all; Cloud failing ("wait a minute, then open it again") says what to do; a connected machine that sends nothing says it is connected but didn't send the file, never that it is off
 
 **Expected experience**
 
@@ -159,7 +161,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 6. Take control from the message, then retry — the refused message carries the Take control its refusal names (the conversation header has none); once control is taken it drops Take control and says Retry will send it, its actions are 44px targets on a phone, and Retry then sends it
 7. Edit and resend retires the refused message — it collapses to "Not sent · replaced by your edit" with no Retry
 8. A late receipt after the supervisor talks on never offers Retry — the supervisor's turn crosses the send and the receipt comes 3.4 s later; the message goes from "Sending…" to delivered without ever showing "Not confirmed" or Retry, and it is sent once
-9. A message the hub never confirms offers Retry — with no receipt, 5 seconds after the supervisor talks on (or 15 seconds after the send) "Sending…" gives way to "Not confirmed", why, and Retry; the retry goes out and is delivered
+9. A message Cassy can't confirm offers Retry — with no receipt, 5 seconds after the supervisor talks on (or 15 seconds after the send) "Sending…" gives way to "Not confirmed · Cassy couldn't confirm delivery to <supervisor>. Retry sends it again."; the retry goes out and is delivered
+10. Not confirmed settles once the supervisor replies after it — a supervisor turn that arrives after the give-up turns the card into "Not confirmed · The supervisor has replied since; send it again only if it missed this." with no Retry, so nothing invites a duplicate send; a quiet underlined "Send again" resends it without retyping
 
 **Expected experience**
 
@@ -168,7 +171,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - The composer status is in plain words, never protocol vocabulary.
 - A refusal says why in plain words, names the next step, and offers Edit and Retry right on the message; a control refusal also offers Take control there, so the step it names is always on screen.
 - Once its edit is sent, a refused message cannot be retried.
-- A message never says "Sending…" forever: without a receipt it turns "Not confirmed" and offers Retry, without claiming it was not sent.
+- A message never says "Sending…" forever: without a receipt it turns "Not confirmed" and offers Retry, without claiming it was not sent, and it names Cassy, never "the hub".
+- Once the supervisor has replied since, a "Not confirmed" message stops offering Retry; only a quiet "Send again" remains.
 - A receipt that is only a few seconds late never flashes "Not confirmed", so there is no Retry that could send the message twice.
 - A screen reader hears who spoke and when for each message group ("You, 12:45"), the status as "Live", and meets no dead attach control.
 

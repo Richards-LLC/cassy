@@ -23,6 +23,7 @@ journey uses `journeys/<journey-id>/`, each with the same shape and its own
 | `cells` | `M01.png`, `M02.png`, … one per run cell, named by ledger id | always |
 | `polish_screenshots` | `visual-qa/<slug>-{light,dark}-{desktop,phone}.png` | always |
 | `visual_qa`, `visual_qa_json`, `visual_qa_stdout` | `visual-qa/visual-qa.md`, `visual-qa/visual-qa.json`, `visual-qa.stdout` | always |
+| `visual_qa_baseline_json` | `visual-qa-baseline/visual-qa.json` (the same strict run against a local build of the base commit) | `visual_qa_status: "scoped"` |
 | `critique` | `critique.md` (the cas-ui-craft rubric table) | always |
 | `a11y` | `a11y-forced-colors.png`, `a11y-reduced-motion.png`, `a11y-contrast-more.png` | visual change |
 
@@ -50,8 +51,35 @@ journey evaluation scores polish for it.
   must not record `"strict": false`. A run against a production or other
   remote origin never counts, because it checks what is deployed there,
   not this commit. With no run, write `unavailable`; never `pass`.
+  `scoped` is for a page that already had findings before this delivery. It
+  needs `files.visual_qa_baseline_json`: the same strict script run against a
+  local build of the base commit (`git merge-base <target> <head>`) over the
+  same pages. Close accepts it when every finding in the delivered build's
+  report also appears in the base report, compared by type, element, page,
+  scheme and viewport, so the delivery added none. The delivered run must
+  still be fresh, strict and local. List the base build's findings as
+  follow-ups in the ledger; they are not this delivery's defects.
 - `files`: the keys above, with paths relative to the bundle
 - `critique_score`: `distinctiveness`, `fit`, `hierarchy`, `craft`, and `accessibility`, each 0–5, matching `critique.md`
+- `deployed` (optional, cas-a6ab): use it only when a local build cannot
+  authenticate, for example when the staging backend's CORS rejects
+  localhost on its session endpoint. The run then goes against the deployed
+  origin, with these fields:
+  - `origin`: the deployment, which must be listed in the project's
+    `qa.deployed_origins`;
+  - `reason`: why local auth is impossible, in a full sentence;
+  - `deployed_sha`: the full commit the deployment serves. It must be the
+    delivered head or a descendant of it;
+  - `deployment_proof`: a bundle file recording what the deployment reports
+    about itself (its version endpoint or deployment metadata). It must name
+    `deployed_sha`.
+
+  The visual-QA report's URLs may then be on that origin. The bundle must
+  carry no credential: no storage state, cookie, session JWT, bearer token
+  or auth header, including the headers Playwright records in `trace.zip`'s
+  network log. Close refuses such a bundle and names the file, never the
+  value. Log in through a setup project that is not traced, and redact
+  header values before listing the trace.
 
 ## Config
 
@@ -155,16 +183,17 @@ npx playwright trace close && rmdir .playwright-cli
 npm exec --yes --package=playwright -- node <skills-dir>/cas-ui-craft/scripts/visual-qa.mjs --strict --artifact-dir "$QA/visual-qa" "$BASE_URL/" > "$QA/visual-qa.stdout" 2>&1
 ```
 
-For polish evidence, also score the surface with the cas-ui-craft
-`references/critique-rubric.md` into `critique.md`. Then write `bundle.json`.
+For polish evidence, also score what the delivery changed with the cas-ui-craft
+`references/critique-rubric.md` into `critique.md`, not the page's older
+backlog. Then write `bundle.json`.
 The floor is distinctiveness, fit, and hierarchy each ≥ 4, and no dimension at
 0. A score below the floor is a defect task, not a note. `<skills-dir>` is the
 harness skill directory (`.claude/skills`, `.codex/skills` or `.grok/skills`);
 the script ships with the cas-ui-craft skill. Only when it is missing (an
 install that predates it), take the four renders at 1280×800 and 390×800 in light and dark with
 `page.screenshot`, set `visual_qa_status: "unavailable"` and say so in the
-ledger's Honesty section. The close gate accepts only `"pass"` without a
-supervisor override, so ask for one with a `blocker=true` message before
+ledger's Honesty section. The close gate accepts only `"pass"` or `"scoped"`
+without a supervisor override, so ask for one with a `blocker=true` message before
 closing. Point `BASE_URL` at your own local serve of
 the delivered commit's build, never the deployed site.
 

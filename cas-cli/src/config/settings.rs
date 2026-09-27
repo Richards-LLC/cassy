@@ -315,6 +315,45 @@ pub struct QaConfig {
     /// instead of opening another round.
     #[serde(default = "default_max_rounds")]
     pub max_rounds: u32,
+
+    /// cas-2ee2: publish the `cassy/independent-qa` commit status on each
+    /// delivered head (pending while a round is open, success once it passes
+    /// or is waived, failure on rejection). Require that context in the
+    /// repository's branch protection so a GitHub-side merge is held to the
+    /// same verdict. Needs `gh` with commit-status write access.
+    #[serde(default)]
+    pub github_status: bool,
+
+    /// cas-d5c1: before an independent QA reviewer claims a round, require a
+    /// GitHub read token (`GH_TOKEN`/`GITHUB_TOKEN` or an authenticated `gh`).
+    #[serde(default)]
+    pub preflight_gh_token: bool,
+
+    /// cas-d5c1: environment variable names that must point at a readable
+    /// file in the reviewer's environment (the path only; never read).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preflight_env_files: Vec<String>,
+
+    /// cas-d5c1: project-relative command that checks, and may replenish,
+    /// test-account capacity before a reviewer claims a round. Exit 0 is
+    /// ready; any other exit is a blocker whose first output line is shown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preflight_hook: Option<String>,
+
+    /// cas-a6ab: remote deployments (`https://staging.example.com`) whose
+    /// authenticated runs may stand in for a local build in a QA evidence
+    /// bundle when local auth is impossible. The bundle must still record
+    /// the reason and prove the deployment served the delivered commit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deployed_origins: Vec<String>,
+
+    /// cas-d5c1: seconds the preflight hook may run.
+    #[serde(default = "default_preflight_hook_timeout_secs")]
+    pub preflight_hook_timeout_secs: u32,
+}
+
+pub fn default_preflight_hook_timeout_secs() -> u32 {
+    120
 }
 
 pub fn default_independent_pass() -> bool {
@@ -363,7 +402,9 @@ pub fn default_max_rounds() -> u32 {
 }
 
 pub fn default_user_facing_labels() -> Vec<String> {
-    ["ui", "hub", "cli-ux", "commander", "frontend"]
+    // cas-74284: `hub-web` is the label QA follow-ups for the Commander web
+    // client carry; without it they were created with no demo_statement.
+    ["ui", "hub", "hub-web", "cli-ux", "commander", "frontend"]
         .into_iter()
         .map(ToOwned::to_owned)
         .collect()
@@ -380,6 +421,12 @@ impl Default for QaConfig {
             user_facing_paths: default_user_facing_paths(),
             pass_timeout_mins: default_pass_timeout_mins(),
             max_rounds: default_max_rounds(),
+            github_status: false,
+            preflight_gh_token: false,
+            preflight_env_files: Vec::new(),
+            preflight_hook: None,
+            deployed_origins: Vec::new(),
+            preflight_hook_timeout_secs: default_preflight_hook_timeout_secs(),
         }
     }
 }

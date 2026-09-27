@@ -1120,7 +1120,9 @@ fn install_parity_check(reports: &[(String, crate::builtins::InstallParity)]) ->
 
 fn host_hub_service_check() -> Check {
     match crate::cli::hub_service::doctor_warning() {
-        Ok(Some(warning)) => Check::new("hub service", CheckStatus::Warning, warning),
+        // cas-621ec: an inactive installed service means nothing restarts the
+        // hub after a crash or reboot; the message carries the fix command.
+        Ok(Some(finding)) => Check::new("hub service", CheckStatus::Error, finding),
         Ok(None) => Check::new(
             "hub service",
             CheckStatus::Ok,

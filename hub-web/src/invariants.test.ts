@@ -867,7 +867,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(css).toContain(".session-identity {");
     expect(css).toContain(".session-back {");
     expect(css).toContain('.session-picker-entry[aria-current="true"]');
-    expect(css).toContain(".session-back { width: var(--button-height); }");
+    expect(css).toContain(".session-back { min-width: var(--button-height); }");
+    // Journey F2: the back control says "Back" on screen, inside its accessible name.
+    expect(main).toContain('<span class="session-back-label" aria-hidden="true">Back</span>');
   });
 
   it("keeps palette and picker states readable and distinct in every colour mode (cas-78c81)", async () => {
@@ -1232,7 +1234,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   it("drives pane recovery from the selected session attach lifecycle", async () => {
     const source = await readSource("main.ts");
     expect(source).toContain("onAttachState: (session, state) =>");
-    expect(source).toContain("const key = sessionKey(machine.id, session);\n      attachStates.set(key, state);");
+    expect(source).toContain("const key = sessionKey(machine.id, session);\n      const attachWasLive = attachStates.get(key)?.phase === \"live\";\n      attachStates.set(key, state);");
     expect(source).toContain("connection.attachSnapshot(selectedSession) ?? connection.snapshot()");
     expect(source).toContain("connection.attachSnapshot(session) ?? connection.snapshot()");
     expect(source).toContain("const connectionSnapshot = terminalAttachSnapshot ?? machineConnectionSnapshot");

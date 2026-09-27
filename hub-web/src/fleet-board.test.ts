@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { FleetBoardRenderer, fleetBoardSignature, type FleetBoardModel } from "./fleet-board";
+import { FleetBoardRenderer, fleetBoardSignature, fleetProvenance, type FleetBoardModel } from "./fleet-board";
 import type { SessionPickerEntry } from "./session-selection";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -232,5 +232,46 @@ describe("fleet verdict and state track", () => {
     expect(board.querySelector(".fleet-session")).toBe(button);
     expect(document.activeElement).toBe(button);
     expect(board.querySelector(".fleet-provenance")?.textContent).not.toContain("catalog not reported");
+  });
+});
+
+describe("the Fleet overview reads as a product, not a debug page (journey F2)", () => {
+  it("shades the Working column only when a session is in it, and says so only then", () => {
+    const idle = freshBoard();
+    new FleetBoardRenderer().render(idle, model({ sessions: [entry({ phase: "idle" })] }), { open: vi.fn() });
+    expect(idle.querySelector("table.fleet-plot")?.classList.contains("has-working")).toBe(false);
+    expect(idle.querySelector(".fleet-figure-caption")?.textContent).toBe("One dot per session. Ringed: needs you.");
+    const busy = freshBoard();
+    new FleetBoardRenderer().render(busy, model({ sessions: [entry({ phase: "building" })] }), { open: vi.fn() });
+    expect(busy.querySelector("table.fleet-plot")?.classList.contains("has-working")).toBe(true);
+    expect(busy.querySelector(".fleet-figure-caption")?.textContent).toBe("One dot per session. Ringed: needs you. Shaded: working.");
+    expect(css).toContain(".fleet-plot.has-working th:nth-child(3), .fleet-plot.has-working .track-working {");
+    expect(css).not.toMatch(/^\.fleet-plot th:nth-child\(3\), \.track-working \{/m);
+  });
+
+  it("replaces the run-on provenance paragraph with one short line, details on hover", () => {
+    const updated = model({ machines: [
+      { id: "m-studio", label: "Studio Mac", state: "live", phase: "Live", selected: true, hubVersion: "3.31.0", catalogUpdatedAt: "2026-09-07T12:59:00Z" },
+      { id: "m-attic", label: "Attic Linux", state: "backoff", phase: "Reconnecting", selected: false, catalogUpdatedAt: "2026-09-07T13:04:00Z" },
+    ] });
+    const line = fleetProvenance(updated);
+    expect(line.text).toMatch(/^Last updated \d{2}:\d{2}$/);
+    expect(line.details.split("\n")).toHaveLength(2);
+    expect(line.details).toContain("Studio Mac · Live · Hub 3.31.0");
+    const board = freshBoard();
+    new FleetBoardRenderer().render(board, updated, { open: vi.fn() });
+    const provenance = board.querySelector<HTMLElement>(".fleet-provenance")!;
+    expect(provenance.textContent).toBe(line.text);
+    expect(provenance.title).toBe(line.details);
+    expect(provenance.textContent).not.toMatch(/ \/ |catalog|Hub /);
+    // The time is said once: the header no longer repeats it.
+    expect(board.querySelector(".fleet-catalog-time")).toBeNull();
+    expect(fleetProvenance(model()).text).toBe("Waiting for the first update");
+    expect(fleetProvenance(model({ machines: [] })).text).toBe("");
+  });
+
+  it("stacks the verdict above the figure when the board is too narrow for the state words", () => {
+    expect(css).toContain(".fleet-board { container: fleet-board / inline-size; }");
+    expect(css).toMatch(/@container fleet-board \(max-width: 60rem\) \{\n  \.fleet-hero \{ grid-template-columns: minmax\(0, 1fr\);/);
   });
 });

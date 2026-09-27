@@ -175,6 +175,37 @@ describe("ConversationView (Pebble thread)", () => {
     expect(view.element.hasAttribute("aria-busy")).toBe(false);
     expect(button.disabled).toBe(false); expect(button.textContent).toBe("Load earlier"); expect(button.querySelector(".dots")).toBeNull();
   });
+  it("keeps the turn on screen in place when Load earlier adds turns above it (journey F7)", () => {
+    const history = new ConversationHistory();
+    const view = new ConversationView(document, history, { supervisor: "sup", hasEarlier: () => true, loadEarlier: () => {} });
+    document.body.replaceChildren(view.element);
+    history.reply(reply(30, "answer", "Is the gate green?"), at(10, 0));
+    history.reply(reply(31, "answer", "Yes, all fourteen targets."), at(10, 1));
+    view.update();
+    // A stand-in layout: every element in the thread, in document order, is 50px tall, stacked from the thread's top edge and moved by scrollTop.
+    const msgs = view.element.querySelector<HTMLElement>(".msgs")!;
+    const rect = (top: number, height: number) => ({ top, bottom: top + height, height, left: 0, right: 100, width: 100, x: 0, y: top, toJSON: () => ({}) }) as DOMRect;
+    const original = Element.prototype.getBoundingClientRect;
+    Element.prototype.getBoundingClientRect = function (this: Element) {
+      if (this === view.element) return rect(0, 200);
+      const index = [...msgs.querySelectorAll("*")].indexOf(this);
+      return index >= 0 ? rect(40 + index * 50 - view.element.scrollTop, 50) : original.call(this);
+    };
+    const bubble = (key: string) => [...msgs.querySelectorAll<HTMLElement>("[data-key]")].find((node) => node.dataset.key === key);
+    try {
+      const key = "reply:30";
+      const before = bubble(key)!.getBoundingClientRect().top;
+      view.element.querySelector<HTMLButtonElement>(".conversation-load-earlier")!.click();
+      // An older page from the same day lands above, from the same sender: its turns join the reader's group.
+      history.reply(reply(10, "answer", "Scheduled for 09:00."), at(9, 0));
+      history.reply(reply(11, "answer", "Three workers."), at(9, 1));
+      view.update();
+      expect(view.element.scrollTop).toBeGreaterThan(0);
+      expect(bubble(key)!.getBoundingClientRect().top).toBe(before);
+    } finally {
+      Element.prototype.getBoundingClientRect = original;
+    }
+  });
   it("falls back to data-kind bubbles for ask and blocker when nothing is registered", () => {
     const history = new ConversationHistory();
     const view = new ConversationView(document, history, "sup"); document.body.replaceChildren(view.element);
@@ -327,7 +358,9 @@ describe("ConversationView (Pebble thread)", () => {
     const label = bubble.querySelector<HTMLElement>(".conversation-unconfirmed")!;
     expect(label.getAttribute("role")).toBe("status");
     expect(label.querySelector("svg.warn")?.getAttribute("aria-hidden")).toBe("true");
-    expect(label.textContent).toBe("Not confirmed · The hub never confirmed this reached sup. Retry sends it again.");
+    expect(label.textContent).toBe("Not confirmed · Cassy couldn't confirm delivery to sup. Retry sends it again.");
+    // Journey F10: the operator's words, not "the hub".
+    expect(label.textContent).not.toMatch(/\bhub\b/i);
     // It may have arrived: no "Not sent", and only Retry (an edit could reach the supervisor twice as easily).
     expect(label.textContent).not.toContain("Not sent");
     const buttons = [...bubble.querySelectorAll<HTMLButtonElement>(".conversation-actions button")];
@@ -338,6 +371,40 @@ describe("ConversationView (Pebble thread)", () => {
     view.update();
     expect(view.element.querySelector(".conversation-unconfirmed")).toBeNull();
     expect(view.element.querySelector(".conversation-delivered")?.textContent).toBe("Delivered");
+  });
+  it("settles a Not confirmed send once the supervisor replies after it: no warning, no Retry, a quiet Send again (journey F10, cas-470e)", () => {
+    const history = new ConversationHistory();
+    const retry = vi.fn();
+    const view = new ConversationView(document, history, { supervisor: "calm-otter-4", retryMessage: retry }); document.body.replaceChildren(view.element);
+    history.submit("x", "calm-otter-4", "Kick off the Mac tests.", at(9, 0));
+    // The turn that crossed the send and made its receipt overdue (cas-1185) does not settle it.
+    history.reply(reply(60, "answer", "Still building."), at(9, 0) + 1_000, undefined, undefined, at(9, 0) + 1_000);
+    history.unconfirmSilent(at(9, 0) + RECEIPT_TIMEOUT_MS);
+    view.update();
+    const bubble = () => view.element.querySelector<HTMLElement>('.turn.you .bub[data-state="unconfirmed"]')!;
+    expect(bubble().dataset.settled).toBeUndefined();
+    expect(bubble().querySelectorAll(".conversation-retry")).toHaveLength(1);
+    // A turn arriving after the give-up does.
+    history.reply(reply(61, "answer", "Tests are running on the Mac."), at(9, 2), undefined, undefined, at(9, 2));
+    view.update();
+    const settled = bubble();
+    expect(settled.dataset.settled).toBe("true");
+    const label = settled.querySelector<HTMLElement>(".conversation-unconfirmed.conversation-settled")!;
+    expect(label.getAttribute("role")).toBe("status");
+    expect(label.textContent).toBe("Not confirmed · The supervisor has replied since; send it again only if it missed this.");
+    expect(label.querySelector("svg.warn")).toBeNull();
+    expect(settled.querySelector(".conversation-retry")).toBeNull();
+    // cas-470e: the copy's "send it again" has its control on the card, a
+    // quiet secondary one, and it resends the same message.
+    const again = settled.querySelectorAll<HTMLButtonElement>(".conversation-send-again");
+    expect(again).toHaveLength(1);
+    expect(again[0].textContent).toBe("Send again");
+    expect(again[0].getAttribute("aria-label")).toBe("Send this message again");
+    again[0].click();
+    expect(retry).toHaveBeenCalledTimes(1);
+    expect(retry.mock.calls[0][0]).toMatchObject({ text: "Kick off the Mac tests.", state: "unconfirmed" });
+    expect(label.textContent).not.toMatch(/\bhub\b/i);
+    expect(history.repliedSince(history.events.find((event) => event.kind === "send")!.value as never)).toBe(true);
   });
   it("names each message group's speaker and time for assistive tech (cas-17e3)", () => {
     const history = new ConversationHistory();
@@ -351,7 +418,7 @@ describe("ConversationView (Pebble thread)", () => {
     // The visible time is not read twice: the group label carries it.
     for (const time of view.element.querySelectorAll(".msgs time")) expect(time.getAttribute("aria-hidden")).toBe("true");
   });
-  it("says Delivered on the latest delivered send until the reply lands (F5)", () => {
+  it("says Delivered on each delivered send until a reply linked to it lands (F5, journey F4)", () => {
     const history = new ConversationHistory();
     const view = new ConversationView(document, history, { supervisor: "sup" }); document.body.replaceChildren(view.element);
     history.submit("a", "sup", "First", at(9, 0)); view.update();
@@ -361,17 +428,22 @@ describe("ConversationView (Pebble thread)", () => {
     expect(delivered.textContent).toBe("Delivered");
     expect(delivered.getAttribute("role")).toBe("status");
     expect(delivered.querySelector("svg.tick")?.getAttribute("aria-hidden")).toBe("true");
-    // A second send still in flight leaves the first as the latest delivered one.
+    // A second send still in flight: the first keeps its tick.
     history.submit("b", "sup", "Second", at(9, 1)); view.update();
     expect(view.element.querySelectorAll(".conversation-delivered")).toHaveLength(1);
     expect(view.element.querySelector('.bub[data-state="sending"] .conversation-delivery')?.textContent).toBe("Sending…");
-    // Once it is delivered too, only the latest says so.
+    // An unrelated supervisor turn crosses the second send (journey F4): the first keeps Delivered…
+    history.reply({ notification_id: 12, reply_to: null, message: "Gate run 2 of 3 is going.", summary: "", device_id: "d" }, at(9, 2)); view.update();
+    expect([...view.element.querySelectorAll(".conversation-delivered")].map((node) => node.closest(".bub")?.textContent)).toEqual(["FirstDelivered"]);
+    // …and the second, acknowledged after that turn, ends Delivered too.
     history.acknowledge({ client_ref: "b", notification_id: 11, target: "sup", stamped: true }); view.update();
+    expect([...view.element.querySelectorAll(".conversation-delivered")].map((node) => node.closest(".bub")?.textContent)).toEqual(["FirstDelivered", "SecondDelivered"]);
+    // A reply linked to a send is its evidence: that send's tick steps aside.
+    history.reply({ notification_id: 13, reply_to: 10, message: "Done.", summary: "", device_id: "d" }, at(9, 3)); view.update();
     expect([...view.element.querySelectorAll(".conversation-delivered")].map((node) => node.closest(".bub")?.textContent)).toEqual(["SecondDelivered"]);
-    // Any supervisor turn after it is the evidence now; Delivered steps aside.
-    history.reply({ notification_id: 12, reply_to: null, message: "On it.", summary: "", device_id: "d" }, at(9, 2)); view.update();
-    expect(view.element.querySelector(".conversation-delivered")).toBeNull();
-    expect(history.delivered()).toBeUndefined();
+    // Hydrated history carries no tick.
+    const hydrated = history.events.find((event) => event.kind === "send" && event.value.id === "a")!.value as never as { sentAt?: number; state: string };
+    expect(history.showsDelivered({ ...hydrated, sentAt: undefined, state: "acknowledged" } as never)).toBe(false);
   });
   it("retires a refused send once its edited version is sent: collapsed, no Retry (F6)", () => {
     const history = new ConversationHistory();

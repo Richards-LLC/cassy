@@ -189,9 +189,14 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
     expect(flashed, "frames that showed Not confirmed before the late receipt").toBe(0);
     await expect(page.getByRole("button", { name: "Retry sending" })).toHaveCount(0);
     await expect(page.getByRole("log").getByText("Run the gate once more.")).toHaveCount(1);
+    // Journey F4: the late-receipt message ends visibly delivered, and the
+    // unrelated "Gate run 2 of 3" turn did not take the tick off the earlier
+    // "Ship it after the gate passes." either.
+    await expect(crossed.locator(".conversation-delivered")).toHaveText("Delivered");
+    await expect(page.locator('.conversation-turn[data-state="acknowledged"]').filter({ hasText: "Ship it after the gate passes." }).locator(".conversation-delivered")).toHaveText("Delivered");
   });
 
-  await journey.stage("A message the hub never confirms offers Retry", async () => {
+  await journey.stage("A message Cassy can't confirm offers Retry", async () => {
     await composer.fill("Is the gate green yet?");
     const unreceipted = hub.nextSend();
     await send.click();
@@ -200,16 +205,47 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
     hub.supervisorSays(PELICAN, "Still running the release gate.");
     const bubble = page.locator('.conversation-turn[data-state="unconfirmed"]');
     // It gives up 5 s after that turn arrived (cas-1185), not at once.
-    await expect(bubble.getByRole("status")).toHaveText(`Not confirmed · The hub never confirmed this reached ${PELICAN}. Retry sends it again.`, { timeout: 10_000 });
+    await expect(bubble.getByRole("status")).toHaveText(`Not confirmed · Cassy couldn't confirm delivery to ${PELICAN}. Retry sends it again.`, { timeout: 10_000 });
     await expect(page.locator('.conversation-turn[data-state="sending"]')).toHaveCount(0);
     await expect(page.getByText(`Sending to ${PELICAN}…`)).toBeHidden();
     const retried = hub.nextSend();
     await bubble.getByRole("button", { name: "Retry sending" }).click();
     expect((await retried).text).toBe("Is the gate green yet?");
     hub.deliverLatest(PELICAN);
-    await expect(page.locator(".conversation-delivered")).toHaveText("Delivered");
+    await expect(page.locator(".conversation-turn").filter({ hasText: "Is the gate green yet?" }).locator(".conversation-delivered")).toHaveText("Delivered");
     await expect(page.locator('.conversation-turn[data-state="unconfirmed"]')).toHaveCount(0);
     await expect(page.getByRole("log").getByText("Is the gate green yet?")).toHaveCount(1);
+  });
+
+  await journey.stage("Not confirmed settles once the supervisor replies after it", async () => {
+    // Journey F10: a later supervisor turn means the send most likely
+    // arrived, so the card stops inviting a duplicate send.
+    await composer.fill("Did the Mac tests start?");
+    const unreceipted = hub.nextSend();
+    await send.click();
+    expect((await unreceipted).text).toBe("Did the Mac tests start?");
+    hub.supervisorSays(PELICAN, "Gate run 3 of 3 is going.");
+    const bubble = page.locator('.conversation-turn[data-state="unconfirmed"]').filter({ hasText: "Did the Mac tests start?" });
+    await expect(bubble.getByRole("button", { name: "Retry sending" })).toBeVisible({ timeout: 10_000 });
+    hub.supervisorSays(PELICAN, "Tests are running on the Mac.");
+    await expect(bubble.getByRole("status")).toHaveText("Not confirmed · The supervisor has replied since; send it again only if it missed this.");
+    await expect(bubble).toHaveAttribute("data-settled", "true");
+    await expect(bubble.getByRole("button", { name: "Retry sending" })).toHaveCount(0);
+    await expect(page.getByRole("log").locator(".conversation-unconfirmed")).not.toContainText(/\bhub\b/i);
+    // cas-470e: the copy says "send it again", so the card carries a quiet
+    // text-weight Send again (no pill, no fill), and it resends the message
+    // without the operator retyping it.
+    const again = bubble.getByRole("button", { name: "Send this message again" });
+    await expect(again).toHaveText("Send again");
+    const look = await again.evaluate((button) => { const style = getComputedStyle(button); return { border: style.borderTopWidth, background: style.backgroundColor, line: style.textDecorationLine }; });
+    expect(look).toEqual({ border: "0px", background: "rgba(0, 0, 0, 0)", line: "underline" });
+    const resent = hub.nextSend();
+    await again.click();
+    expect((await resent).text).toBe("Did the Mac tests start?");
+    hub.deliverLatest(PELICAN);
+    await expect(page.locator(".conversation-turn").filter({ hasText: "Did the Mac tests start?" }).locator(".conversation-delivered")).toHaveText("Delivered");
+    await expect(page.locator('.conversation-turn[data-state="unconfirmed"]')).toHaveCount(0);
+    await expect(page.getByRole("log").getByText("Did the Mac tests start?")).toHaveCount(1);
   });
 
   await journey.stage("A long supervisor name leaves the message box usable", async () => {

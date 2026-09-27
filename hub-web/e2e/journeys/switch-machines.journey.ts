@@ -417,15 +417,19 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
         expect(fit, `header at ${width}px with "${label}"`).toEqual({ overflow: false, clipped: [] });
       }
     }
-    // The same with the machine drawer open, which leaves the header 185–330px
-    // of an 849–990px window: the header sizes to its own column, so the
-    // control and Interrupt show icons under their full accessible names, and
-    // the project name stays whole (cas-3400 QA round 2 F01).
+    // The same with the machine drawer open, which leaves the header 185–620px
+    // of an 849–1440px window: the header sizes to its own column. Every
+    // control stays on screen and clickable, inside the main column and not
+    // under the context panel (cas-ac390); in the narrowest columns ⌘K, the
+    // control and Interrupt become icons under their full accessible names,
+    // Back keeps its ‹, and the title is what gives way (cas-3400 QA rounds
+    // 2 and 3).
     await page.setViewportSize({ width: 1280, height: 720 });
     await page.locator("#machine-drawer-toggle").click();
     await expect(page.locator(".machine-navigation.drawer-open")).toHaveCount(1);
-    for (const width of [849, 900, 990]) {
+    for (const width of [849, 900, 990, 1024, 1280, 1440]) {
       await page.setViewportSize({ width, height: 720 });
+      await expect(page.getByRole("button", { name: /^Open command palette \((Ctrl K|⌘K)\)$/ })).toBeVisible();
       await expect(page.getByRole("button", { name: /^(Release control|Take control|Force takeover)$/ })).toBeVisible();
       await expect(page.getByRole("button", { name: "Interrupt selected pane", exact: true })).toBeVisible();
       const fit = await header.evaluate((element) => {
@@ -433,13 +437,21 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
         const style = getComputedStyle(element);
         const left = box.left + parseFloat(style.paddingLeft) - 0.5;
         const right = box.right - parseFloat(style.paddingRight) + 0.5;
-        const clipped = [...element.querySelectorAll<HTMLElement>(".actions button")]
-          .filter((button) => { const b = button.getBoundingClientRect(); return b.width > 0 && (b.right > right || b.left < left || b.right > innerWidth); })
+        const controls = [...element.querySelectorAll<HTMLElement>("#session-back, .actions button")];
+        const unreachable = controls
+          .filter((button) => {
+            const b = button.getBoundingClientRect();
+            if (b.width === 0) return true;
+            const hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+            return b.right > right || b.left < left || b.right > innerWidth || !hit || !button.contains(hit);
+          })
           .map((button) => button.getAttribute("aria-label"));
-        const name = element.querySelector<HTMLElement>(".session-picker-name")!;
-        return { overflow: element.scrollWidth > element.clientWidth + 1, clipped, projectWhole: name.scrollWidth <= name.clientWidth };
+        return { overflow: element.scrollWidth > element.clientWidth + 1, unreachable, controls: controls.length };
       });
-      expect(fit, `drawer open at ${width}px`).toEqual({ overflow: false, clipped: [], projectWhole: true });
+      expect(fit.unreachable, `every header control is on screen and clickable with the drawer open at ${width}px`).toEqual([]);
+      expect(fit.overflow, `header overflow at ${width}px`).toBe(false);
+      expect(fit.controls, "palette, control and Interrupt at least").toBeGreaterThanOrEqual(3);
+      if (await page.locator("#session-back").count()) await expect(page.locator("#session-back")).toBeVisible();
     }
     await page.setViewportSize({ width: 1280, height: 720 });
     await page.locator("#machine-drawer-close").click();
@@ -513,9 +525,42 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     // The summary and the refresh time start with their own words, not a
     // separator drawn before them (cas-e503): "2 machines · 2 sessions",
     // "16:56". The " · " stays only between the summary's items.
-    for (const selector of [".fleet-board-summary", ".fleet-catalog-time"]) {
+    for (const selector of [".fleet-board-summary", ".fleet-provenance"]) {
       expect(await board.locator(selector).evaluate((element) => getComputedStyle(element, "::before").content), selector).toBe("none");
     }
+    // Journey F2: the Fleet overview reads as a product page, not a debug one.
+    // Column headers are words at desktop width, not a numbered key.
+    const plot = board.locator("table.fleet-plot");
+    for (const label of ["Needs you", "Working", "Idle", "Stale", "Unreachable"]) {
+      await expect(plot.locator("thead .fleet-track-label").filter({ hasText: new RegExp(`^${label}$`) }), label).toBeVisible();
+    }
+    await expect(plot.locator("thead .fleet-track-key")).toHaveCount(5);
+    for (const key of await plot.locator("thead .fleet-track-key").all()) await expect(key).toBeHidden();
+    // No session is working, so the Working column is not shaded.
+    expect(await plot.locator("thead th").nth(2).evaluate((element) => getComputedStyle(element).backgroundColor), "Working header unshaded").toBe("rgba(0, 0, 0, 0)");
+    await expect(board.locator(".fleet-figure-caption")).not.toContainText("Shaded");
+    // One short line says when it was refreshed; the details are its hover title.
+    await expect(board.locator(".fleet-provenance")).toHaveText(/^Last updated \d{2}:\d{2}$/);
+    await expect(board.locator(".fleet-provenance")).toHaveAttribute("title", /Alpha · Linux · Live · Hub /);
+    // Remove names the machine; the back control says Back on screen.
+    await expect(page.locator("#remove-machine")).toHaveText("Remove Alpha · Linux from this browser");
+    await expect(page.locator("#session-back")).toBeVisible();
+    await expect(page.locator("#session-back .session-back-label")).toHaveText("Back");
+    await expect(page.locator("#session-back")).toHaveAccessibleName(/^Back to /);
+    // cas-ac390 QA F01: in a narrow column (900px with the drawer open) Back
+    // yields to its glyph instead of running under ⌘K; its name is unchanged.
+    const viewport = page.viewportSize()!;
+    await page.setViewportSize({ width: 900, height: 720 });
+    await expect(page.locator(".shell.drawer-open")).toHaveCount(1);
+    await expect(page.locator("#session-back .session-back-label")).toBeHidden();
+    await expect(page.locator("#session-back")).toHaveAccessibleName(/^Back to /);
+    // Back and ⌘K both stay (cas-3400 QA round 3): neither is hidden to make room.
+    await expect(page.locator("#session-back")).toBeVisible();
+    await expect(page.locator("#command-palette-toggle")).toBeVisible();
+    const [back, paletteKey] = await Promise.all([page.locator("#session-back").boundingBox(), page.locator("#command-palette-toggle").boundingBox()]);
+    expect(back!.x + back!.width <= paletteKey!.x || paletteKey!.x + paletteKey!.width <= back!.x, "Back and ⌘K do not overlap at 900 with the drawer open").toBe(true);
+    await page.setViewportSize(viewport);
+    await expect(page.locator("#session-back .session-back-label")).toBeVisible();
     // With nothing open, the title says so: the fleet, then the switch.
     await expect(page.getByRole("heading", { level: 1, name: `Fleet overview — switch session (${pickerRows} available)`, exact: true })).toBeVisible();
   });

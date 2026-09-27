@@ -1,0 +1,36 @@
+{
+  "name": "start",
+  "url": "journey-start.html",
+  "timeoutMs": 3000,
+  "states": [
+    {
+      "name": "loading",
+      "routes": [{ "url": "https://visual-qa.invalid/api/**", "hold": true }],
+      "steps": [
+        { "fill": "#email", "value": "ada@example.com" },
+        { "click": "#submit" },
+        { "expect": "#status", "text": "Starting your session" }
+      ]
+    },
+    {
+      "name": "submit-error",
+      "routes": [{ "url": "https://visual-qa.invalid/api/**", "status": 500, "json": { "error": "internal" } }],
+      "steps": [
+        { "fill": "#email", "value": "ada@example.com" },
+        { "click": "#submit" },
+        { "waitFor": "#error" },
+        { "expect": "#email", "focused": true }
+      ]
+    },
+    {
+      "name": "offline",
+      "offline": true,
+      "steps": [
+        { "fill": "#email", "value": "ada@example.com" },
+        { "press": "Enter", "on": "#email" },
+        { "waitFor": "#error" },
+        { "expect": "#error", "text": "offline" }
+      ]
+    }
+  ]
+}

@@ -455,6 +455,13 @@ pre { font-family: var(--font-mono); }
   color: var(--text-hi);
 }
 .fleet-hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: var(--space-6); align-items: start; }
+/* Journey F2: side by side, a board narrower than this leaves the figure too
+   little room for its state words; the verdict then sits above it instead. */
+.fleet-board { container: fleet-board / inline-size; }
+@container fleet-board (max-width: 60rem) {
+  .fleet-hero { grid-template-columns: minmax(0, 1fr); gap: var(--space-4); }
+  .fleet-verdict { max-width: none; }
+}
 .fleet-board-header { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2) var(--space-3); }
 .fleet-eyebrow { margin: 0; color: var(--text-mid); font: var(--weight-semibold) var(--fs-xs)/1.33 var(--font-mono); letter-spacing: var(--tracking-label); text-transform: uppercase; }
 .fleet-catalog-time { color: var(--text-mid); font: var(--fs-xs)/1.33 var(--font-mono); }
@@ -475,7 +482,7 @@ pre { font-family: var(--font-mono); }
 .fleet-track-cell::before { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: var(--line-width); background: var(--line-subtle); }
 .fleet-plot-mark { position: relative; display: inline-flex; align-items: center; gap: var(--space-1); vertical-align: middle; white-space: nowrap; }
 .track-working .fleet-plot-mark { display: flex; padding: 0 var(--space-1); }
-.fleet-plot th:nth-child(3), .track-working { background: var(--bg-active); color: var(--text-hi); }
+.fleet-plot.has-working th:nth-child(3), .fleet-plot.has-working .track-working { background: var(--bg-active); color: var(--text-hi); }
 .fleet-dot { position: relative; display: inline-block; width: var(--space-2); height: var(--space-2); background: var(--text-mid); border-radius: var(--radius-pill); vertical-align: middle; }
 .needs-you .fleet-dot { background: var(--state-crit); outline: var(--rule-verdict) solid var(--color-verdict); outline-offset: var(--line-width); }
 .unreachable .fleet-dot { background: var(--state-warn); }
@@ -491,7 +498,7 @@ pre { font-family: var(--font-mono); }
   .fleet-track-legend > span { white-space: nowrap; }
 }
 .fleet-figure-caption { margin-top: var(--space-3); color: var(--text-mid); font: var(--fs-meta)/1.38 var(--font-mono); }
-.fleet-provenance { margin: 0; padding-top: var(--space-3); border-top: var(--rule-hero) solid var(--color-verdict); color: var(--text-mid); font: var(--fs-meta)/1.38 var(--font-mono); overflow-wrap: anywhere; }
+.fleet-provenance { margin: 0; padding-top: var(--space-3); border-top: var(--rule-hero) solid var(--color-verdict); color: var(--text-mid); font: var(--fs-meta)/1.38 var(--font-mono); overflow-wrap: anywhere; cursor: default; }
 .fleet-provenance:empty { display: none; }
 .fleet-evidence { display: grid; gap: var(--space-4); }
 .fleet-machine { display: grid; gap: var(--space-2); min-width: 0; }
@@ -602,14 +609,28 @@ main {
   gap: var(--space-1);
 }
 
+.session-back-label { font-size: var(--fs-meta); }
+
+/* cas-ac390 QA F01/F02: "Back" yields when the Terminal-view column has no
+   room for it (a 900px window with the drawer open, a phone): the glyph stays
+   and the accessible name is still "Back to …". Scoped to the back control;
+   the column is only the measuring container. */
+.shell > main { container: shell-main / inline-size; }
+@container shell-main (max-width: 36rem) {
+  .session-back-label { display: none; }
+  .session-back { padding: 0; }
+}
+
 .session-back {
   flex: 0 0 auto;
   display: inline-flex;
-  width: var(--space-8);
+  min-width: var(--space-8);
   min-height: var(--space-8);
   align-items: center;
   justify-content: center;
-  padding: 0;
+  gap: var(--space-1);
+  /* Journey F2: the glyph alone read as unlabelled; "Back" is on screen. */
+  padding: 0 var(--space-3) 0 var(--space-2);
   color: var(--text-mid);
   background: var(--bg-raised);
   border: none;
@@ -732,7 +753,9 @@ main {
 /* Desktop header priorities: the title, then the actions, then the mode, the
    connection and last the machine name, which ellipsises first (the full name
    is in the chip's title attribute). */
-.session-header > .session-identity { flex: 0 1 auto; min-width: var(--mobile-header-chip-width); }
+/* The title is the first to give way (cas-3400 QA round 3): no floor beyond
+   the Back glyph, which stays; the project name ellipsises. */
+.session-header > .session-identity { flex: 0 1 auto; min-width: 0; }
 .session-header > .machine-chip { flex: 0 1000 auto; min-width: 6ch; overflow: hidden; text-overflow: ellipsis; }
 .session-header > .mode-badge, .session-header > .connection-summary { flex: 0 0 auto; }
 .session-header > .actions { flex: 0 0 auto; }
@@ -752,15 +775,15 @@ main {
   .session-header .actions .action-icon { display: block; }
   .session-header .actions button:has(.action-icon) { min-width: var(--space-8); padding: 0 var(--space-2); }
 }
-@container session-header (max-width: 280px) {
-  .session-header .actions .command-palette-trigger { display: none; }
-}
-/* Narrower still (the drawer open in an 849px window): the title steps down a
-   size, as the phone header does, and the back arrow gives its 32px to it; the
-   "Conversations" control still leads out of Terminal view. */
+/* Narrower still (the drawer open in an 849px window): every control stays
+   (Back as its ‹ glyph, cas-ac390; the palette, control and Interrupt as
+   icons), and the title steps down a size and gives way instead (cas-3400 QA
+   round 3). */
 @container session-header (max-width: 220px) {
   .session-header h1 { font-size: var(--fs-meta); }
-  .session-header .session-back { display: none; }
+  /* The codename goes first: a sliver of it read as a stray bar beside the
+     project name. The full name is still the heading's accessible name. */
+  .session-header .session-picker-codename { display: none; }
 }
 
 /* The latency words ellipsise inside the chip rather than being cut, and the
@@ -2673,7 +2696,7 @@ dialog form > *,
 
   /* Switching session and stepping back are the two phone gestures this header
      exists for, so they get the widest targets in it. */
-  .session-back { width: var(--button-height); }
+  .session-back { min-width: var(--button-height); }
   .session-picker-toggle { padding-right: var(--space-2); }
 
   .machine-chip { display: none; }
@@ -3116,6 +3139,11 @@ dialog form > *,
  * something the header does not; .context-open gives it its 240px back. */
 .conversation-shell { display: grid; grid-template-columns: var(--conversation-rail-width) minmax(0, 1fr) var(--machine-rail-width); height: var(--keyboard-viewport-height, 100dvh); overflow: hidden; color: var(--ink); background: var(--canvas); }
 .conversation-shell.context-open { grid-template-columns: var(--conversation-rail-width) minmax(0, 1fr) var(--worker-collapsed-width); }
+/* No thread open: no context track at all, not even the folded 48px strip,
+   so the welcome centres in the whole canvas, the same on first load and
+   after coming back (journey F15, cas-9225). */
+.conversation-shell:not(.thread-open) { grid-template-columns: var(--conversation-rail-width) minmax(0, 1fr); }
+.conversation-shell:not(.thread-open) > .conversation-context { display: none; }
 .conversation-shell button { min-height: var(--rail-item-min); }
 /* == Pebble rail (EPIC cas-cac1) ==
    The rail is a panel lifted off the canvas by --lift-edge, not a hairline.
@@ -3225,6 +3253,15 @@ dialog form > *,
    state after it stays visible, instead of the line wrapping to three. */
 .conversation-identity .conversation-host { display: flex; margin-top: 1px; font: var(--weight-regular) 13px/1.25 var(--font-mono); color: var(--ink-mid); white-space: nowrap; }
 .conversation-identity .host-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* The codename is who the operator is talking to, so the machine name yields
+   first (journey F14, QA round 1 F01). The machine ellipsises, and the codename
+   keeps its full width up to the line less the 3ch separator (the reserve can
+   never exceed machine + separator, so a short label never cuts it); only a
+   codename that long ellipsises itself. */
+.conversation-identity .host-where:has(> .host-machine) { display: flex; }
+.conversation-identity .host-machine { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.conversation-identity .host-sep { flex: none; white-space: pre; }
+.conversation-identity .host-machine ~ .codename { flex: none; max-width: calc(100% - 3ch); overflow: hidden; text-overflow: ellipsis; }
 #conversation-connection { flex: none; white-space: pre; }
 .conversation-pane-slot { flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
 .conversation-pane-slot .pane-grid { display: block; padding: 0; height: 100%; min-height: 0; background: var(--bg-root); color: var(--text-hi); }
@@ -3305,6 +3342,18 @@ dialog form > *,
  * critical red (--warn-text is text-grade in both schemes), with Retry only. */
 .thread .turn.you .bub[data-state="unconfirmed"] { border-color: var(--warn-text); }
 .thread .conversation-unconfirmed b, .thread .conversation-unconfirmed .warn { color: var(--warn-text); }
+/* Journey F10: once the supervisor has replied since, the unconfirmed send is
+ * a settled record: a quiet --line-strong outline, the label in --ink-mid,
+ * no warning glyph and no Retry. */
+.thread .turn.you .bub[data-state="unconfirmed"][data-settled="true"] { border-color: var(--line-strong); }
+.thread .conversation-unconfirmed.conversation-settled b { color: var(--ink-mid); }
+/* cas-470e: the settled card's way to resend is secondary to the record it
+ * sits on: a text-weight "Send again" in --ink-mid, underlined, no pill, so it
+ * never reads as the primary Retry it replaced. Same 32px (44px touch) target. */
+.thread .conversation-actions-quiet { margin-top: 4px; }
+.thread .conversation-send-again { min-height: 32px; padding: 0 4px; border: 0; background: transparent; color: var(--ink-mid); font: var(--weight-medium) 13px/1.2 var(--font-ui); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; cursor: pointer; }
+.thread .conversation-send-again:hover { color: var(--ink); }
+.thread .conversation-send-again:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; border-radius: 4px; }
 /* F6: once its edited version is sent, a refused send is only a record — a
  * quiet dashed outline in --line-strong, its text clamped to one line, the
  * "Not sent · replaced by your edit" line, and no actions. */
@@ -3329,6 +3378,7 @@ dialog form > *,
  * targets (WCAG 2.5.5); 32px stays for a mouse on a wide screen. */
 @media (max-width: 53rem), (pointer: coarse) {
   .thread .conversation-edit, .thread .conversation-retry, .thread .conversation-take-control { min-height: 44px; padding: 0 18px; }
+  .thread .conversation-send-again { min-height: 44px; padding: 0 8px; }
 }
 /* coalesced statuses — one quiet box, never a ledger. Long or ask-bearing
  * statuses never land here (thread-model foldsAsStatus); what does is clamped
@@ -3452,6 +3502,8 @@ button.chip:disabled { cursor: default; }
 .thread .fname { display: block; font: var(--weight-semibold) 14.5px/1.35 var(--font-ui); color: var(--ink); overflow-wrap: anywhere; }
 .thread .fsub { display: flex; align-items: center; gap: 6px; margin-top: 3px; font: var(--weight-regular) 12.5px/1.3 var(--font-ui); color: var(--ink-mid); }
 .thread .fsub:empty { display: none; }
+/* Journey F6: why the file did not open, on the card that was pressed. */
+.thread .fnote { display: block; margin-top: 4px; font: var(--weight-medium) 12.5px/1.35 var(--font-ui); color: var(--state-warn); overflow-wrap: anywhere; text-wrap: pretty; }
 /* An attachment-only turn is its sheet alone; the bubble would be a blank pebble. */
 .thread .bub.bub-empty { display: none; }
 
@@ -3639,6 +3691,16 @@ button.chip:disabled { cursor: default; }
   .obj-body { padding: 13px 19px 12px; }
   /* 4px of the 19px inset is the tint edge (P9). */
   .obj.t-a .obj-body { padding-left: 15px; }
+}
+/* Below 500px the conversation header drops the machine's OS word before it
+   truncates the supervisor's codename (journey F14); .host-where's title keeps
+   the full label. A generated codename ("patient-pelican-9") beside its
+   machine then fits whole: the meta line is a touch smaller and Terminal a
+   touch narrower. After the phone block so it wins the cascade. */
+@media (max-width: 500px) {
+  .conversation-identity .host-os { display: none; }
+  .conversation-identity .conversation-host { font-size: 11.5px; }
+  #conversation-terminal { padding: 0 6px; }
 }
 @media (max-height: 30rem) {
   .conversation-heading { padding-top: var(--space-1); padding-bottom: var(--space-1); gap: var(--space-1); }

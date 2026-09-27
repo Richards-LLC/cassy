@@ -7448,7 +7448,24 @@ impl CasCore {
         // `shared_checkout_has_reviewable_changes` for the exact fallbacks
         // (code tasks with no no-code declaration, and unknowable git state,
         // keep the previous signal).
-        let effective_has_reviewable = task.execution_note.as_deref() == Some("value-only")
+        // A supervisor-adopted historical receipt may predate the task floor.
+        // The ordinary work-window probe intentionally omits it; the
+        // receipt-scoped paths must still trigger review and QA on close.
+        let receipt_has_reviewable = req.commit_receipt.as_deref().is_some_and(|receipt| {
+            commit_receipt_window.as_ref().is_some_and(|window| {
+                task_attribution::paths(
+                    worker_worktree_path
+                        .as_deref()
+                        .unwrap_or(close_project_root.as_path()),
+                    &resolved_parent_branch,
+                    window,
+                    Some(receipt),
+                )
+                .is_some_and(|paths| paths.iter().any(|path| is_reviewable_path(path)))
+            })
+        });
+        let effective_has_reviewable = receipt_has_reviewable
+            || task.execution_note.as_deref() == Some("value-only")
             || if let Some(worker_wt) = worker_worktree_path.as_ref() {
                 commit_receipt_window
                     .as_ref()
@@ -11144,6 +11161,26 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
         )
     });
     if attributable == Some(0) {
+        // GH #1028: a supervisor can attach work that was committed before
+        // task creation. With no receipt there is no way to distinguish that
+        // delivery from old lane residue. Require an explicit commit identity
+        // before an override can dismiss the unmerged branch as unrelated.
+        if attribution
+            .window
+            .is_some_and(|window| window.supervisor_override_reason.is_some())
+            && attribution.receipt.is_none()
+            && task.execution_note.as_deref() != Some("no-code")
+        {
+            return MergeStateGateOutcome::Reject(format!(
+                "⚠️ MERGE REQUIRED\n\nTask {} has {stranded} unmerged commit(s) on {factory_branch}, \
+                 but none can be attributed to its work window. A supervisor override \
+                 cannot classify pre-task delivery as unrelated residue without a \
+                 commit_receipt. Retry with commit_receipt=<delivery-tip-sha> so the \
+                 delivery is checked for merge and QA evidence, or record explicit \
+                 no-code intent with its external proof.",
+                task.id
+            ));
+        }
         return MergeStateGateOutcome::ProceedWithNote(format!(
             "decision: merge-state guard cleared — no commit on {factory_branch} is \
              attributable to this task's work cycle (basis: {}). The branch still \
@@ -21937,6 +21974,82 @@ mod merge_state_gate_tests {
                 panic!("zero task-attributable commits must not trip the guard, got {other:?}")
             }
         }
+    }
+
+    /// GH #1028: an override cannot silently discard a pre-task delivery as
+    /// lane residue. A receipt identifies the historical tip for the normal
+    /// merge gate, and after integration it supplies the QA path attribution.
+    #[test]
+    fn supervisor_override_requires_receipt_for_pre_task_delivery_gh_1028() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        commit_file_at(p, "delivery.rs", "// delivered\n", "2020-01-01T00:00:00Z");
+        let receipt = head_sha(p);
+        let task = worker_task("worker");
+        let mut req = base_req(&task.id);
+        req.supervisor_override = Some(true);
+        req.reason = Some("adopt historical delivery".into());
+        let mut window = window_at(1_700_000_000, "latest task lease claim/transfer");
+        window.supervisor_override_reason = req.reason.clone();
+        window.identity = task_commit_identity(&task, None);
+
+        let close_gate = |request: &TaskCloseRequest, window: &TaskCommitReceiptWindow| {
+            run_factory_branch_merge_gate_with_attribution(
+                &task,
+                request,
+                "main",
+                p,
+                TaskCommitAttribution {
+                    receipt: request.commit_receipt.as_deref(),
+                    window: Some(window),
+                },
+            )
+        };
+        match close_gate(&req, &window) {
+            MergeStateGateOutcome::Reject(message) => {
+                assert!(message.contains("MERGE REQUIRED"), "{message}");
+                assert!(message.contains("commit_receipt"), "{message}");
+            }
+            other => panic!("historical delivery closed without receipt: {other:?}"),
+        }
+
+        let mut test_first_task = task.clone();
+        test_first_task.execution_note = Some("test-first".into());
+        match run_factory_branch_merge_gate_with_attribution(
+            &test_first_task,
+            &req,
+            "main",
+            p,
+            TaskCommitAttribution {
+                receipt: None,
+                window: Some(&window),
+            },
+        ) {
+            MergeStateGateOutcome::Reject(message) => {
+                assert!(message.contains("MERGE REQUIRED"), "{message}");
+                assert!(message.contains("commit_receipt"), "{message}");
+            }
+            other => panic!("test-first historical delivery closed without receipt: {other:?}"),
+        }
+
+        req.commit_receipt = Some(receipt.clone());
+        window.identity.known_commits.push(receipt.clone());
+        match close_gate(&req, &window) {
+            MergeStateGateOutcome::Reject(message) => {
+                assert!(message.contains("MERGE REQUIRED"), "{message}");
+            }
+            other => panic!("unmerged historical receipt closed: {other:?}"),
+        }
+
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/worker", "-m", "merge delivery"]);
+        git(p, &["checkout", "-q", "factory/worker"]);
+        assert!(matches!(close_gate(&req, &window), MergeStateGateOutcome::Proceed));
+        assert!(
+            task_attribution::paths(p, "main", &window, Some(&receipt))
+                .is_some_and(|paths| paths.iter().any(|path| path == "delivery.rs")),
+            "QA must inspect the historical delivery path after merge"
+        );
     }
 
     /// The scoping must not become a bypass: commits made inside the task's

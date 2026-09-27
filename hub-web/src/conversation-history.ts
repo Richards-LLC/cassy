@@ -35,7 +35,18 @@ export interface ConversationSend {
   replaced?: boolean;
   /** When this browser gave up on the receipt (ms epoch; `unconfirmed` only). */
   unconfirmedAt?: number;
+  /** The operator swiped or dismissed this failed send out of the thread
+   * (cas-16eed). It is kept, not deleted: the "unsent" chip brings it back. */
+  dismissed?: boolean;
 }
+
+/**
+ * Why an unanswered ask (or blocker) no longer waits on the operator
+ * (cas-16eed): the operator dismissed it, the supervisor session that asked
+ * has ended, or the supervisor has since spoken to the operator unprompted,
+ * which it would not do while still blocked on the question.
+ */
+export type AskRetirement = "dismissed" | "session-ended" | "moved-on";
 /** `at` is when this client saw the event (ms epoch); it stamps the thread's
  * day separators and group timestamps and is never a delivery receipt. */
 /** `at` is the sort key. `shownAt`, when set, is the time to display: a live
@@ -68,6 +79,13 @@ const CLOCK_AHEAD_MS = 60_000;
 /** In-memory per-thread evidence. A submitted socket frame is never a receipt. */
 export class ConversationHistory {
   readonly events: ConversationEvent[] = [];
+  /**
+   * The supervisor session this thread is attached to now. A question stamped
+   * with another session was asked by one that has since ended (cas-16eed).
+   */
+  currentSession?: string;
+  /** Asks and blockers the operator dismissed (notification ids). */
+  private readonly dismissedAsks = new Set<number>();
   /** A durable stamp from this thread's machine has been seen in this browser's future. */
   private machineAhead = false;
   private insert(event: ConversationEvent): void {
@@ -187,6 +205,7 @@ export class ConversationHistory {
     this.events.forEach((event, index) => {
       if (event.kind !== "reply") return;
       const reply = event.value;
+      if ((reply.kind === "ask" || reply.kind === "blocker") && this.retirementAt(index)) return;
       if (reply.kind === "ask" && !this.answered(reply.notification_id)) out.push(reply);
       else if (reply.kind === "blocker" && !this.events.slice(index + 1).some((later) => later.kind === "send" && later.value.state !== "error")) out.push(reply);
     });
@@ -196,12 +215,75 @@ export class ConversationHistory {
   pinnedAsk(): OperatorReply | undefined {
     return this.waiting().filter((reply) => reply.kind === "ask").at(-1);
   }
+  /**
+   * Why an ask or blocker that was never answered no longer waits (cas-16eed),
+   * or undefined while it still does. An answered ask is the answer's story,
+   * not a retirement.
+   */
+  retirement(notificationId: number): AskRetirement | undefined {
+    const index = this.events.findIndex((event) => event.kind === "reply" && event.value.notification_id === notificationId);
+    return index < 0 ? undefined : this.retirementAt(index);
+  }
+  private retirementAt(index: number): AskRetirement | undefined {
+    const event = this.events[index];
+    if (event?.kind !== "reply" || (event.value.kind !== "ask" && event.value.kind !== "blocker")) return undefined;
+    const reply = event.value;
+    if (reply.kind === "ask" && this.answered(reply.notification_id)) return undefined;
+    if (this.dismissedAsks.has(reply.notification_id)) return "dismissed";
+    const later = this.events.slice(index + 1);
+    // Asked by a session that has ended: the thread is attached to another
+    // one now, or a later turn already came from another one.
+    if (event.session && ((this.currentSession !== undefined && event.session !== this.currentSession) || later.some((next) => next.session !== undefined && next.session !== event.session))) return "session-ended";
+    // The supervisor has since told the operator something unprompted (an
+    // answer or a receipt that answers no operator message): it is no longer
+    // blocked on this question, which was settled elsewhere (in the pane).
+    if (reply.kind === "ask" && later.some((next) => next.kind === "reply" && next.value.reply_to === null && (next.value.kind === "answer" || next.value.kind === "receipt"))) return "moved-on";
+    return undefined;
+  }
+  /** The operator dismissed a waiting ask or blocker: it unpins and stops waiting. */
+  dismissAsk(notificationId: number): boolean {
+    if (this.dismissedAsks.has(notificationId)) return false;
+    this.dismissedAsks.add(notificationId);
+    return true;
+  }
+  /** Notification ids of the asks and blockers the operator dismissed. */
+  dismissedAskIds(): number[] { return [...this.dismissedAsks]; }
+  /**
+   * Hide a failed send (refused, or unconfirmed and not yet settled) from the
+   * thread (cas-16eed). Its Edit and Retry come back with it on restore.
+   */
+  dismissSend(id: string): boolean {
+    const event = this.events.find((candidate) => candidate.kind === "send" && candidate.value.id === id);
+    if (event?.kind !== "send" || event.value.dismissed || !this.isFailedSend(event.value)) return false;
+    event.value.dismissed = true;
+    return true;
+  }
+  /** Failed sends the operator dismissed and can still bring back. */
+  dismissedSends(): ConversationSend[] {
+    return this.events.flatMap((event) => event.kind === "send" && event.value.dismissed && this.isFailedSend(event.value) ? [event.value] : []);
+  }
+  /** Bring every dismissed failed send back into the thread; returns them. */
+  restoreDismissed(): ConversationSend[] {
+    const restored = this.dismissedSends();
+    for (const send of restored) delete send.dismissed;
+    return restored;
+  }
+  /** A send that did not go and still offers a way to send it: refused, or unconfirmed with no reply since. */
+  isFailedSend(send: ConversationSend): boolean {
+    return (send.state === "error" && !send.replaced) || (send.state === "unconfirmed" && !this.repliedSince(send));
+  }
+  /** Events as the thread shows them: without the failed sends the operator dismissed. */
+  visibleEvents(): ConversationEvent[] {
+    return this.events.filter((event) => !(event.kind === "send" && event.value.dismissed && this.isFailedSend(event.value)));
+  }
   acknowledge(receipt: MessageQueued): boolean {
     const send = this.events.find((event) => event.kind === "send" && event.value.id === receipt.client_ref && event.value.target === receipt.target)
       ?? this.events.find((event) => event.kind === "send" && event.value.notificationId === receipt.notification_id && event.value.target === receipt.target);
     if (!send || send.kind !== "send") return false;
     send.value.notificationId = receipt.notification_id;
     send.value.stamped = receipt.stamped;
+    // A late receipt means it did go: a dismissed "failed" send is back in the thread as delivered.
+    delete send.value.dismissed;
     send.value.state = this.events.some((event) => event.kind === "reply" && event.value.reply_to === receipt.notification_id) ? "replied" : "acknowledged";
     delete send.value.error;
     return true;
@@ -311,6 +393,8 @@ export class ConversationHistory {
     for (let index = this.events.length - 1; index >= 0; index -= 1) {
       const event = this.events[index]!;
       if (event.kind === "reply") return event.value.message;
+      // A failed send the operator dismissed is out of the thread, so out of the preview too.
+      if (event.value.dismissed && this.isFailedSend(event.value)) continue;
       if (event.value.state !== "error") return `You: ${event.value.text}`;
       if (!event.value.replaced) return `Not sent: ${event.value.text}`;
     }

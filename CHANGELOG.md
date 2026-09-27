@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.34.0] - 2026-09-27
+
 ### Added
 
 - Failed sends in Commander can be dismissed with a swipe or a × button, and

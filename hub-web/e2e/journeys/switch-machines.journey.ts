@@ -22,7 +22,8 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
   // Fourteen stages including a pairing, palette/picker sweeps, two render
   // waits (6 s each) and a phone viewport: past the 60 s default, and a loaded
   // factory host needs the headroom.
-  test.setTimeout(120_000);
+  // Plus a failing-heartbeat window (cas-bf07): about 25 s more.
+  test.setTimeout(160_000);
   const hub = await journey.hub({ machines: [ATLAS, STUDIO, ALPHA], paired: ["atlas", "studio"] });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
   const composer = page.getByRole("textbox", { name: "Your message" });
@@ -345,7 +346,24 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     // shows the first sample (journey F17).
     const latency = page.locator(".connection-summary [data-machine-latency]");
     await expect(latency).toHaveText(/^(Checking…|\d+ms)$/);
+    // Read together, so a sample landing in between cannot split them: while it
+    // says Checking… the dot is neutral, not green (cas-bf07 QA F02).
+    const early = await page.locator(".connection-summary").evaluate((summary) => ({ text: summary.querySelector("[data-machine-latency]")?.textContent, live: summary.classList.contains("live") }));
+    if (early.text === "Checking…") expect(early.live, "no green dot beside Checking…").toBe(false);
     await expect(latency).toHaveText(/^\d+ms$/, { timeout: 12_000 });
+    // Heartbeats that keep failing: the header names the degradation with the
+    // amber dot, as the rail does for the same machine, rather than promising a
+    // check beside a green dot (cas-bf07 QA F01). Then it recovers.
+    const chip = page.locator(".connection-summary");
+    const railDot = page.locator("#machine-rail-list .machine-icon").filter({ hasText: "AT" }).locator(".machine-state");
+    const heartbeat = "https://atlas.test/v1/machine";
+    await page.route(heartbeat, (route) => route.abort());
+    await expect(latency).toHaveText("Degraded", { timeout: 20_000 });
+    await expect(chip).toHaveClass(/\bdegraded\b/);
+    await expect(railDot).toHaveClass(/\bdegraded\b/);
+    await page.unroute(heartbeat);
+    await expect(latency).toHaveText(/^\d+ms$/, { timeout: 15_000 });
+    await expect(chip).not.toHaveClass(/\bdegraded\b/);
     await expect(page.locator(".session-picker-codename")).toHaveText(PELICAN);
     const initials = page.locator("#machine-rail-list .machine-initials");
     await expect(initials).toHaveCount(3);

@@ -40,21 +40,28 @@ export const HEARTBEAT_INTERVAL_MS = 5_000;
 export const DEGRADED_AFTER_MISSED_HEARTBEATS = 2;
 export const RECONNECT_AFTER_MISSED_HEARTBEATS = 4;
 
-const UNHEALTHY_DOT_STATES: ReadonlySet<string> = new Set(["degraded", "backoff", "failed"]);
-
 /**
- * The words beside the Terminal view header's connection dot while the
- * session is up. A live machine has no latency until its first heartbeat
- * lands (about five seconds), and a single missed heartbeat clears the last
- * sample; both read "Checking…", not "Status unavailable" beside a healthy dot
- * (journey F17). "Status unavailable" is kept for a degraded machine whose dot
- * already warns. A machine that is not live names its state (`notLiveLabel`).
+ * The Terminal view header's connection chip (dot class and words) while the
+ * session is up, read from the machine's own connection, the same state the
+ * machine rail shows (cas-bf07 QA F01):
+ * - no latency sample yet, or one missed heartbeat: a neutral dot and
+ *   "Checking…", never a green dot beside "Status unavailable" (journey F17,
+ *   QA F02);
+ * - degraded (heartbeats keep failing): the amber dot and "Degraded", as the
+ *   rail, whatever the terminal attach says;
+ * - a sample: `attachState` (normally live) and the latency;
+ * - not live: the machine's phase and `notLiveLabel`.
  */
-export function headerLatencyLabel(machine: ConnectionSnapshot | undefined, dotState: string, notLiveLabel: string): string {
-  if (machine?.latencyMs !== undefined) return `${machine.latencyMs}ms`;
-  if (!machine) return "Checking…";
-  if (machine.phase !== "live") return notLiveLabel;
-  return machine.degraded && UNHEALTHY_DOT_STATES.has(dotState) ? "Status unavailable" : "Checking…";
+export function headerConnectionChip(
+  machine: ConnectionSnapshot | undefined,
+  attachState: string,
+  notLiveLabel: string,
+): { readonly state: string; readonly text: string } {
+  if (!machine) return { state: "checking", text: "Checking…" };
+  if (machine.phase !== "live") return { state: machine.phase, text: notLiveLabel };
+  if (machine.degraded) return { state: "degraded", text: "Degraded" };
+  if (machine.latencyMs === undefined) return { state: "checking", text: "Checking…" };
+  return { state: attachState, text: `${machine.latencyMs}ms` };
 }
 
 export function backoffDelay(attempt: number, random = Math.random): number {

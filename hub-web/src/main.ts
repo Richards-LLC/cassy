@@ -17,7 +17,7 @@ import { applyScheme, markAppearanceCommands, setScheme, type SchemePreference }
 import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionUrl, createAttentionItem, dismissableInfoItems, groupAttention, machineEventAttention, mergeAttentionItem, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
 import { cycleAttentionGroup, renderAttentionPanel, renderAttentionSummary } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
-import { attachElapsedSeconds, elapsedSeconds, headerLatencyLabel, type AttachSnapshot } from "./connection-state";
+import { attachElapsedSeconds, elapsedSeconds, headerConnectionChip, type AttachSnapshot } from "./connection-state";
 import { disconnectedView, renderConnectionSurfaceInto, shouldRetainDisconnectedFrame, transportFailureNeedsAttention } from "./connection-state-view";
 import { ensureMachineConnection, replaceMachineConnection } from "./connection-lifecycle";
 import { createDeviceKey } from "./dpop";
@@ -2508,11 +2508,14 @@ function render(captureDraft = true): void {
   // heartbeat can fill or empty it without rebuilding the status section.
   const staleStatusText = statusIsStale ? `Not live — reconnecting.${staleStatusTail}` : undefined;
   const terminalSessionKey = selected && selectedSession ? sessionKey(selected.id, selectedSession) : undefined;
-  const connectionState = connectionClass(sessionDown ? headerConnection : connectionSnapshot);
+  // While the session is up the chip reads the machine's own connection, as
+  // the rail does (cas-bf07 QA F01); while it is down it names that state.
+  const connectionChip = sessionDown
+    ? { state: connectionClass(headerConnection), text: fleetConnectionLabel(headerConnection, selected?.id) }
+    : headerConnectionChip(machineConnectionSnapshot, connectionClass(connectionSnapshot), fleetConnectionLabel(machineConnectionSnapshot, selected?.id));
+  const connectionState = connectionChip.state;
   const connectionText = selected ? connectionLabel(sessionDown ? headerConnection : connectionSnapshot) : "idle";
-  const latencyText = sessionDown
-    ? fleetConnectionLabel(headerConnection, selected?.id)
-    : headerLatencyLabel(machineConnectionSnapshot, connectionState, fleetConnectionLabel(machineConnectionSnapshot, selected?.id));
+  const latencyText = connectionChip.text;
   const counts = attentionCounts(attention);
   const infoItems = dismissableInfoItems(attention);
   // With no paired machine and no event to inspect, the canvas is the only

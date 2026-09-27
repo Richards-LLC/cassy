@@ -136,8 +136,7 @@ fn task_delivery_ranges(
             !c.parent.is_empty()
                 && !c.foreign
                 && (c.owned || unmerged.contains(&c.sha))
-                && (in_work_window(window, c.epoch, c.owned)
-                    || (historical_receipt && c.owned))
+                && (in_work_window(window, c.epoch, c.owned) || (historical_receipt && c.owned))
         })
         .collect();
     // The end of a delivery is an upper boundary, not its only commit.
@@ -260,7 +259,10 @@ pub(super) fn paths(
     let ranges = task_delivery_ranges(repo, target, window, receipt.as_deref())?;
     let mut paths = Vec::new();
     for range in ranges {
-        let changed = git_text(repo, &["diff", "--name-only", &range.base, &range.tip, "--"])?;
+        let changed = git_text(
+            repo,
+            &["diff", "--name-only", &range.base, &range.tip, "--"],
+        )?;
         paths.extend(
             changed
                 .lines()
@@ -328,6 +330,7 @@ pub(super) fn merge_tip_content_presence(
     identity: &TaskCommitIdentity,
     validated_receipt: Option<&str>,
 ) -> Option<DeliveryContentPresence> {
+    let has_work_window = window.is_some();
     let fallback_window = TaskCommitReceiptWindow {
         supervisor_override_reason: None,
         not_before: chrono::DateTime::from_timestamp(0, 0)?,
@@ -369,6 +372,66 @@ pub(super) fn merge_tip_content_presence(
         && !commits.iter().any(|commit| commit == &receipt)
     {
         commits.push(receipt);
+    }
+
+    // GH #1018: once the worker's target-sync merge lands, the ordinary
+    // target-relative range is empty. An unnamed content commit on the
+    // merge's first-parent side is still task work when it was made inside
+    // this work cycle and contributes a path to the merge's tree beyond its
+    // target-sync parent. The latter condition keeps an empty sync merge
+    // from masquerading as delivery.
+    if commits.is_empty() && has_work_window {
+        let parents = git_text(repo, &["rev-list", "--parents", "-n", "1", merge_tip])?;
+        let parents = parents.split_whitespace().collect::<Vec<_>>();
+        if parents.len() >= 3 {
+            let first = parents[1];
+            let second = parents[2];
+            let delivered_paths =
+                git_text(repo, &["diff", "--name-only", second, merge_tip, "--"])?
+                    .lines()
+                    .map(str::to_owned)
+                    .collect::<HashSet<_>>();
+            if !delivered_paths.is_empty() {
+                let base = git_text(repo, &["merge-base", first, second])?;
+                let range = format!("{base}..{first}");
+                let history = git_text(
+                    repo,
+                    &[
+                        "log",
+                        "--first-parent",
+                        "--no-merges",
+                        "--reverse",
+                        "--format=%H%x1f%ct%x1e",
+                        &range,
+                    ],
+                )?;
+                for record in history.split('\u{1e}') {
+                    let Some((sha, epoch)) = record.trim().split_once('\u{1f}') else {
+                        continue;
+                    };
+                    let Ok(epoch) = epoch.trim().parse::<i64>() else {
+                        continue;
+                    };
+                    // The recorded merge anchor binds this first-parent range
+                    // to the task. A later administrative restart may move
+                    // not_before past these unnamed commits, but cannot move
+                    // the task's creation floor.
+                    if epoch
+                        < window
+                            .task_floor
+                            .timestamp()
+                            .saturating_sub(COMMIT_RECEIPT_CLOCK_SKEW_SECS)
+                    {
+                        continue;
+                    }
+                    let parent = git_text(repo, &["rev-parse", &format!("{sha}^1")])?;
+                    let paths = git_text(repo, &["diff", "--name-only", &parent, sha, "--"])?;
+                    if paths.lines().any(|path| delivered_paths.contains(path)) {
+                        commits.push(sha.to_string());
+                    }
+                }
+            }
+        }
     }
 
     if commits.is_empty() {

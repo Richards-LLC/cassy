@@ -9,6 +9,9 @@ import {
   connectingView,
   disconnectedView,
   elapsedSeconds,
+  lostConnectionBanner,
+  outageControlsReason,
+  outageRefusal,
   shouldRetainDisconnectedFrame,
   transportFailureNeedsAttention,
   type ConnectionSnapshotView,
@@ -193,5 +196,18 @@ describe("the attach surface opens calmly (journey F3)", () => {
       expect(target.querySelector(".terminal-connecting-title")?.textContent).not.toBe(CONVERSATION_OPENING);
     }
     expect(attachInProgress(snapshot())).toBe(true);
+  });
+});
+
+describe("one outage, one vocabulary (journey F9)", () => {
+  it("words the refusal and the disabled controls the way the banner does", () => {
+    expect(lostConnectionBanner("Atlas · Linux", false)).toBe("Lost connection to Atlas · Linux. Reconnecting…");
+    expect(lostConnectionBanner("Atlas · Linux", true)).toBe("Lost connection to Atlas · Linux. Not retrying.");
+    expect(outageRefusal("Atlas · Linux")).toBe("Not sent: lost connection to Atlas · Linux. Your message is kept; send it again when it's back.");
+    expect(outageControlsReason("Atlas · Linux")).toBe("Lost connection to Atlas · Linux. Control and interrupts return when it reconnects.");
+    for (const line of [outageRefusal("Atlas · Linux"), outageControlsReason("Atlas · Linux")]) {
+      expect(line.toLowerCase()).toContain("lost connection to atlas · linux");
+      expect(line).not.toMatch(/hub connection|session is live/);
+    }
   });
 });

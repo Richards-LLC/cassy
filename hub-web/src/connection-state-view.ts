@@ -258,3 +258,22 @@ export function shouldRetainDisconnectedFrame(snapshot: ConnectionSnapshotView):
 export function transportFailureNeedsAttention(attach: ConnectionSnapshotView | undefined): boolean {
   return attach?.fatal === true && !attach.authFailure;
 }
+
+/**
+ * One outage, one vocabulary (journey F9): the reconnect banner, a send the
+ * outage refused and the controls it disabled all name the machine the way
+ * the banner does, so the operator never reads two descriptions of one drop.
+ */
+export function lostConnectionBanner(machineLabel: string, fatal: boolean): string {
+  return fatal ? `Lost connection to ${machineLabel}. Not retrying.` : `Lost connection to ${machineLabel}. Reconnecting…`;
+}
+
+/** A message the outage refused. The composer keeps the draft, so it says so. */
+export function outageRefusal(machineLabel: string): string {
+  return `Not sent: lost connection to ${machineLabel}. Your message is kept; send it again when it's back.`;
+}
+
+/** Why Take control, Release control and Interrupt are unavailable during an outage. */
+export function outageControlsReason(machineLabel: string): string {
+  return `Lost connection to ${machineLabel}. Control and interrupts return when it reconnects.`;
+}

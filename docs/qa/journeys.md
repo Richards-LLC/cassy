@@ -282,7 +282,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 5. Scroll back through a long thread — "Jump to latest" takes its own row above the composer, never over a turn, and one tap returns to the newest turn
 6. Jump from the palette with the keyboard's Enter — opened with a tap, the palette's filter takes the phone keyboard; Enter opens the match with the keyboard gone, not in the reply box
 7. See the switched-off machine named plainly — the footer counts it with a warning dot, and Paired machines says "Can't reach · retrying", shows times on the thread's 24-hour clock and "Version unknown until it connects"
-8. Pair another machine and read its header at once — pairing from the phone opens its conversation, and the "connected" toast sits below the thread header, never over the back link, project and host
+8. Pair another machine and read its header at once — pairing from the phone opens its conversation, and the "connected" toast sits below the thread header, never over the back link, project and host, and on the list below the brand row
 
 **Expected experience**
 

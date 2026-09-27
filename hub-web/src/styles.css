@@ -325,7 +325,9 @@ pre { font-family: var(--font-mono); }
 
 .machine-row {
   display: grid;
-  grid-template-columns: var(--space-2) minmax(12ch, 1fr) minmax(0, 9ch);
+  /* The status column grows to fit a short state and wraps a long one, so
+     "Reconnecting" is never cut to "Reconnect…" (journey F9). */
+  grid-template-columns: var(--space-2) minmax(12ch, 1fr) fit-content(16ch);
   min-height: var(--button-height);
   align-items: center;
   gap: var(--space-2);
@@ -348,13 +350,11 @@ pre { font-family: var(--font-mono); }
 
 .machine-row small {
   min-width: 0;
-  overflow: hidden;
   color: var(--text-mid);
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
   text-align: right;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: break-word;
 }
 
 .session-tree {
@@ -739,6 +739,21 @@ main {
 }
 
 .control-action { display: inline-flex; }
+
+/* Journey F9: a greyed header control says why on screen. Touch has no
+   tooltip, so title and aria text alone left the reason unreachable. The line
+   continues the header's panel, in the warning ink the composer's reason uses. */
+.session-controls-reason {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0 var(--space-3) var(--space-1);
+  color: var(--state-warn);
+  background: var(--bg-panel);
+  font-size: var(--fs-meta);
+  text-wrap: pretty;
+}
+
+.session-controls-reason[hidden] { display: none; }
 
 .session-header .actions button {
   min-height: var(--space-8);

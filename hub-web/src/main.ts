@@ -1574,6 +1574,7 @@ async function renderSessionState(machineId: string, session: string, state: Ses
   if (selectedMachineId !== machineId || selectedSession !== session) return;
   const grid = document.querySelector<HTMLElement>("#pane-grid");
   if (!grid) return;
+  handFocusFromConnectionCard(grid);
   const { visible: visiblePanes, hiddenWorkers } = splitVisiblePanes(state.panes, hubPresentation === "terminal" && revealWorkers, visibleSessions(machineId).find(item => item.name === session)?.workers ?? []);
   // The hub strips hidden workers from the stream, so the roster count comes
   // from the catalog; local filtering covers hubs that predate the gate.
@@ -2065,6 +2066,25 @@ function landFocus(targets: readonly FocusTarget[], options: { keep?: boolean; n
   };
   if (options.nextTask) window.setTimeout(attempt, 0);
   else queueMicrotask(attempt);
+}
+
+/**
+ * The opened session replaces the connection card. Focus inside the card
+ * (its Details, Retry or another action) would fall to the page body with it,
+ * so it lands where the next keystroke belongs: the composer, else the
+ * thread; in the terminal workspace, the attached terminal, else the way
+ * back. Focus anywhere else is left alone (cas-9a96).
+ */
+function handFocusFromConnectionCard(grid: HTMLElement): void {
+  const card = grid.querySelector<HTMLElement>(":scope > .empty.terminal-state");
+  const active = document.activeElement;
+  if (!card || !(active instanceof HTMLElement) || !card.contains(active)) return;
+  const targets = hubPresentation === "terminal"
+    ? [focusTargets.terminal, focusTargets.conversationReturn]
+    : [focusTargets.composer, focusTargets.thread];
+  // After this render replaces the card; `since` is the card's control, so a
+  // control the operator moves to meanwhile is theirs and is not taken back.
+  landFocus(targets, { keep: true, nextTask: true, waitMs: 2_000, since: active });
 }
 
 /**

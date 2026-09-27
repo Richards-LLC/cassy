@@ -1,6 +1,6 @@
 import { test, expect } from "./journey";
 import type { Machine } from "./hub-double";
-import { ATLAS, STUDIO, PELICAN } from "./world";
+import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
 
 // A machine whose supervisor has a 64-character codename (cas-1334).
 const LONG_NAME = "an-extraordinarily-long-supervisor-name-for-truncation-checks-77";
@@ -332,5 +332,32 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
     // Back on a desktop field the full phrase returns.
     await page.setViewportSize(desktop);
     await expect(composer).toHaveAttribute("placeholder", "Message the forge-tools supervisor");
+  });
+
+  await journey.stage("Focus on the opening card moves into the conversation", async () => {
+    // cas-9a96: keyboard focus on the connection card's Details fell to the
+    // page body when the opened conversation replaced the card. It lands in
+    // the composer now; focus elsewhere is left where it is.
+    const details = page.locator(".conversation-pane-slot .connection-details summary");
+    await page.reload();
+    await expect(list.getByRole("button", { name: /gabber-studio/ })).toBeVisible();
+    hub.delayAttach(OTTER, 3_000);
+    await list.getByRole("button", { name: /gabber-studio/ }).click();
+    await expect(details).toBeVisible();
+    await details.focus();
+    await expect(details).toBeFocused();
+    await expect(page.locator(".conversation-pane-slot .terminal-connecting")).toHaveCount(0, { timeout: 10_000 });
+    await expect(composer).toBeFocused();
+    // Focus outside the card (the list search) stays there when it is replaced.
+    await page.reload();
+    await expect(list.getByRole("button", { name: /cas-src/ })).toBeVisible();
+    hub.delayAttach(PELICAN, 3_000);
+    await list.getByRole("button", { name: /cas-src/ }).click();
+    await expect(details).toBeVisible();
+    const search = page.getByRole("searchbox", { name: "Search conversations" });
+    await search.focus();
+    await expect(page.locator(".conversation-pane-slot .terminal-connecting")).toHaveCount(0, { timeout: 10_000 });
+    await page.waitForTimeout(500);
+    await expect(search).toBeFocused();
   });
 });

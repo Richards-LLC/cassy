@@ -765,11 +765,11 @@ main {
 .session-header .actions button:has(.action-icon) { display: inline-flex; align-items: center; justify-content: center; }
 
 /* The header's own column decides, not the viewport: a desktop window with the
-   machine drawer open leaves the Terminal header 236–296px (cas-3400 QA round
-   2 F01). Below 360px the control and Interrupt buttons show their icons (their
-   accessible names stay "Release control"/"Take control" and "Interrupt
-   selected pane"); below 280px the palette button goes too (Ctrl/⌘ K still
-   opens it), so the title keeps room for the project name. */
+   machine drawer open leaves the Terminal header 185–360px (cas-3400 QA rounds
+   2–3). Below 360px the palette, control and Interrupt buttons show their
+   icons; their accessible names stay "Open command palette (Ctrl K)",
+   "Release control"/"Take control" and "Interrupt selected pane". No control
+   is hidden: the title gives way instead (the 220px rule below). */
 @container session-header (max-width: 360px) {
   .session-header .actions .action-label { display: none; }
   .session-header .actions .action-icon { display: block; }

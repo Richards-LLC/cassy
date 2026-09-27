@@ -305,6 +305,43 @@ impl Config {
                     Some(value.trim().to_string())
                 };
             }
+            "qa.preflight_gh_token" => {
+                let qa = self.qa.get_or_insert_with(QaConfig::default);
+                qa.preflight_gh_token = value
+                    .trim()
+                    .parse()
+                    .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
+            }
+            "qa.preflight_env_files" => {
+                let qa = self.qa.get_or_insert_with(QaConfig::default);
+                qa.preflight_env_files = value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect();
+            }
+            "qa.preflight_hook" => {
+                let qa = self.qa.get_or_insert_with(QaConfig::default);
+                qa.preflight_hook = if value.trim().is_empty() {
+                    None
+                } else {
+                    Some(value.trim().to_string())
+                };
+            }
+            "qa.preflight_hook_timeout_secs" => {
+                let qa = self.qa.get_or_insert_with(QaConfig::default);
+                let secs: u32 = value
+                    .trim()
+                    .parse()
+                    .map_err(|_| MemError::Parse(format!("Invalid seconds value: {value}")))?;
+                if secs == 0 {
+                    return Err(MemError::Parse(
+                        "qa.preflight_hook_timeout_secs must be at least 1".to_string(),
+                    ));
+                }
+                qa.preflight_hook_timeout_secs = secs;
+            }
             "qa.github_status" => {
                 let qa = self.qa.get_or_insert_with(QaConfig::default);
                 qa.github_status = value

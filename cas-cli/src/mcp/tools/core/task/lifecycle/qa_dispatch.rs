@@ -110,15 +110,90 @@ impl CasCore {
                 pass.id, pass.state
             )));
         }
+        // cas-d5c1 (GH #1023 finding 6): check the reviewer's credentials,
+        // env files and test-account capacity before the round is claimed,
+        // so a setup gap is a clear blocker instead of a stalled round.
+        let preflight = self.qa_reviewer_preflight(qa_task, &pass);
+        if let Some(report) = preflight.as_ref().filter(|report| !report.is_ready()) {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!(
+                    "QA PREFLIGHT BLOCKED: {} was not started and round {} for {} @{} was not \
+                     claimed, because this reviewer's environment is not ready:\n{}\n\
+                     Tell the supervisor: `{}coordination action=message target=supervisor \
+                     blocker=true summary=\"QA preflight blocked {}\" message=\"...\"` with the \
+                     lines above, then start {} again once they are fixed.",
+                    qa_task.id,
+                    pass.round,
+                    pass.task_id,
+                    pass.head8(),
+                    report.render(),
+                    crate::mcp::tools::core::guidance::caller_prefix(),
+                    qa_task.id,
+                    qa_task.id,
+                )),
+                data: None,
+            });
+        }
         let claimed = cas_store::claim_qa_pass(&self.cas_root, &pass.task_id, &name, chrono::Utc::now())
             .map_err(reject)?;
+        let preflight_note = preflight
+            .map(|report| format!("\nQA preflight:\n{}", report.render()))
+            .unwrap_or_default();
         Ok(Some(format!(
-            "\nIndependent QA round {} claimed for {} @{} — you are the reviewer; deadline {}.",
+            "\nIndependent QA round {} claimed for {} @{} — you are the reviewer; deadline {}.{preflight_note}",
             claimed.round,
             claimed.task_id,
             claimed.head8(),
             claimed.deadline_at.to_rfc3339()
         )))
+    }
+
+    /// cas-d5c1: the project's QA preflight for this reviewer, or `None` when
+    /// the project declares none. The report is also recorded on the QA work
+    /// item; it holds no secret values (see `qa_pass::preflight`).
+    fn qa_reviewer_preflight(
+        &self,
+        qa_task: &Task,
+        pass: &QaPass,
+    ) -> Option<crate::qa_pass::preflight::PreflightReport> {
+        let config = crate::config::Config::load(&self.cas_root).ok()?;
+        let qa = config.qa();
+        if !crate::qa_pass::preflight::is_configured(&qa) {
+            return None;
+        }
+        let repo_root = super::close_ops::resolve_close_gate_repo_root(&self.cas_root)
+            .unwrap_or_else(|_| {
+                self.cas_root
+                    .parent()
+                    .unwrap_or(&self.cas_root)
+                    .to_path_buf()
+            });
+        let report = crate::qa_pass::preflight::run(
+            &qa,
+            &repo_root,
+            crate::qa_pass::preflight::PreflightContext {
+                delivery_task: &pass.task_id,
+                qa_task: &qa_task.id,
+                head: &pass.bound_head,
+            },
+        )?;
+        if let Ok(store) = self.open_task_store() {
+            let note = format!(
+                "[{}] QA preflight for round {} @{}: {}\n{}",
+                chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+                pass.round,
+                pass.head8(),
+                if report.is_ready() {
+                    "ready"
+                } else {
+                    "BLOCKED"
+                },
+                report.render()
+            );
+            let _ = store.append_note(&qa_task.id, &note);
+        }
+        Some(report)
     }
 
     /// Open the independent QA round for a delivery that just parked (or

@@ -1680,3 +1680,113 @@ async fn supervisor_can_request_independent_qa_for_a_parked_delivery_cas_74284()
         1
     );
 }
+
+/// cas-d5c1 (GH #1023 finding 6): a project's QA preflight runs when the
+/// reviewer starts the QA work item. A missing env file refuses the start as
+/// a blocker, so the round is not claimed and its deadline is not spent. Once
+/// the environment is ready the start claims the round and reports the
+/// preflight, including the capacity hook's line. No secret value appears in
+/// the response or the recorded note.
+#[tokio::test]
+async fn qa_preflight_blocks_an_unready_reviewer_and_reports_a_ready_one_cas_d5c1() {
+    let (temp, core, repo, task_id) = fixture();
+    let _env = env_test_lock();
+    let cas_dir = repo.join(".cas");
+    let _keep = &temp;
+    const VAR: &str = "CAS_TEST_QA_BACKEND_ENV_FILE";
+    struct Unset;
+    impl Drop for Unset {
+        fn drop(&mut self) {
+            // SAFETY: the test holds env_test_lock for its whole body.
+            unsafe { std::env::remove_var(VAR) };
+        }
+    }
+    let _unset = Unset;
+    // SAFETY: as above.
+    unsafe { std::env::remove_var(VAR) };
+    let config = cas_dir.join("config.toml");
+    let body = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        &config,
+        format!(
+            "{body}preflight_env_files = [\"{VAR}\"]\n\
+             preflight_hook = \"echo qa-staging-creator topped up for $CAS_QA_DELIVERY_TASK\"\n"
+        ),
+    )
+    .unwrap();
+
+    let parked = close_text(&core, &task_id).await;
+    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    let qa_task = qa_task_id(&cas_dir, &task_id);
+    let reviewer = reviewer_core(&cas_dir, "qa-reviewer");
+
+    let blocked = reviewer
+        .cas_task_start(Parameters(IdRequest {
+            id: qa_task.clone(),
+        }))
+        .await
+        .expect_err("an unready reviewer environment is a blocker");
+    assert!(
+        blocked.message.contains("QA PREFLIGHT BLOCKED"),
+        "{}",
+        blocked.message
+    );
+    assert!(
+        blocked.message.contains(&format!("{VAR} is not set")),
+        "{}",
+        blocked.message
+    );
+    assert!(
+        blocked.message.contains("blocker=true"),
+        "{}",
+        blocked.message
+    );
+    let pass = cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        pass.state,
+        cas::types::QaPassState::Pending,
+        "the round was not claimed"
+    );
+    assert!(pass.reviewer_agent_id.is_none());
+    let tasks = open_task_store(&cas_dir).unwrap();
+    assert_ne!(tasks.get(&qa_task).unwrap().status, TaskStatus::InProgress);
+
+    // The operator exports the path; the file holds secrets that must not
+    // surface anywhere.
+    let env_file = repo.join("backend.env");
+    std::fs::write(&env_file, "STAGING_API_SECRET=never-print-this-value\n").unwrap();
+    // SAFETY: as above.
+    unsafe { std::env::set_var(VAR, &env_file) };
+    let started = extract_text(
+        reviewer
+            .cas_task_start(Parameters(IdRequest {
+                id: qa_task.clone(),
+            }))
+            .await
+            .expect("a ready reviewer starts and claims the round"),
+    );
+    assert!(started.contains("claimed"), "{started}");
+    assert!(started.contains("QA preflight"), "{started}");
+    assert!(
+        started.contains(&format!("READY env file {VAR}")),
+        "{started}"
+    );
+    assert!(
+        started.contains(&format!("qa-staging-creator topped up for {task_id}")),
+        "{started}"
+    );
+    let notes = tasks.get(&qa_task).unwrap().notes;
+    assert!(
+        notes.contains("QA preflight for round 1") && notes.contains("BLOCKED"),
+        "{notes}"
+    );
+    assert!(notes.contains("ready"), "{notes}");
+    for text in [started.as_str(), notes.as_str(), &*blocked.message] {
+        assert!(
+            !text.contains("never-print-this-value"),
+            "secret leaked: {text}"
+        );
+    }
+}

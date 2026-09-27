@@ -159,6 +159,22 @@ impl Config {
             ),
             ("qa.max_rounds".to_string(), qa.max_rounds.to_string()),
             ("qa.github_status".to_string(), qa.github_status.to_string()),
+            (
+                "qa.preflight_gh_token".to_string(),
+                qa.preflight_gh_token.to_string(),
+            ),
+            (
+                "qa.preflight_env_files".to_string(),
+                qa.preflight_env_files.join(","),
+            ),
+            (
+                "qa.preflight_hook".to_string(),
+                qa.preflight_hook.clone().unwrap_or_default(),
+            ),
+            (
+                "qa.preflight_hook_timeout_secs".to_string(),
+                qa.preflight_hook_timeout_secs.to_string(),
+            ),
             // Dev section
             ("dev.dev_mode".to_string(), dev.dev_mode.to_string()),
             (

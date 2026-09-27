@@ -79,6 +79,40 @@ fn qa_user_facing_labels_default_and_round_trip() {
 }
 
 #[test]
+fn qa_preflight_keys_default_off_and_round_trip_cas_d5c1() {
+    let temp = TempDir::new().unwrap();
+    let mut config = Config::default();
+    assert!(!crate::qa_pass::preflight::is_configured(&config.qa()));
+    for key in [
+        "qa.preflight_gh_token",
+        "qa.preflight_env_files",
+        "qa.preflight_hook",
+        "qa.preflight_hook_timeout_secs",
+    ] {
+        assert!(meta::registry().get(key).is_some(), "{key}");
+    }
+    assert_eq!(config.get("qa.preflight_hook_timeout_secs"), Some("120".to_string()));
+
+    config.set("qa.preflight_gh_token", "true").unwrap();
+    config
+        .set("qa.preflight_env_files", "GABBER_BACKEND_ENV_FILE, ")
+        .unwrap();
+    config
+        .set("qa.preflight_hook", "scripts/qa-topup-credits.sh")
+        .unwrap();
+    config.set("qa.preflight_hook_timeout_secs", "30").unwrap();
+    assert!(config.set("qa.preflight_hook_timeout_secs", "0").is_err());
+    config.save(temp.path()).unwrap();
+
+    let qa = Config::load(temp.path()).unwrap().qa();
+    assert!(qa.preflight_gh_token);
+    assert_eq!(qa.preflight_env_files, vec!["GABBER_BACKEND_ENV_FILE"]);
+    assert_eq!(qa.preflight_hook.as_deref(), Some("scripts/qa-topup-credits.sh"));
+    assert_eq!(qa.preflight_hook_timeout_secs, 30);
+    assert!(crate::qa_pass::preflight::is_configured(&qa));
+}
+
+#[test]
 fn qa_telemetry_sweep_is_optional_and_round_trips() {
     let temp = TempDir::new().unwrap();
     let mut config = Config::default();

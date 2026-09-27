@@ -142,6 +142,46 @@ where
     Cli::from_arg_matches(&matches)
 }
 
+/// Where `cas hub serve` writes its tracing log (cas-093a).
+///
+/// The machine hub is host-level: one per machine, whatever directory it is
+/// started from. `cas hub start` and `restart` launch it detached from the
+/// caller's working directory, and the service unit runs it from the home
+/// directory. Resolved like any command, its tracing log landed in whichever
+/// project's `.cas/logs` was nearest the caller. For example, the 2026-09-26
+/// hub logged into `~/Documents/Accounting/.cas/logs`, where nobody looking at
+/// `~/.cas/hub` would find it.
+///
+/// For `cas hub serve` this returns the hub's own directory (`~/.cas/hub`,
+/// created private first), so tracing goes to `~/.cas/hub/logs/` beside
+/// `hub.log` and `audit.jsonl`. Every other command gets `None` and keeps its
+/// project log.
+pub fn host_tracing_root(cli: &Cli) -> Option<std::path::PathBuf> {
+    let home = dirs::home_dir()?;
+    let root = hub_tracing_root(cli.command.as_ref(), &home)?;
+    // The hub directory is private (0700). Create it that way before the log
+    // writer makes anything beneath it; the hub's own startup re-checks it.
+    let _ = crate::hub::ensure_private_dir(&root);
+    Some(root)
+}
+
+fn hub_tracing_root(
+    command: Option<&Commands>,
+    home: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    match command {
+        Some(Commands::Hub(hub::HubArgs {
+            command: Some(hub::HubCommands::Serve(_)),
+            ..
+        })) => Some(
+            crate::hub::HubRuntimePaths::for_home(home)
+                .root()
+                .to_path_buf(),
+        ),
+        _ => None,
+    }
+}
+
 /// Cassy - Multi-agent coding factory
 #[derive(Parser)]
 #[command(name = "cas")]
@@ -760,7 +800,62 @@ fn serve_execute() -> anyhow::Result<()> {
 mod tests {
     use clap::{CommandFactory, Parser};
 
-    use super::{CASSY_WORDMARK, Cli};
+    use super::{CASSY_WORDMARK, Cli, hub_tracing_root};
+
+    /// cas-093a: `cas hub serve` traces into the host hub directory
+    /// (`<home>/.cas/hub`, so `<home>/.cas/hub/logs/`), however it was
+    /// launched and whatever the working directory was. Every other command,
+    /// including the other hub verbs, keeps its project log.
+    #[test]
+    fn hub_serve_traces_into_the_host_hub_directory() {
+        let home = std::path::Path::new("/home/operator");
+        let root_for = |args: &[&str]| {
+            let cli = Cli::try_parse_from(args).unwrap();
+            hub_tracing_root(cli.command.as_ref(), home)
+        };
+        let expected = Some(home.join(".cas").join("hub"));
+        assert_eq!(root_for(&["cas", "hub", "serve"]), expected);
+        // The detached launcher's form and the service unit's form.
+        assert_eq!(
+            root_for(&["cas", "hub", "serve", "--launched-by", "start"]),
+            expected
+        );
+        assert_eq!(
+            root_for(&[
+                "cas",
+                "hub",
+                "--tailscale-serve",
+                "serve",
+                "--port",
+                "18765"
+            ]),
+            expected
+        );
+        // The root is the hub's own runtime directory, beside hub.log.
+        assert_eq!(
+            expected.as_deref().map(|root| root.join("hub.log")),
+            Some(crate::hub::HubRuntimePaths::for_home(home).log_path())
+        );
+        // Short-lived hub verbs and every other command keep the project log.
+        assert_eq!(root_for(&["cas", "hub", "status"]), None);
+        assert_eq!(root_for(&["cas", "hub", "start"]), None);
+        assert_eq!(root_for(&["cas", "task", "list"]), None);
+        assert_eq!(hub_tracing_root(None, home), None);
+    }
+
+    /// The resolution ignores the working directory: a hub started from
+    /// inside a project still resolves to the host directory, never that
+    /// project's `.cas`.
+    #[test]
+    fn hub_serve_tracing_root_does_not_follow_the_working_directory() {
+        let project = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(project.path().join(".cas")).unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let cli = Cli::try_parse_from(["cas", "hub", "serve"]).unwrap();
+        let root = hub_tracing_root(cli.command.as_ref(), home.path()).unwrap();
+        assert_eq!(root, home.path().join(".cas").join("hub"));
+        assert!(!root.starts_with(project.path()));
+    }
 
     #[test]
     fn top_level_help_exposes_cloud_without_internal_migration_language() {

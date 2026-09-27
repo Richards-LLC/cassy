@@ -517,7 +517,7 @@ describe("hostMarkup (journey F14)", () => {
   it("lets the machine name ellipsise before the codename at every width", () => {
     const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
     expect(css).toContain(".conversation-identity .host-machine { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }");
-    expect(css).toContain(".conversation-identity .host-machine ~ .codename { flex: none; max-width: calc(100% - 6ch); overflow: hidden; text-overflow: ellipsis; }");
+    expect(css).toContain(".conversation-identity .host-machine ~ .codename { flex: none; max-width: calc(100% - 3ch); overflow: hidden; text-overflow: ellipsis; }");
   });
   it("hides the OS word below 500px, after the phone block in the cascade", () => {
     const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");

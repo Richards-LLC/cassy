@@ -3054,6 +3054,11 @@ dialog form > *,
  * something the header does not; .context-open gives it its 240px back. */
 .conversation-shell { display: grid; grid-template-columns: var(--conversation-rail-width) minmax(0, 1fr) var(--machine-rail-width); height: var(--keyboard-viewport-height, 100dvh); overflow: hidden; color: var(--ink); background: var(--canvas); }
 .conversation-shell.context-open { grid-template-columns: var(--conversation-rail-width) minmax(0, 1fr) var(--worker-collapsed-width); }
+/* No thread open: no context track at all, not even the folded 48px strip,
+   so the welcome centres in the whole canvas, the same on first load and
+   after coming back (journey F15, cas-9225). */
+.conversation-shell:not(.thread-open) { grid-template-columns: var(--conversation-rail-width) minmax(0, 1fr); }
+.conversation-shell:not(.thread-open) > .conversation-context { display: none; }
 .conversation-shell button { min-height: var(--rail-item-min); }
 /* == Pebble rail (EPIC cas-cac1) ==
    The rail is a panel lifted off the canvas by --lift-edge, not a hairline.

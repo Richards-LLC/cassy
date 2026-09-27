@@ -627,6 +627,11 @@ main {
   font: inherit;
 }
 
+/* The h1 clips at the toggle's own edges (overflow: hidden keeps the long-title
+   ellipsis), so an outset ring was cut off on every side. Draw it inside the
+   toggle's box instead, where the clip cannot reach it (cas-cf10 QA F01). */
+.session-picker-toggle:focus-visible { outline-offset: calc(-1 * var(--focus-ring-width)); }
+
 /* The caret is the only sign that the session name is a control, so the name
    yields width to it rather than pushing it out of the clipped header. */
 .session-picker-name {
@@ -2085,6 +2090,8 @@ dialog::backdrop { background: var(--overlay-backdrop); }
 .palette-command:disabled { opacity: 1; color: var(--text-mid); background: transparent; }
 .palette-command span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .palette-command small, .palette-empty { color: var(--text-mid); }
+/* A long unbroken filter query wraps inside the dialog instead of running out of it (cas-a8db QA F01). */
+#session-picker-no-match { overflow-wrap: anywhere; }
 /* Journey F20: the Appearance row in effect carries a check and "Current". */
 .palette-check { margin-inline-end: var(--space-2); color: var(--accent, var(--you-bg)); font-weight: var(--weight-semibold); }
 .palette-command small { justify-self: end; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

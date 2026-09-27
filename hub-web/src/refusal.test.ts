@@ -12,6 +12,11 @@ describe("refusal (F6: plain reasons with a next step)", () => {
     ["semantic message enqueue failed: database is locked", "The supervisor's machine couldn't take the message.", "Retry in a moment."],
     ["authentication required", "This device's pairing is no longer accepted.", "Re-pair this device, then retry."],
     ["Session daemon stream closed", "The connection to the machine dropped.", "Retry once the session is live again."],
+    // cas-a0e2: the hub's retryable upstream code (legacy socket: the code;
+    // machine channel: its message) reads as a dropped connection, never as
+    // a control refusal.
+    ["upstream_unavailable", "The connection to the machine dropped.", "Retry once the session is live again."],
+    ["The session's daemon connection is reconnecting, so the message was not sent. Retry once the session is live again.", "The connection to the machine dropped.", "Retry once the session is live again."],
     ["machine protocol error", "The hub didn't accept it.", "Retry; if it keeps happening, re-pair this device."],
   ])("maps %j to a plain reason", (detail, reason, next) => {
     expect(refusal(detail)).toMatchObject({ reason, next });

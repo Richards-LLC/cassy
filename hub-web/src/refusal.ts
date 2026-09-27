@@ -4,7 +4,9 @@
  * The hub and the daemon refuse a send with protocol codes the operator cannot
  * act on: the hub answers every authorization failure with `forbidden`
  * (hub/server.rs `handle_client_message`: no `message:send` scope, or this
- * device does not hold the session lease), and the daemon prefixes its enqueue
+ * device does not hold the session lease), the hub answers
+ * `upstream_unavailable` (retryable, cas-a0e2) when the session's daemon
+ * upstream could not take the message, and the daemon prefixes its enqueue
  * failures with `semantic message enqueue failed:` (daemon runtime
  * delivery.rs), the commonest being an `in_reply_to` ask that is no longer
  * open. Each maps to a reason and the one step that gets the message through.
@@ -36,7 +38,9 @@ const RULES: ReadonlyArray<readonly [RegExp, Refusal]> = [
     reason: "This device's pairing is no longer accepted.",
     next: "Re-pair this device, then retry.",
   }],
-  [/reconnect|disconnect|closed|timed? ?out|unreachable|offline/i, {
+  // cas-a0e2: `upstream_unavailable` is the hub's retryable answer when the
+  // session's daemon upstream is missing; the message never reached it.
+  [/upstream_unavailable|reconnect|disconnect|closed|timed? ?out|unreachable|offline/i, {
     reason: "The connection to the machine dropped.",
     next: "Retry once the session is live again.",
   }],

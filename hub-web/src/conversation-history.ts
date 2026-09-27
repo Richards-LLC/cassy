@@ -38,6 +38,10 @@ export interface ConversationSend {
   /** The operator swiped or dismissed this failed send out of the thread
    * (cas-16eed). It is kept, not deleted: the "unsent" chip brings it back. */
   dismissed?: boolean;
+  /** Held in this browser while the machine is unreachable: never on the
+   * wire yet, so it goes out once (with its own client_ref) when the
+   * session is back, or turns "Not sent" if it is not back in time (cas-0978). */
+  held?: boolean;
 }
 
 /**
@@ -142,6 +146,25 @@ export class ConversationHistory {
     this.insert({ kind: "send", value: { id, target, text, state: "sending", sentAt: at, ...(replyTo === undefined ? {} : { replyTo }) }, at: key, ...(key === at ? {} : { shownAt: at }), session });
   }
 
+  /**
+   * A send the page could not put on the wire because the machine is
+   * unreachable. It shows in the thread as waiting and has no receipt
+   * deadline until `release` puts it on the wire.
+   */
+  hold(id: string, target: string, text: string, at: number = Date.now(), replyTo?: number, session?: string): void {
+    const key = Math.max(at, this.latestAt());
+    this.insert({ kind: "send", value: { id, target, text, state: "sending", held: true, ...(replyTo === undefined ? {} : { replyTo }) }, at: key, ...(key === at ? {} : { shownAt: at }), session });
+  }
+
+  /** The held send went out now: its receipt clock starts. */
+  release(id: string, at: number = Date.now()): boolean {
+    const send = this.events.find((event) => event.kind === "send" && event.value.id === id);
+    if (!send || send.kind !== "send" || !send.value.held) return false;
+    delete send.value.held;
+    send.value.sentAt = at;
+    return true;
+  }
+
   /** The latest stamp already in the thread; live events are placed at or after it. */
   private latestAt(): number {
     return this.events.reduce((max, event) => (event.at !== undefined && Number.isFinite(event.at) && event.at > max ? event.at : max), Number.NEGATIVE_INFINITY);
@@ -196,7 +219,8 @@ export class ConversationHistory {
    * Asks and blockers still waiting on the operator, oldest first. An ask is
    * answered by a send carrying its id; a blocker is acknowledged by any
    * operator send after it that was not refused. A refused send never reached
-   * the supervisor, so the blocker keeps waiting beside it; a sending send
+   * the supervisor, so the blocker keeps waiting beside it, and so does one
+   * whose receipt never came (Not confirmed, cas-71af); a sending send
    * acknowledges optimistically and gives the blocker back if refused, and a
    * successful retry acknowledges it. Drives the list's waiting affordance and
    * the pin.
@@ -208,7 +232,7 @@ export class ConversationHistory {
       const reply = event.value;
       if ((reply.kind === "ask" || reply.kind === "blocker") && this.retirementAt(index)) return;
       if (reply.kind === "ask" && !this.answered(reply.notification_id)) out.push(reply);
-      else if (reply.kind === "blocker" && !this.events.slice(index + 1).some((later) => later.kind === "send" && later.value.state !== "error")) out.push(reply);
+      else if (reply.kind === "blocker" && !this.events.slice(index + 1).some((later) => later.kind === "send" && later.value.state !== "error" && later.value.state !== "unconfirmed")) out.push(reply);
     });
     return out;
   }
@@ -290,6 +314,7 @@ export class ConversationHistory {
     if (!send || send.kind !== "send" || send.value.notificationId !== undefined) return false;
     send.value.state = "error";
     send.value.error = message;
+    delete send.value.held;
     return true;
   }
   /**

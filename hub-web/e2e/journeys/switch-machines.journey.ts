@@ -67,8 +67,18 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     const picker = page.locator("#session-picker");
     const toggle = page.locator("#session-picker-toggle");
     const palette = page.locator("#command-palette");
+    // The list search and the Terminal view button name the palette chord the
+    // same way on this (Linux) browser: Ctrl K, not ⌘K (journey F16).
+    await expect(page.getByRole("searchbox", { name: "Search conversations" })).toHaveAttribute("placeholder", "Search conversations (Ctrl K)");
     await page.getByRole("button", { name: "Terminal view" }).click();
     await expect(toggle).toBeVisible();
+    // Its accessible name carries the visible chord, so "click Ctrl K" works
+    // for a voice user (label in name, cas-3400 QA F02).
+    const paletteButton = page.getByRole("button", { name: "Open command palette (Ctrl K)", exact: true });
+    await expect(paletteButton).toHaveText("Ctrl K");
+    await expect(paletteButton).toHaveAttribute("aria-keyshortcuts", "Control+K Meta+K");
+    // The tab names the open conversation too.
+    await expect(page).toHaveTitle("cas-src patient-pelican-9 — Cassy Cloud");
     // Closing the picker does not rebuild the shell, and the next periodic
     // render papers over a stale "open" state within a few seconds. So each
     // check is short: the picker must open, and say so, at once — not when a
@@ -380,13 +390,79 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await expect(latency).toHaveText("Degraded", { timeout: 20_000 });
     await expect(chip).toHaveClass(/\bdegraded\b/);
     await expect(railDot).toHaveClass(/\bdegraded\b/);
+    // cas-71af (bf07 QA F01): the chip's tooltip reads the same machine state
+    // as the chip, not the terminal attach's "live".
+    await expect(chip).toHaveAttribute("title", /^degraded · \d+ missed$/);
+    // bf07 QA F02: a longer outage does not leave the chip Degraded. After
+    // four missed heartbeats the machine reconnects, and it comes back.
+    await expect(latency).not.toHaveText("Degraded", { timeout: 20_000 });
     await page.unroute(heartbeat);
-    await expect(latency).toHaveText(/^\d+ms$/, { timeout: 15_000 });
+    await expect(latency).toHaveText(/^\d+ms$/, { timeout: 30_000 });
     await expect(chip).not.toHaveClass(/\bdegraded\b/);
+    await expect(chip).toHaveAttribute("title", /^live · \d+ms$/);
     await expect(page.locator(".session-picker-codename")).toHaveText(PELICAN);
     // The title is announced as the open conversation and its machine, the
     // switch after it (journey F19): not "Switch session — 4 available".
     await expect(page.getByRole("heading", { level: 1, name: `cas-src ${PELICAN} on Atlas · Linux — switch session (4 available)`, exact: true })).toBeVisible();
+    // The header's actions stay whole at every width, the title and chips
+    // yielding instead, even beside a long machine name (cas-3400 QA F01: at
+    // 900–1024px they were clipped out of the header).
+    const header = page.locator(".session-header");
+    for (const width of [390, 600, 849, 900, 1024, 1280]) {
+      await page.setViewportSize({ width, height: 720 });
+      for (const label of ["Atlas · Linux", "Build Server With A Very Long Hostname · Linux"]) {
+        const fit = await header.evaluate((element, text) => {
+          const chip = element.querySelector<HTMLElement>(".machine-chip");
+          if (chip) chip.textContent = text;
+          const box = element.getBoundingClientRect();
+          const right = box.right - parseFloat(getComputedStyle(element).paddingRight) + 0.5;
+          const clipped = [...element.querySelectorAll<HTMLElement>(".actions button")]
+            .filter((button) => button.getBoundingClientRect().width > 0 && button.getBoundingClientRect().right > right)
+            .map((button) => button.textContent);
+          return { overflow: element.scrollWidth > element.clientWidth + 1, clipped };
+        }, label);
+        expect(fit, `header at ${width}px with "${label}"`).toEqual({ overflow: false, clipped: [] });
+      }
+    }
+    // The same with the machine drawer open, which leaves the header 185–620px
+    // of an 849–1440px window: the header sizes to its own column. Every
+    // control stays on screen and clickable, inside the main column and not
+    // under the context panel (cas-ac390); in the narrowest columns ⌘K, the
+    // control and Interrupt become icons under their full accessible names,
+    // Back keeps its ‹, and the title is what gives way (cas-3400 QA rounds
+    // 2 and 3).
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await page.locator("#machine-drawer-toggle").click();
+    await expect(page.locator(".machine-navigation.drawer-open")).toHaveCount(1);
+    for (const width of [849, 900, 990, 1024, 1280, 1440]) {
+      await page.setViewportSize({ width, height: 720 });
+      await expect(page.getByRole("button", { name: /^Open command palette \((Ctrl K|⌘K)\)$/ })).toBeVisible();
+      await expect(page.getByRole("button", { name: /^(Release control|Take control|Force takeover)$/ })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Interrupt selected pane", exact: true })).toBeVisible();
+      const fit = await header.evaluate((element) => {
+        const box = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        const left = box.left + parseFloat(style.paddingLeft) - 0.5;
+        const right = box.right - parseFloat(style.paddingRight) + 0.5;
+        const controls = [...element.querySelectorAll<HTMLElement>("#session-back, .actions button")];
+        const unreachable = controls
+          .filter((button) => {
+            const b = button.getBoundingClientRect();
+            if (b.width === 0) return true;
+            const hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+            return b.right > right || b.left < left || b.right > innerWidth || !hit || !button.contains(hit);
+          })
+          .map((button) => button.getAttribute("aria-label"));
+        return { overflow: element.scrollWidth > element.clientWidth + 1, unreachable, controls: controls.length };
+      });
+      expect(fit.unreachable, `every header control is on screen and clickable with the drawer open at ${width}px`).toEqual([]);
+      expect(fit.overflow, `header overflow at ${width}px`).toBe(false);
+      expect(fit.controls, "palette, control and Interrupt at least").toBeGreaterThanOrEqual(3);
+      if (await page.locator("#session-back").count()) await expect(page.locator("#session-back")).toBeVisible();
+    }
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await page.locator("#machine-drawer-close").click();
+    await expect(page.locator(".machine-navigation.drawer-open")).toHaveCount(0);
     const initials = page.locator("#machine-rail-list .machine-initials");
     await expect(initials).toHaveCount(3);
     expect((await initials.allTextContents()).sort()).toEqual(["AL", "AT", "SM"]);
@@ -451,6 +527,8 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await expect(board.locator("button.fleet-session")).toHaveCount(pickerRows);
     expect((await board.locator("button.fleet-session").evaluateAll((cards) => cards.map((card) => (card as HTMLElement).dataset.fleetSession))).sort(), "fleet board sessions").toEqual(pickerSessions);
     await expect(board.locator(".fleet-board-summary")).toHaveText(new RegExp(`^3 machines · ${pickerRows} sessions`));
+    // Nothing open: the tab is the app's name alone.
+    await expect(page).toHaveTitle("Cassy Cloud");
     // The summary and the refresh time start with their own words, not a
     // separator drawn before them (cas-e503): "2 machines · 2 sessions",
     // "16:56". The " · " stays only between the summary's items.
@@ -483,6 +561,9 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await expect(page.locator(".shell.drawer-open")).toHaveCount(1);
     await expect(page.locator("#session-back .session-back-label")).toBeHidden();
     await expect(page.locator("#session-back")).toHaveAccessibleName(/^Back to /);
+    // Back and ⌘K both stay (cas-3400 QA round 3): neither is hidden to make room.
+    await expect(page.locator("#session-back")).toBeVisible();
+    await expect(page.locator("#command-palette-toggle")).toBeVisible();
     const [back, paletteKey] = await Promise.all([page.locator("#session-back").boundingBox(), page.locator("#command-palette-toggle").boundingBox()]);
     expect(back!.x + back!.width <= paletteKey!.x || paletteKey!.x + paletteKey!.width <= back!.x, "Back and ⌘K do not overlap at 900 with the drawer open").toBe(true);
     await page.setViewportSize(viewport);

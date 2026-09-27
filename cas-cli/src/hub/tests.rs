@@ -2951,3 +2951,56 @@ fn dormant_supervisor_metadata_is_not_a_live_catalog_row() {
         "a non-empty supervisor name is not proof of a live supervisor"
     );
 }
+
+/// cas-0140: an audit row that cannot be written refuses its request, and the
+/// hub records why: in memory, in audit-health.json, and so in `cas hub
+/// status` and doctor. The record outlives a restart and the next written row
+/// clears it. A quiet but healthy log is not reported as a failure.
+#[cfg(unix)]
+#[test]
+fn cas_0140_audit_writer_failure_is_visible_and_clears_after_restart() {
+    use chrono::Utc;
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = private_tempdir();
+    let state_dir = temp.path().join("hub");
+    let log = state_dir.join(super::AUDIT_LOG_FILE);
+    let health = state_dir.join(super::AUDIT_HEALTH_FILE);
+    let store = AuthStore::open(&state_dir, "machine-test").unwrap();
+    store.audit(None, "allowed", "before-failure", None, None, Utc::now()).unwrap();
+    let report = super::audit_writer_report(&state_dir, Utc::now());
+    assert_eq!(report.status, "ok");
+    assert!(report.last_row_at.is_some());
+    assert!(!health.exists());
+
+    // The log stops being a private regular file: every write now fails.
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(store.audit(None, "allowed", "during-failure", None, None, Utc::now()).is_err());
+    assert!(store.audit(None, "denied", "dpop_auth", None, None, Utc::now()).is_err());
+    let recorded = store.audit_health().expect("the failure is recorded in memory");
+    assert_eq!(recorded.failures, 2);
+    assert_eq!(recorded.last_action, "dpop_auth");
+    assert!(recorded.last_error.contains("0600"), "{}", recorded.last_error);
+    assert_eq!(super::read_audit_health(&state_dir).unwrap(), Some(recorded.clone()));
+    let report = super::audit_writer_report(&state_dir, Utc::now());
+    assert!(report.is_failure());
+    assert!(report.message.contains("2 failures") && report.message.contains("dpop_auth"), "{}", report.message);
+
+    // A restarted hub still reports it until a row lands.
+    drop(store);
+    let restarted = AuthStore::open(&state_dir, "machine-test").unwrap();
+    assert_eq!(restarted.audit_health(), Some(recorded));
+    assert!(super::audit_writer_report(&state_dir, Utc::now()).is_failure());
+
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o600)).unwrap();
+    restarted.audit(None, "allowed", "after-restart", None, None, Utc::now()).unwrap();
+    assert_eq!(restarted.audit_health(), None);
+    assert!(!health.exists(), "the first written row clears the failure record");
+    assert_eq!(super::audit_writer_report(&state_dir, Utc::now()).status, "ok");
+    let actions = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["action"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(actions, ["before-failure", "after-restart"]);
+}

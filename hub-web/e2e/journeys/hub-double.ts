@@ -48,6 +48,17 @@ export type DoubleOptions = {
   /** How far each session's machine clock runs ahead of this browser (ms): the
    * stamps its replayed history carries, as a skewed daemon's would. */
   clockAheadMs?: Record<string, number>;
+  /** Advertise machine protocol v2 and serve /v1/attach as the real hub does
+   * (one socket per machine, `pty:<session>` channels, health ping/pong). */
+  multiplex?: boolean;
+};
+
+/** A machine the browser cannot reach: how the outage looks from the page. */
+export type Outage = {
+  /** Established sockets stop carrying frames either way without closing, as
+   * a half-open TCP connection does after an interface change (default), or
+   * close as a reset would. */
+  sockets?: "stall" | "close";
 };
 
 const PANE_TEXT = "The supervisor is ready.\r\n";
@@ -67,6 +78,18 @@ export class HubDouble {
   private polls = 0;
   private requestedScopes: string[] = [];
   private nextId = 1000;
+  /** Machines currently unreachable (network down, Tailscale off), and how. */
+  private readonly outages = new Map<string, Outage>();
+  /** Every machine socket, by machine, open or stalled. */
+  private readonly machineSockets = new Map<string, Set<WebSocketRoute>>();
+  /** Session sockets by machine, for outages. */
+  private readonly sessionSocketsByMachine = new Map<string, Set<WebSocketRoute>>();
+  /** Health pings the double answered, per machine. */
+  readonly pongs = new Map<string, number>();
+  /** Sockets that were open when their machine went down: half-open for good. */
+  private readonly stalledSockets = new WeakSet<WebSocketRoute>();
+  /** Machine sockets opened, per machine (multiplex). */
+  readonly machineSocketOpens = new Map<string, number>();
   /** Turns pushed live, replayed in history like a real hub after a reload. */
   private readonly live = new Map<string, { messages: Array<Record<string, unknown>>; replies: Array<Record<string, unknown>> }>();
 
@@ -84,10 +107,41 @@ export class HubDouble {
     // /v1/events is a long-lived event stream the bundle reads with fetch.
     await page.addInitScript(() => {
       const original = window.fetch;
+      // Outages (journey network cells): a machine the page cannot reach
+      // refuses new event streams, and an outage that resets connections
+      // errors the open ones; a stalled one just goes quiet.
+      const down = new Set<string>();
+      const streams = new Map<string, Set<ReadableStreamDefaultController<Uint8Array>>>();
+      const w = window as unknown as { __journeyOutage: (host: string, isDown: boolean, reset: boolean) => void };
+      w.__journeyOutage = (host, isDown, reset) => {
+        if (isDown) down.add(host); else down.delete(host);
+        if (isDown && reset) {
+          for (const controller of streams.get(host) ?? []) { try { controller.error(new TypeError("network changed")); } catch { /* closed */ } }
+          streams.delete(host);
+        }
+      };
       window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
         const url = new URL(String(input instanceof Request ? input.url : input), location.href);
         if (url.hostname.endsWith(".test") && url.pathname === "/v1/events") {
-          const body = new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(": double connected\n\n")); } });
+          if (down.has(url.hostname) || !navigator.onLine) return Promise.reject(new TypeError("Failed to fetch"));
+          if (init?.signal?.aborted) return Promise.reject(new DOMException("The operation was aborted.", "AbortError"));
+          let registered: ReadableStreamDefaultController<Uint8Array> | undefined;
+          const body = new ReadableStream<Uint8Array>({
+            start(c) {
+              registered = c;
+              let set = streams.get(url.hostname);
+              if (!set) streams.set(url.hostname, (set = new Set()));
+              set.add(c);
+              c.enqueue(new TextEncoder().encode(": double connected\n\n"));
+            },
+            cancel() { if (registered) streams.get(url.hostname)?.delete(registered); },
+          });
+          // As a real fetch does, aborting the request errors its body stream.
+          init?.signal?.addEventListener("abort", () => {
+            if (!registered) return;
+            streams.get(url.hostname)?.delete(registered);
+            try { registered.error(new DOMException("The operation was aborted.", "AbortError")); } catch { /* already closed */ }
+          });
           return Promise.resolve(new Response(body, { headers: { "content-type": "text/event-stream" } }));
         }
         return original(input, init);
@@ -95,8 +149,36 @@ export class HubDouble {
     });
     await page.route("https://*.test/**", (route) => this.hub(route));
     await page.route(`${RELAY}/api/hub/pairing/**`, (route) => this.relay(route));
-    await page.routeWebSocket(/\.test\/v1\//, (ws) => this.socket(ws));
+    await page.routeWebSocket(/\.test\/v1\//, (ws) => (new URL(ws.url()).pathname === "/v1/attach" ? this.machineSocket(ws) : this.socket(ws)));
   }
+
+  /**
+   * Take a machine off the network, as losing Wi-Fi or turning Tailscale off
+   * does for that address: HTTP requests fail, new sockets fail, and open
+   * sockets stall (half-open, the default) or close.
+   */
+  async down(machineId: string, outage: Outage = {}): Promise<void> {
+    this.outages.set(machineId, outage);
+    const reset = outage.sockets === "close";
+    if (!reset) {
+      for (const ws of [...(this.machineSockets.get(machineId) ?? []), ...(this.sessionSocketsByMachine.get(machineId) ?? [])]) this.stalledSockets.add(ws);
+    }
+    await this.page.evaluate(({ host, reset }) => (window as unknown as { __journeyOutage: (h: string, d: boolean, r: boolean) => void }).__journeyOutage(host, true, reset), { host: `${machineId}.test`, reset });
+    if (!reset) return;
+    for (const ws of [...(this.machineSockets.get(machineId) ?? []), ...(this.sessionSocketsByMachine.get(machineId) ?? [])]) {
+      void ws.close({ code: 1011, reason: "journey: network reset" });
+    }
+    this.machineSockets.delete(machineId);
+    this.sessionSocketsByMachine.delete(machineId);
+  }
+
+  /** Bring a machine back. Stalled sockets stay dead, as half-open ones do. */
+  async up(machineId: string): Promise<void> {
+    this.outages.delete(machineId);
+    await this.page.evaluate((host) => (window as unknown as { __journeyOutage: (h: string, d: boolean, r: boolean) => void }).__journeyOutage(host, false, false), `${machineId}.test`);
+  }
+
+  private reachable(machineId: string): boolean { return !this.outages.has(machineId); }
 
   /** Seed paired machines in IndexedDB exactly as a completed pairing stores them. */
   async seedPaired(): Promise<void> {
@@ -145,6 +227,7 @@ export class HubDouble {
   send(session: string, message: Record<string, unknown>): void {
     const ws = this.sockets.get(session);
     if (!ws) throw new Error(`hub double: no socket open for ${session}`);
+    if (this.stalledSockets.has(ws)) return;
     ws.send(JSON.stringify(message));
   }
 
@@ -244,9 +327,11 @@ export class HubDouble {
     const machineId = url.hostname.replace(/\.test$/, "");
     const path = url.pathname;
     const method = route.request().method();
+    if (!this.reachable(machineId)) return route.abort("internetdisconnected");
     if (path === "/v1/health") return route.fulfill({ json: { ok: true } });
     if (path === "/v1/machine") {
-      return route.fulfill({ json: { schema_version: 1, version: "journey-double", capabilities: ["session_index", "daemon_attach", "machine_events"] } });
+      const capabilities = ["session_index", "daemon_attach", "machine_events", ...(this.options.multiplex ? ["machine_multiplex_v2"] : [])];
+      return route.fulfill({ json: { schema_version: 1, version: "journey-double", capabilities } });
     }
     if (path === "/v1/sessions") return route.fulfill({ json: { freshness_threshold_secs: 30, sessions: this.sessionsFor(machineId) } });
     if (path === "/v1/auth/pairing/exchange" && method === "POST") {
@@ -320,44 +405,98 @@ export class HubDouble {
 
   private socket(ws: WebSocketRoute): void {
     const session = decodeURIComponent(new URL(ws.url()).pathname.split("/")[3] ?? "");
-    if (this.held.has(session)) { void ws.close({ code: 1011, reason: "journey: still offline" }); return; }
     const machineId = new URL(ws.url()).hostname.replace(/\.test$/, "");
+    if (this.held.has(session) || !this.reachable(machineId)) { void ws.close({ code: 1011, reason: "journey: still offline" }); return; }
     this.sockets.set(session, ws);
+    let bucket = this.sessionSocketsByMachine.get(machineId);
+    if (!bucket) this.sessionSocketsByMachine.set(machineId, (bucket = new Set()));
+    bucket.add(ws);
+    // A socket open when its machine went down is half-open: nothing it
+    // carries arrives, even after the machine is reachable again.
     const pages = [...(this.options.history?.[session] ?? [])];
     ws.onMessage((data) => {
-      const message = JSON.parse(String(data)) as Record<string, Record<string, unknown>>;
-      if (message.SendMessage) {
-        const m = message.SendMessage;
-        this.sends.push({
-          machine: machineId, session, client_ref: String(m.client_ref), target: String(m.target), text: String(m.text),
-          ...(typeof m.in_reply_to === "number" ? { in_reply_to: m.in_reply_to } : {}),
-        });
-        this.waiters.splice(0).forEach((wake) => wake());
-      }
-      if (message.ConversationHistoryRequest) {
-        const request = message.ConversationHistoryRequest;
-        this.historyRequests.push({ session, ...request });
-        const page = request.before === undefined ? pages[0] : pages.find((p, i) => i > 0 && pages[i - 1].next_before === request.before);
-        let reply: HistoryPage = page ?? { messages: [], replies: [], has_earlier: false };
-        const live = this.live.get(session);
-        if (request.before === undefined && live) {
-          reply = { ...reply, messages: [...reply.messages, ...live.messages], replies: [...reply.replies, ...live.replies] };
-        }
-        ws.send(JSON.stringify({ ConversationHistory: { request_id: request.request_id, ...reply } }));
-      }
+      if (this.stalledSockets.has(ws) || !this.reachable(machineId)) { this.stalledSockets.add(ws); return; }
+      this.handleSessionFrame(machineId, session, ws, JSON.parse(String(data)) as Record<string, Record<string, unknown>>, pages);
     });
-    const welcome = () => ws.send(JSON.stringify({
+    const welcome = () => ws.send(JSON.stringify(this.welcomeFor(session)));
+    const delay = this.attachDelays.get(session);
+    this.attachDelays.delete(session);
+    if (delay === undefined) welcome();
+    else setTimeout(welcome, delay);
+  }
+
+  private welcomeFor(session: string): Record<string, unknown> {
+    return {
       Welcome: {
         state: { panes: [{ id: "supervisor", kind: "Supervisor", title: session, focused: true, exited: false }], cols: 100, rows: 28 },
         scrollback: { supervisor: [[...new TextEncoder().encode(PANE_TEXT)]] },
         protocol_version: 3,
         capabilities: ["conversation_history"],
       },
-    }));
-    const delay = this.attachDelays.get(session);
-    this.attachDelays.delete(session);
-    if (delay === undefined) welcome();
-    else setTimeout(welcome, delay);
+    };
+  }
+
+  /**
+   * The real hub's machine socket (protocol v2, cas-cli hub/server.rs): a
+   * `{proto:2}` handshake, `events` and `pty:<session>` subscriptions, frames
+   * wrapped as `{channel, message}`, and health ping/pong.
+   */
+  private machineSocket(ws: WebSocketRoute): void {
+    const machineId = new URL(ws.url()).hostname.replace(/\.test$/, "");
+    if (!this.reachable(machineId)) { void ws.close({ code: 1011, reason: "journey: unreachable" }); return; }
+    this.machineSocketOpens.set(machineId, (this.machineSocketOpens.get(machineId) ?? 0) + 1);
+    let bucket = this.machineSockets.get(machineId);
+    if (!bucket) this.machineSockets.set(machineId, (bucket = new Set()));
+    bucket.add(ws);
+    const subscribed = new Set<string>();
+    const channel = (session: string): WebSocketRoute => ({
+      send: (text: string) => { if (!this.stalledSockets.has(ws)) ws.send(JSON.stringify({ channel: `pty:${session}`, message: JSON.parse(text) })); },
+    }) as unknown as WebSocketRoute;
+    ws.onMessage((data) => {
+      if (this.stalledSockets.has(ws) || !this.reachable(machineId)) { this.stalledSockets.add(ws); return; }
+      const frame = JSON.parse(String(data)) as Record<string, any>;
+      if (frame.proto === 2) { ws.send(JSON.stringify({ proto: 2 })); return; }
+      if (frame.channel === "health" && typeof frame.ping === "number") {
+        this.pongs.set(machineId, (this.pongs.get(machineId) ?? 0) + 1);
+        ws.send(JSON.stringify({ channel: "health", pong: frame.ping }));
+        return;
+      }
+      if (frame.channel === "events") return;
+      if (typeof frame.channel !== "string" || !frame.channel.startsWith("pty:")) return;
+      const session = frame.channel.slice(4);
+      if (frame.subscribe) {
+        if (subscribed.has(session)) return;
+        subscribed.add(session);
+        // The session's frames go to this socket from now on, as the hub's
+        // per-session viewer does.
+        this.sockets.set(session, channel(session));
+        ws.send(JSON.stringify({ channel: `pty:${session}`, message: this.welcomeFor(session) }));
+        return;
+      }
+      if (frame.message) this.handleSessionFrame(machineId, session, channel(session), frame.message as Record<string, Record<string, unknown>>, [...(this.options.history?.[session] ?? [])]);
+    });
+  }
+
+  private handleSessionFrame(machineId: string, session: string, ws: WebSocketRoute, message: Record<string, Record<string, unknown>>, pages: HistoryPage[]): void {
+    if (message.SendMessage) {
+      const m = message.SendMessage;
+      this.sends.push({
+        machine: machineId, session, client_ref: String(m.client_ref), target: String(m.target), text: String(m.text),
+        ...(typeof m.in_reply_to === "number" ? { in_reply_to: m.in_reply_to } : {}),
+      });
+      this.waiters.splice(0).forEach((wake) => wake());
+    }
+    if (message.ConversationHistoryRequest) {
+      const request = message.ConversationHistoryRequest;
+      this.historyRequests.push({ session, ...request });
+      const page = request.before === undefined ? pages[0] : pages.find((p, i) => i > 0 && pages[i - 1].next_before === request.before);
+      let reply: HistoryPage = page ?? { messages: [], replies: [], has_earlier: false };
+      const live = this.live.get(session);
+      if (request.before === undefined && live) {
+        reply = { ...reply, messages: [...reply.messages, ...live.messages], replies: [...reply.replies, ...live.replies] };
+      }
+      ws.send(JSON.stringify({ ConversationHistory: { request_id: request.request_id, ...reply } }));
+    }
   }
 }
 

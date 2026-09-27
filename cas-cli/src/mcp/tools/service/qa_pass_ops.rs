@@ -106,6 +106,47 @@ impl CasService {
         )))
     }
 
+    /// cas-74284: `verification action=qa_request task_id=<parked delivery>
+    /// summary=<reason>`. Supervisor-only. Opens an independent QA round for a
+    /// parked delivery the park did not judge user-facing (for example a
+    /// hub-web change parked without a demo_statement, whose demo_statement
+    /// the delivery-proof scope lock no longer lets anyone add). From then on
+    /// every merge gate waits for that round's verdict.
+    pub(super) async fn verification_qa_request(
+        &self,
+        req: VerificationRequest,
+    ) -> Result<CallToolResult, McpError> {
+        if !crate::harness_policy::is_supervisor_from_env() {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "qa_request is supervisor-only; a worker's close dispatches QA for a user-facing delivery itself",
+            ));
+        }
+        let task_id = required(req.task_id.as_deref(), "task_id (the parked delivery)")?;
+        let reason = required(req.summary.as_deref(), "summary (why this delivery needs independent QA)")?;
+        let supervisor = self.inner.get_agent_id()?;
+        let task = self
+            .inner
+            .open_task_store()?
+            .get(task_id)
+            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, format!("Task not found: {error}")))?;
+        let dispatch = self
+            .inner
+            .request_independent_qa(&task, reason.trim())
+            .map_err(|why| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_request rejected: {why}")))?;
+        let note = format!(
+            "[{}] ✅ DECISION Independent QA requested by supervisor {supervisor}. Reason: {}",
+            chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+            reason.trim(),
+        );
+        if let Err(error) = self.inner.open_task_store()?.append_note(task_id, &note) {
+            tracing::warn!(task_id = %task_id, error = %error, "cas-74284: qa_request decision note not recorded");
+        }
+        Ok(Self::success(format!(
+            "Independent QA requested for {task_id}.{dispatch}"
+        )))
+    }
+
     pub(super) async fn verification_qa_waive(
         &self,
         req: VerificationRequest,

@@ -76,6 +76,23 @@ non-empty reason. The waiver is:
 - recorded on the pass as `state=waived` with the supervisor as issuer;
 - listed with its reason in `coordination action=epic_status`.
 
+The opposite request exists too (cas-74284). A supervisor can ask for a pass
+on a parked delivery that the park did not judge user-facing, for example
+a UI change parked with no demo_statement, whose field the delivery-proof
+scope lock no longer lets anyone set. Use `verification action=qa_request
+task_id=<parked task> summary="<why>"`. It opens a round for the parked
+tip exactly as the park would, records `requested by supervisor: <why>` as
+the reason, and appends a `✅ DECISION` note. From then on every merge gate
+waits for that round. It is supervisor-only and needs a reason. It refuses
+a task that is not parked awaiting merge.
+
+The park measures the task's own delivery branch, including a per-task
+`factory/<name>-<task>` branch. Before GH #1040 it measured
+`factory/<name>`, which is frozen for another parked task in that shape.
+That missed cas-470e's hub-web change until after its merge.
+`qa.user_facing_labels` includes `hub-web` by default, so such a task
+also cannot be created without a demo_statement.
+
 ## 2. Trigger: the QA dispatch
 
 When `park_task_awaiting_merge` parks an eligible task, Cassy does three
@@ -110,6 +127,28 @@ the implementer.
 
 The worker's own close output changes too. MERGE REQUIRED now adds:
 "Independent QA pass `<id>` dispatched. The merge waits for its verdict."
+
+### Reviewer preflight (cas-d5c1)
+
+A project can declare what its reviewers need before a round is claimed
+(GH #1023 finding 6). In the reported session, missing `gh` authentication,
+a missing backend env file, and an empty staging QA account each stalled a
+round partway through. The `[qa]` keys are:
+
+| Key | Check |
+| --- | --- |
+| `preflight_gh_token` | `GH_TOKEN` or `GITHUB_TOKEN` is set, or `gh auth status` succeeds. The value is never shown. |
+| `preflight_env_files` | Each named variable points at a readable file. The path is reported; the file is never read. |
+| `preflight_hook` | A project command run in the repository root with `CAS_QA_DELIVERY_TASK`, `CAS_QA_TASK` and `CAS_QA_HEAD` set. It checks, and may top up, test-account capacity. Exit 0 means ready; any other exit is a blocker whose first output line is the reason. It is bounded by `preflight_hook_timeout_secs` (120 by default). Cassy assumes no billing API. |
+
+Starting the QA work item runs the preflight after the no-self-review
+check. If anything is missing, the start is refused with `QA PREFLIGHT
+BLOCKED`, the lines above, and the blocker message to send the supervisor.
+The round stays unclaimed, so its deadline is not spent. A ready preflight
+is appended to the start response. Every run is recorded as a note on the QA
+work item. Hook output is truncated and redacted: values of `GH_TOKEN`,
+`GITHUB_TOKEN` and any variable named like a token, secret, password or key
+are replaced with `[redacted]`.
 
 ## 3. No self-review (enforced, not advised)
 

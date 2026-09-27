@@ -52,11 +52,11 @@ fn qa_user_facing_labels_default_and_round_trip() {
 
     assert_eq!(
         config.qa().user_facing_labels,
-        vec!["ui", "hub", "cli-ux", "commander", "frontend"]
+        vec!["ui", "hub", "hub-web", "cli-ux", "commander", "frontend"]
     );
     assert_eq!(
         config.get("qa.user_facing_labels"),
-        Some("ui,hub,cli-ux,commander,frontend".to_string())
+        Some("ui,hub,hub-web,cli-ux,commander,frontend".to_string())
     );
     assert!(meta::registry().get("qa.user_facing_labels").is_some());
 
@@ -76,6 +76,40 @@ fn qa_user_facing_labels_default_and_round_trip() {
     config.save(temp.path()).unwrap();
     let loaded = Config::load(temp.path()).unwrap();
     assert_eq!(loaded.qa().user_facing_labels, vec!["mobile", "public-api"]);
+}
+
+#[test]
+fn qa_preflight_keys_default_off_and_round_trip_cas_d5c1() {
+    let temp = TempDir::new().unwrap();
+    let mut config = Config::default();
+    assert!(!crate::qa_pass::preflight::is_configured(&config.qa()));
+    for key in [
+        "qa.preflight_gh_token",
+        "qa.preflight_env_files",
+        "qa.preflight_hook",
+        "qa.preflight_hook_timeout_secs",
+    ] {
+        assert!(meta::registry().get(key).is_some(), "{key}");
+    }
+    assert_eq!(config.get("qa.preflight_hook_timeout_secs"), Some("120".to_string()));
+
+    config.set("qa.preflight_gh_token", "true").unwrap();
+    config
+        .set("qa.preflight_env_files", "GABBER_BACKEND_ENV_FILE, ")
+        .unwrap();
+    config
+        .set("qa.preflight_hook", "scripts/qa-topup-credits.sh")
+        .unwrap();
+    config.set("qa.preflight_hook_timeout_secs", "30").unwrap();
+    assert!(config.set("qa.preflight_hook_timeout_secs", "0").is_err());
+    config.save(temp.path()).unwrap();
+
+    let qa = Config::load(temp.path()).unwrap().qa();
+    assert!(qa.preflight_gh_token);
+    assert_eq!(qa.preflight_env_files, vec!["GABBER_BACKEND_ENV_FILE"]);
+    assert_eq!(qa.preflight_hook.as_deref(), Some("scripts/qa-topup-credits.sh"));
+    assert_eq!(qa.preflight_hook_timeout_secs, 30);
+    assert!(crate::qa_pass::preflight::is_configured(&qa));
 }
 
 #[test]
@@ -881,4 +915,130 @@ fn code_review_owner_is_unknown_after_dispatch_layer_removal() {
     );
     assert!(meta::registry().get("code_review.owner").is_none());
     assert!(config.set("code_review.owner", "supervisor").is_err());
+}
+
+/// cas-8d54 (GH #1011): `cas config get/set factory.epic_base_branch` used to
+/// say "Unknown config key" although the runtime reads the key. It is
+/// registered, readable, listable, and a set value round-trips to the reader
+/// the factory uses.
+#[test]
+fn factory_epic_base_branch_is_registered_and_round_trips_cas_8d54() {
+    let temp = TempDir::new().unwrap();
+    let cas_dir = temp.path().join(".cas");
+    std::fs::create_dir_all(&cas_dir).unwrap();
+    let mut config = Config::default();
+
+    assert!(meta::registry().get("factory.epic_base_branch").is_some());
+    assert_eq!(config.get("factory.epic_base_branch"), Some(String::new()));
+    assert!(config.list().contains(&("factory.epic_base_branch".to_string(), String::new())));
+
+    config.set("factory.epic_base_branch", " staging ").unwrap();
+    assert_eq!(config.get("factory.epic_base_branch"), Some("staging".to_string()));
+    assert_eq!(config.factory().epic_base_branch.as_deref(), Some("staging"));
+    assert!(config.list().contains(&(
+        "factory.epic_base_branch".to_string(),
+        "staging".to_string()
+    )));
+
+    config.save(&cas_dir).unwrap();
+    let loaded = Config::load(&cas_dir).unwrap();
+    assert_eq!(loaded.get("factory.epic_base_branch"), Some("staging".to_string()));
+    assert_eq!(
+        Config::configured_epic_base_branch(temp.path()).as_deref(),
+        Some("staging"),
+        "the runtime reader sees the value `cas config set` wrote"
+    );
+
+    config.set("factory.epic_base_branch", "  ").unwrap();
+    assert_eq!(config.factory().epic_base_branch, None);
+    assert_eq!(config.get("factory.epic_base_branch"), Some(String::new()));
+}
+
+/// cas-1a05: every factory key `cas config set` accepts is also returned by
+/// `get` and `list`, and a set value reads back. The table is the settable
+/// set; it must cover every registered `factory.*` key, so a key added to the
+/// registry or to `set` without `get`/`list` fails here.
+#[test]
+fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
+    // (key, value to set, value get returns)
+    let table: &[(&str, &str, &str)] = &[
+        ("factory.artifacts_root", " /mnt/scratch/artifacts ", "/mnt/scratch/artifacts"),
+        ("factory.message_max_chars", "3000", "3000"),
+        ("factory.message_max_chars_escalation", "6000", "6000"),
+        ("factory.note_max_chars", "1800", "1800"),
+        ("factory.max_concurrent_builders", "3", "3"),
+        ("factory.worker_build_jobs", "6", "6"),
+        ("factory.cargo_build_jobs", "5", "5"),
+        ("factory.merge_sweep", "false", "false"),
+        ("factory.merge_sweep_command", "pnpm test:ci", "pnpm test:ci"),
+        ("factory.epic_base_branch", "staging", "staging"),
+        ("factory.merge_sweep_cwd", "web", "web"),
+        ("factory.merge_sweep_timeout_secs", "900", "900"),
+        ("factory.ai_enrichment.enabled", "true", "true"),
+        ("factory.ai_enrichment.endpoint", "http://127.0.0.1:11434/v1/responses", "http://127.0.0.1:11434/v1/responses"),
+        ("factory.ai_enrichment.provider", "openai-compatible", "openai-compatible"),
+        ("factory.ai_enrichment.api_key_env", "LOCAL_MODEL_KEY", "LOCAL_MODEL_KEY"),
+        ("factory.ai_enrichment.model", "local-summary-1", "local-summary-1"),
+        ("factory.ai_enrichment.effort", "low", "low"),
+    ];
+    let registry = meta::registry();
+    for key in registry.all_keys().into_iter().filter(|key| key.starts_with("factory.")) {
+        assert!(
+            table.iter().any(|(settable, _, _)| *settable == key),
+            "registered key {key} is missing from this round-trip table"
+        );
+    }
+
+    let temp = TempDir::new().unwrap();
+    let mut config = Config::default();
+    // Unset, every registered key reads as its registry default, so
+    // `config list --modified` stays empty on a fresh config.
+    for key in registry.all_keys().into_iter().filter(|key| key.starts_with("factory.")) {
+        assert_eq!(
+            config.get(key).as_deref(),
+            Some(registry.get(key).unwrap().default),
+            "{key}: default read does not match the registry default"
+        );
+    }
+    for (key, _, _) in table {
+        assert!(config.get(key).is_some(), "{key}: settable but `get` does not know it");
+        let listed: std::collections::HashMap<String, String> = config.list().into_iter().collect();
+        // cargo_build_jobs is the accepted alias of worker_build_jobs; `list` shows the canonical key.
+        let listed_key = if *key == "factory.cargo_build_jobs" { "factory.worker_build_jobs" } else { key };
+        assert!(listed.contains_key(listed_key), "{key}: settable but `list` omits it");
+    }
+    for (key, value, expected) in table {
+        config
+            .set(key, value)
+            .unwrap_or_else(|error| panic!("{key} = {value:?}: {error}"));
+        assert_eq!(config.get(key).as_deref(), Some(*expected), "{key} after set");
+        let listed_key = if *key == "factory.cargo_build_jobs" { "factory.worker_build_jobs" } else { key };
+        let listed: std::collections::HashMap<String, String> = config.list().into_iter().collect();
+        assert_eq!(listed.get(listed_key).map(String::as_str), Some(*expected), "{key} in list");
+    }
+
+    // The values survive a save and load.
+    config.save(temp.path()).unwrap();
+    let loaded = Config::load(temp.path()).unwrap();
+    for (key, _, expected) in table {
+        if *key == "factory.worker_build_jobs" {
+            // Overwritten by the later cargo_build_jobs alias row.
+            continue;
+        }
+        assert_eq!(loaded.get(key).as_deref(), Some(*expected), "{key} after reload");
+    }
+    assert_eq!(loaded.get("factory.worker_build_jobs").as_deref(), Some("5"));
+
+    // Optional keys clear back to unset with an empty value.
+    for key in ["factory.merge_sweep_command", "factory.merge_sweep_cwd", "factory.epic_base_branch"] {
+        config.set(key, "").unwrap();
+        assert_eq!(config.get(key).as_deref(), Some(""), "{key} cleared");
+    }
+    config.set("factory.artifacts_root", "").unwrap();
+    assert_eq!(config.factory().artifacts_root, None);
+    assert_eq!(
+        config.get("factory.artifacts_root").as_deref(),
+        Some(FACTORY_ARTIFACTS_ROOT_DEFAULT),
+        "an unset artifacts_root reads as its default"
+    );
 }

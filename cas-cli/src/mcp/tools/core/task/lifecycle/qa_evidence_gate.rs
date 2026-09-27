@@ -190,6 +190,7 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
         repo,
         delivered_head: &head,
         notes: &task.notes,
+        deployed_origins: &qa.deployed_origins,
     };
     run_close_gate(
         &ctx,

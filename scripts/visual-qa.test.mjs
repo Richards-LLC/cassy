@@ -4,7 +4,8 @@ import { execFileSync } from 'node:child_process';
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { existsSync } from 'node:fs';
 
 import { runVisualQa } from './visual-qa.mjs';
 
@@ -233,4 +234,111 @@ test('acceptance surfaces pass and the historical Figure 3 defect fails', async 
   const defectiveReview = await acceptanceRender(await revisionFixture('cbac967b'), join(artifactDir, 'review-cbac967b'));
   assert.equal(defectiveReview.status, 'FAIL');
   assert.ok(defectiveReview.findings.some((finding) => finding.elementPath.includes('fig3cap') && finding.otherElementPath.includes('figure')));
+});
+
+// cas-9178 (GH #1023 finding 7): declared journeys render the states a user
+// reaches after interacting, not just the resting page.
+const journeyFile = fixture('journey-start.json');
+const both = {
+  schemes: ['light', 'dark'],
+  viewports: [
+    { name: 'desktop', width: 1280, height: 800 },
+    { name: 'phone', width: 390, height: 800 },
+  ],
+};
+
+test('a resting-page run misses the planted post-interaction defect', async () => {
+  const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-journey-rest-'));
+  const result = await runVisualQa({ urls: [fixture('journey-start.html')], artifactDir, strict: true, ...both });
+  assert.equal(result.status, 'PASS', JSON.stringify(result.counts));
+  assert.equal(result.journeyRuns, undefined);
+});
+
+test('a declared journey renders loading, submit-error and offline states and fails strict on the planted defect', async () => {
+  const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-journey-'));
+  const result = await runVisualQa({ journey: journeyFile, artifactDir, strict: true, ...both });
+  assert.equal(result.status, 'FAIL');
+  assert.equal(result.exitCode, 1);
+  // The page at rest is still checked (and is clean), then every state on every scheme and viewport.
+  assert.deepEqual(result.urls, [pathToFileURL(fixture('journey-start.html')).href]);
+  assert.equal(result.screenshots.length, 4 + 3 * 4);
+  assert.equal(result.journeyRuns.length, 3 * 4);
+  assert.deepEqual([...new Set(result.journeyRuns.map((run) => run.state))], ['loading', 'submit-error', 'offline']);
+  // Findings come only from the states the defect lives in, never the resting page or the loading state.
+  assert.ok(result.findings.every((finding) => finding.state === 'submit-error' || finding.state === 'offline'), JSON.stringify(result.findings.map((finding) => [finding.state, finding.type])));
+  const errorFindings = result.findings.filter((finding) => finding.state === 'submit-error');
+  assert.ok(errorFindings.some((finding) => finding.type === 'clipped-content' || finding.type === 'truncated-container'), JSON.stringify(result.counts));
+  assert.ok(errorFindings.some((finding) => finding.type === 'contrast'), JSON.stringify(result.counts));
+  // Focus dropped on the page body after the error is an unmet expectation.
+  const focus = errorFindings.find((finding) => finding.type === 'journey-expectation');
+  assert.match(focus.reason, /#email is not focused \(focus is on the page body\)/);
+  // Every run records its steps, a screenshot and a trace.
+  for (const run of result.journeyRuns) {
+    assert.ok(existsSync(join(artifactDir, run.screenshot)), run.screenshot);
+    assert.ok(run.trace && existsSync(join(artifactDir, run.trace)), `${run.state} trace`);
+    assert.ok(run.steps.length >= 3);
+    assert.ok(run.steps.slice(0, 2).every((step) => step.status === 'ok'), JSON.stringify(run.steps));
+  }
+  const loading = result.journeyRuns.find((run) => run.state === 'loading');
+  assert.deepEqual(loading.steps.map((step) => step.status), ['ok', 'ok', 'ok']);
+  const markdown = await readFile(join(artifactDir, 'visual-qa.md'), 'utf8');
+  assert.match(markdown, /## Journey states — start/);
+  assert.match(markdown, /\*\*submit-error\*\* · light · phone — screenshot/);
+  assert.match(markdown, /UNMET — `expect #email focused=true`/);
+  assert.match(markdown, /state submit-error · light/);
+  const report = JSON.parse(await readFile(join(artifactDir, 'visual-qa.json'), 'utf8'));
+  assert.deepEqual(report.journey.states, ['loading', 'submit-error', 'offline']);
+  assert.equal(report.strict, true);
+});
+
+test('the same journey passes once the post-interaction defect is fixed', async () => {
+  const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-journey-fixed-'));
+  const journey = JSON.parse(await readFile(journeyFile, 'utf8'));
+  journey.url = `${pathToFileURL(fixture('journey-start.html')).href}?fixed=1`;
+  const result = await runVisualQa({ journey, artifactDir, strict: true, ...both });
+  assert.equal(result.status, 'PASS', JSON.stringify(result.findings.map((finding) => [finding.state, finding.type, finding.reason])));
+  assert.ok(result.journeyRuns.every((run) => run.steps.every((step) => step.status === 'ok')));
+});
+
+test('a step that cannot run fails the state and skips the rest', async () => {
+  const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-journey-broken-'));
+  const result = await runVisualQa({
+    urls: [fixture('clean.html')],
+    journey: { name: 'broken', timeoutMs: 300, states: [{ name: 'missing', steps: [{ click: '#nope' }, { wait: 10 }] }] },
+    artifactDir,
+    strict: true,
+    schemes: ['light'],
+    viewports: [{ name: 'phone', width: 390, height: 800 }],
+  });
+  assert.equal(result.status, 'FAIL');
+  const [run] = result.journeyRuns;
+  assert.deepEqual(run.steps.map((step) => step.status), ['failed', 'skipped']);
+  assert.ok(result.findings.some((finding) => finding.type === 'journey-step-failed' && /click #nope/.test(finding.reason)));
+});
+
+test('journey files are checked before anything renders', async () => {
+  const { loadJourney } = await import('./visual-qa.mjs');
+  await assert.rejects(loadJourney({ states: [] }), /non-empty states/);
+  await assert.rejects(loadJourney({ states: [{ name: 'a', steps: [{ click: '#x', fill: '#y' }] }] }), /exactly one action/);
+  await assert.rejects(loadJourney({ states: [{ name: 'a' }, { name: 'a' }] }), /used twice/);
+  await assert.rejects(loadJourney({ states: [{ name: 'a', routes: [{ status: 500 }] }] }), /url pattern/);
+  const loaded = await loadJourney(journeyFile);
+  assert.equal(loaded.url, pathToFileURL(fixture('journey-start.html')).href);
+  await assert.rejects(runVisualQa({ urls: [fixture('clean.html'), fixture('defects.html')], journey: { states: [{ name: 'a' }] } }), /exactly one URL/);
+});
+
+test('the command line takes --journey', async () => {
+  const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-journey-cli-'));
+  let status = 0;
+  let output = '';
+  try {
+    output = execFileSync(process.execPath, [join(here, 'visual-qa.mjs'), '--strict', '--scheme', 'light', '--viewport', '390x800', '--artifact-dir', artifactDir, '--journey', journeyFile], { encoding: 'utf8', env: process.env });
+  } catch (error) {
+    status = error.status;
+    output = `${error.stdout}`;
+  }
+  assert.equal(status, 1);
+  assert.match(output, /FAIL journey-expectation \[submit-error\] #email/);
+  const report = JSON.parse(await readFile(join(artifactDir, 'visual-qa.json'), 'utf8'));
+  assert.equal(report.journeyRuns.length, 3);
 });

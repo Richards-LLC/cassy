@@ -13,6 +13,7 @@ use cas_types::{QaPass, Task, TaskType};
 use crate::config::QaConfig;
 
 pub mod github_gate;
+pub mod preflight;
 pub use github_gate::{github_merge_refusal, merge_request_qa_hold};
 
 /// Label carried by every Cassy-created QA work item.

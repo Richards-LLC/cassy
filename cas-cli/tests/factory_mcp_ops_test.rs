@@ -10451,3 +10451,199 @@ async fn gh_699_spawn_preflight_warns_when_a_second_supervisor_shares_the_clone(
         "the warning must not ground the spawn"
     );
 }
+
+// =============================================================================
+// cas-bebc (GH #1023 finding 9): two supervisors on one clone
+// =============================================================================
+
+/// Switch the calling session for the rest of a test that already holds the
+/// fixture's EnvGuard (which restores the original value on drop).
+fn act_as_session(session: &str) {
+    // SAFETY: the caller holds the suite's process-state guard.
+    unsafe { std::env::set_var("CAS_FACTORY_SESSION", session) };
+}
+
+fn standalone_task(env: &FactoryTestEnv, title: &str) -> String {
+    let store = env.task_store();
+    let id = store.generate_id().expect("generate_id");
+    store
+        .add(&Task::new(id.clone(), title.to_string()))
+        .expect("add task");
+    id
+}
+
+fn assigned_task(env: &FactoryTestEnv, title: &str, worker: &str) -> String {
+    let store = env.task_store();
+    let id = store.generate_id().expect("generate_id");
+    let mut task = Task::new(id.clone(), title.to_string());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some(worker.to_string());
+    store.add(&task).expect("add task");
+    id
+}
+
+/// Two live factory sessions share one clone (the GH #734 / #1023 shape).
+/// Each session's shutdown, reset, spawn and merge must refuse the other
+/// session's workers and name the owning session; its own fleet still
+/// works; status stays readable.
+#[tokio::test]
+async fn shared_clone_supervisors_cannot_mutate_each_others_fleet_cas_bebc() {
+    let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-a")]);
+    let env = FactoryTestEnv::new();
+    env.register_supervisor_in_session("sup-a", "session-a");
+    env.register_supervisor_in_session("sup-b", "session-b");
+    env.register_worker_in_session("worker-a", "session-a");
+    env.register_worker_in_session("worker-b", "session-b");
+    let task_a = assigned_task(&env, "session A lane", "worker-a");
+    let task_b = assigned_task(&env, "session B lane", "worker-b");
+    let core = CasCore::with_daemon(env.cas_root.clone(), None, None);
+    core.set_agent_id_for_testing("test-agent-id".to_string());
+
+    for (caller, own, foreign, foreign_task, foreign_session, foreign_supervisor) in [
+        (
+            "session-a",
+            "worker-a",
+            "worker-b",
+            &task_b,
+            "session-b",
+            "sup-b",
+        ),
+        (
+            "session-b",
+            "worker-b",
+            "worker-a",
+            &task_a,
+            "session-a",
+            "sup-a",
+        ),
+    ] {
+        act_as_session(caller);
+        let queued_before = env.spawn_queue().peek(50).expect("peek").len();
+
+        // shutdown_workers: refused, naming the owning session.
+        let mut shutdown = coord_req("shutdown_workers");
+        shutdown.worker_names = Some(foreign.to_string());
+        let refused = env
+            .service
+            .coordination(Parameters(shutdown))
+            .await
+            .expect_err("another session's worker must not be shut down");
+        assert!(
+            refused
+                .message
+                .contains(&format!("{foreign} (factory session {foreign_session})")),
+            "{caller}: {}",
+            refused.message
+        );
+
+        // task reset: refused even with force, naming session and supervisor.
+        let reset = core
+            .cas_task_reset(Parameters(cas::mcp::tools::TaskReleaseRequest {
+                task_id: foreign_task.clone(),
+                force: Some(true),
+            }))
+            .await
+            .expect_err("another session's task must not be reset");
+        assert!(
+            reset.message.contains(foreign_session)
+                && reset.message.contains(foreign_supervisor)
+                && reset.message.contains(caller),
+            "{caller}: {}",
+            reset.message
+        );
+        let untouched = env.task_store().get(foreign_task).expect("task");
+        assert_eq!(untouched.status, TaskStatus::InProgress);
+        assert_eq!(untouched.assignee.as_deref(), Some(foreign));
+
+        // spawn over the other session's live worker name: refused.
+        let mut spawn = factory_req("spawn_workers");
+        spawn.worker_names = Some(foreign.to_string());
+        spawn.task_id = Some(standalone_task(&env, "spawn over a foreign name"));
+        spawn.cli = Some("claude".to_string());
+        let spawn_refused = env
+            .service
+            .factory_request(Parameters(spawn))
+            .await
+            .expect_err("spawning over another session's worker supersedes it");
+        assert!(
+            spawn_refused.message.contains(foreign_session),
+            "{caller}: {}",
+            spawn_refused.message
+        );
+
+        // worktree_merge of the other session's branch, per-task branch, or task.
+        for (id, task_id) in [
+            (format!("factory/{foreign}"), None),
+            (format!("factory/{foreign}-{foreign_task}"), None),
+            ("epic-lane".to_string(), Some(foreign_task.as_str())),
+        ] {
+            let merge = core
+                .worktree_merge(&id, false, task_id, false, None, false, None)
+                .await
+                .expect_err("another session's delivery must not be merged from here");
+            assert!(
+                merge.message.contains("worktree_merge") && merge.message.contains(foreign_session),
+                "{caller} {id}: {}",
+                merge.message
+            );
+        }
+        assert_eq!(
+            env.spawn_queue().peek(50).expect("peek").len(),
+            queued_before,
+            "{caller}: no refused action may queue anything"
+        );
+
+        // The caller's own fleet still works.
+        let mut own_shutdown = coord_req("shutdown_workers");
+        own_shutdown.worker_names = Some(own.to_string());
+        // The own worker holds an in-progress task, so shutdown needs force.
+        own_shutdown.force = Some(true);
+        env.service
+            .coordination(Parameters(own_shutdown))
+            .await
+            .expect("own worker shutdown is queued");
+        let mut own_spawn = factory_req("spawn_workers");
+        own_spawn.worker_names = Some(format!("{own}-2"));
+        own_spawn.task_id = Some(standalone_task(&env, "own spawn"));
+        own_spawn.cli = Some("claude".to_string());
+        env.service
+            .factory_request(Parameters(own_spawn))
+            .await
+            .expect("own spawn is queued");
+        let own_merge = core
+            .worktree_merge(
+                &format!("factory/{own}"),
+                false,
+                None,
+                false,
+                None,
+                false,
+                None,
+            )
+            .await;
+        if let Err(error) = &own_merge {
+            assert!(
+                !error.message.contains("belongs to factory session"),
+                "{caller}: own merge must not hit the ownership refusal: {}",
+                error.message
+            );
+        }
+        // Shared status stays readable from either session.
+        env.service
+            .factory_request(Parameters(factory_req("worker_status")))
+            .await
+            .expect("worker_status stays readable");
+    }
+
+    // The own-session reset (force) goes through.
+    act_as_session("session-a");
+    core.cas_task_reset(Parameters(cas::mcp::tools::TaskReleaseRequest {
+        task_id: task_a.clone(),
+        force: Some(true),
+    }))
+    .await
+    .expect("own task reset succeeds");
+    let reset = env.task_store().get(&task_a).expect("task");
+    assert_eq!(reset.status, TaskStatus::Open);
+    assert_eq!(reset.assignee, None);
+}

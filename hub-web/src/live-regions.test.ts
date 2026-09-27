@@ -17,7 +17,7 @@ const SHELL = `
       </span>
       <div class="actions">
         <span class="control-action" title="Take control">
-          <button id="lease" data-compact-label="Ctrl" aria-label="Take control">Take control</button>
+          <button id="lease" data-compact-label="Ctrl" aria-label="Take control"><svg class="action-icon" aria-hidden="true"></svg><span class="action-label">Take control</span></button>
           <span id="control-disabled-reason" class="sr-only" hidden></span>
         </span>
         <button id="interrupt" class="danger">Interrupt</button>
@@ -253,6 +253,9 @@ describe("live region values", () => {
     const lease = root.querySelector<HTMLButtonElement>("#lease")!;
     expect(lease.textContent).toBe("Force takeover");
     expect(lease.getAttribute("aria-label")).toBe("Force takeover");
+    // The relabel writes the words beside the icon, not over it (cas-3400).
+    expect(lease.querySelector(".action-label")!.textContent).toBe("Force takeover");
+    expect(lease.querySelector("svg.action-icon")).not.toBeNull();
     expect(lease.getAttribute("aria-disabled")).toBe("true");
     expect(root.querySelector<HTMLElement>(".control-action")!.title).toBe("Daniel controls this session");
     expect(root.querySelector<HTMLElement>("#control-disabled-reason")!.hidden).toBe(false);

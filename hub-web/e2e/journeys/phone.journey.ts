@@ -208,6 +208,9 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     // Pairing from the phone opens the new machine's conversation; no list
     // tap in between (journey F8).
     await expect(page.locator(".conversation-identity h1")).toHaveText("forge-tools", { timeout: 15_000 });
+    // cas-71af (dfb2 QA F02): focus lands on the opened thread, not the page
+    // body (and not the reply box, which would raise the phone keyboard).
+    await expect(page.locator(".conversation-reading.thread")).toBeFocused();
     // The "connected" toast sits below the thread header, never over the
     // back link, project and host (cas-002e).
     const [notice, heading] = await Promise.all([toast.boundingBox(), page.locator(".conversation-heading").boundingBox()]);

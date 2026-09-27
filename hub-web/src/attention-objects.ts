@@ -125,6 +125,15 @@ export function renderBlockerObject(reply: OperatorReply, context: TurnRenderCon
   if (waiting) {
     const hint = document.createElement("p"); hint.className = "blk-hint"; hint.textContent = BLOCKER_HINT;
     body.append(hint);
+  } else if (context.history?.events.some((event) => event.kind === "reply" && event.value.notification_id === reply.notification_id)) {
+    // cas-71af (aac8 QA F01): a blocker the operator replied to is handled.
+    // It quiets to the supervisor's colour, as an answered ask does, and says
+    // so with a tick, instead of staying a red alarm with no sign of it.
+    object.dataset.acknowledged = "true";
+    object.setAttribute("aria-label", `Blocker from ${context.supervisor}, acknowledged`);
+    const handled = document.createElement("p"); handled.className = "blk-handled";
+    handled.append(tick(document), document.createTextNode("Acknowledged — you replied"));
+    body.append(handled);
   }
   // cas-16eed: a blocker from a session that has ended no longer waits, and says so.
   const retired = waiting ? undefined : context.history?.retirement(reply.notification_id);

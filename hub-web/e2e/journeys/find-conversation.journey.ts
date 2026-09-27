@@ -182,6 +182,9 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(palette.getByRole("button", { name: /Dismiss all info/ })).toHaveCount(0);
     await expect(palette.getByRole("button", { name: /Show worker panes/ })).toBeHidden();
     await expect(palette.getByRole("button", { name: /Open the terminal view/ })).toBeHidden();
+    // cas-71af (9ecd QA F01): the collapsed Advanced row speaks the palette's
+    // own words, machines and terminal, with no leftover "sessions".
+    await expect(palette.locator('[data-palette-action="terminal-view"] small')).toHaveText("Machines and terminal controls");
     await filter.fill("worker");
     await expect(palette.getByRole("button", { name: /Show worker panes/ })).toBeVisible();
     // A project name finds its session too, and the row names that project.
@@ -383,6 +386,13 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
       const { footer, pane } = (window as unknown as { __attachSeen: { footer: Set<string>; pane: Set<string> } }).__attachSeen;
       return { footer: [...footer], pane: [...pane] };
     });
+    // cas-71af (e918 QA F02): the empty card's machine · codename line yields
+    // the 40-character machine name first; the codename stays whole on a phone.
+    await page.setViewportSize({ width: 390, height: 844 });
+    const meta = page.locator(".thread .empty .proj2");
+    expect(await meta.locator(".codename").evaluate((element) => element.scrollWidth <= element.clientWidth + 1), "codename whole at 390px").toBe(true);
+    expect(await meta.locator(".proj2-machine").evaluate((element) => element.scrollWidth > element.clientWidth), "machine ellipsised at 390px").toBe(true);
+    await page.setViewportSize({ width: 1280, height: 720 });
     expect(seen.footer, "the footer while the conversation opened").toEqual(["Connected"]);
     const jargon = seen.pane.filter((text) => /relay|attempt|authori[sz]ation|handshake|heartbeat|resolving|dialing/i.test(text));
     expect(jargon, "relay-stage words on the default attach surface").toEqual([]);

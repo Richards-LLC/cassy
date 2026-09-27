@@ -11,7 +11,7 @@ import { REFUSED_SEE_ABOVE, refusalSentence, refusal } from "./refusal";
 import { installAttentionObjects } from "./attention-objects";
 import { clearTransientAttachmentNotes, installAttachmentSheet, setAttachmentNote } from "./attachment-sheet";
 import { artifactFailureIsAboutTheFile, artifactIdFromHref, artifactIsLocalOnly, artifactLinkFor, openArtifact } from "./artifact-open";
-import { arrangeConversationShell, bindKeyboardViewport, keyboardViewportHeight, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY } from "./conversation-shell";
+import { arrangeConversationShell, bindKeyboardViewport, keyboardViewportHeight, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY, paletteShortcutLabel, fitConversationHost } from "./conversation-shell";
 import { clockLabel } from "./thread-model";
 import { syncContextRail } from "./context-rail";
 import { applyScheme, markAppearanceCommands, setScheme, type SchemePreference } from "./scheme";
@@ -36,7 +36,7 @@ import { browserSupport, unsupportedBrowserNotice } from "./browser-support";
 import { attentionStore, catalog } from "./storage";
 import { createTerminalSurface, type TerminalSurface } from "./terminal";
 import { firstAttachRetry, machineConnection, sessionConnection } from "./session-connection";
-import { toastPlacementInThread, toastTopClearOfBanner } from "./toast-placement";
+import { toastPlacementInThread, toastTopAboveAction, toastTopClearOfBanner } from "./toast-placement";
 import { absoluteTimestamp, relativeTimestamp } from "./time";
 import { loadPaneLayout, movePane, normalizePaneLayout, orderedPaneIds, promotePane, savePaneLayout, type PaneLayout, type PaneLayoutStorage } from "./pane-layout";
 import { detectSpeechInput, SpeechDictationController, type SpeechInputCapability, type SpeechInputState } from "./speech-input";
@@ -205,6 +205,14 @@ const FOREIGN_LEASE_RECHECK_MS = 5_000;
 // A live Claude/Ink proof after cas-9a29 decides whether one-row PTYs are safe.
 // Until then collapsed phone rows preserve their last real terminal geometry.
 const mobileCollapsedPaneGeometry = "freeze";
+/**
+ * Header action icons, shown in place of the words when the Terminal header's
+ * own column is too narrow for them (styles.css, session-header container):
+ * the buttons keep their accessible names (cas-3400 QA round 2 F01).
+ */
+const HEADER_CONTROL_ICON = '<svg class="action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h10"/></svg>';
+const HEADER_PALETTE_ICON = '<svg class="action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M9 6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3z"/></svg>';
+const HEADER_INTERRUPT_ICON = '<svg class="action-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
 let attention: AttentionItem[] = [];
 const newCriticalAttentionIds = new Set<string>();
 const reclassifiedAttentionIds = new Set<string>();
@@ -713,6 +721,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       if (state.phase === "live") {
         sessionsEverLive.add(key);
         clearTransportStatus(key);
+        void flushHeldSends(machine, session);
         if (!attachWasLive) clearTransientAttachmentNotes(document, machine.id);
         // The socket is back: its transport alarm is history, not attention.
         resolveAttention(`${machine.id}:${session}:session_transport`);
@@ -1948,7 +1957,15 @@ function placeToastClearOfBanner(output: HTMLElement): void {
   // that row whenever it would land on it, as it does below a thread header.
   const brandRow = visibleBox(document.querySelector<HTMLElement>(".conversation-shell:not(.thread-open) .conversation-list-top"));
   const belowBrand = toastTopClearOfBanner(parseFloat(getComputedStyle(output).top), output.getBoundingClientRect(), brandRow);
-  if (belowBrand !== undefined) output.style.top = `${belowBrand}px`;
+  if (belowBrand !== undefined) {
+    // Below the brand it covered the list's title row (cas-71af, dfb2 QA F01):
+    // above the list's bottom action it covers no heading at all.
+    const heading = visibleBox(document.querySelector<HTMLElement>(".conversation-shell:not(.thread-open) .conversation-list-title"));
+    const action = visibleBox(document.querySelector<HTMLElement>(".conversation-shell:not(.thread-open) #compose-fab"))
+      ?? visibleBox(document.querySelector<HTMLElement>(".conversation-shell:not(.thread-open) #hub-footer-badges"));
+    const above = toastTopAboveAction(output.getBoundingClientRect(), action, heading);
+    output.style.top = `${above ?? toastTopClearOfBanner(belowBrand, output.getBoundingClientRect(), heading) ?? belowBrand}px`;
+  }
   const banner = document.querySelector<HTMLElement>(".terminal-disconnected-banner");
   const top = toastTopClearOfBanner(parseFloat(getComputedStyle(output).top), output.getBoundingClientRect(), banner?.getClientRects().length ? banner.getBoundingClientRect() : undefined);
   if (top !== undefined) output.style.top = `${top}px`;
@@ -2447,12 +2464,87 @@ function scheduleReceiptCheck(key: string): void {
   }, wait));
 }
 
+/**
+ * Sends made while the machine is unreachable (cas-0978), per thread, in
+ * order. They never left this browser, so sending them once the session is
+ * back cannot duplicate anything; one not sent within HELD_SEND_MS turns
+ * "Not sent" with Retry and Edit instead of waiting forever.
+ */
+type HeldSend = { clientRef: string; supervisor: string; text: string; replyTo?: number; expiry: ReturnType<typeof setTimeout> };
+const heldSends = new Map<string, HeldSend[]>();
+const flushingHeldSends = new Set<string>();
+const HELD_SEND_MS = 120_000;
+
+/** The machine is reconnecting on its own, as opposed to refused (pairing gone, unsupported browser). */
+function machineWillReconnect(machineId: string): boolean {
+  const snapshot = connections.get(machineId)?.snapshot();
+  return snapshot !== undefined && snapshot.phase !== "idle" && !snapshot.authFailure && !snapshot.fatal;
+}
+
+/** Whether the thread's session is attached and its machine live right now. */
+function sessionIsUp(machineId: string, session: string): boolean {
+  return attachStates.get(sessionKey(machineId, session))?.phase === "live" && connections.get(machineId)?.snapshot().phase === "live";
+}
+
+function holdSupervisorMessage(machine: StoredMachine, session: string, clientRef: string, supervisor: string, text: string, replyTo?: number): void {
+  const key = sessionKey(machine.id, session);
+  conversationHistory(key).hold(clientRef, supervisor, text, Date.now(), replyTo, session);
+  const expiry = setTimeout(() => {
+    const queue = heldSends.get(key) ?? [];
+    const index = queue.findIndex((held) => held.clientRef === clientRef);
+    if (index < 0) return;
+    queue.splice(index, 1);
+    if (queue.length === 0) heldSends.delete(key);
+    // Still unreachable: say so on the message, with Retry and Edit.
+    conversationHistory(key).reject(clientRef, outageRefusal(machine.label));
+    updateConversationViews(); renderConversationList();
+  }, HELD_SEND_MS);
+  const queue = heldSends.get(key) ?? [];
+  queue.push({ clientRef, supervisor, text, replyTo, expiry });
+  heldSends.set(key, queue);
+}
+
+/** The session is back: send what was held, in order, each once. */
+async function flushHeldSends(machine: StoredMachine, session: string): Promise<void> {
+  const key = sessionKey(machine.id, session);
+  if (flushingHeldSends.has(key) || !heldSends.get(key)?.length) return;
+  flushingHeldSends.add(key);
+  try {
+    const history = conversationHistory(key);
+    // The lease lapsed while the machine was away; the hub refuses a message
+    // from an observer, so control is taken back first, as a send does.
+    if (leases.get(key)?.held_by_me !== true && !await takeControlForMessage(machine, session)) {
+      for (const held of heldSends.get(key) ?? []) {
+        clearTimeout(held.expiry);
+        history.reject(held.clientRef, `Could not take control of ${session} after reconnecting. Retry to send it.`);
+      }
+      heldSends.delete(key);
+      return;
+    }
+    const queue = heldSends.get(key) ?? [];
+    while (queue.length) {
+      const held = queue[0]!;
+      if (!connections.get(machine.id)?.send(session, supervisorMessage(held.supervisor, held.text, held.clientRef, held.replyTo))) break;
+      queue.shift();
+      clearTimeout(held.expiry);
+      history.release(held.clientRef);
+    }
+    if (queue.length === 0) heldSends.delete(key);
+    scheduleReceiptCheck(key);
+  } finally {
+    flushingHeldSends.delete(key);
+    updateConversationViews(); renderConversationList();
+  }
+}
+
 function deliverSupervisorMessage(machine: StoredMachine, session: string, supervisor: string, text: string, replyTo?: number, retryOf?: string, editOf?: string): void {
   const clientRef = crypto.randomUUID();
-  const sent = sendControl(machine.id, session, supervisorMessage(supervisor, text, clientRef, replyTo));
+  // Earlier sends still held go first: a new message must not overtake them.
+  const queued = (heldSends.get(sessionKey(machine.id, session))?.length ?? 0) > 0;
+  const sent = !queued && sendControl(machine.id, session, supervisorMessage(supervisor, text, clientRef, replyTo));
   // Without an outcome the operator cannot tell a sent message from a lost
   // one, and the natural response is to send it a second time.
-  if (!sent) {
+  if (!sent && !machineWillReconnect(machine.id)) {
     // In the banner's words, naming the machine it names (journey F9).
     showComposerStatus(outageRefusal(machine.label), "error", true);
     return;
@@ -2462,6 +2554,22 @@ function deliverSupervisorMessage(machine: StoredMachine, session: string, super
   // The edited version is on the wire: the refused original stays as a record
   // but can no longer be retried.
   if (editOf) { history.retireRefused(editOf); editingRefused = undefined; }
+  if (!sent) {
+    holdSupervisorMessage(machine, session, clientRef, supervisor, text, replyTo);
+    updateConversationViews(); renderConversationList();
+    if (selectedMachineId === machine.id && selectedSession === session) {
+      const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
+      if (composer && composer.value.trim() === text) composer.value = "";
+      conversationDrafts.delete(sessionKey(machine.id, session));
+      messageDraft = composer?.value ?? "";
+      messageDraftSelection = messageDraft.length;
+      // A transport status: it clears when the session is back (and the held
+      // message goes out then).
+      showComposerStatus(`Not connected to ${machine.label} right now. Your message will go out by itself when it's back.`, "info", true);
+      composer?.focus();
+    }
+    return;
+  }
   history.submit(clientRef, supervisor, text, Date.now(), replyTo, session);
   scheduleReceiptCheck(sessionKey(machine.id, session));
   updateConversationViews(); renderConversationList();
@@ -2521,7 +2629,10 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
   if (pendingSubmissions.has(submissionKey)) return;
   pendingSubmissions.add(submissionKey);
   try {
-    if (plan.kind === "take-control-then-send") {
+    // While the session is down, taking control cannot succeed and its
+    // refusal would blame the lease; the message is held instead and control
+    // is taken when the session is back (cas-0978).
+    if (plan.kind === "take-control-then-send" && (sessionIsUp(machine.id, session) || !machineWillReconnect(machine.id))) {
     showComposerStatus(plan.notice, "info");
     if (!await takeControlForMessage(machine, session)) {
       showComposerStatus(`Could not take control of ${session}, and the hub refuses a message from a device that is only observing. Send again to retry; if another device controls the session, wait for it to release control.`, "error");
@@ -2642,7 +2753,13 @@ function render(captureDraft = true): void {
     ? { state: connectionClass(headerConnection), text: fleetConnectionLabel(headerConnection, selected?.id) }
     : headerConnectionChip(machineConnectionSnapshot, connectionClass(connectionSnapshot), fleetConnectionLabel(machineConnectionSnapshot, selected?.id));
   const connectionState = connectionChip.state;
-  const connectionText = selected ? connectionLabel(sessionDown ? headerConnection : connectionSnapshot) : "idle";
+  // cas-71af (bf07 QA F01): the chip's tooltip reads the same state as the
+  // chip, the machine's own connection while the session is up, not the
+  // terminal attach (which said "live" beside a Degraded chip).
+  const connectionText = !selected ? "idle"
+    : sessionDown ? connectionLabel(headerConnection)
+    : connectionChip.state === "checking" ? "Checking the connection…"
+    : connectionLabel(machineConnectionSnapshot ?? connectionSnapshot);
   const latencyText = connectionChip.text;
   const counts = attentionCounts(attention);
   const infoItems = dismissableInfoItems(attention);
@@ -2691,6 +2808,10 @@ function render(captureDraft = true): void {
   const sessionPickerTooltip = `Switch session (${sessionPickerCount})`;
   const sessionTitleText = [sessionTitleLead, sessionTitleCodename].filter(Boolean).join(" ");
   const sessionPickerLabel = `${sessionTitleText}${selectedSession && selected ? ` on ${selected.label}` : ""} — ${sessionPickerHint}`;
+  // The browser tab and a screen reader's window title name the open
+  // conversation too, not only the app (cas-3400 QA; cas-cf10 QA F03).
+  const documentTitle = selectedSession ? `${sessionTitleText} — Cassy Cloud` : "Cassy Cloud";
+  if (document.title !== documentTitle) document.title = documentTitle;
   const liveRegions: LiveRegionView = {
     ...(selected ? {
       connection: { state: connectionState, title: compatibility ?? connectionText, latencyText },
@@ -2803,7 +2924,7 @@ function render(captureDraft = true): void {
             <h1 class="${selectedSession ? "toolbar-session-title" : ""}"><button id="session-picker-toggle" class="session-picker-toggle" type="button" aria-haspopup="dialog" aria-expanded="${sessionPickerOpen}" aria-label="${escapeAttr(sessionPickerLabel)}" title="${escapeAttr(sessionPickerTooltip)}"><span class="session-picker-name">${escapeHtml(sessionTitleLead)}</span>${sessionTitleCodename ? `<span class="session-picker-codename codename">${escapeHtml(sessionTitleCodename)}</span>` : ""}<span class="session-picker-caret" aria-hidden="true">▾</span></button></h1>
           </div>
           ${selected ? `<span class="machine-chip" data-compact-label="${escapeAttr(compactMachineLabel)}" title="${escapeAttr(machineLabel)}">${escapeHtml(machineLabel)}</span><span class="mode-badge ${mode.toLowerCase()}" data-compact-label="${lease?.held_by_me ? "CTL" : "OBS"}"${sessionDown ? " hidden" : ""}>${mode}</span><span class="connection-summary ${connectionState}" title="${escapeAttr(compatibility ?? connectionText)}"><span class="connection-dot"></span><span data-machine-latency="${escapeAttr(selected.id)}">${latencyText}</span></span>` : ""}
-          <div class="actions"><button id="command-palette-toggle" class="command-palette-trigger" type="button" aria-label="Open command palette" title="Command palette (Ctrl or Cmd + K)">⌘K</button>${showSessionControls ? `<span class="control-action" title="${escapeAttr(takeControlReason ?? controlActionLabel)}"><button id="lease" data-compact-label="${lease?.held_by_me ? "Rel" : "Ctrl"}" aria-label="${escapeAttr(controlActionLabel)}"${takeControlReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(takeControlReason)}" aria-describedby="control-disabled-reason"` : ""}>${controlActionLabel}</button>${takeControlReason ? `<span id="control-disabled-reason" class="sr-only">${escapeHtml(takeControlReason)}</span>` : ""}</span><button id="interrupt" class="danger" data-compact-label="Int" aria-label="Interrupt selected pane" title="${escapeAttr(interruptReason ?? "Interrupt selected pane")}"${interruptReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(interruptReason)}"` : ""}>Interrupt</button>` : ""}</div>
+          <div class="actions"><button id="command-palette-toggle" class="command-palette-trigger" type="button" aria-label="Open command palette (${escapeAttr(paletteShortcutLabel())})" aria-keyshortcuts="Control+K Meta+K" title="Command palette (${escapeAttr(paletteShortcutLabel())})">${HEADER_PALETTE_ICON}<span class="action-label">${escapeHtml(paletteShortcutLabel())}</span></button>${showSessionControls ? `<span class="control-action" title="${escapeAttr(takeControlReason ?? controlActionLabel)}"><button id="lease" data-compact-label="${lease?.held_by_me ? "Rel" : "Ctrl"}" aria-label="${escapeAttr(controlActionLabel)}"${takeControlReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(takeControlReason)}" aria-describedby="control-disabled-reason"` : ""}>${HEADER_CONTROL_ICON}<span class="action-label">${controlActionLabel}</span></button>${takeControlReason ? `<span id="control-disabled-reason" class="sr-only">${escapeHtml(takeControlReason)}</span>` : ""}</span><button id="interrupt" class="danger" data-compact-label="Int" aria-label="Interrupt selected pane" title="${escapeAttr(interruptReason ?? "Interrupt selected pane")}"${interruptReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(interruptReason)}" aria-describedby="session-controls-reason"` : ""}>${HEADER_INTERRUPT_ICON}<span class="action-label">Interrupt</span></button>` : ""}</div>
         </header>
         ${showSessionControls ? `<p id="session-controls-reason" class="session-controls-reason" role="note"${controlsNotice ? "" : " hidden"}>${escapeHtml(controlsNotice ?? "")}</p>` : ""}
         <section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}>${selectedSession ? '<div class="empty">Connecting to terminal…</div>' : showFleetBoard ? '<div id="fleet-board" class="fleet-board" aria-label="Fleet"></div>' : `<div class="empty empty-pane-slot">${emptyCanvasMarkup()}</div>`}</section>
@@ -2850,7 +2971,7 @@ function render(captureDraft = true): void {
           </section>
           <details class="palette-group palette-advanced" data-palette-group="advanced">
             <summary class="palette-group-heading">Advanced</summary>
-            <button type="button" class="palette-command" data-palette-action="terminal-view"><span>Open the terminal view</span><small>Machines, sessions and terminal controls</small></button>
+            <button type="button" class="palette-command" data-palette-action="terminal-view"><span>Open the terminal view</span><small>Machines and terminal controls</small></button>
             <button type="button" class="palette-command" data-palette-action="workers"><span>${escapeHtml(workersCommandLabel(revealWorkers).title)}</span><small>${escapeHtml(workersCommandLabel(revealWorkers).hint)}</small></button>
             <button type="button" class="palette-command" data-palette-action="dormant"><span>${escapeHtml(dormantCommandLabel(revealDormant).title)}</span><small>${escapeHtml(dormantCommandLabel(revealDormant).hint)}</small></button>
           </details>
@@ -3050,6 +3171,8 @@ function renderConversationList(): void {
       state.replaceChildren(separator, label);
     }
   }
+  // The state's width changes the room the machine · codename line has.
+  fitConversationHost(document);
 }
 
 /**
@@ -3844,6 +3967,25 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
       // Saved and connected are announced at the installation seam inside
       // pairMachine; the handler only closes the dialog.
       document.querySelector<HTMLDialogElement>("#pair-dialog")?.close();
+      // cas-71af (dfb2 QA F02): the dialog hands focus back to a Pair a
+      // machine button the render already replaced, so it fell to <body>.
+      // Land it on the conversation a phone opens for the new machine, else
+      // on Pair a machine where the operator started; a thread, not its reply
+      // box, so a phone raises no keyboard over it.
+      // Only focus that is lost is re-landed: anything the operator focuses
+      // meanwhile is theirs.
+      const deadline = Date.now() + 3_000;
+      const reland = (): void => {
+        const active = document.activeElement;
+        if (!active || active === document.body || !active.isConnected || active.closest("dialog:not([open])")) {
+          for (const target of [focusTargets.thread, () => document.querySelector<HTMLElement>("#pair-toggle")]) {
+            const element = target();
+            if (element?.isConnected && element.getClientRects().length > 0) { element.focus(); break; }
+          }
+        }
+        if (Date.now() < deadline) requestAnimationFrame(reland);
+      };
+      window.setTimeout(reland, 0);
     }).catch((error) => {
       // A pairing failure is stated inside the dialog beside Pair; a toast
       // behind the backdrop only duplicated it. Anything else still surfaces.
@@ -3856,6 +3998,17 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   const explainIfUnavailable = (button: HTMLButtonElement): boolean => {
     const reason = button.dataset.disabledReason;
     if (!reason) return false;
+    // cas-71af (6929 QA F01): when the reason is already on screen under the
+    // header, a toast only repeats it a third time. The click calls attention
+    // to the sentence that is there instead.
+    const notice = document.querySelector<HTMLElement>("#session-controls-reason");
+    if (notice && !notice.hidden && notice.textContent?.includes(reason)) {
+      notice.classList.remove("called");
+      void notice.offsetWidth;
+      notice.classList.add("called");
+      window.setTimeout(() => notice.classList.remove("called"), 1_200);
+      return true;
+    }
     toast(reason);
     return true;
   };
@@ -3937,6 +4090,9 @@ app.addEventListener("click", (event) => {
 const localOnlyArtifacts = new Set<string>();
 
 window.addEventListener("keydown", globalShortcut, true);
+// The conversation header's machine · codename line is fitted to its room
+// (cas-71af): a width change can make the machine name step aside or return.
+window.addEventListener("resize", () => fitConversationHost(document), { passive: true });
 // Rotation changes the layout in CSS instantly, but which panes mount a
 // terminal, whether the worker strip is collapsed and the PTY column floor are
 // all decided in JS at render time. Without this, a phone turned on its side

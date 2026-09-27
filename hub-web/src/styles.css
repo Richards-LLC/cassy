@@ -563,9 +563,15 @@ main {
 }
 
 /* == Unit 3: header == */
+/* The actions (palette, control, Interrupt) never clip: they never shrink.
+   The title keeps its width first; the machine chip yields first (ellipsised),
+   and a header too narrow for the chips drops them in priority order (the
+   container rules below). At 900–1024px the header used to run 871px of
+   content in 640 and cut the actions off (cas-3400 QA F01). A phone header
+   keeps its grid (the 53rem block). */
 .session-header {
-  display: grid;
-  grid-template-columns: minmax(var(--mobile-header-chip-width), auto) auto auto auto minmax(0, 1fr);
+  display: flex;
+  container: session-header / inline-size;
   flex: 0 0 var(--session-header-height);
   height: var(--session-header-height);
   align-items: center;
@@ -656,7 +662,12 @@ main {
 /* The caret is the only sign that the session name is a control, so the name
    yields width to it rather than pushing it out of the clipped header. */
 .session-picker-name {
-  flex: 0 1 auto;
+  /* It keeps its width while the codename has any to give (a proportional
+     shrink took a fraction of a pixel from it too, enough to show "cas-s…"
+     beside a truncated codename, cas-3400), and is capped short of the caret
+     when the project name alone is too long. */
+  flex: 0 0 auto;
+  max-width: calc(100% - var(--space-4));
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -739,6 +750,56 @@ main {
   white-space: nowrap;
 }
 
+/* Desktop header priorities: the title, then the actions, then the mode, the
+   connection and last the machine name, which ellipsises first (the full name
+   is in the chip's title attribute). */
+/* The title is the first to give way (cas-3400 QA round 3): no floor beyond
+   the Back glyph, which stays; the project name ellipsises. */
+.session-header > .session-identity { flex: 0 1 auto; min-width: 0; }
+.session-header > .machine-chip { flex: 0 1000 auto; min-width: 6ch; overflow: hidden; text-overflow: ellipsis; }
+.session-header > .mode-badge, .session-header > .connection-summary { flex: 0 0 auto; }
+.session-header > .actions { flex: 0 0 auto; }
+
+/* Header actions carry an icon for the narrowest header, hidden until then. */
+.session-header .action-icon { display: none; width: 16px; height: 16px; flex: 0 0 auto; }
+.session-header .actions button:has(.action-icon) { display: inline-flex; align-items: center; justify-content: center; }
+
+/* The header's own column decides, not the viewport: a desktop window with the
+   machine drawer open leaves the Terminal header 236–296px (cas-3400 QA round
+   2 F01). Below 360px the control and Interrupt buttons show their icons (their
+   accessible names stay "Release control"/"Take control" and "Interrupt
+   selected pane"); below 280px the palette button goes too (Ctrl/⌘ K still
+   opens it), so the title keeps room for the project name. */
+@container session-header (max-width: 360px) {
+  .session-header .actions .action-label { display: none; }
+  .session-header .actions .action-icon { display: block; }
+  .session-header .actions button:has(.action-icon) { min-width: var(--space-8); padding: 0 var(--space-2); }
+}
+/* Narrower still (the drawer open in an 849px window): every control stays
+   (Back as its ‹ glyph, cas-ac390; the palette, control and Interrupt as
+   icons), and the title steps down a size and gives way instead (cas-3400 QA
+   round 3). */
+@container session-header (max-width: 220px) {
+  .session-header h1 { font-size: var(--fs-meta); }
+  /* The codename goes first: a sliver of it read as a stray bar beside the
+     project name. The full name is still the heading's accessible name. */
+  .session-header .session-picker-codename { display: none; }
+}
+
+/* The latency words ellipsise inside the chip rather than being cut, and the
+   dot keeps its size. */
+.connection-summary [data-machine-latency] { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.connection-summary .connection-dot { flex: 0 0 auto; }
+
+@media (min-width: 53.0625rem) {
+  /* A block box, so the long hostname ends in an ellipsis rather than a cut
+     glyph (an inline-flex chip cannot ellipsise its text). */
+  .session-header > .machine-chip { display: block; }
+  @container session-header (max-width: 820px) { .session-header > .machine-chip { display: none; } }
+  @container session-header (max-width: 720px) { .session-header > .connection-summary { display: none; } }
+  @container session-header (max-width: 560px) { .session-header > .mode-badge { display: none; } }
+}
+
 .mode-badge {
   color: var(--text-mid);
   background: var(--color-transparent);
@@ -757,6 +818,8 @@ main {
 .mode-badge[hidden] { display: none; }
 
 .session-header .actions {
+  /* In the phone grid: the last track, whichever chips are shown. */
+  grid-column: -2;
   display: flex;
   min-width: 0;
   justify-content: flex-end;
@@ -780,6 +843,13 @@ main {
 }
 
 .session-controls-reason[hidden] { display: none; }
+/* cas-71af (6929 QA F01): a click on a control this line explains calls
+   attention to the line (a brief warm wash) instead of repeating it in a toast. */
+.session-controls-reason.called { animation: controls-reason-called 1.2s ease-out; }
+@keyframes controls-reason-called { from { background: color-mix(in srgb, var(--state-warn) 22%, var(--bg-panel)); } to { background: var(--bg-panel); } }
+@media (prefers-reduced-motion: reduce) {
+  .session-controls-reason.called { animation: none; background: color-mix(in srgb, var(--state-warn) 14%, var(--bg-panel)); }
+}
 
 .session-header .actions button {
   min-height: var(--space-8);
@@ -2623,6 +2693,7 @@ dialog form > *,
   }
 
   .session-header {
+    display: grid;
     grid-template-columns: minmax(var(--mobile-header-chip-width), 1fr) auto auto minmax(0, auto);
     gap: var(--space-1);
     padding-inline: var(--space-2);
@@ -3015,7 +3086,7 @@ dialog form > *,
      this the actions overflowed under the attention rail and Interrupt was
      sliced in half. */
   /* == Unit 3: Appearance stays reachable by touch == */
-  .command-palette-trigger { display: inline-flex; }
+  .command-palette-trigger { display: inline-flex; align-items: center; white-space: nowrap; }
   .session-header .actions { gap: var(--space-1); }
   .session-header .actions button { min-width: 0; padding: 0 var(--space-2); }
 
@@ -3038,7 +3109,7 @@ dialog form > *,
   /* The ⌘K chord has no phone equivalent; its width belongs to the two controls
      a thumb actually uses, which stay wide enough to hit. */
   /* == Unit 3: Appearance stays reachable by touch == */
-  .command-palette-trigger { display: inline-flex; }
+  .command-palette-trigger { display: inline-flex; align-items: center; white-space: nowrap; }
   .session-header .actions { gap: var(--space-1); }
   .session-header .actions button { min-width: 0; padding: 0 var(--space-2); }
 }
@@ -3195,9 +3266,16 @@ dialog form > *,
    never exceed machine + separator, so a short label never cuts it); only a
    codename that long ellipsises itself. */
 .conversation-identity .host-where:has(> .host-machine) { display: flex; }
-.conversation-identity .host-machine { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* cas-71af (e918 QA F01): with no room the machine name used to shrink to a
+   2px glyph sliver. It keeps 2ch, one letter and its ellipsis ("D…"), and the
+   codename's reserve is that plus the 3ch separator. */
+.conversation-identity .host-machine { flex: 0 1 auto; min-width: 2ch; overflow: hidden; text-overflow: ellipsis; }
 .conversation-identity .host-sep { flex: none; white-space: pre; }
-.conversation-identity .host-machine ~ .codename { flex: none; max-width: calc(100% - 3ch); overflow: hidden; text-overflow: ellipsis; }
+.conversation-identity .host-machine ~ .codename { flex: none; max-width: calc(100% - 5ch); overflow: hidden; text-overflow: ellipsis; }
+/* With less room than that, the machine and its separator step aside
+   (fitMachineLine); the title keeps the whole "machine · codename". */
+.conversation-identity .host-where.machine-squeezed > :is(.host-machine, .host-sep) { display: none; }
+.conversation-identity .host-where.machine-squeezed > .codename { max-width: 100%; }
 #conversation-connection { flex: none; white-space: pre; }
 .conversation-pane-slot { flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
 .conversation-pane-slot .pane-grid { display: block; padding: 0; height: 100%; min-height: 0; background: var(--bg-root); color: var(--text-hi); }
@@ -3235,6 +3313,8 @@ dialog form > *,
 .thread .msgs { flex: 1; padding: 22px 30px 10px; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .thread .day { align-self: center; margin: 0 0 2px; font-size: 12px; color: var(--ink-mid); }
 .thread .session-divider, .thread .history-end { align-self: center; margin: 0; color: var(--ink-mid); font: var(--weight-medium) 11px/1.3 var(--font-mono); letter-spacing: 0.02em; text-align: center; }
+/* cas-71af: focus lands here when the last Load earlier hides. */
+.thread .history-end:focus-visible, .thread .msgs [data-key]:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; border-radius: 4px; }
 .thread .session-divider { padding: 5px 12px; border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-pill); background: color-mix(in srgb, var(--panel) 72%, transparent); }
 .thread .history-end { padding: 8px 0 2px; font-family: var(--font-ui); font-weight: var(--weight-regular); }
 .thread .turn { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; max-width: 70%; min-width: 0; }
@@ -3384,6 +3464,12 @@ dialog form > *,
 .obj.t-a[data-answered="true"] .obj-body, .obj.t-a[data-answered="true"] .obj-foot { border-left-color: var(--color-transparent); background: var(--sup-bg); color: var(--sup-fg); }
 .obj.t-a[data-answered="true"] .obj-foot { padding-top: 0; }
 .obj.t-a[data-answered="true"] .obj-foot .chip.sent { flex: 0 1 auto; border-color: var(--line-subtle); background: var(--panel); color: var(--ink); }
+/* cas-71af (aac8 QA F01): an acknowledged blocker is handled too. It quiets
+   the same way and carries a ticked "Acknowledged — you replied" line. */
+.obj.t-a.blk[data-acknowledged="true"] { box-shadow: var(--lift-sup); }
+.obj.t-a.blk[data-acknowledged="true"] .obj-body, .obj.t-a.blk[data-acknowledged="true"] .obj-foot { border-left-color: var(--color-transparent); background: var(--sup-bg); color: var(--sup-fg); }
+.obj.t-a.blk .blk-handled { display: flex; align-items: center; gap: 5px; margin-top: 10px; color: var(--ink-mid); font: var(--weight-medium) 12.5px/1.3 var(--font-ui); }
+.obj.t-a.blk .blk-handled .tick { width: 13px; height: 13px; flex: none; color: currentColor; }
 .pinned-ask .obj.t-a .obj-body { border-left-color: var(--color-transparent); background: var(--ask-bg); color: var(--ask-fg); }
 .pinned-ask .obj.t-a .obj-foot { border-left-color: var(--color-transparent); background: var(--ask-deep); }
 .pinned-ask .obj.t-a .obj-foot .chip { border-color: var(--color-transparent); background: var(--pin-chip-bg); color: var(--pin-chip-fg); }
@@ -3517,6 +3603,14 @@ button.chip:disabled { cursor: default; }
 .thread .empty b.codename { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.35; }
 .thread .empty .proj2 { max-width: 100%; font: var(--weight-regular) 13px/1.4 var(--font-mono); color: var(--ink-mid); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .thread .empty .proj2:empty { display: none; }
+/* cas-71af (e918 QA F02): the empty card's machine · codename line yields the
+   machine first, as the header does; the codename stays whole. */
+.thread .empty .proj2:has(> .proj2-machine) { display: flex; }
+.thread .empty .proj2-machine { flex: 0 1 auto; min-width: 2ch; overflow: hidden; text-overflow: ellipsis; }
+.thread .empty .proj2-sep { flex: none; white-space: pre; }
+.thread .empty .proj2-machine ~ .codename { flex: none; max-width: calc(100% - 5ch); overflow: hidden; text-overflow: ellipsis; }
+.thread .empty .proj2.machine-squeezed > :is(.proj2-machine, .proj2-sep) { display: none; }
+.thread .empty .proj2.machine-squeezed > .codename { max-width: 100%; }
 .thread .empty .said { margin: 0; max-width: 34ch; color: var(--ink-mid); font-size: 15px; overflow-wrap: anywhere; }
 /* In the sentence the codename is one unbroken token, capped at 20
    characters and ellipsised beyond (the 2px keeps a rounded-down 20ch from

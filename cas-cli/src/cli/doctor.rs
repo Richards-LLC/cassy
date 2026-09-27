@@ -1000,6 +1000,7 @@ fn host_checks(current: Option<&Path>) -> Vec<Check> {
         host_known_repos_check(),
         host_hub_service_check(),
         host_hub_transport_check(),
+        host_hub_audit_check(),
     ];
     #[cfg(feature = "mcp-proxy")]
     checks.push(host_proxy_check());
@@ -1214,6 +1215,28 @@ fn host_hub_transport_check() -> Check {
         },
         report.message_with_remedy(),
     )
+}
+
+/// cas-0140: a hub whose audit writer fails refuses every audited request,
+/// and the only sign used to be an audit log that stopped growing.
+fn host_hub_audit_check() -> Check {
+    let paths = match crate::hub::HubRuntimePaths::default_for_user() {
+        Ok(paths) => paths,
+        Err(error) => {
+            return Check::new("hub audit log", CheckStatus::Warning, format!("cannot locate hub runtime: {error}"));
+        }
+    };
+    hub_audit_check_for(paths.root(), chrono::Utc::now())
+}
+
+fn hub_audit_check_for(root: &Path, now: chrono::DateTime<chrono::Utc>) -> Check {
+    let report = crate::hub::audit_writer_report(root, now);
+    let status = match report.status {
+        "failing" => CheckStatus::Error,
+        "unknown" => CheckStatus::Warning,
+        _ => CheckStatus::Ok,
+    };
+    Check::new("hub audit log", status, report.message)
 }
 
 #[cfg(feature = "mcp-proxy")]
@@ -5466,6 +5489,31 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    /// cas-0140: doctor errors on a failing hub audit writer and stays OK on a
+    /// log that is merely quiet.
+    #[test]
+    fn hub_audit_check_errors_only_on_a_recorded_writer_failure() {
+        let temp = TempDir::new().unwrap();
+        let now = chrono::Utc::now();
+        fs::write(temp.path().join(crate::hub::AUDIT_LOG_FILE), b"{}\n").unwrap();
+        let quiet = hub_audit_check_for(temp.path(), now + chrono::Duration::days(2));
+        assert!(matches!(quiet.status, CheckStatus::Ok), "{}", quiet.message);
+        assert!(quiet.message.starts_with("last row 2d ago"), "{}", quiet.message);
+        let failure = crate::hub::AuditHealth {
+            failing_since: now,
+            last_failure_at: now,
+            failures: 1,
+            last_action: "websocket_mutation".into(),
+            last_error: "No space left on device".into(),
+        };
+        fs::write(temp.path().join(crate::hub::AUDIT_HEALTH_FILE), serde_json::to_vec(&failure).unwrap()).unwrap();
+        let failing = hub_audit_check_for(temp.path(), now);
+        assert!(matches!(failing.status, CheckStatus::Error));
+        assert!(failing.message.contains("1 failure, last on websocket_mutation") && failing.message.contains("No space left"), "{}", failing.message);
+        fs::write(temp.path().join(crate::hub::AUDIT_HEALTH_FILE), b"not json").unwrap();
+        assert!(matches!(hub_audit_check_for(temp.path(), now).status, CheckStatus::Warning));
+    }
 
     /// cas-3a90: pulled rows this project didn't author are counted per type;
     /// an empty ledger adds no row to the report.

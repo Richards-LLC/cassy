@@ -317,7 +317,7 @@ pub fn render_shared_clone_warning(sessions: &[LiveSupervisorSession], clone_roo
         .unwrap_or(clone_root);
     let described: Vec<String> = sessions.iter().map(LiveSupervisorSession::describe).collect();
     format!(
-        "{} live supervisors share this clone ({}): {} — reset, worktree_merge, shutdown_workers or a spawn from either session can reap the other's workers",
+        "{} live supervisors share this clone ({}): {} — Cassy refuses reset, worktree_merge, shutdown_workers and spawn over the other session's live workers (cas-bebc), but raw git, direct task edits or a supervisor that exits can still reap the other's workers",
         sessions.len(),
         checkout.display(),
         described.join(", ")

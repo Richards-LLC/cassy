@@ -45,6 +45,9 @@ test("HUB-J1 first open and pair a machine with a code", async ({ page, journey 
     await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Daniel");
     await dialog.getByRole("button", { name: "Pair", exact: true }).click();
     await expect(dialog).toBeHidden();
+    // cas-71af (dfb2 QA F02): focus goes back to Pair a machine, where the
+    // operator started, not to the page body.
+    await expect(page.locator("#pair-toggle")).toBeFocused();
     expect(hub.exchanges).toHaveLength(1);
     expect(hub.exchanges[0]).toMatchObject({ hub_id: "atlas", operator_label: "Daniel", token: "journey-invitation" });
   });

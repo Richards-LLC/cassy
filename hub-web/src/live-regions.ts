@@ -87,7 +87,10 @@ export function applyLiveRegions(root: ParentNode, view: LiveRegionView): void {
 
   const lease = root.querySelector<HTMLButtonElement>("#lease");
   if (lease && view.controlAction) {
-    lease.textContent = view.controlAction.label;
+    // The label sits beside an icon the narrow header shows instead of it.
+    const label = lease.querySelector<HTMLElement>(".action-label");
+    if (label) label.textContent = view.controlAction.label;
+    else lease.textContent = view.controlAction.label;
     lease.setAttribute("aria-label", view.controlAction.label);
     setDisabledReason(lease, view.controlAction.disabledReason);
     const wrapper = lease.closest<HTMLElement>(".control-action");
@@ -100,6 +103,10 @@ export function applyLiveRegions(root: ParentNode, view: LiveRegionView): void {
   if (interrupt) {
     interrupt.title = view.interruptReason ?? "Interrupt selected pane";
     setDisabledReason(interrupt, view.interruptReason);
+    // cas-71af: the reason under the header is its description, so a click
+    // (or a screen reader) finds it there instead of in a repeating toast.
+    if (view.interruptReason) interrupt.setAttribute("aria-describedby", "session-controls-reason");
+    else interrupt.removeAttribute("aria-describedby");
   }
   setNotice(root.querySelector<HTMLElement>("#session-controls-reason"), view.controlsNotice);
 

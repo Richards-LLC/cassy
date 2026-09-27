@@ -206,6 +206,7 @@ pub const VERIFICATION_ACTIONS: &[&str] = &[
     "latest",
     "qa_record",
     "qa_waive",
+    "qa_request",
     "qa_status",
 ];
 

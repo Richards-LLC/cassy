@@ -521,6 +521,28 @@ impl CasCore {
             });
         }
 
+        // cas-bebc (GH #1023 finding 9): a supervisor sharing this clone must
+        // not force-release another live session's worker's task. `force`
+        // bypasses the liveness guard below, never ownership.
+        if let Some(assignee) = task.assignee.as_deref()
+            && let Some((owner, caller)) = crate::factory_session_scope::foreign_owner_in_store(
+                &self.cas_root,
+                |agents, caller, now| {
+                    crate::factory_session_scope::foreign_owner_of_worker(
+                        agents, caller, assignee, now,
+                    )
+                },
+            )
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(
+                    owner.refusal(&format!("task reset of {}", req.task_id), &caller),
+                ),
+                data: None,
+            });
+        }
+
         // cas-86c5: Alive-worker safety guard.
         //
         // If the task has an assignee whose heartbeat is within WORKER_STALE_SECS

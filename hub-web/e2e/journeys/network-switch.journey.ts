@@ -145,6 +145,7 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
     await expect(held).toHaveText("Waiting for the connection — sends when it's back");
     await expect(banner).toHaveText("Reconnecting to cas-src… Atlas · Linux is still connected.", { timeout: 10_000 });
     await expect(banner).toHaveAttribute("data-scope", "session");
+    await expect(page.locator("#message-status")).toHaveText("cas-src on Atlas · Linux is reconnecting. Your message will go out by itself when it's back.");
     expect(sentTimes("While the daemon link is down")).toBe(0);
     hub.upstreamBack(PELICAN);
     expect(await until(() => sentTimes("While the daemon link is down"), (n) => n >= 1, 15_000)).toBe(1);

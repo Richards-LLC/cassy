@@ -801,7 +801,8 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
           document.querySelector<HTMLElement>("#message-delivery")?.setAttribute("hidden", "");
         }
         if (selectedMachineId === machine.id && selectedSession === session && heldSends.get(key)?.some((held) => held.clientRef === clientRef)) {
-          showComposerStatus(`${session} on ${machine.label} is reconnecting. Your message will go out by itself when it's back.`, "info", true);
+          // Named as the banner above it names the conversation (cas-d15c).
+          showComposerStatus(`${conversationLabel(machine.id, session)} on ${machine.label} is reconnecting. Your message will go out by itself when it's back.`, "info", true);
         }
         updateConversationViews(); renderConversationList();
         return;

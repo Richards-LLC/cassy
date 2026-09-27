@@ -7764,6 +7764,7 @@ impl FactoryDaemon {
                 &supervisor_queue,
                 &prompt_queue,
                 &self.session_name,
+                self.app.supervisor_name(),
                 agent_id_to_name,
                 None,
                 self.app.cas_dir(),
@@ -7777,6 +7778,7 @@ impl FactoryDaemon {
                 &supervisor_queue,
                 &prompt_queue,
                 &self.session_name,
+                self.app.supervisor_name(),
                 agent_id_to_name,
                 Some(context),
                 self.app.cas_dir(),
@@ -7809,6 +7811,7 @@ impl FactoryDaemon {
                         &supervisor_queue,
                         &prompt_queue,
                         &self.session_name,
+                        self.app.supervisor_name(),
                         agent_id_to_name,
                         Some(&context),
                         self.app.cas_dir(),
@@ -7940,9 +7943,8 @@ fn commander_history_message_text(text: &str) -> (Option<i64>, String) {
 /// Fire a reminder by delivering it to both the notification queue
 /// (for web UI / structured data) and the prompt queue (for PTY injection).
 ///
-/// `agent_id_to_name` maps agent UUIDs to pane names that the prompt queue
-/// can route to. Falls back to `"supervisor"` when the target agent ID is
-/// not found in the map.
+/// `agent_id_to_name` maps agents in this factory to pane names. A target
+/// missing from that map must be resolved before the reminder is marked fired.
 ///
 /// `triggering_event` is the event or external condition that caused this
 /// reminder to fire. Its context is included in the durable payload and
@@ -7974,16 +7976,57 @@ impl ReminderTriggerContext {
     }
 }
 
+/// Choose a recipient from this project's agent store before consuming a
+/// cross-session reminder. The director snapshot contains only this factory's
+/// live agents; its missing target must never become an arbitrary pane.
+fn resolve_reminder_delivery_target(
+    reminder: &cas_store::Reminder,
+    supervisor_name: &str,
+    agent_id_to_name: &std::collections::HashMap<String, String>,
+    cas_dir: &std::path::Path,
+) -> Option<String> {
+    if let Some(name) = agent_id_to_name.get(&reminder.target_id) {
+        return Some(name.clone());
+    }
+    // Cross-session rows can outlive their original daemon. A replacement
+    // factory may take over only after this project's store says the target
+    // shut down in the factory that created the reminder. Unknown, stale, or
+    // still-active agents leave the row pending.
+    let agent = crate::store::open_agent_store(cas_dir)
+        .ok()?
+        .get(&reminder.target_id)
+        .ok()?;
+    if reminder.session_id.is_some()
+        && agent.factory_session.as_deref() != reminder.session_id.as_deref()
+    {
+        return None;
+    }
+    (agent.status == cas_types::AgentStatus::Shutdown).then(|| supervisor_name.to_string())
+}
+
 fn fire_reminder(
     reminder: &cas_store::Reminder,
     reminder_store: &std::sync::Arc<dyn cas_store::ReminderStore>,
     supervisor_queue: &Option<std::sync::Arc<dyn cas_store::SupervisorQueueStore>>,
     prompt_queue: &Option<std::sync::Arc<dyn cas_store::PromptQueueStore>>,
     session_name: &str,
+    supervisor_name: &str,
     agent_id_to_name: &std::collections::HashMap<String, String>,
     triggering_event: Option<&ReminderTriggerContext>,
     cas_dir: &std::path::Path,
 ) {
+    let Some(target) = resolve_reminder_delivery_target(
+        reminder,
+        supervisor_name,
+        agent_id_to_name,
+        cas_dir,
+    ) else {
+        // Another factory can see a cross-session due row in the shared
+        // project DB. Keep it pending until the target or a proven fallback
+        // can receive it; marking it fired here would lose the owner wake.
+        return;
+    };
+
     // Build event JSON for persistence
     let event_json = triggering_event.map(|event| {
         serde_json::json!({
@@ -8024,15 +8067,8 @@ fn fire_reminder(
         }
     }
 
-    // Enqueue to prompt queue for PTY injection into the target agent's session.
-    // Resolve the target agent UUID to its pane name. process_prompt_queue also
-    // resolves the logical name "supervisor" to the actual pane name, so we use
-    // that as fallback when the target ID isn't in the map.
+    // Enqueue to prompt queue for PTY injection into the resolved recipient.
     if let Some(queue) = prompt_queue {
-        let target = agent_id_to_name
-            .get(&reminder.target_id)
-            .map(|s| s.as_str())
-            .unwrap_or("supervisor");
 
         // Include triggering event context for event-based reminders.
         //
@@ -8062,7 +8098,7 @@ fn fire_reminder(
         };
 
         if let Err(e) =
-            queue.enqueue_with_session(&reminder.owner_id, target, &prompt, session_name)
+            queue.enqueue_with_session(&reminder.owner_id, &target, &prompt, session_name)
         {
             tracing::error!("Failed to enqueue reminder prompt: {}", e);
         } else {
@@ -8173,6 +8209,11 @@ mod tests {
         let prompt_store: Arc<dyn cas_store::PromptQueueStore> =
             Arc::new(cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap());
         prompt_store.init().unwrap();
+        let agent_store = crate::store::open_agent_store(temp.path()).unwrap();
+        let mut old_owner = cas_types::Agent::new("supervisor-1".into(), "old-supervisor".into());
+        old_owner.status = cas_types::AgentStatus::Shutdown;
+        old_owner.factory_session = Some("old-factory-session".into());
+        agent_store.register(&old_owner).unwrap();
 
         let id = reminder_store
             .create_with_scope(
@@ -8219,6 +8260,7 @@ mod tests {
             &supervisor,
             &prompt,
             "new-factory-session",
+            "new-supervisor",
             &HashMap::new(),
             Some(&context),
             temp.path(),
@@ -8241,6 +8283,7 @@ mod tests {
         assert!(notifications[0].payload.contains("tag_exists"));
         let prompts = prompt_store.peek_all(10).unwrap();
         assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].target, "new-supervisor");
         assert!(prompts[0].prompt.contains("external condition satisfied"));
 
         // A stale pre-restart snapshot cannot create a second delivery: the
@@ -8251,12 +8294,98 @@ mod tests {
             &supervisor,
             &prompt,
             "new-factory-session",
+            "new-supervisor",
             &HashMap::new(),
             Some(&context),
             temp.path(),
         );
         assert_eq!(supervisor_store.peek("supervisor-1", 10).unwrap().len(), 1);
         assert_eq!(prompt_store.peek_all(10).unwrap().len(), 1);
+    }
+
+    /// GH #1015: a foreign factory must not consume a time reminder while
+    /// its original target is still active in this project's agent store.
+    #[test]
+    fn cross_session_time_reminder_waits_for_its_target_across_factories() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let reminder_store: Arc<dyn cas_store::ReminderStore> =
+            Arc::new(cas_store::SqliteReminderStore::open(temp.path()).unwrap());
+        reminder_store.init().unwrap();
+        let supervisor_store: Arc<dyn cas_store::SupervisorQueueStore> =
+            Arc::new(cas_store::SqliteSupervisorQueueStore::open(temp.path()).unwrap());
+        supervisor_store.init().unwrap();
+        let prompt_store: Arc<dyn cas_store::PromptQueueStore> =
+            Arc::new(cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap());
+        prompt_store.init().unwrap();
+        let agent_store = crate::store::open_agent_store(temp.path()).unwrap();
+        let mut owner = cas_types::Agent::new("owner-id".into(), "young-swan-22".into());
+        owner.role = cas_types::AgentRole::Supervisor;
+        owner.factory_session = Some("origin-factory".into());
+        agent_store.register(&owner).unwrap();
+
+        let id = reminder_store
+            .create_with_scope(
+                "owner-id",
+                None,
+                "check PR 2514",
+                cas_store::ReminderTriggerType::Time,
+                Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
+                None,
+                None,
+                3600,
+                Some("origin-factory"),
+                Some("creator-session"),
+                true,
+                None,
+            )
+            .unwrap();
+        let reminder = reminder_store
+            .get_due_time_reminders()
+            .unwrap()
+            .into_iter()
+            .find(|reminder| reminder.id == id)
+            .unwrap();
+        assert!(super::reminder_matches_factory_session(
+            reminder.session_id.as_deref(),
+            reminder.cross_session,
+            "foreign-factory"
+        ));
+
+        // The foreign daemon lacks owner-id in its own pane map. Its fallback
+        // supervisor (golden-spider-80) must not receive the prompt.
+        super::fire_reminder(
+            &reminder,
+            &reminder_store,
+            &Some(Arc::clone(&supervisor_store)),
+            &Some(Arc::clone(&prompt_store)),
+            "foreign-factory",
+            "golden-spider-80",
+            &HashMap::new(),
+            None,
+            temp.path(),
+        );
+        assert_eq!(reminder_store.get_due_time_reminders().unwrap().len(), 1);
+        assert!(prompt_store.peek_all(10).unwrap().is_empty());
+        assert!(supervisor_store.peek("owner-id", 10).unwrap().is_empty());
+
+        // The owner is present in its factory's map, so the same due row can
+        // fire to that exact pane without changing the cross-session gate.
+        super::fire_reminder(
+            &reminder,
+            &reminder_store,
+            &Some(Arc::clone(&supervisor_store)),
+            &Some(Arc::clone(&prompt_store)),
+            "origin-factory",
+            "origin-supervisor",
+            &HashMap::from([("owner-id".into(), "young-swan-22".into())]),
+            None,
+            temp.path(),
+        );
+        let prompts = prompt_store.peek_all(10).unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].target, "young-swan-22");
+        assert_eq!(prompts[0].factory_session.as_deref(), Some("origin-factory"));
+        assert!(reminder_store.get_due_time_reminders().unwrap().is_empty());
     }
 
     #[test]

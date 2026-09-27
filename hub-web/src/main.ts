@@ -34,7 +34,7 @@ import { DEFAULT_PAIRING_SCOPES, PairingRelayError, acknowledgePairing, createPa
 import { browserSupport, unsupportedBrowserNotice } from "./browser-support";
 import { attentionStore, catalog } from "./storage";
 import { createTerminalSurface, type TerminalSurface } from "./terminal";
-import { machineConnection, sessionConnection } from "./session-connection";
+import { firstAttachRetry, machineConnection, sessionConnection } from "./session-connection";
 import { toastPlacementInThread, toastTopClearOfBanner } from "./toast-placement";
 import { absoluteTimestamp, relativeTimestamp } from "./time";
 import { loadPaneLayout, movePane, normalizePaneLayout, orderedPaneIds, promotePane, savePaneLayout, type PaneLayout, type PaneLayoutStorage } from "./pane-layout";
@@ -1391,7 +1391,10 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
     retry: () => { void connections.get(machineId)?.attach(session); },
     diagnose: () => openConnectionLog(machineId),
     repair: () => openRepairDialog(machineId),
-  }, now, hubPresentation === "conversation" ? { openingTitle: CONVERSATION_OPENING } : {});
+  }, now, {
+    ...(hubPresentation === "conversation" ? { openingTitle: CONVERSATION_OPENING } : {}),
+    quietRetry: "session" in snapshot && firstAttachRetry(snapshot as AttachSnapshot, sessionsEverLive.has(sessionKey(machineId, session))),
+  });
 }
 
 function syncConnectionViewTicker(): void {
@@ -1417,6 +1420,10 @@ function renderTerminalFailure(machineId: string, session: string, detail: strin
   if (grid?.dataset.sessionKey !== sessionKey(machineId, session)) return;
   const placeholder = grid.querySelector<HTMLElement>(":scope > .empty");
   if (!placeholder) return;
+  // cas-28df: a never-live conversation's first retry is still opening; the
+  // connection surface shows it calmly, with this detail behind "Details".
+  const key = sessionKey(machineId, session);
+  if (firstAttachRetry(attachStates.get(key), sessionsEverLive.has(key))) return;
   const message = document.createElement("p");
   message.textContent = `Terminal unavailable: ${detail}`;
   const retry = document.createElement("button");

@@ -197,6 +197,29 @@ describe("the attach surface opens calmly (journey F3)", () => {
     }
     expect(attachInProgress(snapshot())).toBe(true);
   });
+
+  it("keeps a never-live conversation's first retry calm: the opening title, the retry behind Details (cas-28df)", () => {
+    const target = card();
+    const retry = snapshot({ phase: "backoff", stage: "attaching", attempt: 1, retryInMs: 1_000, reason: "Terminal opened but sent no session state within 3s" });
+    renderConnectionSurfaceInto(target, "patient-pelican-9", retry, {}, startedAt + 3_200, { openingTitle: CONVERSATION_OPENING, quietRetry: true });
+    expect(target.querySelector(".terminal-connecting-title")?.textContent).toBe(CONVERSATION_OPENING);
+    expect(target.querySelector(":scope > .connection-timeline")).toBeNull();
+    const details = target.querySelector<HTMLDetailsElement>(":scope > details.connection-details")!;
+    expect(details.open).toBe(false);
+    // The evidence is all still there for whoever asks.
+    expect(details.querySelector(".connection-timeline")?.textContent).toContain("Retry scheduled");
+    expect(details.querySelector(".connection-timeline")?.textContent).toContain("no session state within 3s");
+    expect(target.textContent).not.toMatch(/interrupted|retrying/i);
+    // The 1 Hz repaint keeps keyboard focus on Details instead of dropping it to the page.
+    details.querySelector<HTMLElement>("summary")!.focus();
+    renderConnectionSurfaceInto(target, "patient-pelican-9", { ...retry, retryInMs: 0 }, {}, startedAt + 4_200, { openingTitle: CONVERSATION_OPENING, quietRetry: true });
+    expect(document.activeElement?.tagName).toBe("SUMMARY");
+    expect(target.contains(document.activeElement)).toBe(true);
+    // A fatal failure is never quieted.
+    const fatal = card();
+    renderConnectionSurfaceInto(fatal, "patient-pelican-9", snapshot({ phase: "failed", fatal: true }), {}, startedAt + 3_200, { openingTitle: CONVERSATION_OPENING, quietRetry: true });
+    expect(fatal.querySelector(".terminal-connecting-title")?.textContent).toBe("Connection failed — not retrying.");
+  });
 });
 
 describe("one outage, one vocabulary (journey F9)", () => {

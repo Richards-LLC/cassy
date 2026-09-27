@@ -25,6 +25,7 @@ enum BranchCiState {
     Green {
         sha: String,
         url: Option<String>,
+        test_checks: Vec<String>,
     },
     Red {
         sha: String,
@@ -197,7 +198,23 @@ fn classify_branch_ci_response(_branch: &str, sha: &str, output: GhApiOutput) ->
 
     let mut pending = false;
     let mut url = None;
+    let mut observed_checks = Vec::new();
+    let mut test_checks = Vec::new();
+    let mut passed_test_checks = Vec::new();
+    let mut passed_test_url = None;
     for run in runs {
+        if let Some(name) = run.get("name").and_then(serde_json::Value::as_str) {
+            observed_checks.push(name.to_string());
+            if is_test_check_run(run, name) {
+                test_checks.push(name.to_string());
+                if run.get("conclusion").and_then(serde_json::Value::as_str) == Some("success") {
+                    passed_test_checks.push(name.to_string());
+                    if let Some(run_url) = run.get("html_url").and_then(serde_json::Value::as_str) {
+                        passed_test_url = Some(run_url.to_string());
+                    }
+                }
+            }
+        }
         if let Some(run_url) = run.get("html_url").and_then(serde_json::Value::as_str) {
             url = Some(run_url.to_string());
         }
@@ -234,17 +251,52 @@ fn classify_branch_ci_response(_branch: &str, sha: &str, output: GhApiOutput) ->
             };
         }
     }
+    if test_checks.is_empty() {
+        return BranchCiState::Unknown {
+            sha: sha.to_string(),
+            reason: format!(
+                "no test check-runs found; observed: {}",
+                if observed_checks.is_empty() {
+                    "unnamed checks".to_string()
+                } else {
+                    observed_checks.join(", ")
+                }
+            ),
+        };
+    }
     if pending {
         BranchCiState::Pending {
             sha: sha.to_string(),
             url,
         }
+    } else if passed_test_checks.is_empty() {
+        BranchCiState::Unknown {
+            sha: sha.to_string(),
+            reason: format!("test check-runs did not execute successfully: {}", test_checks.join(", ")),
+        }
     } else {
         BranchCiState::Green {
             sha: sha.to_string(),
-            url,
+            url: passed_test_url,
+            test_checks: passed_test_checks,
         }
     }
+}
+
+/// A deployment preview is a check-run, but it is not test evidence. Require
+/// a named validation job before a merge receipt can call CI green.
+fn is_test_check_run(run: &serde_json::Value, name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let app = run.pointer("/app/slug").and_then(serde_json::Value::as_str);
+    if app == Some("vercel") || lower.contains("vercel") || lower.contains("preview") {
+        return false;
+    }
+    [
+        "test", "vitest", "jest", "playwright", "typescript", "typecheck", "lint", "eslint",
+        "clippy", "cargo", "validation", "verify",
+    ]
+    .iter()
+    .any(|term| lower.contains(term))
 }
 
 fn first_stderr_line(stderr: &[u8]) -> String {
@@ -320,12 +372,17 @@ fn redact_stderr_line(line: &str) -> String {
 
 fn describe_branch_ci_state(branch: &str, state: &BranchCiState) -> String {
     let (sha, detail, admission_path, receipt_id) = match state {
-        BranchCiState::Green { sha, url } => (
+        BranchCiState::Green {
+            sha,
+            url,
+            test_checks,
+        } => (
             sha,
             format!(
-                "CI state: green — checks for {sha} passed{}.",
+                "CI state: green — test checks for {sha} passed: {}{}.",
+                test_checks.join(", "),
                 url.as_deref()
-                    .map(|url| format!(": {url}"))
+                    .map(|url| format!(" ({url})"))
                     .unwrap_or_default()
             ),
             "CI check-run (green)",
@@ -3910,6 +3967,50 @@ mod tests {
             pending_receipt.contains("actions/runs/44"),
             "{pending_receipt}"
         );
+    }
+
+    #[test]
+    fn vercel_preview_alone_never_reports_ci_green_gh_1032() {
+        let preview_only = lookup_branch_ci_with("factory/fox", "80ce2914d", |_, _| {
+            gh_output(
+                true,
+                "exit status: 0",
+                br#"{"check_runs":[{"name":"Vercel Preview Comments","app":{"slug":"vercel"},"status":"completed","conclusion":"success","html_url":"https://vercel.com/preview/42"}]}"#,
+                "",
+            )
+        });
+        let receipt = describe_branch_ci_state("factory/fox", &preview_only);
+        assert!(!receipt.contains("CI state: green"), "{receipt}");
+        assert!(receipt.contains("no test check-runs found"), "{receipt}");
+        assert!(receipt.contains("Vercel Preview Comments"), "{receipt}");
+        assert_eq!(admit_branch_ci(&preview_only, false, None), Ok(false));
+
+        let with_tests = lookup_branch_ci_with("factory/fox", "80ce2914d", |_, _| {
+            gh_output(
+                true,
+                "exit status: 0",
+                br#"{"check_runs":[{"name":"Frontend Vitest","app":{"slug":"github-actions"},"status":"completed","conclusion":"success","html_url":"https://github.com/acme/cas/actions/runs/43"},{"name":"TypeScript","app":{"slug":"github-actions"},"status":"completed","conclusion":"success"},{"name":"ESLint","app":{"slug":"github-actions"},"status":"completed","conclusion":"success"},{"name":"Vercel Preview Comments","app":{"slug":"vercel"},"status":"completed","conclusion":"success","html_url":"https://vercel.com/preview/42"}]}"#,
+                "",
+            )
+        });
+        let receipt = describe_branch_ci_state("factory/fox", &with_tests);
+        assert!(receipt.contains("CI state: green"), "{receipt}");
+        assert!(receipt.contains("Frontend Vitest, TypeScript, ESLint"), "{receipt}");
+        assert!(!receipt.contains("passed: Vercel"), "{receipt}");
+        assert!(receipt.contains("Receipt id: https://github.com/acme/cas/actions/runs/43"), "{receipt}");
+        assert!(!receipt.contains("vercel.com"), "{receipt}");
+
+        let skipped_tests = lookup_branch_ci_with("factory/fox", "80ce2914d", |_, _| {
+            gh_output(
+                true,
+                "exit status: 0",
+                br#"{"check_runs":[{"name":"Frontend Vitest","status":"completed","conclusion":"skipped"},{"name":"Vercel Preview Comments","status":"completed","conclusion":"success"}]}"#,
+                "",
+            )
+        });
+        let receipt = describe_branch_ci_state("factory/fox", &skipped_tests);
+        assert!(!receipt.contains("CI state: green"), "{receipt}");
+        assert!(receipt.contains("test check-runs did not execute successfully"), "{receipt}");
     }
 
     #[test]

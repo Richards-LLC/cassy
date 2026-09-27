@@ -340,6 +340,12 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await list.getByRole("button", { name: /cas-src/ }).click();
     await page.getByRole("button", { name: "Terminal view" }).click();
     await expect(page.locator(".session-picker-name")).toHaveText("cas-src");
+    // Just after the reload there is no latency sample yet: the header says it
+    // is checking, never "Status unavailable" beside a green dot, and then
+    // shows the first sample (journey F17).
+    const latency = page.locator(".connection-summary [data-machine-latency]");
+    await expect(latency).toHaveText(/^(Checking…|\d+ms)$/);
+    await expect(latency).toHaveText(/^\d+ms$/, { timeout: 12_000 });
     await expect(page.locator(".session-picker-codename")).toHaveText(PELICAN);
     const initials = page.locator("#machine-rail-list .machine-initials");
     await expect(initials).toHaveCount(3);

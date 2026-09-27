@@ -40,6 +40,23 @@ export const HEARTBEAT_INTERVAL_MS = 5_000;
 export const DEGRADED_AFTER_MISSED_HEARTBEATS = 2;
 export const RECONNECT_AFTER_MISSED_HEARTBEATS = 4;
 
+const UNHEALTHY_DOT_STATES: ReadonlySet<string> = new Set(["degraded", "backoff", "failed"]);
+
+/**
+ * The words beside the Terminal view header's connection dot while the
+ * session is up. A live machine has no latency until its first heartbeat
+ * lands (about five seconds), and a single missed heartbeat clears the last
+ * sample; both read "Checking…", not "Status unavailable" beside a healthy dot
+ * (journey F17). "Status unavailable" is kept for a degraded machine whose dot
+ * already warns. A machine that is not live names its state (`notLiveLabel`).
+ */
+export function headerLatencyLabel(machine: ConnectionSnapshot | undefined, dotState: string, notLiveLabel: string): string {
+  if (machine?.latencyMs !== undefined) return `${machine.latencyMs}ms`;
+  if (!machine) return "Checking…";
+  if (machine.phase !== "live") return notLiveLabel;
+  return machine.degraded && UNHEALTHY_DOT_STATES.has(dotState) ? "Status unavailable" : "Checking…";
+}
+
 export function backoffDelay(attempt: number, random = Math.random): number {
   const base = Math.min(30_000, 1_000 * 2 ** Math.max(0, attempt));
   const jitter = 0.8 + random() * 0.4;

@@ -17,7 +17,7 @@ import { applyScheme, markAppearanceCommands, setScheme, type SchemePreference }
 import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionUrl, createAttentionItem, dismissableInfoItems, groupAttention, machineEventAttention, mergeAttentionItem, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
 import { cycleAttentionGroup, renderAttentionPanel, renderAttentionSummary } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
-import { attachElapsedSeconds, elapsedSeconds, type AttachSnapshot } from "./connection-state";
+import { attachElapsedSeconds, elapsedSeconds, headerLatencyLabel, type AttachSnapshot } from "./connection-state";
 import { disconnectedView, renderConnectionSurfaceInto, shouldRetainDisconnectedFrame, transportFailureNeedsAttention } from "./connection-state-view";
 import { ensureMachineConnection, replaceMachineConnection } from "./connection-lifecycle";
 import { createDeviceKey } from "./dpop";
@@ -2510,8 +2510,9 @@ function render(captureDraft = true): void {
   const terminalSessionKey = selected && selectedSession ? sessionKey(selected.id, selectedSession) : undefined;
   const connectionState = connectionClass(sessionDown ? headerConnection : connectionSnapshot);
   const connectionText = selected ? connectionLabel(sessionDown ? headerConnection : connectionSnapshot) : "idle";
-  const latency = machineConnectionSnapshot?.latencyMs;
-  const latencyText = sessionDown ? fleetConnectionLabel(headerConnection, selected?.id) : latency === undefined ? "Status unavailable" : `${latency}ms`;
+  const latencyText = sessionDown
+    ? fleetConnectionLabel(headerConnection, selected?.id)
+    : headerLatencyLabel(machineConnectionSnapshot, connectionState, fleetConnectionLabel(machineConnectionSnapshot, selected?.id));
   const counts = attentionCounts(attention);
   const infoItems = dismissableInfoItems(attention);
   // With no paired machine and no event to inspect, the canvas is the only

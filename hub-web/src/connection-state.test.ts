@@ -6,6 +6,7 @@ import {
   connectingAnchor,
   DEGRADED_AFTER_MISSED_HEARTBEATS,
   elapsedSeconds,
+  headerLatencyLabel,
   RECONNECT_AFTER_MISSED_HEARTBEATS,
   stageFailureDetail,
   STAGE_TIMEOUT_MS,
@@ -71,5 +72,33 @@ describe("Commander connection lifecycle contract", () => {
       session: "factory-a", phase: "backoff", stage: "attaching", since: 18_000,
       attachSince: 1_000, attempt: 3, missedHeartbeats: 0, degraded: false,
     }, 21_500)).toBe(20);
+  });
+});
+
+describe("Terminal view header latency label (journey F17)", () => {
+  const live = (update: Partial<ConnectionSnapshot> = {}): ConnectionSnapshot => ({
+    phase: "live", stage: "live", since: 0, attempt: 0, missedHeartbeats: 0, degraded: false, ...update,
+  });
+
+  it("reads Checking… before the first latency sample, never unavailable beside a healthy dot", () => {
+    expect(headerLatencyLabel(live(), "live", "Live")).toBe("Checking…");
+    expect(headerLatencyLabel(undefined, "idle", "Idle")).toBe("Checking…");
+    // One missed heartbeat clears the sample; the dot is still healthy.
+    expect(headerLatencyLabel(live({ missedHeartbeats: 1 }), "live", "Live")).toBe("Checking…");
+  });
+
+  it("shows the latency once a sample lands", () => {
+    expect(headerLatencyLabel(live({ latencyMs: 41 }), "live", "Live")).toBe("41ms");
+  });
+
+  it("keeps unavailable for a degraded machine whose dot already warns", () => {
+    const degraded = live({ missedHeartbeats: 2, degraded: true });
+    expect(headerLatencyLabel(degraded, "degraded", "Degraded")).toBe("Status unavailable");
+    // A healthy dot (the terminal attach is live) never pairs with unavailable.
+    expect(headerLatencyLabel(degraded, "live", "Degraded")).toBe("Checking…");
+  });
+
+  it("names a machine that is not live by its state", () => {
+    expect(headerLatencyLabel(live({ phase: "backoff", stage: "dialing" }), "backoff", "Reconnecting")).toBe("Reconnecting");
   });
 });

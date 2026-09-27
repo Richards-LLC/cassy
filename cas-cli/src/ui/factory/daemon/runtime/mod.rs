@@ -13,6 +13,7 @@ mod output;
 pub(super) mod pane_size;
 pub mod queue_and_events;
 pub(super) mod relay;
+pub(crate) mod send_dedupe;
 pub(super) mod session_summarizer;
 pub(crate) mod teams;
 mod ws_client;

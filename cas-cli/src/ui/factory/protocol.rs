@@ -29,6 +29,10 @@ pub enum ProtocolCapability {
     PagedScrollback,
     /// Durable operator/supervisor conversation turns can be replayed.
     ConversationHistory,
+    /// A `SendMessage` repeated with the same `client_ref` is answered with its
+    /// first `MessageQueued` receipt and queued once (cas-bea6), so a client
+    /// may resend a send whose receipt it never saw.
+    MessageClientRefDedupe,
 }
 
 pub fn daemon_capabilities() -> Vec<ProtocolCapability> {
@@ -38,6 +42,7 @@ pub fn daemon_capabilities() -> Vec<ProtocolCapability> {
         ProtocolCapability::AuthoritativePaneKeyframes,
         ProtocolCapability::PagedScrollback,
         ProtocolCapability::ConversationHistory,
+        ProtocolCapability::MessageClientRefDedupe,
     ]
 }
 
@@ -1099,6 +1104,11 @@ mod tests {
         assert!(daemon_capabilities().contains(&ProtocolCapability::AuthoritativePaneKeyframes));
         assert!(daemon_capabilities().contains(&ProtocolCapability::PagedScrollback));
         assert!(daemon_capabilities().contains(&ProtocolCapability::ConversationHistory));
+        assert!(daemon_capabilities().contains(&ProtocolCapability::MessageClientRefDedupe));
+        assert_eq!(
+            serde_json::to_value(ProtocolCapability::MessageClientRefDedupe).unwrap(),
+            serde_json::json!("message_client_ref_dedupe")
+        );
     }
 
     #[test]

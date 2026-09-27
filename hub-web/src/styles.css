@@ -556,15 +556,15 @@ main {
 }
 
 /* == Unit 3: header == */
-/* The actions (palette, control, Interrupt) never clip: their track's minimum
-   is their own width. The title, the machine chip and the connection chip
-   yield width instead, each ellipsised, and a header too narrow for them drops
-   the chips (the container rule below). At 900–1024px the header used to run
-   871px of content in 640 and cut the actions off (cas-3400 QA F01). */
+/* The actions (palette, control, Interrupt) never clip: they never shrink.
+   The title keeps its width first; the machine chip yields first (ellipsised),
+   and a header too narrow for the chips drops them in priority order (the
+   container rules below). At 900–1024px the header used to run 871px of
+   content in 640 and cut the actions off (cas-3400 QA F01). A phone header
+   keeps its grid (the 53rem block). */
 .session-header {
-  display: grid;
+  display: flex;
   container: session-header / inline-size;
-  grid-template-columns: minmax(var(--mobile-header-chip-width), max-content) minmax(0, max-content) max-content minmax(0, max-content) minmax(max-content, 1fr);
   flex: 0 0 var(--session-header-height);
   height: var(--session-header-height);
   align-items: center;
@@ -636,7 +636,12 @@ main {
 /* The caret is the only sign that the session name is a control, so the name
    yields width to it rather than pushing it out of the clipped header. */
 .session-picker-name {
-  flex: 0 1 auto;
+  /* It keeps its width while the codename has any to give (a proportional
+     shrink took a fraction of a pixel from it too, enough to show "cas-s…"
+     beside a truncated codename, cas-3400), and is capped short of the caret
+     when the project name alone is too long. */
+  flex: 0 0 auto;
+  max-width: calc(100% - var(--space-4));
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -719,20 +724,26 @@ main {
   white-space: nowrap;
 }
 
-/* A long hostname yields to the title and the actions; the full name is in
-   the chip's title attribute. */
-.machine-chip { max-width: min(100%, 20ch); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.connection-summary { max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.connection-summary .connection-dot { flex: 0 0 auto; }
-.connection-summary [data-machine-latency] { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* Desktop header priorities: the title, then the actions, then the mode, the
+   connection and last the machine name, which ellipsises first (the full name
+   is in the chip's title attribute). */
+.session-header > .session-identity { flex: 0 1 auto; min-width: var(--mobile-header-chip-width); }
+.session-header > .machine-chip { flex: 0 1000 auto; min-width: 6ch; overflow: hidden; text-overflow: ellipsis; }
+.session-header > .mode-badge, .session-header > .connection-summary { flex: 0 0 auto; }
+.session-header > .actions { flex: 0 0 auto; }
 
-/* Desktop layout in a narrow column (Terminal view beside the rails at
-   849–1000px): the chips go, as they do on a phone, so the title keeps room and
-   the actions stay whole. */
+/* The latency words ellipsise inside the chip rather than being cut, and the
+   dot keeps its size. */
+.connection-summary [data-machine-latency] { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.connection-summary .connection-dot { flex: 0 0 auto; }
+
 @media (min-width: 53.0625rem) {
-  @container session-header (max-width: 560px) {
-    .machine-chip, .mode-badge, .connection-summary { display: none; }
-  }
+  /* A block box, so the long hostname ends in an ellipsis rather than a cut
+     glyph (an inline-flex chip cannot ellipsise its text). */
+  .session-header > .machine-chip { display: block; }
+  @container session-header (max-width: 820px) { .session-header > .machine-chip { display: none; } }
+  @container session-header (max-width: 720px) { .session-header > .connection-summary { display: none; } }
+  @container session-header (max-width: 560px) { .session-header > .mode-badge { display: none; } }
 }
 
 .mode-badge {
@@ -753,8 +764,7 @@ main {
 .mode-badge[hidden] { display: none; }
 
 .session-header .actions {
-  /* The last track, whichever chips are shown: an auto-placed row put the
-     actions in the machine chip's shrinkable track when the chips were hidden. */
+  /* In the phone grid: the last track, whichever chips are shown. */
   grid-column: -2;
   display: flex;
   min-width: 0;
@@ -2613,6 +2623,7 @@ dialog form > *,
   }
 
   .session-header {
+    display: grid;
     grid-template-columns: minmax(var(--mobile-header-chip-width), 1fr) auto auto minmax(0, auto);
     gap: var(--space-1);
     padding-inline: var(--space-2);

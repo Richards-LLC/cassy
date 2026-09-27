@@ -44,6 +44,33 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
         const alpha = rgb[4] === undefined ? 1 : (rgb[4].endsWith('%') ? Number.parseFloat(rgb[4]) / 100 : Number.parseFloat(rgb[4]));
         return [Number(rgb[1]), Number(rgb[2]), Number(rgb[3]), alpha];
       }
+      const oklch = value.match(/^oklch\(\s*([^)]*)\s*\)$/i);
+      if (oklch) {
+        const [channels, opacity, ...extra] = oklch[1].split('/').map((part) => part.trim());
+        const parts = channels.split(/\s+/);
+        if (extra.length || parts.length !== 3 || (opacity !== undefined && !opacity)) return null;
+        const [lightness, chroma, hue] = parts;
+        const l = Number.parseFloat(lightness) / (lightness.endsWith('%') ? 100 : 1);
+        const c = Number.parseFloat(chroma) * (chroma.endsWith('%') ? 0.004 : 1);
+        const angle = Number.parseFloat(hue) * (hue.endsWith('turn') ? 360 : hue.endsWith('rad') ? 180 / Math.PI : hue.endsWith('grad') ? 0.9 : 1);
+        const alpha = opacity === undefined ? 1 : Number.parseFloat(opacity) / (opacity.endsWith('%') ? 100 : 1);
+        if (![l, c, angle, alpha].every(Number.isFinite)) return null;
+        const a = c * Math.cos(angle * Math.PI / 180);
+        const b = c * Math.sin(angle * Math.PI / 180);
+        const linearL = (l + 0.3963377774 * a + 0.2158037573 * b) ** 3;
+        const linearM = (l - 0.1055613458 * a - 0.0638541728 * b) ** 3;
+        const linearS = (l - 0.0894841775 * a - 1.2914855480 * b) ** 3;
+        const srgb = (linear) => {
+          const gamma = linear <= 0.0031308 ? 12.92 * linear : 1.055 * linear ** (1 / 2.4) - 0.055;
+          return Math.min(255, Math.max(0, gamma * 255));
+        };
+        return [
+          srgb(4.0767416621 * linearL - 3.3077115913 * linearM + 0.2309699292 * linearS),
+          srgb(-1.2684380046 * linearL + 2.6097574011 * linearM - 0.3413193965 * linearS),
+          srgb(-0.0041960863 * linearL - 0.7034186147 * linearM + 1.7076147010 * linearS),
+          alpha,
+        ];
+      }
       return null;
     };
     const over = (foreground, background) => {
@@ -147,7 +174,7 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
         ariaHidden: ariaHidden(element),
         fontSize: Number.parseFloat(style.fontSize) || 16,
         fontWeight: Number.parseInt(style.fontWeight, 10) || 400,
-        colorAlpha: fg ? round(fg[3]) : 0,
+        colorAlpha: fg ? fg[3] : null,
         ignored: Boolean(ignoredReason),
         ignoredReason,
         statusLike: Boolean(element.closest('.tag, .status, [role="status"]')),
@@ -196,8 +223,8 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
     const visibleText = textNodes.filter((item) => !item.ignored && !item.hidden && !item.ariaHidden && item.box.width > 0 && item.box.height > 0);
     for (const item of textNodes) {
       if (item.ignored || item.ariaHidden || item.box.width <= 0 || item.box.height <= 0) continue;
-      if (item.hidden || item.opacity <= 0 || item.colorAlpha <= 0) {
-        add('invisible-text', item, { reason: item.opacity <= 0 ? 'opacity-0' : item.box.width <= 0 || item.box.height <= 0 ? 'zero-size' : 'visibility-hidden' });
+      if (item.hidden || item.opacity <= 0 || item.colorAlpha === 0) {
+        add('invisible-text', item, { reason: item.opacity <= 0 ? 'opacity-0' : item.colorAlpha === 0 ? 'color-alpha-0' : 'visibility-hidden' });
         continue;
       }
       if (!item.foreground || item.hasUnverifiableImage) {

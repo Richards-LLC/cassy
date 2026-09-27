@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { margin: 0; font: 16px/1.4 Arial, sans-serif; color: oklch(20% 0 0); background: oklch(100% 0 0); }
+    p { margin: 16px; }
+    #opaque { color: oklch(20% 0 0); }
+    #half { color: oklch(20% 0 0 / 50%); }
+    #colored { color: oklch(42% 0.15 250); }
+    #colored-background { color: oklch(95% 0.02 250); background: oklch(25% 0.04 250); }
+    #transparent { color: oklch(20% 0 0 / 0); }
+    #low-contrast { color: oklch(95% 0 0); }
+    #unsupported { color: color(display-p3 0 0 0); }
+  </style>
+</head>
+<body>
+  <p id="opaque">Opaque OKLCH text is visible.</p>
+  <p id="half">Half alpha OKLCH text is visible.</p>
+  <p id="colored">Colored OKLCH text is visible.</p>
+  <p id="colored-background">OKLCH text on OKLCH background is visible.</p>
+  <p id="transparent">Transparent OKLCH text is invisible.</p>
+  <p id="low-contrast">Pale OKLCH text has low contrast.</p>
+  <p id="unsupported">Other CSS color formats need a contrast check.</p>
+</body>
+</html>

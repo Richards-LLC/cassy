@@ -76,6 +76,23 @@ test('passes the clean fixture in light and dark at both required widths', async
   assert.deepEqual(json.viewports.map(({ width }) => width), [1280, 390]);
 });
 
+test('parses computed OKLCH colors without false invisible-text findings', async () => {
+  const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-oklch-'));
+  const result = await runVisualQa({
+    urls: [fixture('oklch.html')],
+    artifactDir,
+    strict: true,
+    schemes: ['light'],
+    viewports: [{ name: 'desktop', width: 1280, height: 800 }],
+  });
+
+  const invisible = result.findings.filter((finding) => finding.type === 'invisible-text');
+  assert.deepEqual(invisible.map((finding) => finding.selector), ['#transparent']);
+  assert.equal(invisible[0].reason, 'color-alpha-0');
+  assert.ok(result.findings.some((finding) => finding.type === 'contrast' && finding.selector === '#low-contrast'));
+  assert.deepEqual(result.infoFindings.filter((finding) => finding.type === 'unverifiable-contrast').map((finding) => finding.selector), ['#unsupported']);
+});
+
 test('allowlist requires a reason and suppresses intentional findings', async () => {
   const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-allowlist-'));
   const allowlistPath = join(artifactDir, 'allowlist.json');

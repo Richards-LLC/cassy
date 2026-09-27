@@ -610,6 +610,7 @@ impl CasCore {
                 ),
                 data: None,
             })?;
+            let parked_anchor = task.deliverables.factory_branch_anchor.clone();
 
             let corrected_target = if proof_targets_fix || risk_fix {
                 task.deliverables.work_target.clone()
@@ -745,6 +746,38 @@ impl CasCore {
             } else {
                 format!("{}\n\n{}", task.notes, note)
             };
+            // cas-46c2: an authenticated supervisor may have merged the
+            // parked immutable SHA directly after the worker lane moved.
+            // Observe that Git fact on the task's exact WorkTarget before
+            // asking the store to invalidate the old proof cycle.
+            if let (Some(anchor), Some(target)) =
+                (parked_anchor.as_deref(), corrected_target.as_ref())
+                && let Ok(context) = super::repo_context::resolve_repo_context(&self.cas_root, target)
+                && super::lifecycle::close_ops::git_commit_is_ancestor(
+                    &context.repo_root,
+                    anchor,
+                    &context.target_branch,
+                )
+                && let Some(merged_tip) = super::lifecycle::close_ops::resolve_branch_sha(
+                    &context.repo_root,
+                    &context.target_branch,
+                )
+            {
+                cas_store::record_observed_delivery_merge(
+                    &self.cas_root,
+                    &task.id,
+                    &format!("commit:{anchor}"),
+                    &context.target_branch,
+                    anchor,
+                    &merged_tip,
+                    &supervisor.id,
+                )
+                .map_err(|error| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!("Failed to record exact-SHA merge observation: {error}")),
+                    data: None,
+                })?;
+            }
             let correction = if proof_targets_fix || risk_fix {
                 cas_store::correct_parked_delivery_proof_targets(
                     &self.cas_root,

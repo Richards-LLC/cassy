@@ -1757,7 +1757,11 @@ fn correct_parked_delivery_proof_scope_inner(
         })
         .transpose()?;
 
-    let observed_work_target_merge = if require_merged_delivery && delivery.is_none() {
+    let observed_work_target_merge = if require_merged_delivery
+        && !delivery.as_ref().is_some_and(|(_, state)| {
+            matches!(*state, WorkerDeliveryState::Merged | WorkerDeliveryState::CloseReady)
+        })
+    {
         let target_branch = corrected_task
             .deliverables
             .work_target
@@ -1783,7 +1787,7 @@ fn correct_parked_delivery_proof_scope_inner(
         && !observed_work_target_merge
     {
         return Err(StoreError::Parse(
-            "proof correction requires a merged or close-ready delivery transaction or an authenticated worktree_merge observation on the task's WorkTarget".to_string(),
+            "proof correction requires a merged or close-ready delivery transaction or an authenticated merge observation on the task's WorkTarget".to_string(),
         ));
     }
 
@@ -3206,6 +3210,69 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = SqliteVerificationStore::open(dir.path()).unwrap();
         (store, dir)
+    }
+
+    #[test]
+    fn exact_sha_observation_allows_proof_targets_correction_with_unmerged_delivery() {
+        let dir = TempDir::new().unwrap();
+        let task_store = SqliteTaskStore::open(dir.path()).unwrap();
+        task_store.init().unwrap();
+        let mut task = Task::new("cas-exact-merge".into(), "Exact SHA merge".into());
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:example".into(),
+            target_branch: "epic/target".into(),
+        });
+        task_store.add(&task).unwrap();
+        let expected_updated_at = task.updated_at;
+        task.status = TaskStatus::Open;
+        task.proof_targets.push("cas --lib close_ops".into());
+        task.updated_at = Utc::now();
+
+        assert!(correct_parked_delivery_proof_targets(
+            dir.path(), &task, expected_updated_at, "supervisor", "widen proof"
+        ).is_err());
+        let receipt = crate::build_worker_completion_receipt(
+            &cas_types::WorkerCompletionReceiptInput {
+                task_id: task.id.clone(),
+                worker_agent_id: "worker".into(),
+                repo_selector: "project:example".into(),
+                source_branch: "factory/worker".into(),
+                commit_sha: "1111111111111111111111111111111111111111".into(),
+                merge_base_sha: "0000000000000000000000000000000000000000".into(),
+                target_branch: "epic/target".into(),
+                target_sha: "2222222222222222222222222222222222222222".into(),
+                proof_reference: "worker proof".into(),
+                scope_summary: "exact SHA merge".into(),
+                artifact_path: None,
+            },
+            "worker",
+            Utc::now(),
+        );
+        crate::create_worker_delivery(
+            dir.path(), &receipt, WorkerDeliveryState::AwaitingMerge, "worker"
+        ).unwrap();
+        crate::record_observed_delivery_merge(
+            dir.path(), &task.id, "commit:1111111111111111111111111111111111111111",
+            "epic/other", "1111111111111111111111111111111111111111",
+            "2222222222222222222222222222222222222222", "supervisor",
+        ).unwrap();
+        assert!(correct_parked_delivery_proof_targets(
+            dir.path(), &task, expected_updated_at, "supervisor", "widen proof"
+        ).is_err(), "an observation on a different WorkTarget cannot authorize correction");
+        crate::record_observed_delivery_merge(
+            dir.path(),
+            &task.id,
+            "commit:1111111111111111111111111111111111111111",
+            "epic/target",
+            "1111111111111111111111111111111111111111",
+            "2222222222222222222222222222222222222222",
+            "supervisor",
+        ).unwrap();
+        correct_parked_delivery_proof_targets(
+            dir.path(), &task, expected_updated_at, "supervisor", "widen proof"
+        ).expect("authenticated exact-SHA observation must permit correction");
+        assert_eq!(task_store.get(&task.id).unwrap().status, TaskStatus::Open);
     }
 
     /// The exact m213 dispatch table shape before m230 made repository proofs

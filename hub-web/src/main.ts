@@ -2745,6 +2745,7 @@ function render(captureDraft = true): void {
         <header><strong>Sessions</strong><button id="session-picker-close" type="button" aria-label="Close session picker">×</button></header>
         <input id="session-picker-query" type="search" aria-label="Filter sessions" placeholder="Filter sessions">
         <div class="palette-commands" id="session-picker-list"></div>
+        <p class="palette-empty" id="session-picker-no-match" role="status" hidden></p>
       </section>
     </dialog>
     ${pairedMachinesDialogMarkup()}
@@ -3622,6 +3623,15 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
         owned.push(sibling);
       }
       heading.hidden = owned.length > 0 && owned.every((entry) => entry.hidden);
+    }
+    // A filter that hides every session says so, as the palette does, rather
+    // than leaving an empty dialog (journey F18). With no sessions at all the
+    // list carries its own empty line.
+    const noMatch = picker.querySelector<HTMLElement>("#session-picker-no-match");
+    if (noMatch) {
+      const entries = [...picker.querySelectorAll<HTMLElement>(".session-picker-entry")];
+      noMatch.hidden = query.length === 0 || entries.length === 0 || entries.some((entry) => !entry.hidden);
+      noMatch.textContent = noMatch.hidden ? "" : `No sessions match “${pickerQuery.value.trim()}”.`;
     }
   };
   pickerQuery.onkeydown = (event) => {

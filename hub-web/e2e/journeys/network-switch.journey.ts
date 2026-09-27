@@ -171,7 +171,9 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
     await hub.down("atlas", { sockets: "close" });
     hub.refuseProofs("atlas", 3);
     await hub.up("atlas");
-    await expect.poll(() => hub.proofRefusalsLeft("atlas"), { timeout: 20_000, message: "the refused proofs were exercised" }).toBe(0);
+    // `until`, not expect.poll: each poll miss would be recorded as a failed
+    // expectation in the evidence trace (cas-2036).
+    expect(await until(() => hub.proofRefusalsLeft("atlas"), (n) => n === 0, 20_000), "the refused proofs were exercised").toBe(0);
     await expect(header).toHaveText(" · Live", { timeout: 20_000 });
     expect(hub.refusedProofs.every((refusal) => refusal.reason === "stale_proof")).toBe(true);
     await expect(page.getByText(/re-pair|needs pairing|no longer paired|was revoked/i)).toHaveCount(0);

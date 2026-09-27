@@ -175,6 +175,11 @@ Run the canonical merge-time diff review ([Required merge-review discipline](#re
 factory action=worktree_merge id=<worker> task_id=<task-id>
 ```
 
+The default merge preserves the worker checkout for continued work. A later
+`shutdown_workers` may remove that checkout once it is clean and the worker
+has no nonterminal tasks. Keep the worker running while another process
+depends on its checkout path.
+
 After a successful merge into an `epic/` branch, the factory daemon launches a
 bounded sweep of the project's detected test runner (`cargo nextest run --workspace
 --no-fail-fast` for a Cargo project, the `test` script for a Node project) in a reusable

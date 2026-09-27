@@ -568,6 +568,14 @@ pub(crate) fn resolve_worktree_merge_cleanup(
     }
 }
 
+fn worktree_merge_cleanup_note(do_cleanup: bool) -> &'static str {
+    if do_cleanup {
+        " Worktree removed (cleanup=true)."
+    } else {
+        " Worktree preserved for this merge. A later shutdown_workers may remove it when clean and all tasks are terminal; pass cleanup=true to remove it now."
+    }
+}
+
 /// Short SHA for receipt prose; passes anything shorter through unchanged.
 fn short_sha(sha: &str) -> &str {
     sha.get(..12).unwrap_or(sha)
@@ -3414,11 +3422,7 @@ impl CasCore {
             String::new()
         };
 
-        let cleanup_note = if do_cleanup {
-            " Worktree removed (cleanup=true)."
-        } else {
-            " Worktree preserved (mid-session merge; pass cleanup=true to remove)."
-        };
+        let cleanup_note = worktree_merge_cleanup_note(do_cleanup);
 
         // cas-5ee0 (GH #137): resolve push state for the non-transactional
         // path (the transactional one already published, before its close).
@@ -4331,6 +4335,15 @@ mod tests {
             "System-B mid-session default must preserve even if config cleanup_on_close=true"
         );
         assert!(!resolve_worktree_merge_cleanup(None, true, false));
+    }
+
+    #[test]
+    fn preserved_merge_receipt_names_shutdown_lifetime_gh_1035() {
+        let note = worktree_merge_cleanup_note(false);
+        assert!(note.contains("preserved for this merge"));
+        assert!(note.contains("shutdown_workers may remove it"));
+        assert!(note.contains("clean and all tasks are terminal"));
+        assert!(worktree_merge_cleanup_note(true).contains("Worktree removed"));
     }
 
     #[test]

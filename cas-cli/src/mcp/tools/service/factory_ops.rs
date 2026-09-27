@@ -626,6 +626,10 @@ impl ShutdownWorkerSnapshot {
     }
 }
 
+fn shutdown_worktree_cleanup_notice() -> &'static str {
+    "Shutdown cleanup: a clean worktree may be removed when its worker has no nonterminal tasks; dirty worktrees are preserved. A previous worktree_merge with cleanup=false does not exempt a clean worktree from shutdown cleanup."
+}
+
 fn shutdown_worker_snapshot(
     cas_root: &std::path::Path,
     worker: &cas_types::Agent,
@@ -2968,7 +2972,8 @@ impl CasService {
             format!("worker(s): {}", worker_names.join(", "))
         };
         let msg = format!(
-            "Queued shutdown request for {request_scope} (request ID: {request_id})\nExact affected workers and request-time state:\n{}",
+            "Queued shutdown request for {request_scope} (request ID: {request_id})\n{}\nExact affected workers and request-time state:\n{}",
+            shutdown_worktree_cleanup_notice(),
             snapshots
                 .iter()
                 .map(|snapshot| format!("- {}", snapshot.render()))
@@ -11084,6 +11089,15 @@ mod spawn_lifecycle_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shutdown_receipt_explains_preserved_merge_worktree_cleanup_gh_1035() {
+        let notice = shutdown_worktree_cleanup_notice();
+        assert!(notice.contains("clean worktree may be removed"));
+        assert!(notice.contains("no nonterminal tasks"));
+        assert!(notice.contains("worktree_merge with cleanup=false"));
+        assert!(notice.contains("dirty worktrees are preserved"));
+    }
 
     // -----------------------------------------------------------------
     // cas-2c05: shutdown_workers target resolution.

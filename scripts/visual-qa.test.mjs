@@ -55,6 +55,7 @@ test('passes the clean fixture in light and dark at both required widths', async
   const result = await runVisualQa({
     urls: [fixture('clean.html')],
     artifactDir,
+    strict: true,
     schemes: ['light', 'dark'],
     viewports: [
       { name: 'desktop', width: 1280, height: 800 },
@@ -66,6 +67,11 @@ test('passes the clean fixture in light and dark at both required widths', async
   assert.equal(result.findings.length, 0);
   assert.equal(result.screenshots.length, 4);
   const json = JSON.parse(await readFile(join(artifactDir, 'visual-qa.json'), 'utf8'));
+  const markdown = await readFile(join(artifactDir, 'visual-qa.md'), 'utf8');
+  assert.equal(json.status, 'PASS');
+  assert.equal(json.strict, true);
+  assert.deepEqual(json.urls, [fixture('clean.html')]);
+  assert.match(markdown, /^# Visual QA — PASS\n/);
   assert.deepEqual(json.schemes, ['light', 'dark']);
   assert.deepEqual(json.viewports.map(({ width }) => width), [1280, 390]);
 });

@@ -39,9 +39,14 @@ journey evaluation scores polish for it.
 - `build_url`, `playwright_version`, `created_at` (RFC 3339)
 - `visual_change` (boolean) and `visual_qa_status` (`pass`, `fail`, or `unavailable`).
   `pass` is a claim that close checks against the run's own report,
-  `visual-qa/visual-qa.json`. The report must say `"status": "PASS"`, and
-  its `generatedAt` must be later than the delivered commit. Every URL in
-  `urls` must be a local build: loopback, `*.localhost`, or a file. The run
+  `visual-qa/visual-qa.json`. The bundled script reports `"status": "PASS"`.
+  A project script's single-source report may instead say `"totalIssues": 0`
+  with nonempty `renders`, `validRenders` equal to the render count, and
+  `"strict": true`. In either format, the JSON report is the verdict; the
+  Markdown heading and stdout footer may include the source name and counts.
+  The report's `generatedAt` must be later than the delivered commit. Every URL in
+  `urls` (or a single-source `input`) must be a local build: loopback,
+  `*.localhost`, or a file. The run
   must not record `"strict": false`. A run against a production or other
   remote origin never counts, because it checks what is deployed there,
   not this commit. With no run, write `unavailable`; never `pass`.

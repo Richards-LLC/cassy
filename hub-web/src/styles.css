@@ -478,6 +478,11 @@ pre { font-family: var(--font-mono); }
 .fleet-plot tbody th, .fleet-track-cell { height: var(--button-compact-height); padding: 0; vertical-align: middle; }
 .fleet-plot tbody th { color: var(--text-mid); }
 .fleet-plot-name { display: block; padding: 0 var(--space-1); line-height: var(--button-compact-height); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* cas-598e QA F01: rows sharing a project carry a codename tag that never truncates; the project gives way first. */
+.fleet-plot-name.tagged { display: flex; align-items: baseline; gap: var(--space-1); }
+.fleet-plot-project { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.fleet-plot-tag { flex: none; }
+.fleet-plot-tag::before { content: "· "; }
 .fleet-track-cell { position: relative; text-align: center; }
 .fleet-track-cell::before { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: var(--line-width); background: var(--line-subtle); }
 .fleet-plot-mark { position: relative; display: inline-flex; align-items: center; gap: var(--space-1); vertical-align: middle; white-space: nowrap; }

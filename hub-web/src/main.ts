@@ -39,7 +39,7 @@ import { toastPlacementInThread, toastTopAboveAction, toastTopClearOfBanner } fr
 import { absoluteTimestamp, relativeTimestamp } from "./time";
 import { loadPaneLayout, movePane, normalizePaneLayout, orderedPaneIds, promotePane, savePaneLayout, type PaneLayout, type PaneLayoutStorage } from "./pane-layout";
 import { detectSpeechInput, SpeechDictationController, type SpeechInputCapability, type SpeechInputState } from "./speech-input";
-import { backLabel, clearStoredSelection, forgetMachine, goBackSelection, loadStoredSelection, pairedSessionToOpen, previousSelection, restorableSession, saveStoredSelection, selectSelection, sessionPickerEntries, sessionPickerHeadline, sessionPickerRowMeta, workerCountLabel, type SelectionState, type SessionPickerEntry, type SelectionStorage, type SessionSelection } from "./session-selection";
+import { backLabel, clearStoredSelection, forgetMachine, goBackSelection, loadStoredSelection, pairedSessionToOpen, previousSelection, restorableSession, saveStoredSelection, selectSelection, sessionPickerEntries, sessionPickerHeadline, sessionPickerRowMeta, type SelectionState, type SessionPickerEntry, type SelectionStorage, type SessionSelection } from "./session-selection";
 import { composerFocusWinner, planSupervisorSend, sendsOnEnter, supervisorMessage, supervisorTarget } from "./supervisor-message";
 import { hiddenWorkersLabel, saveWorkersRevealed, splitVisiblePanes, workersCommandLabel, workersRevealed, workersRoute } from "./worker-visibility";
 import { dormantCommandLabel, dormantRevealed, dormantRoute, saveDormantRevealed } from "./dormant-visibility";
@@ -3244,9 +3244,18 @@ function sessionButton(machineId: string, session: HubSession): HTMLButtonElemen
   const button = document.createElement("button"); button.className = `nav-item ${session.name === selectedSession ? "active" : ""}`;
   const summary = sessionSummaries.get(sessionKey(machineId, session.name));
   const stale = summary && summary.phase !== "idle" && Date.now() - Date.parse(summary.generated_at) > 10 * 60 * 1000;
+  // Project first, codename once in the meta line (journey F1): the same
+  // headline and meta helpers the session picker rows use.
+  const entry: SessionPickerEntry = {
+    machineId, machineLabel: machines.get(machineId)?.label ?? machineId, session: session.name,
+    project: projectTitle(session.project_dir),
+    role: session.supervisor ? "supervisor" : "session", supervisor: session.supervisor || undefined,
+    workerCount: session.workers.length, status: sessionStatusLabel(machineId, session.liveness.replaceAll("_", " ")),
+    current: session.name === selectedSession,
+  };
   button.innerHTML = summary
-    ? `<small class="session-name session-eyebrow">${escapeHtml(session.name)}</small><span class="session-summary-title">${escapeHtml(summary.title)}</span><span class="phase-chip phase-${escapeAttr(summary.phase)}">${escapeHtml(summary.phase)}</span><small class="session-summary-description${stale ? " stale" : ""}">${escapeHtml(summary.description)}</small>`
-    : `<span class="session-name">${escapeHtml(session.name)}</span><small class="session-meta">${escapeHtml(session.supervisor)} · ${escapeHtml(workerCountLabel(session.workers.length))} · ${escapeHtml(sessionStatusLabel(machineId, session.liveness.replaceAll("_", " ")))}</small>`;
+    ? `<small class="session-name session-eyebrow">${escapeHtml(sessionPickerHeadline(entry))}</small><span class="session-summary-title">${escapeHtml(summary.title)}</span><span class="phase-chip phase-${escapeAttr(summary.phase)}">${escapeHtml(summary.phase)}</span><small class="session-summary-description${stale ? " stale" : ""}">${escapeHtml(summary.description)}</small>`
+    : `<span class="session-name">${escapeHtml(sessionPickerHeadline(entry))}</span><small class="session-meta">${escapeHtml(sessionPickerRowMeta(entry))}</small>`;
   button.onclick = () => { machineDrawerOpen = false; void openSession(machineId, session.name); };
   return button;
 }

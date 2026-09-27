@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { FleetBoardRenderer, fleetBoardSignature, fleetProvenance, type FleetBoardModel } from "./fleet-board";
+import { FleetBoardRenderer, fleetBoardSignature, fleetPlotLabels, fleetProvenance, type FleetBoardModel } from "./fleet-board";
 import type { SessionPickerEntry } from "./session-selection";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -99,6 +99,61 @@ describe("fleet board region lifecycle", () => {
     expect(renderer.render(board, summarised, callbacks)).toBe(true);
     expect(board.querySelector(".fleet-session .session-summary-title")?.textContent).toBe("Visual overhaul");
     expect(board.querySelector(".fleet-session .phase-chip")?.textContent).toBe("building");
+  });
+
+  it("leads each row with the project and names the codename once beneath it (journey F1)", () => {
+    const renderer = new FleetBoardRenderer();
+    const board = freshBoard();
+    renderer.render(board, model({ sessions: [entry({ session: "keen-lynx-1", supervisor: "keen-lynx-1", project: "orion", workerCount: 1 }), entry({ session: "bright-otter", supervisor: "bright-otter" })] }), { open: vi.fn() });
+    const [projectRow, bareRow] = [...board.querySelectorAll<HTMLButtonElement>(".fleet-session")];
+    expect(projectRow!.querySelector(".session-name")?.textContent).toBe("orion");
+    expect(projectRow!.querySelector(".session-meta")?.textContent).toBe("supervisor keen-lynx-1 · 1 worker · live");
+    expect(projectRow!.textContent!.split("keen-lynx-1")).toHaveLength(2);
+    expect(projectRow!.getAttribute("aria-label")).toBe("Open orion, keen-lynx-1 on Studio Mac");
+    // No project: the session name heads the row and is not repeated.
+    expect(bareRow!.querySelector(".session-name")?.textContent).toBe("bright-otter");
+    expect(bareRow!.querySelector(".session-meta")?.textContent).toBe("supervisor · 3 workers · live");
+    expect(bareRow!.getAttribute("aria-label")).toBe("Open bright-otter on Studio Mac");
+    // The plot's row labels lead with the project as well.
+    const plotRow = board.querySelector<HTMLElement>('.fleet-plot-row[data-fleet-session="keen-lynx-1"] th')!;
+    expect(plotRow.querySelector(".fleet-plot-name")?.textContent).toBe("orion");
+    expect(plotRow.getAttribute("aria-label")).toBe("orion, keen-lynx-1 on Studio Mac");
+    expect(plotRow.title).toBe("orion · keen-lynx-1");
+    // A project appearing later rebuilds the row.
+    expect(fleetBoardSignature(model({ sessions: [entry({ project: "orion" })] }))).not.toBe(fleetBoardSignature(model({ sessions: [entry()] })));
+  });
+
+  it("tells plot rows that share a project apart by the codename's shortest distinct tail (cas-598e QA F01)", () => {
+    const atlas = { machineId: "m-atlas", machineLabel: "Atlas · Linux" };
+    const forge = { machineId: "m-forge", machineLabel: "Forge · Linux" };
+    const sessions = [
+      entry({ ...atlas, session: "patient-pelican-9", supervisor: "patient-pelican-9", project: "cas-src" }),
+      entry({ ...forge, session: "brisk-otter-5", supervisor: "brisk-otter-5", project: "cas-src" }),
+      entry({ ...forge, session: "quiet-heron-8", supervisor: "quiet-heron-8", project: "cas-src" }),
+      entry({ ...forge, session: "loose-wren-7", supervisor: "loose-wren-7" }),
+      entry({ session: "calm-otter-4", supervisor: "calm-otter-4", project: "gabber-studio" }),
+    ];
+    const labels = fleetPlotLabels(sessions);
+    expect(labels.get("m-atlas/patient-pelican-9")).toEqual({ name: "cas-src", tag: "pelican-9" });
+    expect(labels.get("m-forge/brisk-otter-5")).toEqual({ name: "cas-src", tag: "otter-5" });
+    expect(labels.get("m-forge/quiet-heron-8")).toEqual({ name: "cas-src", tag: "heron-8" });
+    // A label that does not repeat carries no tag.
+    expect(labels.get("m-forge/loose-wren-7")).toEqual({ name: "loose-wren-7" });
+    expect(labels.get("m-studio/calm-otter-4")).toEqual({ name: "gabber-studio" });
+    // Tails that collide grow until they differ; identical codenames name the machine.
+    const grown = fleetPlotLabels([entry({ session: "brave-otter-5", supervisor: "brave-otter-5", project: "p" }), entry({ session: "calm-otter-5", supervisor: "calm-otter-5", project: "p" })]);
+    expect([...grown.values()].map((label) => label.tag)).toEqual(["brave-otter-5", "calm-otter-5"]);
+    const twins = fleetPlotLabels([entry({ ...atlas, session: "keen-lynx-1", supervisor: "keen-lynx-1", project: "p" }), entry({ ...forge, session: "keen-lynx-1", supervisor: "keen-lynx-1", project: "p" })]);
+    expect([...twins.values()].map((label) => label.tag)).toEqual(["keen-lynx-1 · Atlas · Linux", "keen-lynx-1 · Forge · Linux"]);
+    // Rendered: the tag is its own span, after the project, so the project gives way first.
+    const board = freshBoard();
+    new FleetBoardRenderer().render(board, model({ sessions }), { open: vi.fn() });
+    const names = [...board.querySelectorAll<HTMLElement>(".fleet-plot-row th .fleet-plot-name")].map((name) => [name.querySelector(".fleet-plot-project")?.textContent ?? name.textContent, name.querySelector(".fleet-plot-tag")?.textContent ?? ""]);
+    expect(names.filter(([project]) => project === "cas-src").map(([, tag]) => tag).sort()).toEqual(["heron-8", "otter-5", "pelican-9"]);
+    expect(new Set(names.map((pair) => pair.join(" "))).size).toBe(names.length);
+    expect(css).toMatch(/\.fleet-plot-name\.tagged\s*\{[^}]*display: flex;/);
+    expect(css).toMatch(/\.fleet-plot-project\s*\{[^}]*min-width: 0;[^}]*text-overflow: ellipsis;/);
+    expect(css).toMatch(/\.fleet-plot-tag\s*\{[^}]*flex: none;/);
   });
 
   it("keys on phase words, never on latency or counts", () => {

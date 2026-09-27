@@ -1,4 +1,4 @@
-import { sessionPickerMeta, type SessionPickerEntry } from "./session-selection";
+import { sessionPickerHeadline, sessionPickerRowMeta, type SessionPickerEntry } from "./session-selection";
 
 /**
  * The fleet board: the canvas with machines paired and no session open. It is
@@ -39,7 +39,7 @@ export interface FleetBoardCallbacks {
 export function fleetBoardSignature(model: FleetBoardModel): string {
   return [
     ...model.machines.map((machine) => `${machine.id}|${machine.label}|${machine.state}|${machine.phase}|${machine.selected ? 1 : 0}|${machine.hubVersion ?? ""}`),
-    ...model.sessions.map((entry) => `${entry.machineId}/${entry.session}|${entry.supervisor ?? ""}|${entry.workerCount}|${entry.status}|${entry.title ?? ""}|${entry.phase ?? ""}|${entry.attentionSeverity ?? ""}|${entry.lastActivity ?? ""}`),
+    ...model.sessions.map((entry) => `${entry.machineId}/${entry.session}|${entry.project ?? ""}|${entry.supervisor ?? ""}|${entry.workerCount}|${entry.status}|${entry.title ?? ""}|${entry.phase ?? ""}|${entry.attentionSeverity ?? ""}|${entry.lastActivity ?? ""}`),
   ].join("~");
 }
 
@@ -60,10 +60,14 @@ function sessionCard(entry: FleetSessionView, callbacks: FleetBoardCallbacks): H
   button.className = `fleet-session${fleetSessionState(entry) === "needs-you" ? " needs-you" : ""}`;
   button.dataset.fleetMachine = entry.machineId;
   button.dataset.fleetSession = entry.session;
-  button.setAttribute("aria-label", `Open ${entry.session} on ${entry.machineLabel}`);
+  // Project first, codename once in the line beneath (journey F1), as the
+  // session picker, the list and the palette read.
+  const headline = sessionPickerHeadline(entry);
+  const codename = entry.project ? entry.supervisor ?? entry.session : undefined;
+  button.setAttribute("aria-label", `Open ${headline}${codename ? `, ${codename}` : ""} on ${entry.machineLabel}`);
   const name = document.createElement("span");
   name.className = "session-name";
-  name.textContent = entry.session;
+  name.textContent = headline;
   button.append(name);
   if (entry.phase) {
     const chip = document.createElement("span");
@@ -79,7 +83,7 @@ function sessionCard(entry: FleetSessionView, callbacks: FleetBoardCallbacks): H
   }
   const meta = document.createElement("small");
   meta.className = "session-meta";
-  meta.textContent = sessionPickerMeta(entry);
+  meta.textContent = sessionPickerRowMeta(entry);
   button.append(meta);
   // A region re-creates this node, so it carries its own handler.
   button.onclick = () => callbacks.open(entry.machineId, entry.session);
@@ -201,9 +205,12 @@ function fleetFigure(model: FleetBoardModel): HTMLElement {
     row.dataset.state = state;
     const name = document.createElement("th");
     name.scope = "row";
-    name.title = entry.session;
-    name.setAttribute("aria-label", `${entry.session} on ${entry.machineLabel}`);
-    name.append(textNode("span", "fleet-plot-name", entry.session.split("-").slice(-3).join("-")));
+    // The plot's row labels lead with the project too (journey F1); without
+    // one, the session name, trimmed to its last three words as before.
+    const codename = entry.project ? entry.supervisor ?? entry.session : undefined;
+    name.title = codename ? `${entry.project} · ${codename}` : entry.session;
+    name.setAttribute("aria-label", `${sessionPickerHeadline(entry)}${codename ? `, ${codename}` : ""} on ${entry.machineLabel}`);
+    name.append(textNode("span", "fleet-plot-name", entry.project ?? entry.session.split("-").slice(-3).join("-")));
     row.append(name);
     for (const position of TRACK) {
       const cell = row.insertCell();

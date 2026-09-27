@@ -457,6 +457,24 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     for (const selector of [".fleet-board-summary", ".fleet-catalog-time"]) {
       expect(await board.locator(selector).evaluate((element) => getComputedStyle(element, "::before").content), selector).toBe("none");
     }
+    // Journey F1: every Fleet overview row leads with its project; the
+    // codename is named once, in the line beneath.
+    const row = (session: string) => board.locator(`button.fleet-session[data-fleet-session="${session}"]`);
+    await expect(row("keen-lynx-1").locator(".session-name")).toHaveText("orion");
+    await expect(row("keen-lynx-1").locator(".session-meta")).toHaveText("supervisor keen-lynx-1 · 1 worker · live");
+    await expect(row(PELICAN).locator(".session-name")).toHaveText("cas-src");
+    await expect(board.locator('.fleet-plot-row[data-fleet-session="keen-lynx-1"] .fleet-plot-name')).toHaveText("orion");
+    for (const session of ["keen-lynx-1", "lone-heron-2", PELICAN, OTTER]) {
+      expect((await row(session).innerText()).split(session).length - 1, `${session} named once in its Fleet overview row`).toBe(1);
+    }
+    // The machine drawer, opened by the rail click above, reads the same way.
+    const drawer = page.locator("#machine-tree");
+    await expect(drawer.locator(".nav-item .session-name").first()).toBeVisible();
+    const drawerRows = await drawer.locator(".nav-item").evaluateAll((items) => items.map((item) => [item.querySelector(".session-name")?.textContent ?? "", item.querySelector(".session-meta, .session-summary-title")?.textContent ?? ""]));
+    for (const [headline, meta] of drawerRows) {
+      expect(["cas-src", "gabber-studio", "orion", "lighthouse"], `drawer row headline ${headline}`).toContain(headline);
+      expect(meta, `drawer row ${headline} names its codename once, beneath`).not.toContain(headline);
+    }
     // With nothing open, the title says so: the fleet, then the switch.
     await expect(page.getByRole("heading", { level: 1, name: `Fleet overview — switch session (${pickerRows} available)`, exact: true })).toBeVisible();
   });

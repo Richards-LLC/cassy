@@ -860,7 +860,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     // cas-5d94: the hub derives the roster from the live agent registry, so the
     // count is stated — including a real zero — instead of being suppressed.
     expect(main).not.toContain("const workers = entry.workerCount > 0 ?");
-    expect(main).toContain("escapeHtml(workerCountLabel(session.workers.length))");
+    // The drawer row states it through the picker's row meta (workerCountLabel), project first (journey F1).
+    expect(main).toContain("workerCount: session.workers.length, status: sessionStatusLabel(");
+    expect(main).toContain('<small class="session-meta">${escapeHtml(sessionPickerRowMeta(entry))}</small>');
     expect(main).toContain('if (entry.current) button.setAttribute("aria-current", "true");');
     // A five-second heartbeat render must not close the picker mid-choice.
     expect(main).toContain('if (sessionPickerOpen) document.querySelector<HTMLDialogElement>("#session-picker")?.showModal();');

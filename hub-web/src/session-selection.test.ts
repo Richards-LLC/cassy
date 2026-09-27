@@ -13,7 +13,6 @@ import {
   selectSelection,
   sessionPickerEntries,
   sessionPickerHeadline,
-  sessionPickerMeta,
   sessionPickerRowMeta,
   workerCountLabel,
   SELECTION_HISTORY_LIMIT,
@@ -218,14 +217,15 @@ describe("session picker entries", () => {
 
   it("is what the picker line says between the role and the hub status", () => {
     const [entry] = sessionPickerEntries({ machines, sessions, selection: { machineId: "m1", session: "cas-src-young-raven-93" } });
-    expect(sessionPickerMeta(entry!)).toBe("supervisor fast-kestrel-6 · 5 workers · live");
+    expect(sessionPickerRowMeta(entry!)).toBe("supervisor fast-kestrel-6 · 5 workers · live");
   });
 
   it("leads with the project when the hub reports one (cas-56e6)", () => {
     const withProject = new Map([["m1", [{ ...sessions.get("m1")![0]!, project_dir: "/home/op/projects/cas-src/" }]]]);
     const [entry] = sessionPickerEntries({ machines, sessions: withProject, selection: { machineId: "m1" } });
     expect(entry!.project).toBe("cas-src");
-    expect(sessionPickerMeta(entry!)).toMatch(/^cas-src · supervisor /);
+    expect(sessionPickerHeadline(entry!)).toBe("cas-src");
+    expect(sessionPickerRowMeta(entry!)).toMatch(/^supervisor /);
   });
 
   it("picker rows lead with the project and keep the codename secondary (3.30.0 F2)", () => {
@@ -264,7 +264,7 @@ describe("session picker entries", () => {
   it("says a worker-less session has none instead of omitting the fact", () => {
     const entries = sessionPickerEntries({ machines, sessions, selection: { machineId: "m1" } });
     const idle = entries.find((entry) => entry.session === "gabber-studio-witty-panda-98")!;
-    expect(sessionPickerMeta(idle)).toBe("supervisor witty-panda-98 · no workers · stale metadata");
+    expect(sessionPickerRowMeta(idle)).toBe("supervisor witty-panda-98 · no workers · stale metadata");
   });
 
 });

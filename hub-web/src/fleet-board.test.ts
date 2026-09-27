@@ -101,6 +101,28 @@ describe("fleet board region lifecycle", () => {
     expect(board.querySelector(".fleet-session .phase-chip")?.textContent).toBe("building");
   });
 
+  it("leads each row with the project and names the codename once beneath it (journey F1)", () => {
+    const renderer = new FleetBoardRenderer();
+    const board = freshBoard();
+    renderer.render(board, model({ sessions: [entry({ session: "keen-lynx-1", supervisor: "keen-lynx-1", project: "orion", workerCount: 1 }), entry({ session: "bright-otter", supervisor: "bright-otter" })] }), { open: vi.fn() });
+    const [projectRow, bareRow] = [...board.querySelectorAll<HTMLButtonElement>(".fleet-session")];
+    expect(projectRow!.querySelector(".session-name")?.textContent).toBe("orion");
+    expect(projectRow!.querySelector(".session-meta")?.textContent).toBe("supervisor keen-lynx-1 · 1 worker · live");
+    expect(projectRow!.textContent!.split("keen-lynx-1")).toHaveLength(2);
+    expect(projectRow!.getAttribute("aria-label")).toBe("Open orion, keen-lynx-1 on Studio Mac");
+    // No project: the session name heads the row and is not repeated.
+    expect(bareRow!.querySelector(".session-name")?.textContent).toBe("bright-otter");
+    expect(bareRow!.querySelector(".session-meta")?.textContent).toBe("supervisor · 3 workers · live");
+    expect(bareRow!.getAttribute("aria-label")).toBe("Open bright-otter on Studio Mac");
+    // The plot's row labels lead with the project as well.
+    const plotRow = board.querySelector<HTMLElement>('.fleet-plot-row[data-fleet-session="keen-lynx-1"] th')!;
+    expect(plotRow.querySelector(".fleet-plot-name")?.textContent).toBe("orion");
+    expect(plotRow.getAttribute("aria-label")).toBe("orion, keen-lynx-1 on Studio Mac");
+    expect(plotRow.title).toBe("orion · keen-lynx-1");
+    // A project appearing later rebuilds the row.
+    expect(fleetBoardSignature(model({ sessions: [entry({ project: "orion" })] }))).not.toBe(fleetBoardSignature(model({ sessions: [entry()] })));
+  });
+
   it("keys on phase words, never on latency or counts", () => {
     // fleetConnectionLabel in main.ts maps a snapshot to one of these words; a
     // latency change inside `live` must produce the same signature.

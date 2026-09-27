@@ -1544,6 +1544,15 @@ impl CasCore {
         // cas-619f: a QA work item may never be started by the implementer of
         // the delivery it reviews; starting it claims the round.
         let qa_claim_note = self.claim_qa_round_on_start(&task)?.unwrap_or_default();
+        // cas-31a3: the QA preflight (cas-d5c1) appends its report to this
+        // task's notes in the store. The start writes `task` back below, so
+        // take the notes as they are now; the copy read above would overwrite
+        // the ready report with the notes from before it.
+        if !qa_claim_note.is_empty()
+            && let Ok(fresh) = task_store.get(&req.id)
+        {
+            task.notes = fresh.notes;
+        }
 
         let open_blocker_ids = super::open_blocker_ids(task_store.as_ref(), &req.id)?;
         super::ensure_no_start_gates(task_store.as_ref(), &req.id)?;

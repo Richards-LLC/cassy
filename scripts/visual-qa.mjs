@@ -587,7 +587,7 @@ function markdownReport(result) {
   return `${lines.join('\n')}\n`;
 }
 
-/* ---- Declared journeys (cas-9178, GH #1023 finding 7) ----------------------
+/* ---- Declared journeys ---------------------------------------------------
  * A resting page can pass while the states a user reaches do not: a submit
  * that fails, a request still loading, the connection gone. A journey file
  * declares those states so strict visual QA renders and inspects them too,

@@ -839,7 +839,7 @@ mod tests {
         // Short-lived hub verbs and every other command keep the project log.
         assert_eq!(root_for(&["cas", "hub", "status"]), None);
         assert_eq!(root_for(&["cas", "hub", "start"]), None);
-        assert_eq!(root_for(&["cas", "task", "list"]), None);
+        assert_eq!(root_for(&["cas", "doctor"]), None);
         assert_eq!(hub_tracing_root(None, home), None);
     }
 

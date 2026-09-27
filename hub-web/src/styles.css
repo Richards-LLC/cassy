@@ -3257,6 +3257,13 @@ dialog form > *,
  * no warning glyph and no Retry. */
 .thread .turn.you .bub[data-state="unconfirmed"][data-settled="true"] { border-color: var(--line-strong); }
 .thread .conversation-unconfirmed.conversation-settled b { color: var(--ink-mid); }
+/* cas-470e: the settled card's way to resend is secondary to the record it
+ * sits on: a text-weight "Send again" in --ink-mid, underlined, no pill, so it
+ * never reads as the primary Retry it replaced. Same 32px (44px touch) target. */
+.thread .conversation-actions-quiet { margin-top: 4px; }
+.thread .conversation-send-again { min-height: 32px; padding: 0 4px; border: 0; background: transparent; color: var(--ink-mid); font: var(--weight-medium) 13px/1.2 var(--font-ui); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; cursor: pointer; }
+.thread .conversation-send-again:hover { color: var(--ink); }
+.thread .conversation-send-again:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; border-radius: 4px; }
 /* F6: once its edited version is sent, a refused send is only a record — a
  * quiet dashed outline in --line-strong, its text clamped to one line, the
  * "Not sent · replaced by your edit" line, and no actions. */
@@ -3281,6 +3288,7 @@ dialog form > *,
  * targets (WCAG 2.5.5); 32px stays for a mouse on a wide screen. */
 @media (max-width: 53rem), (pointer: coarse) {
   .thread .conversation-edit, .thread .conversation-retry, .thread .conversation-take-control { min-height: 44px; padding: 0 18px; }
+  .thread .conversation-send-again { min-height: 44px; padding: 0 8px; }
 }
 /* coalesced statuses — one quiet box, never a ledger. Long or ask-bearing
  * statuses never land here (thread-model foldsAsStatus); what does is clamped

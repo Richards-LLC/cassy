@@ -1897,6 +1897,17 @@ fn assembly_proof_line(notes: &str) -> Option<String> {
         .last()
 }
 
+fn close_delivered_tip(
+    repo: &std::path::Path,
+    receipt: Option<&str>,
+    merged_anchor: Option<&str>,
+) -> Option<String> {
+    receipt
+        .and_then(|receipt| resolve_branch_sha(repo, receipt))
+        .or_else(|| merged_anchor.map(str::to_string))
+        .or_else(|| resolve_branch_sha(repo, "HEAD"))
+}
+
 /// Whether a close must carry its own Rust build proofs (cas-4cbb).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BuildProofs {
@@ -5624,7 +5635,21 @@ impl CasCore {
         // disposition: a detached, stale, or already-retired worker worktree
         // must not make the supervisor's recorded decision unclosable. Worker
         // delivery dispositions retain the resolution and branch gate below.
-        let worker_worktree_path = if close_disposition == TaskCloseDisposition::Decision {
+        // cas-46c2: once the immutable parked SHA is already on the declared
+        // target, a supervisor's override close concerns that merged delivery.
+        // The assignee may now be on another task's branch in the same
+        // checkout; validating its current branch would reject the old task.
+        let supervisor_closing_merged_anchor = declared_repo_context.as_ref().is_some_and(|context| {
+            supervisor_merged_anchor_close(
+                supervisor_override,
+                task.deliverables.factory_branch_anchor.as_deref(),
+                &context.repo_root,
+                &context.target_branch,
+            )
+        });
+        let worker_worktree_path = if close_disposition == TaskCloseDisposition::Decision
+            || supervisor_closing_merged_anchor
+        {
             None
         } else {
             match self.resolve_worker_worktree_path(&task, declared_repo_context.as_ref()) {
@@ -7561,12 +7586,16 @@ impl CasCore {
             }
             let mut scoped_proof_cache = ScopedProofTargetCache::default();
             // The tip this close delivers: the named commit receipt, else the
-            // proof checkout's HEAD (the worker's branch).
-            let delivered_tip = req
-                .commit_receipt
-                .as_deref()
-                .and_then(|receipt| resolve_branch_sha(proof_repo, receipt))
-                .or_else(|| resolve_branch_sha(proof_repo, "HEAD"));
+            // already merged parked anchor, else the proof checkout's HEAD.
+            let delivered_tip = close_delivered_tip(
+                proof_repo,
+                req.commit_receipt.as_deref(),
+                if supervisor_closing_merged_anchor {
+                    task.deliverables.factory_branch_anchor.as_deref()
+                } else {
+                    None
+                },
+            );
             // cas-4cbb: workers never build; their build proof is the
             // supervisor's epic-assembly run. An ASSEMBLY_PROOF on the parent
             // epic whose tested head contains this delivery also stands for a
@@ -12901,6 +12930,16 @@ fn resolve_system_b_worktree_path_for_repo(
     path.join(".git").exists().then_some(path)
 }
 
+fn supervisor_merged_anchor_close(
+    supervisor_override: bool,
+    anchor: Option<&str>,
+    repo: &std::path::Path,
+    target_branch: &str,
+) -> bool {
+    supervisor_override
+        && anchor.is_some_and(|anchor| commit_is_merged_into_parent(repo, anchor, target_branch))
+}
+
 fn validate_pre_close_worktree(
     path: &std::path::Path,
     expected: &crate::mcp::tools::core::task::repo_context::RepoContext,
@@ -17975,7 +18014,11 @@ pub(crate) fn run_declared_pre_close_hook(
                     supervisor_override,
                 ));
             }
-            let lint_parent = if normalized_receipt.is_some() || derived_epic_anchor.is_some() {
+            let lint_parent = if normalized_receipt.is_some()
+                || derived_epic_anchor.is_some()
+                || (supervisor_override
+                    && task.deliverables.factory_branch_anchor.as_deref() == Some(tip))
+            {
                 target_only_receipt_lint_parent(&repo_context.repo_root, tip)?
             } else {
                 live_target_ref.clone()
@@ -20949,6 +20992,34 @@ mod merge_state_gate_tests {
                 other => panic!("expected Reject for stranded factory branch, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn supervisor_override_uses_merged_anchor_after_worker_branch_moves_cas_46c2() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        commit_file_at(p, "delivered.rs", "// delivered\n", "2026-08-04T12:00:00Z");
+        let anchor = head_sha(p);
+        assert!(!supervisor_merged_anchor_close(true, Some(&anchor), p, "main"));
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", &anchor, "-m", "merge exact SHA"]);
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git(p, &["checkout", "-q", "-b", "factory/worker-cas-next"]);
+        assert!(supervisor_merged_anchor_close(true, Some(&anchor), p, "main"));
+        assert!(!supervisor_merged_anchor_close(false, Some(&anchor), p, "main"));
+        assert!(!supervisor_merged_anchor_close(true, None, p, "main"));
+        commit_file_at(p, "next.rs", "// unrelated next task\n", "2026-08-04T12:02:00Z");
+        let next_head = head_sha(p);
+        assert_eq!(close_delivered_tip(p, None, Some(&anchor)), Some(anchor.clone()));
+        assert_ne!(close_delivered_tip(p, None, Some(&anchor)), Some(next_head));
+        let assembly_head = rev_parse_local(p, "main");
+        let assembly_note = format!("ASSEMBLY_PROOF: head={assembly_head} result=PASS");
+        let line = assembly_proof_line(&assembly_note).unwrap();
+        let tested_head = scoped_proof_receipt_field(&line, "head=").unwrap();
+        let delivered = close_delivered_tip(p, None, Some(&anchor)).unwrap();
+        assert!(git_commit_is_ancestor(p, &delivered, &tested_head));
+        assert!(!git_commit_is_ancestor(p, &next_head, &tested_head));
+        assert!(commit_is_merged_into_parent(p, &anchor, "main"));
     }
 
     /// cas-dc1b (M03): PreToolUse denies `git push origin` for local_merge

@@ -14,6 +14,13 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
   const held = page.getByRole("log").locator(".conversation-held");
   const sentTimes = (text: string) => hub.sends.filter((m) => m.text === text).length;
   const sendNow = async (text: string) => { await composer.fill(text); await send.click(); };
+  // Waits on the double's own counters without recording each miss as a
+  // failed expectation; the caller asserts the final value once.
+  const until = async (value: () => number, done: (n: number) => boolean, timeout: number): Promise<number> => {
+    const end = Date.now() + timeout;
+    while (!done(value()) && Date.now() < end) await page.waitForTimeout(100);
+    return value();
+  };
 
   await journey.stage("Open the conversation", async () => {
     await journey.open();
@@ -27,10 +34,10 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
     // sockets reset and are replaced within about a second.
     await hub.down("atlas", { sockets: "close" });
     await hub.up("atlas");
-    await expect.poll(() => hub.machineSocketOpens.get("atlas") ?? 0, { timeout: 10_000 }).toBeGreaterThan(1);
+    expect(await until(() => hub.machineSocketOpens.get("atlas") ?? 0, (n) => n > 1, 10_000)).toBeGreaterThan(1);
     await expect(header).toHaveText(" · Live");
     await sendNow("After the route change");
-    await expect.poll(() => sentTimes("After the route change"), { timeout: 5_000 }).toBe(1);
+    expect(await until(() => sentTimes("After the route change"), (n) => n >= 1, 5_000)).toBe(1);
   });
 
   await journey.stage("Tailscale goes off, then on again", async () => {
@@ -50,7 +57,7 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
     await expect(header).toHaveText(" · Live", { timeout: 15_000 });
     expect(Date.now() - restored, "recovered within 15 s of the network returning").toBeLessThan(15_000);
     // The held message went out once, on a fresh socket.
-    await expect.poll(() => sentTimes("While Tailscale is off"), { timeout: 5_000 }).toBe(1);
+    expect(await until(() => sentTimes("While Tailscale is off"), (n) => n >= 1, 5_000)).toBe(1);
     await expect(held).toHaveCount(0);
     await expect(page.locator("#message-status")).toBeHidden();
     hub.deliverLatest(PELICAN);
@@ -72,7 +79,7 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
     // Back online retries now rather than when the backoff timer says.
     await expect(header).toHaveText(" · Live", { timeout: 5_000 });
     expect(Date.now() - restored, "back within 5 s of coming online").toBeLessThan(5_000);
-    await expect.poll(() => sentTimes("During the handover"), { timeout: 5_000 }).toBe(1);
+    expect(await until(() => sentTimes("During the handover"), (n) => n >= 1, 5_000)).toBe(1);
     await page.waitForTimeout(1_000);
     expect(sentTimes("During the handover"), "sent once").toBe(1);
   });
@@ -96,12 +103,12 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
     await sendNow("Right after waking");
     // Waking checks the socket (a health ping, 3 s to answer) and replaces
     // it, well before four missed heartbeats (about 20 s) would.
-    await expect.poll(() => hub.machineSocketOpens.get("atlas") ?? 0, { timeout: 8_000 }).toBeGreaterThan(opens);
+    expect(await until(() => hub.machineSocketOpens.get("atlas") ?? 0, (n) => n > opens, 8_000)).toBeGreaterThan(opens);
     expect(Date.now() - woke, "socket replaced within 8 s of waking").toBeLessThan(8_000);
     await expect(header).toHaveText(" · Live");
-    await expect.poll(() => sentTimes("Right after waking"), { timeout: 8_000 }).toBe(1);
+    expect(await until(() => sentTimes("Right after waking"), (n) => n >= 1, 8_000)).toBe(1);
     await sendNow("After waking");
-    await expect.poll(() => sentTimes("After waking"), { timeout: 5_000 }).toBe(1);
+    expect(await until(() => sentTimes("After waking"), (n) => n >= 1, 5_000)).toBe(1);
     expect(sentTimes("Right after waking"), "sent once").toBe(1);
   });
 });

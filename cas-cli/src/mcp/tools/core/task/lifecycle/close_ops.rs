@@ -11169,7 +11169,7 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
             .window
             .is_some_and(|window| window.supervisor_override_reason.is_some())
             && attribution.receipt.is_none()
-            && task.execution_note.is_none()
+            && task.execution_note.as_deref() != Some("no-code")
         {
             return MergeStateGateOutcome::Reject(format!(
                 "⚠️ MERGE REQUIRED\n\nTask {} has {stranded} unmerged commit(s) on {factory_branch}, \
@@ -22011,6 +22011,25 @@ mod merge_state_gate_tests {
                 assert!(message.contains("commit_receipt"), "{message}");
             }
             other => panic!("historical delivery closed without receipt: {other:?}"),
+        }
+
+        let mut test_first_task = task.clone();
+        test_first_task.execution_note = Some("test-first".into());
+        match run_factory_branch_merge_gate_with_attribution(
+            &test_first_task,
+            &req,
+            "main",
+            p,
+            TaskCommitAttribution {
+                receipt: None,
+                window: Some(&window),
+            },
+        ) {
+            MergeStateGateOutcome::Reject(message) => {
+                assert!(message.contains("MERGE REQUIRED"), "{message}");
+                assert!(message.contains("commit_receipt"), "{message}");
+            }
+            other => panic!("test-first historical delivery closed without receipt: {other:?}"),
         }
 
         req.commit_receipt = Some(receipt.clone());

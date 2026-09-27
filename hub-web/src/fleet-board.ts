@@ -193,18 +193,71 @@ function writeProvenance(line: HTMLElement, model: FleetBoardModel): void {
   line.title = details;
 }
 
-/** A plot row's label: the project (or trimmed session), and a tag when that label repeats. */
-export interface FleetPlotLabel { name: string; tag?: string }
+/**
+ * A plot row's label: the project (or trimmed session), and a tag when that
+ * label repeats. A twin (the same codename on several machines) also carries
+ * the tag's parts, so the tag can be fitted to the column it lands in
+ * (fitFleetPlotTags): `tail` gives way from the left, `mark` never does.
+ */
+export interface FleetPlotLabel { name: string; tag?: string; tail?: string; mark?: string }
 
 /**
- * A twin's whole tag fits the narrow label column beside at least a letter of
- * the project (cas-ae5e). The narrowest column is 132px at 390 (124px of
- * content). Beside the project's 2ch minimum and the gap, that leaves about
- * 105px for "· " and the tag: 14 glyphs of 7.2px. QA round 2 measured 13
- * characters fitting and 14 clipped, so 12 keeps a margin for wider phone
- * monospace fonts.
+ * The ways a twin's tag can read, longest first (cas-ae5e): the whole tail
+ * and machine mark, then the tail trimmed from the left one character at a
+ * time ("…ican-19 · Atl"), then the mark alone. The mark is never cut.
  */
-export const FLEET_TWIN_TAG_MAX = 12;
+export function twinTagCandidates(tail: string, mark: string): string[] {
+  const chars = Array.from(tail);
+  const trimmed = chars.slice(1).map((_, index) => `…${chars.slice(index + 1).join("")} · ${mark}`);
+  return [`${tail} · ${mark}`, ...trimmed, mark];
+}
+
+/** The longest twin tag that `measure` fits within `available` px; the mark alone when none does. */
+export function fittingTwinTag(tail: string, mark: string, available: number, measure: (text: string) => number): string {
+  const candidates = twinTagCandidates(tail, mark);
+  return candidates.find((text) => measure(text) <= available) ?? mark;
+}
+
+/**
+ * Fit every twin tag on the board to its measured label column (cas-ae5e).
+ * The room is the label's content box less the project's minimum width
+ * (2ch: it always keeps a letter) and the gap. Candidates are measured in
+ * the tag's own font, including the "· " it draws before itself. A board not
+ * laid out yet (no width) is left as rendered; the resize watch fits it.
+ */
+export function fitFleetPlotTags(root: ParentNode): void {
+  const tags = [...root.querySelectorAll<HTMLElement>(".fleet-plot-name.tagged > .fleet-plot-tag[data-mark]")];
+  if (!tags.length) return;
+  const document = tags[0]!.ownerDocument;
+  const view = document.defaultView;
+  if (!view) return;
+  const probe = document.createElement("span");
+  probe.setAttribute("aria-hidden", "true");
+  probe.style.cssText = "position:absolute;left:-10000px;top:0;visibility:hidden;white-space:pre;";
+  document.body.append(probe);
+  try {
+    for (const tag of tags) {
+      const name = tag.parentElement!;
+      if (!name.isConnected || name.clientWidth === 0) continue;
+      const project = name.querySelector<HTMLElement>(".fleet-plot-project");
+      const style = view.getComputedStyle(name);
+      const room = name.clientWidth - parseFloat(style.paddingLeft || "0") - parseFloat(style.paddingRight || "0")
+        - (project ? parseFloat(view.getComputedStyle(project).minWidth) || 0 : 0)
+        - (parseFloat(style.columnGap) || 0);
+      const font = view.getComputedStyle(tag);
+      probe.style.font = font.font;
+      probe.style.letterSpacing = font.letterSpacing;
+      const measure = (text: string) => { probe.textContent = `· ${text}`; return probe.getBoundingClientRect().width; };
+      const tail = tag.dataset.tail ?? "";
+      const mark = tag.dataset.mark ?? "";
+      const fitted = fittingTwinTag(tail, mark, room, measure);
+      if (tag.textContent !== fitted) tag.textContent = fitted;
+    }
+  } finally {
+    probe.remove();
+  }
+}
+
 
 /** A machine's own name, letters and digits only: "Atlas" from "Atlas · Linux". */
 function machineName(label: string): string {
@@ -251,9 +304,9 @@ function machineMarks(entries: readonly FleetSessionView[]): Map<FleetSessionVie
  * the codenames apart ("pelican-9", "otter-5"): at least its last two words
  * (cas-598e QA F01). The same codename running on two machines adds a short
  * machine mark (machineMarks: "otter-5 · AT", or "otter-5 · Atl" when initials
- * collide). That tag is capped at FLEET_TWIN_TAG_MAX characters, trimming the
- * codename from the left ("…er-5 · Atl"), so it always fits the narrow label
- * column (cas-ae5e). Keyed by machine/session.
+ * collide). Such a twin tag is fitted to its column once it is laid out
+ * (fitFleetPlotTags), trimming the codename from the left and never the mark
+ * (cas-ae5e). Keyed by machine/session.
  */
 export function fleetPlotLabels(sessions: readonly FleetSessionView[]): Map<string, FleetPlotLabel> {
   const key = (entry: FleetSessionView) => `${entry.machineId}/${entry.session}`;
@@ -275,18 +328,13 @@ export function fleetPlotLabels(sessions: readonly FleetSessionView[]): Map<stri
     const tail = (entry: FleetSessionView) => codename(entry).split("-").slice(-length).join("-");
     const twinSets = new Map<string, FleetSessionView[]>();
     for (const entry of group) twinSets.set(codename(entry), [...(twinSets.get(codename(entry)) ?? []), entry]);
-    const tags = new Map<FleetSessionView, string>();
+    const tags = new Map<FleetSessionView, { tag: string; tail?: string; mark?: string }>();
     for (const twins of twinSets.values()) {
-      if (twins.length === 1) { tags.set(twins[0]!, tail(twins[0]!)); continue; }
+      if (twins.length === 1) { tags.set(twins[0]!, { tag: tail(twins[0]!) }); continue; }
       const marks = machineMarks(twins);
-      for (const entry of twins) {
-        const mark = marks.get(entry)!;
-        const room = FLEET_TWIN_TAG_MAX - mark.length - " · ".length;
-        const short = tail(entry).length <= room ? tail(entry) : `…${tail(entry).slice(-(room - 1))}`;
-        tags.set(entry, `${short} · ${mark}`);
-      }
+      for (const entry of twins) tags.set(entry, { tag: `${tail(entry)} · ${marks.get(entry)!}`, tail: tail(entry), mark: marks.get(entry)! });
     }
-    for (const entry of group) labels.set(key(entry), { name: label, tag: tags.get(entry)! });
+    for (const entry of group) labels.set(key(entry), { name: label, ...tags.get(entry)! });
   }
   return labels;
 }
@@ -332,7 +380,14 @@ function fleetFigure(model: FleetBoardModel): HTMLElement {
     if (label.tag) {
       // The project gives way before the tag does, so repeated rows stay apart at any width.
       plotName.classList.add("tagged");
-      plotName.append(textNode("span", "fleet-plot-project", label.name), textNode("span", "fleet-plot-tag", label.tag));
+      const tag = textNode("span", "fleet-plot-tag", label.tag);
+      if (label.mark !== undefined) {
+        // Fitted to the column once laid out (fitFleetPlotTags); the full tag stays in the title.
+        tag.dataset.tail = label.tail ?? "";
+        tag.dataset.mark = label.mark;
+        tag.title = label.tag;
+      }
+      plotName.append(textNode("span", "fleet-plot-project", label.name), tag);
     } else {
       plotName.textContent = label.name;
     }
@@ -398,6 +453,18 @@ export function renderFleetBoardInto(board: HTMLElement, model: FleetBoardModel,
 export class FleetBoardRenderer {
   private board: HTMLElement | undefined;
   private signature: string | undefined;
+  /** Refits twin tags when the board's width changes (cas-ae5e). */
+  private resize?: ResizeObserver;
+  private observed?: HTMLElement;
+
+  private watch(board: HTMLElement): void {
+    fitFleetPlotTags(board);
+    if (this.observed === board || typeof ResizeObserver === "undefined") return;
+    this.resize?.disconnect();
+    this.resize = new ResizeObserver(() => { if (this.observed) fitFleetPlotTags(this.observed); });
+    this.resize.observe(board);
+    this.observed = board;
+  }
 
   /** Returns true when the board was (re)built, false when left untouched. */
   render(board: HTMLElement | null | undefined, model: FleetBoardModel, callbacks: FleetBoardCallbacks): boolean {
@@ -415,6 +482,7 @@ export class FleetBoardRenderer {
     renderFleetBoardInto(board, model, callbacks);
     this.board = board;
     this.signature = signature;
+    this.watch(board);
     return true;
   }
 }

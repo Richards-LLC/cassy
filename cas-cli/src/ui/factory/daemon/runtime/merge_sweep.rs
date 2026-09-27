@@ -98,6 +98,7 @@ struct SweepSettings {
     /// GH #1006: `factory.merge_sweep_command`, run via `sh -c` instead of
     /// the detected runner.
     command: Option<String>,
+    cwd: Option<String>,
     /// GH #1006: `factory.merge_sweep_env`. Values are never logged.
     env: crate::config::SweepEnv,
 }
@@ -116,6 +117,7 @@ struct TestRunner {
     program: String,
     args: Vec<String>,
     package_manager: Option<&'static str>,
+    cwd: PathBuf,
 }
 
 impl From<&FactoryConfig> for SweepSettings {
@@ -133,6 +135,12 @@ impl From<&FactoryConfig> for SweepSettings {
                 .map(str::trim)
                 .filter(|command| !command.is_empty())
                 .map(str::to_owned),
+            cwd: config
+                .merge_sweep_cwd
+                .as_deref()
+                .map(str::trim)
+                .filter(|cwd| !cwd.is_empty())
+                .map(str::to_owned),
             env: config.merge_sweep_env.valid(),
         }
     }
@@ -148,6 +156,7 @@ pub(crate) struct MergeSweepCoordinator {
     active: HashMap<String, ActiveSweep>,
     completed: HashMap<String, String>,
     retry_after: Option<(Instant, SweepRequest)>,
+    unavailable_reported: bool,
 }
 
 impl MergeSweepCoordinator {
@@ -168,6 +177,7 @@ impl MergeSweepCoordinator {
             active: HashMap::new(),
             completed: HashMap::new(),
             retry_after: None,
+            unavailable_reported: false,
         }
     }
 
@@ -215,7 +225,7 @@ impl MergeSweepCoordinator {
             strict_target,
             deadline,
         )
-            .await
+        .await
     }
 
     async fn recover_once_with_deadline(
@@ -422,10 +432,33 @@ impl MergeSweepCoordinator {
         tracing::warn!(epic = %request.epic_id, reason, "post-merge workspace sweep deferred");
     }
 
-    fn record_result(&self, cas_dir: &Path, result: &SweepResult) {
+    fn record_result(&mut self, cas_dir: &Path, result: &SweepResult) {
         if result.status == SweepStatus::Superseded {
             tracing::debug!(epic = %result.request.epic_id, commit = %result.request.commit, "post-merge sweep superseded");
             return;
+        }
+        if result.status == SweepStatus::Unavailable {
+            if self.unavailable_reported {
+                return;
+            }
+            self.unavailable_reported = true;
+            let marker = cas_dir.join(LOG_DIR).join(format!(
+                "unavailable-{}.marker",
+                sanitize_component(&self.session_name)
+            ));
+            if fs::create_dir_all(cas_dir.join(LOG_DIR)).is_ok() {
+                match OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&marker)
+                {
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return,
+                    Err(error) => {
+                        tracing::warn!(%error, "could not persist sweep unavailable marker")
+                    }
+                }
+            }
         }
         if !result.integration_epics.is_empty() {
             rolling_integration::record_result(cas_dir, result);
@@ -499,7 +532,10 @@ impl crate::ui::factory::daemon::FactoryDaemon {
         config: &FactoryConfig,
     ) -> Result<String, String> {
         let (request, strict_target) = if base_only {
-            (rolling_integration::base_only_recovery_request(project_root)?, false)
+            (
+                rolling_integration::base_only_recovery_request(project_root)?,
+                false,
+            )
         } else if let Some(epic_id) = focus {
             match rolling_integration::recovery_request_for_focus(
                 project_root,
@@ -539,7 +575,10 @@ impl crate::ui::factory::daemon::FactoryDaemon {
                 Ok(request) => (request, true),
                 Err(error) if error.contains("no complete authentic") => {
                     tracing::info!(%error, "falling back to base-only integration recovery");
-                    (rolling_integration::base_only_recovery_request(project_root)?, false)
+                    (
+                        rolling_integration::base_only_recovery_request(project_root)?,
+                        false,
+                    )
                 }
                 Err(error) => return Err(error),
             }
@@ -660,15 +699,84 @@ fn settings_to_config(settings: &SweepSettings) -> FactoryConfig {
 /// detection, so a project whose suites need a particular script or setup
 /// step is swept the way it is actually tested.
 fn resolve_sweep_runner(worktree: &Path, settings: &SweepSettings) -> Result<TestRunner, String> {
+    let cwd = if let Some(configured) = settings.cwd.as_deref() {
+        let relative = Path::new(configured);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        {
+            return Err("sweep unavailable: factory.merge_sweep_cwd must be a relative directory inside the checkout".to_owned());
+        }
+        let cwd = worktree.join(relative);
+        let canonical = cwd.canonicalize().map_err(|error| format!("sweep unavailable: factory.merge_sweep_cwd `{configured}` is not readable ({error})"))?;
+        if !canonical.starts_with(worktree.canonicalize().map_err(|error| error.to_string())?)
+            || !canonical.is_dir()
+        {
+            return Err(format!(
+                "sweep unavailable: factory.merge_sweep_cwd `{configured}` must be a directory inside the checkout"
+            ));
+        }
+        canonical
+    } else {
+        worktree.to_path_buf()
+    };
     match settings.command.as_deref() {
         Some(command) => Ok(TestRunner {
             kind: TestRunnerKind::Configured,
             program: "sh".to_owned(),
             args: vec!["-c".to_owned(), command.to_owned()],
             package_manager: None,
+            cwd,
         }),
-        None => resolve_test_runner(worktree),
+        None if settings.cwd.is_some() => resolve_test_runner(&cwd),
+        None => discover_test_runner(worktree),
     }
+}
+
+fn discover_test_runner(worktree: &Path) -> Result<TestRunner, String> {
+    let root = resolve_test_runner(worktree);
+    if root.is_ok() || worktree.join("Cargo.toml").is_file() {
+        return root;
+    }
+    let mut directories = vec![(worktree.to_path_buf(), 0usize)];
+    while let Some((directory, depth)) = directories.pop() {
+        if depth >= 3 {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        let mut children: Vec<_> = entries
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_type()
+                    .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink())
+            })
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        !name.starts_with('.')
+                            && !matches!(name, "node_modules" | "target" | "vendor")
+                    })
+            })
+            .collect();
+        children.sort();
+        for child in &children {
+            if child.join("Cargo.toml").is_file() || child.join("package.json").is_file() {
+                if let Ok(runner) = resolve_test_runner(child) {
+                    return Ok(runner);
+                }
+            }
+        }
+        for child in children.into_iter().rev() {
+            directories.push((child, depth + 1));
+        }
+    }
+    root
 }
 
 fn resolve_test_runner(worktree: &Path) -> Result<TestRunner, String> {
@@ -683,6 +791,7 @@ fn resolve_test_runner(worktree: &Path) -> Result<TestRunner, String> {
                 "--no-fail-fast".to_owned(),
             ],
             package_manager: None,
+            cwd: worktree.to_path_buf(),
         });
     }
 
@@ -725,6 +834,7 @@ fn resolve_test_runner(worktree: &Path) -> Result<TestRunner, String> {
         program,
         args,
         package_manager: Some(manager),
+        cwd: worktree.to_path_buf(),
     })
 }
 
@@ -956,7 +1066,7 @@ fn execute_sweep(
             };
         }
     };
-    if let Some(error) = missing_package_setup(&worktree, &runner) {
+    if let Some(error) = missing_package_setup(&runner.cwd, &runner) {
         let _ = writeln!(log, "{error}");
         return SweepResult {
             request,
@@ -979,13 +1089,13 @@ fn execute_sweep(
     let _ = writeln!(
         log,
         "sweep: {command_display}\nworktree: {}\ntarget: {}",
-        worktree.display(),
+        runner.cwd.display(),
         request.commit
     );
     if !settings.env.is_empty() {
         let _ = writeln!(log, "env: {}", settings.env.redacted_listing());
     }
-    let Some(mut child) = spawn_test_runner(&worktree, &settings, &log, &runner) else {
+    let Some(mut child) = spawn_test_runner(&runner.cwd, &settings, &log, &runner) else {
         let summary = format!(
             "sweep unavailable: could not start `{}`; ensure the target project's configured test runner is installed and on PATH",
             runner.program
@@ -1461,6 +1571,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unavailable_is_recorded_once_per_coordinator_session_across_merges() {
+        let temp = tempfile::tempdir().unwrap();
+        let tasks = crate::store::open_task_store(temp.path()).unwrap();
+        tasks
+            .add(&cas_types::Task::new(
+                "cas-epic".to_owned(),
+                "epic".to_owned(),
+            ))
+            .unwrap();
+        let mut coordinator = MergeSweepCoordinator::new(temp.path(), "session");
+        let mut result = SweepResult {
+            request: SweepRequest {
+                epic_id: "cas-epic".to_owned(),
+                target_branch: "epic/test".to_owned(),
+                commit: "first".to_owned(),
+            },
+            status: SweepStatus::Unavailable,
+            log_path: temp.path().join("sweep.log"),
+            summary: "sweep unavailable: no runner".to_owned(),
+            failures: Vec::new(),
+            integration_epics: vec!["cas-epic".to_owned()],
+            base_failure: None,
+            after_deferrals: 0,
+        };
+        coordinator.record_result(temp.path(), &result);
+        result.request.commit = "second".to_owned();
+        coordinator.record_result(temp.path(), &result);
+        let mut restarted = MergeSweepCoordinator::new(temp.path(), "session");
+        restarted.record_result(temp.path(), &result);
+        let notes = tasks.get("cas-epic").unwrap().notes;
+        assert_eq!(
+            notes
+                .matches("Rolling integration SWEEP_UNAVAILABLE")
+                .count(),
+            1
+        );
+        assert!(coordinator.unavailable_reported);
+    }
+
+    #[test]
     fn old_coordinator_reads_next_day_merge_once_after_partial_line_and_filters_sessions() {
         let temp = tempfile::tempdir().unwrap();
         let cas_dir = temp.path();
@@ -1548,14 +1698,21 @@ mod tests {
                 "if env | grep -E '^CAS_(AGENT_NAME|AGENT_ROLE|SESSION_ID|AGENT_ID|SUPERVISOR_NAME|ROOT)='; then exit 17; fi".to_owned(),
             ],
             package_manager: Some("npm"),
+            cwd: temp.path().to_path_buf(),
         };
         let mut child = spawn_test_runner(temp.path(), &settings, &log, &runner)
             .expect("the scrubbed child should start");
         let status = child.wait().unwrap();
         assert!(status.success(), "child leaked sweep identity: {status}");
-        assert_eq!(std::env::var("CAS_AGENT_NAME").as_deref(), Ok("caller-name"));
+        assert_eq!(
+            std::env::var("CAS_AGENT_NAME").as_deref(),
+            Ok("caller-name")
+        );
         assert_eq!(std::env::var("CAS_AGENT_ROLE").as_deref(), Ok("supervisor"));
-        assert_eq!(std::env::var("CAS_SESSION_ID").as_deref(), Ok("caller-session"));
+        assert_eq!(
+            std::env::var("CAS_SESSION_ID").as_deref(),
+            Ok("caller-session")
+        );
         assert_eq!(std::env::var("CAS_ROOT").as_deref(), Ok("/caller/cas"));
     }
 
@@ -1624,6 +1781,47 @@ mod tests {
         assert_eq!(runner.program, "pnpm");
         assert_eq!(runner.args, ["test"]);
         assert_eq!(format_command(&runner.program, &runner.args), "pnpm test");
+    }
+
+    #[test]
+    fn sweep_discovers_nested_package_runner_and_uses_its_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let web = temp.path().join("apps/web");
+        fs::create_dir_all(&web).unwrap();
+        fs::write(
+            web.join("package.json"),
+            r#"{"scripts":{"test":"node test.mjs"}}"#,
+        )
+        .unwrap();
+        fs::write(web.join("package-lock.json"), "{}").unwrap();
+        let runner =
+            resolve_sweep_runner(temp.path(), &SweepSettings::from(&FactoryConfig::default()))
+                .unwrap();
+        assert_eq!(runner.kind, TestRunnerKind::Package);
+        assert_eq!(runner.cwd, web);
+        assert_eq!(runner.program, "npm");
+    }
+
+    #[test]
+    fn configured_sweep_cwd_selects_runner_and_rejects_escape() {
+        let temp = tempfile::tempdir().unwrap();
+        let web = temp.path().join("web");
+        fs::create_dir(&web).unwrap();
+        fs::write(
+            web.join("package.json"),
+            r#"{"scripts":{"test":"node test.mjs"}}"#,
+        )
+        .unwrap();
+        let mut config = FactoryConfig::default();
+        config.merge_sweep_cwd = Some("web".to_owned());
+        let runner = resolve_sweep_runner(temp.path(), &SweepSettings::from(&config)).unwrap();
+        assert_eq!(runner.cwd, web);
+        config.merge_sweep_command = Some("echo configured".to_owned());
+        let runner = resolve_sweep_runner(temp.path(), &SweepSettings::from(&config)).unwrap();
+        assert_eq!(runner.kind, TestRunnerKind::Configured);
+        assert_eq!(runner.cwd, web);
+        config.merge_sweep_cwd = Some("../outside".to_owned());
+        assert!(resolve_sweep_runner(temp.path(), &SweepSettings::from(&config)).is_err());
     }
 
     #[test]
@@ -1724,6 +1922,7 @@ mod tests {
                 .into_owned(),
             args: vec!["test".to_owned()],
             package_manager: Some("pnpm"),
+            cwd: temp.path().to_path_buf(),
         };
 
         assert!(spawn_test_runner(temp.path(), &settings, &log, &runner).is_none());
@@ -1787,6 +1986,7 @@ mod tests {
                 program: "yarn".to_owned(),
                 args: vec!["test".to_owned()],
                 package_manager: Some("yarn"),
+                cwd: temp.path().to_path_buf(),
             };
 
             assert!(
@@ -1809,6 +2009,7 @@ mod tests {
             program: "yarn".to_owned(),
             args: vec!["test".to_owned()],
             package_manager: Some("yarn"),
+            cwd: temp.path().to_path_buf(),
         };
 
         let error = missing_package_setup(temp.path(), &runner).unwrap();
@@ -1830,6 +2031,7 @@ mod tests {
             program: "npm".to_owned(),
             args: vec!["test".to_owned()],
             package_manager: Some("npm"),
+            cwd: temp.path().to_path_buf(),
         };
 
         let error = missing_package_setup(temp.path(), &runner).unwrap();
@@ -2007,13 +2209,15 @@ mod tests {
         git(&["init", "-b", "main"]);
         git(&["config", "user.name", "Runner Fixture"]);
         git(&["config", "user.email", "runner@example.invalid"]);
+        let web = temp.path().join("web");
+        fs::create_dir(&web).unwrap();
         fs::write(
-            temp.path().join("package.json"),
+            web.join("package.json"),
             r#"{"packageManager":"npm@11.0.0","scripts":{"test":"node test.mjs"}}"#,
         )
         .unwrap();
         fs::write(
-            temp.path().join("test.mjs"),
+            web.join("test.mjs"),
             "console.log('dependency-free-declared-script');\n",
         )
         .unwrap();
@@ -2025,7 +2229,7 @@ mod tests {
             commit: git(&["rev-parse", "HEAD"]),
         };
         let detached = prepare_merge_worktree(temp.path(), &request).unwrap();
-        assert!(!detached.join("node_modules").exists());
+        assert!(!detached.join("web/node_modules").exists());
         let _env = crate::test_support::TestEnvGuard::with_optional_vars(&[("NPM", None)]);
 
         let result = execute_sweep(
@@ -2039,6 +2243,10 @@ mod tests {
         assert_eq!(result.status, SweepStatus::Passed, "{}", result.summary);
         let log = fs::read_to_string(result.log_path).unwrap();
         assert!(log.contains("sweep: npm test"), "{log}");
+        assert!(
+            log.contains(&format!("worktree: {}", detached.join("web").display())),
+            "{log}"
+        );
         assert!(log.contains("dependency-free-declared-script"), "{log}");
     }
 

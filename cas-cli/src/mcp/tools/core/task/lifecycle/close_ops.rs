@@ -5955,7 +5955,7 @@ impl CasCore {
             // branch otherwise charged an earlier, already-merged task's UI
             // commits to a backend-only task.
             let attributed_paths = commit_receipt_window.as_ref().and_then(|window| {
-                task_attribution::paths(
+                task_attribution::qa_paths(
                     &evidence_repo,
                     &resolved_parent_branch,
                     window,

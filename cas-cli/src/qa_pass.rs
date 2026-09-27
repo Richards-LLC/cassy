@@ -32,6 +32,11 @@ impl QaEligibility {
 /// these is never gated, whatever its demo_statement says.
 pub fn is_non_surface_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
+    // Builtin skill examples and token snippets ship as instructions, not
+    // rendered application surfaces (GH #1027).
+    if lower.starts_with("cas-cli/src/builtins/") {
+        return true;
+    }
     let file = lower.rsplit('/').next().unwrap_or(&lower);
     let in_dir = |dir: &str| lower.starts_with(&format!("{dir}/")) || lower.contains(&format!("/{dir}/"));
     ["docs", "doc", "tests", "test", "__tests__", "e2e", "fixtures", "testdata", ".github", ".circleci", ".gitlab", ".buildkite"]
@@ -351,7 +356,8 @@ fn branch_binds_task(
             || passes.iter().any(|pass| pass.branch == branch))
 }
 
-/// Paths the delivery changes: `merge-base(parent, branch)..branch`.
+/// Reviewable paths from the delivery's first-parent content commits after
+/// `merge-base(parent, branch)`.
 pub fn changed_paths_for_delivery(
     repo: &Path,
     parent_branch: &str,
@@ -369,29 +375,65 @@ pub fn changed_paths_for_delivery(
         ));
     }
     let base = String::from_utf8_lossy(&base.stdout).trim().to_string();
-    let diff = Command::new("git")
-        .args(["diff", "--name-only", &format!("{base}..{branch}")])
-        .current_dir(repo)
-        .output()
-        .map_err(|error| format!("git diff failed to start: {error}"))?;
-    if !diff.status.success() {
-        return Err(format!(
-            "git diff --name-only {base}..{branch} failed: {}",
-            String::from_utf8_lossy(&diff.stderr).trim()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&diff.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(ToOwned::to_owned)
-        .collect())
+    delivery_content_paths(repo, &base, branch)
 }
 
-/// Paths a delivery brought into `target` after it merged: the change set of
-/// the first merge on the ancestry path from `head` to `target`, or
-/// `merge-base..head` when the tip has not merged. `None` when neither can
-/// be computed (fast-forward merges carry no merge commit).
+/// Paths changed by first-parent content commits in a delivery. Merge commits
+/// carry incoming history, not this task's own edits; `-w` and the diff filter
+/// exclude formatting-only changes and deleted surfaces (GH #1027/#1037).
+pub fn delivery_content_paths(repo: &Path, base: &str, head: &str) -> Result<Vec<String>, String> {
+    let commits = Command::new("git")
+        .args([
+            "rev-list",
+            "--first-parent",
+            "--no-merges",
+            "--reverse",
+            &format!("{base}..{head}"),
+        ])
+        .current_dir(repo)
+        .output()
+        .map_err(|error| format!("git rev-list failed to start: {error}"))?;
+    if !commits.status.success() {
+        return Err(format!(
+            "git rev-list {base}..{head} failed: {}",
+            String::from_utf8_lossy(&commits.stderr).trim()
+        ));
+    }
+    let mut paths = Vec::new();
+    for commit in String::from_utf8_lossy(&commits.stdout).lines() {
+        let diff = Command::new("git")
+            .args([
+                "diff",
+                "-w",
+                "--diff-filter=ACMRT",
+                "--name-only",
+                &format!("{commit}^"),
+                commit,
+                "--",
+            ])
+            .current_dir(repo)
+            .output()
+            .map_err(|error| format!("git diff failed to start: {error}"))?;
+        if !diff.status.success() {
+            return Err(format!(
+                "git diff {commit} failed: {}",
+                String::from_utf8_lossy(&diff.stderr).trim()
+            ));
+        }
+        paths.extend(
+            String::from_utf8_lossy(&diff.stdout)
+                .lines()
+                .map(str::to_string),
+        );
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+/// Reviewable paths a delivery brought into `target`: its own content commits
+/// before the first merge on the ancestry path, or its unmerged content
+/// commits. `None` when that merge boundary cannot be found.
 pub fn integrated_paths(repo: &Path, head: &str, target: &str) -> Option<Vec<String>> {
     let git = |args: &[&str]| -> Option<String> {
         let out = Command::new("git").args(args).current_dir(repo).output().ok()?;
@@ -413,18 +455,12 @@ pub fn integrated_paths(repo: &Path, head: &str, target: &str) -> Option<Vec<Str
             &format!("{head}..{target}"),
         ])?;
         let merge = merges.lines().next()?.trim().to_string();
-        (format!("{merge}^1"), merge)
+        (format!("{merge}^1"), head.to_string())
     } else {
         (git(&["merge-base", target, head])?, head.to_string())
     };
-    let diff = git(&["diff", "--name-only", &from, &to])?;
-    Some(
-        diff.lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(ToOwned::to_owned)
-            .collect(),
-    )
+    let base = git(&["merge-base", &from, &to])?;
+    delivery_content_paths(repo, &base, &to).ok()
 }
 
 /// `epic_status` section listing each child's latest independent QA round
@@ -721,6 +757,67 @@ mod tests {
         // One real surface file among them is enough.
         let mixed = paths(&["docs/a.md", "hub-web/src/styles.css"]);
         assert!(delivery_eligibility(&task(), &qa, Some(&mixed), &[]).is_eligible());
+    }
+
+    #[test]
+    fn deleted_builtin_and_merge_only_or_whitespace_vue_do_not_trigger_qa_gh_1027_1037() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(["-c", "user.name=QA", "-c", "user.email=qa@example.invalid"])
+                .args(args)
+                .current_dir(repo)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?}: {output:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("old.html"), "<main>old</main>\n").unwrap();
+        std::fs::write(repo.join("old.css"), "body { color: red; }\n").unwrap();
+        std::fs::write(repo.join("app.vue"), "<template><p>Hello</p></template>\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "base"]);
+        git(&["switch", "-q", "-c", "factory/worker"]);
+        std::fs::remove_file(repo.join("old.html")).unwrap();
+        std::fs::remove_file(repo.join("old.css")).unwrap();
+        std::fs::write(repo.join("app.vue"), "<template> <p>Hello</p> </template>\n").unwrap();
+        std::fs::create_dir_all(repo.join("cas-cli/src/builtins/examples")).unwrap();
+        std::fs::write(repo.join("cas-cli/src/builtins/examples/tokens.css"), "body { color: blue; }\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "remove examples and format"]);
+        let paths = changed_paths_for_delivery(repo, "main", "HEAD").unwrap();
+        assert_eq!(paths, vec!["cas-cli/src/builtins/examples/tokens.css"]);
+        assert!(!user_facing_reasons(&task(), &QaConfig::default(), Some(&paths), &[]).is_eligible());
+
+        git(&["switch", "-q", "main"]);
+        std::fs::write(repo.join("incoming.vue"), "<template><p>Incoming</p></template>\n").unwrap();
+        git(&["add", "incoming.vue"]);
+        git(&["commit", "-q", "-m", "staging UI"]);
+        git(&["switch", "-q", "factory/worker"]);
+        git(&["merge", "-q", "--no-ff", "-m", "sync staging", "main"]);
+        let paths = changed_paths_for_delivery(repo, "main~1", "HEAD").unwrap();
+        assert!(!paths.iter().any(|path| path == "incoming.vue"), "{paths:?}");
+        assert!(!paths.iter().any(|path| path == "app.vue"), "{paths:?}");
+
+        std::fs::write(repo.join("app.vue"), "<template><p>Changed</p></template>\n").unwrap();
+        git(&["add", "app.vue"]);
+        git(&["commit", "-q", "-m", "real UI edit"]);
+        let paths = changed_paths_for_delivery(repo, "main", "HEAD").unwrap();
+        assert!(paths.iter().any(|path| path == "app.vue"), "{paths:?}");
+        assert!(user_facing_reasons(&task(), &QaConfig::default(), Some(&paths), &[]).is_eligible());
+
+        let delivery_head = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        let delivery_head = String::from_utf8(delivery_head.stdout).unwrap();
+        git(&["switch", "-q", "main"]);
+        git(&["merge", "-q", "--no-ff", "-m", "land worker", "factory/worker"]);
+        let integrated = integrated_paths(repo, delivery_head.trim(), "main").unwrap();
+        assert!(integrated.iter().any(|path| path == "app.vue"), "{integrated:?}");
+        assert!(!integrated.iter().any(|path| path == "incoming.vue"), "{integrated:?}");
     }
 
     #[test]

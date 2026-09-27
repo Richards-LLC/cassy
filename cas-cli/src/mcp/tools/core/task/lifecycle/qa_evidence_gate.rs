@@ -126,9 +126,9 @@ fn live_target_ref(repo: &Path, target_branch: &str) -> String {
 /// whenever the target has not absorbed them as ancestors: a stale local
 /// target, or a squash-merged PR. A backend-only task was then asked for web
 /// QA evidence for the previous task's UI. When the attribution found this
-/// task's changes, only those are judged. Otherwise (no attributable commits,
-/// or legacy history) the branch diff against the live target applies, as
-/// before.
+/// task's changes, only those are judged, including an empty content range
+/// from a merge-only or formatting-only task. With no selected task range or
+/// legacy history, the branch diff against the live target applies.
 pub(crate) fn qa_evidence_close_gate_for_paths(
     cas_root: &Path,
     task: &Task,
@@ -153,7 +153,10 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
     let range = (!target_branch.is_empty())
         .then(|| delivery_range(repo, &head, &live_target_ref(repo, target_branch)))
         .flatten();
-    let changed = match attributed_paths.filter(|paths| !paths.is_empty()) {
+    // An empty attributed set is authoritative: a merge-only or formatting-
+    // only task delivered no reviewable UI, even if the branch's merge diff
+    // contains UI files from the other parent (GH #1037).
+    let changed = match attributed_paths {
         Some(paths) => Some(paths.to_vec()),
         None => range
             .as_ref()
@@ -350,9 +353,9 @@ mod tests {
         let refusal = qa_evidence_close_gate(&cas_root, &task, &repo, "main", None)
             .expect_err("the branch-wide diff alone cannot tell A from B");
         assert!(refusal.contains("app.css"), "{refusal}");
-        // Nothing attributed falls back to the branch diff rather than
-        // waving the gate through.
-        let fallback = qa_evidence_close_gate_for_paths(
+        // An empty set from a selected delivery range is authoritative.
+        // Callers pass None when attribution found no delivery range.
+        qa_evidence_close_gate_for_paths(
             &cas_root,
             &task,
             &repo,
@@ -360,8 +363,7 @@ mod tests {
             None,
             Some(Vec::<String>::new().as_slice()),
         )
-        .expect_err("an empty attribution is not evidence of a backend-only task");
-        assert!(fallback.contains("app.css"), "{fallback}");
+        .expect("an attributed merge-only delivery has no UI change");
     }
 
     #[test]

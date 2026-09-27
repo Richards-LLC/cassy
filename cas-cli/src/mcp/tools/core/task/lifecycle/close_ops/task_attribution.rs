@@ -276,6 +276,31 @@ pub(super) fn paths(
     Some(paths)
 }
 
+/// Reviewable paths from selected task ranges. An empty result is meaningful
+/// when the task only merged history or changed whitespace/deletions.
+pub(super) fn qa_paths(
+    repo: &Path,
+    target: &str,
+    window: &TaskCommitReceiptWindow,
+    receipt: Option<&str>,
+) -> Option<Vec<String>> {
+    let receipt = receipt
+        .map(|receipt| resolve_task_commit_receipt_sha(repo, receipt))
+        .transpose()
+        .ok()?;
+    let ranges = task_delivery_ranges(repo, target, window, receipt.as_deref())?;
+    if ranges.is_empty() {
+        return None;
+    }
+    let mut paths = Vec::new();
+    for range in ranges {
+        paths.extend(crate::qa_pass::delivery_content_paths(repo, &range.base, &range.tip).ok()?);
+    }
+    paths.sort();
+    paths.dedup();
+    Some(paths)
+}
+
 /// The immutable baseline a scoped proof must be measured against: the first
 /// parent of the earliest commit in this task's delivery.
 ///
@@ -668,6 +693,36 @@ mod tests {
                 .expect("paths must resolve")
                 .is_empty(),
             "the proof surface must not be empty: that is what made the gate unsatisfiable"
+        );
+    }
+
+    #[test]
+    fn qa_attribution_ignores_incoming_merge_and_whitespace_only_vue_gh_1037() {
+        let dir = fixture();
+        let repo = dir.path();
+        assert_eq!(qa_paths(repo, "main", &window(), None), None);
+        git(repo, &["checkout", "-q", "main"]);
+        commit(repo, "incoming.vue", "<template><p>Incoming</p></template>\n", "staging UI");
+        git(repo, &["checkout", "-q", "factory/worker"]);
+        git(repo, &["merge", "-q", "--no-ff", "-m", "sync staging", "main"]);
+        let merge_tip = git(repo, &["rev-parse", "HEAD"]);
+        assert!(
+            paths(repo, "main", &window(), Some(&merge_tip))
+                .unwrap()
+                .contains(&"incoming.vue".into())
+        );
+        assert_eq!(qa_paths(repo, "main", &window(), Some(&merge_tip)), Some(vec![]));
+
+        commit(repo, "app.vue", "<template><p>Hello</p></template>\n", "initial UI");
+        let base = git(repo, &["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("app.vue"), "<template> <p>Hello</p> </template>\n").unwrap();
+        git(repo, &["add", "app.vue"]);
+        git(repo, &["commit", "-qm", "format only"]);
+        let formatted = git(repo, &["rev-parse", "HEAD"]);
+        assert!(
+            crate::qa_pass::delivery_content_paths(repo, &base, &formatted)
+                .unwrap()
+                .is_empty()
         );
     }
 

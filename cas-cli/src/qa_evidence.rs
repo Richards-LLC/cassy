@@ -1143,10 +1143,11 @@ pub fn delivery_range(repo: &Path, head: &str, target: &str) -> Option<(String, 
     }
 }
 
-/// Paths changed over a range.
+/// Reviewable paths changed over a range; deletions and whitespace-only
+/// changes cannot require a UI evidence bundle.
 pub fn range_paths(repo: &Path, from: &str, to: &str) -> Option<Vec<String>> {
     Some(
-        git(repo, &["diff", "--name-only", from, to])?
+        git(repo, &["diff", "-w", "--diff-filter=ACMRT", "--name-only", from, to])?
             .lines()
             .map(str::trim)
             .filter(|line| !line.is_empty())

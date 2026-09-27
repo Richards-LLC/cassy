@@ -752,6 +752,26 @@ fn delivery_range_before_and_after_merge() {
 }
 
 #[test]
+fn qa_range_paths_ignore_deleted_html_css_and_whitespace_vue_gh_1027_1037() {
+    let fx = Fixture::new();
+    let base = fx.head.clone();
+    commit(&fx.repo, "old.html", 60);
+    commit(&fx.repo, "old.css", 50);
+    std::fs::write(fx.repo.join("app.vue"), "<template><p>Hello</p></template>\n").unwrap();
+    git_ok(&fx.repo, &["add", "app.vue"]);
+    git_ok(&fx.repo, &["commit", "-qm", "initial vue"]);
+    let before = git_ok(&fx.repo, &["rev-parse", "HEAD"]);
+    std::fs::remove_file(fx.repo.join("old.html")).unwrap();
+    std::fs::remove_file(fx.repo.join("old.css")).unwrap();
+    std::fs::write(fx.repo.join("app.vue"), "<template> <p>Hello</p> </template>\n").unwrap();
+    git_ok(&fx.repo, &["add", "-A"]);
+    git_ok(&fx.repo, &["commit", "-qm", "remove and format"]);
+    let after = git_ok(&fx.repo, &["rev-parse", "HEAD"]);
+    assert!(range_paths(&fx.repo, &before, &after).unwrap().is_empty());
+    assert_eq!(range_paths(&fx.repo, &base, &before).unwrap(), vec!["app.vue", "old.css", "old.html"]);
+}
+
+#[test]
 fn journey_polish_exception_does_not_reach_the_delivery_close() {
     // Supervisor decision (cas-0cd5): a journey bundle without polish proof
     // is valid for the release evaluation but cannot close a delivery.

@@ -51,6 +51,10 @@ pub struct EvidenceContext<'a> {
     pub delivered_head: &'a str,
     /// The task's notes, where the `qa-bundle:` citation lives.
     pub notes: &'a str,
+    /// cas-a6ab: `qa.deployed_origins`, the remote deployments whose
+    /// authenticated runs may stand in for a local build when local auth is
+    /// impossible. Empty means local builds only.
+    pub deployed_origins: &'a [String],
 }
 
 /// Why evidence is refused. `problem` completes "its QA evidence bundle is …";
@@ -93,6 +97,49 @@ struct Manifest {
     files: ManifestFiles,
     #[serde(default)]
     critique_score: std::collections::BTreeMap<String, i64>,
+    /// cas-a6ab: present when the run was made against a deployed origin
+    /// because local auth is impossible.
+    #[serde(default)]
+    deployed: Option<DeployedEvidence>,
+}
+
+/// cas-a6ab (GH #1023 finding 4): the provenance of a run against a deployed
+/// origin instead of a local build. gabber-studio's staging backend rejects a
+/// localhost origin on `/auth/session` (CORS), so an authenticated page has
+/// no local real-build run. A deployed run counts only when it names the
+/// reason, a configured origin, and proof that the deployment served the
+/// delivered commit.
+#[derive(Debug, Deserialize)]
+struct DeployedEvidence {
+    /// `scheme://host[:port]` of the deployment the run checked.
+    #[serde(default)]
+    origin: String,
+    /// Why a local build could not be used (for example the backend's CORS
+    /// rejecting a localhost origin on its session endpoint).
+    #[serde(default)]
+    reason: String,
+    /// The commit the deployment serves.
+    #[serde(default)]
+    deployed_sha: String,
+    /// Bundle-relative file recording what the deployment reported about
+    /// itself (a version endpoint response, deployment metadata), naming
+    /// `deployed_sha`.
+    #[serde(default)]
+    deployment_proof: String,
+}
+
+/// Shortest recorded reason accepted for a deployed-origin run.
+const DEPLOYED_REASON_MIN_CHARS: usize = 20;
+
+/// `scheme://host[:port]` of a URL, lower-cased, or `None` if it is not an
+/// http(s) URL with a host.
+pub fn url_origin(target: &str) -> Option<String> {
+    let parsed = url::Url::parse(target.trim()).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    parsed.host_str()?;
+    Some(parsed.origin().ascii_serialization().to_ascii_lowercase())
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -268,6 +315,13 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
         ));
     }
 
+    // cas-a6ab: a deployed-origin run names its reason and a configured
+    // origin up front; its commit binding and proof are checked below.
+    let deployed_origin = match manifest.deployed.as_ref() {
+        Some(deployed) => Some(check_deployed_declaration(ctx, deployed, &manifest_path)?),
+        None => None,
+    };
+
     // 2. Required files.
     let files = &manifest.files;
     let singles: [(&str, &Option<String>); 9] = [
@@ -332,6 +386,16 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
         listed.push((
             format!("a11y[{index}]"),
             resolve_bundle_file(&bundle_dir, "a11y", relative)?,
+        ));
+    }
+    if let Some(deployed) = manifest.deployed.as_ref() {
+        listed.push((
+            "deployed.deployment_proof".to_string(),
+            resolve_bundle_file(
+                &bundle_dir,
+                "deployed.deployment_proof",
+                deployed.deployment_proof.trim(),
+            )?,
         ));
     }
     for (key, path) in &listed {
@@ -401,6 +465,9 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
             ),
             rerun,
         ));
+    }
+    if let Some(deployed) = manifest.deployed.as_ref() {
+        check_deployed_binding(ctx, deployed, &listed, &rerun)?;
     }
     let created = chrono::DateTime::parse_from_rfc3339(manifest.created_at.trim())
         .map(|time| time.timestamp())
@@ -493,8 +560,13 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
         // Markdown and stdout are retained as evidence, but their presentation
         // varies by script and source count. The JSON run report is the verdict
         // authority (GH #1017/#1025); no hand-written PASS markers are needed.
-        "pass" => check_visual_qa_run(&visual_qa_json, delivered_time, &delivered_label)
-            .map_err(|problem| EvidenceRefusal::new(problem, run_command()))?,
+        "pass" => check_visual_qa_run_at(
+            &visual_qa_json,
+            delivered_time,
+            &delivered_label,
+            deployed_origin.as_deref(),
+        )
+        .map_err(|problem| EvidenceRefusal::new(problem, run_command()))?,
         "scoped" => {
             let Some(relative) = files
                 .visual_qa_baseline_json
@@ -505,7 +577,13 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
             };
             let baseline =
                 resolve_bundle_file(&bundle_dir, "visual_qa_baseline_json", relative)?;
-            check_visual_qa_scoped(&visual_qa_json, &baseline, delivered_time, &delivered_label)
+            check_visual_qa_scoped_at(
+                &visual_qa_json,
+                &baseline,
+                delivered_time,
+                &delivered_label,
+                deployed_origin.as_deref(),
+            )
                 .map_err(|problem| {
                     EvidenceRefusal::new(
                         problem,
@@ -521,6 +599,11 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
                 producing_command("visual_qa_stdout", &bundle_dir),
             ));
         }
+    }
+
+    // cas-a6ab: an authenticated run must not carry its credentials.
+    if manifest.deployed.is_some() {
+        check_no_secrets(&bundle_dir, &listed)?;
     }
 
     // 6. Critique floor.
@@ -635,6 +718,17 @@ pub fn check_visual_qa_run(
     not_before: i64,
     not_before_label: &str,
 ) -> Result<(), String> {
+    check_visual_qa_run_at(report, not_before, not_before_label, None)
+}
+
+/// [`check_visual_qa_run`], also accepting targets on `deployed_origin`
+/// (cas-a6ab) when the bundle's deployed-origin declaration was validated.
+pub fn check_visual_qa_run_at(
+    report: &Path,
+    not_before: i64,
+    not_before_label: &str,
+    deployed_origin: Option<&str>,
+) -> Result<(), String> {
     let claim = "claims a visual-QA pass, but";
     let run = read_visual_qa_run(report, claim)?;
     let legacy_single_source = run.status.is_empty() && run.total_issues.is_some();
@@ -658,7 +752,13 @@ pub fn check_visual_qa_run(
             run.total_issues
         ));
     }
-    check_run_provenance(&run, report, claim, Some((not_before, not_before_label)))?;
+    check_run_provenance(
+        &run,
+        report,
+        claim,
+        Some((not_before, not_before_label)),
+        deployed_origin,
+    )?;
     Ok(())
 }
 
@@ -684,6 +784,7 @@ fn check_run_provenance(
     report: &Path,
     claim: &str,
     fresh: Option<(i64, &str)>,
+    deployed_origin: Option<&str>,
 ) -> Result<Vec<String>, String> {
     if run.strict == Some(false) {
         return Err(format!(
@@ -722,7 +823,10 @@ fn check_run_provenance(
             report.display()
         ));
     }
-    if let Some(remote) = targets.iter().find(|target| !is_local_origin(target)) {
+    if let Some(remote) = targets.iter().find(|target| {
+        !is_local_origin(target)
+            && !deployed_origin.is_some_and(|origin| url_origin(target).as_deref() == Some(origin))
+    }) {
         return Err(format!(
             "{claim} {} ran against {remote}, which is not a local build of the delivered commit (a production or remote origin shows what is deployed there, not this commit)",
             report.display()
@@ -794,12 +898,29 @@ pub fn check_visual_qa_scoped(
     not_before: i64,
     not_before_label: &str,
 ) -> Result<ScopedVisualQa, String> {
+    check_visual_qa_scoped_at(tip, baseline, not_before, not_before_label, None)
+}
+
+/// [`check_visual_qa_scoped`], also accepting targets on `deployed_origin`
+/// (cas-a6ab). The base run stays local: it serves the base commit.
+pub fn check_visual_qa_scoped_at(
+    tip: &Path,
+    baseline: &Path,
+    not_before: i64,
+    not_before_label: &str,
+    deployed_origin: Option<&str>,
+) -> Result<ScopedVisualQa, String> {
     let claim = "claims a scoped visual-QA result, but";
     let tip_run = read_visual_qa_run(tip, claim)?;
-    let tip_targets =
-        check_run_provenance(&tip_run, tip, claim, Some((not_before, not_before_label)))?;
+    let tip_targets = check_run_provenance(
+        &tip_run,
+        tip,
+        claim,
+        Some((not_before, not_before_label)),
+        deployed_origin,
+    )?;
     let base_run = read_visual_qa_run(baseline, claim)?;
-    let base_targets = check_run_provenance(&base_run, baseline, claim, None)?;
+    let base_targets = check_run_provenance(&base_run, baseline, claim, None, None)?;
     let (Some(tip_findings), Some(base_findings)) = (&tip_run.findings, &base_run.findings) else {
         return Err(format!(
             "{claim} {} and {} must both carry the `findings` list visual-qa.mjs writes, so the two runs can be compared",
@@ -847,6 +968,233 @@ pub fn check_visual_qa_scoped(
     Ok(ScopedVisualQa {
         pre_existing: tip_findings.len(),
     })
+}
+
+/// cas-a6ab: the declaration half of a deployed-origin run: a recorded
+/// reason, and an origin that is remote and configured for this project.
+/// Returns the normalised origin.
+fn check_deployed_declaration(
+    ctx: &EvidenceContext<'_>,
+    deployed: &DeployedEvidence,
+    manifest_path: &Path,
+) -> Result<String, EvidenceRefusal> {
+    let fix = format!(
+        "record deployed.origin, deployed.reason, deployed.deployed_sha and deployed.deployment_proof in {} ({CONTRACT_REFERENCE})",
+        manifest_path.display()
+    );
+    if deployed.reason.trim().chars().count() < DEPLOYED_REASON_MIN_CHARS {
+        return Err(EvidenceRefusal::new(
+            "a deployed-origin run without its reason: deployed.reason must say why a local build could not be used (for example the backend's CORS rejecting localhost on its session endpoint)",
+            fix,
+        ));
+    }
+    let Some(origin) = url_origin(&deployed.origin) else {
+        return Err(EvidenceRefusal::new(
+            format!(
+                "a deployed-origin run whose deployed.origin {:?} is not an http(s) origin",
+                deployed.origin
+            ),
+            fix,
+        ));
+    };
+    if is_local_origin(&origin) {
+        return Err(EvidenceRefusal::new(
+            format!("a deployed-origin run that names a local origin ({origin}); a local build needs no deployed declaration"),
+            "remove `deployed` from bundle.json".to_string(),
+        ));
+    }
+    let allowed: Vec<String> = ctx
+        .deployed_origins
+        .iter()
+        .filter_map(|configured| url_origin(configured))
+        .collect();
+    if !allowed.iter().any(|configured| *configured == origin) {
+        return Err(EvidenceRefusal::new(
+            format!(
+                "from the wrong origin: {origin} is not a configured deployed origin (qa.deployed_origins: {})",
+                if allowed.is_empty() {
+                    "none".to_string()
+                } else {
+                    allowed.join(", ")
+                }
+            ),
+            format!(
+                "run against a configured deployment, or have the supervisor add it: `cas config set qa.deployed_origins {origin}`"
+            ),
+        ));
+    }
+    Ok(origin)
+}
+
+/// cas-a6ab: the binding half of a deployed-origin run: the deployment
+/// served the delivered commit (or a descendant of it), and the recorded
+/// proof says so.
+fn check_deployed_binding(
+    ctx: &EvidenceContext<'_>,
+    deployed: &DeployedEvidence,
+    listed: &[(String, PathBuf)],
+    rerun: &str,
+) -> Result<(), EvidenceRefusal> {
+    let sha = deployed.deployed_sha.trim();
+    if !is_full_sha(sha) {
+        return Err(EvidenceRefusal::new(
+            format!("unbound: deployed.deployed_sha {sha:?} is not a full 40-hex commit"),
+            rerun.to_string(),
+        ));
+    }
+    let covers = sha == ctx.delivered_head
+        || git(
+            ctx.repo,
+            &["merge-base", "--is-ancestor", ctx.delivered_head, sha],
+        )
+        .is_some();
+    if !covers {
+        return Err(EvidenceRefusal::new(
+            format!(
+                "stale: the deployment served {} but the delivery is {} (deploy the delivered commit, then re-run against it)",
+                short(sha),
+                short(ctx.delivered_head)
+            ),
+            rerun.to_string(),
+        ));
+    }
+    let proof = listed
+        .iter()
+        .find(|(key, _)| key == "deployed.deployment_proof")
+        .map(|(_, path)| path.clone())
+        .unwrap_or_default();
+    let recorded = std::fs::read_to_string(&proof).unwrap_or_default();
+    if !recorded.contains(sha) {
+        return Err(EvidenceRefusal::new(
+            format!(
+                "unproven: deployed.deployment_proof ({}) does not name the deployed commit {}",
+                proof.display(),
+                short(sha)
+            ),
+            "record what the deployment reports about itself (its version endpoint or deployment metadata, naming the full commit) into the proof file".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Credential shapes an authenticated run can leak into its artifacts.
+fn secret_patterns() -> &'static [(&'static str, regex::Regex)] {
+    static PATTERNS: std::sync::OnceLock<Vec<(&'static str, regex::Regex)>> =
+        std::sync::OnceLock::new();
+    PATTERNS.get_or_init(|| {
+        [
+            (
+                "a JSON web token",
+                r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
+            ),
+            ("a bearer token", r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}"),
+            (
+                "an API token",
+                r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|sk_(?:live|test)_[A-Za-z0-9]{10,}|xox[abpr]-[A-Za-z0-9-]{10,})",
+            ),
+            (
+                "a cookie or authorization header value",
+                r#"(?i)"name"\s*:\s*"(?:cookie|set-cookie|authorization)"\s*,\s*"value"\s*:\s*"[^"]{8,}""#,
+            ),
+            (
+                "a cookie or authorization header value",
+                r"(?im)^\s*(?:cookie|set-cookie|authorization)\s*:\s*\S{8,}",
+            ),
+            (
+                "a saved browser storage state (cookies)",
+                r#""cookies"\s*:\s*\[\s*\{[^\]]*"value"\s*:\s*"[^"]{8,}""#,
+            ),
+        ]
+        .into_iter()
+        .map(|(kind, pattern)| (kind, regex::Regex::new(pattern).expect("secret pattern")))
+        .collect()
+    })
+}
+
+/// Largest single text or trace entry the secret scan reads.
+const SECRET_SCAN_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+fn first_secret(text: &str) -> Option<&'static str> {
+    secret_patterns()
+        .iter()
+        .find(|(_, pattern)| pattern.is_match(text))
+        .map(|(kind, _)| *kind)
+}
+
+/// cas-a6ab: an authenticated deployed run must not carry credentials into
+/// the bundle. Scans every listed text artifact, and every text entry of the
+/// trace (Playwright records request headers there), naming the file and
+/// the kind of secret, never its value. A saved storage-state file anywhere
+/// in the bundle is refused by name.
+fn check_no_secrets(bundle_dir: &Path, listed: &[(String, PathBuf)]) -> Result<(), EvidenceRefusal> {
+    let fix = "re-record without credentials: never copy a storage state, cookie, token or auth header into the bundle; redact header values from the trace before listing it".to_string();
+    if let Ok(entries) = std::fs::read_dir(bundle_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            if name.contains("storage-state") || name.contains("storagestate") {
+                return Err(EvidenceRefusal::new(
+                    format!(
+                        "carrying credentials: {} is a saved browser storage state",
+                        entry.path().display()
+                    ),
+                    fix,
+                ));
+            }
+        }
+    }
+    for (key, path) in listed {
+        let found = if key == "trace" {
+            scan_trace_for_secrets(path)
+        } else {
+            scan_text_file_for_secrets(path)
+        };
+        if let Some((kind, place)) = found {
+            return Err(EvidenceRefusal::new(
+                format!(
+                    "carrying credentials: files.{key} ({}{place}) contains {kind}",
+                    path.display()
+                ),
+                fix,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn scan_text_file_for_secrets(path: &Path) -> Option<(&'static str, String)> {
+    let meta = std::fs::metadata(path).ok()?;
+    if meta.len() > SECRET_SCAN_MAX_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    // Images and video are binary; only text can carry a copied header.
+    let text = std::str::from_utf8(&bytes).ok()?;
+    first_secret(text).map(|kind| (kind, String::new()))
+}
+
+fn scan_trace_for_secrets(path: &Path) -> Option<(&'static str, String)> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut archive = zip::ZipArchive::new(file).ok()?;
+    for index in 0..archive.len() {
+        let Ok(mut entry) = archive.by_index(index) else {
+            continue;
+        };
+        if entry.size() > SECRET_SCAN_MAX_BYTES {
+            continue;
+        }
+        let name = entry.name().to_string();
+        let mut bytes = Vec::new();
+        if entry.read_to_end(&mut bytes).is_err() {
+            continue;
+        }
+        let Ok(text) = std::str::from_utf8(&bytes) else {
+            continue;
+        };
+        if let Some(kind) = first_secret(text) {
+            return Some((kind, format!(" entry {name}")));
+        }
+    }
+    None
 }
 
 fn missing_key(key: &str) -> EvidenceRefusal {

@@ -305,6 +305,28 @@ impl Config {
                     Some(value.trim().to_string())
                 };
             }
+            "qa.deployed_origins" => {
+                let qa = self.qa.get_or_insert_with(QaConfig::default);
+                let mut origins = Vec::new();
+                for raw in value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|raw| !raw.is_empty())
+                {
+                    let origin = crate::qa_evidence::url_origin(raw).ok_or_else(|| {
+                        MemError::Parse(format!(
+                            "qa.deployed_origins: {raw:?} is not an http(s) origin"
+                        ))
+                    })?;
+                    if crate::qa_evidence::is_local_origin(&origin) {
+                        return Err(MemError::Parse(format!(
+                            "qa.deployed_origins: {origin} is local; a local build needs no deployed origin"
+                        )));
+                    }
+                    origins.push(origin);
+                }
+                qa.deployed_origins = origins;
+            }
             "qa.preflight_gh_token" => {
                 let qa = self.qa.get_or_insert_with(QaConfig::default);
                 qa.preflight_gh_token = value

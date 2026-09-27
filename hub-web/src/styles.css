@@ -3245,6 +3245,11 @@ dialog form > *,
  * critical red (--warn-text is text-grade in both schemes), with Retry only. */
 .thread .turn.you .bub[data-state="unconfirmed"] { border-color: var(--warn-text); }
 .thread .conversation-unconfirmed b, .thread .conversation-unconfirmed .warn { color: var(--warn-text); }
+/* Journey F10: once the supervisor has replied since, the unconfirmed send is
+ * a settled record: a quiet --line-strong outline, the label in --ink-mid,
+ * no warning glyph and no Retry. */
+.thread .turn.you .bub[data-state="unconfirmed"][data-settled="true"] { border-color: var(--line-strong); }
+.thread .conversation-unconfirmed.conversation-settled b { color: var(--ink-mid); }
 /* F6: once its edited version is sent, a refused send is only a record — a
  * quiet dashed outline in --line-strong, its text clamped to one line, the
  * "Not sent · replaced by your edit" line, and no actions. */

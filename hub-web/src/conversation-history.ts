@@ -33,6 +33,8 @@ export interface ConversationSend {
   /** A refused send whose edited version has since gone out: it stays in the
    * thread as a record, but offers nothing to retry. */
   replaced?: boolean;
+  /** When this browser gave up on the receipt (ms epoch; `unconfirmed` only). */
+  unconfirmedAt?: number;
 }
 /** `at` is when this client saw the event (ms epoch); it stamps the thread's
  * day separators and group timestamps and is never a delivery receipt. */
@@ -224,6 +226,7 @@ export class ConversationHistory {
       const deadline = this.receiptDeadline(index);
       if (deadline === undefined || now < deadline || event.kind !== "send") return;
       event.value.state = "unconfirmed";
+      event.value.unconfirmedAt = now;
       changed.push(event.value.id);
     });
     return changed;
@@ -275,6 +278,19 @@ export class ConversationHistory {
    * no supervisor turn has landed since. Sends still in flight or refused after
    * it do not hide it — it is still the latest message known to have arrived.
    */
+  /**
+   * True when the supervisor has spoken since an unconfirmed send gave up on
+   * its receipt (journey F10): the send most likely arrived, so its card
+   * settles instead of inviting a blind resend. A turn that arrived before
+   * the give-up does not count: it is the crossing turn that made the
+   * receipt overdue in the first place (cas-1185).
+   */
+  repliedSince(send: ConversationSend): boolean {
+    const index = this.events.findIndex((event) => event.kind === "send" && event.value === send);
+    if (index < 0) return false;
+    const since = send.unconfirmedAt;
+    return this.events.slice(index + 1).some((event) => event.kind === "reply" && (since === undefined || (event.arrivedAt ?? event.at ?? 0) > since));
+  }
   delivered(): ConversationSend | undefined {
     for (let index = this.events.length - 1; index >= 0; index -= 1) {
       const event = this.events[index]!;

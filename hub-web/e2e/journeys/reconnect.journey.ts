@@ -54,12 +54,14 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
       return product;
     });
     expect(readingOpacity, "the conversation reading view is not faded during an outage").toBe(1);
-    // A send during the outage is refused in the banner's own words, and the
-    // draft is kept (journey F9).
+    // A send during the outage is held, not refused: it waits in the thread
+    // and goes out by itself, once, when the session is back (cas-0978).
     await composer.fill("Are you there?");
     await page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true }).click();
-    await expect(page.locator("#message-status")).toHaveText("Not sent: lost connection to Atlas · Linux. Your message is kept; send it again when it's back.");
-    await expect(composer).toHaveValue("Are you there?");
+    await expect(page.locator("#message-status")).toHaveText("Not connected to Atlas · Linux right now. Your message will go out by itself when it's back.");
+    await expect(composer).toHaveValue("");
+    await expect(page.getByRole("log").locator(".conversation-held")).toHaveText("Waiting for the connection — sends when it's back");
+    expect(hub.sends.filter((m) => m.text === "Are you there?")).toHaveLength(0);
     // The rail defers to the banner: no second, technical alarm about the same
     // drop, and whatever it does show counts the same in every place (cas-90d4).
     const rail = page.locator("#attention-panel");
@@ -80,12 +82,20 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 30_000 }).toBe(true);
     await expect(banner).toBeHidden({ timeout: 15_000 });
     await expect(header).toHaveText(" · Live");
-    await expect(row).toContainText("Live");
+    // The row previews the held message now, so it no longer shows the Live
+    // status line; it must not say Reconnecting either.
+    await expect(row).not.toContainText("Reconnecting");
     await expect(footer).toContainText("Connected");
     await expect(footer.locator(".pairing-dot")).toHaveClass("pairing-dot connected");
-    // The reconnecting refusal cleared with the reconnect; the draft is kept to send again (cas-b789).
+    // The held message went out on its own, exactly once, and the waiting
+    // line cleared with the reconnect (cas-0978, cas-b789).
+    await expect.poll(() => hub.sends.filter((m) => m.text === "Are you there?").length, { timeout: 10_000 }).toBe(1);
     await expect(page.locator("#message-status")).toBeHidden();
-    await expect(composer).toHaveValue("Are you there?");
+    await expect(page.getByRole("log").locator(".conversation-held")).toHaveCount(0);
+    hub.deliverLatest(PELICAN);
+    await expect(page.getByRole("log").getByText("Delivered")).toBeVisible();
+    await page.waitForTimeout(1_000);
+    expect(hub.sends.filter((m) => m.text === "Are you there?"), "sent once, not again").toHaveLength(1);
     // The transport alarm resolved itself with the reconnect.
     await expect(page.getByText("Terminal transport problem")).toHaveCount(0);
   });

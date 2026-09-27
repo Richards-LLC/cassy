@@ -35,6 +35,10 @@ export interface ConversationSend {
   replaced?: boolean;
   /** When this browser gave up on the receipt (ms epoch; `unconfirmed` only). */
   unconfirmedAt?: number;
+  /** Held in this browser while the machine is unreachable: never on the
+   * wire yet, so it goes out once (with its own client_ref) when the
+   * session is back, or turns "Not sent" if it is not back in time (cas-0978). */
+  held?: boolean;
 }
 /** `at` is when this client saw the event (ms epoch); it stamps the thread's
  * day separators and group timestamps and is never a delivery receipt. */
@@ -121,6 +125,25 @@ export class ConversationHistory {
   submit(id: string, target: string, text: string, at: number = Date.now(), replyTo?: number, session?: string): void {
     const key = Math.max(at, this.latestAt());
     this.insert({ kind: "send", value: { id, target, text, state: "sending", sentAt: at, ...(replyTo === undefined ? {} : { replyTo }) }, at: key, ...(key === at ? {} : { shownAt: at }), session });
+  }
+
+  /**
+   * A send the page could not put on the wire because the machine is
+   * unreachable. It shows in the thread as waiting and has no receipt
+   * deadline until `release` puts it on the wire.
+   */
+  hold(id: string, target: string, text: string, at: number = Date.now(), replyTo?: number, session?: string): void {
+    const key = Math.max(at, this.latestAt());
+    this.insert({ kind: "send", value: { id, target, text, state: "sending", held: true, ...(replyTo === undefined ? {} : { replyTo }) }, at: key, ...(key === at ? {} : { shownAt: at }), session });
+  }
+
+  /** The held send went out now: its receipt clock starts. */
+  release(id: string, at: number = Date.now()): boolean {
+    const send = this.events.find((event) => event.kind === "send" && event.value.id === id);
+    if (!send || send.kind !== "send" || !send.value.held) return false;
+    delete send.value.held;
+    send.value.sentAt = at;
+    return true;
   }
 
   /** The latest stamp already in the thread; live events are placed at or after it. */
@@ -211,6 +234,7 @@ export class ConversationHistory {
     if (!send || send.kind !== "send" || send.value.notificationId !== undefined) return false;
     send.value.state = "error";
     send.value.error = message;
+    delete send.value.held;
     return true;
   }
   /**

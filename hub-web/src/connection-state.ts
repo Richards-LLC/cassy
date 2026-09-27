@@ -64,6 +64,18 @@ export function headerConnectionChip(
   return { state: attachState, text: `${machine.latencyMs}ms` };
 }
 
+/**
+ * The longest the machine connection waits between reconnect attempts. The
+ * exponential backoff's 30 s ceiling suits a hub that is down; a network that
+ * came back without telling the page (Tailscale switched on again: no
+ * `online` event) must not wait that long to be noticed (cas-0978).
+ */
+export const MACHINE_RETRY_CEILING_MS = 10_000;
+
+/** How long a health ping on the machine socket may go unanswered when the
+ * page has reason to doubt it (back online, woken, network changed). */
+export const SOCKET_PROBE_TIMEOUT_MS = 3_000;
+
 export function backoffDelay(attempt: number, random = Math.random): number {
   const base = Math.min(30_000, 1_000 * 2 ** Math.max(0, attempt));
   const jitter = 0.8 + random() * 0.4;

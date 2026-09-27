@@ -18,7 +18,7 @@ import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionU
 import { cycleAttentionGroup, renderAttentionPanel, renderAttentionSummary } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
 import { attachElapsedSeconds, elapsedSeconds, type AttachSnapshot } from "./connection-state";
-import { disconnectedView, renderConnectionSurfaceInto, shouldRetainDisconnectedFrame, transportFailureNeedsAttention } from "./connection-state-view";
+import { disconnectedView, lostConnectionBanner, outageControlsReason, outageRefusal, renderConnectionSurfaceInto, shouldRetainDisconnectedFrame, transportFailureNeedsAttention } from "./connection-state-view";
 import { ensureMachineConnection, replaceMachineConnection } from "./connection-lifecycle";
 import { createDeviceKey } from "./dpop";
 import { readPairingFragment, watchPairingFragment } from "./fragment";
@@ -47,7 +47,7 @@ import { machineAccentClass, machineInitials, setMachineAccentFleet, storageAcce
 import { COMPACT_MEDIA_QUERY, PHONE_MEDIA_QUERY } from "./viewport";
 import { defaultTranscriptView, loadTranscriptView, saveTranscriptView, type TranscriptViewMode } from "./transcript";
 import { TranscriptView } from "./transcript-view";
-import { applyLiveRegions, type LiveRegionView } from "./live-regions";
+import { applyLiveRegions, sessionControlsNotice, type LiveRegionView } from "./live-regions";
 import { DeferredRenderScheduler } from "./deferred-render";
 import { FleetBoardRenderer } from "./fleet-board";
 import { FirstConnectionAnnouncer, installPairedMachine } from "./first-connection";
@@ -1359,9 +1359,7 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
     // A fatal failure is not reconnecting, so the banner must not claim it is.
     // Plain words in the body font (cas-a447): who was lost and what happens next.
     const where = machines.get(machineId)?.label ?? "the machine";
-    banner.textContent = snapshot.fatal === true
-      ? `Lost connection to ${where}. Not retrying.`
-      : `Lost connection to ${where}. Reconnecting…`;
+    banner.textContent = lostConnectionBanner(where, snapshot.fatal === true);
     banner.dataset.attempt = String(view.attempt);
     grid.classList.add("terminal-disconnected");
     // A toast already up when the banner arrives moves clear of it (cas-00cc).
@@ -2357,7 +2355,8 @@ function deliverSupervisorMessage(machine: StoredMachine, session: string, super
   // Without an outcome the operator cannot tell a sent message from a lost
   // one, and the natural response is to send it a second time.
   if (!sent) {
-    showComposerStatus("The hub connection is reconnecting, so this message was not delivered. Try again once the session is live.", "error", true);
+    // In the banner's words, naming the machine it names (journey F9).
+    showComposerStatus(outageRefusal(machine.label), "error", true);
     return;
   }
   const history = conversationHistory(sessionKey(machine.id, session));
@@ -2504,7 +2503,7 @@ function render(captureDraft = true): void {
   const outageReason = sessionDown && selected && selectedSession
     && (sessionsEverLive.has(sessionKey(selected.id, selectedSession))
       || (machineConnectionSnapshot !== undefined && machineConnectionSnapshot.phase !== "live" && lastLiveAt.has(selected.id)))
-    ? `${selected.label} is reconnecting. Control and interrupts come back when it is live.`
+    ? outageControlsReason(selected.label)
     : undefined;
   const controlReason = controlDisabledReason(selected, selectedSession, lease);
   const takeControlReason = outageReason ?? takeControlDisabledReason(selected, selectedSession, lease);
@@ -2550,6 +2549,9 @@ function render(captureDraft = true): void {
   // well otherwise split a phone into three unrelated empty states.
   const fleetEmpty = machineCatalogLoaded && machines.size === 0 && attention.length === 0;
   const showSessionControls = selected !== undefined && selectedSession !== undefined;
+  // A touch screen has no tooltip: the reason a header control is unavailable
+  // is printed under the header, not left in title and aria text (journey F9).
+  const controlsNotice = showSessionControls ? sessionControlsNotice(takeControlReason, interruptReason) : undefined;
   // With machines paired and nothing open, the canvas is the fleet: every
   // machine and its sessions, one tap from opening. An empty card pointing at a
   // drawer was a detour to the same list.
@@ -2582,6 +2584,7 @@ function render(captureDraft = true): void {
     } : {}),
     ...(showSessionControls ? {
       controlAction: { label: controlActionLabel, ...(takeControlReason ? { disabledReason: takeControlReason } : {}) },
+      ...(controlsNotice ? { controlsNotice } : {}),
     } : {}),
     ...(interruptReason ? { interruptReason } : {}),
     ...(staleStatusText ? { staleNotice: staleStatusText } : {}),
@@ -2688,6 +2691,7 @@ function render(captureDraft = true): void {
           ${selected ? `<span class="machine-chip" data-compact-label="${escapeAttr(compactMachineLabel)}" title="${escapeAttr(machineLabel)}">${escapeHtml(machineLabel)}</span><span class="mode-badge ${mode.toLowerCase()}" data-compact-label="${lease?.held_by_me ? "CTL" : "OBS"}"${sessionDown ? " hidden" : ""}>${mode}</span><span class="connection-summary ${connectionState}" title="${escapeAttr(compatibility ?? connectionText)}"><span class="connection-dot"></span><span data-machine-latency="${escapeAttr(selected.id)}">${latencyText}</span></span>` : ""}
           <div class="actions"><button id="command-palette-toggle" class="command-palette-trigger" type="button" aria-label="Open command palette" title="Command palette (Ctrl or Cmd + K)">⌘K</button>${showSessionControls ? `<span class="control-action" title="${escapeAttr(takeControlReason ?? controlActionLabel)}"><button id="lease" data-compact-label="${lease?.held_by_me ? "Rel" : "Ctrl"}" aria-label="${escapeAttr(controlActionLabel)}"${takeControlReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(takeControlReason)}" aria-describedby="control-disabled-reason"` : ""}>${controlActionLabel}</button>${takeControlReason ? `<span id="control-disabled-reason" class="sr-only">${escapeHtml(takeControlReason)}</span>` : ""}</span><button id="interrupt" class="danger" data-compact-label="Int" aria-label="Interrupt selected pane" title="${escapeAttr(interruptReason ?? "Interrupt selected pane")}"${interruptReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(interruptReason)}"` : ""}>Interrupt</button>` : ""}</div>
         </header>
+        ${showSessionControls ? `<p id="session-controls-reason" class="session-controls-reason" role="note"${controlsNotice ? "" : " hidden"}>${escapeHtml(controlsNotice ?? "")}</p>` : ""}
         <section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}>${selectedSession ? '<div class="empty">Connecting to terminal…</div>' : showFleetBoard ? '<div id="fleet-board" class="fleet-board" aria-label="Fleet"></div>' : `<div class="empty empty-pane-slot">${emptyCanvasMarkup()}</div>`}</section>
         ${supervisor ? `<button id="talk-supervisor" class="talk-supervisor primary" type="button"><span>Talk to supervisor</span><small>${escapeHtml(supervisor)}</small></button>` : ""}
       </main>

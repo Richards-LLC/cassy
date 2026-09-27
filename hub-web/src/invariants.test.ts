@@ -323,6 +323,7 @@ describe("binding Cassy Cloud browser invariants", () => {
       'class="control-action"',
       'id="control-disabled-reason"',
       'id="interrupt"',
+      '<p id="session-controls-reason" class="session-controls-reason" role="note"',
       'class="status-stale" role="status"',
       'class="control-disabled-reason" role="note"',
       'id="message-send"',
@@ -347,7 +348,8 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(main).toContain('<p id="message-status" class="message-status');
     expect(main).toContain('function showComposerStatus(text: string, tone: "info" | "error", transport = false): void {');
     // A reconnecting refusal clears when the session is live again (cas-b789).
-    expect(main).toContain('"The hub connection is reconnecting, so this message was not delivered. Try again once the session is live.", "error", true);');
+    // In the banner's words (journey F9).
+    expect(main).toContain("showComposerStatus(outageRefusal(machine.label), \"error\", true);");
     expect(main).toContain("sessionsEverLive.add(key);\n        clearTransportStatus(key);");
     expect(css).toContain(".message-status {");
     expect(css).toContain(".message-status.error {");
@@ -1201,7 +1203,10 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain("openConnectionLog(machineId)");
     expect(source).toContain("const view = disconnectedView(snapshot, now)");
     // Plain words naming the machine (cas-a447), not the protocol retry line.
-    expect(source).toContain("`Lost connection to ${where}. Reconnecting…`");
+    // The words now live in connection-state-view so the refusal and the
+    // disabled controls share them (journey F9).
+    expect(source).toContain("banner.textContent = lostConnectionBanner(where, snapshot.fatal === true);");
+    expect(connectionView).toContain("`Lost connection to ${machineLabel}. Reconnecting…`");
     expect(source).not.toContain("Connection interrupted — ${view.retryLabel}");
     // Header, row and footer read one conversation connection, and the
     // transport alarm resolves itself once the socket is live again.

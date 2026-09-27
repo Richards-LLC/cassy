@@ -417,7 +417,33 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
         expect(fit, `header at ${width}px with "${label}"`).toEqual({ overflow: false, clipped: [] });
       }
     }
+    // The same with the machine drawer open, which leaves the header 185–330px
+    // of an 849–990px window: the header sizes to its own column, so the
+    // control and Interrupt show icons under their full accessible names, and
+    // the project name stays whole (cas-3400 QA round 2 F01).
     await page.setViewportSize({ width: 1280, height: 720 });
+    await page.locator("#machine-drawer-toggle").click();
+    await expect(page.locator(".machine-navigation.drawer-open")).toHaveCount(1);
+    for (const width of [849, 900, 990]) {
+      await page.setViewportSize({ width, height: 720 });
+      await expect(page.getByRole("button", { name: /^(Release control|Take control|Force takeover)$/ })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Interrupt selected pane", exact: true })).toBeVisible();
+      const fit = await header.evaluate((element) => {
+        const box = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        const left = box.left + parseFloat(style.paddingLeft) - 0.5;
+        const right = box.right - parseFloat(style.paddingRight) + 0.5;
+        const clipped = [...element.querySelectorAll<HTMLElement>(".actions button")]
+          .filter((button) => { const b = button.getBoundingClientRect(); return b.width > 0 && (b.right > right || b.left < left || b.right > innerWidth); })
+          .map((button) => button.getAttribute("aria-label"));
+        const name = element.querySelector<HTMLElement>(".session-picker-name")!;
+        return { overflow: element.scrollWidth > element.clientWidth + 1, clipped, projectWhole: name.scrollWidth <= name.clientWidth };
+      });
+      expect(fit, `drawer open at ${width}px`).toEqual({ overflow: false, clipped: [], projectWhole: true });
+    }
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await page.locator("#machine-drawer-close").click();
+    await expect(page.locator(".machine-navigation.drawer-open")).toHaveCount(0);
     const initials = page.locator("#machine-rail-list .machine-initials");
     await expect(initials).toHaveCount(3);
     expect((await initials.allTextContents()).sort()).toEqual(["AL", "AT", "SM"]);

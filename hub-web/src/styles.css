@@ -737,6 +737,32 @@ main {
 .session-header > .mode-badge, .session-header > .connection-summary { flex: 0 0 auto; }
 .session-header > .actions { flex: 0 0 auto; }
 
+/* Header actions carry an icon for the narrowest header, hidden until then. */
+.session-header .action-icon { display: none; width: 16px; height: 16px; flex: 0 0 auto; }
+.session-header .actions button:has(.action-icon) { display: inline-flex; align-items: center; justify-content: center; }
+
+/* The header's own column decides, not the viewport: a desktop window with the
+   machine drawer open leaves the Terminal header 236–296px (cas-3400 QA round
+   2 F01). Below 360px the control and Interrupt buttons show their icons (their
+   accessible names stay "Release control"/"Take control" and "Interrupt
+   selected pane"); below 280px the palette button goes too (Ctrl/⌘ K still
+   opens it), so the title keeps room for the project name. */
+@container session-header (max-width: 360px) {
+  .session-header .actions .action-label { display: none; }
+  .session-header .actions .action-icon { display: block; }
+  .session-header .actions button:has(.action-icon) { min-width: var(--space-8); padding: 0 var(--space-2); }
+}
+@container session-header (max-width: 280px) {
+  .session-header .actions .command-palette-trigger { display: none; }
+}
+/* Narrower still (the drawer open in an 849px window): the title steps down a
+   size, as the phone header does, and the back arrow gives its 32px to it; the
+   "Conversations" control still leads out of Terminal view. */
+@container session-header (max-width: 220px) {
+  .session-header h1 { font-size: var(--fs-meta); }
+  .session-header .session-back { display: none; }
+}
+
 /* The latency words ellipsise inside the chip rather than being cut, and the
    dot keeps its size. */
 .connection-summary [data-machine-latency] { min-width: 0; overflow: hidden; text-overflow: ellipsis; }

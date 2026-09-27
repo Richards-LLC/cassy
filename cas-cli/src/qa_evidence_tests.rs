@@ -1026,6 +1026,46 @@ fn visual_qa_local_runs_are_accepted() {
 }
 
 #[test]
+fn single_source_visual_qa_report_is_authority_over_text_markers_gh_1017_1025() {
+    let fx = Fixture::new();
+    fx.write_bundle(|_| {});
+    std::fs::write(
+        fx.bundle_dir().join("visual-qa/visual-qa.md"),
+        "# Visual QA\n\nResult: **PASS**\n",
+    )
+    .unwrap();
+    std::fs::write(
+        fx.bundle_dir().join("visual-qa.stdout"),
+        "PASS local-source: 0 issue(s) [no issues]\n",
+    )
+    .unwrap();
+    let report = serde_json::json!({
+        "generatedAt": chrono::Utc::now().to_rfc3339(),
+        "input": "http://127.0.0.1:4173/",
+        "strict": true,
+        "totalIssues": 0,
+        "validRenders": 1,
+        "renders": [{"valid": true}]
+    });
+    let report_path = fx.bundle_dir().join("visual-qa/visual-qa.json");
+    std::fs::write(&report_path, report.to_string()).unwrap();
+    fx.validate(&fx.notes()).expect("real single-source PASS needs no hand-edited markers");
+
+    for (field, value) in [
+        ("totalIssues", serde_json::json!(1)),
+        ("validRenders", serde_json::json!(0)),
+        ("renders", serde_json::json!([{"valid": false}])),
+        ("strict", serde_json::json!(false)),
+        ("input", serde_json::json!("https://example.com/")),
+    ] {
+        let mut failed = report.clone();
+        failed[field] = value;
+        std::fs::write(&report_path, failed.to_string()).unwrap();
+        assert!(fx.validate(&fx.notes()).is_err(), "{field} must invalidate the run");
+    }
+}
+
+#[test]
 fn local_origin_predicate() {
     for local in [
         "http://127.0.0.1:1/",

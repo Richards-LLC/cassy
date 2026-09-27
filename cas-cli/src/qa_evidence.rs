@@ -481,35 +481,9 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
             producing_command("visual_qa_stdout", &bundle_dir),
         ));
     }
-    let visual_qa =
-        std::fs::read_to_string(path_of("visual_qa").unwrap_or_default()).unwrap_or_default();
-    if !visual_qa
-        .lines()
-        .next()
-        .is_some_and(|line| line.contains("PASS"))
-    {
-        return Err(EvidenceRefusal::new(
-            "missing polish proof: files.visual_qa does not start with `# Visual QA — PASS`",
-            producing_command("visual_qa_stdout", &bundle_dir),
-        ));
-    }
-    let stdout = std::fs::read_to_string(path_of("visual_qa_stdout").unwrap_or_default())
-        .unwrap_or_default();
-    if stdout
-        .lines()
-        .rev()
-        .find(|line| !line.trim().is_empty())
-        .map(str::trim)
-        != Some("PASS")
-    {
-        return Err(EvidenceRefusal::new(
-            "missing polish proof: files.visual_qa_stdout does not end with `PASS`",
-            producing_command("visual_qa_stdout", &bundle_dir),
-        ));
-    }
-
-    // The claim is backed by the run itself, of a local build, after the
-    // delivered commit (cas-a6a3).
+    // Markdown and stdout are retained as evidence, but their presentation
+    // varies by script and source count. The JSON run report is the verdict
+    // authority (GH #1017/#1025); no hand-written PASS markers are needed.
     check_visual_qa_run(
         &path_of("visual_qa_json").unwrap_or_default(),
         delivered_time,
@@ -563,8 +537,8 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
     })
 }
 
-/// The report `scripts/visual-qa.mjs` writes itself (`visual-qa.json`). A
-/// bundle's `visual_qa_status` is only a claim; this is the run's own record.
+/// The report a visual-QA script writes (`visual-qa.json`). A bundle's
+/// `visual_qa_status` is only a claim; this is the run's own record.
 #[derive(Debug, Deserialize)]
 struct VisualQaRun {
     #[serde(default)]
@@ -573,10 +547,24 @@ struct VisualQaRun {
     generated_at: String,
     #[serde(default)]
     urls: Vec<String>,
-    /// Written by visual-qa.mjs since cas-a6a3. Older copies of the script
-    /// omit it, so only an explicit `false` is refused.
+    #[serde(default)]
+    input: String,
+    #[serde(default, rename = "totalIssues")]
+    total_issues: Option<usize>,
+    #[serde(default, rename = "validRenders")]
+    valid_renders: Option<usize>,
+    #[serde(default)]
+    renders: Vec<VisualQaRender>,
+    /// Older canonical reports omit this field, so only an explicit `false`
+    /// is refused there. A single-source report must record `true`.
     #[serde(default)]
     strict: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VisualQaRender {
+    #[serde(default)]
+    valid: bool,
 }
 
 /// Whether a visual-QA target is a local build: loopback or unspecified
@@ -631,11 +619,25 @@ pub fn check_visual_qa_run(
             report.display()
         )
     })?;
-    if run.status != "PASS" {
+    let legacy_single_source = run.status.is_empty() && run.total_issues.is_some();
+    if legacy_single_source {
+        if run.total_issues != Some(0)
+            || run.renders.is_empty()
+            || run.valid_renders != Some(run.renders.len())
+            || run.renders.iter().any(|render| !render.valid)
+            || run.strict != Some(true)
+        {
+            return Err(format!(
+                "{claim} {} records totalIssues={:?}, validRenders={:?}/{}, strict={:?}; a single-source pass needs zero issues and every render valid under --strict",
+                report.display(), run.total_issues, run.valid_renders, run.renders.len(), run.strict
+            ));
+        }
+    } else if run.status != "PASS" || run.total_issues.is_some_and(|issues| issues > 0) {
         return Err(format!(
-            "{claim} {} records status {:?}, not \"PASS\"",
+            "{claim} {} records status {:?} and totalIssues {:?}, not a passing run",
             report.display(),
-            run.status
+            run.status,
+            run.total_issues
         ));
     }
     if run.strict == Some(false) {
@@ -660,13 +662,20 @@ pub fn check_visual_qa_run(
             run.generated_at.trim()
         ));
     }
-    if run.urls.is_empty() {
+    let targets: Vec<&str> = if !run.urls.is_empty() {
+        run.urls.iter().map(String::as_str).collect()
+    } else if !run.input.trim().is_empty() {
+        vec![run.input.trim()]
+    } else {
+        Vec::new()
+    };
+    if targets.is_empty() {
         return Err(format!(
             "{claim} {} names no URL it checked",
             report.display()
         ));
     }
-    if let Some(remote) = run.urls.iter().find(|target| !is_local_origin(target)) {
+    if let Some(remote) = targets.iter().find(|target| !is_local_origin(target)) {
         return Err(format!(
             "{claim} {} ran against {remote}, which is not a local build of the delivered commit (a production or remote origin shows what is deployed there, not this commit)",
             report.display()

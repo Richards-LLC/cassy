@@ -1447,6 +1447,11 @@ async function loadStatus(machineId: string, session: string): Promise<void> {
 async function loadLease(machineId: string, session: string): Promise<void> {
   try {
     const state = await connections.get(machineId)?.lease(session);
+    // A control on a message that the lease change repaints (the "Waiting for
+    // …" pill turning back into Take control) hands focus to its replacement,
+    // not to the page body (cas-88d86 QA F01), as a refused take does.
+    const pressed = document.activeElement instanceof HTMLElement && document.activeElement.closest(".conversation-reading.thread") ? document.activeElement : null;
+    let holderChanged = false;
     if (state) {
       const key = sessionKey(machineId, session);
       const previousLease = leases.get(key);
@@ -1467,10 +1472,14 @@ async function loadLease(machineId: string, session: string): Promise<void> {
       const delay = watching ? Math.min(expiryDelay ?? Infinity, FOREIGN_LEASE_RECHECK_MS) : expiryDelay;
       if (delay !== undefined) leaseExpiryTimers.set(key, window.setTimeout(() => void loadLease(machineId, session), delay));
       // The refused message reads the holder: repaint it when that changes.
-      if (previousLease?.controller_label !== state.controller_label || previousLease?.held_by_me !== state.held_by_me) updateConversationViews();
+      holderChanged = previousLease?.controller_label !== state.controller_label || previousLease?.held_by_me !== state.held_by_me;
+      if (holderChanged) updateConversationViews();
       if (state.held_by_me) startLeaseHeartbeat(machineId, session);
     }
     render();
+    if (pressed && holderChanged && selectedMachineId === machineId && selectedSession === session) {
+      landFocus([messageControl(pressed)], { keep: true, nextTask: true, waitMs: 1_000, since: pressed });
+    }
   } catch { /* legacy hub may not expose lease status */ }
 }
 

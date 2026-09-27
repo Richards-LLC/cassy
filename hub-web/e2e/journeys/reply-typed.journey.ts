@@ -94,11 +94,14 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
     await expect(waiting).toHaveText("Waiting for Studio iPad");
     await expect(waiting).toHaveAttribute("aria-disabled", "true");
     await expect(waiting).toBeFocused();
+    expect(await waiting.evaluate((element) => getComputedStyle(element).cursor), "the waiting pill does not look pressable").toBe("default");
     await expect(take).toHaveCount(0);
-    // When the iPad releases control, Take control comes back on its own.
+    // When the iPad releases control, Take control comes back on its own,
+    // and the keyboard user parked on the pill is on it (cas-88d86 QA F01).
     await page.unroute(lease);
     await expect(take).toBeVisible({ timeout: 10_000 });
     await expect(take).not.toHaveAttribute("aria-disabled", "true");
+    await expect(take).toBeFocused();
   });
 
   await journey.stage("Take control from the message, then retry", async () => {

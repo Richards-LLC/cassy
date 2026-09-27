@@ -115,7 +115,8 @@ export function planSupervisorSend(context: SupervisorSendContext): SupervisorSe
     return {
       kind: "blocked",
       block: "controlled-elsewhere",
-      reason: `${context.leaseControllerLabel} controls this session, and the hub only accepts a message from its controller. Wait for control to be released, or take over with an administrator credential.`,
+      // Plain words (journey F5): who is in control and what to do next.
+      reason: `${context.leaseControllerLabel} is in control of this session. Wait for it to release control, or take over with an administrator credential.`,
     };
   }
   // The hub treats a supervisor message as a leased mutation, so observing

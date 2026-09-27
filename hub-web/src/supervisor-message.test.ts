@@ -140,6 +140,9 @@ describe("Cassy Cloud supervisor send plan", () => {
     expect(plan).toMatchObject({ kind: "blocked", block: "controlled-elsewhere" });
     if (plan.kind !== "blocked") return;
     expect(plan.reason).toContain("Daniel's phone");
+    // Journey F5: plain words, no hub or controller vocabulary.
+    expect(plan.reason).toBe("Daniel's phone is in control of this session. Wait for it to release control, or take over with an administrator credential.");
+    expect(plan.reason).not.toMatch(/\bhub\b|controller/);
   });
 
   it("blocks a session with no supervisor and a hub without Cassy Cloud control", () => {

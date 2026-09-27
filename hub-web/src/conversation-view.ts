@@ -579,9 +579,21 @@ export class ConversationView {
       bubble.append(state);
       const actions = document.createElement("div"); actions.className = "conversation-actions";
       if (plain.action === "take-control" && !resolved && this.options.takeControl) {
-        const take = document.createElement("button"); take.type = "button"; take.className = "conversation-take-control"; take.textContent = "Take control";
-        take.setAttribute("aria-label", "Take control of the session");
-        take.onclick = () => this.options.takeControl?.(send);
+        const take = document.createElement("button"); take.type = "button"; take.className = "conversation-take-control";
+        if (holder) {
+          // Journey F5: a take the hub will refuse again is not offered as
+          // pressable. It says who is being waited on, keeps its place (and
+          // keyboard focus) in the message, and turns back into Take control
+          // when the lease is released.
+          take.textContent = `Waiting for ${holder}`;
+          take.setAttribute("aria-label", `Waiting for ${holder} to release control`);
+          take.setAttribute("aria-disabled", "true");
+          take.dataset.waiting = "true";
+        } else {
+          take.textContent = "Take control";
+          take.setAttribute("aria-label", "Take control of the session");
+          take.onclick = () => this.options.takeControl?.(send);
+        }
         actions.append(take);
       }
       if (this.options.editMessage) {

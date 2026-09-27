@@ -173,6 +173,8 @@ const selectedPanes = new Map<string, string>();
 const collapsedWorkerPanes = new Set<string>();
 const leaseHeartbeats = new Map<string, number>();
 const leaseExpiryTimers = new Map<string, number>();
+/** How often an open session held by another device is re-checked for release (journey F5). */
+const FOREIGN_LEASE_RECHECK_MS = 5_000;
 // A live Claude/Ink proof after cas-9a29 decides whether one-row PTYs are safe.
 // Until then collapsed phone rows preserve their last real terminal geometry.
 const mobileCollapsedPaneGeometry = "freeze";
@@ -1455,10 +1457,17 @@ async function loadLease(machineId: string, session: string): Promise<void> {
       if (becameGeometryOwner) resizeViewablePanes(machineId, session);
       const expiryTimer = leaseExpiryTimers.get(key);
       if (expiryTimer !== undefined) window.clearTimeout(expiryTimer);
-      if (state.expires_at) {
-        const delay = Math.max(0, new Date(state.expires_at).getTime() - Date.now() + 100);
-        leaseExpiryTimers.set(key, window.setTimeout(() => void loadLease(machineId, session), delay));
-      }
+      leaseExpiryTimers.delete(key);
+      // While another device holds the open session, its release is checked
+      // for, so "Waiting for …" turns back into Take control without a blind
+      // retry (journey F5). The expiry, when sooner, still wins.
+      const heldElsewhere = !state.held_by_me && Boolean(state.controller_label);
+      const watching = heldElsewhere && selectedMachineId === machineId && selectedSession === session;
+      const expiryDelay = state.expires_at ? Math.max(0, new Date(state.expires_at).getTime() - Date.now() + 100) : undefined;
+      const delay = watching ? Math.min(expiryDelay ?? Infinity, FOREIGN_LEASE_RECHECK_MS) : expiryDelay;
+      if (delay !== undefined) leaseExpiryTimers.set(key, window.setTimeout(() => void loadLease(machineId, session), delay));
+      // The refused message reads the holder: repaint it when that changes.
+      if (previousLease?.controller_label !== state.controller_label || previousLease?.held_by_me !== state.held_by_me) updateConversationViews();
       if (state.held_by_me) startLeaseHeartbeat(machineId, session);
     }
     render();
@@ -2294,8 +2303,10 @@ async function takeControlForRefused(machineId: string, session: string): Promis
       showComposerStatus("You control this session now. Retry to send the message.", "info");
       return;
     }
+    // Journey F5: the message already names the device in control and what
+    // to do, so the composer only points at it rather than saying it twice.
     showComposerStatus(after?.controller_label && !after.held_by_me
-      ? `${after.controller_label} controls this session, and the hub only accepts a message from its controller. Wait for control to be released, then take control and retry.`
+      ? REFUSED_SEE_ABOVE
       : "Could not take control of this session. Check that it is live, then take control again.", "error");
   } finally {
     pendingSubmissions.delete(key);

@@ -81,13 +81,24 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
       : route.fulfill({ json: { held_by_me: false, controller_label: "Studio iPad" } }));
     await take.focus();
     await page.keyboard.press("Enter");
-    await expect(page.locator("#message-status")).toContainText("Studio iPad controls this session");
-    await expect(take).toBeVisible();
-    await expect(take).toBeFocused();
-    // cas-1730 (cas-008f N01): the message agrees with the composer — it names
-    // the device in control and says to take control once it is released.
+    // Journey F5: the reason is said once, on the message, in plain words; the
+    // composer only points at it.
+    await expect(page.locator("#message-status")).toHaveText("Not sent — see the message above.");
     await expect(bubble.getByRole("status")).toContainText("Studio iPad is in control. Take control when it's released, then retry.");
+    await expect(page.getByText(/Studio iPad (is in control|controls)/)).toHaveCount(1);
+    await expect(page.locator("#message-status")).not.toContainText(/\bhub\b|controller/);
+    await expect(bubble.getByRole("status")).not.toContainText(/\bhub\b|controller/);
+    // A take that would be refused again is not offered as pressable: it says
+    // who is being waited on, and the keyboard user keeps their place on it.
+    const waiting = bubble.getByRole("button", { name: "Waiting for Studio iPad to release control", exact: true });
+    await expect(waiting).toHaveText("Waiting for Studio iPad");
+    await expect(waiting).toHaveAttribute("aria-disabled", "true");
+    await expect(waiting).toBeFocused();
+    await expect(take).toHaveCount(0);
+    // When the iPad releases control, Take control comes back on its own.
     await page.unroute(lease);
+    await expect(take).toBeVisible({ timeout: 10_000 });
+    await expect(take).not.toHaveAttribute("aria-disabled", "true");
   });
 
   await journey.stage("Take control from the message, then retry", async () => {

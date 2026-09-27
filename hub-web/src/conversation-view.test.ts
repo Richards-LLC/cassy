@@ -279,8 +279,24 @@ describe("ConversationView (Pebble thread)", () => {
     holder = "Studio iPad"; contested.update();
     expect(contestedBubble().querySelector(".conversation-refused-next")?.textContent).toBe(" Studio iPad is in control. Take control when it's released, then retry.");
     expect(document.activeElement).toBe(contestedBubble().querySelector(".conversation-take-control"));
+    // Journey F5: a take the hub would refuse again is not offered as
+    // pressable; it names who is being waited on.
+    const waiting = contestedBubble().querySelector<HTMLButtonElement>(".conversation-take-control")!;
+    expect(waiting.textContent).toBe("Waiting for Studio iPad");
+    expect(waiting.getAttribute("aria-label")).toBe("Waiting for Studio iPad to release control");
+    expect(waiting.getAttribute("aria-disabled")).toBe("true");
+    const takesBefore = take.mock.calls.length;
+    waiting.click();
+    expect(take.mock.calls.length, "a waiting control does not ask the hub again").toBe(takesBefore);
     holder = undefined; contested.update();
     expect(contestedBubble().querySelector(".conversation-refused-next")?.textContent).toBe(" Take control, then retry.");
+    // Released: Take control is back, pressable.
+    const released = contestedBubble().querySelector<HTMLButtonElement>(".conversation-take-control")!;
+    expect(released.textContent).toBe("Take control");
+    expect(released.getAttribute("aria-label")).toBe("Take control of the session");
+    expect(released.hasAttribute("aria-disabled")).toBe(false);
+    released.click();
+    expect(take.mock.calls.length).toBe(takesBefore + 1);
     // Only a control refusal offers it: taking control fixes nothing else.
     const other = new ConversationHistory();
     other.submit("z", "sup", "Late answer", at(9, 2), 7); other.reject("z", "semantic message enqueue failed: in_reply_to notification 7 does not exist");

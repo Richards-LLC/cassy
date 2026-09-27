@@ -302,10 +302,18 @@ export function fitMachineLine(line: HTMLElement | null | undefined, available: 
 
 /** The conversation header's host line, fitted to the room beside its connection state. */
 export function fitConversationHost(root: ParentNode): void {
-  const host = root.querySelector<HTMLElement>(".conversation-identity .conversation-host");
-  if (!host) return;
+  const identity = root.querySelector<HTMLElement>(".conversation-identity");
+  const host = identity?.querySelector<HTMLElement>(".conversation-host");
+  if (!identity || !host) return;
+  // The room is the identity row less the avatar, not the host line's own
+  // width: that line is sized to its content, so it shrinks once the machine
+  // steps aside and would keep it aside for good.
+  const avatar = identity.querySelector<HTMLElement>(":scope > .conversation-avatar");
+  const style = getComputedStyle(identity);
+  const room = identity.clientWidth - parseFloat(style.paddingLeft || "0") - parseFloat(style.paddingRight || "0")
+    - (avatar ? avatar.getBoundingClientRect().width + (parseFloat(style.columnGap) || 0) : 0);
   const connection = host.querySelector<HTMLElement>("#conversation-connection");
-  fitMachineLine(host.querySelector<HTMLElement>(":scope > .host-where"), host.clientWidth - (connection?.getBoundingClientRect().width ?? 0));
+  fitMachineLine(host.querySelector<HTMLElement>(":scope > .host-where"), room - (connection?.getBoundingClientRect().width ?? 0));
 }
 
 export function arrangeConversationShell(app: HTMLElement, model: ConversationShellModel): void {

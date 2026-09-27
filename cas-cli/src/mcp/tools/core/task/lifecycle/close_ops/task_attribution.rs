@@ -473,8 +473,8 @@ pub(super) fn merge_tip_content_presence(
     let mut superseding_commits = Vec::new();
     let mut dropped_paths = Vec::new();
     let mut unknown_reason = None;
-    for commit in commits {
-        match super::delivery_content_presence_in_parent(repo, &commit, target) {
+    for (index, commit) in commits.iter().enumerate() {
+        match super::delivery_content_presence_in_parent(repo, commit, target) {
             DeliveryContentPresence::Present { paths } => {
                 append_unique(&mut present_paths, paths);
             }
@@ -483,13 +483,24 @@ pub(super) fn merge_tip_content_presence(
                 append_unique(&mut superseding_commits, commits);
             }
             DeliveryContentPresence::Dropped { paths } => {
-                append_unique(
-                    &mut dropped_paths,
-                    paths
-                        .into_iter()
-                        .filter(|path| !merge_tip_paths.contains(path))
-                        .collect(),
-                );
+                let later = &commits[index + 1..];
+                for path in paths
+                    .into_iter()
+                    .filter(|path| !merge_tip_paths.contains(path))
+                {
+                    // cas-3f8c: the task's own later commit replaced this
+                    // hunk (cas-bf07: 8f6121a9 added `headerLatencyLabel`,
+                    // fc578d02 swapped it for `headerConnectionChip`). The
+                    // later commit's own check proves the path's delivery;
+                    // the earlier hunk was never meant to survive.
+                    match rewritten_by_later_task_commit(repo, commit, &path, later) {
+                        Some(rewriter) => {
+                            append_unique(&mut superseded_paths, vec![path]);
+                            append_unique(&mut superseding_commits, vec![rewriter]);
+                        }
+                        None => append_unique(&mut dropped_paths, vec![path]),
+                    }
+                }
             }
             DeliveryContentPresence::Unknown { reason } => {
                 unknown_reason.get_or_insert(reason);
@@ -513,6 +524,28 @@ pub(super) fn merge_tip_content_presence(
             paths: present_paths,
         })
     }
+}
+
+/// The last later commit of the same delivery that touches `path`, when
+/// `commit`'s effect on `path` does not survive there: the task itself
+/// replaced that hunk before handing the branch over (cas-3f8c). `None`
+/// when no later task commit touches the path, or when the earlier hunk is
+/// still intact at the task's final version of it. In that case its absence
+/// from the target is a real drop, and the caller keeps reporting it.
+fn rewritten_by_later_task_commit(
+    repo: &Path,
+    commit: &str,
+    path: &str,
+    later: &[String],
+) -> Option<String> {
+    let last_touch = later.iter().rev().find(|later_commit| {
+        super::commit_changes_path(repo, later_commit, path).unwrap_or(false)
+    })?;
+    let parent = git_text(repo, &["rev-parse", &format!("{commit}^1")])?;
+    let survives =
+        super::delivery_path_effect_survives_on_tree(repo, &parent, commit, last_touch, path)
+            .ok()?;
+    (!survives).then(|| last_touch.clone())
 }
 
 fn is_merge_commit(repo: &Path, commit: &str) -> bool {

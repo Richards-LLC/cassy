@@ -10343,14 +10343,11 @@ fn delivery_content_anchor_at_close<'a>(
     parent_branch: &str,
     validated_receipt: Option<&'a str>,
 ) -> &'a str {
-    // GH #846: a supervisor merge can advance the worker's mutable factory
-    // ref to the target merge commit before the worker retries close. A
-    // validated non-merge commit receipt is durable delivery evidence and is
-    // the narrowest content anchor in that shape; the merge tip's
-    // first-parent history does not contain the worker commit. Do not accept
-    // an arbitrary receipt here: callers provide this only after the normal
-    // receipt validator has proved its topology, attribution, diff, and
-    // target content predicates.
+    // GH #895 / GH #846: a target-sync merge can advance the factory tip
+    // without changing the delivered file; a supervisor merge can later
+    // advance that mutable ref again. The validated non-merge receipt is the
+    // narrowest durable content anchor. Do not accept an arbitrary receipt:
+    // callers first prove its topology, attribution, diff, and target content.
     if let Some(receipt) = validated_receipt
         && git_commit_parent_count(repo_path, receipt) < 2
         && commit_is_merged_into_parent(repo_path, receipt, parent_branch)
@@ -23500,6 +23497,70 @@ mod merge_state_gate_tests {
             ),
             "a target-sync merge tip must be proven from task content commits"
         );
+    }
+
+    /// GH #895: GitHub updates a worker branch by merging the target into it,
+    /// then the target accepts the PR and an unrelated commit. The receipt
+    /// names the worker's last content commit, not the target-sync merge tip.
+    #[test]
+    fn receipt_survives_target_sync_merge_and_later_unrelated_target_commit_gh895() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let upload = "apps/frontend/app/src/composables/useUpload.ts";
+        std::fs::create_dir_all(p.join("apps/frontend/app/src/composables")).unwrap();
+        std::fs::write(p.join(upload), "export const upload = 1;\n").unwrap();
+        git(p, &["add", upload]);
+        git(p, &["commit", "-q", "-m", "feat(cas-test1): add upload"]);
+        std::fs::write(p.join(upload), "export const upload = 2;\n").unwrap();
+        git(p, &["add", upload]);
+        git(p, &["commit", "-q", "-m", "fix(cas-test1): finish upload"]);
+        let receipt = rev_parse_local(p, "HEAD");
+
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::write(p.join("en.json"), "{}\n").unwrap();
+        git(p, &["add", "en.json"]);
+        git(p, &["commit", "-q", "-m", "advance target for CI"]);
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git(p, &["merge", "-q", "--no-ff", "main", "-m", "update worker branch"]);
+        let merge_tip = rev_parse_local(p, "HEAD");
+        assert!(
+            git_command(p, &["diff", "--quiet", &format!("{merge_tip}^1"), &merge_tip, "--", upload])
+                .status()
+                .unwrap()
+                .success(),
+            "target-sync merge must not itself change the delivery path"
+        );
+
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/worker", "-m", "accept delivery"]);
+        std::fs::write(p.join("en.json"), "{\"later\":true}\n").unwrap();
+        git(p, &["add", "en.json"]);
+        git(p, &["commit", "-q", "-m", "unrelated locale edit"]);
+
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(merge_tip.clone());
+        let mut req = base_req(&task.id);
+        req.commit_receipt = Some(receipt.clone());
+        let window = window_at(0, "GH #895 receipt regression");
+        assert!(validate_task_commit_receipt(p, &receipt, "main", &window).is_ok());
+        assert_eq!(
+            delivery_content_anchor_at_close(p, &merge_tip, "factory/worker", "main", Some(&receipt)),
+            receipt
+        );
+        assert!(matches!(
+            run_factory_branch_merge_gate_with_attribution(
+                &task,
+                &req,
+                "main",
+                p,
+                TaskCommitAttribution {
+                    receipt: Some(&receipt),
+                    window: Some(&window),
+                },
+            ),
+            MergeStateGateOutcome::Proceed
+        ));
     }
 
     /// GH #840: a worker's own conflict-resolution merge can intentionally

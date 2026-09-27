@@ -1172,3 +1172,206 @@ async fn a_new_tip_supersedes_a_pending_round_without_messaging_anyone_cas_ce39(
     assert!(again.contains("INDEPENDENT QA PENDING"), "{again}");
     assert!(!again.contains("SUPERSEDED"), "{again}");
 }
+
+/// Points `gh` at a test double for the scope of a test holding
+/// `env_test_lock`, and restores the previous value on drop.
+struct GhStub {
+    previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+impl GhStub {
+    fn install(dir: &Path, head_sha: &str) -> (Self, std::path::PathBuf) {
+        let gh = dir.join("gh");
+        let log = dir.join("gh.log");
+        // `gh pr view 2546` knows PR #2546 (head factory/test-agent); every
+        // other lookup fails like an unknown PR. `gh api --method POST` is a
+        // status publication and succeeds. Every call is logged.
+        cas::test_paths::warm_stub(
+            &gh,
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "$CAS_TEST_GH_LOG"
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "2546" ]; then
+  printf '{"headRefName":"factory/test-agent","headRefOid":"%s"}' "$CAS_TEST_GH_HEAD"
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "$2" = "--method" ] && [ "$3" = "POST" ]; then
+  printf '{}'
+  exit 0
+fi
+exit 1
+"#,
+        );
+        let mut previous = Vec::new();
+        for (key, value) in [
+            ("CAS_QA_GH", gh.as_os_str().to_owned()),
+            ("CAS_TEST_GH_LOG", log.as_os_str().to_owned()),
+            ("CAS_TEST_GH_HEAD", head_sha.into()),
+        ] {
+            previous.push((key, std::env::var_os(key)));
+            // SAFETY: callers hold env_test_lock for the whole test body.
+            unsafe { std::env::set_var(key, value) };
+        }
+        (Self { previous }, log)
+    }
+}
+
+impl Drop for GhStub {
+    fn drop(&mut self) {
+        for (key, value) in self.previous.drain(..) {
+            // SAFETY: as in `install`.
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+}
+
+/// Wait for the background status publisher to log a line with every needle.
+fn wait_for_gh_call(log: &Path, needles: &[&str]) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let calls = std::fs::read_to_string(log).unwrap_or_default();
+        if calls
+            .lines()
+            .any(|line| needles.iter().all(|needle| line.contains(needle)))
+        {
+            return calls;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no gh call with {needles:?}; calls so far:\n{calls}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// cas-2ee2 (GH #1023 finding 3): cas-a6cf's PR #2546 was merged with
+/// `gh pr merge` before the supervisor read its QA dispatch. Every raw GitHub
+/// merge path is now held to the same verdict as `worktree_merge`, for every
+/// role; the merge request leads with the QA hold; and with
+/// `qa.github_status` on, the repository-side required check follows the
+/// round (pending → success on waiver).
+#[tokio::test]
+async fn raw_github_merges_wait_for_the_independent_verdict_cas_2ee2() {
+    let (temp, core, repo, task_id) = fixture();
+    let _env = env_test_lock();
+    let cas_dir = repo.join(".cas");
+    let _keep = &temp;
+    let config = cas_dir.join("config.toml");
+    let body = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(&config, format!("{body}github_status = true\n")).unwrap();
+    let head = git(&repo, &["rev-parse", "factory/test-agent"]);
+    let stub_dir = repo.join("stub-bin");
+    std::fs::create_dir_all(&stub_dir).unwrap();
+    let (_gh, gh_log) = GhStub::install(&stub_dir, &head);
+
+    let parked = close_text(&core, &task_id).await;
+    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    let qa_task = qa_task_id(&cas_dir, &task_id);
+    // Repository side: the open round is a pending required check on the
+    // delivered head.
+    wait_for_gh_call(
+        &gh_log,
+        &[
+            &format!("statuses/{head}"),
+            "state=pending",
+            "context=cassy/independent-qa",
+        ],
+    );
+
+    let raw_merges = [
+        // Resolved through GitHub: PR #2546's head is the delivery branch.
+        "gh pr merge 2546 --squash --delete-branch",
+        "gh pr merge https://github.com/acme/gabber/pull/2546 --merge",
+        "gh api -X PUT repos/acme/gabber/pulls/2546/merge -f merge_method=squash",
+        // Named by branch, or the checked-out branch's PR (auto-merge too).
+        "gh pr merge factory/test-agent --rebase",
+        "gh pr merge --auto --squash",
+    ];
+    for command in raw_merges {
+        let supervisor = cas::qa_pass::supervisor_merge_refusal(&cas_dir, &repo, command)
+            .unwrap_or_else(|| panic!("supervisor merge allowed: {command}"));
+        assert!(
+            supervisor.contains(&task_id)
+                && supervisor.contains(&qa_task)
+                && supervisor.contains("raw GitHub merge"),
+            "{command}: {supervisor}"
+        );
+        assert!(
+            cas::qa_pass::github_merge_refusal(&cas_dir, &repo, command).is_some(),
+            "any role's merge allowed: {command}"
+        );
+    }
+
+    // A PR Cassy cannot map, and a GraphQL merge by node id, are refused
+    // while a round is open rather than waved through.
+    for command in [
+        "gh pr merge 77 --squash",
+        "gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"PR_kw\"}) { clientMutationId } }'",
+    ] {
+        let refusal = cas::qa_pass::github_merge_refusal(&cas_dir, &repo, command)
+            .unwrap_or_else(|| panic!("unmapped merge allowed: {command}"));
+        assert!(
+            refusal.contains("cannot tell which delivery") && refusal.contains(&task_id),
+            "{command}: {refusal}"
+        );
+    }
+
+    // A PR number the worker reported binds the delivery without GitHub.
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = tasks.get(&task_id).unwrap();
+    task.deliverables.delivery_pr_number = Some(3000);
+    tasks.update(&task).unwrap();
+    let recorded = cas::qa_pass::github_merge_refusal(&cas_dir, &repo, "gh pr merge 3000")
+        .expect("the recorded PR must wait for QA");
+    assert!(recorded.contains(&qa_task), "{recorded}");
+
+    // The merge request the supervisor reads leads with the QA hold.
+    let hold = cas::qa_pass::merge_request_qa_hold(&cas_dir, &tasks.get(&task_id).unwrap(), &head)
+        .expect("an open round holds the merge request");
+    assert!(hold.starts_with("⏸ QA HOLD"), "{hold}");
+    assert!(hold.contains(&qa_task) && hold.contains("gh pr merge"), "{hold}");
+
+    // A logged supervisor waiver opens every path for exactly this head.
+    let _role = SupervisorRole::enter();
+    let waived = extract_text(
+        CasService::new(core.clone(), None)
+            .verification(Parameters(verification(serde_json::json!({
+                "action": "qa_waive",
+                "task_id": task_id,
+                "summary": "copy-only hotfix reviewed live with the operator",
+            }))))
+            .await
+            .expect("supervisor waiver"),
+    );
+    assert!(waived.contains("waived"), "{waived}");
+    wait_for_gh_call(
+        &gh_log,
+        &[
+            &format!("statuses/{head}"),
+            "state=success",
+            "waived by supervisor: copy-only hotfix",
+        ],
+    );
+    for command in raw_merges.iter().copied().chain(["gh pr merge 3000"]) {
+        assert!(
+            cas::qa_pass::supervisor_merge_refusal(&cas_dir, &repo, command).is_none(),
+            "the waived head may merge: {command}"
+        );
+    }
+    assert!(
+        cas::qa_pass::merge_request_qa_hold(&cas_dir, &tasks.get(&task_id).unwrap(), &head)
+            .is_none()
+    );
+
+    // A commit pushed after the waiver is not covered.
+    let drift = commit_file(&repo, "web/composer.css", "/* drift */\n", "unreviewed drift");
+    assert_ne!(drift, head);
+    assert!(
+        cas::qa_pass::github_merge_refusal(&cas_dir, &repo, "gh pr merge 3000").is_some(),
+        "the recorded PR's new head has no verdict"
+    );
+}

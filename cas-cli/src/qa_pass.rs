@@ -12,6 +12,9 @@ use cas_types::{QaPass, Task, TaskType};
 
 use crate::config::QaConfig;
 
+pub mod github_gate;
+pub use github_gate::{github_merge_refusal, merge_request_qa_hold};
+
 /// Label carried by every Cassy-created QA work item.
 pub const QA_PASS_LABEL: &str = "qa-pass";
 
@@ -292,11 +295,15 @@ pub fn factory_branches_merged_by(command: &str) -> Vec<String> {
 /// a user-facing delivery with a recorded round whose current tip has no passed or waived
 /// independent QA round. Fails open (None) when Cassy state is unreadable —
 /// the close backstop still refuses such a task later.
+///
+/// cas-2ee2: raw GitHub merges (`gh pr merge`, the merge API) are checked
+/// too; [`github_merge_refusal`] also runs for non-supervisor roles.
 pub fn supervisor_merge_refusal(cas_root: &Path, cwd: &Path, command: &str) -> Option<String> {
     let branches = factory_branches_merged_by(command);
     branches
         .into_iter()
         .find_map(|branch| branch_merge_refusal(cas_root, cwd, &branch))
+        .or_else(|| github_merge_refusal(cas_root, cwd, command))
 }
 
 /// Check the branch selected by `worktree_merge`, including calls without a

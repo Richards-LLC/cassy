@@ -315,6 +315,14 @@ pub struct QaConfig {
     /// instead of opening another round.
     #[serde(default = "default_max_rounds")]
     pub max_rounds: u32,
+
+    /// cas-2ee2: publish the `cassy/independent-qa` commit status on each
+    /// delivered head (pending while a round is open, success once it passes
+    /// or is waived, failure on rejection). Require that context in the
+    /// repository's branch protection so a GitHub-side merge is held to the
+    /// same verdict. Needs `gh` with commit-status write access.
+    #[serde(default)]
+    pub github_status: bool,
 }
 
 pub fn default_independent_pass() -> bool {
@@ -380,6 +388,7 @@ impl Default for QaConfig {
             user_facing_paths: default_user_facing_paths(),
             pass_timeout_mins: default_pass_timeout_mins(),
             max_rounds: default_max_rounds(),
+            github_status: false,
         }
     }
 }

@@ -67,6 +67,7 @@ impl Config {
             "qa.user_facing_paths" => Some(qa.user_facing_paths.join(",")),
             "qa.pass_timeout_mins" => Some(qa.pass_timeout_mins.to_string()),
             "qa.max_rounds" => Some(qa.max_rounds.to_string()),
+            "qa.github_status" => Some(qa.github_status.to_string()),
             // Dev section
             "dev.dev_mode" => Some(dev.dev_mode.to_string()),
             "dev.trace_commands" => Some(dev.trace_commands.to_string()),

@@ -60,6 +60,8 @@ impl CasService {
             now,
         )
         .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_record rejected: {error}")))?;
+        // cas-2ee2: the verdict turns the GitHub required check green or red.
+        crate::qa_pass::github_gate::publish_pass_status(&cas_root, &pass);
 
         // Cite the round's bundle on the delivery the same way an
         // implementer cites its own (`note_type=platform_proof`).
@@ -171,6 +173,9 @@ impl CasService {
             chrono::Utc::now(),
         )
         .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_waive rejected: {error}")))?;
+        // cas-2ee2: a waiver satisfies the GitHub required check too, and its
+        // status description carries the logged reason.
+        crate::qa_pass::github_gate::publish_pass_status(&self.inner.cas_root, &pass);
         // Same shape as `task action=notes note_type=decision`, so the waiver
         // reads as a decision in every note view.
         let note = format!(

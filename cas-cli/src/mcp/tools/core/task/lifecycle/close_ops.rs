@@ -21980,11 +21980,20 @@ mod merge_state_gate_tests {
         let head = rev_parse_local(repo, "HEAD");
         // The project's real catalog and helper, left untracked so they are
         // in neither diff.
-        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        // Embedded at build time: an archived test runs away from the
+        // producer checkout, so it must not read it at runtime.
         std::fs::create_dir_all(repo.join("scripts")).unwrap();
         std::fs::create_dir_all(repo.join("docs/qa")).unwrap();
-        std::fs::copy(source.join("scripts/journeys-for-diff.py"), repo.join("scripts/journeys-for-diff.py")).unwrap();
-        std::fs::copy(source.join("docs/qa/journeys.md"), repo.join("docs/qa/journeys.md")).unwrap();
+        std::fs::write(
+            repo.join("scripts/journeys-for-diff.py"),
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/journeys-for-diff.py")),
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("docs/qa/journeys.md"),
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../docs/qa/journeys.md")),
+        )
+        .unwrap();
         let qa = crate::config::QaConfig::default();
 
         let docs = crate::qa_pass::changed_paths_for_delivery(repo, "main", &head).unwrap();

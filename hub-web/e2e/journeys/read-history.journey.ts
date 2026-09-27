@@ -58,16 +58,34 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
     expect(hub.artifactRequests).toEqual(["art-report"]);
     expect(page.url()).not.toContain("#artifact:");
 
-    await log.locator('a[data-artifact-id="art-local-draft"]').click();
-    await expect(page.locator("#toast")).toHaveText("This file was only saved on Atlas · Linux. It was never uploaded to Cloud, so it can't open here.");
+    // Journey F6: every failure is said on the card that was pressed, not in
+    // a toast at the top of the thread, and no tab is left open.
+    const toast = page.locator("#toast.visible");
+    const note = (id: string) => log.locator(`a[data-artifact-id="${id}"] .fnote`);
+    const local = log.locator('a[data-artifact-id="art-local-draft"]');
+    await local.click();
+    await expect(note("art-local-draft")).toHaveText("This file was only saved on Atlas · Linux. It was never uploaded to Cloud, so it can't open here.");
+    await expect(local).toHaveAccessibleName(/never uploaded to Cloud/);
     expect(hub.artifactRequests).toEqual(["art-report", "art-local-draft"]);
+    // Known now: opening it again opens no tab at all.
+    let popups = 0;
+    const countPopup = () => { popups += 1; };
+    page.on("popup", countPopup);
+    await local.click();
+    await expect.poll(() => hub.artifactRequests.length).toBe(3);
+    await expect(note("art-local-draft")).toContainText("only saved on Atlas · Linux");
+    expect(popups, "no tab for a file known to be only on the machine").toBe(0);
+    page.off("popup", countPopup);
 
-    // cas-e503: Cloud failing and the machine not answering each say what to do.
-    const toast = page.locator("#toast");
+    // cas-e503: Cloud failing says what to do, and a connected machine that
+    // sends nothing is not called unreachable while the header says Live.
     await log.locator('a[data-artifact-id="art-cloud-down"]').click();
-    await expect(toast).toHaveText("Cassy Cloud couldn't open the file right now. Wait a minute, then tap it again.");
+    await expect(note("art-cloud-down")).toHaveText("Cassy Cloud couldn't open the file right now. Wait a minute, then open it again.");
+    await expect(page.locator("#conversation-connection")).toContainText("Live");
     await log.locator('a[data-artifact-id="art-offline"]').click();
-    await expect(toast).toHaveText("Couldn't reach Atlas · Linux. Check that it's on and connected, then tap the file again.");
+    await expect(note("art-offline")).toHaveText("Atlas · Linux is connected but didn't send the file. Try again in a moment.");
+    await expect(toast).toHaveCount(0);
+    await expect(log).not.toContainText(/\btap\b/i);
     expect(page.context().pages()).toHaveLength(1);
   });
 });

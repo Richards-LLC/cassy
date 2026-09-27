@@ -49,8 +49,18 @@ export function artifactLinkFor(target: EventTarget | null): HTMLAnchorElement |
   return link && artifactIdFromHref(link.getAttribute("href")) ? link : undefined;
 }
 
-/** Why an artifact did not open, in the operator's words. */
-export function artifactOpenFailure(result: Extract<ArtifactViewResult, { ok: false }>, machineLabel: string): string {
+/** Whether the machine said the file never left it: the one failure worth remembering (journey F6). */
+export function artifactIsLocalOnly(result: ArtifactViewResult | undefined): boolean {
+  return result !== undefined && !result.ok && result.code === "artifact_not_in_cloud";
+}
+
+/**
+ * Why an artifact did not open, in the operator's words. `machineLive` is
+ * whether this page's connection to the machine is up: a request that got no
+ * answer from a connected machine must not claim the machine is off while the
+ * header says Live (journey F6). The words work for a click and a tap alike.
+ */
+export function artifactOpenFailure(result: Extract<ArtifactViewResult, { ok: false }>, machineLabel: string, machineLive = false): string {
   switch (result.code) {
     case "artifact_not_in_cloud":
       return `This file was only saved on ${machineLabel}. It was never uploaded to Cloud, so it can't open here.`;
@@ -65,7 +75,7 @@ export function artifactOpenFailure(result: Extract<ArtifactViewResult, { ok: fa
       return "This file isn't available any more.";
     case "cloud_failed":
       // The machine answered; Cloud did not (cas-e503).
-      return "Cassy Cloud couldn't open the file right now. Wait a minute, then tap it again.";
+      return "Cassy Cloud couldn't open the file right now. Wait a minute, then open it again.";
     default:
       if (result.status === 401 || result.status === 403) {
         return "This device isn't allowed to open files on this machine. Pair it again.";
@@ -73,7 +83,9 @@ export function artifactOpenFailure(result: Extract<ArtifactViewResult, { ok: fa
       // No answer at all: the machine is off, asleep or off the network
       // (cas-e503), so the fix is on the machine, not in Cloud.
       if (result.status === 0) {
-        return `Couldn't reach ${machineLabel}. Check that it's on and connected, then tap the file again.`;
+        return machineLive
+          ? `${machineLabel} is connected but didn't send the file. Try again in a moment.`
+          : `Couldn't reach ${machineLabel}. Check that it's on and connected, then open the file again.`;
       }
       return "The file didn't open. Try again.";
   }
@@ -84,9 +96,19 @@ export interface ArtifactOpenDeps {
   readonly fetchView: () => Promise<ArtifactViewResult>;
   /** Open the new tab; must run synchronously inside the tap. */
   readonly openWindow: () => Window | null;
-  /** Say something to the operator. */
-  readonly notify: (message: string) => void;
+  /** Say something to the operator; `result` is the machine's answer, when there was one. */
+  readonly notify: (message: string, result?: ArtifactViewResult) => void;
   readonly machineLabel: string;
+  /** Whether this page's connection to the machine is live right now. */
+  readonly machineLive?: () => boolean;
+  /**
+   * The machine already said this file was never uploaded (journey F6). No
+   * tab is opened for it; the machine is asked again only to learn whether
+   * that has changed.
+   */
+  readonly knownLocalOnly?: boolean;
+  /** The file's name, shown in the tab while the machine answers. */
+  readonly fileName?: string;
 }
 
 /**
@@ -95,11 +117,14 @@ export interface ArtifactOpenDeps {
  * the signed URL.
  */
 export async function openArtifact(deps: ArtifactOpenDeps): Promise<boolean> {
-  const tab = deps.openWindow();
+  const tab = deps.knownLocalOnly ? null : deps.openWindow();
   if (tab) {
     // The opened page must not be able to reach back into Commander.
     try { tab.opener = null; } catch { /* a closed or cross-origin tab */ }
     try { tab.document.title = "Opening file…"; } catch { /* not yet navigable */ }
+    // A slow machine leaves this tab up for the whole request: it says what
+    // it is waiting for rather than sitting blank (journey F6).
+    try { tab.document.body.textContent = `Opening ${deps.fileName ?? "the file"} from ${deps.machineLabel}…`; } catch { /* not yet navigable */ }
   }
   let result: ArtifactViewResult;
   try {
@@ -109,11 +134,16 @@ export async function openArtifact(deps: ArtifactOpenDeps): Promise<boolean> {
   }
   if (!result.ok) {
     tab?.close();
-    deps.notify(artifactOpenFailure(result, deps.machineLabel));
+    deps.notify(artifactOpenFailure(result, deps.machineLabel, deps.machineLive?.() ?? false), result);
+    return false;
+  }
+  if (deps.knownLocalOnly) {
+    // No tab was opened, and one opened after an await would be blocked.
+    deps.notify("This file is in Cloud now. Open it again to view it.", result);
     return false;
   }
   if (!tab) {
-    deps.notify("Your browser blocked the new tab. Allow pop-ups for Commander and tap the file again.");
+    deps.notify("Your browser blocked the new tab. Allow pop-ups for Commander and open the file again.", result);
     return false;
   }
   tab.location.href = result.view.url;

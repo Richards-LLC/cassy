@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { webcrypto } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { artifactIdFromHref, artifactLinkFor, artifactOpenFailure, openArtifact, type ArtifactViewResult } from "./artifact-open";
+import { artifactIdFromHref, artifactIsLocalOnly, artifactLinkFor, artifactOpenFailure, openArtifact, type ArtifactViewResult } from "./artifact-open";
 import { HubConnectionSupervisor, type HubCallbacks } from "./connection";
 import { createDeviceKey } from "./dpop";
 import type { StoredMachine } from "./types";
@@ -80,10 +80,35 @@ describe("opening an artifact from Commander (cassy#910)", () => {
     const notify = vi.fn();
     await openArtifact({ fetchView: async () => { throw new Error("network"); }, openWindow: () => tab as unknown as Window, notify, machineLabel: "Atlas" });
     expect(tab.closed).toBe(true);
-    expect(notify).toHaveBeenLastCalledWith("Couldn't reach Atlas. Check that it's on and connected, then tap the file again.");
+    expect(notify).toHaveBeenLastCalledWith("Couldn't reach Atlas. Check that it's on and connected, then open the file again.", { ok: false, status: 0 });
 
     await openArtifact({ fetchView: async () => ({ ok: true, view: { artifact_id: "a", url: "https://x.example/" } }), openWindow: () => null, notify, machineLabel: "Atlas" });
-    expect(notify).toHaveBeenLastCalledWith(expect.stringContaining("blocked the new tab"));
+    expect(notify).toHaveBeenLastCalledWith(expect.stringContaining("blocked the new tab"), expect.objectContaining({ ok: true }));
+  });
+
+  it("says a file card's failure without contradicting a live connection, and without 'tap' (journey F6)", () => {
+    const silent = { ok: false, status: 0 } as const;
+    expect(artifactOpenFailure(silent, "Atlas · Linux", true)).toBe("Atlas · Linux is connected but didn't send the file. Try again in a moment.");
+    expect(artifactOpenFailure(silent, "Atlas · Linux", false)).toBe("Couldn't reach Atlas · Linux. Check that it's on and connected, then open the file again.");
+    for (const result of [silent, { ok: false, status: 502, code: "cloud_failed" }, { ok: false, status: 500 }] as const) {
+      for (const live of [true, false]) expect(artifactOpenFailure(result, "Atlas · Linux", live)).not.toMatch(/\btap\b/i);
+    }
+    expect(artifactIsLocalOnly({ ok: false, status: 409, code: "artifact_not_in_cloud" })).toBe(true);
+    expect(artifactIsLocalOnly({ ok: false, status: 0 })).toBe(false);
+    expect(artifactIsLocalOnly(undefined)).toBe(false);
+  });
+
+  it("opens no tab for a file already known to be only on the machine, and says when it reaches Cloud (journey F6)", async () => {
+    const openWindow = vi.fn(() => fakeTab() as unknown as Window);
+    const notify = vi.fn();
+    const local: ArtifactViewResult = { ok: false, status: 409, code: "artifact_not_in_cloud" };
+    await expect(openArtifact({ fetchView: async () => local, openWindow, notify, machineLabel: "Atlas · Linux", knownLocalOnly: true })).resolves.toBe(false);
+    expect(openWindow).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenLastCalledWith(expect.stringContaining("only saved on Atlas · Linux"), local);
+    const uploaded: ArtifactViewResult = { ok: true, view: { artifact_id: "a", url: "https://x.example/" } };
+    await expect(openArtifact({ fetchView: async () => uploaded, openWindow, notify, machineLabel: "Atlas · Linux", knownLocalOnly: true })).resolves.toBe(false);
+    expect(openWindow).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenLastCalledWith("This file is in Cloud now. Open it again to view it.", uploaded);
   });
 
   it("asks the machine with a DPoP proof and reads a refusal as an answer", async () => {

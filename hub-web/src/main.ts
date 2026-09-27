@@ -8,8 +8,8 @@ import { ConversationHistory } from "./conversation-history";
 import { ConversationView } from "./conversation-view";
 import { REFUSED_SEE_ABOVE, refusalSentence, refusal } from "./refusal";
 import { installAttentionObjects } from "./attention-objects";
-import { installAttachmentSheet } from "./attachment-sheet";
-import { artifactIdFromHref, artifactLinkFor, openArtifact } from "./artifact-open";
+import { installAttachmentSheet, setAttachmentNote } from "./attachment-sheet";
+import { artifactIdFromHref, artifactIsLocalOnly, artifactLinkFor, openArtifact } from "./artifact-open";
 import { arrangeConversationShell, bindKeyboardViewport, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY } from "./conversation-shell";
 import { clockLabel } from "./thread-model";
 import { syncContextRail } from "./context-rail";
@@ -3796,13 +3796,27 @@ app.addEventListener("click", (event) => {
     toast("Open the conversation this file came from to view it.");
     return;
   }
+  // Journey F6: a file the machine said never left it opens no tab again,
+  // and every outcome is said on the card that was pressed.
+  const localKey = `${machineId}:${artifactId}`;
+  const onCard = link.matches("a.sheet");
   void openArtifact({
     fetchView: () => connection.artifactView(session, artifactId),
     openWindow: () => window.open("about:blank", "_blank"),
-    notify: toast,
+    notify: (message, result) => {
+      if (artifactIsLocalOnly(result)) localOnlyArtifacts.add(localKey);
+      else if (result?.ok) localOnlyArtifacts.delete(localKey);
+      if (onCard && setAttachmentNote(document, artifactId, message) > 0) return;
+      toast(message);
+    },
     machineLabel: machines.get(machineId)?.label ?? "that machine",
-  });
+    machineLive: () => machineFooterConnection(machineId)?.phase === "live",
+    knownLocalOnly: localOnlyArtifacts.has(localKey),
+    fileName: link.querySelector(".fname")?.textContent?.trim() || undefined,
+  }).then((opened) => { if (opened) setAttachmentNote(document, artifactId, undefined); });
 });
+/** Files a machine said were never uploaded to Cloud, by machine and artifact (journey F6). */
+const localOnlyArtifacts = new Set<string>();
 
 window.addEventListener("keydown", globalShortcut, true);
 // Rotation changes the layout in CSS instantly, but which panes mount a

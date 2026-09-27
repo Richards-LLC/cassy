@@ -3342,6 +3342,8 @@ button.chip:disabled { cursor: default; }
 .thread .fname { display: block; font: var(--weight-semibold) 14.5px/1.35 var(--font-ui); color: var(--ink); overflow-wrap: anywhere; }
 .thread .fsub { display: flex; align-items: center; gap: 6px; margin-top: 3px; font: var(--weight-regular) 12.5px/1.3 var(--font-ui); color: var(--ink-mid); }
 .thread .fsub:empty { display: none; }
+/* Journey F6: why the file did not open, on the card that was pressed. */
+.thread .fnote { display: block; margin-top: 4px; font: var(--weight-medium) 12.5px/1.35 var(--font-ui); color: var(--state-warn); overflow-wrap: anywhere; text-wrap: pretty; }
 /* An attachment-only turn is its sheet alone; the bubble would be a blank pebble. */
 .thread .bub.bub-empty { display: none; }
 

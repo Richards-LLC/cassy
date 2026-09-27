@@ -684,6 +684,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       if (state.phase === "live") {
         sessionsEverLive.add(key);
         clearTransportStatus(key);
+        void flushHeldSends(machine, session);
         if (!attachWasLive) clearTransientAttachmentNotes(document, machine.id);
         // The socket is back: its transport alarm is history, not attention.
         resolveAttention(`${machine.id}:${session}:session_transport`);
@@ -2390,12 +2391,87 @@ function scheduleReceiptCheck(key: string): void {
   }, wait));
 }
 
+/**
+ * Sends made while the machine is unreachable (cas-0978), per thread, in
+ * order. They never left this browser, so sending them once the session is
+ * back cannot duplicate anything; one not sent within HELD_SEND_MS turns
+ * "Not sent" with Retry and Edit instead of waiting forever.
+ */
+type HeldSend = { clientRef: string; supervisor: string; text: string; replyTo?: number; expiry: ReturnType<typeof setTimeout> };
+const heldSends = new Map<string, HeldSend[]>();
+const flushingHeldSends = new Set<string>();
+const HELD_SEND_MS = 120_000;
+
+/** The machine is reconnecting on its own, as opposed to refused (pairing gone, unsupported browser). */
+function machineWillReconnect(machineId: string): boolean {
+  const snapshot = connections.get(machineId)?.snapshot();
+  return snapshot !== undefined && snapshot.phase !== "idle" && !snapshot.authFailure && !snapshot.fatal;
+}
+
+/** Whether the thread's session is attached and its machine live right now. */
+function sessionIsUp(machineId: string, session: string): boolean {
+  return attachStates.get(sessionKey(machineId, session))?.phase === "live" && connections.get(machineId)?.snapshot().phase === "live";
+}
+
+function holdSupervisorMessage(machine: StoredMachine, session: string, clientRef: string, supervisor: string, text: string, replyTo?: number): void {
+  const key = sessionKey(machine.id, session);
+  conversationHistory(key).hold(clientRef, supervisor, text, Date.now(), replyTo, session);
+  const expiry = setTimeout(() => {
+    const queue = heldSends.get(key) ?? [];
+    const index = queue.findIndex((held) => held.clientRef === clientRef);
+    if (index < 0) return;
+    queue.splice(index, 1);
+    if (queue.length === 0) heldSends.delete(key);
+    // Still unreachable: say so on the message, with Retry and Edit.
+    conversationHistory(key).reject(clientRef, outageRefusal(machine.label));
+    updateConversationViews(); renderConversationList();
+  }, HELD_SEND_MS);
+  const queue = heldSends.get(key) ?? [];
+  queue.push({ clientRef, supervisor, text, replyTo, expiry });
+  heldSends.set(key, queue);
+}
+
+/** The session is back: send what was held, in order, each once. */
+async function flushHeldSends(machine: StoredMachine, session: string): Promise<void> {
+  const key = sessionKey(machine.id, session);
+  if (flushingHeldSends.has(key) || !heldSends.get(key)?.length) return;
+  flushingHeldSends.add(key);
+  try {
+    const history = conversationHistory(key);
+    // The lease lapsed while the machine was away; the hub refuses a message
+    // from an observer, so control is taken back first, as a send does.
+    if (leases.get(key)?.held_by_me !== true && !await takeControlForMessage(machine, session)) {
+      for (const held of heldSends.get(key) ?? []) {
+        clearTimeout(held.expiry);
+        history.reject(held.clientRef, `Could not take control of ${session} after reconnecting. Retry to send it.`);
+      }
+      heldSends.delete(key);
+      return;
+    }
+    const queue = heldSends.get(key) ?? [];
+    while (queue.length) {
+      const held = queue[0]!;
+      if (!connections.get(machine.id)?.send(session, supervisorMessage(held.supervisor, held.text, held.clientRef, held.replyTo))) break;
+      queue.shift();
+      clearTimeout(held.expiry);
+      history.release(held.clientRef);
+    }
+    if (queue.length === 0) heldSends.delete(key);
+    scheduleReceiptCheck(key);
+  } finally {
+    flushingHeldSends.delete(key);
+    updateConversationViews(); renderConversationList();
+  }
+}
+
 function deliverSupervisorMessage(machine: StoredMachine, session: string, supervisor: string, text: string, replyTo?: number, retryOf?: string, editOf?: string): void {
   const clientRef = crypto.randomUUID();
-  const sent = sendControl(machine.id, session, supervisorMessage(supervisor, text, clientRef, replyTo));
+  // Earlier sends still held go first: a new message must not overtake them.
+  const queued = (heldSends.get(sessionKey(machine.id, session))?.length ?? 0) > 0;
+  const sent = !queued && sendControl(machine.id, session, supervisorMessage(supervisor, text, clientRef, replyTo));
   // Without an outcome the operator cannot tell a sent message from a lost
   // one, and the natural response is to send it a second time.
-  if (!sent) {
+  if (!sent && !machineWillReconnect(machine.id)) {
     // In the banner's words, naming the machine it names (journey F9).
     showComposerStatus(outageRefusal(machine.label), "error", true);
     return;
@@ -2405,6 +2481,22 @@ function deliverSupervisorMessage(machine: StoredMachine, session: string, super
   // The edited version is on the wire: the refused original stays as a record
   // but can no longer be retried.
   if (editOf) { history.retireRefused(editOf); editingRefused = undefined; }
+  if (!sent) {
+    holdSupervisorMessage(machine, session, clientRef, supervisor, text, replyTo);
+    updateConversationViews(); renderConversationList();
+    if (selectedMachineId === machine.id && selectedSession === session) {
+      const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
+      if (composer && composer.value.trim() === text) composer.value = "";
+      conversationDrafts.delete(sessionKey(machine.id, session));
+      messageDraft = composer?.value ?? "";
+      messageDraftSelection = messageDraft.length;
+      // A transport status: it clears when the session is back (and the held
+      // message goes out then).
+      showComposerStatus(`Not connected to ${machine.label} right now. Your message will go out by itself when it's back.`, "info", true);
+      composer?.focus();
+    }
+    return;
+  }
   history.submit(clientRef, supervisor, text, Date.now(), replyTo, session);
   scheduleReceiptCheck(sessionKey(machine.id, session));
   updateConversationViews(); renderConversationList();
@@ -2464,7 +2556,10 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
   if (pendingSubmissions.has(submissionKey)) return;
   pendingSubmissions.add(submissionKey);
   try {
-    if (plan.kind === "take-control-then-send") {
+    // While the session is down, taking control cannot succeed and its
+    // refusal would blame the lease; the message is held instead and control
+    // is taken when the session is back (cas-0978).
+    if (plan.kind === "take-control-then-send" && (sessionIsUp(machine.id, session) || !machineWillReconnect(machine.id))) {
     showComposerStatus(plan.notice, "info");
     if (!await takeControlForMessage(machine, session)) {
       showComposerStatus(`Could not take control of ${session}, and the hub refuses a message from a device that is only observing. Send again to retry; if another device controls the session, wait for it to release control.`, "error");

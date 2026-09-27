@@ -545,8 +545,10 @@ export class ConversationView {
     bubble.append(...paragraphs(document, send.text));
     if (send.state === "sending") {
       const state = document.createElement("span");
-      state.className = "conversation-delivery"; state.setAttribute("role", "status");
-      state.textContent = "Sending…";
+      state.className = `conversation-delivery${send.held ? " conversation-held" : ""}`; state.setAttribute("role", "status");
+      // Held while the machine is unreachable (cas-0978): not on the wire yet,
+      // and it will be sent by itself, once, when the machine is back.
+      state.textContent = send.held ? "Waiting for the connection — sends when it's back" : "Sending…";
       bubble.append(state);
     } else if (this.history.showsDelivered(send)) {
       // F5: the receipt is the difference between a delivered message and a

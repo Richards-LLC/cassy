@@ -335,8 +335,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 **Steps**
 
 1. Open the conversation — the thread is live
-2. The network drops — "Lost connection to Atlas · Linux. Reconnecting…" appears; the header and the row say Reconnecting, and the footer counts 1 of 2 connected with a warning dot; a send is refused for the connection; the attention rail raises no transport alarm of its own, and its counts agree
-3. It reconnects on its own — the banner and the refusal line clear, everything says Live again, the draft is kept, and no transport alarm is left
+2. The network drops — "Lost connection to Atlas · Linux. Reconnecting…" appears; the header and the row say Reconnecting, and the footer counts 1 of 2 connected with a warning dot; a send is held in the thread ("Waiting for the connection — sends when it's back") and not sent; the attention rail raises no transport alarm of its own, and its counts agree
+3. It reconnects on its own — the banner and the waiting line clear, everything says Live again, the held message goes out exactly once and is delivered, and no transport alarm is left
 4. Sending works again — a message goes through and is answered
 5. On a phone, the banner stays readable through an outage — no toast sits on the reconnect banner, in light and dark; after it reconnects, every turn keeps its place (the message stays below its session line)
 6. In Terminal view, nothing claims all clear or live during an outage — the Attention rail names the outage instead of "All clear", the machine rail says Reconnecting, the header drops CONTROL and shows Reconnecting in place of a latency, Take/Release control and Interrupt say why they are unavailable, and the machine drawer's session row says Reconnecting, not live; all return when the session is back
@@ -351,4 +351,31 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 **Edge paths**
 
 - Pairing revoked (401/403): "Needs pairing", with a re-pair route (hidden on a phone).
-- The machine is offline for a long time: attempts back off up to 30 s.
+- The machine is offline for a long time: attempts back off, at most 10 s apart; a held message not sent within 2 minutes turns "Not sent" with Retry and Edit.
+
+### HUB-J12 · Switch networks without losing the conversation
+
+- **Entry:** an open conversation on a phone or laptop that changes network: local network to Tailscale, Tailscale off and on, Wi-Fi to cellular, sleep and wake
+- **Goal:** the conversation reconnects by itself and every message I send is delivered exactly once
+- **Touches:** `hub-web/src/connection*.ts`, `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/main.ts`
+- **Suite:** `hub-web/e2e/journeys/network-switch.journey.ts`
+- **Gaps:** the protocol double reproduces what a switch leaves behind (reset sockets, half-open sockets, offline, no event at all); a real phone moving between radios and a laptop truly sleeping are not driven, and a sleeping page is simulated by its visibility events
+
+**Steps**
+
+1. Open the conversation — the thread is live over the machine socket
+2. The route changes under the page — the sockets reset and are replaced within seconds; a message sent then goes out once
+3. Tailscale goes off, then on again — no browser event says so; the dead socket is noticed, everything says Reconnecting, a message written meanwhile waits in the thread; within 15 s of Tailscale returning it is Live again without a reload, and the waiting message goes out once and is delivered
+4. Wi-Fi hands over to cellular — going offline says Reconnecting at once; a message written meanwhile waits; coming online reconnects within 5 s and sends it once
+5. The page wakes on a half-open socket — waking checks the socket and replaces it within seconds, well before the heartbeat would notice; a message then goes out once
+
+**Expected experience**
+
+- A network switch never needs a reload, and never leaves the page claiming Live on a dead socket.
+- A message is never silently lost: it goes out once when it can, or says "Not sent" with Retry.
+- Recovery is bounded: at most 10 s after the network returns, sooner when the browser says it changed.
+
+**Edge paths**
+
+- A message sent into a socket that later proves dead gets no receipt: it turns "Not confirmed" with Retry. Sending it again automatically would need the hub to recognise a repeat (its client_ref); until it does, the operator decides.
+- The machine is unreachable for more than 2 minutes: a held message turns "Not sent" with Retry and Edit.

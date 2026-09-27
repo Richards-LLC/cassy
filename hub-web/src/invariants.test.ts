@@ -205,7 +205,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     // duplicate message to the supervisor.
     expect(source).toContain("function sendControl(machineId: string, session: string, message: unknown): boolean {");
     expect(source).toContain("const clientRef = crypto.randomUUID();");
-    expect(source).toContain("const sent = sendControl(machine.id, session, supervisorMessage(supervisor, text, clientRef, replyTo));");
+    expect(source).toContain("const sent = !queued && sendControl(machine.id, session, supervisorMessage(supervisor, text, clientRef, replyTo));");
     expect(source).toContain("messageDelivery = { session: sessionKey(machine.id, session), target: supervisor, clientRef };");
     expect(source).toContain("toast(`Sending to ${supervisor}`);");
   });
@@ -360,7 +360,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     // The hub refuses SendMessage without this device's session lease
     // (hub/server.rs handle_client_message), so observe-mode sends need the
     // lease the operator would otherwise have to take by hand.
-    expect(source).toContain('if (plan.kind === "take-control-then-send") {');
+    expect(source).toContain('if (plan.kind === "take-control-then-send" && (sessionIsUp(machine.id, session) || !machineWillReconnect(machine.id))) {');
     expect(source).toContain("async function takeControlForMessage(machine: StoredMachine, session: string): Promise<boolean> {");
     expect(source).toContain("await connections.get(machine.id)?.requestControl(session, false);");
     expect(source).toContain("return leases.get(sessionKey(machine.id, session))?.held_by_me === true;");
@@ -1046,7 +1046,11 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(connection).toContain("export class UnsupportedBrowserError extends Error {}");
     expect(connection).toContain("if (unsupported) throw new UnsupportedBrowserError(unsupported);");
     expect(connection).toContain("this.transition(\"failed\", stage, { reason: error.message, fatal: true });");
-    expect(connection).not.toContain("error instanceof TypeError");
+    // A TypeError is only ever classified as a network failure (cas-0978),
+    // in one helper that no fatal path calls.
+    expect(connection.match(/instanceof TypeError/g)).toHaveLength(1);
+    expect(connection).toContain("function isNetworkFailure(error: unknown): boolean {");
+    expect(connection).not.toMatch(/isNetworkFailure\([^)]*\)[^;\n]*fatal: true/);
     // The connect clock survives the transitions that reset `since`.
     expect(connection).toContain("connectingSince: connectingAnchor(this.lifecycle, phase, now),");
     // One line naming the missing API and the minimum browsers.

@@ -121,6 +121,17 @@ export function restorableSession(
   return sessions.some((session) => session.name === stored.session) ? stored.session : undefined;
 }
 
+/**
+ * The conversation a phone opens right after pairing a machine (journey F8):
+ * the machine's first session that can actually be attached. Pairing then
+ * lands on that conversation instead of a list the operator must tap through.
+ * A dormant, unreachable or not-yet-live session is never opened on the
+ * operator's behalf; with none live, the list stays as it was.
+ */
+export function pairedSessionToOpen(sessions: readonly HubSession[]): string | undefined {
+  return sessions.find((session) => session.liveness === "live" && !session.dormant && !session.unreachable)?.name;
+}
+
 export interface SessionPickerEntry {
   readonly machineId: string;
   readonly machineLabel: string;

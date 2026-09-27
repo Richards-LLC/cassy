@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it } from "vitest";
-import { applyLiveRegions } from "./live-regions";
+import { applyLiveRegions, sessionControlsNotice } from "./live-regions";
 
 /**
  * The shapes render() emits. An invariant in invariants.test.ts pins these
@@ -23,6 +23,7 @@ const SHELL = `
         <button id="interrupt" class="danger">Interrupt</button>
       </div>
     </header>
+    <p id="session-controls-reason" class="session-controls-reason" role="note" hidden></p>
     <section class="status-context">
       <p class="status-stale" role="status" hidden></p>
       <div id="status-view"></div>
@@ -94,6 +95,28 @@ describe("the mode badge while the session is down (cas-edcd, cas-4a93)", () => 
     applyLiveRegions(root, live);
     expect(mode.hidden).toBe(false);
     expect(mode.textContent).toBe("CONTROL");
+  });
+});
+
+describe("the header controls say why they are unavailable, on screen (journey F9)", () => {
+  const outage = "Lost connection to Atlas · Linux. Control and interrupts return when it reconnects.";
+  it("states one outage once, even when it disables both controls", () => {
+    expect(sessionControlsNotice(outage, outage)).toBe(outage);
+    expect(sessionControlsNotice(undefined, "Take control to enable terminal input, messages, and interrupts."))
+      .toBe("Take control to enable terminal input, messages, and interrupts.");
+    expect(sessionControlsNotice("A.", "B.")).toBe("A. B.");
+    expect(sessionControlsNotice(undefined, undefined)).toBeUndefined();
+    expect(sessionControlsNotice(" ", undefined)).toBeUndefined();
+  });
+  it("shows the reason in the visible line during an outage and hides it when live", () => {
+    const line = root.querySelector<HTMLElement>("#session-controls-reason")!;
+    applyLiveRegions(root, { ...live, controlAction: { label: "Release control", disabledReason: outage }, interruptReason: outage, controlsNotice: outage });
+    expect(line.hidden).toBe(false);
+    expect(line.textContent).toBe(outage);
+    expect(root.querySelector("#lease")!.getAttribute("aria-disabled")).toBe("true");
+    applyLiveRegions(root, live);
+    expect(line.hidden).toBe(true);
+    expect(line.textContent).toBe("");
   });
 });
 

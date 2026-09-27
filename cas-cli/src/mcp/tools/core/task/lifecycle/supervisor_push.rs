@@ -900,7 +900,7 @@ pub fn emit_qa_dispatch_handoff(
     deadline: DateTime<Utc>,
     implementer: &str,
     reasons: &str,
-    merged_into: Option<&str>,
+    location: crate::prompt_revalidation::QaDeliveryLocation<'_>,
 ) -> Result<(), String> {
     let body = crate::prompt_revalidation::qa_dispatch_envelope(
         pass_id,
@@ -911,7 +911,7 @@ pub fn emit_qa_dispatch_handoff(
         &deadline.to_rfc3339(),
         implementer,
         reasons,
-        merged_into,
+        location,
     );
     let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
     let source = format!("{QA_DISPATCH_SOURCE_PREFIX}{pass_id}");

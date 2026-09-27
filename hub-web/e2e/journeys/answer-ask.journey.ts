@@ -165,6 +165,17 @@ test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
     const bar = pinned.locator(".pinned-expand");
     const release = hub.supervisorSays(PELICAN, "Every lane is merged and the gate is green.\n\n- 21 tasks closed.\n- The diff is 579 files.\n- The audit docs ship with it.\n- **Ask:** open the PR to main and cut a release?", { kind: "ask" });
     await expect(pinned.getByRole("button", { name: "Yes, go ahead" })).toBeVisible();
+    // cas-16eed QA F01: a supervisor posting progress while it waits does not
+    // retire its question. An unprompted FYI and a status update later, the
+    // question is still pinned with its choices, and its copy in the thread
+    // does not claim it stopped waiting.
+    hub.supervisorSays(PELICAN, "FYI: the Mac tests are still running.");
+    hub.supervisorSays(PELICAN, "Gate 2 of 3 is going.", { kind: "status" });
+    await expect(page.getByRole("log").getByText("FYI: the Mac tests are still running.")).toBeVisible();
+    await expect(pinned.getByRole("button", { name: "Yes, go ahead" })).toBeVisible();
+    await expect(pinned.getByRole("button", { name: "Hold" })).toBeVisible();
+    await expect(page.getByRole("log").locator(`.obj.t-a[data-notification-id="${release}"]`)).not.toHaveAttribute("data-retired", /.+/);
+    await expect(page.getByRole("log").locator(".ask-retired")).toHaveText(["No longer waiting: the session that asked has ended."]);
     // Desktop, light: Collapse and Dismiss sit on the card; the bar opens it
     // again; writing in the composer leaves it open (there is room for both).
     await pinned.getByRole("button", { name: "Collapse question" }).click();

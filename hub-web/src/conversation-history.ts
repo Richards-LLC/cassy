@@ -42,11 +42,12 @@ export interface ConversationSend {
 
 /**
  * Why an unanswered ask (or blocker) no longer waits on the operator
- * (cas-16eed): the operator dismissed it, the supervisor session that asked
- * has ended, or the supervisor has since spoken to the operator unprompted,
- * which it would not do while still blocked on the question.
+ * (cas-16eed): the operator dismissed it, or the supervisor session that asked
+ * has ended. Nothing the supervisor says in the meantime retires it: a
+ * supervisor posts progress while it waits, and a question it is still
+ * waiting on keeps its pin and its choices (cas-16eed QA F01).
  */
-export type AskRetirement = "dismissed" | "session-ended" | "moved-on";
+export type AskRetirement = "dismissed" | "session-ended";
 /** `at` is when this client saw the event (ms epoch); it stamps the thread's
  * day separators and group timestamps and is never a delivery receipt. */
 /** `at` is the sort key. `shownAt`, when set, is the time to display: a live
@@ -234,10 +235,6 @@ export class ConversationHistory {
     // Asked by a session that has ended: the thread is attached to another
     // one now, or a later turn already came from another one.
     if (event.session && ((this.currentSession !== undefined && event.session !== this.currentSession) || later.some((next) => next.session !== undefined && next.session !== event.session))) return "session-ended";
-    // The supervisor has since told the operator something unprompted (an
-    // answer or a receipt that answers no operator message): it is no longer
-    // blocked on this question, which was settled elsewhere (in the pane).
-    if (reply.kind === "ask" && later.some((next) => next.kind === "reply" && next.value.reply_to === null && (next.value.kind === "answer" || next.value.kind === "receipt"))) return "moved-on";
     return undefined;
   }
   /** The operator dismissed a waiting ask or blocker: it unpins and stops waiting. */

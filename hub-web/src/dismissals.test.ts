@@ -89,19 +89,19 @@ describe("questions that stop waiting", () => {
     history.reply(reply(11, "ask", "Old stamp-less ask?"), at(9, 1));
     expect(history.waiting().map((item) => item.notification_id)).toEqual([10, 11]);
   });
-  it("retires an ask the supervisor moved past with an unprompted answer, but not for status or a reply to a later message", () => {
+  it("keeps a question waiting while the supervisor posts progress, answers other messages or sends receipts (QA F01)", () => {
     const history = new ConversationHistory();
-    history.reply(reply(10, "ask", "Ship?"), at(9, 0));
-    history.reply(reply(11, "status", "Gate 2 of 3."), at(9, 1));
-    expect(history.retirement(10)).toBeUndefined();
-    history.submit("q", "sup", "How long?", at(9, 2));
+    history.currentSession = "live";
+    history.reply({ ...reply(10, "ask", "Two tests flaked. Quarantine them or fix in-train — which one?"), options: ["Quarantine", "Fix in-train"] }, at(9, 0), "live");
+    history.reply(reply(11, "answer", "FYI: the Mac tests are still running."), at(9, 1), "live");
+    history.reply(reply(12, "status", "Gate 2 of 3."), at(9, 2), "live");
+    history.submit("q", "sup", "How long?", at(9, 3), undefined, "live");
     history.acknowledge({ client_ref: "q", notification_id: 40, target: "sup", stamped: true });
-    history.reply(reply(12, "answer", "Ten minutes.", 40), at(9, 3));
+    history.reply(reply(13, "answer", "Ten minutes.", 40), at(9, 4), "live");
+    history.reply(reply(14, "receipt", "Released the lanes."), at(9, 5), "live");
     expect(history.retirement(10)).toBeUndefined();
     expect(history.pinnedAsk()?.notification_id).toBe(10);
-    history.reply(reply(13, "receipt", "Released 3.32.0."), at(9, 4));
-    expect(history.retirement(10)).toBe("moved-on");
-    expect(history.pinnedAsk()).toBeUndefined();
+    expect(history.waiting().map((item) => item.notification_id)).toEqual([10]);
   });
   it("does not call an answered question retired", () => {
     const history = new ConversationHistory();

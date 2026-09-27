@@ -33,7 +33,6 @@ export function askOptions(reply: OperatorReply): string[] {
 export const RETIRED_LINES: Readonly<Record<AskRetirement, string>> = {
   dismissed: "Dismissed. You can still answer here.",
   "session-ended": "No longer waiting: the session that asked has ended.",
-  "moved-on": "No longer waiting: the supervisor has moved on.",
 };
 
 /** The collapsed in-flow copy's pointer to the pinned tray. */

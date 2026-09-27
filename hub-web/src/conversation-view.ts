@@ -534,7 +534,7 @@ export class ConversationView {
     const waiting = reply?.kind === "blocker" ? this.history.waiting().some((item) => item.notification_id === reply.notification_id) : undefined;
     // The pinned ask's flow copy is collapsed; it expands again when a newer ask takes the pin.
     const pinned = reply?.kind === "ask" ? this.history.pinnedAsk()?.notification_id === reply.notification_id : undefined;
-    // A question that stops waiting (dismissed, its session ended, the supervisor moved on) repaints quiet (cas-16eed).
+    // A question that stops waiting (dismissed, or its session ended) repaints quiet (cas-16eed).
     const retired = reply?.kind === "ask" || reply?.kind === "blocker" ? this.history.retirement(reply.notification_id) : undefined;
     const delivered = turn.event.kind === "send" ? this.history.showsDelivered(turn.event.value) : undefined;
     // A refused send repaints when control changes hands (cas-8e0a).

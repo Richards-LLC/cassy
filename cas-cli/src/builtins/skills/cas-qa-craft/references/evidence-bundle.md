@@ -61,7 +61,7 @@ journey evaluation scores polish for it.
   follow-ups in the ledger; they are not this delivery's defects.
 - `files`: the keys above, with paths relative to the bundle
 - `critique_score`: `distinctiveness`, `fit`, `hierarchy`, `craft`, and `accessibility`, each 0–5, matching `critique.md`
-- `deployed` (optional, cas-a6ab): use it only when a local build cannot
+- `deployed` (optional): use it only when a local build cannot
   authenticate, for example when the staging backend's CORS rejects
   localhost on its session endpoint. The run then goes against the deployed
   origin, with these fields:

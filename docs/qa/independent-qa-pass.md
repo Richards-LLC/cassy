@@ -128,6 +128,28 @@ the implementer.
 The worker's own close output changes too. MERGE REQUIRED now adds:
 "Independent QA pass `<id>` dispatched. The merge waits for its verdict."
 
+### Reviewer preflight (cas-d5c1)
+
+A project can declare what its reviewers need before a round is claimed
+(GH #1023 finding 6). In the reported session, missing `gh` authentication,
+a missing backend env file, and an empty staging QA account each stalled a
+round partway through. The `[qa]` keys are:
+
+| Key | Check |
+| --- | --- |
+| `preflight_gh_token` | `GH_TOKEN` or `GITHUB_TOKEN` is set, or `gh auth status` succeeds. The value is never shown. |
+| `preflight_env_files` | Each named variable points at a readable file. The path is reported; the file is never read. |
+| `preflight_hook` | A project command run in the repository root with `CAS_QA_DELIVERY_TASK`, `CAS_QA_TASK` and `CAS_QA_HEAD` set. It checks, and may top up, test-account capacity. Exit 0 means ready; any other exit is a blocker whose first output line is the reason. It is bounded by `preflight_hook_timeout_secs` (120 by default). Cassy assumes no billing API. |
+
+Starting the QA work item runs the preflight after the no-self-review
+check. If anything is missing, the start is refused with `QA PREFLIGHT
+BLOCKED`, the lines above, and the blocker message to send the supervisor.
+The round stays unclaimed, so its deadline is not spent. A ready preflight
+is appended to the start response. Every run is recorded as a note on the QA
+work item. Hook output is truncated and redacted: values of `GH_TOKEN`,
+`GITHUB_TOKEN` and any variable named like a token, secret, password or key
+are replaced with `[redacted]`.
+
 ## 3. No self-review (enforced, not advised)
 
 - **Starting the QA task.** `task start` or `claim` on a `qa-pass` task

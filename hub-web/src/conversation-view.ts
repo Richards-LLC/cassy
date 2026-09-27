@@ -359,7 +359,7 @@ export class ConversationView {
     const waiting = reply?.kind === "blocker" ? this.history.waiting().some((item) => item.notification_id === reply.notification_id) : undefined;
     // The pinned ask's flow copy is collapsed; it expands again when a newer ask takes the pin.
     const pinned = reply?.kind === "ask" ? this.history.pinnedAsk()?.notification_id === reply.notification_id : undefined;
-    const delivered = turn.event.kind === "send" ? this.history.delivered() === turn.event.value : undefined;
+    const delivered = turn.event.kind === "send" ? this.history.showsDelivered(turn.event.value) : undefined;
     // A refused send repaints when control changes hands (cas-8e0a).
     const held = turn.event.kind === "send" && turn.event.value.state === "error" ? this.options.controlHeld?.() === true : undefined;
     const holder = turn.event.kind === "send" && turn.event.value.state === "error" ? this.options.controlHolder?.() : undefined;
@@ -548,10 +548,11 @@ export class ConversationView {
       state.className = "conversation-delivery"; state.setAttribute("role", "status");
       state.textContent = "Sending…";
       bubble.append(state);
-    } else if (send.state === "acknowledged" && this.history.delivered() === send) {
-      // F5: the hub's receipt is the difference between a delivered message
-      // and a lost one, so the latest delivered send says so until the reply
-      // lands (then the answer itself is the evidence).
+    } else if (this.history.showsDelivered(send)) {
+      // F5: the receipt is the difference between a delivered message and a
+      // lost one, so a delivered send says so until the reply linked to it
+      // lands (then the answer itself is the evidence). Journey F4: an
+      // unrelated supervisor turn crossing it no longer hides the tick.
       const state = document.createElement("span");
       state.className = "conversation-delivery conversation-delivered"; state.setAttribute("role", "status");
       const tick = document.createElement("template"); tick.innerHTML = TICK;

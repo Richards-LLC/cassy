@@ -2918,6 +2918,76 @@ mod related_recall_response_tests {
     }
 
     #[tokio::test]
+    async fn standalone_create_in_fresh_git_init_warns_without_blocking() {
+        let temp = TempDir::new().expect("temporary project");
+        let repo = temp.path();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q", "-b", "main"])
+                .current_dir(repo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let core = CasCore::with_daemon(repo.to_path_buf(), None, None);
+        let receipt = text(
+            core.cas_task_create(Parameters(plain_task_request("Fresh project task")))
+                .await
+                .expect("missing commit and origin must not block task creation"),
+        );
+        assert!(receipt.contains("WORK TARGET UNRESOLVED"), "{receipt}");
+        assert!(receipt.contains("epic_base_branch"), "{receipt}");
+        assert!(receipt.contains("target_branch"), "{receipt}");
+        let task = core
+            .open_task_store()
+            .unwrap()
+            .list(None)
+            .unwrap()
+            .pop()
+            .expect("task persisted");
+        assert!(task.deliverables.work_target.is_none());
+
+        std::fs::create_dir_all(repo.join(".cas")).unwrap();
+        std::fs::write(
+            repo.join(".cas/config.toml"),
+            "[factory]\nepic_base_branch = \"bad..branch\"\n",
+        )
+        .unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args([
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://github.com/example/fresh-project.git",
+                ])
+                .current_dir(repo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let invalid_target_receipt = text(
+            core.cas_task_create(Parameters(plain_task_request("Invalid target task")))
+                .await
+                .expect("invalid configured target must not block task creation"),
+        );
+        assert!(
+            invalid_target_receipt.contains("WORK TARGET UNRESOLVED")
+                && invalid_target_receipt.contains("target_branch"),
+            "{invalid_target_receipt}"
+        );
+        let invalid_target_task = core
+            .open_task_store()
+            .unwrap()
+            .list(None)
+            .unwrap()
+            .into_iter()
+            .find(|task| task.title == "Invalid target task")
+            .expect("task persisted despite invalid target");
+        assert!(invalid_target_task.deliverables.work_target.is_none());
+    }
+
+    #[tokio::test]
     async fn create_path_enforces_and_persists_user_facing_demo_statement() {
         let temp = TempDir::new().expect("temporary project");
         let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);

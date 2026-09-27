@@ -502,16 +502,29 @@ pub(crate) fn standalone_work_target(
     let Ok((checkout_root, _)) = git_checkout_layout(cas_root) else {
         return Ok((None, None));
     };
+    let unresolved_warning = |reason: &str| {
+        format!(
+            "\n\n⚠️ WORK TARGET UNRESOLVED: no target could be detected or persisted ({reason}). \
+             This task has no work target. Set [factory] epic_base_branch in \
+             .cas/config.toml or pass target_branch when creating the task."
+        )
+    };
     let configured = crate::config::Config::configured_epic_base_branch(&checkout_root);
     let branch = match configured.as_deref() {
         Some(branch) => branch.to_string(),
-        None => resolve_default_branch(&checkout_root)?,
+        None => match resolve_default_branch(&checkout_root) {
+            Ok(branch) => branch,
+            Err(error) => return Ok((None, Some(unresolved_warning(&error)))),
+        },
     };
-    let target = declare_work_target(
+    let target = match declare_work_target(
         cas_root,
         Some(checkout_root.to_string_lossy().as_ref()),
         Some(&branch),
-    )?;
+    ) {
+        Ok(target) => target,
+        Err(error) => return Ok((None, Some(unresolved_warning(&error)))),
+    };
     let warning = configured.is_none().then(|| {
         format!(
             "\n\n⚠️ WORK TARGET DEFAULTED: no [factory] epic_base_branch is configured. \

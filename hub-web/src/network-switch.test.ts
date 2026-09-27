@@ -203,3 +203,83 @@ describe("a send the hub could not forward (cas-0653)", () => {
     expect(machine.machineSubscriptions.has("factory-a")).toBe(true);
   });
 });
+
+// cas-a355: while the daemon link stays down, each live attach used to resend
+// the held message and be refused again about once a second. And on the
+// legacy socket, a message written after the refused one was never answered.
+describe("held-send polish after cas-0653 (cas-a355)", () => {
+  type Refusing = {
+    desired: boolean;
+    machineSubscriptions: Set<string>;
+    attachRetryTimers: Map<string, number>;
+    socketAttempts: Map<string, number>;
+    sockets: Map<string, unknown>;
+    machineSocketReady: boolean;
+    handleMachineMessage(input: string): Promise<void>;
+    handleDaemonMessage(session: string, input: string): Promise<void>;
+  };
+  const refused = (ref: string) => JSON.stringify({ channel: "pty:factory-a", error: { code: "upstream_unavailable", retryable: true, message: "The session's daemon connection is reconnecting.", client_ref: ref } });
+  const closed = JSON.stringify({ channel: "pty:factory-a", closed: true });
+
+  it("backs the reattach off 1, 2, 4, then 8 s while the upstream keeps refusing, and starts afresh once a send lands", async () => {
+    vi.stubGlobal("window", globalThis);
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const onMessageRejected = vi.fn();
+    const onAttachState = vi.fn();
+    const { sup, internals } = supervisor({ onMessageRejected, onAttachState, onSocketError: vi.fn(), onMessageQueued: vi.fn() });
+    const machine = internals as unknown as Refusing;
+    machine.desired = true;
+    const delays: number[] = [];
+    const cycle = async (ref: string) => {
+      // A live attach (Welcome) resets the attempt count, as it does in the page.
+      machine.socketAttempts.set("factory-a", 0);
+      machine.machineSubscriptions.add("factory-a");
+      await machine.handleMachineMessage(refused(ref));
+      await machine.handleMachineMessage(closed);
+      const backoff = onAttachState.mock.calls.filter(([, snapshot]) => snapshot.phase === "backoff").at(-1)?.[1];
+      delays.push(backoff?.retryInMs);
+      for (const timer of machine.attachRetryTimers.values()) clearTimeout(timer);
+      machine.attachRetryTimers.clear();
+    };
+    for (let refusal = 1; refusal <= 5; refusal += 1) await cycle(`send-${refusal}`);
+    expect(delays, "each refusal waits longer, capped at about 8 s").toEqual([1_000, 2_000, 4_000, 8_000, 8_000]);
+    expect(onMessageRejected).toHaveBeenCalledTimes(5);
+
+    await machine.handleMachineMessage(JSON.stringify({ channel: "pty:factory-a", message: { MessageQueued: { notification_id: 7, target: "patient-pelican-9", client_ref: "send-6" } } }));
+    await cycle("send-7");
+    expect(delays.at(-1), "a delivered send resets the backoff").toBe(1_000);
+    sup.stop();
+    vi.restoreAllMocks();
+  });
+
+  it("refuses, as retryable, every message written to the legacy socket after the refused one, and nothing before it", async () => {
+    vi.stubGlobal("window", globalThis);
+    const onMessageRejected = vi.fn();
+    const { sup, internals } = supervisor({ onMessageRejected, onSocketError: vi.fn() });
+    const machine = internals as unknown as Refusing;
+    machine.desired = true;
+    machine.machineSocketReady = false;
+    const socket = fakeSocket();
+    machine.sockets.set("factory-a", socket);
+    for (const ref of ["send-1", "send-2", "send-3"]) {
+      expect(sup.send("factory-a", { SendMessage: { target: "patient-pelican-9", message: ref, client_ref: ref } })).toBe(true);
+    }
+    // send-1 was forwarded (its receipt is pending); send-2 is refused and
+    // the hub closes the socket, so send-3 is never read.
+    await machine.handleDaemonMessage("factory-a", JSON.stringify({ error: "upstream_unavailable", retryable: true, message: "The session's daemon connection is reconnecting.", client_ref: "send-2" }));
+    const rejection = { code: "upstream_unavailable", retryable: true };
+    expect(onMessageRejected.mock.calls).toEqual([
+      ["factory-a", "send-2", "The session's daemon connection is reconnecting.", rejection],
+      ["factory-a", "send-3", "The session's daemon connection is reconnecting.", rejection],
+    ]);
+
+    // A refusal that is not retryable speaks only for its own message.
+    onMessageRejected.mockClear();
+    const next = fakeSocket();
+    machine.sockets.set("factory-a", next);
+    for (const ref of ["send-4", "send-5"]) sup.send("factory-a", { SendMessage: { target: "patient-pelican-9", message: ref, client_ref: ref } });
+    await machine.handleDaemonMessage("factory-a", JSON.stringify({ error: "forbidden", client_ref: "send-4" }));
+    expect(onMessageRejected.mock.calls).toEqual([["factory-a", "send-4", "forbidden", { code: "forbidden", retryable: false }]]);
+    sup.stop();
+  });
+});

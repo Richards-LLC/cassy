@@ -25,6 +25,14 @@ export interface Refusal {
 }
 
 const RULES: ReadonlyArray<readonly [RegExp, Refusal]> = [
+  // cas-a355: a held send that ran out of time (connection-state-view.ts
+  // `outageRefusal`). It never left this browser, so the next step is a Retry
+  // once the session is back, never re-pairing. First, because the machine
+  // label it names could contain any of the words below.
+  [/^Not sent: lost connection to /, {
+    reason: "The session didn't come back while it waited.",
+    next: "Retry once the session is live again.",
+  }],
   [/in_reply_to|not a supervisor turn|belongs to factory session/i, {
     reason: "The question it answered is no longer open.",
     next: "Edit it and send it as a new message.",

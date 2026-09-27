@@ -194,10 +194,13 @@ export class HubConnectionSupervisor {
   private readonly socketAttempts = new Map<string, number>();
   /**
    * Retryable `upstream_unavailable` refusals per session since its last
-   * acknowledged send (cas-a355). Each one lengthens the next reattach: 1, 2,
-   * 4, then 8 s, instead of a fresh 1 s after every live attach.
+   * acknowledged send (cas-a355), or since it last stayed live without one
+   * (cas-2036). Each one lengthens the next reattach: 1, 2, 4, then 8 s,
+   * instead of a fresh 1 s after every live attach.
    */
   private readonly upstreamRefusalStreak = new Map<string, number>();
+  /** Pending "stayed live" resets of the refusal streak, per session (cas-2036). */
+  private readonly upstreamStreakResets = new Map<string, number>();
   /** Supervisor messages written to each legacy session socket, in order (cas-a355). */
   private readonly legacySends = new WeakMap<WebSocket, string[]>();
   private readonly attachRetryTimers = new Map<string, number>();
@@ -252,6 +255,7 @@ export class HubConnectionSupervisor {
     this.heartbeatTimer = undefined;
     this.clearAttachRetries();
     this.clearAttachTimeouts();
+    for (const session of [...this.upstreamStreakResets.keys()]) this.cancelUpstreamStreakReset(session);
     this.machineSocket?.close(1000, "machine removed");
     this.machineSocket = undefined;
     this.machineSocketReady = false;
@@ -1214,9 +1218,42 @@ export class HubConnectionSupervisor {
   }
 
   private noteUpstreamRefusal(session: string): void {
+    // Refused again right after going live: the upstream is still gone.
+    this.cancelUpstreamStreakReset(session);
     const streak = (this.upstreamRefusalStreak.get(session) ?? 0) + 1;
     this.upstreamRefusalStreak.set(session, streak);
     this.socketAttempts.set(session, Math.min(streak - 1, UPSTREAM_BACKOFF_MAX_ATTEMPT));
+  }
+
+  /**
+   * The session went live. Every reattach while the upstream is gone also
+   * goes live and is refused again as soon as the held send goes out, so live
+   * alone proves nothing. A session that stays live for
+   * UPSTREAM_STREAK_SETTLE_MS with no retryable refusal has its upstream
+   * back, and the next refusal starts the backoff at 1 s again, delivered
+   * send or not (cas-2036). Before this, a held send that expired unsent
+   * left the streak in place, and the next drop, however much later, started
+   * at 8 s.
+   */
+  private settleUpstreamStreak(session: string): void {
+    if (!this.upstreamRefusalStreak.has(session)) return;
+    this.cancelUpstreamStreakReset(session);
+    this.upstreamStreakResets.set(session, window.setTimeout(() => {
+      this.upstreamStreakResets.delete(session);
+      this.upstreamRefusalStreak.delete(session);
+    }, UPSTREAM_STREAK_SETTLE_MS));
+  }
+
+  private cancelUpstreamStreakReset(session: string): void {
+    const pending = this.upstreamStreakResets.get(session);
+    if (pending === undefined) return;
+    window.clearTimeout(pending);
+    this.upstreamStreakResets.delete(session);
+  }
+
+  private clearUpstreamStreak(session: string): void {
+    this.cancelUpstreamStreakReset(session);
+    this.upstreamRefusalStreak.delete(session);
   }
 
   requestPaneKeyframe(session: string, paneId: string): boolean {
@@ -1352,10 +1389,12 @@ export class HubConnectionSupervisor {
         this.readySockets.add(socket);
         this.clearAttachTimeout(session, "ready");
         this.socketAttempts.set(session, 0);
+        this.settleUpstreamStreak(session);
         this.transitionAttach(session, "live", "live");
       } else if (this.machineSocketReady) {
         this.clearAttachTimeout(session, "ready");
         this.socketAttempts.set(session, 0);
+        this.settleUpstreamStreak(session);
         this.transitionAttach(session, "live", "live");
       }
       const welcome = message.Welcome;
@@ -1401,7 +1440,7 @@ export class HubConnectionSupervisor {
       const queued = messageQueuedFromDaemon(message);
       // A send reached the daemon: the upstream is back, so the next
       // retryable refusal starts the backoff afresh (cas-a355).
-      if (queued) this.upstreamRefusalStreak.delete(session);
+      if (queued) this.clearUpstreamStreak(session);
       if (queued) this.callbacks.onMessageQueued?.(session, queued);
     } else if (message.OperatorReply) {
       this.callbacks.onOperatorReply?.(session, message.OperatorReply as OperatorReply);
@@ -1456,6 +1495,14 @@ function isSupervisorMessage(message: unknown): boolean {
 
 /** Reattach attempts after repeated `upstream_unavailable` refusals stop growing here: backoffDelay(3), about 8 s (cas-a355). */
 export const UPSTREAM_BACKOFF_MAX_ATTEMPT = 3;
+
+/**
+ * How long a session must stay live, with no retryable refusal, before the
+ * refusal streak resets (cas-2036). Longer than a held send's resend and its
+ * refusal take after a live attach, so a still-missing upstream keeps
+ * backing off.
+ */
+export const UPSTREAM_STREAK_SETTLE_MS = 10_000;
 
 /** The client_ref of an outbound SendMessage, if it carries one. */
 function sendMessageClientRef(message: unknown): string | undefined {

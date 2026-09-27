@@ -92,8 +92,14 @@ export class HubDouble {
   private readonly stalledSockets = new WeakSet<WebSocketRoute>();
   /** Machine sockets opened, per machine (multiplex). */
   readonly machineSocketOpens = new Map<string, number>();
+  /** Legacy per-session sockets opened, per session (cas-2036). */
+  readonly legacySocketOpens = new Map<string, number>();
   /** Sessions whose daemon upstream is gone while the hub stays up (cas-0653). */
   private readonly upstreamDown = new Set<string>();
+  /** How long a legacy-socket refusal takes to reach the page, per session (cas-2036). */
+  private readonly upstreamRefusalDelays = new Map<string, number>();
+  /** Legacy session sockets the hub stopped reading after a refusal (cas-2036). */
+  private readonly unreadLegacySockets = new WeakSet<WebSocketRoute>();
   /** client_refs the double refused with `upstream_unavailable`, in order. */
   readonly upstreamRefusals: string[] = [];
   /** Turns pushed live, replayed in history like a real hub after a reload. */
@@ -272,7 +278,20 @@ export class HubDouble {
    * refuses it (hub/server.rs): `upstream_unavailable`, retryable, with its
    * client_ref, and the session's stream is closed so the page attaches again.
    */
-  upstreamLost(session: string): void { this.upstreamDown.add(session); }
+  upstreamLost(session: string, options: { refusalDelayMs?: number } = {}): void {
+    this.upstreamDown.add(session);
+    // The round trip a refusal takes on a real network: a message written
+    // meanwhile is already on the legacy socket the hub stops reading (cas-2036).
+    if (options.refusalDelayMs) this.upstreamRefusalDelays.set(session, options.refusalDelayMs);
+    else this.upstreamRefusalDelays.delete(session);
+  }
+
+  /**
+   * Stop advertising the machine protocol, as a hub that predates it would:
+   * after its next reload the page attaches one legacy socket per session
+   * (cas-2036).
+   */
+  useLegacySockets(): void { this.options.multiplex = false; }
 
   /** The daemon link is back: the next attach carries sends again. */
   upstreamBack(session: string): void { this.upstreamDown.delete(session); }
@@ -457,6 +476,7 @@ export class HubDouble {
     const session = decodeURIComponent(new URL(ws.url()).pathname.split("/")[3] ?? "");
     const machineId = new URL(ws.url()).hostname.replace(/\.test$/, "");
     if (this.held.has(session) || !this.reachable(machineId)) { void ws.close({ code: 1011, reason: "journey: still offline" }); return; }
+    this.legacySocketOpens.set(session, (this.legacySocketOpens.get(session) ?? 0) + 1);
     this.sockets.set(session, ws);
     let bucket = this.sessionSocketsByMachine.get(machineId);
     if (!bucket) this.sessionSocketsByMachine.set(machineId, (bucket = new Set()));
@@ -466,12 +486,21 @@ export class HubDouble {
     const pages = [...(this.options.history?.[session] ?? [])];
     ws.onMessage((data) => {
       if (this.stalledSockets.has(ws) || !this.reachable(machineId)) { this.stalledSockets.add(ws); return; }
+      // The real hub stops reading a legacy socket once it refused a send on
+      // it (hub/server.rs `proxy_socket` breaks out of its loop): anything the
+      // page wrote after the refused message is never read (cas-2036).
+      if (this.unreadLegacySockets.has(ws)) return;
       const message = JSON.parse(String(data)) as Record<string, Record<string, unknown>>;
       const refused = this.refuseWithoutUpstream(session, message);
       if (refused !== undefined) {
+        this.unreadLegacySockets.add(ws);
         // The real hub's legacy socket: the refusal, then a close (cas-0653).
-        ws.send(JSON.stringify({ error: "upstream_unavailable", retryable: true, message: UPSTREAM_UNAVAILABLE_MESSAGE, client_ref: refused }));
-        void ws.close({ code: 1011, reason: "journey: session daemon link is reconnecting" });
+        const refuse = () => {
+          ws.send(JSON.stringify({ error: "upstream_unavailable", retryable: true, message: UPSTREAM_UNAVAILABLE_MESSAGE, client_ref: refused }));
+          void ws.close({ code: 1011, reason: "journey: session daemon link is reconnecting" });
+        };
+        const delay = this.upstreamRefusalDelays.get(session);
+        if (delay) setTimeout(refuse, delay); else refuse();
         return;
       }
       this.handleSessionFrame(machineId, session, ws, message, pages);

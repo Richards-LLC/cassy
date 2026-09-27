@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { HubConnectionSupervisor, messageRejection, type HubCallbacks } from "./connection";
+import { HubConnectionSupervisor, messageRejection, UPSTREAM_STREAK_SETTLE_MS, type HubCallbacks } from "./connection";
 import { ConversationHistory } from "./conversation-history";
 import { MACHINE_RETRY_CEILING_MS, SOCKET_PROBE_TIMEOUT_MS } from "./connection-state";
 import type { StoredMachine } from "./types";
@@ -248,6 +248,46 @@ describe("held-send polish after cas-0653 (cas-a355)", () => {
     await machine.handleMachineMessage(JSON.stringify({ channel: "pty:factory-a", message: { MessageQueued: { notification_id: 7, target: "patient-pelican-9", client_ref: "send-6" } } }));
     await cycle("send-7");
     expect(delays.at(-1), "a delivered send resets the backoff").toBe(1_000);
+    sup.stop();
+    vi.restoreAllMocks();
+  });
+
+  // cas-2036 (cas-a355 QA N3): only a receipt used to reset the streak, so a
+  // held send that expired unsent left the next drop starting at 8 s.
+  it("starts the backoff afresh once the session stays live with no refusal, delivered send or not", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("window", globalThis);
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const onAttachState = vi.fn();
+    const known: Record<string, unknown> = { onAttachState, onState: vi.fn() };
+    const callbacks = new Proxy(known, { get: (target, key: string) => (target[key] ??= vi.fn()) });
+    const sup = new HubConnectionSupervisor({ baseUrl: "https://atlas.test" } as StoredMachine, callbacks as unknown as HubCallbacks);
+    const machine = sup as unknown as Refusing & { handleDaemonObject(session: string, message: Record<string, unknown>): void };
+    machine.desired = true;
+    machine.machineSocketReady = true;
+    const live = () => machine.handleDaemonObject("factory-a", { Welcome: { state: { panes: [], cols: 80, rows: 24 }, scrollback: {}, protocol_version: 1 } });
+    const refusedThenClosed = async (ref: string): Promise<number | undefined> => {
+      machine.machineSubscriptions.add("factory-a");
+      await machine.handleMachineMessage(refused(ref));
+      await machine.handleMachineMessage(closed);
+      const delay = onAttachState.mock.calls.filter(([, snapshot]) => snapshot.phase === "backoff").at(-1)?.[1]?.retryInMs;
+      for (const timer of machine.attachRetryTimers.values()) clearTimeout(timer);
+      machine.attachRetryTimers.clear();
+      return delay;
+    };
+    // The upstream stays gone: every live attach is refused again at once.
+    const delays: Array<number | undefined> = [];
+    for (const ref of ["send-1", "send-2", "send-3"]) { live(); delays.push(await refusedThenClosed(ref)); }
+    expect(delays).toEqual([1_000, 2_000, 4_000]);
+    // Live again and refused just inside the settle window: still gone, so it keeps backing off.
+    live();
+    vi.advanceTimersByTime(UPSTREAM_STREAK_SETTLE_MS - 1);
+    expect(await refusedThenClosed("send-4")).toBe(8_000);
+    // Live and quiet for the settle window, nothing delivered (the held send
+    // expired unsent): the upstream is back, and the next drop starts at 1 s.
+    live();
+    vi.advanceTimersByTime(UPSTREAM_STREAK_SETTLE_MS);
+    expect(await refusedThenClosed("send-5")).toBe(1_000);
     sup.stop();
     vi.restoreAllMocks();
   });

@@ -2965,7 +2965,7 @@ dialog form > *,
      this the actions overflowed under the attention rail and Interrupt was
      sliced in half. */
   /* == Unit 3: Appearance stays reachable by touch == */
-  .command-palette-trigger { display: inline-flex; }
+  .command-palette-trigger { display: inline-flex; align-items: center; white-space: nowrap; }
   .session-header .actions { gap: var(--space-1); }
   .session-header .actions button { min-width: 0; padding: 0 var(--space-2); }
 
@@ -2988,7 +2988,7 @@ dialog form > *,
   /* The ⌘K chord has no phone equivalent; its width belongs to the two controls
      a thumb actually uses, which stay wide enough to hit. */
   /* == Unit 3: Appearance stays reachable by touch == */
-  .command-palette-trigger { display: inline-flex; }
+  .command-palette-trigger { display: inline-flex; align-items: center; white-space: nowrap; }
   .session-header .actions { gap: var(--space-1); }
   .session-header .actions button { min-width: 0; padding: 0 var(--space-2); }
 }

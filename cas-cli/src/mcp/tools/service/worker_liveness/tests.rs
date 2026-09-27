@@ -405,3 +405,47 @@ fn process_evidence_adapter_rejects_a_reused_parent_pid() {
         "the recorded MCP child's current parent may prove the live harness"
     );
 }
+
+#[test]
+fn live_codex_mcp_child_prevents_false_dead_after_parent_changes_gh_1033() {
+    let mut agent = cas_types::Agent::new("session".into(), "codex-worker".into());
+    agent.pid = Some(10); // registered cas serve child
+    agent.ppid = Some(20); // former Codex parent
+    agent.pid_starttime = Some(123);
+    agent.metadata.insert("worker_cli".into(), "codex".into());
+
+    let pid_alive = |pid| pid == 10;
+    let fingerprint = |pid, starttime| pid == 10 && starttime == 123;
+    let is_harness = |pid| pid == 20;
+    let reparented = |_child| Some(1);
+    let probes = ProcessProbes {
+        pid_alive: &pid_alive,
+        pid_matches_fingerprint: &fingerprint,
+        is_harness: &is_harness,
+        parent_pid: &reparented,
+    };
+    assert_eq!(
+        process_selection_for_agent(&agent, None, &probes),
+        ProcessSelection::Unavailable("registered MCP child alive; harness parent identity changed")
+    );
+    assert_eq!(
+        run_with_unresolved_process(
+            SupervisorCli::Codex,
+            "{\"timestamp\":\"2026-09-10T19:00:59Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"turn_started\"}}\n",
+        )
+        .state,
+        Liveness::Executing
+    );
+
+    let child_gone = |_: u32| false;
+    let probes = ProcessProbes {
+        pid_alive: &child_gone,
+        pid_matches_fingerprint: &fingerprint,
+        is_harness: &is_harness,
+        parent_pid: &reparented,
+    };
+    assert_eq!(
+        process_selection_for_agent(&agent, None, &probes),
+        ProcessSelection::Exited("worker harness parent exited"),
+    );
+}

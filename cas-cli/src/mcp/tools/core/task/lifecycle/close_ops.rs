@@ -21011,7 +21011,7 @@ mod merge_state_gate_tests {
         commit_file_at(p, "next.rs", "// unrelated next task\n", "2026-08-04T12:02:00Z");
         let next_head = head_sha(p);
         assert_eq!(close_delivered_tip(p, None, Some(&anchor)), Some(anchor.clone()));
-        assert_ne!(close_delivered_tip(p, None, Some(&anchor)), Some(next_head));
+        assert_ne!(close_delivered_tip(p, None, Some(&anchor)), Some(next_head.clone()));
         let assembly_head = rev_parse_local(p, "main");
         let assembly_note = format!("ASSEMBLY_PROOF: head={assembly_head} result=PASS");
         let line = assembly_proof_line(&assembly_note).unwrap();

@@ -2324,6 +2324,10 @@ pub fn normalize_harness_skill_content(content: &str) -> String {
     for prefix in ["mcp__cas__", "mcp__cs__", "cas__"] {
         normalized = normalized.replace(prefix, "<CAS_TOOL_PREFIX>");
     }
+    // The supervisor checklist has a tailored Codex skill directory, while
+    // Claude and Grok use the shared name. This spelling is projection state,
+    // not a change to the skill's instructions.
+    normalized = normalized.replace("cas-codex-supervisor-checklist", "cas-supervisor-checklist");
     normalized
 }
 

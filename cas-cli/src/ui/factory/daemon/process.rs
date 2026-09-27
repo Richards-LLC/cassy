@@ -139,6 +139,8 @@ pub fn fork_into_daemon(app: FactoryApp, session_name: String) -> anyhow::Result
             // Child process - becomes daemon
             // Detach from terminal
             let _ = nix::unistd::setsid();
+            // The daemon outlives the clients it writes to (cas-5918).
+            crate::server_signals::ignore_sigpipe_for_server();
 
             // Redirect stdin/stdout/stderr to /dev/null
             let devnull = std::fs::File::open("/dev/null")?;
@@ -202,6 +204,7 @@ pub async fn run_daemon_after_fork(
     listener: UnixListener,
     session_name: String,
 ) -> anyhow::Result<()> {
+    crate::server_signals::ignore_sigpipe_for_server();
     unsafe { std::env::set_var("CAS_FACTORY_SESSION", &session_name) };
     app.set_factory_session(session_name.clone());
 
@@ -370,6 +373,8 @@ pub async fn run_daemon_after_fork(
 
 /// Run the factory daemon (called by the daemon subprocess - legacy mode)
 pub async fn run_daemon(config: DaemonConfig) -> anyhow::Result<()> {
+    // A client that vanishes mid-write must not kill the daemon (cas-5918).
+    crate::server_signals::ignore_sigpipe_for_server();
     let trace_path = daemon_trace_log_path(&config.session_name);
     let log_file = open_log_file_truncate(&trace_path)?;
     let subscriber = tracing_subscriber::fmt()
@@ -390,6 +395,8 @@ pub async fn run_daemon_with_boot_progress(
     supervisor_name: String,
     worker_names: Vec<String>,
 ) -> anyhow::Result<()> {
+    // Boot progress goes to a parent that may exit first (cas-5918).
+    crate::server_signals::ignore_sigpipe_for_server();
     let trace_path = daemon_trace_log_path(&config.session_name);
     let log_file = open_log_file_truncate(&trace_path)?;
     let subscriber = tracing_subscriber::fmt()

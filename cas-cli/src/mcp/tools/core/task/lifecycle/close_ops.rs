@@ -8662,7 +8662,12 @@ impl CasCore {
             validate_pre_close_worktree(&worktree.path, expected, Some(&worktree.branch))
                 .map_err(|error| error.to_string())?;
             if let Some(assignee) = task.assignee.as_deref() {
-                let expected_branch = format!("factory/{assignee}");
+                // cas-8606 follow-through: any of the worker's own branches,
+                // including a per-task branch, as on the System-B path.
+                let expected_branch = system_b_expected_branch(
+                    assignee,
+                    crate::factory_isolation::branch_at(&worktree.path).as_deref(),
+                );
                 validate_pre_close_worktree(&worktree.path, expected, Some(&expected_branch))
                     .map_err(|error| error.to_string())?;
             }
@@ -10419,6 +10424,87 @@ fn enrich_merge_required_with_conflict_check(
     }
 }
 
+/// cas-3f8c: name the delivered lines the target lacks, so a supervisor can
+/// confirm a DELIVERY CONTENT DROPPED in seconds instead of diffing trees.
+/// The delivery's own effect is measured against its first parent, or
+/// against the target side of a worker's target-sync merge. Up to three
+/// lines per path are shown, truncated. Empty when nothing can be named.
+fn dropped_line_samples(
+    repo_path: &std::path::Path,
+    anchor: &str,
+    parent_branch: &str,
+    paths: &[String],
+) -> String {
+    const PER_PATH: usize = 3;
+    const MAX_CHARS: usize = 140;
+    let git = |args: &[&str]| -> Option<String> {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo_path)
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+    };
+    let base = if git_commit_parent_count(repo_path, anchor) >= 2 {
+        format!("{anchor}^2")
+    } else {
+        format!("{anchor}^1")
+    };
+    let target = {
+        let origin = format!("origin/{parent_branch}");
+        if git_ref_exists(repo_path, &origin) && git_commit_is_ancestor(repo_path, anchor, &origin)
+        {
+            origin
+        } else {
+            parent_branch.to_string()
+        }
+    };
+    let mut report = String::new();
+    for path in paths {
+        let Some(patch) = git(&[
+            "diff",
+            "--unified=0",
+            "--no-renames",
+            &base,
+            anchor,
+            "--",
+            path,
+        ]) else {
+            continue;
+        };
+        let target_text = git(&["show", &format!("{target}:{path}")]).unwrap_or_default();
+        let target_lines: std::collections::HashSet<&str> =
+            target_text.lines().map(str::trim).collect();
+        let missing: Vec<String> = patch
+            .lines()
+            .filter(|line| line.starts_with('+') && !line.starts_with("+++"))
+            .map(|line| line[1..].trim())
+            .filter(|line| !line.is_empty() && !target_lines.contains(line))
+            .take(PER_PATH)
+            .map(|line| {
+                let mut shown: String = line.chars().take(MAX_CHARS).collect();
+                if line.chars().count() > MAX_CHARS {
+                    shown.push('…');
+                }
+                format!("\n  {path}: `{shown}`")
+            })
+            .collect();
+        for line in missing {
+            report.push_str(&line);
+        }
+    }
+    if report.is_empty() {
+        report
+    } else {
+        format!(
+            "\n\nDelivered line(s) not found verbatim on the target (first {PER_PATH} per path):{report}"
+        )
+    }
+}
+
 fn anchored_delivery_content_gate(
     task_id: &str,
     repo_path: &std::path::Path,
@@ -10461,12 +10547,13 @@ fn anchored_delivery_content_gate(
                  task close rejected: delivery anchor `{anchor}` is reachable from \
                  `{parent_branch}`, but its tree effect is absent from the current \
                  target tree. Reachability alone cannot prove delivery.\n\n\
-                 Dropped path(s): {}\n\n\
+                 Dropped path(s): {}{}\n\n\
                  Cassy measured the missing tree effect; it cannot identify the \
                  change that removed it. Restore the missing delivery content on \
                  the assigned factory branch, commit it, and retry close; do not \
                  re-merge the already-reachable anchor for task {task_id}.",
-            paths.join(", ")
+            paths.join(", "),
+            dropped_line_samples(repo_path, anchor, parent_branch, &paths),
         ))),
         DeliveryContentPresence::Unknown { reason } => {
             Some(MergeStateGateOutcome::Reject(format!(
@@ -23967,6 +24054,143 @@ mod merge_state_gate_tests {
         ));
     }
 
+    /// cas-3f8c, the cas-bf07 shape: an earlier task commit added
+    /// `headerLatencyLabel`, and the same task's later commit replaced it with
+    /// `headerConnectionChip`. The worker then synced the target, the
+    /// delivery merged, and a later target commit extended the import line.
+    /// The earlier commit's hunk was rewritten by the task itself, so it is
+    /// not dropped delivery content.
+    #[test]
+    fn a_hunk_the_same_task_later_rewrote_is_not_dropped_content_cas_3f8c() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let commit_main_ts = |body: &str, message: &str| {
+            std::fs::write(p.join("main.ts"), body).unwrap();
+            git(p, &["add", "main.ts"]);
+            git(p, &["commit", "-q", "-m", message]);
+        };
+        commit_main_ts(
+            "import { attach, headerLatencyLabel } from \"./connection-state\";\nexport const latency = headerLatencyLabel();\n",
+            "fix(cas-test1): say Checking until the first latency sample",
+        );
+        commit_main_ts(
+            "import { attach, headerConnectionChip } from \"./connection-state\";\nexport const latency = headerConnectionChip();\n",
+            "fix(cas-test1): header chip reads the machine's state",
+        );
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::write(p.join("target-only.rs"), "// target-only\n").unwrap();
+        git(p, &["add", "target-only.rs"]);
+        git(p, &["commit", "-q", "-m", "chore: advance target"]);
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "main",
+                "-m",
+                "Merge branch 'main' into factory/worker",
+            ],
+        );
+        let worker_tip = rev_parse_local(p, "HEAD");
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "factory/worker",
+                "-m",
+                "merge worker delivery",
+            ],
+        );
+        // A later target change extends the delivered import line, so the
+        // merge tip no longer matches the target for this path.
+        commit_main_ts(
+            "import { attach, headerConnectionChip, type AttachSnapshot } from \"./connection-state\";\nexport const latency = headerConnectionChip();\n",
+            "feat: extend the connection-state import",
+        );
+
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(worker_tip);
+        let req = base_req(&task.id);
+        let outcome = run_factory_branch_merge_gate(&task, &req, "main", p);
+        assert!(
+            matches!(outcome, MergeStateGateOutcome::Proceed),
+            "a hunk the task rewrote itself must not read as dropped: {outcome:?}"
+        );
+    }
+
+    /// cas-3f8c: a real drop still rejects, and the refusal now names the
+    /// delivered lines the target lacks. The earlier hunk survives the same
+    /// task's later commit, but the integration discarded the delivery.
+    #[test]
+    fn a_real_drop_still_rejects_and_names_the_missing_lines_cas_3f8c() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        std::fs::write(p.join("main.ts"), "export const keep = 1;\n").unwrap();
+        git(p, &["add", "main.ts"]);
+        git(p, &["commit", "-q", "-m", "feat(cas-test1): keep"]);
+        std::fs::write(
+            p.join("main.ts"),
+            "export const keep = 1;\nexport const other = 2;\n",
+        )
+        .unwrap();
+        git(p, &["add", "main.ts"]);
+        git(p, &["commit", "-q", "-m", "feat(cas-test1): other"]);
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::write(p.join("target-only.rs"), "// target-only\n").unwrap();
+        git(p, &["add", "target-only.rs"]);
+        git(p, &["commit", "-q", "-m", "chore: advance target"]);
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "main",
+                "-m",
+                "Merge branch 'main' into factory/worker",
+            ],
+        );
+        let worker_tip = rev_parse_local(p, "HEAD");
+        git(p, &["checkout", "-q", "main"]);
+        // The integration keeps the target's tree: the delivery is lost.
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "-s",
+                "ours",
+                "factory/worker",
+                "-m",
+                "merge worker delivery (resolution dropped it)",
+            ],
+        );
+
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(worker_tip);
+        let req = base_req(&task.id);
+        let MergeStateGateOutcome::Reject(message) =
+            run_factory_branch_merge_gate(&task, &req, "main", p)
+        else {
+            panic!("a delivery the integration discarded must still be rejected");
+        };
+        assert!(message.contains("DELIVERY CONTENT DROPPED"), "{message}");
+        assert!(message.contains("main.ts"), "{message}");
+        assert!(
+            message.contains("Delivered line(s) not found verbatim on the target"),
+            "{message}"
+        );
+        assert!(message.contains("`export const keep = 1;`"), "{message}");
+    }
     /// A target-sync merge with no task-attributed content must remain
     /// fail-closed; the presence of a merge commit alone is not delivery.
     #[test]

@@ -305,6 +305,13 @@ impl Config {
                     Some(value.trim().to_string())
                 };
             }
+            "qa.github_status" => {
+                let qa = self.qa.get_or_insert_with(QaConfig::default);
+                qa.github_status = value
+                    .trim()
+                    .parse()
+                    .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
+            }
             "qa.independent_pass" => {
                 let qa = self.qa.get_or_insert_with(QaConfig::default);
                 qa.independent_pass = value

@@ -277,6 +277,23 @@ pub fn handle_pre_tool_use(
         return Ok(HookOutput::with_pre_tool_permission("deny", &refusal));
     }
 
+    // cas-2ee2 (GH #1023): a pull request merged on GitHub skips both Cassy
+    // merge paths, and any agent holding a `gh` token can do it, so the raw
+    // GitHub merge check applies to every role. (The supervisor already got
+    // it through `supervisor_merge_refusal` above.)
+    if tool_name == "Bash"
+        && !crate::harness_policy::is_supervisor(input)
+        && let Some(root) = cas_root
+        && let Some(cmd) = input
+            .tool_input
+            .as_ref()
+            .and_then(|ti| ti.get("command").and_then(|v| v.as_str()))
+        && let Some(refusal) =
+            crate::qa_pass::github_merge_refusal(root, std::path::Path::new(&input.cwd), cmd)
+    {
+        return Ok(HookOutput::with_pre_tool_permission("deny", &refusal));
+    }
+
     // ========================================================================
     // FACTORY WORKSPACE CONTRACT — ROOT-INDEPENDENT FALLBACK
     //

@@ -10,7 +10,7 @@ import { REFUSED_SEE_ABOVE, refusalSentence, refusal } from "./refusal";
 import { installAttentionObjects } from "./attention-objects";
 import { clearTransientAttachmentNotes, installAttachmentSheet, setAttachmentNote } from "./attachment-sheet";
 import { artifactFailureIsAboutTheFile, artifactIdFromHref, artifactIsLocalOnly, artifactLinkFor, openArtifact } from "./artifact-open";
-import { arrangeConversationShell, bindKeyboardViewport, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY, paletteShortcutLabel } from "./conversation-shell";
+import { arrangeConversationShell, bindKeyboardViewport, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY, paletteShortcutLabel, fitConversationHost } from "./conversation-shell";
 import { clockLabel } from "./thread-model";
 import { syncContextRail } from "./context-rail";
 import { applyScheme, markAppearanceCommands, setScheme, type SchemePreference } from "./scheme";
@@ -35,7 +35,7 @@ import { browserSupport, unsupportedBrowserNotice } from "./browser-support";
 import { attentionStore, catalog } from "./storage";
 import { createTerminalSurface, type TerminalSurface } from "./terminal";
 import { firstAttachRetry, machineConnection, sessionConnection } from "./session-connection";
-import { toastPlacementInThread, toastTopClearOfBanner } from "./toast-placement";
+import { toastPlacementInThread, toastTopAboveAction, toastTopClearOfBanner } from "./toast-placement";
 import { absoluteTimestamp, relativeTimestamp } from "./time";
 import { loadPaneLayout, movePane, normalizePaneLayout, orderedPaneIds, promotePane, savePaneLayout, type PaneLayout, type PaneLayoutStorage } from "./pane-layout";
 import { detectSpeechInput, SpeechDictationController, type SpeechInputCapability, type SpeechInputState } from "./speech-input";
@@ -1928,7 +1928,15 @@ function placeToastClearOfBanner(output: HTMLElement): void {
   // that row whenever it would land on it, as it does below a thread header.
   const brandRow = visibleBox(document.querySelector<HTMLElement>(".conversation-shell:not(.thread-open) .conversation-list-top"));
   const belowBrand = toastTopClearOfBanner(parseFloat(getComputedStyle(output).top), output.getBoundingClientRect(), brandRow);
-  if (belowBrand !== undefined) output.style.top = `${belowBrand}px`;
+  if (belowBrand !== undefined) {
+    // Below the brand it covered the list's title row (cas-71af, dfb2 QA F01):
+    // above the list's bottom action it covers no heading at all.
+    const heading = visibleBox(document.querySelector<HTMLElement>(".conversation-shell:not(.thread-open) .conversation-list-title"));
+    const action = visibleBox(document.querySelector<HTMLElement>(".conversation-shell:not(.thread-open) #compose-fab"))
+      ?? visibleBox(document.querySelector<HTMLElement>(".conversation-shell:not(.thread-open) #hub-footer-badges"));
+    const above = toastTopAboveAction(output.getBoundingClientRect(), action, heading);
+    output.style.top = `${above ?? toastTopClearOfBanner(belowBrand, output.getBoundingClientRect(), heading) ?? belowBrand}px`;
+  }
   const banner = document.querySelector<HTMLElement>(".terminal-disconnected-banner");
   const top = toastTopClearOfBanner(parseFloat(getComputedStyle(output).top), output.getBoundingClientRect(), banner?.getClientRects().length ? banner.getBoundingClientRect() : undefined);
   if (top !== undefined) output.style.top = `${top}px`;
@@ -2688,7 +2696,13 @@ function render(captureDraft = true): void {
     ? { state: connectionClass(headerConnection), text: fleetConnectionLabel(headerConnection, selected?.id) }
     : headerConnectionChip(machineConnectionSnapshot, connectionClass(connectionSnapshot), fleetConnectionLabel(machineConnectionSnapshot, selected?.id));
   const connectionState = connectionChip.state;
-  const connectionText = selected ? connectionLabel(sessionDown ? headerConnection : connectionSnapshot) : "idle";
+  // cas-71af (bf07 QA F01): the chip's tooltip reads the same state as the
+  // chip, the machine's own connection while the session is up, not the
+  // terminal attach (which said "live" beside a Degraded chip).
+  const connectionText = !selected ? "idle"
+    : sessionDown ? connectionLabel(headerConnection)
+    : connectionChip.state === "checking" ? "Checking the connection…"
+    : connectionLabel(machineConnectionSnapshot ?? connectionSnapshot);
   const latencyText = connectionChip.text;
   const counts = attentionCounts(attention);
   const infoItems = dismissableInfoItems(attention);
@@ -2853,7 +2867,7 @@ function render(captureDraft = true): void {
             <h1 class="${selectedSession ? "toolbar-session-title" : ""}"><button id="session-picker-toggle" class="session-picker-toggle" type="button" aria-haspopup="dialog" aria-expanded="${sessionPickerOpen}" aria-label="${escapeAttr(sessionPickerLabel)}" title="${escapeAttr(sessionPickerTooltip)}"><span class="session-picker-name">${escapeHtml(sessionTitleLead)}</span>${sessionTitleCodename ? `<span class="session-picker-codename codename">${escapeHtml(sessionTitleCodename)}</span>` : ""}<span class="session-picker-caret" aria-hidden="true">▾</span></button></h1>
           </div>
           ${selected ? `<span class="machine-chip" data-compact-label="${escapeAttr(compactMachineLabel)}" title="${escapeAttr(machineLabel)}">${escapeHtml(machineLabel)}</span><span class="mode-badge ${mode.toLowerCase()}" data-compact-label="${lease?.held_by_me ? "CTL" : "OBS"}"${sessionDown ? " hidden" : ""}>${mode}</span><span class="connection-summary ${connectionState}" title="${escapeAttr(compatibility ?? connectionText)}"><span class="connection-dot"></span><span data-machine-latency="${escapeAttr(selected.id)}">${latencyText}</span></span>` : ""}
-          <div class="actions"><button id="command-palette-toggle" class="command-palette-trigger" type="button" aria-label="Open command palette (${escapeAttr(paletteShortcutLabel())})" aria-keyshortcuts="Control+K Meta+K" title="Command palette (${escapeAttr(paletteShortcutLabel())})">${HEADER_PALETTE_ICON}<span class="action-label">${escapeHtml(paletteShortcutLabel())}</span></button>${showSessionControls ? `<span class="control-action" title="${escapeAttr(takeControlReason ?? controlActionLabel)}"><button id="lease" data-compact-label="${lease?.held_by_me ? "Rel" : "Ctrl"}" aria-label="${escapeAttr(controlActionLabel)}"${takeControlReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(takeControlReason)}" aria-describedby="control-disabled-reason"` : ""}>${HEADER_CONTROL_ICON}<span class="action-label">${controlActionLabel}</span></button>${takeControlReason ? `<span id="control-disabled-reason" class="sr-only">${escapeHtml(takeControlReason)}</span>` : ""}</span><button id="interrupt" class="danger" data-compact-label="Int" aria-label="Interrupt selected pane" title="${escapeAttr(interruptReason ?? "Interrupt selected pane")}"${interruptReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(interruptReason)}"` : ""}>${HEADER_INTERRUPT_ICON}<span class="action-label">Interrupt</span></button>` : ""}</div>
+          <div class="actions"><button id="command-palette-toggle" class="command-palette-trigger" type="button" aria-label="Open command palette (${escapeAttr(paletteShortcutLabel())})" aria-keyshortcuts="Control+K Meta+K" title="Command palette (${escapeAttr(paletteShortcutLabel())})">${HEADER_PALETTE_ICON}<span class="action-label">${escapeHtml(paletteShortcutLabel())}</span></button>${showSessionControls ? `<span class="control-action" title="${escapeAttr(takeControlReason ?? controlActionLabel)}"><button id="lease" data-compact-label="${lease?.held_by_me ? "Rel" : "Ctrl"}" aria-label="${escapeAttr(controlActionLabel)}"${takeControlReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(takeControlReason)}" aria-describedby="control-disabled-reason"` : ""}>${HEADER_CONTROL_ICON}<span class="action-label">${controlActionLabel}</span></button>${takeControlReason ? `<span id="control-disabled-reason" class="sr-only">${escapeHtml(takeControlReason)}</span>` : ""}</span><button id="interrupt" class="danger" data-compact-label="Int" aria-label="Interrupt selected pane" title="${escapeAttr(interruptReason ?? "Interrupt selected pane")}"${interruptReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(interruptReason)}" aria-describedby="session-controls-reason"` : ""}>${HEADER_INTERRUPT_ICON}<span class="action-label">Interrupt</span></button>` : ""}</div>
         </header>
         ${showSessionControls ? `<p id="session-controls-reason" class="session-controls-reason" role="note"${controlsNotice ? "" : " hidden"}>${escapeHtml(controlsNotice ?? "")}</p>` : ""}
         <section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}>${selectedSession ? '<div class="empty">Connecting to terminal…</div>' : showFleetBoard ? '<div id="fleet-board" class="fleet-board" aria-label="Fleet"></div>' : `<div class="empty empty-pane-slot">${emptyCanvasMarkup()}</div>`}</section>
@@ -2900,7 +2914,7 @@ function render(captureDraft = true): void {
           </section>
           <details class="palette-group palette-advanced" data-palette-group="advanced">
             <summary class="palette-group-heading">Advanced</summary>
-            <button type="button" class="palette-command" data-palette-action="terminal-view"><span>Open the terminal view</span><small>Machines, sessions and terminal controls</small></button>
+            <button type="button" class="palette-command" data-palette-action="terminal-view"><span>Open the terminal view</span><small>Machines and terminal controls</small></button>
             <button type="button" class="palette-command" data-palette-action="workers"><span>${escapeHtml(workersCommandLabel(revealWorkers).title)}</span><small>${escapeHtml(workersCommandLabel(revealWorkers).hint)}</small></button>
             <button type="button" class="palette-command" data-palette-action="dormant"><span>${escapeHtml(dormantCommandLabel(revealDormant).title)}</span><small>${escapeHtml(dormantCommandLabel(revealDormant).hint)}</small></button>
           </details>
@@ -3100,6 +3114,8 @@ function renderConversationList(): void {
       state.replaceChildren(separator, label);
     }
   }
+  // The state's width changes the room the machine · codename line has.
+  fitConversationHost(document);
 }
 
 /**
@@ -3894,6 +3910,25 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
       // Saved and connected are announced at the installation seam inside
       // pairMachine; the handler only closes the dialog.
       document.querySelector<HTMLDialogElement>("#pair-dialog")?.close();
+      // cas-71af (dfb2 QA F02): the dialog hands focus back to a Pair a
+      // machine button the render already replaced, so it fell to <body>.
+      // Land it on the conversation a phone opens for the new machine, else
+      // on Pair a machine where the operator started; a thread, not its reply
+      // box, so a phone raises no keyboard over it.
+      // Only focus that is lost is re-landed: anything the operator focuses
+      // meanwhile is theirs.
+      const deadline = Date.now() + 3_000;
+      const reland = (): void => {
+        const active = document.activeElement;
+        if (!active || active === document.body || !active.isConnected || active.closest("dialog:not([open])")) {
+          for (const target of [focusTargets.thread, () => document.querySelector<HTMLElement>("#pair-toggle")]) {
+            const element = target();
+            if (element?.isConnected && element.getClientRects().length > 0) { element.focus(); break; }
+          }
+        }
+        if (Date.now() < deadline) requestAnimationFrame(reland);
+      };
+      window.setTimeout(reland, 0);
     }).catch((error) => {
       // A pairing failure is stated inside the dialog beside Pair; a toast
       // behind the backdrop only duplicated it. Anything else still surfaces.
@@ -3906,6 +3941,17 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   const explainIfUnavailable = (button: HTMLButtonElement): boolean => {
     const reason = button.dataset.disabledReason;
     if (!reason) return false;
+    // cas-71af (6929 QA F01): when the reason is already on screen under the
+    // header, a toast only repeats it a third time. The click calls attention
+    // to the sentence that is there instead.
+    const notice = document.querySelector<HTMLElement>("#session-controls-reason");
+    if (notice && !notice.hidden && notice.textContent?.includes(reason)) {
+      notice.classList.remove("called");
+      void notice.offsetWidth;
+      notice.classList.add("called");
+      window.setTimeout(() => notice.classList.remove("called"), 1_200);
+      return true;
+    }
     toast(reason);
     return true;
   };
@@ -3987,6 +4033,9 @@ app.addEventListener("click", (event) => {
 const localOnlyArtifacts = new Set<string>();
 
 window.addEventListener("keydown", globalShortcut, true);
+// The conversation header's machine · codename line is fitted to its room
+// (cas-71af): a width change can make the machine name step aside or return.
+window.addEventListener("resize", () => fitConversationHost(document), { passive: true });
 // Rotation changes the layout in CSS instantly, but which panes mount a
 // terminal, whether the worker strip is collapsed and the PTY column floor are
 // all decided in JS at render time. Without this, a phone turned on its side

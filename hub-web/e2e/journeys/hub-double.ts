@@ -124,6 +124,7 @@ export class HubDouble {
         const url = new URL(String(input instanceof Request ? input.url : input), location.href);
         if (url.hostname.endsWith(".test") && url.pathname === "/v1/events") {
           if (down.has(url.hostname) || !navigator.onLine) return Promise.reject(new TypeError("Failed to fetch"));
+          if (init?.signal?.aborted) return Promise.reject(new DOMException("The operation was aborted.", "AbortError"));
           let registered: ReadableStreamDefaultController<Uint8Array> | undefined;
           const body = new ReadableStream<Uint8Array>({
             start(c) {

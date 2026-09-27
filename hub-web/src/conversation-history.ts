@@ -200,7 +200,8 @@ export class ConversationHistory {
    * Asks and blockers still waiting on the operator, oldest first. An ask is
    * answered by a send carrying its id; a blocker is acknowledged by any
    * operator send after it that was not refused. A refused send never reached
-   * the supervisor, so the blocker keeps waiting beside it; a sending send
+   * the supervisor, so the blocker keeps waiting beside it, and so does one
+   * whose receipt never came (Not confirmed, cas-71af); a sending send
    * acknowledges optimistically and gives the blocker back if refused, and a
    * successful retry acknowledges it. Drives the list's waiting affordance and
    * the pin.
@@ -211,7 +212,7 @@ export class ConversationHistory {
       if (event.kind !== "reply") return;
       const reply = event.value;
       if (reply.kind === "ask" && !this.answered(reply.notification_id)) out.push(reply);
-      else if (reply.kind === "blocker" && !this.events.slice(index + 1).some((later) => later.kind === "send" && later.value.state !== "error")) out.push(reply);
+      else if (reply.kind === "blocker" && !this.events.slice(index + 1).some((later) => later.kind === "send" && later.value.state !== "error" && later.value.state !== "unconfirmed")) out.push(reply);
     });
     return out;
   }

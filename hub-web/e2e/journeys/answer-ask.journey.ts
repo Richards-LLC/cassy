@@ -107,6 +107,16 @@ test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
     expect(quiet.edge, "no attention edge").toBe("rgba(0, 0, 0, 0)");
     await expect(answered.locator(".chip.sent .tick")).toBeVisible();
     await expect(page.getByRole("log").locator(".blk-hint")).toHaveCount(0);
+    // cas-71af (aac8 QA F01): the acknowledged blocker is handled too. It
+    // quiets to the supervisor's colour and says so, instead of staying a red alarm.
+    const handled = page.getByRole("log").getByRole("group", { name: `Blocker from ${PELICAN}, acknowledged` });
+    await expect(handled.locator(".blk-handled")).toHaveText("Acknowledged — you replied");
+    await expect(handled.locator(".blk-handled .tick")).toBeVisible();
+    expect(await handled.evaluate((object) => {
+      const probe = document.createElement("span"); probe.style.background = "var(--sup-bg)"; object.append(probe);
+      const supervisor = getComputedStyle(probe).backgroundColor; probe.remove();
+      return getComputedStyle(object.querySelector(".obj-body")!).backgroundColor === supervisor;
+    }), "acknowledged blocker background").toBe(true);
     // The answer comes after everything shown, so nothing is left waiting in the rail (cas-ce17).
     await expect(waiting).toBeHidden();
     // It sorts after the machine's future-stamped blocker, but shows the time it was sent, under today (cas-ac1f).

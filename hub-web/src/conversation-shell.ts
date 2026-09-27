@@ -299,6 +299,39 @@ export function conversationShellMarkup(model: ConversationShellModel): string {
 }
 
 /** Rehouse existing owned regions; retain terminal surfaces and composer APIs. */
+/**
+ * cas-71af (e918 QA F01): a "machine · codename" line whose machine name cannot
+ * keep a letter and its ellipsis (2ch) beside the whole codename drops the
+ * machine and its separator instead of shrinking it to a glyph sliver; the
+ * line's title still names it. `available` is the width the line may take.
+ * Decided from widths that do not depend on the current state (the codename's
+ * full width, the space on offer), so it never flips back and forth.
+ */
+export function fitMachineLine(line: HTMLElement | null | undefined, available: number): void {
+  if (!line) return;
+  const codename = line.querySelector<HTMLElement>(":scope > .codename");
+  const machine = line.querySelector<HTMLElement>(":scope > .host-machine, :scope > .proj2-machine");
+  if (!codename || !machine || !(available > 0)) { line.classList.remove("machine-squeezed"); return; }
+  const ch = parseFloat(getComputedStyle(codename).fontSize) * 0.6;
+  line.classList.toggle("machine-squeezed", codename.scrollWidth + 5 * ch > available + 1);
+}
+
+/** The conversation header's host line, fitted to the room beside its connection state. */
+export function fitConversationHost(root: ParentNode): void {
+  const identity = root.querySelector<HTMLElement>(".conversation-identity");
+  const host = identity?.querySelector<HTMLElement>(".conversation-host");
+  if (!identity || !host) return;
+  // The room is the identity row less the avatar, not the host line's own
+  // width: that line is sized to its content, so it shrinks once the machine
+  // steps aside and would keep it aside for good.
+  const avatar = identity.querySelector<HTMLElement>(":scope > .conversation-avatar");
+  const style = getComputedStyle(identity);
+  const room = identity.clientWidth - parseFloat(style.paddingLeft || "0") - parseFloat(style.paddingRight || "0")
+    - (avatar ? avatar.getBoundingClientRect().width + (parseFloat(style.columnGap) || 0) : 0);
+  const connection = host.querySelector<HTMLElement>("#conversation-connection");
+  fitMachineLine(host.querySelector<HTMLElement>(":scope > .host-where"), room - (connection?.getBoundingClientRect().width ?? 0));
+}
+
 export function arrangeConversationShell(app: HTMLElement, model: ConversationShellModel): void {
   const old = app.querySelector<HTMLElement>(".shell");
   if (!old) return;

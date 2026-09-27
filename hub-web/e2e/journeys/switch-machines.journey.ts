@@ -113,11 +113,14 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     ]) {
       await filter.fill("zz");
       await expect(picker.locator(".session-picker-entry:visible")).toHaveCount(0);
+      // An empty result says so, not an empty dialog (journey F18).
+      await expect(picker.getByRole("status")).toHaveText("No sessions match “zz”.");
       await close();
       await closed();
       await open();
       await expect(filter).toHaveValue("");
       await expect(picker.locator(".session-picker-entry:visible")).toHaveCount(everySession);
+      await expect(picker.locator("#session-picker-no-match")).toBeHidden();
     }
     // A closed picker must not pop back open over the next dialog either.
     await page.keyboard.press("Escape");

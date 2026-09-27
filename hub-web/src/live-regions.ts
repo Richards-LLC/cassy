@@ -17,6 +17,8 @@ export interface LiveRegionView {
   readonly mode?: { readonly badge: string; readonly compact: string; readonly hidden?: boolean };
   readonly controlAction?: { readonly label: string; readonly disabledReason?: string };
   readonly interruptReason?: string;
+  /** The visible line under the header naming why its controls are unavailable. */
+  readonly controlsNotice?: string;
   /** Full sentence, or undefined when the hub is live. */
   readonly staleNotice?: string;
   readonly controlReason?: string;
@@ -56,6 +58,16 @@ function setNotice(element: HTMLElement | null, text: string | undefined): void 
   element.hidden = text === undefined;
 }
 
+/**
+ * The on-screen reason for the header's unavailable controls (journey F9):
+ * each distinct reason once, so an outage that disables both Release control
+ * and Interrupt reads as one sentence. Undefined when every control is usable.
+ */
+export function sessionControlsNotice(...reasons: readonly (string | undefined)[]): string | undefined {
+  const distinct = [...new Set(reasons.filter((reason): reason is string => Boolean(reason?.trim())))];
+  return distinct.length ? distinct.join(" ") : undefined;
+}
+
 export function applyLiveRegions(root: ParentNode, view: LiveRegionView): void {
   const summary = root.querySelector<HTMLElement>(".connection-summary");
   if (summary && view.connection) {
@@ -89,6 +101,7 @@ export function applyLiveRegions(root: ParentNode, view: LiveRegionView): void {
     interrupt.title = view.interruptReason ?? "Interrupt selected pane";
     setDisabledReason(interrupt, view.interruptReason);
   }
+  setNotice(root.querySelector<HTMLElement>("#session-controls-reason"), view.controlsNotice);
 
   setNotice(root.querySelector<HTMLElement>(".status-stale"), view.staleNotice);
   setNotice(root.querySelector<HTMLElement>(".control-disabled-reason"), view.controlReason);

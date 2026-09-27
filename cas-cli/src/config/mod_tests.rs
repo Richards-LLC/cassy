@@ -52,11 +52,11 @@ fn qa_user_facing_labels_default_and_round_trip() {
 
     assert_eq!(
         config.qa().user_facing_labels,
-        vec!["ui", "hub", "cli-ux", "commander", "frontend"]
+        vec!["ui", "hub", "hub-web", "cli-ux", "commander", "frontend"]
     );
     assert_eq!(
         config.get("qa.user_facing_labels"),
-        Some("ui,hub,cli-ux,commander,frontend".to_string())
+        Some("ui,hub,hub-web,cli-ux,commander,frontend".to_string())
     );
     assert!(meta::registry().get("qa.user_facing_labels").is_some());
 

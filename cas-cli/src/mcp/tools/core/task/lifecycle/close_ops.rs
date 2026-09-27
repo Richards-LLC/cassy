@@ -12293,7 +12293,9 @@ fn scoped_proof_base_for_work_target(
 /// layouts bound to the owning repository while refusing roots that are not
 /// contained in a git checkout at all. A `.git` file is accepted as well as a
 /// directory so linked worktrees use the same path.
-fn resolve_close_gate_repo_root(cas_root: &std::path::Path) -> Result<std::path::PathBuf, String> {
+pub(crate) fn resolve_close_gate_repo_root(
+    cas_root: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
     use std::process::Command;
 
     for ancestor in cas_root.ancestors() {
@@ -12409,7 +12411,7 @@ fn resolve_standalone_merge_target(repo_path: &std::path::Path) -> Result<String
 /// worker-spawn normalization, so a late parent link cannot leave close
 /// checking the stale trunk. A distinct task target remains explicit
 /// supervisor authority and is never overwritten.
-fn effective_close_work_target(
+pub(crate) fn effective_close_work_target(
     task: &Task,
     parent_epic: Option<&Task>,
 ) -> Option<cas_types::WorkTarget> {

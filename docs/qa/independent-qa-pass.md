@@ -76,6 +76,23 @@ non-empty reason. The waiver is:
 - recorded on the pass as `state=waived` with the supervisor as issuer;
 - listed with its reason in `coordination action=epic_status`.
 
+The opposite request exists too (cas-74284). A supervisor can ask for a pass
+on a parked delivery that the park did not judge user-facing, for example
+a UI change parked with no demo_statement, whose field the delivery-proof
+scope lock no longer lets anyone set. Use `verification action=qa_request
+task_id=<parked task> summary="<why>"`. It opens a round for the parked
+tip exactly as the park would, records `requested by supervisor: <why>` as
+the reason, and appends a `✅ DECISION` note. From then on every merge gate
+waits for that round. It is supervisor-only and needs a reason. It refuses
+a task that is not parked awaiting merge.
+
+The park measures the task's own delivery branch, including a per-task
+`factory/<name>-<task>` branch. Before GH #1040 it measured
+`factory/<name>`, which is frozen for another parked task in that shape.
+That missed cas-470e's hub-web change until after its merge.
+`qa.user_facing_labels` includes `hub-web` by default, so such a task
+also cannot be created without a demo_statement.
+
 ## 2. Trigger: the QA dispatch
 
 When `park_task_awaiting_merge` parks an eligible task, Cassy does three

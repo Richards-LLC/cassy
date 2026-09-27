@@ -8,7 +8,7 @@ pub(super) fn register_qa(registry: &mut ConfigRegistry) {
         name: "User-Facing Task Labels",
         description: "Comma-separated labels that require a non-empty demo_statement when creating a task. Epics and supervisor overrides are exempt.",
         value_type: ConfigType::StringList,
-        default: "ui,hub,cli-ux,commander,frontend",
+        default: "ui,hub,hub-web,cli-ux,commander,frontend",
         constraint: Constraint::None,
         advanced: false,
         requires_feature: None,

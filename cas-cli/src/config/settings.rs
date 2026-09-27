@@ -371,7 +371,9 @@ pub fn default_max_rounds() -> u32 {
 }
 
 pub fn default_user_facing_labels() -> Vec<String> {
-    ["ui", "hub", "cli-ux", "commander", "frontend"]
+    // cas-74284: `hub-web` is the label QA follow-ups for the Commander web
+    // client carry; without it they were created with no demo_statement.
+    ["ui", "hub", "hub-web", "cli-ux", "commander", "frontend"]
         .into_iter()
         .map(ToOwned::to_owned)
         .collect()

@@ -156,7 +156,103 @@ impl CasCore {
             head,
             changed,
             QaDeliveryLocation::ParkedForMerge,
+            None,
         )
+    }
+
+    /// cas-74284: a supervisor asks for an independent QA round on a parked
+    /// delivery that Cassy did not judge user-facing at the park (no
+    /// demo_statement, no surface path or journey in its diff). Opens the
+    /// round for the parked tip exactly as the park would, with the
+    /// supervisor's reason recorded as the eligibility reason, so the merge
+    /// gates wait for a verdict from then on. Returns the dispatch text, or
+    /// why no round could be opened.
+    pub(crate) fn request_independent_qa(
+        &self,
+        task: &Task,
+        reason: &str,
+    ) -> Result<String, String> {
+        let config = crate::config::Config::load(&self.cas_root)
+            .map_err(|error| format!("could not load config: {error}"))?;
+        if !config.qa().independent_pass {
+            return Err(
+                "qa.independent_pass is off for this project, so no merge gate would wait for the round"
+                    .to_string(),
+            );
+        }
+        if task.status != TaskStatus::AwaitingMerge {
+            return Err(format!(
+                "{} is {:?}, not parked awaiting merge. A round binds a parked delivery tip;                  the worker's close parks it (and dispatches QA itself when the diff is user-facing).",
+                task.id, task.status
+            ));
+        }
+        let implementer = task.assignee.as_deref().ok_or_else(|| {
+            format!(
+                "{} has no assignee, so there is no implementer to keep out of the review",
+                task.id
+            )
+        })?;
+        // Resolve the delivery's repository and target the way the close
+        // does: the task's (or its epic's) work target, else this Cassy
+        // root's repository and the epic branch or trunk.
+        let parent_epic = self
+            .open_task_store()
+            .ok()
+            .and_then(|store| store.get_parent_epic(&task.id).ok().flatten());
+        let (repo_root, target_branch) =
+            match super::close_ops::effective_close_work_target(task, parent_epic.as_ref()) {
+                Some(target) => {
+                    let context =
+                        crate::mcp::tools::core::task::repo_context::resolve_repo_context(
+                            &self.cas_root,
+                            &target,
+                        )?;
+                    (context.repo_root, context.target_branch)
+                }
+                None => {
+                    let repo_root = super::close_ops::resolve_close_gate_repo_root(&self.cas_root)
+                        .unwrap_or_else(|_| {
+                            self.cas_root
+                                .parent()
+                                .unwrap_or(&self.cas_root)
+                                .to_path_buf()
+                        });
+                    let target_branch =
+                        match parent_epic.as_ref().and_then(|epic| epic.branch.clone()) {
+                            Some(branch) => branch,
+                            None => {
+                                crate::mcp::tools::core::task::repo_context::resolve_default_branch(
+                                    &repo_root,
+                                )?
+                            }
+                        };
+                    (repo_root, target_branch)
+                }
+            };
+        let branch = super::close_ops::close_measured_factory_branch(&repo_root, task, implementer);
+        let head = task
+            .deliverables
+            .factory_branch_anchor
+            .clone()
+            .or_else(|| super::close_ops::resolve_branch_sha(&repo_root, &branch))
+            .ok_or_else(|| {
+                format!(
+                    "the parked tip of {} could not be resolved ({branch} does not resolve and no anchor is recorded)",
+                    task.id
+                )
+            })?;
+        let changed = changed_paths_for_delivery(&repo_root, &target_branch, &head).ok();
+        self.independent_qa_for_paths(
+            task,
+            &repo_root,
+            &target_branch,
+            &branch,
+            Some(&head),
+            changed,
+            QaDeliveryLocation::ParkedForMerge,
+            Some(reason),
+        )
+        .ok_or_else(|| format!("Cassy could not open a round for {} @{head}", task.id))
     }
 
     /// Shared tail of the park and the close backstop: decide eligibility
@@ -173,6 +269,7 @@ impl CasCore {
         head: Option<&str>,
         changed: Option<Vec<String>>,
         location: QaDeliveryLocation<'_>,
+        requested: Option<&str>,
     ) -> Option<String> {
         let config = crate::config::Config::load(&self.cas_root).ok()?;
         let qa = config.qa();
@@ -182,7 +279,13 @@ impl CasCore {
             .map(|paths| crate::qa_pass::catalog_journeys_for(repo, paths))
             .unwrap_or_default();
         let mut eligibility = delivery_eligibility(task, &qa, changed.as_deref(), &journeys);
-        if !eligibility.is_eligible() {
+        if let Some(reason) = requested.map(str::trim).filter(|reason| !reason.is_empty()) {
+            // cas-74284: the supervisor's request is the reason on record,
+            // whatever the diff alone would have said.
+            eligibility
+                .reasons
+                .push(format!("requested by supervisor: {reason}"));
+        } else if !eligibility.is_eligible() {
             // GH #1001 (cas-627c): once a round is on record the delivery is
             // gated (`gate_applies`), so a re-park must open the next round
             // even when this park's diff alone looks non-user-facing: a
@@ -591,6 +694,7 @@ impl CasCore {
                 Some(&head),
                 changed,
                 location,
+                None,
             )
             .unwrap_or_default();
         QaCloseGate::Refuse(format!(

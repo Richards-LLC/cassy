@@ -16427,7 +16427,7 @@ fn run_epic_close_merge_gate_with_budget(
         detail = detail,
         closing_instruction = closing_instruction.replace("{parent}", parent_branch),
         cleaned_worktree_guidance = cleaned_worktree_guidance,
-                        parent = child_target,
+        parent = parent_branch,
         tool_prefix = crate::mcp::tools::core::guidance::caller_prefix()
     ))
 }

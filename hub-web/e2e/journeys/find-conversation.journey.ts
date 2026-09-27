@@ -191,7 +191,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     // The lease command sits in its own group once a conversation is open,
     // and the palette speaks of conversations, not sessions.
     await expect(page.locator("#palette-group-session")).toHaveText("This conversation");
-    await expect(filter).toHaveAttribute("placeholder", "Type a command or conversation");
+    await expect(page.locator("#command-palette-query")).toHaveAttribute("placeholder", "Type a command or conversation");
     await expect(page.locator('#command-palette [data-palette-group="session"] [data-palette-action="control"]')).toHaveCount(1);
     await expect(page.getByRole("textbox", { name: "Your message" })).toBeFocused();
   });

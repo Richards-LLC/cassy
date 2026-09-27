@@ -1439,7 +1439,39 @@ fn terminate_failed_launch(
     }
 }
 
+/// Keep a broken peer from killing the hub (cas-621ec).
+///
+/// `main` resets SIGPIPE to `SIG_DFL` for every `cas` process so that
+/// `cas … | head` exits quietly. That disposition is fatal to a long-lived
+/// server: hyper writes HTTP/1 responses with `writev` (tokio's `TcpStream`
+/// reports `is_write_vectored() == true`), and std's
+/// `TcpStream::write_vectored` issues a plain `writev(2)`; only the scalar
+/// `write` path uses `send(…, MSG_NOSIGNAL)`. A Commander client that
+/// disconnects mid-response therefore raised SIGPIPE and the kernel killed
+/// the hub (`code=killed, signal=PIPE` on soundwave, 2026-09-26). With the
+/// signal ignored the write fails with `EPIPE`, hyper drops that one
+/// connection and the hub keeps serving. Children spawned through
+/// `std::process::Command` still start with the default disposition.
+fn ignore_sigpipe_for_server() {
+    #[cfg(unix)]
+    // SAFETY: installing SIG_IGN for SIGPIPE is async-signal-safe and does not
+    // interact with any Rust-managed state.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+}
+
+/// One hub.log breadcrumb, prefixed with an RFC 3339 UTC timestamp so the
+/// log can be lined up against the service manager's journal.
+fn hub_log_line(message: &str) -> String {
+    format!(
+        "{} {message}",
+        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    )
+}
+
 fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: u16) -> Result<()> {
+    ignore_sigpipe_for_server();
     let addr = SocketAddr::new(args.bind, args.port);
     validate_control_bind(addr, TransportSecurity::Plaintext)?;
     let paths = HubRuntimePaths::default_for_user()?;
@@ -1451,11 +1483,47 @@ fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: 
         .create(true)
         .append(true)
         .open(paths.log_path())?;
+    // One "starting" line per process start. The matching "exited" line below
+    // tells a clean stop or an error apart from a kill: a start line with no
+    // exit line before the next start means the process died by signal.
     writeln!(
         startup_log,
-        "cas hub serve starting (tailscale_serve={tailscale_serve}, bind={addr})"
+        "{}",
+        hub_log_line(&format!(
+            "cas hub serve starting (tailscale_serve={tailscale_serve}, bind={addr}, pid={}, launched_by={})",
+            std::process::id(),
+            args.launched_by,
+        ))
     )?;
     startup_log.flush()?;
+    let result = serve_foreground_logged(
+        args,
+        tailscale_serve,
+        tailscale_port,
+        addr,
+        paths,
+        startup_log.try_clone()?,
+    );
+    let exit_line = match &result {
+        Ok(()) => format!("cas hub serve exited cleanly (pid={})", std::process::id()),
+        Err(error) => format!(
+            "cas hub serve exited with error (pid={}): {error:#}",
+            std::process::id()
+        ),
+    };
+    let _ = writeln!(startup_log, "{}", hub_log_line(&exit_line));
+    let _ = startup_log.flush();
+    result
+}
+
+fn serve_foreground_logged(
+    args: &HubServeArgs,
+    tailscale_serve: bool,
+    tailscale_port: u16,
+    addr: SocketAddr,
+    paths: HubRuntimePaths,
+    mut startup_log: std::fs::File,
+) -> Result<()> {
     let (tailscale_serve, tailscale_port) = resolve_lifecycle_tailscale_request(
         tailscale_serve,
         tailscale_port,
@@ -1524,9 +1592,12 @@ fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: 
             );
             let _ = writeln!(
                 startup_log,
-                "Tailscale Serve ensure {} in {}ms",
-                if ensure_result.is_ok() { "succeeded" } else { "refused" },
-                ensure_started.elapsed().as_millis(),
+                "{}",
+                hub_log_line(&format!(
+                    "Tailscale Serve ensure {} in {}ms",
+                    if ensure_result.is_ok() { "succeeded" } else { "refused" },
+                    ensure_started.elapsed().as_millis(),
+                )),
             );
             match ensure_result {
                 Ok(receipt) => (Some(proxy_listener), Some(receipt), None),
@@ -1918,6 +1989,13 @@ fn status(cli: &Cli) -> Result<()> {
             let holder = paths.lock_holders().into_iter().next();
             let service_warning =
                 super::hub_service::inactive_detached_warning(&paths, None)?;
+            // An installed service owns (re)starts; `cas hub start` would only
+            // add an unsupervised detached hub next to it.
+            let missing_remedy = if service_warning.is_some() {
+                "Run `cas hub restart`."
+            } else {
+                "Run `cas hub start`."
+            };
             let transport = hub_transport_report(&paths, None);
             if cli.json {
                 println!(
@@ -1929,13 +2007,14 @@ fn status(cli: &Cli) -> Result<()> {
                             "pid": null,
                             "age_secs": null,
                             "message": "no runtime record",
-                            "remedy": "Run `cas hub start`.",
+                            "remedy": missing_remedy,
                         })),
                         "record": null,
                         "binary": env!("CARGO_PKG_VERSION"),
                         "lock_holder": holder.as_ref().map(lock_holder_json),
                         "tailscale_serve": transport,
                         "service_warning": service_warning,
+                        "service_status": service_status(service_warning),
                     })
                 );
             } else if let Some(holder) = &holder {
@@ -1946,12 +2025,15 @@ fn status(cli: &Cli) -> Result<()> {
                 );
                 println!("  remedy: {}", hub_state_remedy(state, holder.pid));
                 if let Some(warning) = service_warning {
-                    println!("WARNING: {warning}");
+                    println!("ERROR: {warning}");
                 }
                 println!("{}", render_transport_status(&transport));
             } else {
                 println!("Cassy hub is not running: no runtime record");
-                println!("  remedy: Run `cas hub start`.");
+                println!("  remedy: {missing_remedy}");
+                if let Some(warning) = service_warning {
+                    println!("ERROR: {warning}");
+                }
             }
             let detail = holder
                 .as_ref()
@@ -1981,6 +2063,7 @@ fn status(cli: &Cli) -> Result<()> {
                 "binary": env!("CARGO_PKG_VERSION"),
                 "tailscale_serve": transport,
                 "service_warning": service_warning,
+                "service_status": service_status(service_warning),
             })
         );
     } else {
@@ -1989,17 +2072,27 @@ fn status(cli: &Cli) -> Result<()> {
             render_status(&record, state, env!("CARGO_PKG_VERSION"))
         );
         if let Some(warning) = service_warning {
-            println!("WARNING: {warning}");
+            println!("ERROR: {warning}");
         }
         println!("{}", render_transport_status(&transport));
     }
     anyhow::ensure!(live, "cas hub is not ready; see status above");
+    // cas-621ec: a hub serving outside its installed service has no restart
+    // supervision; that is an error, not a footnote.
+    if let Some(warning) = service_warning {
+        anyhow::bail!("cas hub {warning}");
+    }
     anyhow::ensure!(
         !transport.is_failure(),
         "Tailscale Serve check failed: {}",
         transport.message_with_remedy()
     );
     Ok(())
+}
+
+/// `--json` severity of the installed-service finding (cas-621ec).
+fn service_status(finding: Option<&str>) -> &'static str {
+    if finding.is_some() { "error" } else { "ok" }
 }
 
 fn render_transport_status(report: &HubTransportReport) -> String {
@@ -2357,6 +2450,17 @@ pub(crate) fn restart_stale_hub(
     binary_version: &str,
     cli: &Cli,
 ) -> Result<HubRestartOutcome> {
+    // cas-621ec: rewrite an installed unit to the current restart policy
+    // before any early return below, so a hub that needs no restart, or is
+    // not running at all, still gets the new policy on this update.
+    if let Err(error) = super::hub_service::refresh_installed_service() {
+        tracing::warn!(error = %format!("{error:#}"), "cas update: hub service unit refresh failed");
+        if !cli.json {
+            eprintln!(
+                "cas update: could not refresh the hub service definition: {error:#}; rerun `cas hub service install` with the same flags to rewrite it"
+            );
+        }
+    }
     let paths = HubRuntimePaths::default_for_user()?;
     let record = paths.read_process_record().ok();
     let holder = paths.lock_holders().into_iter().next();
@@ -2684,6 +2788,78 @@ fn actual_serve_target(handlers: &[(String, String)]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fork, reproduce `main`'s SIGPIPE reset, optionally apply the hub's
+    /// serve-start fix, then make the same kind of call hyper makes: a std
+    /// vectored socket write to a peer that has gone away. Returns the raw
+    /// wait status. The child only makes async-signal-safe calls (`signal`,
+    /// `writev`, `_exit`), so forking from the multithreaded harness is sound.
+    #[cfg(unix)]
+    fn vectored_write_to_closed_peer_in_child(ignore_sigpipe: bool) -> libc::c_int {
+        use std::io::{IoSlice, Write};
+        use std::os::unix::net::UnixStream;
+
+        let (writer, reader) = UnixStream::pair().unwrap();
+        drop(reader);
+        let payload = [b'x'; 64];
+        // SAFETY: see the function comment; the child never returns.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed");
+        if pid == 0 {
+            // SAFETY: async-signal-safe; this is exactly what `main` does.
+            unsafe {
+                libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+            }
+            if ignore_sigpipe {
+                ignore_sigpipe_for_server();
+            }
+            let result =
+                (&writer).write_vectored(&[IoSlice::new(&payload), IoSlice::new(&payload)]);
+            let code = match result {
+                Err(error) if error.raw_os_error() == Some(libc::EPIPE) => 0,
+                _ => 3,
+            };
+            // SAFETY: terminate the forked child without running harness code.
+            unsafe { libc::_exit(code) }
+        }
+        drop(writer);
+        let mut status = 0;
+        // SAFETY: waiting on our own child.
+        let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
+        assert_eq!(waited, pid, "waitpid failed");
+        status
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vectored_write_to_a_gone_peer_kills_a_process_with_mains_sigpipe_disposition() {
+        // cas-621ec root cause: std's vectored socket write is a bare writev
+        // with no MSG_NOSIGNAL, so under `main`'s SIG_DFL it is fatal.
+        let status = vectored_write_to_closed_peer_in_child(false);
+        assert!(libc::WIFSIGNALED(status), "wait status {status:#x}");
+        assert_eq!(libc::WTERMSIG(status), libc::SIGPIPE);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hub_serve_sigpipe_fix_turns_a_gone_peer_into_epipe() {
+        let status = vectored_write_to_closed_peer_in_child(true);
+        assert!(
+            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+            "the child must survive and observe EPIPE; wait status {status:#x}"
+        );
+    }
+
+    #[test]
+    fn hub_log_lines_carry_an_rfc3339_utc_timestamp() {
+        let message = "cas hub serve starting (tailscale_serve=false, bind=127.0.0.1:4173)";
+        let line = hub_log_line(message);
+        let (stamp, rest) = line.split_once(' ').unwrap();
+        chrono::DateTime::parse_from_rfc3339(stamp)
+            .unwrap_or_else(|error| panic!("{stamp:?} is not RFC 3339: {error}"));
+        assert!(stamp.ends_with('Z'), "{stamp}");
+        assert_eq!(rest, message);
+    }
 
     fn record(version: &str, port: u16, tailscale_serve_port: Option<u16>) -> HubProcessRecord {
         HubProcessRecord {

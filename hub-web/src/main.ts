@@ -8,8 +8,8 @@ import { ConversationHistory } from "./conversation-history";
 import { ConversationView } from "./conversation-view";
 import { REFUSED_SEE_ABOVE, refusalSentence, refusal } from "./refusal";
 import { installAttentionObjects } from "./attention-objects";
-import { installAttachmentSheet, setAttachmentNote } from "./attachment-sheet";
-import { artifactIdFromHref, artifactIsLocalOnly, artifactLinkFor, openArtifact } from "./artifact-open";
+import { clearTransientAttachmentNotes, installAttachmentSheet, setAttachmentNote } from "./attachment-sheet";
+import { artifactFailureIsAboutTheFile, artifactIdFromHref, artifactIsLocalOnly, artifactLinkFor, openArtifact } from "./artifact-open";
 import { arrangeConversationShell, bindKeyboardViewport, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY } from "./conversation-shell";
 import { clockLabel } from "./thread-model";
 import { syncContextRail } from "./context-rail";
@@ -631,10 +631,14 @@ watchPairingFragment(window, pendingPairingStore, (fragment) => {
 function createConnection(machine: StoredMachine): HubConnectionSupervisor {
   return new HubConnectionSupervisor(machine, {
     onState: (state) => {
+      const wasLive = connectionStates.get(machine.id)?.phase === "live";
       connectionStates.set(machine.id, state);
       // Anchor staleness to the last live moment: retry transitions rewrite
       // snapshot.since, which would report a ten-minute outage as "just now".
       if (state.phase === "live") lastLiveAt.set(machine.id, Date.now());
+      // cas-c808 QA F01: a card that said the machine couldn't be reached
+      // must not keep saying so once it is back.
+      if (state.phase === "live" && !wasLive) clearTransientAttachmentNotes(document, machine.id);
       const connectedNotice = firstConnections.observe(machine.id, machine.label, state);
       if (connectedNotice) toast(connectedNotice);
       if (state.phase === "failed" || state.phase === "backoff") invalidateMachineLeases(machine.id);
@@ -664,10 +668,12 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
     },
     onAttachState: (session, state) => {
       const key = sessionKey(machine.id, session);
+      const attachWasLive = attachStates.get(key)?.phase === "live";
       attachStates.set(key, state);
       if (state.phase === "live") {
         sessionsEverLive.add(key);
         clearTransportStatus(key);
+        if (!attachWasLive) clearTransientAttachmentNotes(document, machine.id);
         // The socket is back: its transport alarm is history, not attention.
         resolveAttention(`${machine.id}:${session}:session_transport`);
       }
@@ -3806,7 +3812,7 @@ app.addEventListener("click", (event) => {
     notify: (message, result) => {
       if (artifactIsLocalOnly(result)) localOnlyArtifacts.add(localKey);
       else if (result?.ok) localOnlyArtifacts.delete(localKey);
-      if (onCard && setAttachmentNote(document, artifactId, message) > 0) return;
+      if (onCard && setAttachmentNote(document, artifactId, message, { machineId, transient: !artifactFailureIsAboutTheFile(result) }) > 0) return;
       toast(message);
     },
     machineLabel: machines.get(machineId)?.label ?? "that machine",

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { attachmentSize, attachmentTypeMark, installAttachmentSheet, renderAttachmentSheet, setAttachmentNote } from "./attachment-sheet";
+import { attachmentSize, attachmentTypeMark, installAttachmentSheet, renderAttachmentSheet, setAttachmentNote, clearTransientAttachmentNotes } from "./attachment-sheet";
 import { ConversationHistory } from "./conversation-history";
 import { ConversationView, registerTurnRenderer } from "./conversation-view";
 import type { ArtifactRef, OperatorReply } from "./types";
@@ -122,5 +122,23 @@ describe("a file card says why it did not open (journey F6)", () => {
     expect(sheet.querySelector(".fnote")).toBeNull();
     expect(sheet.getAttribute("aria-label")).toBe("3.26.0 release brief.pdf, PDF, 1.4 MB. Open");
     expect(renderAttachmentSheet(document, brief).querySelector(".fnote")).toBeNull();
+  });
+});
+
+describe("a note about the connection does not outlive it (cas-c808 QA F01)", () => {
+  it("clears that machine's transient notes when it reconnects, and keeps notes about the file", () => {
+    document.body.replaceChildren(renderAttachmentSheet(document, brief), renderAttachmentSheet(document, card));
+    setAttachmentNote(document, brief.artifact_id, "Couldn't reach Atlas · Linux. Check that it's on and connected, then open the file again.", { machineId: "atlas", transient: true });
+    setAttachmentNote(document, card.artifact_id, "This file was only saved on Atlas · Linux. It was never uploaded to Cloud, so it can't open here.", { machineId: "atlas", transient: false });
+    // Another machine reconnecting changes nothing here.
+    expect(clearTransientAttachmentNotes(document, "studio")).toBe(0);
+    expect(document.querySelector(`a.sheet[data-artifact-id="${brief.artifact_id}"] .fnote`)).not.toBeNull();
+    expect(clearTransientAttachmentNotes(document, "atlas")).toBe(1);
+    expect(document.querySelector(`a.sheet[data-artifact-id="${brief.artifact_id}"] .fnote`)).toBeNull();
+    expect(document.querySelector(`a.sheet[data-artifact-id="${brief.artifact_id}"]`)?.getAttribute("aria-label")).toBe("3.26.0 release brief.pdf, PDF, 1.4 MB. Open");
+    expect(document.querySelector(`a.sheet[data-artifact-id="${card.artifact_id}"] .fnote`)?.textContent).toContain("only saved on Atlas · Linux");
+    // A rebuilt card does not bring the cleared note back.
+    expect(renderAttachmentSheet(document, brief).querySelector(".fnote")).toBeNull();
+    setAttachmentNote(document, card.artifact_id, undefined);
   });
 });

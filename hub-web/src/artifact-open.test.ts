@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { webcrypto } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { artifactIdFromHref, artifactIsLocalOnly, artifactLinkFor, artifactOpenFailure, openArtifact, type ArtifactViewResult } from "./artifact-open";
+import { artifactFailureIsAboutTheFile, artifactIdFromHref, artifactIsLocalOnly, artifactLinkFor, artifactOpenFailure, openArtifact, type ArtifactViewResult } from "./artifact-open";
 import { HubConnectionSupervisor, type HubCallbacks } from "./connection";
 import { createDeviceKey } from "./dpop";
 import type { StoredMachine } from "./types";
@@ -96,6 +96,13 @@ describe("opening an artifact from Commander (cassy#910)", () => {
     expect(artifactIsLocalOnly({ ok: false, status: 409, code: "artifact_not_in_cloud" })).toBe(true);
     expect(artifactIsLocalOnly({ ok: false, status: 0 })).toBe(false);
     expect(artifactIsLocalOnly(undefined)).toBe(false);
+    // cas-c808 QA F01: only a failure about the file itself outlives a reconnect.
+    expect(artifactFailureIsAboutTheFile({ ok: false, status: 409, code: "artifact_not_in_cloud" })).toBe(true);
+    expect(artifactFailureIsAboutTheFile({ ok: false, status: 404, code: "not_found" })).toBe(true);
+    for (const result of [silent, { ok: false, status: 502, code: "cloud_failed" }, { ok: false, status: 409, code: "artifact_not_committed" }, { ok: false, status: 500 }] as const) {
+      expect(artifactFailureIsAboutTheFile(result)).toBe(false);
+    }
+    expect(artifactFailureIsAboutTheFile({ ok: true, view: { artifact_id: "a", url: "https://x.example/" } })).toBe(false);
   });
 
   it("opens no tab for a file already known to be only on the machine, and says when it reaches Cloud (journey F6)", async () => {

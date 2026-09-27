@@ -87,5 +87,21 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
     await expect(toast).toHaveCount(0);
     await expect(log).not.toContainText(/\btap\b/i);
     expect(page.context().pages()).toHaveLength(1);
+
+    // cas-c808 QA F01: a note about reaching the machine does not outlive the
+    // outage. Once the connection is back it leaves the card; a note about
+    // the file itself stays.
+    const header = page.locator("#conversation-connection");
+    hub.hold(PELICAN);
+    hub.drop(PELICAN);
+    await expect(header).toContainText("Reconnecting");
+    await log.locator('a[data-artifact-id="art-offline"]').click();
+    await expect(note("art-offline")).toHaveText("Couldn't reach Atlas · Linux. Check that it's on and connected, then open the file again.");
+    hub.release(PELICAN);
+    await expect(header).toHaveText(" · Live", { timeout: 30_000 });
+    await expect(note("art-offline")).toHaveCount(0);
+    await expect(note("art-cloud-down")).toHaveCount(0);
+    await expect(note("art-local-draft")).toContainText("only saved on Atlas · Linux");
+    expect(page.context().pages()).toHaveLength(1);
   });
 });

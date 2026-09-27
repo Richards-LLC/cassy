@@ -56,7 +56,19 @@ export const ARTIFACT_LINK_PREFIX = "#artifact:";
  * on the card the operator pressed, not in a toast at the top of the thread.
  * Kept per artifact so a thread repaint that rebuilds the card keeps it.
  */
-const attachmentNotes = new Map<string, string>();
+interface AttachmentNote {
+  readonly text: string;
+  /** The machine the file came from. */
+  readonly machineId?: string;
+  /**
+   * Says something about the connection or Cloud right now ("couldn't
+   * reach", "wait a minute"), not about the file itself. It is cleared when
+   * the machine's connection comes back, so it never sits beside a Live
+   * header (cas-c808 QA F01).
+   */
+  readonly transient: boolean;
+}
+const attachmentNotes = new Map<string, AttachmentNote>();
 
 function applyAttachmentNote(sheet: HTMLAnchorElement, note: string | undefined): void {
   const text = sheet.querySelector<HTMLElement>(".ftext");
@@ -77,11 +89,28 @@ function applyAttachmentNote(sheet: HTMLAnchorElement, note: string | undefined)
  * that artifact. Returns how many cards now carry it; zero means the file is
  * not on screen as a card and the caller should say it elsewhere.
  */
-export function setAttachmentNote(root: ParentNode, artifactId: string, note: string | undefined): number {
-  if (note === undefined) attachmentNotes.delete(artifactId); else attachmentNotes.set(artifactId, note);
+export function setAttachmentNote(root: ParentNode, artifactId: string, note: string | undefined, options: { machineId?: string; transient?: boolean } = {}): number {
+  if (note === undefined) attachmentNotes.delete(artifactId);
+  else attachmentNotes.set(artifactId, { text: note, transient: options.transient ?? false, ...(options.machineId ? { machineId: options.machineId } : {}) });
   const sheets = [...root.querySelectorAll<HTMLAnchorElement>("a.sheet[data-artifact-id]")].filter((sheet) => sheet.dataset.artifactId === artifactId);
   for (const sheet of sheets) applyAttachmentNote(sheet, note);
   return sheets.length;
+}
+
+/**
+ * The machine's connection is back: every note about reaching it or Cloud
+ * right now is out of date, so it leaves the cards. A note about the file
+ * itself ("only saved on …", "isn't available any more") stays. Returns how
+ * many notes were cleared.
+ */
+export function clearTransientAttachmentNotes(root: ParentNode, machineId: string): number {
+  let cleared = 0;
+  for (const [artifactId, note] of [...attachmentNotes]) {
+    if (!note.transient || note.machineId !== machineId) continue;
+    setAttachmentNote(root, artifactId, undefined);
+    cleared += 1;
+  }
+  return cleared;
 }
 
 export function artifactHref(attachment: ArtifactRef): string {
@@ -109,7 +138,7 @@ export function renderAttachmentSheet(document: Document, attachment: ArtifactRe
   text.append(name, sub);
   sheet.append(plate, text);
   const note = attachmentNotes.get(attachment.artifact_id);
-  if (note !== undefined) applyAttachmentNote(sheet, note);
+  if (note !== undefined) applyAttachmentNote(sheet, note.text);
   return sheet;
 }
 

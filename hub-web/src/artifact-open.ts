@@ -49,6 +49,15 @@ export function artifactLinkFor(target: EventTarget | null): HTMLAnchorElement |
   return link && artifactIdFromHref(link.getAttribute("href")) ? link : undefined;
 }
 
+/**
+ * Whether a failure describes the file itself (never uploaded, gone), which
+ * stays true, rather than the connection or Cloud right now, which the next
+ * reconnect makes out of date (cas-c808 QA F01).
+ */
+export function artifactFailureIsAboutTheFile(result: ArtifactViewResult | undefined): boolean {
+  return result !== undefined && !result.ok && ["artifact_not_in_cloud", "not_found", "cloud_artifact_not_found"].includes(result.code ?? "");
+}
+
 /** Whether the machine said the file never left it: the one failure worth remembering (journey F6). */
 export function artifactIsLocalOnly(result: ArtifactViewResult | undefined): boolean {
   return result !== undefined && !result.ok && result.code === "artifact_not_in_cloud";

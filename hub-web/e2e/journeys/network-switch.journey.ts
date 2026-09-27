@@ -5,8 +5,12 @@ import { ATLAS, STUDIO, PELICAN } from "./world";
 // machine protocol (one socket, health ping/pong) so a half-open socket, the
 // failure a network switch actually leaves, can be reproduced.
 test("HUB-J12 switch networks without losing the conversation", async ({ page, journey }) => {
-  // Four transitions, one of them a 25 s outage with four missed heartbeats.
-  test.setTimeout(180_000);
+  // Five transitions, one of them a 25 s outage with four missed heartbeats,
+  // plus the held-send backoff wait.
+  test.setTimeout(240_000);
+  // Time flows as usual; the fake clock only lets the daemon-link stage jump
+  // past the two-minute hold on a held message (cas-a355).
+  await page.clock.install();
   const hub = await journey.hub({ machines: [ATLAS, STUDIO], paired: ["atlas", "studio"], multiplex: true });
   const composer = page.getByRole("textbox", { name: "Your message" });
   const send = page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true });
@@ -130,5 +134,48 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
     await expect(header).toHaveText(" · Live");
     await page.waitForTimeout(1_000);
     expect(sentTimes("While the daemon link is down"), "sent once").toBe(1);
+
+    // cas-a355: when the link stays down, the page backs off (about 1, 2,
+    // then 4 s between attempts) instead of resending once a second.
+    hub.upstreamLost(PELICAN);
+    const stayedDownFrom = hub.upstreamRefusals.length;
+    await sendNow("While the daemon link stays down");
+    await expect(held).toHaveText("Waiting for the connection — sends when it's back");
+    await page.waitForTimeout(8_000);
+    expect(hub.upstreamRefusals.length - stayedDownFrom, "refusals in 8 s: backed off, not one a second").toBeLessThanOrEqual(4);
+    // Past the two-minute hold the message says Not sent, with Retry, in
+    // words that fit: no "re-pair this device", and the composer no longer
+    // promises it will go out by itself.
+    await page.clock.fastForward("02:00");
+    const log = page.getByRole("log");
+    await expect(log.getByText("Not sent", { exact: true })).toBeVisible({ timeout: 10_000 });
+    await expect(log.getByText("The session didn't come back while it waited.")).toBeVisible();
+    await expect(log.getByText(/re-pair/i)).toHaveCount(0);
+    await expect(held).toHaveCount(0);
+    await expect(page.locator("#message-status")).not.toContainText("go out by itself");
+    expect(sentTimes("While the daemon link stays down")).toBe(0);
+    // Retry, once the link is back, sends it once.
+    hub.upstreamBack(PELICAN);
+    await log.getByRole("button", { name: "Retry" }).last().click();
+    expect(await until(() => sentTimes("While the daemon link stays down"), (n) => n >= 1, 15_000)).toBe(1);
+    await page.waitForTimeout(1_000);
+    expect(sentTimes("While the daemon link stays down"), "sent once").toBe(1);
+  });
+
+  await journey.stage("A proof refused after a switch retries on its own", async () => {
+    // cas-d636 (soundwave, 22:58Z): after the phone slept through a network
+    // switch its first proofs reached the hub stale and were refused, and
+    // every 401 read as a revoked pairing, so Commander went dark. The first
+    // is now retried with a fresh proof; one refused twice backs off like a
+    // lost network. It recovers by itself and never asks to re-pair.
+    await hub.down("atlas", { sockets: "close" });
+    hub.refuseProofs("atlas", 3);
+    await hub.up("atlas");
+    await expect.poll(() => hub.proofRefusalsLeft("atlas"), { timeout: 20_000, message: "the refused proofs were exercised" }).toBe(0);
+    await expect(header).toHaveText(" · Live", { timeout: 20_000 });
+    expect(hub.refusedProofs.every((refusal) => refusal.reason === "stale_proof")).toBe(true);
+    await expect(page.getByText(/re-pair|needs pairing|no longer paired|was revoked/i)).toHaveCount(0);
+    await sendNow("After a refused proof");
+    expect(await until(() => sentTimes("After a refused proof"), (n) => n >= 1, 5_000)).toBe(1);
   });
 });

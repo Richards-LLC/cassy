@@ -42,6 +42,88 @@ pub enum PairingExchangeError {
     Opaque(#[from] anyhow::Error),
 }
 
+/// Why a DPoP-authenticated request was refused (cas-d636). Every refusal
+/// used to be the same bare 401, and hub-web read each one as a revoked
+/// pairing and stopped reconnecting, so a proof that was merely signed before
+/// the phone slept and sent after it woke (soundwave, 2026-09-26 22:58Z)
+/// silenced Commander until a reload. The 401 now names the reason, and only
+/// the definitive ones ask for a new pairing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum AuthRefusal {
+    /// The proof's `iat` is outside the hub's skew window; retry with a fresh proof.
+    #[error("authentication refused: stale proof ({skew_secs}s from the hub clock)")]
+    StaleProof { skew_secs: i64 },
+    /// The proof does not verify for this request (signature, method, target,
+    /// access-token hash or a missing jti); retry with a fresh proof.
+    #[error("authentication refused: invalid proof")]
+    InvalidProof,
+    /// The proof's jti was already used; retry with a fresh proof.
+    #[error("authentication refused: proof replayed")]
+    ProofReplay,
+    /// The proof was signed by a key other than the paired one.
+    #[error("authentication refused: proof key does not match the pairing")]
+    KeyMismatch,
+    /// No paired device holds this credential.
+    #[error("authentication refused: unknown credential")]
+    UnknownCredential,
+    /// The Authorization header is not a DPoP credential.
+    #[error("authentication refused: malformed credential")]
+    MalformedCredential,
+    #[error("authentication refused: pairing revoked")]
+    Revoked,
+    /// Past its absolute lifetime; the credential refresh route may still renew it.
+    #[error("authentication refused: credential expired")]
+    Expired,
+    /// Unused for longer than the idle limit.
+    #[error("authentication refused: credential idle too long")]
+    Idle,
+    #[error("authentication refused: origin does not match the pairing")]
+    OriginMismatch,
+}
+
+impl AuthRefusal {
+    /// The machine-readable reason carried on the 401 and in the audit row.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::StaleProof { .. } => "stale_proof",
+            Self::InvalidProof => "invalid_proof",
+            Self::ProofReplay => "proof_replay",
+            Self::KeyMismatch => "key_mismatch",
+            Self::UnknownCredential => "unknown_credential",
+            Self::MalformedCredential => "malformed_credential",
+            Self::Revoked => "revoked",
+            Self::Expired => "expired",
+            Self::Idle => "idle",
+            Self::OriginMismatch => "origin_mismatch",
+        }
+    }
+
+    /// Whether the same credential can succeed with a fresh proof.
+    pub fn retryable(self) -> bool {
+        matches!(self, Self::StaleProof { .. } | Self::InvalidProof | Self::ProofReplay)
+    }
+
+    /// RFC 9449 `WWW-Authenticate: DPoP error=...`: a proof problem is
+    /// `invalid_dpop_proof`, a credential problem `invalid_token`.
+    pub fn dpop_error(self) -> &'static str {
+        if self.retryable() { "invalid_dpop_proof" } else { "invalid_token" }
+    }
+
+    fn detail(self) -> Option<String> {
+        match self {
+            Self::StaleProof { skew_secs } if skew_secs < 0 => {
+                Some(format!("proof iat {}s behind the hub clock", -skew_secs))
+            }
+            Self::StaleProof { skew_secs } => Some(format!("proof iat {skew_secs}s ahead of the hub clock")),
+            _ => None,
+        }
+    }
+}
+
+fn refusal_of(error: &anyhow::Error) -> AuthRefusal {
+    error.downcast_ref::<AuthRefusal>().copied().unwrap_or(AuthRefusal::InvalidProof)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Scope {
@@ -613,6 +695,11 @@ struct AuditRecord<'a> {
     operator_label: Option<&'a str>,
     controller_origin: Option<&'a str>,
     target_session: Option<&'a str>,
+    /// cas-d636: why an authentication was denied (an AuthRefusal code).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
 }
 
 struct AuthInner {
@@ -860,10 +947,10 @@ impl AuthStore {
         target_uri: &str,
         now: DateTime<Utc>,
     ) -> Result<AuthContext> {
-        validate_origin(origin)?;
+        validate_origin(origin).map_err(|_| AuthRefusal::OriginMismatch)?;
         let credential = authorization
             .strip_prefix("DPoP ")
-            .context("authentication refused")?;
+            .ok_or(AuthRefusal::MalformedCredential)?;
         let credential_hash = hash_b64(credential.as_bytes());
         let mut state = self.lock()?;
         let device_index = state
@@ -871,16 +958,9 @@ impl AuthStore {
             .iter()
             .position(|device| constant_time_eq(&device.credential_hash, &credential_hash));
         let Some(device_index) = device_index else {
-            anyhow::bail!("authentication refused")
+            return Err(AuthRefusal::UnknownCredential.into());
         };
         let device = state.devices[device_index].clone();
-        anyhow::ensure!(
-            device.revoked_at.is_none()
-                && device.expires_at >= now
-                && device.last_used_at + Duration::days(CREDENTIAL_IDLE_DAYS) >= now
-                && device.controller_origin == origin,
-            "authentication refused"
-        );
         let context = AuthContext {
             device_id: device.device_id.clone(),
             credential_id: device.credential_id.clone(),
@@ -890,6 +970,24 @@ impl AuthStore {
             scopes: device.scopes.clone(),
             request_id: uuid::Uuid::new_v4().to_string(),
         };
+        // cas-d636: each credential refusal names itself, so the client can
+        // tell a revocation (re-pair) from an expiry (refresh).
+        let standing = if device.revoked_at.is_some() {
+            Some(AuthRefusal::Revoked)
+        } else if device.controller_origin != origin {
+            Some(AuthRefusal::OriginMismatch)
+        } else if device.last_used_at + Duration::days(CREDENTIAL_IDLE_DAYS) < now {
+            Some(AuthRefusal::Idle)
+        } else if device.expires_at < now {
+            Some(AuthRefusal::Expired)
+        } else {
+            None
+        };
+        if let Some(refused) = standing {
+            drop(state);
+            self.audit_refusal(&context, "dpop_auth", refused, now)?;
+            return Err(refused.into());
+        }
         let verified = match verify_dpop(
             proof,
             credential,
@@ -902,8 +1000,9 @@ impl AuthStore {
             Ok(verified) => verified,
             Err(error) => {
                 drop(state);
-                self.audit(Some(&context), "denied", "dpop_auth", None, None, now)?;
-                return Err(error);
+                let refused = refusal_of(&error);
+                self.audit_refusal(&context, "dpop_auth", refused, now)?;
+                return Err(refused.into());
             }
         };
         state.dpop_jtis.retain(|entry| entry.expires_at >= now);
@@ -913,8 +1012,8 @@ impl AuthStore {
             .any(|entry| entry.credential_id == device.credential_id && entry.jti == verified.jti)
         {
             drop(state);
-            self.audit(Some(&context), "denied", "dpop_replay", None, None, now)?;
-            anyhow::bail!("authentication refused")
+            self.audit_refusal(&context, "dpop_replay", AuthRefusal::ProofReplay, now)?;
+            return Err(AuthRefusal::ProofReplay.into());
         }
         state.dpop_jtis.push(ReplayRecord {
             credential_id: context.credential_id.clone(),
@@ -941,25 +1040,32 @@ impl AuthStore {
         target_uri: &str,
         now: DateTime<Utc>,
     ) -> Result<DeviceCredential> {
-        validate_origin(origin)?;
+        validate_origin(origin).map_err(|_| AuthRefusal::OriginMismatch)?;
         let credential = authorization
             .strip_prefix("DPoP ")
-            .context("authentication refused")?;
+            .ok_or(AuthRefusal::MalformedCredential)?;
         let credential_hash = hash_b64(credential.as_bytes());
         let mut state = self.lock()?;
         let device_index = state
             .devices
             .iter()
             .position(|device| constant_time_eq(&device.credential_hash, &credential_hash))
-            .context("authentication refused")?;
+            .ok_or(AuthRefusal::UnknownCredential)?;
         let device = state.devices[device_index].clone();
-        anyhow::ensure!(
-            device.revoked_at.is_none()
-                && device.controller_origin == origin
-                && device.last_used_at + Duration::days(CREDENTIAL_IDLE_DAYS) >= now
-                && device.expires_at + Duration::days(CREDENTIAL_REFRESH_GRACE_DAYS) >= now,
-            "authentication refused"
-        );
+        // cas-d636: a refresh refusal names itself too. Past the refresh
+        // grace, an expired credential is as final as a revoked one.
+        if device.revoked_at.is_some() {
+            return Err(AuthRefusal::Revoked.into());
+        }
+        if device.controller_origin != origin {
+            return Err(AuthRefusal::OriginMismatch.into());
+        }
+        if device.last_used_at + Duration::days(CREDENTIAL_IDLE_DAYS) < now {
+            return Err(AuthRefusal::Idle.into());
+        }
+        if device.expires_at + Duration::days(CREDENTIAL_REFRESH_GRACE_DAYS) < now {
+            return Err(AuthRefusal::Expired.into());
+        }
         let verified = verify_dpop(
             proof,
             credential,
@@ -970,12 +1076,13 @@ impl AuthStore {
             now,
         )?;
         state.dpop_jtis.retain(|entry| entry.expires_at >= now);
-        anyhow::ensure!(
-            !state.dpop_jtis.iter().any(|entry| {
-                entry.credential_id == device.credential_id && entry.jti == verified.jti
-            }),
-            "authentication refused"
-        );
+        if state
+            .dpop_jtis
+            .iter()
+            .any(|entry| entry.credential_id == device.credential_id && entry.jti == verified.jti)
+        {
+            return Err(AuthRefusal::ProofReplay.into());
+        }
         state.dpop_jtis.push(ReplayRecord {
             credential_id: device.credential_id.clone(),
             jti: verified.jti,
@@ -1235,6 +1342,31 @@ impl AuthStore {
         target_session: Option<&str>,
         now: DateTime<Utc>,
     ) -> Result<()> {
+        self.write_audit(context, outcome, action, required_scope, target_session, None, now)
+    }
+
+    /// A denied authentication, with its reason (cas-d636).
+    fn audit_refusal(
+        &self,
+        context: &AuthContext,
+        action: &str,
+        refusal: AuthRefusal,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        self.write_audit(Some(context), "denied", action, None, None, Some(refusal), now)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_audit(
+        &self,
+        context: Option<&AuthContext>,
+        outcome: &str,
+        action: &str,
+        required_scope: Option<Scope>,
+        target_session: Option<&str>,
+        refusal: Option<AuthRefusal>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
         let record = AuditRecord {
             timestamp: now,
             machine_id: &self.0.machine_id,
@@ -1248,6 +1380,8 @@ impl AuthStore {
             operator_label: context.map(|value| value.operator_label.as_str()),
             controller_origin: context.map(|value| value.controller_origin.as_str()),
             target_session,
+            reason: refusal.map(AuthRefusal::code),
+            detail: refusal.and_then(AuthRefusal::detail),
         };
         let written = self
             .lock()
@@ -1415,32 +1549,47 @@ fn verify_dpop(
     target_uri: &str,
     now: DateTime<Utc>,
 ) -> Result<VerifiedDpop> {
+    let invalid = |_| AuthRefusal::InvalidProof;
     let parts: Vec<&str> = proof.split('.').collect();
-    anyhow::ensure!(parts.len() == 3, "authentication refused");
-    let header: DpopHeader = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[0])?)?;
-    let claims: DpopClaims = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1])?)?;
-    anyhow::ensure!(header.alg == "ES256", "authentication refused");
-    let thumbprint = header.jwk.thumbprint()?;
-    anyhow::ensure!(
-        constant_time_eq(&thumbprint, stored_thumbprint)
-            && constant_time_eq(&thumbprint, &stored_key.thumbprint()?),
-        "authentication refused"
-    );
-    let signature_bytes = URL_SAFE_NO_PAD.decode(parts[2])?;
-    let signature = Signature::from_slice(&signature_bytes).context("authentication refused")?;
+    if parts.len() != 3 {
+        return Err(AuthRefusal::InvalidProof.into());
+    }
+    let header: DpopHeader = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[0]).map_err(invalid)?)
+        .map_err(|_| AuthRefusal::InvalidProof)?;
+    let claims: DpopClaims = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1]).map_err(invalid)?)
+        .map_err(|_| AuthRefusal::InvalidProof)?;
+    if header.alg != "ES256" {
+        return Err(AuthRefusal::InvalidProof.into());
+    }
+    let thumbprint = header.jwk.thumbprint().map_err(|_| AuthRefusal::InvalidProof)?;
+    // A different key cannot become right on retry: the browser lost or
+    // replaced the key it paired with.
+    if !(constant_time_eq(&thumbprint, stored_thumbprint)
+        && constant_time_eq(&thumbprint, &stored_key.thumbprint()?))
+    {
+        return Err(AuthRefusal::KeyMismatch.into());
+    }
+    let signature_bytes = URL_SAFE_NO_PAD.decode(parts[2]).map_err(invalid)?;
+    let signature = Signature::from_slice(&signature_bytes).map_err(|_| AuthRefusal::InvalidProof)?;
     header
         .jwk
-        .validate()?
+        .validate()
+        .map_err(|_| AuthRefusal::InvalidProof)?
         .verify(format!("{}.{}", parts[0], parts[1]).as_bytes(), &signature)
-        .context("authentication refused")?;
-    anyhow::ensure!(
-        claims.htm.eq_ignore_ascii_case(method)
-            && claims.htu == target_uri
-            && constant_time_eq(&claims.ath, &hash_b64(credential.as_bytes()))
-            && (claims.iat - now.timestamp()).abs() <= DPOP_SKEW_SECONDS
-            && !claims.jti.is_empty(),
-        "authentication refused"
-    );
+        .map_err(|_| AuthRefusal::InvalidProof)?;
+    if !(claims.htm.eq_ignore_ascii_case(method)
+        && claims.htu == target_uri
+        && constant_time_eq(&claims.ath, &hash_b64(credential.as_bytes()))
+        && !claims.jti.is_empty())
+    {
+        return Err(AuthRefusal::InvalidProof.into());
+    }
+    // Checked last, so a stale verdict means the proof was otherwise good:
+    // most often signed before the device slept and sent after it woke.
+    let skew_secs = claims.iat - now.timestamp();
+    if skew_secs.abs() > DPOP_SKEW_SECONDS {
+        return Err(AuthRefusal::StaleProof { skew_secs }.into());
+    }
     Ok(VerifiedDpop { jti: claims.jti })
 }
 

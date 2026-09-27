@@ -1,7 +1,7 @@
 import { createHash, webcrypto } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { HubConnectionSupervisor, type ConnectionState, type HubCallbacks } from "./connection";
+import { HubConnectionSupervisor, TransientAuthError, type ConnectionState, type HubCallbacks } from "./connection";
 import { connectingView } from "./connection-state-view";
 import { createDeviceKey, dpopHeaders } from "./dpop";
 import { consumePairingFragment } from "./fragment";
@@ -1003,8 +1003,10 @@ describe("binding Cassy Cloud browser invariants", () => {
       phase: "failed", stage: "auth", authFailure: "needs-pairing",
     });
     expect(callbacks.onState).not.toHaveBeenCalledWith(expect.objectContaining({ phase: "backoff" }));
+    // cas-d636: an opaque failure is confirmed before it ends the pairing: the
+    // hub still answers its health probe and an authenticated read still fails.
     expect(fetchMock.mock.calls.map(([input]) => new URL(String(input)).pathname)).toEqual([
-      "/v1/health", "/v1/machine", "/v1/sessions",
+      "/v1/health", "/v1/machine", "/v1/sessions", "/v1/health", "/v1/machine",
     ]);
     const [main, connectionView] = await Promise.all([
       readSource("main.ts"),
@@ -1489,5 +1491,83 @@ describe("3.30.0 journey polish (cas-b128)", () => {
     expect(main).not.toContain("toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })");
     expect(paired).toContain("'Version unknown until it connects'");
     expect(paired).not.toContain("Runtime not yet received");
+  });
+});
+
+/**
+ * cas-d636: on soundwave a phone's proofs were signed before it slept and sent
+ * when it woke, 266 s later; the hub refused them and every 401 read as a
+ * revoked pairing, so Commander went dark until a reload. A refusal now says
+ * why: a retryable one is tried again with a fresh proof on the hub's clock,
+ * and only a definitive one ends the pairing.
+ */
+describe("a refused DPoP proof is not a lost pairing (cas-d636)", () => {
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  type Reply = { status: number; ok: boolean; json: () => Promise<unknown>; clone: () => Reply };
+  const reply = (status: number, body: unknown = {}): Reply => ({ status, ok: status >= 200 && status < 300, json: async () => body, clone: () => reply(status, body) });
+  const claims = (init: RequestInit | undefined): { iat: number; jti: string } => {
+    const proof = (init?.headers as Record<string, string>).DPoP;
+    return JSON.parse(Buffer.from(proof.split(".")[1]!, "base64url").toString("utf8"));
+  };
+  async function supervisorWith(replies: (path: string, call: number) => Reply | Promise<never>) {
+    vi.stubGlobal("window", globalThis);
+    const { privateKey, publicKey } = await createDeviceKey();
+    const machine = {
+      id: "machine", label: "Machine", baseUrl: "https://hub.example", deviceId: "device",
+      credentialId: "credential-id", credential: "opaque-credential", expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+      scopes: ["machine-read"], publicKey, privateKey,
+    } satisfies StoredMachine;
+    const callbacks = {
+      onState: vi.fn(), onAuthFailure: vi.fn(), onSessions: vi.fn(), onMachineEvent: vi.fn(),
+      onSessionState: vi.fn(), onOutput: vi.fn(), onPaneKeyframe: vi.fn(), onSocketError: vi.fn(),
+    } satisfies HubCallbacks;
+    let calls = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => replies(new URL(String(input)).pathname, calls++));
+    vi.stubGlobal("fetch", fetchMock);
+    return { supervisor: new HubConnectionSupervisor(machine, callbacks), callbacks, fetchMock };
+  }
+
+  it("retries a stale proof once with a fresh one on the hub's clock, and recovers", async () => {
+    const hubNow = Math.floor(Date.now() / 1000) + 600;
+    const { supervisor, fetchMock } = await supervisorWith((_path, call) => call === 0
+      ? reply(401, { error: "unauthorized", reason: "stale_proof", retryable: true, server_time: hubNow })
+      : reply(200, { schema_version: 1 }));
+    await expect(supervisor.request("GET", "/v1/machine")).resolves.toEqual({ schema_version: 1 });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [first, second] = fetchMock.mock.calls.map(([, init]) => claims(init));
+    expect(second!.jti).not.toBe(first!.jti);
+    // Signed on the hub's clock, ten minutes ahead of this device's.
+    expect(Math.abs(second!.iat - hubNow)).toBeLessThanOrEqual(2);
+  });
+
+  it("reads a definitive refusal as a lost pairing at once, without a retry", async () => {
+    const { supervisor, fetchMock } = await supervisorWith(() => reply(401, { reason: "revoked", retryable: false, server_time: Math.floor(Date.now() / 1000) }));
+    await expect(supervisor.request("GET", "/v1/machine")).rejects.toMatchObject({ kind: "revoked", message: "pairing was revoked" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const expired = await supervisorWith(() => reply(401, { reason: "expired", retryable: false }));
+    await expect(expired.supervisor.request("GET", "/v1/machine")).rejects.toMatchObject({ kind: "expired" });
+    const key = await supervisorWith(() => reply(401, { reason: "key_mismatch", retryable: false }));
+    await expect(key.supervisor.request("GET", "/v1/machine")).rejects.toMatchObject({ kind: "revoked", message: "this browser's key no longer matches the pairing" });
+  });
+
+  it("keeps a legacy hub's bare 401 a lost pairing, after one fresh proof", async () => {
+    const { supervisor, fetchMock } = await supervisorWith(() => reply(401, { error: "unauthorized" }));
+    await expect(supervisor.request("GET", "/v1/machine")).rejects.toMatchObject({ kind: "revoked" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries a proof refused twice like a network failure, never as re-pair", async () => {
+    const { supervisor, callbacks } = await supervisorWith((path) => path === "/v1/health"
+      ? reply(200, { status: "ok" })
+      : reply(401, { reason: "stale_proof", retryable: true, server_time: Math.floor(Date.now() / 1000) }));
+    await expect(supervisor.request("GET", "/v1/machine")).rejects.toBeInstanceOf(TransientAuthError);
+    supervisor.start();
+    await vi.waitFor(() => {
+      expect(callbacks.onState).toHaveBeenCalledWith(expect.objectContaining({ phase: "backoff", stage: "auth" }));
+    });
+    expect(callbacks.onAuthFailure).not.toHaveBeenCalled();
+    expect(supervisor.snapshot().authFailure).toBeUndefined();
+    supervisor.stop();
   });
 });

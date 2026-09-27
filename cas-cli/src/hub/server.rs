@@ -381,17 +381,15 @@ async fn machine<R: SessionReadModel>(
     State(state): State<HubState<R>>,
     headers: HeaderMap,
 ) -> Response {
-    if authorize(
+    if let Err(error) = authorize(
         &state,
         HubAction::MachineRead,
         Scope::MachineRead,
         &headers,
         "GET",
         "/v1/machine",
-    )
-    .is_err()
-    {
-        return unauthorized();
+    ) {
+        return with_cors(unauthorized_for(&error), &headers);
     }
     with_cors(
         Json(MachineResponse {
@@ -418,17 +416,15 @@ async fn diagnostics<R: SessionReadModel>(
     State(state): State<HubState<R>>,
     headers: HeaderMap,
 ) -> Response {
-    if authorize(
+    if let Err(error) = authorize(
         &state,
         HubAction::MachineRead,
         Scope::MachineRead,
         &headers,
         "GET",
         "/v1/diagnostics",
-    )
-    .is_err()
-    {
-        return unauthorized();
+    ) {
+        return with_cors(unauthorized_for(&error), &headers);
     }
     let tailscale = tokio::time::timeout(
         Duration::from_secs(3),
@@ -482,17 +478,15 @@ async fn sessions<R: SessionReadModel>(
     Query(query): Query<SessionsQuery>,
     headers: HeaderMap,
 ) -> Response {
-    if authorize(
+    if let Err(error) = authorize(
         &state,
         HubAction::SessionRead,
         Scope::SessionRead,
         &headers,
         "GET",
         "/v1/sessions",
-    )
-    .is_err()
-    {
-        return unauthorized();
+    ) {
+        return with_cors(unauthorized_for(&error), &headers);
     }
     match state.catalog.list().await {
         Ok(sessions) => with_cors(
@@ -513,17 +507,15 @@ async fn events<R: SessionReadModel>(
     State(state): State<HubState<R>>,
     headers: HeaderMap,
 ) -> Response {
-    if authorize(
+    if let Err(error) = authorize(
         &state,
         HubAction::SessionRead,
         Scope::SessionRead,
         &headers,
         "GET",
         "/v1/events",
-    )
-    .is_err()
-    {
-        return unauthorized();
+    ) {
+        return with_cors(unauthorized_for(&error), &headers);
     }
     // Subscribe before snapshotting. A concurrent event can consequently be
     // replayed once and then observed live once; sequence+revision make that a
@@ -570,17 +562,15 @@ async fn status<R: SessionReadModel>(
     headers: HeaderMap,
 ) -> Response {
     let uri = format!("/v1/sessions/{session}/status");
-    if authorize(
+    if let Err(error) = authorize(
         &state,
         HubAction::SessionRead,
         Scope::SessionRead,
         &headers,
         "GET",
         &uri,
-    )
-    .is_err()
-    {
-        return unauthorized();
+    ) {
+        return with_cors(unauthorized_for(&error), &headers);
     }
     match tokio::task::spawn_blocking(move || {
         let session = crate::bridge::server::session::resolve_session_by_name(&session)?;
@@ -607,19 +597,17 @@ async fn artifact_view_url<R: SessionReadModel>(
     headers: HeaderMap,
 ) -> Response {
     let uri = format!("/v1/sessions/{session}/artifacts/{artifact}/url");
-    if authorize(
+    if let Err(error) = authorize(
         &state,
         HubAction::SessionRead,
         Scope::SessionRead,
         &headers,
         "GET",
         &uri,
-    )
-    .is_err()
-    {
+    ) {
         // With CORS, so Commander reads a refused pairing as a refusal, not as
         // an unreachable machine (cas-e503).
-        return with_cors(unauthorized(), &headers);
+        return with_cors(unauthorized_for(&error), &headers);
     }
     let outcome = tokio::task::spawn_blocking(move || {
         let session = crate::bridge::server::session::resolve_session_by_name(&session)?;
@@ -1176,7 +1164,7 @@ async fn refresh_credential<R: SessionReadModel>(
         chrono::Utc::now(),
     ) {
         Ok(credential) => with_cors(Json(credential).into_response(), &headers),
-        Err(_) => with_cors(unauthorized(), &headers),
+        Err(error) => with_cors(unauthorized_for(&error), &headers),
     }
 }
 
@@ -1201,7 +1189,8 @@ async fn websocket_ticket<R: SessionReadModel>(
         uri,
     ) {
         Ok(Some(context)) => context,
-        _ => return unauthorized(),
+        Ok(None) => return unauthorized(),
+        Err(error) => return with_cors(unauthorized_for(&error), &headers),
     };
     let (session, endpoint) = match request.session {
         Some(session) => {
@@ -1833,7 +1822,8 @@ async fn acquire_lease<R: SessionReadModel>(
         &uri,
     ) {
         Ok(Some(context)) => context,
-        _ => return unauthorized(),
+        Ok(None) => return unauthorized(),
+        Err(error) => return with_cors(unauthorized_for(&error), &headers),
     };
     match state.auth.as_ref().unwrap().acquire_or_force_lease(
         &context,
@@ -1885,7 +1875,8 @@ async fn lease_status<R: SessionReadModel>(
         &uri,
     ) {
         Ok(Some(context)) => context,
-        _ => return unauthorized(),
+        Ok(None) => return unauthorized(),
+        Err(error) => return with_cors(unauthorized_for(&error), &headers),
     };
     match state
         .auth
@@ -1913,7 +1904,8 @@ async fn release_lease<R: SessionReadModel>(
         &uri,
     ) {
         Ok(Some(context)) => context,
-        _ => return unauthorized(),
+        Ok(None) => return unauthorized(),
+        Err(error) => return with_cors(unauthorized_for(&error), &headers),
     };
     match state
         .auth
@@ -2038,6 +2030,39 @@ fn authorized<R: SessionReadModel>(
         .authorizer
         .authorize(&HubRequest { action, origin })
         .is_allowed()
+}
+
+/// A 401 that says why (cas-d636). An authentication refusal carries its
+/// machine-readable reason, whether a fresh proof can succeed, and the hub's
+/// clock (so a device whose clock drifted can correct its proofs), in the
+/// body and as RFC 9449 `WWW-Authenticate: DPoP error=...`. Any other failure
+/// stays the bare 401.
+fn unauthorized_for(error: &anyhow::Error) -> Response {
+    let Some(refusal) = error.downcast_ref::<super::AuthRefusal>().copied() else {
+        return unauthorized();
+    };
+    let mut response = (
+        StatusCode::UNAUTHORIZED,
+        Json(serde_json::json!({
+            "error": "unauthorized",
+            "reason": refusal.code(),
+            "retryable": refusal.retryable(),
+            "server_time": chrono::Utc::now().timestamp(),
+        })),
+    )
+        .into_response();
+    if let Ok(value) = HeaderValue::from_str(&format!(
+        "DPoP error=\"{}\", error_description=\"{}\"",
+        refusal.dpop_error(),
+        refusal.code()
+    )) {
+        response.headers_mut().insert("www-authenticate", value);
+    }
+    response.headers_mut().insert(
+        "access-control-expose-headers",
+        HeaderValue::from_static("WWW-Authenticate"),
+    );
+    response
 }
 
 fn unauthorized() -> Response {

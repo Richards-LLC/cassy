@@ -94,6 +94,59 @@ class AuthenticationError extends Error {
 }
 
 /**
+ * The hub refused a proof, not the pairing (cas-d636): a proof signed before
+ * the phone slept and sent after it woke, a clock that drifted, a replayed
+ * jti. A fresh proof was already tried once. This is retried like a network
+ * failure, never shown as "re-pair".
+ */
+export class TransientAuthError extends Error {
+  constructor(readonly reason: string) { super(`the hub refused a proof (${reason}); retrying`); }
+}
+
+/** What a hub 401 says about itself (cas-d636); a legacy hub says nothing. */
+export interface AuthRefusal {
+  reason?: string;
+  /** true: a fresh proof can succeed; false: definitive; undefined: a legacy bare 401. */
+  retryable?: boolean;
+  /** The hub's clock, Unix seconds. */
+  serverTime?: number;
+}
+
+export async function readAuthRefusal(response: Response): Promise<AuthRefusal> {
+  try {
+    const body = await response.clone().json() as Record<string, unknown>;
+    return {
+      reason: typeof body.reason === "string" ? body.reason : undefined,
+      retryable: typeof body.retryable === "boolean" ? body.retryable : undefined,
+      serverTime: typeof body.server_time === "number" && Number.isFinite(body.server_time) ? body.server_time : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Which re-pair screen a refusal earns. Only a definitive answer is a lost
+ * pairing: an expired credential refreshes, and a legacy bare 401 keeps the
+ * old reading (expired by date, else revoked) (cas-d636).
+ */
+export function authFailureKind(status: number, refusal: AuthRefusal, expiresAt: string, now = Date.now()): AuthFailureKind {
+  if (status === 403) return "scope-mismatch";
+  if (refusal.reason === "expired") return "expired";
+  if (refusal.reason === undefined && Date.parse(expiresAt) <= now) return "expired";
+  return "revoked";
+}
+
+function authFailureMessage(kind: AuthFailureKind, refusal: AuthRefusal): string {
+  if (kind === "expired") return "pairing expired";
+  if (kind === "scope-mismatch") return "credential ceiling does not grant this operation";
+  if (refusal.reason === "key_mismatch") return "this browser's key no longer matches the pairing";
+  if (refusal.reason === "idle") return "pairing unused for too long";
+  if (refusal.reason === "origin_mismatch") return "pairing belongs to another Cassy Cloud";
+  return "pairing was revoked";
+}
+
+/**
  * A browser that lacks an API this build needs cannot be fixed by trying
  * again, so it is failed once with the reason on screen instead of retried
  * forever behind a "Connecting…" spinner (report cas-b652, defect D3).
@@ -125,6 +178,12 @@ export class HubConnectionSupervisor {
   private missedHeartbeats = 0;
   private lastHeartbeatAt?: number;
   private expiredRefreshAttempted = false;
+  /**
+   * The hub's clock minus this device's, from its last 401 (cas-d636). A
+   * phone whose clock drifted past the hub's proof window signs every proof
+   * stale; proofs are signed on the hub's clock instead.
+   */
+  private clockOffsetMs = 0;
   private resumeStage: ConnectionStage = "resolving";
   private lifecycle: ConnectionSnapshot = {
     phase: "idle", stage: "idle", since: Date.now(), attempt: 0, missedHeartbeats: 0, degraded: false,
@@ -133,6 +192,14 @@ export class HubConnectionSupervisor {
   private readonly keyframeRequests = new Set<string>();
   private readonly attachLifecycles = new Map<string, AttachSnapshot>();
   private readonly socketAttempts = new Map<string, number>();
+  /**
+   * Retryable `upstream_unavailable` refusals per session since its last
+   * acknowledged send (cas-a355). Each one lengthens the next reattach: 1, 2,
+   * 4, then 8 s, instead of a fresh 1 s after every live attach.
+   */
+  private readonly upstreamRefusalStreak = new Map<string, number>();
+  /** Supervisor messages written to each legacy session socket, in order (cas-a355). */
+  private readonly legacySends = new WeakMap<WebSocket, string[]>();
   private readonly attachRetryTimers = new Map<string, number>();
   private readonly attachTimeouts = new Map<string, { open?: number; ready?: number }>();
   private readonly timedOutSockets = new WeakSet<WebSocket>();
@@ -329,7 +396,14 @@ export class HubConnectionSupervisor {
       // browser failure on an authenticated route is how an unpaired origin
       // appears when CORS preflight withholds the response; do not present it
       // as an offline hub or keep retrying an action that needs re-pairing.
-      if (stage === "auth") {
+      // A refused proof or a timed-out stage is not that (cas-d636): it
+      // retries below. A network failure is only read as a refusal when the
+      // hub answers its health probe and an authenticated request still
+      // fails, as an attach failure is (cas-0978).
+      const refusedOrigin = stage === "auth" && !(error instanceof TransientAuthError) && !(error instanceof DOMException)
+        && (!isNetworkFailure(error) || (await this.hubIsReachable() && !(await this.authenticatedRequestSucceeds())));
+      if (!this.desired) return;
+      if (refusedOrigin) {
         this.blockAuthentication(
           "needs-pairing",
           "Hub is reachable but this Cassy Cloud is no longer paired. Re-pair to continue.",
@@ -368,22 +442,53 @@ export class HubConnectionSupervisor {
     if (!response.ok) throw new Error(`daemon health failed (${response.status})`);
   }
 
-  async request<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
-    const startedAt = performance.now();
+  /**
+   * An authenticated fetch (cas-d636). A 401 that is not definitive (a
+   * retryable reason, or a legacy bare 401) is tried once more with a fresh
+   * proof on the hub's clock: the common case is a proof signed before the
+   * phone slept and sent when it woke. A second retryable refusal throws
+   * TransientAuthError, retried like a network failure. Any other 401 or 403
+   * is returned for the caller to read as a lost pairing.
+   */
+  private async authorizedFetch(method: string, path: string, init: RequestInit = {}): Promise<{ response: Response; refusal: AuthRefusal }> {
     // The proof binds the bare path; the hub rejects an htu with a query.
-    const headers = await dpopHeaders(this.machine, method, path.split("?")[0] ?? path);
-    const response = await fetch(new URL(path, this.machine.baseUrl), {
+    const htu = path.split("?")[0] ?? path;
+    const send = async () => fetch(new URL(path, this.machine.baseUrl), {
+      ...init,
       method,
-      headers: { ...headers, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
-      body: body === undefined ? undefined : JSON.stringify(body),
+      headers: { ...(init.headers as Record<string, string> | undefined), ...await dpopHeaders(this.machine, method, htu, Date.now() + this.clockOffsetMs) },
       cache: "no-store",
       credentials: "omit",
+    });
+    let response = await send();
+    if (response.status !== 401) return { response, refusal: {} };
+    let refusal = await readAuthRefusal(response);
+    if (refusal.retryable === false) return { response, refusal };
+    this.adoptHubClock(refusal.serverTime);
+    response = await send();
+    if (response.status !== 401) return { response, refusal: {} };
+    refusal = await readAuthRefusal(response);
+    if (refusal.retryable === true) throw new TransientAuthError(refusal.reason ?? "invalid_proof");
+    return { response, refusal };
+  }
+
+  private adoptHubClock(serverTime: number | undefined): void {
+    if (serverTime === undefined) return;
+    const offset = serverTime * 1000 - Date.now();
+    // Inside a few seconds is latency and rounding, not drift.
+    this.clockOffsetMs = Math.abs(offset) > 5_000 ? offset : 0;
+  }
+
+  async request<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+    const startedAt = performance.now();
+    const { response, refusal } = await this.authorizedFetch(method, path, {
+      headers: body === undefined ? {} : { "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
       signal,
     });
     if (response.status === 401 || response.status === 403) {
-      const kind: AuthFailureKind = Date.parse(this.machine.expiresAt) <= Date.now()
-        ? "expired" : response.status === 403 ? "scope-mismatch" : "revoked";
-      throw new AuthenticationError(kind, kind === "expired" ? "pairing expired" : kind === "revoked" ? "pairing was revoked" : "credential ceiling does not grant this operation");
+      const kind = authFailureKind(response.status, refusal, this.machine.expiresAt);
+      throw new AuthenticationError(kind, authFailureMessage(kind, refusal));
     }
     if (!response.ok) throw new Error(`${method} ${path} failed (${response.status})`);
     this.callbacks.onLatency?.(Math.max(0, Math.round(performance.now() - startedAt)));
@@ -403,7 +508,7 @@ export class HubConnectionSupervisor {
       this.machineMultiplex = info.capabilities.includes("machine_multiplex_v2");
       this.callbacks.onMachineInfo?.(info);
     } catch (error) {
-      if (error instanceof AuthenticationError) throw error;
+      if (error instanceof AuthenticationError || error instanceof TransientAuthError) throw error;
       // Older hubs can still offer the read-only session surface. The UI shows
       // a visible compatibility warning and leaves capability-gated controls off.
       this.callbacks.onMachineInfo?.(undefined);
@@ -417,8 +522,7 @@ export class HubConnectionSupervisor {
    */
   async artifactView(session: string, artifactId: string): Promise<ArtifactViewResult> {
     const path = `/v1/sessions/${encodeURIComponent(session)}/artifacts/${encodeURIComponent(artifactId)}/url`;
-    const headers = await dpopHeaders(this.machine, "GET", path);
-    const response = await fetch(new URL(path, this.machine.baseUrl), { method: "GET", headers, cache: "no-store", credentials: "omit" });
+    const { response } = await this.authorizedFetch("GET", path);
     const body = await response.json().catch(() => undefined) as Record<string, unknown> | undefined;
     if (response.ok && body && typeof body.url === "string") {
       return { ok: true, view: body as unknown as ArtifactView };
@@ -460,17 +564,14 @@ export class HubConnectionSupervisor {
   private async openEventStream(signal: AbortSignal): Promise<Response> {
     this.eventAbort = new AbortController();
     const path = "/v1/events";
-    const response = await fetch(new URL(path, this.machine.baseUrl), {
-      headers: await dpopHeaders(this.machine, "GET", path),
+    const { response, refusal } = await this.authorizedFetch("GET", path, {
       // AbortSignal.any is Chrome 116+; calling it bare took the whole event
       // stream out on older engines (cas-b652 D3).
       signal: anySignal([this.eventAbort.signal, signal]),
-      cache: "no-store",
-      credentials: "omit",
     });
     if (response.status === 401 || response.status === 403) {
-      const kind: AuthFailureKind = Date.parse(this.machine.expiresAt) <= Date.now() ? "expired" : response.status === 403 ? "scope-mismatch" : "revoked";
-      throw new AuthenticationError(kind, "event-stream authentication failed");
+      const kind = authFailureKind(response.status, refusal, this.machine.expiresAt);
+      throw new AuthenticationError(kind, `event-stream authentication failed: ${authFailureMessage(kind, refusal)}`);
     }
     if (!response.ok || !response.body) throw new Error(`event stream failed (${response.status})`);
     return response;
@@ -778,7 +879,7 @@ export class HubConnectionSupervisor {
     try {
       ticket = await this.request<{ ticket: string }>("POST", "/v1/auth/websocket-ticket", {});
     } catch (error) {
-      if (error instanceof AuthenticationError) throw error;
+      if (error instanceof AuthenticationError || error instanceof TransientAuthError) throw error;
       // A network failure says nothing about the hub's protocol: without this
       // a ticket request lost to a network switch downgraded the page to
       // per-session sockets for the rest of its life (cas-0978).
@@ -1092,7 +1193,30 @@ export class HubConnectionSupervisor {
     const socket = this.sockets.get(session);
     if (!socket || socket.readyState !== WebSocket.OPEN) return false;
     socket.send(JSON.stringify(outbound));
+    const sent = sendMessageClientRef(outbound);
+    if (sent) this.legacySends.set(socket, [...(this.legacySends.get(socket) ?? []), sent]);
     return true;
+  }
+
+  /**
+   * A retryable refusal: the hub closes this session's stream right after it
+   * and the page attaches again. Repeated refusals back off that reattach
+   * (cas-a355): the n-th refusal since the last acknowledged send waits
+   * backoffDelay(min(n - 1, 3)), about 1, 2, 4 then 8 s.
+   */
+  private unansweredAfter(session: string, clientRef: string): string[] {
+    const socket = this.sockets.get(session);
+    const written = socket ? this.legacySends.get(socket) ?? [] : [];
+    const index = written.indexOf(clientRef);
+    if (!socket || index < 0) return [];
+    this.legacySends.set(socket, written.slice(0, index));
+    return written.slice(index + 1);
+  }
+
+  private noteUpstreamRefusal(session: string): void {
+    const streak = (this.upstreamRefusalStreak.get(session) ?? 0) + 1;
+    this.upstreamRefusalStreak.set(session, streak);
+    this.socketAttempts.set(session, Math.min(streak - 1, UPSTREAM_BACKOFF_MAX_ATTEMPT));
   }
 
   requestPaneKeyframe(session: string, paneId: string): boolean {
@@ -1197,7 +1321,8 @@ export class HubConnectionSupervisor {
       const rejection = messageRejection(envelope.error);
       // A retryable refusal is followed by the hub closing this session's
       // stream (`closed` above), which reattaches it; the held send goes out
-      // on that live attach (cas-0653).
+      // on that live attach (cas-0653), after a backoff (cas-a355).
+      if (rejection.retryable) this.noteUpstreamRefusal(session);
       if (typeof envelope.error.client_ref === "string") this.callbacks.onMessageRejected?.(session, envelope.error.client_ref, detail, rejection);
       else this.callbacks.onSocketError(session, detail);
       return;
@@ -1274,6 +1399,9 @@ export class HubConnectionSupervisor {
       this.callbacks.onOutput(session, message.Output.pane_id, new Uint8Array(message.Output.data));
     } else if (message.MessageQueued) {
       const queued = messageQueuedFromDaemon(message);
+      // A send reached the daemon: the upstream is back, so the next
+      // retryable refusal starts the backoff afresh (cas-a355).
+      if (queued) this.upstreamRefusalStreak.delete(session);
       if (queued) this.callbacks.onMessageQueued?.(session, queued);
     } else if (message.OperatorReply) {
       this.callbacks.onOperatorReply?.(session, message.OperatorReply as OperatorReply);
@@ -1292,8 +1420,16 @@ export class HubConnectionSupervisor {
       const rejection = messageRejection(message.error, message);
       // The hub closes the legacy socket after a retryable refusal, and its
       // close handler reattaches (cas-0653).
-      if (typeof clientRef === "string") this.callbacks.onMessageRejected?.(session, clientRef, detail, rejection);
-      else this.callbacks.onSocketError(session, detail);
+      if (typeof clientRef === "string") {
+        if (rejection.retryable) this.noteUpstreamRefusal(session);
+        this.callbacks.onMessageRejected?.(session, clientRef, detail, rejection);
+        // The hub stops reading this socket after the refusal (hub/server.rs
+        // `proxy_socket`), so a message written after the refused one never
+        // reached the daemon and is never answered. It is refused the same
+        // way, and held again, instead of waiting out "Not confirmed"
+        // (cas-a355).
+        if (rejection.retryable) for (const later of this.unansweredAfter(session, clientRef)) this.callbacks.onMessageRejected?.(session, later, detail, rejection);
+      } else this.callbacks.onSocketError(session, detail);
     } else if (message.Error) {
       if (typeof message.Error.client_ref === "string") this.callbacks.onMessageRejected?.(session, message.Error.client_ref, message.Error.message);
       else this.callbacks.onSocketError(session, message.Error.message);
@@ -1316,6 +1452,17 @@ export function messageQueuedFromDaemon(message: Record<string, any>): MessageQu
 
 function isSupervisorMessage(message: unknown): boolean {
   return typeof message === "object" && message !== null && "SendMessage" in message;
+}
+
+/** Reattach attempts after repeated `upstream_unavailable` refusals stop growing here: backoffDelay(3), about 8 s (cas-a355). */
+export const UPSTREAM_BACKOFF_MAX_ATTEMPT = 3;
+
+/** The client_ref of an outbound SendMessage, if it carries one. */
+function sendMessageClientRef(message: unknown): string | undefined {
+  if (typeof message !== "object" || message === null) return undefined;
+  const send = (message as Record<string, unknown>).SendMessage;
+  const ref = send && typeof send === "object" ? (send as Record<string, unknown>).client_ref : undefined;
+  return typeof ref === "string" ? ref : undefined;
 }
 
 function withClientRef(message: unknown, clientRef: string | undefined): unknown {

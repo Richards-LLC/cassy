@@ -30,6 +30,8 @@ export async function dpopHeaders(
   machine: StoredMachine,
   method: string,
   targetUri: string,
+  // The signing time; a caller corrects it by the hub's clock (cas-d636).
+  now = Date.now(),
 ): Promise<Record<string, string>> {
   const ath = b64url(await crypto.subtle.digest("SHA-256", encoder.encode(machine.credential)));
   const header = encodedJson({
@@ -44,7 +46,7 @@ export async function dpopHeaders(
   const claims = encodedJson({
     htm: method.toUpperCase(),
     htu: targetUri,
-    iat: Math.floor(Date.now() / 1000),
+    iat: Math.floor(now / 1000),
     jti: crypto.randomUUID(),
     ath,
   });

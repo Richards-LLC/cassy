@@ -5,7 +5,6 @@ import { ATLAS, STUDIO, PELICAN } from "./world";
 // machine protocol (one socket, health ping/pong) so a half-open socket, the
 // failure a network switch actually leaves, can be reproduced.
 test("HUB-J12 switch networks without losing the conversation", async ({ page, journey }) => {
-  // Seven transitions, one of them a 25 s outage with four missed heartbeats,
   // Eight transitions, one of them a 25 s outage with four missed heartbeats,
   // plus the held-send backoff wait and the legacy-socket stage.
   test.setTimeout(330_000);
@@ -266,12 +265,17 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
     // cas-d15c (cas-d636 QA F01): a definitive refusal ends the pairing. The
     // banner beside "Needs pairing" used to say "Reconnecting…", and a phone,
     // which hides the attention rail, had no Re-pair anywhere.
-    await page.setViewportSize({ width: 390, height: 844 });
     const banner = page.locator(".terminal-disconnected-banner");
     hub.refuseProofs("atlas", 1_000, "revoked", false);
     await hub.down("atlas", { sockets: "close" });
     await hub.up("atlas");
     await expect(header).toHaveText(" · Needs pairing", { timeout: 25_000 });
+    // At 1280 the context rail's status notice says the same, not
+    // "reconnecting" (cas-d15c QA round 1 F01).
+    const stale = page.locator(".status-stale").filter({ visible: true });
+    await expect(stale).toHaveText(/^Not live — this browser needs pairing again\./);
+    await expect(page.getByText(/reconnecting/i).filter({ visible: true })).toHaveCount(0);
+    await page.setViewportSize({ width: 390, height: 844 });
     await expect(banner.locator(".banner-text")).toHaveText("Atlas · Linux needs pairing again.");
     await expect(banner).not.toContainText("Reconnecting");
     const repair = banner.getByRole("button", { name: "Re-pair Atlas · Linux" });

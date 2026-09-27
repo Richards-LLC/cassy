@@ -697,6 +697,9 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       // collapses every retry into a single card with a repeat count instead of
       // burying the feed under a card for each attempt.
       if (state.authFailure) {
+        // The hub answered, so it is not "Reconnecting to hub" any more; the
+        // pairing card below says what is wrong (cas-d15c QA F01).
+        resolveAttention(`${machine.id}:hub_disconnected`);
         void addAttention(machine, undefined, "auth_loss", {
           headline: state.authFailure === "needs-pairing" ? "Machine needs pairing" : "Authentication blocked",
           detail: state.reason ?? "Authentication blocked",
@@ -2001,7 +2004,8 @@ function invalidateMachineLeases(machineId: string): void {
   }
   // Control disappearing in silence invites typing into a terminal that is no
   // longer listening.
-  if (held) toast("Control released — the hub connection dropped");
+  // cas-d15c QA N2: a refused pairing is not a dropped connection.
+  if (held) toast(connectionStates.get(machineId)?.authFailure ? "Control released — this browser needs pairing again" : "Control released — the hub connection dropped");
 }
 
 let toastTimer: number | undefined;
@@ -2877,7 +2881,13 @@ function render(captureDraft = true): void {
     : ` Showing the last state received ${staleStatusAge === "now" ? "just now" : `${staleStatusAge} ago`}.`;
   // The sentence, not the element: the element is always in the shell so a
   // heartbeat can fill or empty it without rebuilding the status section.
-  const staleStatusText = statusIsStale ? `Not live — reconnecting.${staleStatusTail}` : undefined;
+  // cas-d15c QA F01: a refused pairing is not reconnecting; the rail says
+  // what the header's "Needs pairing" and the banner say.
+  const pairingLostHere = Boolean(selected) && (machineConnectionSnapshot?.authFailure !== undefined
+    || (terminalAttachSnapshot?.authFailure !== undefined));
+  const staleStatusText = statusIsStale
+    ? (pairingLostHere ? `Not live — this browser needs pairing again.${staleStatusTail}` : `Not live — reconnecting.${staleStatusTail}`)
+    : undefined;
   const terminalSessionKey = selected && selectedSession ? sessionKey(selected.id, selectedSession) : undefined;
   // While the session is up the chip reads the machine's own connection, as
   // the rail does (cas-bf07 QA F01); while it is down it names that state.

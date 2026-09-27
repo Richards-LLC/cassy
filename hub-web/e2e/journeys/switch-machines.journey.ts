@@ -600,18 +600,28 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
       { name: "quiet-heron-8", supervisor: "quiet-heron-8", project_dir: "/projects/cas-src", workers: [], liveness: "live" },
     ] as Machine["sessions"];
     alpha.push(...extra);
+    // cas-ae5e: the same codename on a second machine (brisk-otter-5 on Atlas
+    // too) is told apart by the machine's rail initials, which fit the narrow
+    // label column where the full machine name did not.
+    const atlasSessions = hub.machine("atlas").sessions;
+    const twin = { ...extra[0]!, workers: [] } as Machine["sessions"][number];
+    atlasSessions.push(twin);
     const plotName = (session: string) => board.locator(`.fleet-plot-row[data-fleet-session="${session}"] .fleet-plot-name`);
     await expect(plotName("quiet-heron-8")).toBeVisible({ timeout: 15_000 });
+    await expect(plotName("brisk-otter-5")).toHaveCount(2, { timeout: 15_000 });
     const plotLabels = async () => board.locator(".fleet-plot-row").evaluateAll((rows) => rows.map((row) => {
       const name = row.querySelector<HTMLElement>(".fleet-plot-name")!;
       const tag = name.querySelector<HTMLElement>(".fleet-plot-tag");
-      return { session: (row as HTMLElement).dataset.fleetSession!, project: name.querySelector(".fleet-plot-project")?.textContent ?? name.textContent ?? "", tag: tag?.textContent ?? "", tagWhole: !tag || tag.scrollWidth <= tag.clientWidth + 1 && tag.getBoundingClientRect().right <= name.getBoundingClientRect().right + 1 };
+      const project = name.querySelector<HTMLElement>(".fleet-plot-project");
+      return { session: (row as HTMLElement).dataset.fleetSession!, project: project?.textContent ?? name.textContent ?? "", projectWidth: project ? project.getBoundingClientRect().width : name.getBoundingClientRect().width, tag: tag?.textContent ?? "", tagWhole: !tag || tag.scrollWidth <= tag.clientWidth + 1 && tag.getBoundingClientRect().right <= name.getBoundingClientRect().right + 1 };
     }));
     for (const width of [viewport.width, 390]) {
       await page.setViewportSize({ width, height: viewport.height });
       const labels = await plotLabels();
       const casSrc = labels.filter((label) => label.project === "cas-src");
-      expect(casSrc.map((label) => label.tag).sort(), `cas-src plot rows at ${width}px`).toEqual(["heron-8", "otter-5", "pelican-9"]);
+      expect(casSrc.map((label) => label.tag).sort(), `cas-src plot rows at ${width}px`).toEqual(["heron-8", "otter-5 · AL", "otter-5 · AT", "pelican-9"]);
+      // The project keeps at least a letter beside the tag; it never collapses to a bare "·".
+      expect(casSrc.every((label) => label.projectWidth >= 8), `the project stays visible beside the tag at ${width}px: ${JSON.stringify(casSrc)}`).toBe(true);
       expect(new Set(labels.map((label) => `${label.project} ${label.tag}`)).size, `every plot row reads differently at ${width}px`).toBe(labels.length);
       expect(casSrc.every((label) => label.tagWhole), `the tag is never cut at ${width}px`).toBe(true);
       // A project that appears once carries no tag.
@@ -619,7 +629,9 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     }
     await page.setViewportSize(viewport);
     alpha.splice(alpha.length - extra.length, extra.length);
+    atlasSessions.splice(atlasSessions.indexOf(twin), 1);
     await expect(plotName("quiet-heron-8")).toHaveCount(0, { timeout: 15_000 });
+    await expect(plotName("brisk-otter-5")).toHaveCount(0, { timeout: 15_000 });
     await expect(board.locator(".fleet-plot-tag")).toHaveCount(0);
   });
 
@@ -630,5 +642,63 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await expect(page.locator(".session-picker-name")).toHaveText("cas-src");
     await expect(page.locator("body")).toMatchAriaSnapshot(`- heading "cas-src ${PELICAN} on Atlas · Linux — switch session (4 available)" [level=1]`);
     expect(await page.locator("body").ariaSnapshot()).not.toContain('heading "Switch session');
+  });
+
+  await journey.stage("Tell one codename apart on two machines whose initials match", async () => {
+    // cas-ae5e QA F01: Atlas and Attic share the rail initials AT. The paired
+    // Alpha is renamed Attic in this browser, and brisk-otter-5 and
+    // patient-pelican-9 run on both machines. The plot marks each machine by
+    // the shortest part of its name that differs ("Atl" / "Att"), never the
+    // full label. A twin tag is capped to fit the 132px column at 390 (QA
+    // round 2), so a long tail is trimmed from the left: "…ter-5 · Atl",
+    // "…can-9 · Att". The tag stays whole and the project keeps a letter, at
+    // 1280 and 390.
+    await page.evaluate(async () => {
+      const db: IDBDatabase = await new Promise((ok, fail) => { const req = indexedDB.open("cas-commander-v1"); req.onsuccess = () => ok(req.result); req.onerror = () => fail(req.error); });
+      await new Promise<void>((ok, fail) => {
+        const tx = db.transaction("machines", "readwrite");
+        const store = tx.objectStore("machines");
+        const get = store.get("alpha");
+        // A machine paired in the page keeps its visible record as the install's candidate.
+        get.onsuccess = () => {
+          const record = get.result;
+          const renamed = { ...record, label: "Attic · Linux" };
+          if (record.pairingInstall?.candidate) renamed.pairingInstall = { ...record.pairingInstall, candidate: { ...record.pairingInstall.candidate, label: "Attic · Linux" } };
+          store.put(renamed);
+        };
+        tx.oncomplete = () => ok();
+        tx.onerror = () => fail(tx.error);
+      });
+      db.close();
+    });
+    const twin = (): Machine["sessions"][number] => ({ name: "brisk-otter-5", supervisor: "brisk-otter-5", project_dir: "/projects/cas-src", workers: [], liveness: "live" });
+    hub.machine("alpha").sessions.push(twin(), { name: PELICAN, supervisor: PELICAN, project_dir: "/projects/cas-src", workers: [], liveness: "live" });
+    hub.machine("atlas").sessions.push(twin());
+    await page.reload();
+    const terminal = page.getByRole("button", { name: "Terminal view" });
+    if (await terminal.isVisible()) await terminal.click();
+    await page.locator("#machine-rail-list .machine-icon").filter({ hasText: "AT" }).first().click();
+    const board = page.locator("#fleet-board");
+    const rows = board.locator(`.fleet-plot-row:is([data-fleet-session="brisk-otter-5"], [data-fleet-session="${PELICAN}"])`);
+    await expect(rows).toHaveCount(4, { timeout: 20_000 });
+    const viewport = page.viewportSize()!;
+    for (const width of [viewport.width, 390]) {
+      await page.setViewportSize({ width, height: viewport.height });
+      const twins = await rows.evaluateAll((items) => items.map((row) => {
+        const name = row.querySelector<HTMLElement>(".fleet-plot-name")!;
+        const tag = name.querySelector<HTMLElement>(".fleet-plot-tag")!;
+        const project = name.querySelector<HTMLElement>(".fleet-plot-project")!;
+        return {
+          project: project.textContent,
+          projectWidth: project.getBoundingClientRect().width,
+          tag: tag.textContent,
+          tagWhole: tag.scrollWidth <= tag.clientWidth + 1 && tag.getBoundingClientRect().right <= name.getBoundingClientRect().right + 1,
+        };
+      }));
+      expect(twins.map((row) => row.tag).sort(), `twin tags at ${width}px`).toEqual(["…can-9 · Atl", "…can-9 · Att", "…ter-5 · Atl", "…ter-5 · Att"]);
+      expect(twins.every((row) => row.project === "cas-src" && row.projectWidth >= 8), `the project keeps a letter at ${width}px: ${JSON.stringify(twins)}`).toBe(true);
+      expect(twins.every((row) => row.tagWhole), `the tag is never cut at ${width}px: ${JSON.stringify(twins)}`).toBe(true);
+    }
+    await page.setViewportSize(viewport);
   });
 });

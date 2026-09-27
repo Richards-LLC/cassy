@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { FleetBoardRenderer, fleetBoardSignature, fleetPlotLabels, fleetProvenance, type FleetBoardModel } from "./fleet-board";
+import { FLEET_TWIN_TAG_MAX, FleetBoardRenderer, fleetBoardSignature, fleetPlotLabels, fleetProvenance, type FleetBoardModel } from "./fleet-board";
 import type { SessionPickerEntry } from "./session-selection";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -143,8 +143,41 @@ describe("fleet board region lifecycle", () => {
     // Tails that collide grow until they differ; identical codenames name the machine.
     const grown = fleetPlotLabels([entry({ session: "brave-otter-5", supervisor: "brave-otter-5", project: "p" }), entry({ session: "calm-otter-5", supervisor: "calm-otter-5", project: "p" })]);
     expect([...grown.values()].map((label) => label.tag)).toEqual(["brave-otter-5", "calm-otter-5"]);
+    // cas-ae5e: the same codename on two machines adds the machine's rail
+    // initials, short enough for the narrow label column, and a twin does not
+    // lengthen the other rows' tags.
     const twins = fleetPlotLabels([entry({ ...atlas, session: "keen-lynx-1", supervisor: "keen-lynx-1", project: "p" }), entry({ ...forge, session: "keen-lynx-1", supervisor: "keen-lynx-1", project: "p" })]);
-    expect([...twins.values()].map((label) => label.tag)).toEqual(["keen-lynx-1 · Atlas · Linux", "keen-lynx-1 · Forge · Linux"]);
+    expect([...twins.values()].map((label) => label.tag)).toEqual(["lynx-1 · AT", "lynx-1 · FO"]);
+    const mixed = fleetPlotLabels([
+      entry({ ...atlas, session: "patient-pelican-9", supervisor: "patient-pelican-9", project: "cas-src" }),
+      entry({ ...forge, session: "patient-pelican-9", supervisor: "patient-pelican-9", project: "cas-src" }),
+      entry({ ...forge, session: "brisk-otter-5", supervisor: "brisk-otter-5", project: "cas-src" }),
+    ]);
+    expect([...mixed.values()].map((label) => label.tag)).toEqual(["…ican-9 · AT", "…ican-9 · FO", "otter-5"]);
+    // cas-ae5e QA F01: initials that collide (Atlas, Attic: both AT) use the
+    // shortest differing prefix of the machine's name, never the full label.
+    const sameInitials = fleetPlotLabels([
+      entry({ machineId: "m-a", machineLabel: "Atlas · Linux", session: "brisk-otter-5", supervisor: "brisk-otter-5", project: "cas-src" }),
+      entry({ machineId: "m-b", machineLabel: "Attic · Linux", session: "brisk-otter-5", supervisor: "brisk-otter-5", project: "cas-src" }),
+      entry({ machineId: "m-c", machineLabel: "Studio Mac · macOS", session: "brisk-otter-5", supervisor: "brisk-otter-5", project: "cas-src" }),
+      entry({ machineId: "m-a", machineLabel: "Atlas · Linux", session: "patient-pelican-9", supervisor: "patient-pelican-9", project: "cas-src" }),
+    ]);
+    expect([...sameInitials.values()].map((label) => label.tag)).toEqual(["…ter-5 · Atl", "…ter-5 · Att", "otter-5 · SM", "pelican-9"]);
+    // Names that share four letters fall back to the initials and an ordinal, in label order.
+    const numbered = fleetPlotLabels([
+      entry({ machineId: "b2", machineLabel: "Build Server 2", session: "keen-lynx-1", supervisor: "keen-lynx-1", project: "p" }),
+      entry({ machineId: "b1", machineLabel: "Build Server 1", session: "keen-lynx-1", supervisor: "keen-lynx-1", project: "p" }),
+    ]);
+    expect([...numbered.values()].map((label) => label.tag)).toEqual(["lynx-1 · BS2", "lynx-1 · BS1"]);
+    // Every twin tag fits the narrow column: long tails are trimmed from the left, keeping the distinguishing end.
+    const long = fleetPlotLabels([
+      entry({ machineId: "x1", machineLabel: "Atlas · Linux", session: "extraordinarily-patient-pelican-19", supervisor: "extraordinarily-patient-pelican-19", project: "p" }),
+      entry({ machineId: "x2", machineLabel: "Attic · Linux", session: "extraordinarily-patient-pelican-19", supervisor: "extraordinarily-patient-pelican-19", project: "p" }),
+    ]);
+    expect([...long.values()].map((label) => label.tag)).toEqual(["…an-19 · Atl", "…an-19 · Att"]);
+    for (const labels of [twins, mixed, sameInitials, numbered, long]) {
+      for (const label of labels.values()) if (label.tag?.includes(" · ")) expect(label.tag.length, label.tag).toBeLessThanOrEqual(FLEET_TWIN_TAG_MAX);
+    }
     // Rendered: the tag is its own span, after the project, so the project gives way first.
     const board = freshBoard();
     new FleetBoardRenderer().render(board, model({ sessions }), { open: vi.fn() });
@@ -152,7 +185,7 @@ describe("fleet board region lifecycle", () => {
     expect(names.filter(([project]) => project === "cas-src").map(([, tag]) => tag).sort()).toEqual(["heron-8", "otter-5", "pelican-9"]);
     expect(new Set(names.map((pair) => pair.join(" "))).size).toBe(names.length);
     expect(css).toMatch(/\.fleet-plot-name\.tagged\s*\{[^}]*display: flex;/);
-    expect(css).toMatch(/\.fleet-plot-project\s*\{[^}]*min-width: 0;[^}]*text-overflow: ellipsis;/);
+    expect(css).toMatch(/\.fleet-plot-project\s*\{[^}]*min-width: 2ch;[^}]*text-overflow: ellipsis;/);
     expect(css).toMatch(/\.fleet-plot-tag\s*\{[^}]*flex: none;/);
   });
 

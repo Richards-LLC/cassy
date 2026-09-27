@@ -39,7 +39,7 @@ import { toastPlacementInThread, toastTopClearOfBanner } from "./toast-placement
 import { absoluteTimestamp, relativeTimestamp } from "./time";
 import { loadPaneLayout, movePane, normalizePaneLayout, orderedPaneIds, promotePane, savePaneLayout, type PaneLayout, type PaneLayoutStorage } from "./pane-layout";
 import { detectSpeechInput, SpeechDictationController, type SpeechInputCapability, type SpeechInputState } from "./speech-input";
-import { backLabel, clearStoredSelection, forgetMachine, goBackSelection, loadStoredSelection, previousSelection, restorableSession, saveStoredSelection, selectSelection, sessionPickerEntries, sessionPickerHeadline, sessionPickerRowMeta, workerCountLabel, type SelectionState, type SessionPickerEntry, type SelectionStorage, type SessionSelection } from "./session-selection";
+import { backLabel, clearStoredSelection, forgetMachine, goBackSelection, loadStoredSelection, pairedSessionToOpen, previousSelection, restorableSession, saveStoredSelection, selectSelection, sessionPickerEntries, sessionPickerHeadline, sessionPickerRowMeta, workerCountLabel, type SelectionState, type SessionPickerEntry, type SelectionStorage, type SessionSelection } from "./session-selection";
 import { composerFocusWinner, planSupervisorSend, sendsOnEnter, supervisorMessage, supervisorTarget } from "./supervisor-message";
 import { hiddenWorkersLabel, saveWorkersRevealed, splitVisiblePanes, workersCommandLabel, workersRevealed, workersRoute } from "./worker-visibility";
 import { dormantCommandLabel, dormantRevealed, dormantRoute, saveDormantRevealed } from "./dormant-visibility";
@@ -188,6 +188,10 @@ let selection: SelectionState = { history: [] };
 // The last session from the previous visit, held until this machine's hub
 // confirms it still exists.
 let restoreTarget: SessionSelection | undefined;
+// A machine just paired from a phone, held until its hub lists sessions so its
+// first live conversation opens instead of the list (journey F8). Any
+// selection the operator makes first cancels it.
+let openAfterPairing: string | undefined;
 let sessionPickerOpen = false;
 let pairingStatus = pendingPairing?.kind === "relay-request" ? "Waiting for a machine to claim the code…" : pairingArrivalNotice;
 // Cancellation whose durable cleanup did not complete: the dialog stays on a
@@ -458,6 +462,7 @@ function applySelection(next: SessionSelection | undefined): void {
  */
 function commitSelection(next: SessionSelection): void {
   restoreTarget = undefined;
+  openAfterPairing = undefined;
   selection = selectSelection(selection, next);
   applySelection(next);
   saveStoredSelection(selectionStorage(), next);
@@ -684,7 +689,8 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       window.clearTimeout(catalogExpiryTimers.get(machine.id));
       if (Number.isFinite(ttl)) catalogExpiryTimers.set(machine.id, window.setTimeout(() => render(), ttl));
       sessions.set(machine.id, retainPendingSessions(sessions.get(machine.id) ?? [], items, name => conversationHistories.get(sessionKey(machine.id, name))?.hasPending() ?? false));
-      restoreLastSession(machine.id, visibleSessions(machine.id)); render();
+      if (!openPairedSession(machine.id, visibleSessions(machine.id))) restoreLastSession(machine.id, visibleSessions(machine.id));
+      render();
     },
     onMachineEvent: (event) => {
       const kind = String(event.kind ?? "hub_event");
@@ -861,6 +867,21 @@ function restoreLastSession(machineId: string, items: readonly HubSession[]): vo
   if (!session) return;
   restoreTarget = undefined;
   void openSession(machineId, session);
+}
+
+/**
+ * Pairing from a phone lands in the new machine's conversation (journey F8):
+ * the first session list from its hub settles the choice once, whether or not
+ * a live session is on it, so a session that starts later never pulls the
+ * operator out of wherever they went next. Returns whether one was opened.
+ */
+function openPairedSession(machineId: string, items: readonly HubSession[]): boolean {
+  if (openAfterPairing !== machineId) return false;
+  openAfterPairing = undefined;
+  const session = pairedSessionToOpen(items);
+  if (!session || selectedMachineId !== machineId || selectedSession !== undefined) return false;
+  void openSession(machineId, session);
+  return true;
 }
 
 function ensureConnection(machine: StoredMachine): HubConnectionSupervisor {
@@ -1051,6 +1072,10 @@ async function pairMachine(form: HTMLFormElement): Promise<StoredMachine | false
   pairingDraft = createPairingDraft(location.origin);
   machines.set(machine.id, machine);
   commitSelection({ machineId: machine.id });
+  // A phone shows the list or one conversation, never both: with only the
+  // machine selected it stays on the list, so its first live session opens
+  // when the connection installed below first lists sessions (journey F8).
+  if (phoneLayout()) openAfterPairing = machine.id;
   // The installation seam: "Access saved" and the armed first-connection
   // announcement both precede the connection, so a hub that reports healthy
   // live synchronously still yields saved → connected, named from the machine
@@ -1852,6 +1877,12 @@ function placeToastClearOfBanner(output: HTMLElement): void {
     document.documentElement.clientWidth,
   );
   if (inThread) { output.style.top = `${inThread.top}px`; output.style.right = `${inThread.right}px`; }
+  // On the list the header row is the brand and the appearance control; a
+  // toast at the phone's top edge covered both (journey F8). It drops below
+  // that row whenever it would land on it, as it does below a thread header.
+  const brandRow = visibleBox(document.querySelector<HTMLElement>(".conversation-shell:not(.thread-open) .conversation-list-top"));
+  const belowBrand = toastTopClearOfBanner(parseFloat(getComputedStyle(output).top), output.getBoundingClientRect(), brandRow);
+  if (belowBrand !== undefined) output.style.top = `${belowBrand}px`;
   const banner = document.querySelector<HTMLElement>(".terminal-disconnected-banner");
   const top = toastTopClearOfBanner(parseFloat(getComputedStyle(output).top), output.getBoundingClientRect(), banner?.getClientRects().length ? banner.getBoundingClientRect() : undefined);
   if (top !== undefined) output.style.top = `${top}px`;
@@ -3836,6 +3867,7 @@ async function forgetPairedMachine(id: string): Promise<void> {
   window.clearTimeout(catalogExpiryTimers.get(id)); catalogExpiryTimers.delete(id); catalogExpiresAt.delete(id);
   selection = forgetMachine(selection, id);
   if (restoreTarget?.machineId === id) restoreTarget = undefined;
+  if (openAfterPairing === id) openAfterPairing = undefined;
   if (selectedMachineId === id) {
     clearStoredSelection(selectionStorage());
     const next = machines.keys().next().value;

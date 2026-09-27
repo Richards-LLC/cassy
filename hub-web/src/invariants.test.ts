@@ -1470,6 +1470,8 @@ describe("3.30.0 journey polish (cas-b128)", () => {
     const [main, paired] = await Promise.all([readSource("main.ts"), readSource("paired-machines.ts")]);
     expect(main).toContain('const visibleToast = document.querySelector<HTMLElement>("#toast.visible");');
     expect(main).toContain("toastPlacementInThread(");
+    // Journey F8 (dist 3126b032): on the list the toast drops below the brand row.
+    expect(main).toContain('document.querySelector<HTMLElement>(".conversation-shell:not(.thread-open) .conversation-list-top")');
     expect(main).toContain("Last seen ${relativeTimestamp(Date.parse(updated))} · ${clockLabel(Date.parse(updated))}");
     expect(main).not.toContain("toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })");
     expect(paired).toContain("'Version unknown until it connects'");

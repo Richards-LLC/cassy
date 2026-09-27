@@ -18,6 +18,20 @@ describe("toastTopClearOfBanner (cas-00cc)", () => {
   });
 });
 
+describe("toast below the list brand row (journey F8, dist 3126b032)", () => {
+  // Phone 390: the list's top row (brand + appearance) spans 12–56 px.
+  const brandRow = box(12, 12, 366, 44);
+  it("drops a toast at the phone's top edge below the brand row", () => {
+    expect(toastTopClearOfBanner(12, box(12, 12, 366, 46), brandRow)).toBe(64);
+  });
+  it("leaves the desktop toast alone: the list column is not under it", () => {
+    expect(toastTopClearOfBanner(16, box(1075, 16, 189, 46), box(16, 16, 328, 44))).toBeUndefined();
+  });
+  it("ignores a brand row scrolled off the top", () => {
+    expect(toastTopClearOfBanner(12, box(12, 12, 366, 46), box(12, -80, 366, 44))).toBeUndefined();
+  });
+});
+
 describe("toastPlacementInThread (3.30.0 journey F8)", () => {
   // Desktop 1280: list 0–360, thread 360–960, context rail 960–1280.
   const header = box(360, 0, 600, 96);

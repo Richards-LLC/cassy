@@ -21538,6 +21538,38 @@ mod merge_state_gate_tests {
         );
     }
 
+    #[test]
+    fn qa_paths_use_task_tip_not_older_worker_lane_gh_1040() {
+        let (dir, _bare) = handoff_repo();
+        let repo = dir.path();
+        let task = worker_task("worker");
+        git(repo, &["checkout", "-q", "factory/worker"]);
+        std::fs::create_dir_all(repo.join("web/src/components")).unwrap();
+        std::fs::write(repo.join("web/src/components/EntryBox.tsx"), "export default null;\n").unwrap();
+        git(repo, &["add", "web/src/components/EntryBox.tsx"]);
+        git(repo, &["commit", "-q", "-m", "older UI task"]);
+        let task_branch = format!("factory/worker-{}", task.id);
+        git(repo, &["checkout", "-q", "-b", &task_branch, "main"]);
+        std::fs::write(repo.join("next.py"), "print('next')\n").unwrap();
+        git(repo, &["add", "next.py"]);
+        git(repo, &["commit", "-q", "-m", "next task"]);
+        let head = rev_parse_local(repo, "HEAD");
+
+        assert_eq!(close_measured_factory_branch(repo, &task, "worker"), task_branch);
+        let paths = crate::qa_pass::changed_paths_for_delivery(repo, "main", &head).unwrap();
+        assert_eq!(paths, vec!["next.py"]);
+        assert!(
+            !crate::qa_pass::user_facing_reasons(
+                &task,
+                &crate::config::QaConfig::default(),
+                Some(&paths),
+                &[],
+            )
+            .is_eligible(),
+            "the older lane's EntryBox.tsx must not dispatch QA for this Python delivery",
+        );
+    }
+
     /// Without a per-task branch the worker's own branch is measured, as
     /// before.
     #[test]

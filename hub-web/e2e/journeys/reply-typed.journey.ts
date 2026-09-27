@@ -296,12 +296,13 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
       expect(await oneLineCodename(".thread .empty .proj2"), `meta line at ${width}px`).toMatchObject({ lines: 1, oneLine: true, title: `Forge · Linux · ${LONG_NAME}` });
       // The machine name yields first; a codename this long still ellipsises on a phone.
       expect(await oneLineCodename(".thread .empty .proj2 > .codename"), `meta codename at ${width}px`).toMatchObject({ lines: 1, oneLine: true, ...(width === 390 ? { ellipsised: true } : {}) });
-      // cas-71af (e918 QA F01): with no room the machine name keeps a letter
-      // and its ellipsis ("F…"), never a 2px glyph sliver, in the header and
-      // on the empty card.
+      // cas-71af (e918 QA F01): the machine name keeps at least a letter and
+      // its ellipsis ("F…"), or steps aside with its separator when even that
+      // does not fit beside the codename; never a 2px glyph sliver. Header
+      // and empty card alike.
       for (const machine of [".conversation-identity .host-machine", ".thread .empty .proj2-machine"]) {
         const shown = await page.locator(machine).evaluate((element) => ({ width: element.getBoundingClientRect().width, ch: parseFloat(getComputedStyle(element).fontSize) * 0.5 }));
-        expect(shown.width, `${machine} at ${width}px`).toBeGreaterThanOrEqual(shown.ch * 2 - 1);
+        if (shown.width > 0) expect(shown.width, `${machine} at ${width}px`).toBeGreaterThanOrEqual(shown.ch * 2 - 1);
       }
     }
     await page.setViewportSize(desktop);

@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ConversationHistory, RECEIPT_REPLY_GRACE_MS, RECEIPT_TIMEOUT_MS } from "./conversation-history";
 import { ConversationList, conversationRowMarkup, filterConversationRows, truncateConversationPreview, type ConversationRow } from "./conversation-list";
 import { ConversationView } from "./conversation-view";
-import { ATTACH_DISABLED_REASON, ATTACH_SUPPORTED, arrangeConversationShell, conversationNoMatchText, hostMarkup, conversationShellMarkup, dressComposer, KEYBOARD_HINT_MEDIA_QUERY } from "./conversation-shell";
+import { ATTACH_DISABLED_REASON, ATTACH_SUPPORTED, arrangeConversationShell, conversationNoMatchText, fitMachineLine, hostMarkup, conversationShellMarkup, dressComposer, KEYBOARD_HINT_MEDIA_QUERY } from "./conversation-shell";
 import { renderConversationFixture } from "../fixtures/conversations";
 import { projectName, projectBadge } from "./cloud-brand";
 
@@ -523,5 +523,30 @@ describe("hostMarkup (journey F14)", () => {
     const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
     const rule = css.indexOf("@media (max-width: 500px) {\n  .conversation-identity .host-os { display: none; }");
     expect(rule).toBeGreaterThan(css.indexOf("  .conversation-identity .host-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; }\n  #conversation-connection"));
+  });
+});
+
+describe("fitMachineLine (cas-71af, e918 QA F01)", () => {
+  const line = (codenameWidth: number) => {
+    const where = document.createElement("span"); where.className = "host-where";
+    where.innerHTML = '<span class="host-machine">Daniel\'s MacBook Pro</span><span class="host-sep"> · </span><span class="codename">vigilant-kingfisher-12</span>';
+    const codename = where.querySelector<HTMLElement>(".codename")!;
+    codename.style.fontSize = "10px";
+    Object.defineProperty(codename, "scrollWidth", { configurable: true, get: () => codenameWidth });
+    document.body.append(where);
+    return where;
+  };
+  it("drops the machine and separator when they cannot keep 2ch beside the whole codename", () => {
+    // 5ch at 10px mono is 30px.
+    const where = line(132);
+    fitMachineLine(where, 150);
+    expect(where.classList.contains("machine-squeezed")).toBe(true);
+    fitMachineLine(where, 170);
+    expect(where.classList.contains("machine-squeezed")).toBe(false);
+  });
+  it("hides it in the stylesheet, header and empty card alike, and gives the codename the line", () => {
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
+    expect(css).toContain(".conversation-identity .host-where.machine-squeezed > :is(.host-machine, .host-sep) { display: none; }");
+    expect(css).toContain(".thread .empty .proj2.machine-squeezed > :is(.proj2-machine, .proj2-sep) { display: none; }");
   });
 });

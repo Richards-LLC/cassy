@@ -10,7 +10,7 @@ import { REFUSED_SEE_ABOVE, refusalSentence, refusal } from "./refusal";
 import { installAttentionObjects } from "./attention-objects";
 import { clearTransientAttachmentNotes, installAttachmentSheet, setAttachmentNote } from "./attachment-sheet";
 import { artifactFailureIsAboutTheFile, artifactIdFromHref, artifactIsLocalOnly, artifactLinkFor, openArtifact } from "./artifact-open";
-import { arrangeConversationShell, bindKeyboardViewport, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY } from "./conversation-shell";
+import { arrangeConversationShell, bindKeyboardViewport, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY, fitConversationHost } from "./conversation-shell";
 import { clockLabel } from "./thread-model";
 import { syncContextRail } from "./context-rail";
 import { applyScheme, markAppearanceCommands, setScheme, type SchemePreference } from "./scheme";
@@ -3007,6 +3007,8 @@ function renderConversationList(): void {
       state.replaceChildren(separator, label);
     }
   }
+  // The state's width changes the room the machine · codename line has.
+  fitConversationHost(document);
 }
 
 /**
@@ -3924,6 +3926,9 @@ app.addEventListener("click", (event) => {
 const localOnlyArtifacts = new Set<string>();
 
 window.addEventListener("keydown", globalShortcut, true);
+// The conversation header's machine · codename line is fitted to its room
+// (cas-71af): a width change can make the machine name step aside or return.
+window.addEventListener("resize", () => fitConversationHost(document), { passive: true });
 // Rotation changes the layout in CSS instantly, but which panes mount a
 // terminal, whether the worker strip is collapsed and the PTY column floor are
 // all decided in JS at render time. Without this, a phone turned on its side

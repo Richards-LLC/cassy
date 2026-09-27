@@ -1,3 +1,4 @@
+import { fitMachineLine } from "./conversation-shell";
 import { machineMonogram } from "./machine-accent";
 import { renderMarkdown } from "./markdown-renderer";
 import { refusal } from "./refusal";
@@ -239,6 +240,7 @@ export class ConversationView {
     if (typeof ResizeObserver !== "undefined") {
       this.resize = new ResizeObserver(() => {
         for (const node of this.msgs.querySelectorAll<HTMLElement>(".coalesce-turn")) syncClampPill(node);
+        this.fitEmptyMeta();
         if (this.following) this.pin();
       });
       this.resize.observe(this.element);
@@ -461,6 +463,15 @@ export class ConversationView {
     const children: HTMLElement[] = [mono, name, where, said];
     if (echo) { const quiet = document.createElement("div"); quiet.className = "quiet"; quiet.textContent = echo; children.push(quiet); }
     this.empty.replaceChildren(...children);
+    if (typeof requestAnimationFrame !== "undefined") requestAnimationFrame(() => this.fitEmptyMeta());
+  }
+
+  /** The empty card's machine · codename line, fitted like the header's (cas-71af). */
+  private fitEmptyMeta(): void {
+    const line = this.empty.querySelector<HTMLElement>(":scope > .proj2");
+    if (!line || this.empty.hidden) return;
+    const style = getComputedStyle(this.empty);
+    fitMachineLine(line, this.empty.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight));
   }
 
   /** Cheap liveness poll: repaints only when the working state actually flipped. */

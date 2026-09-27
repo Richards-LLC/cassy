@@ -126,6 +126,23 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
     });
 
     registry.register(ConfigMeta {
+        key: "factory.epic_base_branch",
+        section: "factory",
+        name: "Epic Base Branch",
+        description: "Integration branch epics and workers are cut from, and the work target a task without one defaults to. Empty uses the repository's detected default branch (origin/HEAD, then init.defaultBranch).",
+        value_type: ConfigType::String,
+        default: "",
+        constraint: Constraint::None,
+        advanced: false,
+        requires_feature: None,
+        keywords: &["factory", "epic", "base", "branch", "trunk", "staging", "target", "integration"],
+        use_cases: &[
+            "Cut epics and workers from staging in a staging-first repository",
+            "Leave empty to use the repository's default branch",
+        ],
+    });
+
+    registry.register(ConfigMeta {
         key: "factory.merge_sweep_cwd",
         section: "factory",
         name: "Post-Merge Sweep Working Directory",

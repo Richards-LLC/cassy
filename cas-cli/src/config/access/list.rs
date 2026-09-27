@@ -141,6 +141,13 @@ impl Config {
                 qa.telemetry_sweep.unwrap_or_default(),
             ),
             (
+                "factory.epic_base_branch".to_string(),
+                self.factory
+                    .as_ref()
+                    .and_then(|factory| factory.epic_base_branch.clone())
+                    .unwrap_or_default(),
+            ),
+            (
                 "qa.independent_pass".to_string(),
                 qa.independent_pass.to_string(),
             ),

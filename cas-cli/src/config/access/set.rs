@@ -86,6 +86,13 @@ impl Config {
                 let command = value.trim();
                 factory.merge_sweep_command = (!command.is_empty()).then(|| command.to_string());
             }
+            // cas-8d54 (GH #1011): the runtime reads this key
+            // (Config::configured_epic_base_branch); empty clears it.
+            "factory.epic_base_branch" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                let branch = value.trim();
+                factory.epic_base_branch = (!branch.is_empty()).then(|| branch.to_string());
+            }
             "factory.merge_sweep_cwd" => {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
                 let cwd = value.trim();

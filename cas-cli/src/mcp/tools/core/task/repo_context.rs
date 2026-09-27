@@ -494,24 +494,33 @@ pub(crate) fn declare_work_target(
     }))
 }
 
-/// Anchor a targetless Git task to the factory integration branch at creation.
+/// Anchor a targetless Git task to the integration branch at creation.
 /// Non-Git task stores retain their legacy target-free behavior.
-pub(crate) fn standalone_work_target(cas_root: &Path) -> Result<Option<WorkTarget>, String> {
+pub(crate) fn standalone_work_target(
+    cas_root: &Path,
+) -> Result<(Option<WorkTarget>, Option<String>), String> {
     let Ok((checkout_root, _)) = git_checkout_layout(cas_root) else {
-        return Ok(None);
+        return Ok((None, None));
     };
-    let branch =
-        crate::config::Config::configured_epic_base_branch(&checkout_root).ok_or_else(|| {
-            "WORK TARGET REQUIRED: this Git project has no [factory] epic_base_branch. \
-             Set that integration branch in .cas/config.toml or pass target_branch (and, \
-             for a different repository, target_repo); refusing an implicit trunk fallback."
-                .to_string()
-        })?;
-    declare_work_target(
+    let configured = crate::config::Config::configured_epic_base_branch(&checkout_root);
+    let branch = match configured.as_deref() {
+        Some(branch) => branch.to_string(),
+        None => resolve_default_branch(&checkout_root)?,
+    };
+    let target = declare_work_target(
         cas_root,
         Some(checkout_root.to_string_lossy().as_ref()),
         Some(&branch),
-    )
+    )?;
+    let warning = configured.is_none().then(|| {
+        format!(
+            "\n\n⚠️ WORK TARGET DEFAULTED: no [factory] epic_base_branch is configured. \
+             This task is explicitly targeted to detected trunk `{branch}`. \
+             If your integration branch differs, set [factory] epic_base_branch in \
+             .cas/config.toml or pass target_branch when creating the task."
+        )
+    });
+    Ok((target, warning))
 }
 
 /// Select the durable WorkTarget a child should inherit from an epic.

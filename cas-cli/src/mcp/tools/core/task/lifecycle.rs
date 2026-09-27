@@ -1020,8 +1020,10 @@ impl CasCore {
                     None
                 }
             });
-        let work_target = if let Some(target) = inherited_from_epic.or(declared_work_target) {
-            Some(target)
+        let (work_target, default_target_warning) = if let Some(target) =
+            inherited_from_epic.or(declared_work_target)
+        {
+            (Some(target), None)
         } else {
             super::repo_context::standalone_work_target(&self.cas_root).map_err(|message| {
                 McpError {
@@ -1179,7 +1181,8 @@ impl CasCore {
                     &task.labels,
                     &task.description,
                 ))
-                .unwrap_or_default();
+                .unwrap_or_default()
+            + default_target_warning.as_deref().unwrap_or_default();
 
         if let Ok(search) = self.open_search_index() {
             let _ = search.index_task(&task);
@@ -2821,7 +2824,7 @@ mod related_recall_response_tests {
     /// GH #1011: a standalone task must carry the integration target from
     /// creation; otherwise close can silently measure its delivery against main.
     #[tokio::test]
-    async fn standalone_create_anchors_configured_staging_and_rejects_implicit_main() {
+    async fn standalone_create_anchors_configured_staging_or_warns_on_detected_main() {
         use std::process::Command;
 
         let _env = TestEnvGuard::temp_home();
@@ -2859,21 +2862,32 @@ mod related_recall_response_tests {
             );
         }
         let core = CasCore::with_daemon(repo.to_path_buf(), None, None);
-        let missing = core
+        let defaulted = text(
+            core
             .cas_task_create(Parameters(plain_task_request("No implicit main")))
             .await
-            .expect_err("no integration target must reject before persisting");
-        assert!(
-            missing.message.contains("WORK TARGET REQUIRED"),
-            "{missing}"
+            .expect("detected trunk still permits creation"),
         );
-        assert!(missing.message.contains("epic_base_branch"), "{missing}");
         assert!(
-            core.open_task_store()
-                .unwrap()
-                .list(None)
-                .unwrap()
-                .is_empty()
+            defaulted.contains("WORK TARGET DEFAULTED")
+                && defaulted.contains("`main`")
+                && defaulted.contains("epic_base_branch"),
+            "{defaulted}"
+        );
+        let store = core.open_task_store().unwrap();
+        let defaulted_task = store
+            .list(None)
+            .unwrap()
+            .into_iter()
+            .find(|task| task.title == "No implicit main")
+            .expect("created task");
+        assert_eq!(
+            defaulted_task
+                .deliverables
+                .work_target
+                .expect("durable detected target")
+                .target_branch,
+            "main"
         );
 
         std::fs::create_dir_all(repo.join(".cas")).unwrap();
@@ -2882,16 +2896,18 @@ mod related_recall_response_tests {
             "[factory]\nepic_base_branch = \"staging\"\n",
         )
         .unwrap();
-        core.cas_task_create(Parameters(plain_task_request("Use staging")))
-            .await
-            .expect("configured integration target permits creation");
-        let task = core
-            .open_task_store()
-            .unwrap()
+        let configured = text(
+            core.cas_task_create(Parameters(plain_task_request("Use staging")))
+                .await
+                .expect("configured integration target permits creation"),
+        );
+        assert!(!configured.contains("WORK TARGET DEFAULTED"), "{configured}");
+        let task = store
             .list(None)
             .unwrap()
-            .pop()
-            .unwrap();
+            .into_iter()
+            .find(|task| task.title == "Use staging")
+            .expect("configured task");
         assert_eq!(
             task.deliverables
                 .work_target

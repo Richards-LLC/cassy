@@ -1321,6 +1321,16 @@ main {
   border-left: var(--rule-verdict) solid var(--state-warn);
 }
 
+/* cas-d15c: the pairing-lost banner carries Re-pair beside its sentence,
+   since a phone hides the rail that otherwise offers it. */
+.terminal-disconnected-banner[data-scope="pairing"] { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.terminal-disconnected-banner .banner-repair { flex: none; min-height: 32px; padding: 0 var(--space-3); border: 1.5px solid var(--line-strong); border-radius: 999px; background: transparent; color: var(--text-hi); font: var(--weight-medium) var(--fs-meta)/1.2 var(--font-ui); cursor: pointer; }
+.terminal-disconnected-banner .banner-repair:hover { border-color: var(--text-hi); }
+.terminal-disconnected-banner .banner-repair:focus-visible { outline: 2px solid var(--text-hi); outline-offset: 2px; }
+@media (max-width: 53rem), (pointer: coarse) {
+  .terminal-disconnected-banner .banner-repair { min-height: 44px; }
+}
+
 /* Dims the terminal only. The conversation reading view lives inside the
    same mount; fading it put its text at 2.2-3.3:1 during an outage (cas-3446).
    The banner and the header already mark the session as not live. */

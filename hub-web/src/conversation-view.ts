@@ -116,6 +116,12 @@ export interface ConversationViewOptions {
    */
   controlHeld?: () => boolean;
   /**
+   * Whether the conversation's session is live now (cas-d15c). A send that
+   * expired waiting for it then says Retry will go through, instead of
+   * "once the session is live again" under a header that reads Live.
+   */
+  sessionLive?: () => boolean;
+  /**
    * The device holding control when this one cannot take it over. A control
    * refusal then names it and says to take control once it is released, as
    * the composer does (cas-1730, cas-008f N01). Take control stays on the
@@ -575,9 +581,11 @@ export class ConversationView {
     // A refused send repaints when control changes hands (cas-8e0a).
     const held = turn.event.kind === "send" && turn.event.value.state === "error" ? this.options.controlHeld?.() === true : undefined;
     const holder = turn.event.kind === "send" && turn.event.value.state === "error" ? this.options.controlHolder?.() : undefined;
+    // ...and when its session comes back (cas-d15c).
+    const live = turn.event.kind === "send" && turn.event.value.state === "error" ? this.options.sessionLive?.() === true : undefined;
     // An unconfirmed send settles once the supervisor speaks after it (journey F10).
     const settled = turn.event.kind === "send" && turn.event.value.state === "unconfirmed" ? this.history.repliedSince(turn.event.value) : undefined;
-    return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting, pinned, retired, delivered, held, holder, settled]);
+    return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting, pinned, retired, delivered, held, holder, settled, live]);
   }
 
   /**
@@ -868,7 +876,8 @@ export class ConversationView {
       const holder = plain.action === "take-control" && !resolved ? this.options.controlHolder?.() : undefined;
       const reason = document.createElement("span"); reason.className = "conversation-refused-reason"; reason.textContent = resolved ? "This device controls the session now." : plain.reason;
       const next = document.createElement("span"); next.className = "conversation-refused-next";
-      next.textContent = resolved ? " Retry to send it." : holder ? ` ${holder} is in control. Take control when it's released, then retry.` : ` ${plain.next}`;
+      const sessionBack = plain.action === "await-session" && this.options.sessionLive?.() === true;
+      next.textContent = resolved || sessionBack ? " Retry to send it." : holder ? ` ${holder} is in control. Take control when it's released, then retry.` : ` ${plain.next}`;
       reason.append(next);
       state.append(glyph.content.firstElementChild!, label, separator, reason);
       bubble.append(state);

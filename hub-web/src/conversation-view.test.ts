@@ -11,6 +11,20 @@ function reply(id: number, kind: OperatorTurnKind, message = `m${id}`, reply_to:
 }
 
 describe("ConversationView (Pebble thread)", () => {
+  it("says Retry goes through once the session a held send waited for is live again (cas-d15c, cas-a355 N2)", () => {
+    const history = new ConversationHistory();
+    let live = false;
+    const view = new ConversationView(document, history, { supervisor: "sup", retryMessage: vi.fn(), sessionLive: () => live }); document.body.replaceChildren(view.element);
+    history.submit("x", "sup", "Rotate the key", at(9, 0));
+    history.reject("x", "Not sent: lost connection to Atlas · Linux. Your message is kept; send it again when it's back.");
+    view.update();
+    const line = () => view.element.querySelector('.bub[data-state="error"] .conversation-refused')?.textContent;
+    expect(line()).toBe("Not sent · The session didn't come back while it waited. Retry once the session is live again.");
+    live = true; view.update();
+    expect(line()).toBe("Not sent · The session didn't come back while it waited. Retry to send it.");
+    live = false; view.update();
+    expect(line()).toContain("Retry once the session is live again.");
+  });
   it("paints operator pebbles right, supervisor pebbles in the accent scope, grouped corners and one time per group", () => {
     const history = new ConversationHistory();
     const view = new ConversationView(document, history, { supervisor: "atlas-sup", machine: "Atlas", project: "cas-src", accentClass: "machine-accent-0" });

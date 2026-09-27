@@ -19,7 +19,7 @@ import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionU
 import { cycleAttentionGroup, renderAttentionPanel, renderAttentionSummary } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
 import { attachElapsedSeconds, elapsedSeconds, headerConnectionChip, type AttachSnapshot } from "./connection-state";
-import { CONVERSATION_OPENING, disconnectedView, lostConnectionBanner, outageControlsReason, outageRefusal, renderConnectionSurfaceInto, shouldRetainDisconnectedFrame, transportFailureNeedsAttention } from "./connection-state-view";
+import { CONVERSATION_OPENING, disconnectedView, lostConnectionBanner, outageControlsReason, outageRefusal, pairingLostBanner, renderConnectionSurfaceInto, sessionOutageControlsReason, sessionReconnectingBanner, shouldRetainDisconnectedFrame, transportFailureNeedsAttention } from "./connection-state-view";
 import { ensureMachineConnection, replaceMachineConnection } from "./connection-lifecycle";
 import { createDeviceKey } from "./dpop";
 import { readPairingFragment, watchPairingFragment } from "./fragment";
@@ -376,6 +376,9 @@ function mountConversation(key: string, mount: HTMLElement): void {
       // refused message because the conversation header has none (cas-3433).
       takeControl: () => { void takeControlForRefused(threadMachineId, threadSession); },
       controlHeld: () => controlTakenAfterRefusal.has(threadKey) && leases.get(threadKey)?.held_by_me === true,
+      // The header's own state: a send that expired waiting for the session
+      // says Retry will go through once this reads live (cas-d15c).
+      sessionLive: () => conversationConnection(threadMachineId, threadSession)?.phase === "live",
       // cas-1730 (cas-008f N01): while another device holds control and this
       // one cannot force a takeover, the refused message names that device
       // and says to take control once it is released, as the composer does.
@@ -694,6 +697,9 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       // collapses every retry into a single card with a repeat count instead of
       // burying the feed under a card for each attempt.
       if (state.authFailure) {
+        // The hub answered, so it is not "Reconnecting to hub" any more; the
+        // pairing card below says what is wrong (cas-d15c QA F01).
+        resolveAttention(`${machine.id}:hub_disconnected`);
         void addAttention(machine, undefined, "auth_loss", {
           headline: state.authFailure === "needs-pairing" ? "Machine needs pairing" : "Authentication blocked",
           detail: state.reason ?? "Authentication blocked",
@@ -702,7 +708,11 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
           fingerprint: `${machine.id}:auth_loss`,
         });
       }
-      if (state.phase === "live") resolveAttention(`${machine.id}:hub_disconnected`);
+      if (state.phase === "live") {
+        resolveAttention(`${machine.id}:hub_disconnected`);
+        // cas-d636 QA F02: a pairing that works again is no longer blocked.
+        resolveAttention(`${machine.id}:auth_loss`);
+      }
       if (state.phase === "backoff") {
         void addAttention(machine, undefined, "hub_disconnected", {
           headline: "Reconnecting to hub",
@@ -801,7 +811,8 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
           document.querySelector<HTMLElement>("#message-delivery")?.setAttribute("hidden", "");
         }
         if (selectedMachineId === machine.id && selectedSession === session && heldSends.get(key)?.some((held) => held.clientRef === clientRef)) {
-          showComposerStatus(`${session} on ${machine.label} is reconnecting. Your message will go out by itself when it's back.`, "info", true);
+          // Named as the banner above it names the conversation (cas-d15c).
+          showComposerStatus(`${conversationLabel(machine.id, session)} on ${machine.label} is reconnecting. Your message will go out by itself when it's back.`, "info", true);
         }
         updateConversationViews(); renderConversationList();
         return;
@@ -1411,6 +1422,19 @@ function openConnectionLog(machineId: string): void {
   });
 }
 
+/**
+ * The hub closed just this session's stream and the machine is still
+ * connected: the drop is the conversation's, not the machine's (cas-d15c).
+ */
+function sessionOnlyDrop(machineId: string, session: string): boolean {
+  return attachStates.get(sessionKey(machineId, session))?.sessionOnly === true && connectionStates.get(machineId)?.phase === "live";
+}
+
+/** A conversation as the operator knows it: its project, else its session name. */
+function conversationLabel(machineId: string, session: string): string {
+  return projectTitle(sessions.get(machineId)?.find((item) => item.name === session)?.project_dir) || session;
+}
+
 function renderConnectionSurface(machineId: string, session: string, snapshot: ConnectionState, now = Date.now()): void {
   if (selectedMachineId !== machineId || selectedSession !== session) return;
   const grid = document.querySelector<HTMLElement>("#pane-grid");
@@ -1428,7 +1452,40 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
     // A fatal failure is not reconnecting, so the banner must not claim it is.
     // Plain words in the body font (cas-a447): who was lost and what happens next.
     const where = machines.get(machineId)?.label ?? "the machine";
-    banner.textContent = lostConnectionBanner(where, snapshot.fatal === true);
+    // cas-d15c: with the machine still connected, only this session's daemon
+    // link dropped; the banner names the conversation, not the machine.
+    const sessionOnly = sessionOnlyDrop(machineId, session);
+    // A refused pairing is not reconnecting: say what the header's "Needs
+    // pairing" means instead (cas-d15c).
+    const pairingLost = Boolean(snapshot.authFailure ?? connectionStates.get(machineId)?.authFailure);
+    // The words sit in their own span so the 1 Hz repaint updates them
+    // without rebuilding the Re-pair control (and dropping its focus).
+    let words = banner.querySelector<HTMLElement>(":scope > .banner-text");
+    if (!words) {
+      words = document.createElement("span");
+      words.className = "banner-text";
+      banner.replaceChildren(words);
+    }
+    words.textContent = pairingLost
+      ? pairingLostBanner(where)
+      : sessionOnly
+        ? sessionReconnectingBanner(conversationLabel(machineId, session), where, snapshot.fatal === true)
+        : lostConnectionBanner(where, snapshot.fatal === true);
+    // cas-d636 QA F01: a phone hides the rail's Re-pair, so the banner that
+    // says the pairing is gone carries it.
+    const repair = banner.querySelector<HTMLButtonElement>(":scope > .banner-repair");
+    if (pairingLost && !repair) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "banner-repair";
+      button.textContent = "Re-pair";
+      button.setAttribute("aria-label", `Re-pair ${where}`);
+      button.onclick = () => openRepairDialog(machineId);
+      banner.append(button);
+    } else if (!pairingLost && repair) {
+      repair.remove();
+    }
+    banner.dataset.scope = pairingLost ? "pairing" : sessionOnly ? "session" : "machine";
     banner.dataset.attempt = String(view.attempt);
     grid.classList.add("terminal-disconnected");
     // A toast already up when the banner arrives moves clear of it (cas-00cc).
@@ -1947,7 +2004,8 @@ function invalidateMachineLeases(machineId: string): void {
   }
   // Control disappearing in silence invites typing into a terminal that is no
   // longer listening.
-  if (held) toast("Control released — the hub connection dropped");
+  // cas-d15c QA N2: a refused pairing is not a dropped connection.
+  if (held) toast(connectionStates.get(machineId)?.authFailure ? "Control released — this browser needs pairing again" : "Control released — the hub connection dropped");
 }
 
 let toastTimer: number | undefined;
@@ -2790,7 +2848,7 @@ function render(captureDraft = true): void {
   const outageReason = sessionDown && selected && selectedSession
     && (sessionsEverLive.has(sessionKey(selected.id, selectedSession))
       || (machineConnectionSnapshot !== undefined && machineConnectionSnapshot.phase !== "live" && lastLiveAt.has(selected.id)))
-    ? outageControlsReason(selected.label)
+    ? (sessionOnlyDrop(selected.id, selectedSession) ? sessionOutageControlsReason(conversationLabel(selected.id, selectedSession)) : outageControlsReason(selected.label))
     : undefined;
   const controlReason = controlDisabledReason(selected, selectedSession, lease);
   const takeControlReason = outageReason ?? takeControlDisabledReason(selected, selectedSession, lease);
@@ -2823,7 +2881,13 @@ function render(captureDraft = true): void {
     : ` Showing the last state received ${staleStatusAge === "now" ? "just now" : `${staleStatusAge} ago`}.`;
   // The sentence, not the element: the element is always in the shell so a
   // heartbeat can fill or empty it without rebuilding the status section.
-  const staleStatusText = statusIsStale ? `Not live — reconnecting.${staleStatusTail}` : undefined;
+  // cas-d15c QA F01: a refused pairing is not reconnecting; the rail says
+  // what the header's "Needs pairing" and the banner say.
+  const pairingLostHere = Boolean(selected) && (machineConnectionSnapshot?.authFailure !== undefined
+    || (terminalAttachSnapshot?.authFailure !== undefined));
+  const staleStatusText = statusIsStale
+    ? (pairingLostHere ? `Not live — this browser needs pairing again.${staleStatusTail}` : `Not live — reconnecting.${staleStatusTail}`)
+    : undefined;
   const terminalSessionKey = selected && selectedSession ? sessionKey(selected.id, selectedSession) : undefined;
   // While the session is up the chip reads the machine's own connection, as
   // the rail does (cas-bf07 QA F01); while it is down it names that state.

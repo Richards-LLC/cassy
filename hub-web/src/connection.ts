@@ -322,6 +322,9 @@ export class HubConnectionSupervisor {
       attempt: this.socketAttempts.get(session) ?? 0,
       missedHeartbeats: 0,
       degraded: false,
+      // A session-only drop stays one through its retry; another failure, or
+      // being live again, ends it (cas-d15c).
+      sessionOnly: phase === "failed" || phase === "live" || phase === "idle" ? undefined : prior?.sessionOnly,
       ...update,
     };
     this.attachLifecycles.set(session, snapshot);
@@ -1016,7 +1019,9 @@ export class HubConnectionSupervisor {
     if (timeouts.ready !== undefined) window.clearTimeout(timeouts.ready);
     timeouts.ready = window.setTimeout(() => {
       if (!this.machineSocketReady || this.attachLifecycles.get(session)?.phase === "live") return;
-      this.transitionAttach(session, "failed", "attaching", { reason: "Machine stream sent no session state within 3s" });
+      // cas-d15c (QA F01): the machine socket is still ready, so a session
+      // whose stream the hub closed is still a session-only outage.
+      this.transitionAttach(session, "failed", "attaching", { reason: "Machine stream sent no session state within 3s", sessionOnly: this.attachLifecycles.get(session)?.sessionOnly });
       this.callbacks.onSocketError(session, "Machine stream sent no session state within 3s. Retrying…");
       this.scheduleAttach(session);
     }, STAGE_TIMEOUT_MS.attaching);
@@ -1348,7 +1353,7 @@ export class HubConnectionSupervisor {
     }
     if (envelope.closed) {
       this.machineSubscriptions.delete(session);
-      this.transitionAttach(session, "failed", "attaching", { reason: "Session daemon stream closed" });
+      this.transitionAttach(session, "failed", "attaching", { reason: "Session daemon stream closed", sessionOnly: true });
       this.callbacks.onSocketError(session, "Session daemon stream closed. Retrying…");
       this.scheduleAttach(session);
       return;

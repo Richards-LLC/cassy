@@ -5,9 +5,9 @@ import { ATLAS, STUDIO, PELICAN } from "./world";
 // machine protocol (one socket, health ping/pong) so a half-open socket, the
 // failure a network switch actually leaves, can be reproduced.
 test("HUB-J12 switch networks without losing the conversation", async ({ page, journey }) => {
-  // Five transitions, one of them a 25 s outage with four missed heartbeats,
+  // Eight transitions, one of them a 25 s outage with four missed heartbeats,
   // plus the held-send backoff wait and the legacy-socket stage.
-  test.setTimeout(270_000);
+  test.setTimeout(330_000);
   // Time flows as usual; the fake clock only lets the daemon-link stage jump
   // past the two-minute hold on a held message (cas-a355).
   await page.clock.install();
@@ -48,6 +48,8 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
     // No browser event says so; the open socket goes quiet (half-open).
     await hub.down("atlas");
     await expect(header).toHaveText(" · Reconnecting", { timeout: 30_000 });
+    // A real machine drop keeps the machine-level wording (cas-d15c).
+    await expect(page.locator(".terminal-disconnected-banner")).toHaveText("Lost connection to Atlas · Linux. Reconnecting…");
     // A message written now waits in the thread instead of vanishing into
     // the dead socket, and says so.
     await sendNow("While Tailscale is off");
@@ -122,11 +124,35 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
     // (upstream_unavailable) and closes the session's stream; the message
     // waits in the thread instead of reading "Not sent", and goes out once
     // when the session is live again.
+    // cas-d15c: the machine never dropped, so the banner names the
+    // conversation, not the machine, and the footer stays Connected; it used
+    // to read "Lost connection to Atlas · Linux".
+    const banner = page.locator(".terminal-disconnected-banner");
+    const footer = page.locator("#hub-footer-badges .machine-badge-state");
+    await expect(footer).toHaveText("Connected");
+    await page.evaluate(() => {
+      const seen: string[] = [];
+      (window as unknown as { __footerSeen: string[] }).__footerSeen = seen;
+      const sample = () => { const text = document.querySelector<HTMLElement>("#hub-footer-badges .machine-badge-state")?.innerText.trim(); if (text && seen.at(-1) !== text) seen.push(text); };
+      new MutationObserver(sample).observe(document.body, { subtree: true, childList: true, characterData: true });
+    });
     hub.upstreamLost(PELICAN);
+    // The resubscribe answers after 5 s, past the 3 s session-state window,
+    // so the reattach is on screen and outlives its first timeout (QA F01).
+    hub.delayAttach(PELICAN, 5_000);
     const refusalsBefore = hub.upstreamRefusals.length;
     await sendNow("While the daemon link is down");
     expect(await until(() => hub.upstreamRefusals.length, (n) => n > refusalsBefore, 5_000)).toBeGreaterThan(refusalsBefore);
     await expect(held).toHaveText("Waiting for the connection — sends when it's back");
+    await expect(banner).toHaveText("Reconnecting to cas-src… Atlas · Linux is still connected.", { timeout: 10_000 });
+    await expect(banner).toHaveAttribute("data-scope", "session");
+    // Past the 3 s window the wording still names the conversation, and the
+    // footer still reads Connected (cas-d15c QA F01).
+    await page.waitForTimeout(3_500);
+    await expect(banner).toHaveText("Reconnecting to cas-src… Atlas · Linux is still connected.");
+    await expect(banner).toHaveAttribute("data-scope", "session");
+    await expect(footer).toHaveText("Connected");
+    await expect(page.locator("#message-status")).toHaveText("cas-src on Atlas · Linux is reconnecting. Your message will go out by itself when it's back.");
     expect(sentTimes("While the daemon link is down")).toBe(0);
     hub.upstreamBack(PELICAN);
     expect(await until(() => sentTimes("While the daemon link is down"), (n) => n >= 1, 15_000)).toBe(1);
@@ -134,6 +160,9 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
     await expect(header).toHaveText(" · Live");
     await page.waitForTimeout(1_000);
     expect(sentTimes("While the daemon link is down"), "sent once").toBe(1);
+    await expect(banner).toBeHidden({ timeout: 15_000 });
+    const footerSeen = await page.evaluate(() => (window as unknown as { __footerSeen: string[] }).__footerSeen);
+    expect(footerSeen.filter((text) => text !== "Connected"), "the footer while the session reconnected").toEqual([]);
 
     // cas-a355: when the link stays down, the page backs off (about 1, 2,
     // then 4 s between attempts) instead of resending once a second.
@@ -150,6 +179,10 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
     const log = page.getByRole("log");
     await expect(log.getByText("Not sent", { exact: true })).toBeVisible({ timeout: 10_000 });
     await expect(log.getByText("The session didn't come back while it waited.")).toBeVisible();
+    // cas-a355 N2: the session itself is live (only its daemon link refuses
+    // sends), so the card does not ask to wait for it (cas-d15c).
+    await expect(header).toHaveText(" · Live");
+    await expect(log.locator('.bub[data-state="error"] .conversation-refused-next').last()).toHaveText(" Retry to send it.");
     await expect(log.getByText(/re-pair/i)).toHaveCount(0);
     await expect(held).toHaveCount(0);
     await expect(page.locator("#message-status")).not.toContainText("go out by itself");
@@ -226,5 +259,29 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
     expect(await until(() => sentTimes("After the session stayed live"), (n) => n >= 1, 15_000)).toBe(1);
     await page.waitForTimeout(1_000);
     expect(sentTimes("After the session stayed live"), "sent once").toBe(1);
+  });
+
+  await journey.stage("A revoked pairing says so and offers Re-pair, on a phone too", async () => {
+    // cas-d15c (cas-d636 QA F01): a definitive refusal ends the pairing. The
+    // banner beside "Needs pairing" used to say "Reconnecting…", and a phone,
+    // which hides the attention rail, had no Re-pair anywhere.
+    const banner = page.locator(".terminal-disconnected-banner");
+    hub.refuseProofs("atlas", 1_000, "revoked", false);
+    await hub.down("atlas", { sockets: "close" });
+    await hub.up("atlas");
+    await expect(header).toHaveText(" · Needs pairing", { timeout: 25_000 });
+    // At 1280 the context rail's status notice says the same, not
+    // "reconnecting" (cas-d15c QA round 1 F01).
+    const stale = page.locator(".status-stale").filter({ visible: true });
+    await expect(stale).toHaveText(/^Not live — this browser needs pairing again\./);
+    await expect(page.getByText(/reconnecting/i).filter({ visible: true })).toHaveCount(0);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(banner.locator(".banner-text")).toHaveText("Atlas · Linux needs pairing again.");
+    await expect(banner).not.toContainText("Reconnecting");
+    const repair = banner.getByRole("button", { name: "Re-pair Atlas · Linux" });
+    await expect(repair).toBeVisible();
+    expect((await repair.boundingBox())!.height, "a 44 px target on a phone").toBeGreaterThanOrEqual(44);
+    await repair.click();
+    await expect(page.locator("#pair-dialog")).toBeVisible();
   });
 });

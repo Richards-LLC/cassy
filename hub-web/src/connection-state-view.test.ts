@@ -1,6 +1,11 @@
+// @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
 import {
+  ATTACH_QUIET_MS,
+  CONVERSATION_OPENING,
+  attachInProgress,
   connectionTimeline,
+  renderConnectionSurfaceInto,
   connectingView,
   disconnectedView,
   elapsedSeconds,
@@ -139,5 +144,54 @@ describe("transportFailureNeedsAttention", () => {
 
   it("raises a failure that will not retry", () => {
     expect(transportFailureNeedsAttention(snapshot({ phase: "failed", fatal: true, reason: "This browser cannot open the terminal stream." }))).toBe(true);
+  });
+});
+
+describe("the attach surface opens calmly (journey F3)", () => {
+  const JARGON = /relay|attempt|authori[sz]ation|handshake|heartbeat|resolving|dialing/i;
+  const card = () => { const target = document.createElement("div"); document.body.replaceChildren(target); return target; };
+
+  it("shows only the title during the quiet window", () => {
+    const target = card();
+    renderConnectionSurfaceInto(target, "patient-pelican-9", snapshot({ phase: "auth", stage: "auth" }), {}, startedAt + ATTACH_QUIET_MS - 1, { openingTitle: CONVERSATION_OPENING });
+    expect(target.textContent).toBe("Opening the conversation…");
+    expect(target.querySelector(".connection-timeline")).toBeNull();
+    expect(target.textContent).not.toContain("patient-pelican-9");
+  });
+
+  it("then offers the attempt and stage behind a closed Details, and keeps it open across repaints", () => {
+    const target = card();
+    const state = snapshot({ phase: "dialing", stage: "dialing" });
+    renderConnectionSurfaceInto(target, "patient-pelican-9", state, {}, startedAt + ATTACH_QUIET_MS, { openingTitle: CONVERSATION_OPENING });
+    const details = target.querySelector<HTMLDetailsElement>(":scope > details.connection-details")!;
+    expect(details.open).toBe(false);
+    expect(details.querySelector("summary")?.textContent).toBe("Details");
+    expect(details.querySelector(".connection-timeline")?.textContent).toContain("dialing the relay");
+    // Everything outside Details is free of relay vocabulary.
+    expect(target.querySelector(".terminal-connecting-title")?.textContent).not.toMatch(JARGON);
+    expect(target.querySelector(":scope > .connection-timeline")).toBeNull();
+    details.open = true;
+    renderConnectionSurfaceInto(target, "patient-pelican-9", state, {}, startedAt + 2_000, { openingTitle: CONVERSATION_OPENING });
+    expect(target.querySelector<HTMLDetailsElement>(".connection-details")?.open).toBe(true);
+  });
+
+  it("keeps the terminal's title and offers Retry and Diagnose once the attach is slow", () => {
+    const target = card();
+    renderConnectionSurfaceInto(target, "factory-a", snapshot(), { retry: () => {}, diagnose: () => {} }, startedAt + 15_000);
+    expect(target.querySelector(".terminal-connecting-title")?.textContent).toBe("Connecting to factory-a…");
+    expect(target.querySelector(".connection-details")).not.toBeNull();
+    expect([...target.querySelectorAll(".terminal-connecting-actions button")].map((button) => button.textContent)).toEqual(["Retry", "Diagnose"]);
+  });
+
+  it("shows a failure or a retry with its timeline in the open, not behind Details", () => {
+    for (const state of [snapshot({ phase: "backoff", retryInMs: 2_000 }), snapshot({ phase: "failed", reason: "hub did not answer" }), snapshot({ phase: "failed", fatal: true })]) {
+      expect(attachInProgress(state)).toBe(false);
+      const target = card();
+      renderConnectionSurfaceInto(target, "factory-a", state, {}, startedAt + 100, { openingTitle: CONVERSATION_OPENING });
+      expect(target.querySelector(".connection-details")).toBeNull();
+      expect(target.querySelector(":scope > .connection-timeline")).not.toBeNull();
+      expect(target.querySelector(".terminal-connecting-title")?.textContent).not.toBe(CONVERSATION_OPENING);
+    }
+    expect(attachInProgress(snapshot())).toBe(true);
   });
 });

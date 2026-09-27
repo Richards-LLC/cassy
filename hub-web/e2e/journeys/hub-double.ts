@@ -63,6 +63,7 @@ export class HubDouble {
   private readonly sockets = new Map<string, WebSocketRoute>();
   private readonly waiters: Array<() => void> = [];
   private readonly held = new Set<string>();
+  private readonly attachDelays = new Map<string, number>();
   private polls = 0;
   private requestedScopes: string[] = [];
   private nextId = 1000;
@@ -216,6 +217,11 @@ export class HubDouble {
     this.held.delete(session);
   }
 
+  /** Answer a session's next attach only after `ms`: a relay that takes its time. */
+  delayAttach(session: string, ms: number): void {
+    this.attachDelays.set(session, ms);
+  }
+
   hasSocket(session: string): boolean {
     return this.sockets.has(session);
   }
@@ -340,7 +346,7 @@ export class HubDouble {
         ws.send(JSON.stringify({ ConversationHistory: { request_id: request.request_id, ...reply } }));
       }
     });
-    ws.send(JSON.stringify({
+    const welcome = () => ws.send(JSON.stringify({
       Welcome: {
         state: { panes: [{ id: "supervisor", kind: "Supervisor", title: session, focused: true, exited: false }], cols: 100, rows: 28 },
         scrollback: { supervisor: [[...new TextEncoder().encode(PANE_TEXT)]] },
@@ -348,6 +354,10 @@ export class HubDouble {
         capabilities: ["conversation_history"],
       },
     }));
+    const delay = this.attachDelays.get(session);
+    this.attachDelays.delete(session);
+    if (delay === undefined) welcome();
+    else setTimeout(welcome, delay);
   }
 }
 

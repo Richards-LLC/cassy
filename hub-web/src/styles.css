@@ -1167,6 +1167,13 @@ main {
 
 .connection-timeline-detail { color: var(--text-mid); }
 
+/* An attach in progress keeps its attempt and relay stage behind "Details"
+   (journey F3): the default surface is the calm title alone. */
+.connection-details { width: 100%; text-align: left; }
+.connection-details > summary { width: fit-content; min-height: var(--space-6); margin-inline: auto; padding: var(--space-1) var(--space-3); border-radius: var(--radius-pill); color: var(--text-mid); font-size: var(--fs-meta); cursor: pointer; text-align: center; }
+.connection-details > summary:hover { color: var(--text-hi); }
+.connection-details[open] > summary { margin-bottom: var(--space-2); }
+
 .terminal-connecting-actions {
   display: flex;
   flex-wrap: wrap;

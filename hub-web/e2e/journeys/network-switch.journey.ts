@@ -6,8 +6,8 @@ import { ATLAS, STUDIO, PELICAN } from "./world";
 // failure a network switch actually leaves, can be reproduced.
 test("HUB-J12 switch networks without losing the conversation", async ({ page, journey }) => {
   // Five transitions, one of them a 25 s outage with four missed heartbeats,
-  // plus the held-send backoff wait.
-  test.setTimeout(240_000);
+  // plus the held-send backoff wait and the legacy-socket stage.
+  test.setTimeout(270_000);
   // Time flows as usual; the fake clock only lets the daemon-link stage jump
   // past the two-minute hold on a held message (cas-a355).
   await page.clock.install();
@@ -171,11 +171,60 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
     await hub.down("atlas", { sockets: "close" });
     hub.refuseProofs("atlas", 3);
     await hub.up("atlas");
-    await expect.poll(() => hub.proofRefusalsLeft("atlas"), { timeout: 20_000, message: "the refused proofs were exercised" }).toBe(0);
+    // `until`, not expect.poll: each poll miss would be recorded as a failed
+    // expectation in the evidence trace (cas-2036).
+    expect(await until(() => hub.proofRefusalsLeft("atlas"), (n) => n === 0, 20_000), "the refused proofs were exercised").toBe(0);
     await expect(header).toHaveText(" · Live", { timeout: 20_000 });
     expect(hub.refusedProofs.every((refusal) => refusal.reason === "stale_proof")).toBe(true);
     await expect(page.getByText(/re-pair|needs pairing|no longer paired|was revoked/i)).toHaveCount(0);
     await sendNow("After a refused proof");
     expect(await until(() => sentTimes("After a refused proof"), (n) => n >= 1, 5_000)).toBe(1);
+  });
+
+  await journey.stage("On a legacy socket, a second message sent before the refusal arrives waits too", async () => {
+    // cas-2036 (cas-a355 QA N4): a hub without the machine protocol carries
+    // each session on its own socket, and stops reading it once it refuses a
+    // send (hub/server.rs `proxy_socket`). A message written before that
+    // refusal reached the page is never read, so it is held with the first
+    // and each goes out once, in order, when the session is back.
+    hub.useLegacySockets();
+    const legacyOpens = hub.legacySocketOpens.get(PELICAN) ?? 0;
+    await page.reload();
+    await expect(header).toHaveText(" · Live", { timeout: 15_000 });
+    expect(hub.legacySocketOpens.get(PELICAN) ?? 0, "the session is on a legacy socket").toBeGreaterThan(legacyOpens);
+    // The refusal takes 1.5 s to arrive, as a slow network's round trip would.
+    hub.upstreamLost(PELICAN, { refusalDelayMs: 1_500 });
+    const sendsFrom = hub.sends.length;
+    const refusalsFrom = hub.upstreamRefusals.length;
+    await sendNow("First, on the legacy socket");
+    await sendNow("Second, before the refusal arrived");
+    await expect(held).toHaveCount(2, { timeout: 5_000 });
+    await expect(held.first()).toHaveText("Waiting for the connection — sends when it's back");
+    // Three refusals in a row: the next reattach already waits about 4 s.
+    expect(await until(() => hub.upstreamRefusals.length - refusalsFrom, (n) => n >= 3, 20_000)).toBeGreaterThanOrEqual(3);
+    await expect(held).toHaveCount(2);
+    hub.upstreamBack(PELICAN);
+    expect(await until(() => sentTimes("Second, before the refusal arrived"), (n) => n >= 1, 20_000)).toBe(1);
+    await page.waitForTimeout(1_000);
+    expect(sentTimes("First, on the legacy socket"), "first sent once").toBe(1);
+    expect(sentTimes("Second, before the refusal arrived"), "second sent once").toBe(1);
+    expect(hub.sends.slice(sendsFrom).map((m) => m.text), "in the order they were written").toEqual(["First, on the legacy socket", "Second, before the refusal arrived"]);
+    await expect(held).toHaveCount(0);
+
+    // cas-2036 (cas-a355 QA N3): the session stayed live with no receipt
+    // (the double sends none). Past the settle window (10 s) the next drop
+    // retries after about 1 s, not the 8 s the earlier refusals had reached.
+    await page.waitForTimeout(11_000);
+    hub.upstreamLost(PELICAN);
+    const again = hub.upstreamRefusals.length;
+    await sendNow("After the session stayed live");
+    expect(await until(() => hub.upstreamRefusals.length - again, (n) => n >= 1, 5_000)).toBeGreaterThanOrEqual(1);
+    const firstRefusal = Date.now();
+    expect(await until(() => hub.upstreamRefusals.length - again, (n) => n >= 2, 3_000), "retried within about a second").toBeGreaterThanOrEqual(2);
+    expect(Date.now() - firstRefusal, "the backoff started afresh").toBeLessThan(3_000);
+    hub.upstreamBack(PELICAN);
+    expect(await until(() => sentTimes("After the session stayed live"), (n) => n >= 1, 15_000)).toBe(1);
+    await page.waitForTimeout(1_000);
+    expect(sentTimes("After the session stayed live"), "sent once").toBe(1);
   });
 });

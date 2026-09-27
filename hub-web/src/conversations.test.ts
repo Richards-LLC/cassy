@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ConversationHistory, RECEIPT_REPLY_GRACE_MS, RECEIPT_TIMEOUT_MS } from "./conversation-history";
 import { ConversationList, conversationRowMarkup, filterConversationRows, truncateConversationPreview, type ConversationRow } from "./conversation-list";
 import { ConversationView } from "./conversation-view";
-import { ATTACH_DISABLED_REASON, ATTACH_SUPPORTED, arrangeConversationShell, conversationNoMatchText, hostMarkup, conversationShellMarkup, dressComposer, KEYBOARD_HINT_MEDIA_QUERY } from "./conversation-shell";
+import { applePlatform, appearanceButtonMarkup, ATTACH_DISABLED_REASON, ATTACH_SUPPORTED, arrangeConversationShell, conversationNoMatchText, conversationSearchPlaceholder, conversationShellMarkup, dressComposer, hostMarkup, KEYBOARD_HINT_MEDIA_QUERY, paletteShortcutLabel } from "./conversation-shell";
 import { renderConversationFixture } from "../fixtures/conversations";
 import { projectName, projectBadge } from "./cloud-brand";
 
@@ -292,6 +292,22 @@ describe('conversation evidence', () => {
     expect(toggle.textContent).toBe('');
     expect(toggle.querySelector('svg')?.getAttribute('aria-hidden')).toBe('true');
     expect(paired.querySelector('.conversation-sidebar footer #command-palette-toggle')).toBeNull();
+  });
+  it('names the palette shortcut the way this keyboard prints it, the same on every surface (journey F16)', () => {
+    expect(applePlatform({ platform: 'Linux x86_64' })).toBe(false);
+    expect(applePlatform({ platform: 'Win32' })).toBe(false);
+    expect(applePlatform({ platform: 'MacIntel' })).toBe(true);
+    expect(applePlatform({ platform: 'iPad' })).toBe(true);
+    expect(applePlatform({ platform: '', userAgentData: { platform: 'macOS' } })).toBe(true);
+    expect(applePlatform({ platform: 'MacIntel', userAgentData: { platform: 'Windows' } })).toBe(false);
+    expect(applePlatform(undefined)).toBe(false);
+    expect(paletteShortcutLabel(false)).toBe('Ctrl K');
+    expect(paletteShortcutLabel(true)).toBe('⌘K');
+    expect(conversationSearchPlaceholder(true, 'Ctrl K')).toBe('Search conversations (Ctrl K)');
+    expect(conversationSearchPlaceholder(true, '⌘K')).toBe('Search conversations (⌘K)');
+    expect(conversationSearchPlaceholder(false, '⌘K')).toBe('Search conversations');
+    expect(appearanceButtonMarkup('⌘K')).toContain('title="Appearance &amp; commands (⌘K twice)"');
+    expect(appearanceButtonMarkup('Ctrl K')).toContain('title="Appearance &amp; commands (Ctrl K twice)"');
   });
   it('puts a visible "Search conversations (Ctrl K)" field at the top of the list once a machine is paired (journey F8)', () => {
     const paired = document.createElement('div');

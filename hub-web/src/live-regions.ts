@@ -87,7 +87,10 @@ export function applyLiveRegions(root: ParentNode, view: LiveRegionView): void {
 
   const lease = root.querySelector<HTMLButtonElement>("#lease");
   if (lease && view.controlAction) {
-    lease.textContent = view.controlAction.label;
+    // The label sits beside an icon the narrow header shows instead of it.
+    const label = lease.querySelector<HTMLElement>(".action-label");
+    if (label) label.textContent = view.controlAction.label;
+    else lease.textContent = view.controlAction.label;
     lease.setAttribute("aria-label", view.controlAction.label);
     setDisabledReason(lease, view.controlAction.disabledReason);
     const wrapper = lease.closest<HTMLElement>(".control-action");

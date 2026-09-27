@@ -1,9 +1,12 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { ConversationHistory, RECEIPT_REPLY_GRACE_MS, RECEIPT_TIMEOUT_MS } from "./conversation-history";
 import { ConversationList, conversationRowMarkup, filterConversationRows, truncateConversationPreview, type ConversationRow } from "./conversation-list";
 import { ConversationView } from "./conversation-view";
-import { ATTACH_DISABLED_REASON, ATTACH_SUPPORTED, arrangeConversationShell, conversationNoMatchText, conversationShellMarkup, dressComposer, KEYBOARD_HINT_MEDIA_QUERY } from "./conversation-shell";
+import { ATTACH_DISABLED_REASON, ATTACH_SUPPORTED, arrangeConversationShell, conversationNoMatchText, hostMarkup, conversationShellMarkup, dressComposer, KEYBOARD_HINT_MEDIA_QUERY } from "./conversation-shell";
 import { renderConversationFixture } from "../fixtures/conversations";
 import { projectName, projectBadge } from "./cloud-brand";
 
@@ -395,6 +398,9 @@ describe('conversation evidence', () => {
     expect(header.querySelector('h1 .project-badge')).toBeNull();
     expect(header.textContent?.split('cas-src')).toHaveLength(2);
     expect(header.querySelector('.conversation-host')?.textContent).toBe('Atlas · Linux · patient-pelican-9');
+    // The OS word is its own span, so a phone can drop it before the codename (journey F14).
+    expect(header.querySelector('.host-where .host-os')?.textContent).toBe(' · Linux');
+    expect(header.querySelector('.host-where')?.getAttribute('title')).toBe('Atlas · Linux · patient-pelican-9');
     expect(header.querySelector('.conversation-host > .host-where > .codename')?.textContent).toBe('patient-pelican-9');
     expect(header.querySelector('.conversation-host > .host-where + #conversation-connection')).not.toBeNull();
     expect(header.querySelector('#conversation-connection')).not.toBeNull();
@@ -495,4 +501,19 @@ it('retains a destination until a correlated reply or refusal settles each send'
   expect(history.hasPending()).toBe(false);
   history.submit('refused', 'supervisor', 'instruction'); history.reject('refused', 'no access');
   expect(history.hasPending()).toBe(false);
+});
+
+describe("hostMarkup (journey F14)", () => {
+  it("wraps only a trailing OS word, and escapes the label", () => {
+    expect(hostMarkup("Studio Mac · macOS")).toBe('Studio Mac<span class="host-os"> · macOS</span>');
+    expect(hostMarkup("Forge build box · Linux")).toBe('Forge build box<span class="host-os"> · Linux</span>');
+    expect(hostMarkup("hub · staging")).toBe("hub · staging");
+    expect(hostMarkup("pippenz-desktop")).toBe("pippenz-desktop");
+    expect(hostMarkup("<b> · Windows")).toBe('&lt;b&gt;<span class="host-os"> · Windows</span>');
+  });
+  it("hides the OS word below 500px, after the phone block in the cascade", () => {
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
+    const rule = css.indexOf("@media (max-width: 500px) {\n  .conversation-identity .host-os { display: none; }");
+    expect(rule).toBeGreaterThan(css.indexOf("  .conversation-identity .host-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; }\n  #conversation-connection"));
+  });
 });

@@ -15,6 +15,16 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
   await page.routeWebSocket(/shed\.test/, (ws) => { void ws.close({ code: 1006 }); });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
   const composer = page.getByRole("textbox", { name: "Your message" });
+  /** At 390 px the header reads "<machine> · <codename> · <state>": no OS word, the codename whole, the state visible. */
+  const expectHeaderKeepsCodename = async (machine: string, codename: string) => {
+    const where = page.locator(".conversation-identity .host-where");
+    await expect(where).toHaveAttribute("title", new RegExp(`· ${codename}$`));
+    await expect(page.locator(".conversation-identity .host-os")).toBeHidden();
+    expect(await where.innerText()).toBe(`${machine} · ${codename}`);
+    const cut = await where.evaluate((element) => element.scrollWidth > element.clientWidth + 1);
+    expect(cut, `the header shows ${codename} whole at 390 px`).toBe(false);
+    await expect(page.locator("#conversation-connection")).toBeVisible();
+  };
 
   await journey.stage("Open the list on a phone", async () => {
     // Record every word the list and the footer badge show during the cold
@@ -50,6 +60,8 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     await list.getByRole("button", { name: /cas-src/ }).tap();
     await expect(list).toBeHidden();
     await expect(page.getByRole("button", { name: "‹ Conversations", exact: true })).toBeVisible();
+    // The header drops the OS word before it cuts the codename (journey F14).
+    await expectHeaderKeepsCodename("Atlas", PELICAN);
   });
 
   await journey.stage("Reply with the phone keyboard", async () => {
@@ -83,6 +95,7 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     await page.getByRole("button", { name: /Jump to gabber-studio/ }).tap();
     await expect(page.locator("#command-palette")).toBeHidden();
     await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();
+    await expectHeaderKeepsCodename("Studio Mac", OTTER);
     // Like a tap on a list row: land to read, with no soft keyboard raised
     // over the conversation just opened.
     await expect(composer).not.toBeFocused();

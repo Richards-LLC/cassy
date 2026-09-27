@@ -3553,6 +3553,16 @@ button.chip:disabled { cursor: default; }
   /* 4px of the 19px inset is the tint edge (P9). */
   .obj.t-a .obj-body { padding-left: 15px; }
 }
+/* Below 500px the conversation header drops the machine's OS word before it
+   truncates the supervisor's codename (journey F14); .host-where's title keeps
+   the full label. A generated codename ("patient-pelican-9") beside its
+   machine then fits whole: the meta line is a touch smaller and Terminal a
+   touch narrower. After the phone block so it wins the cascade. */
+@media (max-width: 500px) {
+  .conversation-identity .host-os { display: none; }
+  .conversation-identity .conversation-host { font-size: 11.5px; }
+  #conversation-terminal { padding: 0 6px; }
+}
 @media (max-height: 30rem) {
   .conversation-heading { padding-top: var(--space-1); padding-bottom: var(--space-1); gap: var(--space-1); }
   .conversation-identity .conversation-host { display: none; }

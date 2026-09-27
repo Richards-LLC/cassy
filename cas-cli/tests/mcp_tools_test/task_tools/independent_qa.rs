@@ -441,6 +441,20 @@ async fn pending_round_refuses_both_merge_paths_in_progress_and_awaiting_merge()
             managed.message.contains(&task_id) && managed.message.contains(&qa_task),
             "{managed:?}"
         );
+
+        // GH #1024: the reported call omitted task_id and merged despite QA.
+        let implicit = core
+            .worktree_merge("factory/test-agent", false, None, false, None, false, None)
+            .await
+            .expect_err("worktree_merge without task_id must wait for QA");
+        assert!(
+            implicit.message.contains(&task_id) && implicit.message.contains(&qa_task),
+            "{implicit:?}"
+        );
+        assert_eq!(
+            git(&repo, &["rev-parse", "main"]),
+            git(&repo, &["merge-base", "main", "factory/test-agent"])
+        );
     }
 
     // The round still binds its branch if the task is reassigned before QA.

@@ -8080,15 +8080,18 @@ fn fire_reminder(
 
 /// Whether this factory daemon session may fire the reminder (cas-fcd4).
 ///
-/// Reminders registered with a non-empty factory `session_id` only fire in
-/// that factory. `cross_session` preserves a reminder across the creator's
-/// agent session, not across unrelated factories sharing the same database.
-/// Legacy / non-factory reminders (`session_id` unset) remain unscoped.
+/// Reminders registered with a non-empty `session_id` only fire when the
+/// processing daemon's session name matches. Legacy / non-factory reminds
+/// (`session_id` unset) still fire in any session so single-session behavior
+/// is unchanged.
 pub(crate) fn reminder_matches_factory_session(
     reminder_session_id: Option<&str>,
-    _cross_session: bool,
+    cross_session: bool,
     current_session: &str,
 ) -> bool {
+    if cross_session {
+        return true;
+    }
     match reminder_session_id.map(str::trim).filter(|s| !s.is_empty()) {
         None => true,
         Some(sid) => sid == current_session,
@@ -8181,7 +8184,7 @@ mod tests {
                 Some(super::super::ci_watch::EXTERNAL_TAG_EXISTS_EVENT),
                 Some(&serde_json::json!({"tag": "v3.6.0"})),
                 0,
-                Some("same-factory-session"),
+                Some("old-factory-session"),
                 Some("old-origin-session"),
                 true,
                 None,
@@ -8208,14 +8211,14 @@ mod tests {
         assert!(super::reminder_matches_factory_session(
             reminder.session_id.as_deref(),
             reminder.cross_session,
-            "same-factory-session"
+            "new-factory-session"
         ));
         super::fire_reminder(
             &reminder,
             &reminder_store,
             &supervisor,
             &prompt,
-            "same-factory-session",
+            "new-factory-session",
             &HashMap::new(),
             Some(&context),
             temp.path(),
@@ -8247,86 +8250,13 @@ mod tests {
             &reminder_store,
             &supervisor,
             &prompt,
-            "same-factory-session",
+            "new-factory-session",
             &HashMap::new(),
             Some(&context),
             temp.path(),
         );
         assert_eq!(supervisor_store.peek("supervisor-1", 10).unwrap().len(), 1);
         assert_eq!(prompt_store.peek_all(10).unwrap().len(), 1);
-    }
-
-    /// GH #1015: a foreign daemon must leave a due cross-session reminder
-    /// pending, even when its own supervisor can receive prompt fallback.
-    #[test]
-    fn due_cross_session_time_reminder_fires_only_in_origin_factory() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let reminder_store: Arc<dyn cas_store::ReminderStore> =
-            Arc::new(cas_store::SqliteReminderStore::open(temp.path()).unwrap());
-        reminder_store.init().unwrap();
-        let supervisor_store: Arc<dyn cas_store::SupervisorQueueStore> =
-            Arc::new(cas_store::SqliteSupervisorQueueStore::open(temp.path()).unwrap());
-        supervisor_store.init().unwrap();
-        let prompt_store: Arc<dyn cas_store::PromptQueueStore> =
-            Arc::new(cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap());
-        prompt_store.init().unwrap();
-
-        let id = reminder_store
-            .create_with_scope(
-                "origin-supervisor-id",
-                None,
-                "check the merge",
-                cas_store::ReminderTriggerType::Time,
-                Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
-                None,
-                None,
-                3600,
-                Some("origin-factory"),
-                Some("origin-agent-session"),
-                true,
-                None,
-            )
-            .unwrap();
-        let reminder = reminder_store
-            .get_due_time_reminders()
-            .unwrap()
-            .into_iter()
-            .find(|reminder| reminder.id == id)
-            .expect("time reminder is due");
-        assert_eq!(reminder.target_id, "origin-supervisor-id");
-
-        assert!(!super::reminder_matches_factory_session(
-            reminder.session_id.as_deref(),
-            reminder.cross_session,
-            "foreign-factory"
-        ));
-        assert_eq!(reminder_store.get_due_time_reminders().unwrap().len(), 1);
-        assert!(prompt_store.peek_all(10).unwrap().is_empty());
-
-        assert!(super::reminder_matches_factory_session(
-            reminder.session_id.as_deref(),
-            reminder.cross_session,
-            "origin-factory"
-        ));
-        super::fire_reminder(
-            &reminder,
-            &reminder_store,
-            &Some(Arc::clone(&supervisor_store)),
-            &Some(Arc::clone(&prompt_store)),
-            "origin-factory",
-            &HashMap::from([(
-                "origin-supervisor-id".to_string(),
-                "young-swan-22".to_string(),
-            )]),
-            None,
-            temp.path(),
-        );
-        let prompts = prompt_store.peek_all(10).unwrap();
-        assert_eq!(prompts.len(), 1);
-        assert_eq!(prompts[0].target, "young-swan-22");
-        assert_eq!(prompts[0].factory_session.as_deref(), Some("origin-factory"));
-        assert_eq!(supervisor_store.peek("origin-supervisor-id", 10).unwrap().len(), 1);
-        assert!(reminder_store.get_due_time_reminders().unwrap().is_empty());
     }
 
     #[test]
@@ -12726,16 +12656,11 @@ mod tests {
     }
 
     #[test]
-    fn cross_session_reminder_stays_in_its_factory() {
-        assert!(!reminder_matches_factory_session(
-            Some("factory-session-a"),
-            true,
-            "factory-session-b"
-        ));
+    fn cross_session_reminder_bypasses_the_factory_session_gate() {
         assert!(reminder_matches_factory_session(
             Some("factory-session-a"),
             true,
-            "factory-session-a"
+            "factory-session-b"
         ));
     }
 

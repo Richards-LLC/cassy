@@ -97,9 +97,16 @@ export function dressComposer(composer: HTMLElement, supervisor?: string, projec
   composer.querySelector("h2")?.classList.add("sr-only");
   const input = composer.querySelector("textarea");
   if (input) {
-    // A placeholder that cannot fit is ellipsised here as well as by the
-    // stylesheet, so no engine wraps it into a taller field (journey F9).
-    input.placeholder = composerPlaceholder(project);
+    // The longest wording that fits the field is chosen when the field is
+    // laid out and again whenever it resizes, so a phone never shows a cut
+    // "Message the gabber-studio supervi…" (cas-1e0f QA F01). The stylesheet
+    // still ellipsises on one line as the last guard (journey F9).
+    input.dataset.placeholders = JSON.stringify(composerPlaceholders(project));
+    fitComposerPlaceholder(input);
+    // dressComposer runs before a rebuild re-attaches the composer: fit again
+    // once it is back in the document.
+    queueMicrotask(() => fitComposerPlaceholder(input));
+    watchComposerPlaceholder(input);
     input.rows = 1;
     // Hidden until attaching works (cas-17e3): a control that can never be
     // used is noise for every reader, and a dead stop for keyboard users.
@@ -117,19 +124,69 @@ export function dressComposer(composer: HTMLElement, supervisor?: string, projec
   }
 }
 
-/** The composer's resting placeholder: the project's supervisor, or just "the supervisor". */
-export function composerPlaceholder(project?: string): string {
+/**
+ * The composer's placeholder wordings, longest first: the project's
+ * supervisor, then the project alone, then the role. Never the codename, and
+ * never a name cut inside the text (cas-1e0f QA F02).
+ */
+export function composerPlaceholders(project?: string): string[] {
   const name = project?.trim();
-  return name ? `Message the ${composerNameHint(name)} supervisor` : "Message the supervisor";
+  return name ? [`Message the ${name} supervisor`, `Message ${name}`, COMPOSER_ROLE_PLACEHOLDER] : [COMPOSER_ROLE_PLACEHOLDER];
 }
 
-/** Longest project name the composer placeholder spells out in full. */
-export const COMPOSER_NAME_MAX_CHARS = 20;
+export const COMPOSER_ROLE_PLACEHOLDER = "Message the supervisor";
 
-/** The name as the placeholder shows it: whole, or cut with an ellipsis. */
-export function composerNameHint(name: string): string {
-  const characters = Array.from(name);
-  return characters.length <= COMPOSER_NAME_MAX_CHARS ? name : `${characters.slice(0, COMPOSER_NAME_MAX_CHARS - 1).join("")}…`;
+/** The composer's resting placeholder before it is measured: the fullest wording. */
+export function composerPlaceholder(project?: string): string {
+  return composerPlaceholders(project)[0];
+}
+
+/** The first wording whose width fits `available` px; the last (shortest) when none does. */
+export function fittingPlaceholder(candidates: readonly string[], available: number, measure: (text: string) => number): string {
+  return candidates.find((text) => measure(text) <= available) ?? candidates[candidates.length - 1];
+}
+
+/**
+ * Measure the field's placeholder wordings in its own font and keep the
+ * longest that fits its text box. Not laid out yet (no width): keep the
+ * fullest; the resize watch fits it once there is a box. While dictation
+ * holds the placeholder, the fitted wording becomes the one it restores.
+ */
+export function fitComposerPlaceholder(field: HTMLTextAreaElement): void {
+  let candidates: string[];
+  try { candidates = JSON.parse(field.dataset.placeholders ?? "[]") as string[]; } catch { return; }
+  if (!candidates.length) return;
+  const document = field.ownerDocument;
+  const view = document.defaultView;
+  const current = field.dataset.restingPlaceholder ?? field.placeholder;
+  // Unmeasurable (detached mid-rebuild, not laid out): keep a wording already
+  // fitted for these candidates; the microtask and resize watch refit it.
+  let chosen = candidates.includes(current) ? current : candidates[0];
+  if (view && field.isConnected && field.clientWidth > 0) {
+    const style = view.getComputedStyle(field);
+    const available = field.clientWidth - parseFloat(style.paddingLeft || "0") - parseFloat(style.paddingRight || "0");
+    const probe = document.createElement("span");
+    probe.setAttribute("aria-hidden", "true");
+    probe.style.cssText = "position:absolute;left:-10000px;top:0;visibility:hidden;white-space:pre;";
+    probe.style.font = style.font;
+    probe.style.letterSpacing = style.letterSpacing;
+    document.body.append(probe);
+    chosen = fittingPlaceholder(candidates, available, (text) => { probe.textContent = text; return probe.getBoundingClientRect().width; });
+    probe.remove();
+  }
+  if (field.dataset.restingPlaceholder !== undefined) field.dataset.restingPlaceholder = chosen;
+  else if (field.placeholder !== chosen) field.placeholder = chosen;
+}
+
+const watchedComposerFields = new WeakSet<HTMLTextAreaElement>();
+
+/** Refit on every size change of the field (a rotation, a breakpoint, the rail opening) and once web fonts land. */
+function watchComposerPlaceholder(field: HTMLTextAreaElement): void {
+  if (watchedComposerFields.has(field)) return;
+  watchedComposerFields.add(field);
+  const view = field.ownerDocument.defaultView as (Window & typeof globalThis) | null;
+  if (view && typeof view.ResizeObserver === "function") new view.ResizeObserver(() => fitComposerPlaceholder(field)).observe(field);
+  void field.ownerDocument.fonts?.ready.then(() => fitComposerPlaceholder(field));
 }
 
 /** The list's empty line: loading, unpaired, or paired with nothing live. */

@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { CHECKING_VOICE_INPUT, LISTENING_PLACEHOLDER, VOICE_INPUT_UNSUPPORTED, applyMicState, composerMarkup, micPresentation, type MicState } from "./composer-markup";
-import { COMPOSER_NAME_MAX_CHARS, composerNameHint, composerPlaceholder, dressComposer } from "./conversation-shell";
+import { COMPOSER_ROLE_PLACEHOLDER, composerPlaceholder, composerPlaceholders, dressComposer, fitComposerPlaceholder, fittingPlaceholder } from "./conversation-shell";
 
 // WCAG 2.x contrast, the same arithmetic as machine-accent.test.ts.
 const luminance = (hex: string) => [1, 3, 5].map((o) => Number.parseInt(hex.slice(o, o + 2), 16) / 255).map((c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4)).reduce((sum, c, i) => sum + c * [0.2126, 0.7152, 0.0722][i], 0);
@@ -133,11 +133,37 @@ describe("mic state styling (P6)", () => {
 
 describe("a long supervisor name keeps the composer one line (3.30.0 journey F9)", () => {
   const LONG = "an-extraordinarily-long-supervisor-name-for-truncation-checks-77";
-  it("ellipsises the name in the placeholder, keeps a short one whole", () => {
+  it("offers the full wording, then the project alone, then the role; never a name cut inside the text (cas-1e0f QA F01/F02)", () => {
     expect(LONG).toHaveLength(64);
-    expect(composerNameHint("patient-pelican-9")).toBe("patient-pelican-9");
-    expect(Array.from(composerNameHint(LONG))).toHaveLength(COMPOSER_NAME_MAX_CHARS);
-    expect(composerNameHint(LONG)).toBe(`${LONG.slice(0, COMPOSER_NAME_MAX_CHARS - 1)}…`);
+    expect(composerPlaceholders("gabber-studio")).toEqual(["Message the gabber-studio supervisor", "Message gabber-studio", "Message the supervisor"]);
+    expect(composerPlaceholders(undefined)).toEqual([COMPOSER_ROLE_PLACEHOLDER]);
+    expect(composerPlaceholders(LONG).some((text) => text.includes("…"))).toBe(false);
+    // 8px a character: a 245px phone field takes the second wording, a desktop field the first.
+    const measure = (text: string) => text.length * 8;
+    const wordings = composerPlaceholders("gabber-studio");
+    expect(fittingPlaceholder(wordings, 245, measure)).toBe("Message gabber-studio");
+    expect(fittingPlaceholder(wordings, 400, measure)).toBe("Message the gabber-studio supervisor");
+    expect(fittingPlaceholder(composerPlaceholders("petra-stella-cloud-staging-mirror"), 245, measure)).toBe("Message the supervisor");
+    // Nothing fits: the shortest, still whole.
+    expect(fittingPlaceholder(wordings, 10, measure)).toBe("Message the supervisor");
+  });
+  it("keeps a fitted wording when the field is re-dressed while detached, and refits into dictation's restore slot", () => {
+    const slot = document.createElement("div");
+    slot.innerHTML = composerMarkup("patient-pelican-9");
+    const composer = slot.querySelector<HTMLElement>(".message")!;
+    dressComposer(composer, "patient-pelican-9", "gabber-studio");
+    const field = slot.querySelector<HTMLTextAreaElement>("#message-text")!;
+    field.placeholder = "Message gabber-studio"; // as fitted on a phone
+    dressComposer(composer, "patient-pelican-9", "gabber-studio");
+    expect(field.placeholder).toBe("Message gabber-studio");
+    // Another project's candidates replace it.
+    dressComposer(composer, "calm-otter-4", "cas-src");
+    expect(field.placeholder).toBe("Message the cas-src supervisor");
+    // While dictation holds the placeholder, a refit only updates what it restores.
+    field.dataset.restingPlaceholder = "Message the cas-src supervisor"; field.placeholder = "Listening…";
+    fitComposerPlaceholder(field);
+    expect(field.placeholder).toBe("Listening…");
+    expect(field.dataset.restingPlaceholder).toBe("Message the cas-src supervisor");
   });
   it("addresses the project's supervisor, never the codename, and keeps the full name in Send's accessible name (journey F13)", () => {
     const slot = document.createElement("div");
@@ -152,8 +178,8 @@ describe("a long supervisor name keeps the composer one line (3.30.0 journey F9)
     // No project: the role alone, still no codename.
     dressComposer(slot.querySelector<HTMLElement>(".message")!, LONG);
     expect(field.placeholder).toBe("Message the supervisor");
-    // A long project name is cut with an ellipsis like any placeholder name.
-    expect(composerPlaceholder(LONG)).toBe(`Message the ${composerNameHint(LONG)} supervisor`);
+    // The unmeasured default is the fullest wording, whole.
+    expect(composerPlaceholder(LONG)).toBe(`Message the ${LONG} supervisor`);
     expect(composerPlaceholder("  ")).toBe("Message the supervisor");
   });
   it("keeps the empty field to one line in the stylesheet", () => {

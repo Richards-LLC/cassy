@@ -7,6 +7,9 @@ const LONG_NAME = "an-extraordinarily-long-supervisor-name-for-truncation-checks
 const FORGE: Machine = { id: "forge", label: "Forge · Linux", sessions: [{ name: LONG_NAME, supervisor: LONG_NAME, project_dir: "/projects/forge-tools", workers: ["steady-wren-3"], liveness: "live" }] };
 
 test("HUB-J5 reply by typing", async ({ page, journey }) => {
+  // Eleven stages plus the phone placeholder sweep: past the 60 s budget on a
+  // loaded host, so it gets the headroom HUB-J3 has.
+  test.setTimeout(120_000);
   const hub = await journey.hub({ machines: [ATLAS, STUDIO, FORGE], paired: ["atlas", "studio", "forge"] });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
   const composer = page.getByRole("textbox", { name: "Your message" });
@@ -243,5 +246,41 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
       expect(await oneLineCodename(".thread .empty .proj2"), `meta line at ${width}px`).toEqual({ lines: 1, oneLine: true, ellipsised: true, title: `Forge · Linux · ${LONG_NAME}` });
     }
     await page.setViewportSize(desktop);
+  });
+
+  await journey.stage("On a phone the placeholder reads whole for every project", async () => {
+    // cas-1e0f QA F01/F02: "Message the gabber-studio supervisor" overflowed
+    // the 245px phone field and was cut mid-word. The composer now keeps the
+    // longest wording that fits: the full phrase, then "Message <project>",
+    // then "Message the supervisor", never a cut one.
+    const desktop = page.viewportSize()!;
+    const fit = () => composer.evaluate((field: HTMLTextAreaElement) => {
+      const style = getComputedStyle(field);
+      const probe = document.createElement("span");
+      probe.style.cssText = "position:absolute;left:-10000px;visibility:hidden;white-space:pre;";
+      probe.style.font = style.font; probe.style.letterSpacing = style.letterSpacing;
+      probe.textContent = field.placeholder; document.body.append(probe);
+      const width = probe.getBoundingClientRect().width; probe.remove();
+      return { text: field.placeholder, fits: width <= field.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight) + 0.5 };
+    });
+    const expected: Record<string, string[]> = {
+      "cas-src": ["Message the cas-src supervisor"],
+      "gabber-studio": ["Message gabber-studio", "Message the gabber-studio supervisor"],
+      "forge-tools": ["Message the forge-tools supervisor", "Message forge-tools"],
+    };
+    await page.setViewportSize({ width: 390, height: 844 });
+    for (const [project, wordings] of Object.entries(expected)) {
+      const back = page.getByRole("button", { name: "‹ Conversations", exact: true });
+      if (await back.isVisible()) await back.click();
+      await list.getByRole("button", { name: new RegExp(project) }).click();
+      await expect(composer).toBeVisible();
+      await expect.poll(async () => (await fit()).fits, { message: `${project}: the placeholder fits the 390px field` }).toBe(true);
+      const { text } = await fit();
+      expect(wordings, `${project}: a whole wording, not a cut one`).toContain(text);
+      expect(text).not.toContain("…");
+    }
+    // Back on a desktop field the full phrase returns.
+    await page.setViewportSize(desktop);
+    await expect(composer).toHaveAttribute("placeholder", "Message the forge-tools supervisor");
   });
 });

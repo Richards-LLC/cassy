@@ -605,6 +605,7 @@ struct ShutdownWorkerSnapshot {
     task_states: Vec<String>,
     has_in_progress_task: bool,
     worktree_state: String,
+    worktree_cleanup_verdict: String,
     unsafe_worktree: bool,
 }
 
@@ -620,8 +621,12 @@ impl ShutdownWorkerSnapshot {
             self.task_states.join(", ")
         };
         format!(
-            "{} (id={}): tasks=[{}]; {}",
-            self.worker_name, self.worker_id, tasks, self.worktree_state
+            "{} (id={}): tasks=[{}]; {}; {}",
+            self.worker_name,
+            self.worker_id,
+            tasks,
+            self.worktree_state,
+            self.worktree_cleanup_verdict
         )
     }
 }
@@ -662,15 +667,20 @@ fn shutdown_worker_snapshot(
         .map(str::to_string)
         .collect::<Vec<_>>();
 
-    let (worktree_state, unsafe_worktree) = match resolve_worker_clone_path(cas_root, worker) {
-        WorkerClonePathResolve::Ready(path) => {
-            shutdown_worktree_safety(&path, local_merge_delivery, &target_branches)
-        }
-        WorkerClonePathResolve::NotOnDisk { candidate, .. } => (
-            format!("worktree={} (not present)", candidate.display()),
-            false,
-        ),
-    };
+    let (worktree_state, worktree_cleanup_verdict, unsafe_worktree) =
+        match resolve_worker_clone_path(cas_root, worker) {
+            WorkerClonePathResolve::Ready(path) => {
+                let (state, unsafe_worktree) =
+                    shutdown_worktree_safety(&path, local_merge_delivery, &target_branches);
+                let verdict = shutdown_worktree_cleanup_verdict(&path, !assigned.is_empty());
+                (state, verdict, unsafe_worktree)
+            }
+            WorkerClonePathResolve::NotOnDisk { candidate, .. } => (
+                format!("worktree={} (not present)", candidate.display()),
+                "worktree absent (nothing to remove)".to_string(),
+                false,
+            ),
+        };
 
     ShutdownWorkerSnapshot {
         worker_name: worker.name.clone(),
@@ -678,7 +688,19 @@ fn shutdown_worker_snapshot(
         task_states,
         has_in_progress_task,
         worktree_state,
+        worktree_cleanup_verdict,
         unsafe_worktree,
+    }
+}
+
+fn shutdown_worktree_cleanup_verdict(path: &std::path::Path, has_open_tasks: bool) -> String {
+    if !crate::worktree::should_finalize_worker_worktree(false, has_open_tasks) {
+        return format!("worktree {} kept (nonterminal tasks)", path.display());
+    }
+    match dirty_file_count(path) {
+        Ok(0) => format!("worktree {} will be removed at shutdown", path.display()),
+        Ok(_) => format!("worktree {} kept (dirty)", path.display()),
+        Err(_) => format!("worktree {} kept (cleanliness unknown)", path.display()),
     }
 }
 
@@ -11134,6 +11156,33 @@ mod spawn_lifecycle_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shutdown_snapshot_renders_worker_specific_cleanup_verdict_gh_1035() {
+        let repo = tempfile::tempdir().expect("test repo");
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo.path())
+            .status()
+            .expect("git init")
+            .success());
+        let mut snapshot = ShutdownWorkerSnapshot {
+            worker_name: "calm-hawk-84".to_string(),
+            worker_id: "worker-id".to_string(),
+            task_states: vec![],
+            has_in_progress_task: false,
+            worktree_state: "worktree=/repo/.cas/worktrees/calm-hawk-84 (dirty_files=0)".to_string(),
+            worktree_cleanup_verdict: shutdown_worktree_cleanup_verdict(repo.path(), false),
+            unsafe_worktree: false,
+        };
+        assert!(snapshot.render().contains("will be removed at shutdown"));
+        std::fs::write(repo.path().join("unfinished.txt"), "work").expect("write dirty file");
+        snapshot.worktree_cleanup_verdict = shutdown_worktree_cleanup_verdict(repo.path(), false);
+        assert!(snapshot.render().contains("kept (dirty)"));
+        std::fs::remove_file(repo.path().join("unfinished.txt")).expect("remove dirty file");
+        snapshot.worktree_cleanup_verdict = shutdown_worktree_cleanup_verdict(repo.path(), true);
+        assert!(snapshot.render().contains("kept (nonterminal tasks)"));
+    }
 
     // -----------------------------------------------------------------
     // cas-2c05: shutdown_workers target resolution.

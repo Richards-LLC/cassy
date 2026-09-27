@@ -494,6 +494,26 @@ pub(crate) fn declare_work_target(
     }))
 }
 
+/// Anchor a targetless Git task to the factory integration branch at creation.
+/// Non-Git task stores retain their legacy target-free behavior.
+pub(crate) fn standalone_work_target(cas_root: &Path) -> Result<Option<WorkTarget>, String> {
+    let Ok((checkout_root, _)) = git_checkout_layout(cas_root) else {
+        return Ok(None);
+    };
+    let branch =
+        crate::config::Config::configured_epic_base_branch(&checkout_root).ok_or_else(|| {
+            "WORK TARGET REQUIRED: this Git project has no [factory] epic_base_branch. \
+             Set that integration branch in .cas/config.toml or pass target_branch (and, \
+             for a different repository, target_repo); refusing an implicit trunk fallback."
+                .to_string()
+        })?;
+    declare_work_target(
+        cas_root,
+        Some(checkout_root.to_string_lossy().as_ref()),
+        Some(&branch),
+    )
+}
+
 /// Select the durable WorkTarget a child should inherit from an epic.
 ///
 /// The live epic branch is the delivery lane whenever it is recorded.  Its

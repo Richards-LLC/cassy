@@ -982,7 +982,7 @@ impl CasCore {
         // task-owned authority.
         let mut inherited_default_note = None;
         let mut inherited_delivery_mode = None;
-        let work_target = epic_id
+        let inherited_from_epic = epic_id
             .as_deref()
             .map(|epic_id| {
                 task_store.get(epic_id).map_err(|error| McpError {
@@ -1019,8 +1019,18 @@ impl CasCore {
                 } else {
                     None
                 }
-            })
-            .or(declared_work_target);
+            });
+        let work_target = if let Some(target) = inherited_from_epic.or(declared_work_target) {
+            Some(target)
+        } else {
+            super::repo_context::standalone_work_target(&self.cas_root).map_err(|message| {
+                McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(message),
+                    data: None,
+                }
+            })?
+        };
         let delivery_mode = requested_delivery_mode
             .or(inherited_delivery_mode)
             .unwrap_or_default();
@@ -2805,6 +2815,89 @@ mod related_recall_response_tests {
                 .expect("list tasks")
                 .is_empty(),
             "rejected create must not persist a task row"
+        );
+    }
+
+    /// GH #1011: a standalone task must carry the integration target from
+    /// creation; otherwise close can silently measure its delivery against main.
+    #[tokio::test]
+    async fn standalone_create_anchors_configured_staging_and_rejects_implicit_main() {
+        use std::process::Command;
+
+        let _env = TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().expect("host registry");
+        let temp = TempDir::new().expect("temporary project");
+        let repo = temp.path();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["config", "user.email", "test@cas.test"],
+            vec!["config", "user.name", "Cassy Test"],
+            vec!["remote", "add", "origin", "https://github.com/example/target-test.git"],
+        ] {
+            assert!(
+                Command::new("git")
+                    .args(&args)
+                    .current_dir(repo)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        std::fs::write(repo.join("seed.txt"), "seed\n").unwrap();
+        for args in [
+            vec!["add", "seed.txt"],
+            vec!["commit", "-q", "-m", "seed"],
+            vec!["branch", "staging"],
+        ] {
+            assert!(
+                Command::new("git")
+                    .args(&args)
+                    .current_dir(repo)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let core = CasCore::with_daemon(repo.to_path_buf(), None, None);
+        let missing = core
+            .cas_task_create(Parameters(plain_task_request("No implicit main")))
+            .await
+            .expect_err("no integration target must reject before persisting");
+        assert!(
+            missing.message.contains("WORK TARGET REQUIRED"),
+            "{missing}"
+        );
+        assert!(missing.message.contains("epic_base_branch"), "{missing}");
+        assert!(
+            core.open_task_store()
+                .unwrap()
+                .list(None)
+                .unwrap()
+                .is_empty()
+        );
+
+        std::fs::create_dir_all(repo.join(".cas")).unwrap();
+        std::fs::write(
+            repo.join(".cas/config.toml"),
+            "[factory]\nepic_base_branch = \"staging\"\n",
+        )
+        .unwrap();
+        core.cas_task_create(Parameters(plain_task_request("Use staging")))
+            .await
+            .expect("configured integration target permits creation");
+        let task = core
+            .open_task_store()
+            .unwrap()
+            .list(None)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(
+            task.deliverables
+                .work_target
+                .expect("durable target")
+                .target_branch,
+            "staging"
         );
     }
 

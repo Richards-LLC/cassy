@@ -5,12 +5,13 @@ import "./styles.css";
 import { ConversationList, filterConversationRows, type ConversationRow } from "./conversation-list";
 import { controlCommandCopy, sessionJumpCommandMarkup } from "./palette-commands";
 import { ConversationHistory } from "./conversation-history";
+import { loadDismissedAsks, saveDismissedAsks, type DismissedAsksStorage } from "./dismissed-asks";
 import { ConversationView } from "./conversation-view";
 import { REFUSED_SEE_ABOVE, refusalSentence, refusal } from "./refusal";
 import { installAttentionObjects } from "./attention-objects";
 import { clearTransientAttachmentNotes, installAttachmentSheet, setAttachmentNote } from "./attachment-sheet";
 import { artifactFailureIsAboutTheFile, artifactIdFromHref, artifactIsLocalOnly, artifactLinkFor, openArtifact } from "./artifact-open";
-import { arrangeConversationShell, bindKeyboardViewport, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY, paletteShortcutLabel, fitConversationHost } from "./conversation-shell";
+import { arrangeConversationShell, bindKeyboardViewport, keyboardViewportHeight, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY, paletteShortcutLabel, fitConversationHost } from "./conversation-shell";
 import { clockLabel } from "./thread-model";
 import { syncContextRail } from "./context-rail";
 import { applyScheme, markAppearanceCommands, setScheme, type SchemePreference } from "./scheme";
@@ -82,6 +83,9 @@ const pairingOperations = new PairingOperationCoordinator();
 const pairingCancellations = new PairingCancellationTracker();
 const app = document.querySelector<HTMLDivElement>("#app")!;
 bindKeyboardViewport(window);
+// The keyboard coming up or going away resizes the window: the pinned question folds or opens with it (cas-16eed).
+window.addEventListener("resize", () => syncComposing());
+window.visualViewport?.addEventListener("resize", () => syncComposing());
 const machines = new Map<string, StoredMachine>();
 let machineCatalogLoaded = false;
 const sessions = new Map<string, HubSession[]>();
@@ -116,10 +120,24 @@ let conversationSearchQuery = "";
 const conversationList = new ConversationList();
 let hubPresentation: "conversation" | "terminal" = "conversation";
 const pendingSubmissions = new Set<string>();
-function conversationHistory(key: string): ConversationHistory {
+/**
+ * The thread for machine:session. With `session`, the thread learns which
+ * supervisor session it is attached to, so questions a session that has since
+ * ended asked stop waiting (cas-16eed).
+ */
+function conversationHistory(key: string, session?: string): ConversationHistory {
   let history = conversationHistories.get(key);
-  if (!history) { history = new ConversationHistory(); conversationHistories.set(key, history); }
+  if (!history) {
+    history = new ConversationHistory();
+    // Questions dismissed on an earlier visit stay dismissed when history replays them.
+    for (const id of loadDismissedAsks(dismissedAskStorage(), key)) history.dismissAsk(id);
+    conversationHistories.set(key, history);
+  }
+  if (session !== undefined) history.currentSession = session;
   return history;
+}
+function dismissedAskStorage(): DismissedAsksStorage | undefined {
+  try { return window.localStorage; } catch { return undefined; }
 }
 const conversationHistoryPages = new Map<string, { hasEarlier: boolean; nextBefore?: number; loading: boolean; loaded: boolean; requested?: boolean }>();
 function conversationHistoryPage(key: string): { hasEarlier: boolean; nextBefore?: number; loading: boolean; loaded: boolean; requested?: boolean } {
@@ -331,7 +349,7 @@ function mountConversation(key: string, mount: HTMLElement): void {
     const threadMachineId = selectedMachineId!, threadSession = selectedSession!;
     const hubSession = sessions.get(selectedMachineId!)?.find((item) => item.name === selectedSession);
     const target = supervisorTarget(hubSession) || "Supervisor";
-    const history = conversationHistory(threadKey);
+    const history = conversationHistory(threadKey, threadSession);
     conversation = new ConversationView(document, history, {
       supervisor: target,
       machine: machines.get(selectedMachineId!)?.label,
@@ -368,6 +386,15 @@ function mountConversation(key: string, mount: HTMLElement): void {
           ? lease.controller_label
           : undefined;
       },
+      // cas-16eed: a failed send swiped away takes the composer's pointer at
+      // it along, the list preview stops saying "Not sent", and a dismissed
+      // question stays dismissed across a reload.
+      dismissalsChanged: () => {
+        saveDismissedAsks(dismissedAskStorage(), threadKey, history.dismissedAskIds());
+        if (messageStatus?.session === threadKey && messageStatus.text === REFUSED_SEE_ABOVE && !history.visibleEvents().some((event) => event.kind === "send" && history.isFailedSend(event.value))) clearComposerStatus();
+        renderConversationList();
+        syncConversationContext();
+      },
       hasEarlier: () => conversationHistoryPage(threadKey).hasEarlier,
       loadingEarlier: () => conversationHistoryPage(threadKey).loading,
       loadingHistory: () => {
@@ -396,6 +423,8 @@ function mountConversation(key: string, mount: HTMLElement): void {
   // The unanswered ask is pinned directly above the composer as well as in the flow.
   const composerSlot = document.querySelector<HTMLElement>("#conversation-composer-slot");
   if (composerSlot && conversation.pinned.parentElement !== composerSlot) composerSlot.prepend(conversation.pinned);
+  // "1 unsent message" sits above the pinned question: the way back to a dismissed failed send (cas-16eed).
+  if (composerSlot && conversation.unsent.parentElement !== composerSlot) composerSlot.prepend(conversation.unsent);
   // "Jump to latest" gets its own row above the pinned card and composer, so
   // it never floats over a turn in the thread (cas-97ea).
   if (composerSlot && conversation.jump.parentElement !== composerSlot) composerSlot.prepend(conversation.jump);
@@ -795,7 +824,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       updateConversationViews(); renderConversationList();
     },
     onOperatorReply: (session, reply) => {
-      conversationHistory(sessionKey(machine.id, session)).receive(reply, Date.now(), session);
+      conversationHistory(sessionKey(machine.id, session), session).receive(reply, Date.now(), session);
       // A later supervisor turn shortens an unreceipted send's wait (cas-1622).
       scheduleReceiptCheck(sessionKey(machine.id, session));
       updateConversationViews(); renderConversationList();
@@ -822,7 +851,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       cursor.loaded = true;
       cursor.hasEarlier = page.has_earlier;
       cursor.nextBefore = page.next_before;
-      const history = conversationHistory(key);
+      const history = conversationHistory(key, session);
       for (const message of page.messages) history.hydrateSend(message);
       const replies = operatorReplies.get(key) ?? [];
       for (const reply of page.replies) {
@@ -2238,7 +2267,12 @@ function bindSpeechComposer(): void {
   keyboard.onclick = () => composer.focus();
   // The keyboard is about to cover the bottom of the thread: pin the tail so
   // the last turn and any pinned ask sit directly above the field (cas-edc9).
-  composer.onfocus = () => { if (selectedMachineId && selectedSession) conversationViews.get(sessionKey(selectedMachineId, selectedSession))?.followTail(); };
+  composer.onfocus = () => {
+    for (const view of selectedConversationViews()) view.followTail();
+    syncComposing();
+  };
+  // Deferred: focus passing to Send or the mic and straight back must not flicker the question open.
+  composer.onblur = () => { window.setTimeout(syncComposing, COMPOSING_BLUR_MS); };
   mic.onclick = () => speechController?.toggle();
   syncSpeechComposer();
   if (speechDetectionStarted) return;
@@ -2248,6 +2282,29 @@ function bindSpeechComposer(): void {
     speechController = capability.mode === "typing" ? undefined : createSpeechController(capability);
     syncSpeechComposer();
   });
+}
+
+/**
+ * cas-16eed: while the operator writes on a phone or touch screen (or with a
+ * soft keyboard up), the pinned question folds to a one-line bar so at least
+ * a few lines of the latest conversation stay readable above the field. On a
+ * desktop there is room for both, so a question being answered in the
+ * composer stays open.
+ */
+const COMPOSE_COLLAPSE_MEDIA_QUERY = `${PHONE_MEDIA_QUERY}, (pointer: coarse)`;
+const COMPOSING_BLUR_MS = 150;
+function syncComposing(): void {
+  const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
+  const focused = composer !== null && composer.isConnected && document.activeElement === composer;
+  const small = window.matchMedia(COMPOSE_COLLAPSE_MEDIA_QUERY).matches || keyboardViewportHeight(window.innerHeight, window.visualViewport) !== undefined;
+  const selected = new Set(selectedConversationViews());
+  for (const view of conversationViews.values()) view.setComposing(focused && small && selected.has(view));
+}
+/** The open thread's views. Views are keyed by pane (machine:session:pane), so match the session prefix. */
+function selectedConversationViews(): ConversationView[] {
+  if (!selectedMachineId || !selectedSession) return [];
+  const thread = sessionKey(selectedMachineId, selectedSession);
+  return [...conversationViews].filter(([key]) => key === thread || key.startsWith(`${thread}:`)).map(([, view]) => view);
 }
 
 function openSupervisorComposer(): void {
@@ -2561,7 +2618,7 @@ function deliverSupervisorMessage(machine: StoredMachine, session: string, super
     showComposerStatus(outageRefusal(machine.label), "error", true);
     return;
   }
-  const history = conversationHistory(sessionKey(machine.id, session));
+  const history = conversationHistory(sessionKey(machine.id, session), session);
   if (retryOf) history.discardRefused(retryOf);
   // The edited version is on the wire: the refused original stays as a record
   // but can no longer be retried.

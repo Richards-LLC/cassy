@@ -146,7 +146,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** an open conversation with a live supervisor
 - **Goal:** my message reaches the supervisor and I see its answer
-- **Touches:** `hub-web/src/composer-markup.ts`, `hub-web/src/supervisor-message.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/live-regions.ts`, `hub-web/src/operator-thread.ts`, `hub-web/src/thread-model.ts`, `hub-web/src/conversation-history.ts`, `hub-web/src/refusal.ts`
+- **Touches:** `hub-web/src/composer-markup.ts`, `hub-web/src/supervisor-message.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/live-regions.ts`, `hub-web/src/operator-thread.ts`, `hub-web/src/thread-model.ts`, `hub-web/src/conversation-history.ts`, `hub-web/src/refusal.ts`, `hub-web/src/swipe-dismiss.ts`
 - **Suite:** `hub-web/e2e/journeys/reply-typed.journey.ts`
 - **Gaps:** delivery by a running daemon and operator stamping are doubled
 
@@ -159,11 +159,12 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 5. A refused message says why — "Not sent", a plain reason and the next step on the message, said once (the composer only points at it); the list does not preview it as said
    - A refused Take control keeps focus on the message — when another device holds the session the take is refused; the message names the device in control, once, in plain words, and the composer only points at it; its Take control reads "Waiting for <device>" and is not pressable until that device releases control, then comes back on its own; keyboard focus stays on it, never the page body
 6. Take control from the message, then retry — the refused message carries the Take control its refusal names (the conversation header has none); once control is taken it drops Take control and says Retry will send it, its actions are 44px targets on a phone, and Retry then sends it
-7. Edit and resend retires the refused message — it collapses to "Not sent · replaced by your edit" with no Retry
-8. A late receipt after the supervisor talks on never offers Retry — the supervisor's turn crosses the send and the receipt comes 3.4 s later; the message goes from "Sending…" to delivered without ever showing "Not confirmed" or Retry, and it is sent once
-9. A message Cassy can't confirm offers Retry — with no receipt, 5 seconds after the supervisor talks on (or 15 seconds after the send) "Sending…" gives way to "Not confirmed · Cassy couldn't confirm delivery to <supervisor>. Retry sends it again."; the retry goes out and is delivered
-10. Not confirmed settles once the supervisor replies after it — a supervisor turn that arrives after the give-up turns the card into "Not confirmed · The supervisor has replied since; send it again only if it missed this." with no Retry, so nothing invites a duplicate send; a quiet underlined "Send again" resends it without retyping
-11. Focus on the opening card moves into the conversation — with keyboard focus on the connection card's Details while a slow relay opens the conversation, focus lands in the composer when the conversation replaces the card, never the page body; focus elsewhere (the list search) stays where it is
+7. Dismiss a refused message and bring it back — Dismiss (the corner ×, by keyboard or mouse) or a sideways swipe on a touch screen takes the refused message out of the thread; the composer stops pointing at it and the list stops previewing it; a "1 unsent message" chip (a 44px target on a phone) brings it back with Edit and Retry, focus landing on Retry; a short swipe settles back, and under reduced motion a swipe dismisses at once with no slide
+8. Edit and resend retires the refused message — it collapses to "Not sent · replaced by your edit" with no Retry
+9. A late receipt after the supervisor talks on never offers Retry — the supervisor's turn crosses the send and the receipt comes 3.4 s later; the message goes from "Sending…" to delivered without ever showing "Not confirmed" or Retry, and it is sent once
+10. A message Cassy can't confirm offers Retry — with no receipt, 5 seconds after the supervisor talks on (or 15 seconds after the send) "Sending…" gives way to "Not confirmed · Cassy couldn't confirm delivery to <supervisor>. Retry sends it again."; the retry goes out and is delivered
+11. Not confirmed settles once the supervisor replies after it — a supervisor turn that arrives after the give-up turns the card into "Not confirmed · The supervisor has replied since; send it again only if it missed this." with no Retry, so nothing invites a duplicate send; a quiet underlined "Send again" resends it without retyping
+12. Focus on the opening card moves into the conversation — with keyboard focus on the connection card's Details while a slow relay opens the conversation, focus lands in the composer when the conversation replaces the card, never the page body; focus elsewhere (the list search) stays where it is
 
 **Expected experience**
 
@@ -172,6 +173,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - The composer status is in plain words, never protocol vocabulary.
 - A refusal says why in plain words, names the next step, and offers Edit and Retry right on the message; a control refusal also offers Take control there, so the step it names is always on screen.
 - Once its edit is sent, a refused message cannot be retried.
+- A failed message never has to stay on screen: it can be dismissed or swiped away, and it is one tap to bring back.
 - A message never says "Sending…" forever: without a receipt it turns "Not confirmed" and offers Retry, without claiming it was not sent, and it names Cassy, never "the hub".
 - Once the supervisor has replied since, a "Not confirmed" message stops offering Retry; only a quiet "Send again" remains.
 - A receipt that is only a few seconds late never flashes "Not confirmed", so there is no Retry that could send the message twice.
@@ -212,22 +214,26 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** an open conversation where the supervisor asks a question with choices
 - **Goal:** I answer with one tap and the supervisor acts on it
-- **Touches:** `hub-web/src/attention-objects.ts`, `hub-web/src/attention-view.ts`, `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/context-rail.ts`
+- **Touches:** `hub-web/src/attention-objects.ts`, `hub-web/src/attention-view.ts`, `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/context-rail.ts`, `hub-web/src/swipe-dismiss.ts`, `hub-web/src/dismissed-asks.ts`
 - **Suite:** `hub-web/e2e/journeys/answer-ask.journey.ts`
 - **Gaps:** none
 
 **Steps**
 
 1. Open the conversation — the thread is live
-2. The supervisor asks a question — it is pinned above the composer with its choices, and the thread keeps a one-line reference to it; the machine's earlier blocker, stamped by a clock that runs ahead, sits above the session line at its arrival time and is marked "machine clock ahead"
-3. Answer with one tap — the pin clears, the thread records the chosen answer, and nothing is left waiting in the context rail, even when the machine's clock runs ahead; the answer shows the time it was sent, under today
-4. See the supervisor act on the answer — the reply follows, and a new blocker after the answer waits
-5. Reply to a machine a day ahead — no future day header: the machine's turn sits under Today at its arrival time, marked "machine clock ahead", and the reply shows the time it was sent below it
-6. Reopen the page — the thread rebuilt from history keeps every turn where the visit showed it, in the machine's order, under Today, with times reading in order
+2. A question from an ended session does not wait — the previous session's unanswered question reads quietly in the thread with "No longer waiting: the session that asked has ended." and no choices; nothing is pinned and the context rail lists only the live blocker
+3. The supervisor asks a question — it is pinned above the composer with its choices, and the thread keeps a one-line reference to it; the machine's earlier blocker, stamped by a clock that runs ahead, sits above the session line at its arrival time and is marked "machine clock ahead"
+4. Answer with one tap — the pin clears, the thread records the chosen answer, and nothing is left waiting in the context rail, even when the machine's clock runs ahead; the answer shows the time it was sent, under today
+5. See the supervisor act on the answer — the reply follows, and a new blocker after the answer waits
+6. Fold, open and dismiss a question — the supervisor posting an FYI and a status update while it waits leaves the question pinned with its choices; on a desktop the pinned question collapses to a one-line bar ("Waiting on you: open the PR…") and opens again, and writing in the composer leaves it open; on a phone (390px, dark) focusing the composer folds it to the bar, and with the keyboard up (about 440px of page) at least three lines of the latest conversation stay readable; a tap on the bar opens it; a swipe takes it off, and its copy in the thread says "Dismissed. You can still answer here." and keeps its choices
+7. Reply to a machine a day ahead — no future day header: the machine's turn sits under Today at its arrival time, marked "machine clock ahead", and the reply shows the time it was sent below it
+8. Reopen the page — the thread rebuilt from history keeps every turn where the visit showed it, in the machine's order, under Today, with times reading in order
 
 **Expected experience**
 
 - The question is impossible to miss, and its choices are buttons.
+- A question never takes the whole screen: while the operator writes on a phone it is a one-line bar, and it can be dismissed.
+- A question from a session that has ended is not shown as "Waiting on you"; a question the supervisor is still waiting on keeps its pin and its choices while the supervisor posts progress.
 - After answering, the question stays readable in the thread with the answer shown.
 - Turns read in time order under the right day, even when the machine's clock runs ahead: no future day header, and a quiet "machine clock ahead" instead of a time from the future.
 

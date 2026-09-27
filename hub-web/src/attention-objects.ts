@@ -1,6 +1,7 @@
 import { BLOCKER_HINT, entryText } from "./context-rail";
 import { registerTurnRenderer, renderBody, type TurnRenderContext } from "./conversation-view";
 import { blockerEvidence } from "./thread-model";
+import type { AskRetirement } from "./conversation-history";
 import type { OperatorReply } from "./types";
 
 /**
@@ -22,6 +23,17 @@ export function askOptions(reply: OperatorReply): string[] {
   const options = (reply.options ?? []).map((option) => option.trim()).filter(Boolean);
   return options.length > 0 ? options : [...DEFAULT_ASK_OPTIONS];
 }
+
+/**
+ * What a question that stopped waiting without an answer says in the thread
+ * (cas-16eed). A dismissed one keeps its choices, so it can still be answered
+ * from here; one whose session ended, or that the supervisor moved past,
+ * offers none.
+ */
+export const RETIRED_LINES: Readonly<Record<AskRetirement, string>> = {
+  dismissed: "Dismissed. You can still answer here.",
+  "session-ended": "No longer waiting: the session that asked has ended.",
+};
 
 /** The collapsed in-flow copy's pointer to the pinned tray. */
 export const WAITING_LINE = "Waiting on you — answer below";
@@ -67,6 +79,15 @@ export function renderAskObject(reply: OperatorReply, context: TurnRenderContext
     object.append(body);
     return object;
   }
+  const retired = answer || context.pinned ? undefined : context.history?.retirement(reply.notification_id);
+  if (retired) {
+    // cas-16eed: no longer waiting, so it quiets like an answered question
+    // and says why instead of showing an answer.
+    object.dataset.answered = "false";
+    object.dataset.retired = retired;
+    const note = document.createElement("p"); note.className = "ask-retired"; note.textContent = RETIRED_LINES[retired];
+    foot.append(note);
+  }
   if (answer) {
     // The chosen reply stays in the tray as sent; the other choices leave.
     // Handled, it quiets to the supervisor's colour (journey F12): only what
@@ -76,7 +97,7 @@ export function renderAskObject(reply: OperatorReply, context: TurnRenderContext
     sent.append(tick(document), document.createTextNode(answer.text));
     sent.setAttribute("aria-label", `You replied: ${answer.text}`);
     foot.append(sent);
-  } else {
+  } else if (!retired || retired === "dismissed") {
     object.dataset.answered = "false";
     for (const option of askOptions(reply)) {
       const chip = document.createElement("button"); chip.type = "button"; chip.className = "chip"; chip.textContent = option;
@@ -113,6 +134,13 @@ export function renderBlockerObject(reply: OperatorReply, context: TurnRenderCon
     const handled = document.createElement("p"); handled.className = "blk-handled";
     handled.append(tick(document), document.createTextNode("Acknowledged — you replied"));
     body.append(handled);
+  }
+  // cas-16eed: a blocker from a session that has ended no longer waits, and says so.
+  const retired = waiting ? undefined : context.history?.retirement(reply.notification_id);
+  if (retired) {
+    object.dataset.retired = retired;
+    const note = document.createElement("p"); note.className = "blk-retired"; note.textContent = RETIRED_LINES[retired];
+    body.append(note);
   }
   object.append(body);
   if (evidence) {

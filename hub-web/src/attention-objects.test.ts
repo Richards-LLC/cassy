@@ -125,6 +125,29 @@ describe("blocker object", () => {
     expect(node.querySelector(".obj-body p")?.textContent).toBe("The release gate went red. The train is held.");
     expect(node.querySelector(".obj-foot code.window")?.textContent).toBe("attention.rs:212 · needless_borrow");
   });
+  it("says how to clear it while it waits, and drops the hint once a send acknowledges it (journey F12)", () => {
+    const history = new ConversationHistory();
+    const blocker = reply(51, "blocker", "The release gate went red.\nattention.rs:212 · needless_borrow");
+    history.reply(blocker, at(9, 58));
+    const waiting = renderBlockerObject(blocker, context(blocker, history));
+    expect(waiting.dataset.waiting).toBe("true");
+    expect(waiting.querySelector(".obj-body .blk-hint")?.textContent).toBe("Reply to unblock");
+    // The hint sits in the body, above the evidence window.
+    expect(waiting.querySelector(".obj-body")?.lastElementChild?.className).toBe("blk-hint");
+    history.submit("ack", "atlas-sup", "Looking now.", at(10, 0));
+    const acknowledged = renderBlockerObject(blocker, context(blocker, history));
+    expect(acknowledged.dataset.waiting).toBe("false");
+    expect(acknowledged.querySelector(".blk-hint")).toBeNull();
+    // A refused send never reached the supervisor: the blocker still waits and still says how.
+    history.reject("ack", "no access");
+    expect(renderBlockerObject(blocker, context(blocker, history)).querySelector(".blk-hint")?.textContent).toBe("Reply to unblock");
+  });
+  it("quiets an answered question in the stylesheet: supervisor colour, the tick kept (journey F12)", async () => {
+    const [{ readFileSync }, { dirname, join }, { fileURLToPath }] = await Promise.all([import("node:fs"), import("node:path"), import("node:url")]);
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
+    expect(css).toContain('.obj.t-a[data-answered="true"] .obj-body, .obj.t-a[data-answered="true"] .obj-foot { border-left-color: var(--color-transparent); background: var(--sup-bg); color: var(--sup-fg); }');
+    expect(css).toContain('.obj.t-a[data-answered="true"] { box-shadow: var(--lift-sup); }');
+  });
   it("has no tray without evidence", () => {
     const blocker = reply(51, "blocker", "The release gate went red.");
     const node = renderBlockerObject(blocker, context(blocker, new ConversationHistory()));

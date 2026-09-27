@@ -7,6 +7,9 @@ const LONG_NAME = "an-extraordinarily-long-supervisor-name-for-truncation-checks
 const FORGE: Machine = { id: "forge", label: "Forge · Linux", sessions: [{ name: LONG_NAME, supervisor: LONG_NAME, project_dir: "/projects/forge-tools", workers: ["steady-wren-3"], liveness: "live" }] };
 
 test("HUB-J5 reply by typing", async ({ page, journey }) => {
+  // Eleven stages plus the phone placeholder sweep: past the 60 s budget on a
+  // loaded host, so it gets the headroom HUB-J3 has.
+  test.setTimeout(120_000);
   const hub = await journey.hub({ machines: [ATLAS, STUDIO, FORGE], paired: ["atlas", "studio", "forge"] });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
   const composer = page.getByRole("textbox", { name: "Your message" });
@@ -200,18 +203,19 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
     const longSend = page.getByRole("button", { name: `Send to ${LONG_NAME}`, exact: true });
     await expect(longSend).toBeVisible();
     const [field, button, row] = await Promise.all([composer.boundingBox(), longSend.boundingBox(), page.locator(".conversation-composer").boundingBox()]);
-    // The field keeps about its usual share of the row (a normal name leaves
-    // it ~40%); the send group takes at most half and its label ellipsises.
+    // The field keeps about its usual share of the row; the button reads
+    // "Send" and its accessible name keeps the codename whole (journey F13).
     expect(field!.width, "message field width").toBeGreaterThan(row!.width * 0.33);
     expect(button!.x + button!.width, "Send stays inside the composer").toBeLessThanOrEqual(row!.x + row!.width);
-    expect(await longSend.locator(".send-label").evaluate((label) => label.scrollWidth > label.clientWidth), "the label ellipsises").toBe(true);
+    await expect(longSend.locator(".send-label")).toHaveText("Send");
     // The empty field stays one line tall (a 64-character name used to grow it
     // to three), and the header's machine · codename line stays one line with
     // the connection state visible (3.30.0 journey F9).
     const lineHeight = await composer.evaluate((field) => parseFloat(getComputedStyle(field).lineHeight));
     const oneLine = await composer.evaluate((field) => field.getBoundingClientRect().height);
     expect(oneLine, "empty composer height").toBeLessThan(2 * lineHeight + 26);
-    expect(await composer.getAttribute("placeholder")).toMatch(/…$/);
+    // The placeholder addresses the project's supervisor, not the codename.
+    await expect(composer).toHaveAttribute("placeholder", "Message the forge-tools supervisor");
     const host = page.locator(".conversation-host");
     const hostLine = await host.evaluate((element) => parseFloat(getComputedStyle(element).lineHeight));
     expect((await host.boundingBox())!.height, "header meta on one line").toBeLessThan(hostLine * 1.5);
@@ -227,5 +231,56 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
     await page.setViewportSize(desktop);
     const title = page.locator(".thread .empty b");
     expect(await title.evaluate((element) => element.scrollWidth <= element.clientWidth + 1), "the empty-thread title is not clipped").toBe(true);
+    // The empty state names the role and gives the codename in brackets; the
+    // codename never breaks at its hyphens, in the sentence or the meta line,
+    // at desktop or on a phone (journey F13).
+    const said = page.locator(".thread .empty .said");
+    await expect(said).toHaveText(`Nothing waiting on you. The supervisor (${LONG_NAME}) will write here when it needs a decision.`);
+    const oneLineCodename = (selector: string) => page.locator(selector).evaluate((element) => {
+      const lineHeight = parseFloat(getComputedStyle(element).lineHeight);
+      return { lines: element.getClientRects().length, oneLine: element.getBoundingClientRect().height < lineHeight * 1.5, ellipsised: element.scrollWidth > element.clientWidth, title: element.getAttribute("title") };
+    });
+    for (const width of [desktop.width, 390]) {
+      await page.setViewportSize({ width, height: desktop.height });
+      expect(await oneLineCodename(".thread .empty .said .codename"), `sentence codename at ${width}px`).toEqual({ lines: 1, oneLine: true, ellipsised: true, title: LONG_NAME });
+      expect(await oneLineCodename(".thread .empty .proj2"), `meta line at ${width}px`).toEqual({ lines: 1, oneLine: true, ellipsised: true, title: `Forge · Linux · ${LONG_NAME}` });
+    }
+    await page.setViewportSize(desktop);
+  });
+
+  await journey.stage("On a phone the placeholder reads whole for every project", async () => {
+    // cas-1e0f QA F01/F02: "Message the gabber-studio supervisor" overflowed
+    // the 245px phone field and was cut mid-word. The composer now keeps the
+    // longest wording that fits: the full phrase, then "Message <project>",
+    // then "Message the supervisor", never a cut one.
+    const desktop = page.viewportSize()!;
+    const fit = () => composer.evaluate((field: HTMLTextAreaElement) => {
+      const style = getComputedStyle(field);
+      const probe = document.createElement("span");
+      probe.style.cssText = "position:absolute;left:-10000px;visibility:hidden;white-space:pre;";
+      probe.style.font = style.font; probe.style.letterSpacing = style.letterSpacing;
+      probe.textContent = field.placeholder; document.body.append(probe);
+      const width = probe.getBoundingClientRect().width; probe.remove();
+      return { text: field.placeholder, fits: width <= field.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight) + 0.5 };
+    });
+    const expected: Record<string, string[]> = {
+      "cas-src": ["Message the cas-src supervisor"],
+      "gabber-studio": ["Message gabber-studio", "Message the gabber-studio supervisor"],
+      "forge-tools": ["Message the forge-tools supervisor", "Message forge-tools"],
+    };
+    await page.setViewportSize({ width: 390, height: 844 });
+    for (const [project, wordings] of Object.entries(expected)) {
+      const back = page.getByRole("button", { name: "‹ Conversations", exact: true });
+      if (await back.isVisible()) await back.click();
+      await list.getByRole("button", { name: new RegExp(project) }).click();
+      await expect(composer).toBeVisible();
+      await expect.poll(async () => (await fit()).fits, { message: `${project}: the placeholder fits the 390px field` }).toBe(true);
+      const { text } = await fit();
+      expect(wordings, `${project}: a whole wording, not a cut one`).toContain(text);
+      expect(text).not.toContain("…");
+    }
+    // Back on a desktop field the full phrase returns.
+    await page.setViewportSize(desktop);
+    await expect(composer).toHaveAttribute("placeholder", "Message the forge-tools supervisor");
   });
 });

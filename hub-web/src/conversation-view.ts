@@ -345,7 +345,7 @@ export class ConversationView {
       const line = document.createElement("p"); line.className = "said conversation-loading"; line.setAttribute("role", "status");
       const dots = document.createElement("span"); dots.className = "dots"; dots.setAttribute("aria-hidden", "true");
       dots.append(document.createElement("i"), document.createElement("i"), document.createElement("i"));
-      const codename = document.createElement("span"); codename.className = "codename"; codename.textContent = supervisor;
+      const codename = document.createElement("span"); codename.className = "codename"; codename.textContent = supervisor; codename.title = supervisor;
       const text = document.createElement("span"); text.append("Loading your conversation with ", codename, "…");
       line.append(dots, text);
       this.empty.replaceChildren(line);
@@ -362,18 +362,23 @@ export class ConversationView {
     // The project titles the card, as it titles the header and every list row
     // (journey F7); machine and codename sit beneath it. Without a project the
     // codename is the only name there is, and it keeps the title.
-    const name = document.createElement("b"); name.textContent = project || supervisor;
+    const name = document.createElement("b"); name.textContent = project || supervisor; name.title = project || supervisor;
     if (!project) name.className = "codename";
     const where = document.createElement("span"); where.className = "proj2";
+    where.title = [machine, project ? supervisor : undefined].filter(Boolean).join(" · ");
     if (machine) where.append(machine);
     if (project) {
       const secondary = document.createElement("span"); secondary.className = "codename"; secondary.textContent = supervisor;
       where.append(...(machine ? [" · "] : []), secondary);
     }
     const said = document.createElement("p"); said.className = "said"; said.setAttribute("role", "status");
-    // The codename is an identifier: mono and never broken at its hyphen, even inside prose.
-    const codename = document.createElement("span"); codename.className = "codename"; codename.textContent = supervisor;
-    said.append("Nothing waiting on you. ", codename, " will write here when it needs a decision.");
+    // The sentence names the role, not the generated codename (journey F13).
+    // The codename follows in brackets as an identifier: mono, one unbroken
+    // line, ellipsised past a cap, and whole in its title and the DOM.
+    const codename = document.createElement("span"); codename.className = "codename"; codename.textContent = supervisor; codename.title = supervisor;
+    // The brackets travel with it: no line break between "(" and the name.
+    const who = document.createElement("span"); who.className = "said-who"; who.append("(", codename, ")");
+    said.append("Nothing waiting on you. The supervisor ", who, " will write here when it needs a decision.");
     const children: HTMLElement[] = [mono, name, where, said];
     if (echo) { const quiet = document.createElement("div"); quiet.className = "quiet"; quiet.textContent = echo; children.push(quiet); }
     this.empty.replaceChildren(...children);

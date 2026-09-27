@@ -64,7 +64,7 @@ describe("ConversationView (Pebble thread)", () => {
     view.update();
 
     expect(view.element.querySelector<HTMLElement>(".empty")?.hidden).toBe(false);
-    expect(view.element.querySelector(".said")?.textContent).toBe("Nothing waiting on you. sup will write here when it needs a decision.");
+    expect(view.element.querySelector(".said")?.textContent).toBe("Nothing waiting on you. The supervisor (sup) will write here when it needs a decision.");
     expect(view.element.querySelector(".history-end")).toBeNull();
     expect(view.element.querySelector(".working")).toBeNull();
   });
@@ -83,7 +83,7 @@ describe("ConversationView (Pebble thread)", () => {
     // The page lands empty: now the empty state is the truth.
     loading = false; view.update();
     expect(empty.dataset.state).toBeUndefined();
-    expect(empty.querySelector(".said")?.textContent).toBe("Nothing waiting on you. sup will write here when it needs a decision.");
+    expect(empty.querySelector(".said")?.textContent).toBe("Nothing waiting on you. The supervisor (sup) will write here when it needs a decision.");
     // A page with turns shows the turns, whatever the flag says.
     loading = true; history.reply(reply(1, "answer", "Ready."), at(9, 0)); view.update();
     expect(empty.hidden).toBe(true);
@@ -442,9 +442,11 @@ describe("ConversationView (Pebble thread)", () => {
     expect(empty.querySelector("b")?.textContent).toBe("cas-hub-static");
     expect(empty.querySelector(".proj2")?.textContent).toBe("Bench · calm-heron-5");
     expect(empty.querySelector(".proj2 > .codename")?.textContent).toBe("calm-heron-5");
-    expect(empty.querySelector(".said")?.textContent).toBe("Nothing waiting on you. calm-heron-5 will write here when it needs a decision.");
+    expect(empty.querySelector(".said")?.textContent).toBe("Nothing waiting on you. The supervisor (calm-heron-5) will write here when it needs a decision.");
     // The codename in the sentence is an identifier span that never breaks at its hyphen.
     expect(empty.querySelector(".said .codename")?.textContent).toBe("calm-heron-5");
+    expect(empty.querySelector<HTMLElement>(".said .codename")?.title).toBe("calm-heron-5");
+    expect(empty.querySelector<HTMLElement>(".proj2")?.title).toBe("Bench · calm-heron-5");
     expect(empty.querySelector("b")?.classList.contains("codename")).toBe(false);
     expect(empty.querySelector(".quiet")?.textContent).toBe("Promoted the hub to production on Monday.");
     echo = undefined; view.update();
@@ -476,5 +478,14 @@ describe("ConversationView (Pebble thread)", () => {
     const history = new ConversationHistory(); const view = new ConversationView(document, history, "sup");
     history.reply(reply(3, "ask"), at(10, 0)); view.update();
     expect(view.element.querySelector<HTMLElement>('[data-kind="ask"]')?.classList.contains("bub")).toBe(true);
+  });
+});
+
+describe("coalesced status lines under forced colours (journey F11)", () => {
+  it("keeps the 10px clamp spacer in Canvas, never a bar in the text colour", async () => {
+    const [{ readFileSync }, { dirname, join }, { fileURLToPath }] = await Promise.all([import("node:fs"), import("node:path"), import("node:url")]);
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
+    expect(css).toContain("border-bottom: 10px solid transparent;");
+    expect(css).toMatch(/@media \(forced-colors: active\) \{\s*\.thread \.coalesce \{ border-bottom-color: Canvas; \}\s*\}/);
   });
 });

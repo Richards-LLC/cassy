@@ -37,6 +37,11 @@ export interface ConnectionSurfaceActions {
   readonly repair?: () => void;
 }
 
+export interface ConnectionSurfaceOptions {
+  /** Title while the attach is in progress; defaults to "Connecting to <session>…". */
+  readonly openingTitle?: string;
+}
+
 const STAGE_COPY: Record<ConnectionSnapshot["stage"], string> = {
   idle: "waiting to start the connection",
   resolving: "resolving the target node",
@@ -89,6 +94,27 @@ export function connectionTimeline(snapshot: ConnectionSnapshotView): Connection
   return entries;
 }
 
+/**
+ * An attach still on its way to live: no failure, no scheduled retry. Its
+ * default surface is one calm title (journey F3); the attempt and relay stage
+ * wait behind "Details", and only after the quiet window below.
+ */
+export function attachInProgress(snapshot: ConnectionSnapshotView): boolean {
+  return snapshot.fatal !== true && snapshot.phase !== "failed" && snapshot.phase !== "backoff" && snapshot.phase !== "live";
+}
+
+/** A conversation's attach title: calm, and free of relay vocabulary (journey F3). */
+export const CONVERSATION_OPENING = "Opening the conversation…";
+
+/** How long an attach shows its title alone before "Details" is offered. */
+export const ATTACH_QUIET_MS = 400;
+
+/** Milliseconds since this not-yet-live lifecycle began, on the same clocks as elapsedSeconds. */
+export function elapsedMs(snapshot: ConnectionSnapshotView, now = Date.now()): number {
+  const anchor = "session" in snapshot ? snapshot.attachSince ?? snapshot.since : snapshot.connectingSince ?? snapshot.since;
+  return Math.max(0, now - anchor);
+}
+
 export function elapsedSeconds(snapshot: ConnectionSnapshotView, now = Date.now()): number {
   return "session" in snapshot
     ? attachElapsedSeconds(snapshot, now)
@@ -138,10 +164,14 @@ export function renderConnectionSurfaceInto(
   snapshot: ConnectionSnapshotView,
   actions: ConnectionSurfaceActions = {},
   now = Date.now(),
+  options: ConnectionSurfaceOptions = {},
 ): void {
   const document = target.ownerDocument;
   const view = connectingView(snapshot, now);
   const fatal = snapshot.fatal === true;
+  const opening = attachInProgress(snapshot);
+  // A repaint (the 1 Hz ticker, a hub push) keeps "Details" as the operator left it.
+  const detailsOpen = target.querySelector<HTMLDetailsElement>(":scope > .connection-details")?.open === true;
   target.className = `empty terminal-state terminal-connecting${fatal ? " terminal-connect-failed" : ""}`;
 
   const title = document.createElement("p");
@@ -154,8 +184,11 @@ export function renderConnectionSurfaceInto(
       ? snapshot.authFailure ? "Connection failed — re-pair required." : "Connection failed — retry available."
     : snapshot.phase === "backoff"
       ? "Connection interrupted — retrying."
-      : `Connecting to ${session}…`;
+      : options.openingTitle ?? `Connecting to ${session}…`;
   target.replaceChildren(title);
+  // An attach in progress shows its title alone for the quiet window: against
+  // a quick relay nothing more ever appears (journey F3).
+  if (opening && elapsedMs(snapshot, now) < ATTACH_QUIET_MS && !view.actionsAvailable) return;
 
   const timeline = document.createElement("ol");
   timeline.className = "connection-timeline";
@@ -177,7 +210,19 @@ export function renderConnectionSurfaceInto(
     item.append(marker, content);
     timeline.append(item);
   }
-  target.append(timeline);
+  if (opening) {
+    // The attempt and relay stage are evidence for whoever asks, not the
+    // default surface: they sit behind "Details".
+    const details = document.createElement("details");
+    details.className = "connection-details";
+    details.open = detailsOpen;
+    const summary = document.createElement("summary");
+    summary.textContent = "Details";
+    details.append(summary, timeline);
+    target.append(details);
+  } else {
+    target.append(timeline);
+  }
 
   if (view.actionsAvailable) {
     const actionRow = document.createElement("div");

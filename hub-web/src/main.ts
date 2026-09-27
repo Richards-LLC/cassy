@@ -18,7 +18,7 @@ import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionU
 import { cycleAttentionGroup, renderAttentionPanel, renderAttentionSummary } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
 import { attachElapsedSeconds, elapsedSeconds, type AttachSnapshot } from "./connection-state";
-import { disconnectedView, lostConnectionBanner, outageControlsReason, outageRefusal, renderConnectionSurfaceInto, shouldRetainDisconnectedFrame, transportFailureNeedsAttention } from "./connection-state-view";
+import { CONVERSATION_OPENING, disconnectedView, lostConnectionBanner, outageControlsReason, outageRefusal, renderConnectionSurfaceInto, shouldRetainDisconnectedFrame, transportFailureNeedsAttention } from "./connection-state-view";
 import { ensureMachineConnection, replaceMachineConnection } from "./connection-lifecycle";
 import { createDeviceKey } from "./dpop";
 import { readPairingFragment, watchPairingFragment } from "./fragment";
@@ -1310,9 +1310,8 @@ function renderTerminalConnecting(machineId: string, session: string): void {
   const placeholder = grid.querySelector<HTMLElement>(":scope > .empty");
   if (placeholder) {
     placeholder.classList.remove("terminal-state");
-    // The conversation names who the operator is waiting on, not the pane.
-    const who = hubPresentation === "conversation" ? supervisorTarget(sessions.get(machineId)?.find((item) => item.name === session)) || session : session;
-    placeholder.textContent = `Connecting to ${who}…`;
+    // A conversation opens calmly (journey F3): no codename, no relay words.
+    placeholder.textContent = hubPresentation === "conversation" ? CONVERSATION_OPENING : `Connecting to ${session}…`;
   }
 }
 
@@ -1375,7 +1374,7 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
     retry: () => { void connections.get(machineId)?.attach(session); },
     diagnose: () => openConnectionLog(machineId),
     repair: () => openRepairDialog(machineId),
-  }, now);
+  }, now, hubPresentation === "conversation" ? { openingTitle: CONVERSATION_OPENING } : {});
 }
 
 function syncConnectionViewTicker(): void {

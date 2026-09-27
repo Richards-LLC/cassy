@@ -489,7 +489,8 @@ it('routes correlated daemon, legacy Hub and multiplex Hub rejections to the add
   internals.handleDaemonObject('a', { Error: { client_ref: 'daemon', message: 'Refused by daemon' } });
   internals.handleDaemonObject('a', { error: 'forbidden', client_ref: 'legacy' });
   await internals.handleMachineMessage(JSON.stringify({ channel: 'pty:b', error: { code: 'forbidden', client_ref: 'mux' } }));
-  expect(onMessageRejected.mock.calls).toEqual([['a', 'daemon', 'Refused by daemon'], ['a', 'legacy', 'forbidden'], ['b', 'mux', 'forbidden']]);
+  const forbidden = { code: 'forbidden', retryable: false };
+  expect(onMessageRejected.mock.calls).toEqual([['a', 'daemon', 'Refused by daemon'], ['a', 'legacy', 'forbidden', forbidden], ['b', 'mux', 'forbidden', forbidden]]);
   expect(onSocketError).not.toHaveBeenCalled();
 });
 

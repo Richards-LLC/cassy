@@ -61,6 +61,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - A held message that waits past two minutes says Not sent because the
   session didn't come back, with Retry, instead of advising to re-pair the
   device. The composer no longer promises it will go out by itself.
+- When only one conversation's daemon link drops, Commander says
+  "Reconnecting to" that conversation in the banner, the composer note and
+  the disabled controls, and the machine stays Connected. "Lost connection
+  to <machine>" is kept for a real machine drop.
+- A revoked pairing reads "needs pairing again" everywhere, with Re-pair on
+  the banner, and nothing on screen still says reconnecting. The auth-loss
+  alarm resolves once a pairing works again.
 - The factory daemon answers a resent `SendMessage` with its first receipt
   and queues it once.
 - A refused DPoP proof is retried instead of being read as a revoked

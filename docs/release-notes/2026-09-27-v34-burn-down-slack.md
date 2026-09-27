@@ -33,6 +33,10 @@ Was: the hub could die and a network switch could strand Commander. → Now: bot
 
 • *Quick recovery after a blip* — Was: after a session came back, the next brief drop could wait up to 8 seconds before trying again. → Now: it retries within about a second.
 
+• *One conversation reconnecting* — Was: when only one conversation's link dropped, the banner said the whole machine was lost. → Now: it says "Reconnecting to" that conversation, and the machine stays Connected.
+
+• *Pairing needed* — Was: a pairing that had been revoked could still read as reconnecting. → Now: it says "needs pairing again" everywhere, with a Re-pair button on the phone.
+
 • *No double messages* — Was: a message sent again after a reconnect could arrive twice. → Now: it arrives once.
 
 *Conversations*
@@ -101,6 +105,10 @@ Was: SIGPIPE killed long-lived servers and GitHub merges could skip independent 
 • *Held-send expiry* — Was: the expired bubble fell through to "re-pair this device" and the composer still said "will go out by itself". → Now: "The session didn't come back while it waited", Retry, and the composer points at the message.
 
 • *Backoff reset* — Was: the held-send backoff kept its last step after the session recovered, so the next blip waited up to 8 s. → Now: it resets after 10 s of live settle, and the hub double stops reading the legacy socket after a refusal, as the hub does (HUB-J12 step 8).
+
+• *Session-scoped outage* — Was: an `upstream_unavailable` stream close read "Lost connection to <machine>" in the banner, composer and controls. → Now: all three name the conversation, say the machine is still connected, and keep that wording past the resubscribe timeout.
+
+• *Auth-loss alarm* — Was: a revoked pairing's rail notice still said reconnecting, and its alarm outlived a pairing that worked again. → Now: the notice reads "needs pairing again" with Re-pair, and a working pairing resolves the alarm.
 
 • *SendMessage dedupe* — Was: a resent SendMessage could queue twice. → Now: the daemon answers a repeated `client_ref` with its first receipt and queues it once.
 

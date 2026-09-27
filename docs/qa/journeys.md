@@ -368,7 +368,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 3. Tailscale goes off, then on again — no browser event says so; the dead socket is noticed, everything says Reconnecting, a message written meanwhile waits in the thread; within 15 s of Tailscale returning it is Live again without a reload, and the waiting message goes out once and is delivered
 4. Wi-Fi hands over to cellular — going offline says Reconnecting at once; a message written meanwhile waits; coming online reconnects within 5 s and sends it once
 5. The page wakes on a half-open socket — waking checks the socket and replaces it within seconds, well before the heartbeat would notice; a message then goes out once
-6. The session's daemon link drops for a moment — the hub is reachable but cannot reach the session's daemon, so it refuses the send as retryable (upstream_unavailable); the message waits in the thread instead of reading "Not sent", and goes out once when the session is live again
+6. The session's daemon link drops for a moment — the hub is reachable but cannot reach the session's daemon, so it refuses the send as retryable (upstream_unavailable); the message waits in the thread instead of reading "Not sent", and goes out once when the session is live again; while the link stays down the page retries with a growing pause (about 1, 2, 4, then 8 s), and past the two-minute hold the message reads Not sent with Retry ("The session didn't come back while it waited."), never "re-pair this device" or "will go out by itself"
 
 **Expected experience**
 

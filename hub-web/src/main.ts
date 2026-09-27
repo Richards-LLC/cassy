@@ -2470,12 +2470,23 @@ function reholdRefusedSend(machine: StoredMachine, session: string, clientRef: s
   heldSince.set(clientRef, first);
   const remaining = HELD_SEND_MS - (now - first);
   if (remaining <= 0) {
-    heldSince.delete(clientRef);
-    history.reject(clientRef, outageRefusal(machine.label));
+    expireHeldSend(machine, key, clientRef);
     return true;
   }
   queueHeldSend(machine, key, clientRef, send.target, send.text, send.replyTo, remaining);
   return true;
+}
+
+/**
+ * A held send ran out of time: it says Not sent on the message, with Retry
+ * and Edit. The composer's "will go out by itself" line was about this send;
+ * once nothing is held for the session it would contradict the message, so it
+ * points at the message instead (cas-a355).
+ */
+function expireHeldSend(machine: StoredMachine, key: string, clientRef: string): void {
+  heldSince.delete(clientRef);
+  conversationHistory(key).reject(clientRef, outageRefusal(machine.label));
+  if (!heldSends.get(key)?.length && messageStatus?.transport && messageStatus.session === key) showComposerStatus(REFUSED_SEE_ABOVE, "error");
 }
 
 function queueHeldSend(machine: StoredMachine, key: string, clientRef: string, supervisor: string, text: string, replyTo: number | undefined, expiresInMs: number): void {
@@ -2486,9 +2497,7 @@ function queueHeldSend(machine: StoredMachine, key: string, clientRef: string, s
     if (index < 0) return;
     queue.splice(index, 1);
     if (queue.length === 0) heldSends.delete(key);
-    // Still unreachable: say so on the message, with Retry and Edit.
-    heldSince.delete(clientRef);
-    conversationHistory(key).reject(clientRef, outageRefusal(machine.label));
+    expireHeldSend(machine, key, clientRef);
     updateConversationViews(); renderConversationList();
   }, expiresInMs);
   const queue = heldSends.get(key) ?? [];

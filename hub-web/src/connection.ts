@@ -133,6 +133,14 @@ export class HubConnectionSupervisor {
   private readonly keyframeRequests = new Set<string>();
   private readonly attachLifecycles = new Map<string, AttachSnapshot>();
   private readonly socketAttempts = new Map<string, number>();
+  /**
+   * Retryable `upstream_unavailable` refusals per session since its last
+   * acknowledged send (cas-a355). Each one lengthens the next reattach: 1, 2,
+   * 4, then 8 s, instead of a fresh 1 s after every live attach.
+   */
+  private readonly upstreamRefusalStreak = new Map<string, number>();
+  /** Supervisor messages written to each legacy session socket, in order (cas-a355). */
+  private readonly legacySends = new WeakMap<WebSocket, string[]>();
   private readonly attachRetryTimers = new Map<string, number>();
   private readonly attachTimeouts = new Map<string, { open?: number; ready?: number }>();
   private readonly timedOutSockets = new WeakSet<WebSocket>();
@@ -1092,7 +1100,30 @@ export class HubConnectionSupervisor {
     const socket = this.sockets.get(session);
     if (!socket || socket.readyState !== WebSocket.OPEN) return false;
     socket.send(JSON.stringify(outbound));
+    const sent = sendMessageClientRef(outbound);
+    if (sent) this.legacySends.set(socket, [...(this.legacySends.get(socket) ?? []), sent]);
     return true;
+  }
+
+  /**
+   * A retryable refusal: the hub closes this session's stream right after it
+   * and the page attaches again. Repeated refusals back off that reattach
+   * (cas-a355): the n-th refusal since the last acknowledged send waits
+   * backoffDelay(min(n - 1, 3)), about 1, 2, 4 then 8 s.
+   */
+  private unansweredAfter(session: string, clientRef: string): string[] {
+    const socket = this.sockets.get(session);
+    const written = socket ? this.legacySends.get(socket) ?? [] : [];
+    const index = written.indexOf(clientRef);
+    if (!socket || index < 0) return [];
+    this.legacySends.set(socket, written.slice(0, index));
+    return written.slice(index + 1);
+  }
+
+  private noteUpstreamRefusal(session: string): void {
+    const streak = (this.upstreamRefusalStreak.get(session) ?? 0) + 1;
+    this.upstreamRefusalStreak.set(session, streak);
+    this.socketAttempts.set(session, Math.min(streak - 1, UPSTREAM_BACKOFF_MAX_ATTEMPT));
   }
 
   requestPaneKeyframe(session: string, paneId: string): boolean {
@@ -1197,7 +1228,8 @@ export class HubConnectionSupervisor {
       const rejection = messageRejection(envelope.error);
       // A retryable refusal is followed by the hub closing this session's
       // stream (`closed` above), which reattaches it; the held send goes out
-      // on that live attach (cas-0653).
+      // on that live attach (cas-0653), after a backoff (cas-a355).
+      if (rejection.retryable) this.noteUpstreamRefusal(session);
       if (typeof envelope.error.client_ref === "string") this.callbacks.onMessageRejected?.(session, envelope.error.client_ref, detail, rejection);
       else this.callbacks.onSocketError(session, detail);
       return;
@@ -1274,6 +1306,9 @@ export class HubConnectionSupervisor {
       this.callbacks.onOutput(session, message.Output.pane_id, new Uint8Array(message.Output.data));
     } else if (message.MessageQueued) {
       const queued = messageQueuedFromDaemon(message);
+      // A send reached the daemon: the upstream is back, so the next
+      // retryable refusal starts the backoff afresh (cas-a355).
+      if (queued) this.upstreamRefusalStreak.delete(session);
       if (queued) this.callbacks.onMessageQueued?.(session, queued);
     } else if (message.OperatorReply) {
       this.callbacks.onOperatorReply?.(session, message.OperatorReply as OperatorReply);
@@ -1292,8 +1327,16 @@ export class HubConnectionSupervisor {
       const rejection = messageRejection(message.error, message);
       // The hub closes the legacy socket after a retryable refusal, and its
       // close handler reattaches (cas-0653).
-      if (typeof clientRef === "string") this.callbacks.onMessageRejected?.(session, clientRef, detail, rejection);
-      else this.callbacks.onSocketError(session, detail);
+      if (typeof clientRef === "string") {
+        if (rejection.retryable) this.noteUpstreamRefusal(session);
+        this.callbacks.onMessageRejected?.(session, clientRef, detail, rejection);
+        // The hub stops reading this socket after the refusal (hub/server.rs
+        // `proxy_socket`), so a message written after the refused one never
+        // reached the daemon and is never answered. It is refused the same
+        // way, and held again, instead of waiting out "Not confirmed"
+        // (cas-a355).
+        if (rejection.retryable) for (const later of this.unansweredAfter(session, clientRef)) this.callbacks.onMessageRejected?.(session, later, detail, rejection);
+      } else this.callbacks.onSocketError(session, detail);
     } else if (message.Error) {
       if (typeof message.Error.client_ref === "string") this.callbacks.onMessageRejected?.(session, message.Error.client_ref, message.Error.message);
       else this.callbacks.onSocketError(session, message.Error.message);
@@ -1316,6 +1359,17 @@ export function messageQueuedFromDaemon(message: Record<string, any>): MessageQu
 
 function isSupervisorMessage(message: unknown): boolean {
   return typeof message === "object" && message !== null && "SendMessage" in message;
+}
+
+/** Reattach attempts after repeated `upstream_unavailable` refusals stop growing here: backoffDelay(3), about 8 s (cas-a355). */
+export const UPSTREAM_BACKOFF_MAX_ATTEMPT = 3;
+
+/** The client_ref of an outbound SendMessage, if it carries one. */
+function sendMessageClientRef(message: unknown): string | undefined {
+  if (typeof message !== "object" || message === null) return undefined;
+  const send = (message as Record<string, unknown>).SendMessage;
+  const ref = send && typeof send === "object" ? (send as Record<string, unknown>).client_ref : undefined;
+  return typeof ref === "string" ? ref : undefined;
 }
 
 function withClientRef(message: unknown, clientRef: string | undefined): unknown {

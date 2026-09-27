@@ -21953,6 +21953,66 @@ mod merge_state_gate_tests {
         );
     }
 
+    /// cas-a472: a release-note park (CHANGELOG.md plus a docs/release-notes
+    /// draft) opened hub QA on "journeys:HUB-J1..HUB-J11". The installed
+    /// binary measured the worker's base lane, which still held a
+    /// hub-web/src/main.ts delivery (a Surface-wide path in the catalog).
+    /// Measured from the task's own tip, through the real journey catalog
+    /// and its helper, a docs-only diff maps to no journey and dispatches no
+    /// QA, while the hub-web source path still maps to its journeys.
+    #[test]
+    fn docs_only_park_maps_to_no_journey_while_hub_source_still_does_cas_a472() {
+        let (dir, _bare) = handoff_repo();
+        let repo = dir.path();
+        let task = worker_task("worker");
+        git(repo, &["checkout", "-q", "factory/worker"]);
+        std::fs::create_dir_all(repo.join("hub-web/src")).unwrap();
+        std::fs::write(repo.join("hub-web/src/main.ts"), "export {};\n").unwrap();
+        git(repo, &["add", "hub-web/src/main.ts"]);
+        git(repo, &["commit", "-q", "-m", "older hub-web task"]);
+        let task_branch = format!("factory/worker-{}", task.id);
+        git(repo, &["checkout", "-q", "-b", &task_branch, "main"]);
+        std::fs::create_dir_all(repo.join("docs/release-notes")).unwrap();
+        std::fs::write(repo.join("CHANGELOG.md"), "# Changelog\n").unwrap();
+        std::fs::write(repo.join("docs/release-notes/2026-09-27-v34-slack.md"), "# Draft\n").unwrap();
+        git(repo, &["add", "CHANGELOG.md", "docs/release-notes/2026-09-27-v34-slack.md"]);
+        git(repo, &["commit", "-q", "-m", "release notes"]);
+        let head = rev_parse_local(repo, "HEAD");
+        // The project's real catalog and helper, left untracked so they are
+        // in neither diff.
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        std::fs::create_dir_all(repo.join("scripts")).unwrap();
+        std::fs::create_dir_all(repo.join("docs/qa")).unwrap();
+        std::fs::copy(source.join("scripts/journeys-for-diff.py"), repo.join("scripts/journeys-for-diff.py")).unwrap();
+        std::fs::copy(source.join("docs/qa/journeys.md"), repo.join("docs/qa/journeys.md")).unwrap();
+        let qa = crate::config::QaConfig::default();
+
+        let docs = crate::qa_pass::changed_paths_for_delivery(repo, "main", &head).unwrap();
+        assert_eq!(docs, vec!["CHANGELOG.md", "docs/release-notes/2026-09-27-v34-slack.md"]);
+        let docs_journeys = crate::qa_pass::catalog_journeys_for(repo, &docs);
+        assert!(docs_journeys.is_empty(), "a docs-only diff maps to no journey: {docs_journeys:?}");
+        assert!(
+            !crate::qa_pass::user_facing_reasons(&task, &qa, Some(&docs), &docs_journeys).is_eligible(),
+            "a docs-only park dispatches no independent QA",
+        );
+
+        let lane = crate::qa_pass::changed_paths_for_delivery(repo, "main", "factory/worker").unwrap();
+        assert!(lane.contains(&"hub-web/src/main.ts".to_string()), "{lane:?}");
+        let lane_journeys = crate::qa_pass::catalog_journeys_for(repo, &lane);
+        assert!(
+            ["HUB-J1", "HUB-J8", "HUB-J12"].iter().all(|id| lane_journeys.iter().any(|journey| journey == id)),
+            "hub-web/src/main.ts is Surface-wide and maps to every hub journey: {lane_journeys:?}",
+        );
+        let reasons = crate::qa_pass::user_facing_reasons(&task, &qa, Some(&lane), &lane_journeys).reasons;
+        assert!(reasons.iter().any(|reason| reason.starts_with("journeys:HUB-J1")), "{reasons:?}");
+
+        let one = crate::qa_pass::catalog_journeys_for(repo, &["hub-web/src/connection.ts".to_string()]);
+        assert!(
+            !one.is_empty() && one.len() < lane_journeys.len(),
+            "a narrower hub-web source path maps to its own journeys, not all: {one:?}",
+        );
+    }
+
     /// Without a per-task branch the worker's own branch is measured, as
     /// before.
     #[test]

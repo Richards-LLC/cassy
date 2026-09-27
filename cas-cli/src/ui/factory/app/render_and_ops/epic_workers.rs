@@ -894,6 +894,39 @@ fn prefer_fresher_base_ref(
     }
 }
 
+/// A spawn's logical parent must be a local branch so worktree_merge can use
+/// it later. Materialize an origin-only branch before checkout-base selection.
+fn ensure_local_spawn_parent(
+    repo_root: &std::path::Path,
+    parent: &str,
+) -> Result<Option<String>, String> {
+    if parent.starts_with("origin/") {
+        return Ok(None);
+    }
+    let local = parent.strip_prefix("refs/heads/").unwrap_or(parent);
+    if full_sha(repo_root, &format!("refs/heads/{local}")).is_some() {
+        return Ok(None);
+    }
+    let git = crate::worktree::GitOperations::new(repo_root.to_path_buf());
+    let fetch_error = git.fetch_branch(local).err();
+    let remote = format!("origin/{local}");
+    let remote_sha = full_sha(repo_root, &remote).ok_or_else(|| {
+        format!(
+            "spawn base '{parent}' does not resolve locally or as '{remote}' after fetch{}; run `git fetch origin {local}` and create a local branch from '{remote}' before retrying",
+            fetch_error
+                .map(|error| format!(" ({error})"))
+                .unwrap_or_default()
+        )
+    })?;
+    git.create_branch_from(local, &remote).map_err(|error| {
+        format!("could not create local spawn base '{local}' from '{remote}': {error}")
+    })?;
+    Ok(Some(format!(
+        "SPAWN BASE MATERIALIZED: local '{local}' created from '{remote}' ({}) for worker checkout and merge-back.",
+        &remote_sha[..remote_sha.len().min(12)]
+    )))
+}
+
 /// Resolve the immutable commit a worker will be checked out from, preserving
 /// the logical parent branch used for merge-back. A declared WorkTarget is
 /// fetched before selection: it uses `origin/<branch>` when that is the
@@ -1879,6 +1912,11 @@ impl FactoryApp {
                 let (parent_branch, base_source) =
                     resolve_spawn_base(&task_base, self.epic_branch.as_deref(), &trunk);
                 let mut notices: Vec<String> = Vec::new();
+                if let Some(notice) = ensure_local_spawn_parent(&repo_root, &parent_branch)
+                    .map_err(|error| anyhow::anyhow!("{error}"))?
+                {
+                    notices.push(notice);
+                }
                 let base_epic_id = match &base_source {
                     SpawnBaseSource::TaskEpic { epic_id, .. } => Some(epic_id.as_str()),
                     SpawnBaseSource::PinnedFocus => self.current_epic_id.as_deref(),
@@ -3692,6 +3730,54 @@ mod spawn_base_tests {
     /// cas-d897 (GH #146) part (b): the chosen base's local ref was stale while
     /// `origin/`'s copy of the same branch was ahead. The spawn must cut from
     /// the fresher commit and name both SHAs.
+    #[test]
+    fn origin_only_spawn_base_is_fetched_and_materialized_gh_1034() {
+        let tmp = TempDir::new().unwrap();
+        let origin = tmp.path().join("origin");
+        std::fs::create_dir(&origin).unwrap();
+        init_repo(&origin);
+        let repo = tmp.path().join("repo");
+        assert!(Command::new("git")
+            .args(["clone", "-q", origin.to_str().unwrap(), repo.to_str().unwrap()])
+            .status()
+            .unwrap()
+            .success());
+
+        assert!(Command::new("git")
+            .args(["checkout", "-q", "-b", "epic/magic-links-followups"])
+            .current_dir(&origin)
+            .status()
+            .unwrap()
+            .success());
+        commit_file(&origin, "epic-only.txt", "remote epic tip");
+        let branch = "epic/magic-links-followups";
+        assert!(full_sha(&repo, branch).is_none());
+        assert!(full_sha(&repo, &format!("origin/{branch}")).is_none());
+
+        let notice = ensure_local_spawn_parent(&repo, branch)
+            .expect("origin-only branch should provision")
+            .expect("materialization notice");
+        assert!(notice.contains("SPAWN BASE MATERIALIZED"), "{notice}");
+        assert_eq!(full_sha(&repo, branch), full_sha(&repo, &format!("origin/{branch}")));
+        let (base_ref, _, _) = checkout_ref_for_spawn_base(&repo, branch, &SpawnBaseSource::PinnedFocus);
+        let worker_path = tmp.path().join("worker");
+        crate::worktree::GitOperations::new(repo.clone())
+            .create_worktree(&worker_path, "factory/magic-worker", base_ref.as_deref().or(Some(branch)))
+            .expect("worker worktree should use the fetched commit");
+        assert_eq!(std::fs::read_to_string(worker_path.join("epic-only.txt")).unwrap(), "remote epic tip");
+    }
+
+    #[test]
+    fn absent_spawn_base_still_refuses_without_writing_local_branch_gh_1034() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+        let error = ensure_local_spawn_parent(&repo, "epic/missing").unwrap_err();
+        assert!(error.contains("git fetch origin epic/missing"), "{error}");
+        assert!(full_sha(&repo, "epic/missing").is_none());
+    }
+
     #[test]
     fn stale_local_base_ref_loses_to_a_fresher_origin_ref_cas_d897() {
         let tmp = TempDir::new().unwrap();

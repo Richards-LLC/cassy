@@ -1,4 +1,4 @@
-import { test, expect } from "./journey";
+import { test, expect, expectWholeFocusRing } from "./journey";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
 import type { Machine } from "./hub-double";
 
@@ -88,6 +88,10 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     // The first open rebuilt the shell; Escape still lands on the session
     // title, and Enter there reopens the picker (cas-7eaf).
     await expect(toggle).toBeFocused();
+    // Focus there is visible: the whole ring shows, not clipped away by the
+    // title's ellipsis clip (cas-cf10 QA F01).
+    expect(await toggle.evaluate((element) => element.matches(":focus-visible"))).toBe(true);
+    await expectWholeFocusRing(toggle, { vertical: true });
     await page.keyboard.press("Enter");
     await expect(picker).toBeVisible();
     await page.getByRole("button", { name: "Close session picker" }).click();
@@ -114,6 +118,18 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
       await expect(picker.locator(".session-picker-entry:visible")).toHaveCount(0);
       // An empty result says so, not an empty dialog (journey F18).
       await expect(picker.getByRole("status")).toHaveText("No sessions match “zz”.");
+      // A long unbroken query wraps inside the dialog (cas-a8db QA F01).
+      const long = "z".repeat(120);
+      await filter.fill(long);
+      const status = picker.getByRole("status");
+      await expect(status).toHaveText(`No sessions match “${long}”.`);
+      const fit = await status.evaluate((line) => {
+        const dialog = line.closest("dialog")!.getBoundingClientRect();
+        const box = line.getBoundingClientRect();
+        return { overflow: line.scrollWidth > line.clientWidth + 1, inside: box.left >= dialog.left && box.right <= dialog.right + 0.5 };
+      });
+      expect(fit, "the no-match line wraps inside the picker").toEqual({ overflow: false, inside: true });
+      await filter.fill("zz");
       await close();
       await closed();
       await open();

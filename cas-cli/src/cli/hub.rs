@@ -1439,28 +1439,6 @@ fn terminate_failed_launch(
     }
 }
 
-/// Keep a broken peer from killing the hub (cas-621ec).
-///
-/// `main` resets SIGPIPE to `SIG_DFL` for every `cas` process so that
-/// `cas … | head` exits quietly. That disposition is fatal to a long-lived
-/// server: hyper writes HTTP/1 responses with `writev` (tokio's `TcpStream`
-/// reports `is_write_vectored() == true`), and std's
-/// `TcpStream::write_vectored` issues a plain `writev(2)`; only the scalar
-/// `write` path uses `send(…, MSG_NOSIGNAL)`. A Commander client that
-/// disconnects mid-response therefore raised SIGPIPE and the kernel killed
-/// the hub (`code=killed, signal=PIPE` on soundwave, 2026-09-26). With the
-/// signal ignored the write fails with `EPIPE`, hyper drops that one
-/// connection and the hub keeps serving. Children spawned through
-/// `std::process::Command` still start with the default disposition.
-fn ignore_sigpipe_for_server() {
-    #[cfg(unix)]
-    // SAFETY: installing SIG_IGN for SIGPIPE is async-signal-safe and does not
-    // interact with any Rust-managed state.
-    unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
-    }
-}
-
 /// One hub.log breadcrumb, prefixed with an RFC 3339 UTC timestamp so the
 /// log can be lined up against the service manager's journal.
 fn hub_log_line(message: &str) -> String {
@@ -1471,7 +1449,9 @@ fn hub_log_line(message: &str) -> String {
 }
 
 fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: u16) -> Result<()> {
-    ignore_sigpipe_for_server();
+    // A Commander client that disconnects mid-response must not kill the hub
+    // (cas-621ec): hyper writes with writev, which raises SIGPIPE.
+    crate::server_signals::ignore_sigpipe_for_server();
     let addr = SocketAddr::new(args.bind, args.port);
     validate_control_bind(addr, TransportSecurity::Plaintext)?;
     let paths = HubRuntimePaths::default_for_user()?;
@@ -2788,67 +2768,6 @@ fn actual_serve_target(handlers: &[(String, String)]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Fork, reproduce `main`'s SIGPIPE reset, optionally apply the hub's
-    /// serve-start fix, then make the same kind of call hyper makes: a std
-    /// vectored socket write to a peer that has gone away. Returns the raw
-    /// wait status. The child only makes async-signal-safe calls (`signal`,
-    /// `writev`, `_exit`), so forking from the multithreaded harness is sound.
-    #[cfg(unix)]
-    fn vectored_write_to_closed_peer_in_child(ignore_sigpipe: bool) -> libc::c_int {
-        use std::io::{IoSlice, Write};
-        use std::os::unix::net::UnixStream;
-
-        let (writer, reader) = UnixStream::pair().unwrap();
-        drop(reader);
-        let payload = [b'x'; 64];
-        // SAFETY: see the function comment; the child never returns.
-        let pid = unsafe { libc::fork() };
-        assert!(pid >= 0, "fork failed");
-        if pid == 0 {
-            // SAFETY: async-signal-safe; this is exactly what `main` does.
-            unsafe {
-                libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-            }
-            if ignore_sigpipe {
-                ignore_sigpipe_for_server();
-            }
-            let result =
-                (&writer).write_vectored(&[IoSlice::new(&payload), IoSlice::new(&payload)]);
-            let code = match result {
-                Err(error) if error.raw_os_error() == Some(libc::EPIPE) => 0,
-                _ => 3,
-            };
-            // SAFETY: terminate the forked child without running harness code.
-            unsafe { libc::_exit(code) }
-        }
-        drop(writer);
-        let mut status = 0;
-        // SAFETY: waiting on our own child.
-        let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
-        assert_eq!(waited, pid, "waitpid failed");
-        status
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn vectored_write_to_a_gone_peer_kills_a_process_with_mains_sigpipe_disposition() {
-        // cas-621ec root cause: std's vectored socket write is a bare writev
-        // with no MSG_NOSIGNAL, so under `main`'s SIG_DFL it is fatal.
-        let status = vectored_write_to_closed_peer_in_child(false);
-        assert!(libc::WIFSIGNALED(status), "wait status {status:#x}");
-        assert_eq!(libc::WTERMSIG(status), libc::SIGPIPE);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn hub_serve_sigpipe_fix_turns_a_gone_peer_into_epipe() {
-        let status = vectored_write_to_closed_peer_in_child(true);
-        assert!(
-            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
-            "the child must survive and observe EPIPE; wait status {status:#x}"
-        );
-    }
 
     #[test]
     fn hub_log_lines_carry_an_rfc3339_utc_timestamp() {

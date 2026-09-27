@@ -77,6 +77,7 @@ pub mod qa_pass;
 pub mod retrieval_eval;
 pub mod retrieval_parity;
 pub mod sentry;
+pub(crate) mod server_signals;
 mod skill_validation;
 pub mod store;
 pub mod sync;

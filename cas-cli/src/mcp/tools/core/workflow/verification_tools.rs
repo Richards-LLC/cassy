@@ -559,13 +559,33 @@ impl CasCore {
                     })?
             {
                 if supervisor_verification_retry_matches(&existing, &verification) {
+                    // The verdict may have committed while the best-effort
+                    // post-commit wake failed. An identical supervisor retry
+                    // repairs that wake without recording a second verdict.
+                    let retry_note = if existing.status == VerificationStatus::Approved
+                        && existing.verification_type == VerificationType::Task
+                        && proof_dispatch.delivery_transaction_id.is_none()
+                    {
+                        match crate::mcp::tools::core::task::lifecycle::supervisor_push::queue_approved_verification_close_retry(
+                            &self.cas_root,
+                            &task,
+                            &requested_dispatch_id,
+                        ) {
+                            Ok(Some(prompt_id)) => format!("; close retry prompt {prompt_id} queued"),
+                            Ok(None) => "; no live assigned worker to retry close".to_string(),
+                            Err(error) => format!("; close retry wake failed: {error}"),
+                        }
+                    } else {
+                        String::new()
+                    };
                     return Ok(Self::success(format!(
-                        "{} Verification {} for task {} - {}: {} (idempotent retry)",
+                        "{} Verification {} for task {} - {}: {} (idempotent retry{})",
                         verification_status_emoji(existing.status),
                         existing.id,
                         req.task_id,
                         task.title,
-                        existing.summary
+                        existing.summary,
+                        retry_note
                     )));
                 }
                 return Err(McpError {
@@ -844,9 +864,34 @@ impl CasCore {
 
         let status_emoji = verification_status_emoji(verification.status);
 
+        // GH #1036: the first worker retry may race the supervisor verdict.
+        // Queue only after the verdict transaction commits, so a woken worker
+        // can always observe the approval. A transactional delivery still
+        // needs its merge transition before close and is excluded here.
+        let close_retry = if verification.status == VerificationStatus::Approved
+            && verification.verification_type == VerificationType::Task
+            && task.pending_verification
+            && proof_dispatch.delivery_transaction_id.is_none()
+        {
+            match task_store.get(&req.task_id) {
+                Ok(current) => match crate::mcp::tools::core::task::lifecycle::supervisor_push::queue_approved_verification_close_retry(
+                    &self.cas_root,
+                    &current,
+                    &requested_dispatch_id,
+                ) {
+                    Ok(Some(prompt_id)) => format!("\nClose retry queued for the assigned worker (prompt {prompt_id})."),
+                    Ok(None) => "\nNo live assigned worker was available for a close retry; a supervisor can retry task close.".to_string(),
+                    Err(error) => format!("\nClose retry could not be queued after the verdict was recorded: {error}. Retry task close or notify the worker."),
+                },
+                Err(error) => format!("\nClose retry could not read the task after the verdict was recorded: {error}. Retry task close or notify the worker."),
+            }
+        } else {
+            String::new()
+        };
+
         Ok(Self::success(format!(
-            "{} Verification {} for task {} - {}: {}",
-            status_emoji, id, req.task_id, task.title, verification.summary
+            "{} Verification {} for task {} - {}: {}{}",
+            status_emoji, id, req.task_id, task.title, verification.summary, close_retry
         )))
     }
 

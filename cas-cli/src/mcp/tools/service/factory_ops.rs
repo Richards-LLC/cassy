@@ -605,6 +605,7 @@ struct ShutdownWorkerSnapshot {
     task_states: Vec<String>,
     has_in_progress_task: bool,
     worktree_state: String,
+    worktree_cleanup_verdict: String,
     unsafe_worktree: bool,
 }
 
@@ -620,8 +621,12 @@ impl ShutdownWorkerSnapshot {
             self.task_states.join(", ")
         };
         format!(
-            "{} (id={}): tasks=[{}]; {}",
-            self.worker_name, self.worker_id, tasks, self.worktree_state
+            "{} (id={}): tasks=[{}]; {}; {}",
+            self.worker_name,
+            self.worker_id,
+            tasks,
+            self.worktree_state,
+            self.worktree_cleanup_verdict
         )
     }
 }
@@ -662,15 +667,20 @@ fn shutdown_worker_snapshot(
         .map(str::to_string)
         .collect::<Vec<_>>();
 
-    let (worktree_state, unsafe_worktree) = match resolve_worker_clone_path(cas_root, worker) {
-        WorkerClonePathResolve::Ready(path) => {
-            shutdown_worktree_safety(&path, local_merge_delivery, &target_branches)
-        }
-        WorkerClonePathResolve::NotOnDisk { candidate, .. } => (
-            format!("worktree={} (not present)", candidate.display()),
-            false,
-        ),
-    };
+    let (worktree_state, worktree_cleanup_verdict, unsafe_worktree) =
+        match resolve_worker_clone_path(cas_root, worker) {
+            WorkerClonePathResolve::Ready(path) => {
+                let (state, unsafe_worktree) =
+                    shutdown_worktree_safety(&path, local_merge_delivery, &target_branches);
+                let verdict = shutdown_worktree_cleanup_verdict(&path, !assigned.is_empty());
+                (state, verdict, unsafe_worktree)
+            }
+            WorkerClonePathResolve::NotOnDisk { candidate, .. } => (
+                format!("worktree={} (not present)", candidate.display()),
+                "worktree absent (nothing to remove)".to_string(),
+                false,
+            ),
+        };
 
     ShutdownWorkerSnapshot {
         worker_name: worker.name.clone(),
@@ -678,7 +688,19 @@ fn shutdown_worker_snapshot(
         task_states,
         has_in_progress_task,
         worktree_state,
+        worktree_cleanup_verdict,
         unsafe_worktree,
+    }
+}
+
+fn shutdown_worktree_cleanup_verdict(path: &std::path::Path, has_open_tasks: bool) -> String {
+    if !crate::worktree::should_finalize_worker_worktree(false, has_open_tasks) {
+        return format!("worktree {} kept (nonterminal tasks)", path.display());
+    }
+    match dirty_file_count(path) {
+        Ok(0) => format!("worktree {} will be removed at shutdown", path.display()),
+        Ok(_) => format!("worktree {} kept (dirty)", path.display()),
+        Err(_) => format!("worktree {} kept (cleanliness unknown)", path.display()),
     }
 }
 
@@ -2484,6 +2506,26 @@ impl CasService {
             "\nWARNING — NON-ISOLATED SHARED-CHECKOUT RISK: every spawned worker uses the same working directory and mutable HEAD. Another worker can switch HEAD between tool calls, causing commits to land on a foreign factory branch; an explicit HEAD:<mine> push can graft that worker's commits onto the caller's remote branch; and SKILL.md guidance can change on disk mid-session. Prefer isolate=true. Commit/merge/push guards will refuse unless the checkout is still on the calling worker's exact factory/<name> branch.".to_string()
         };
 
+        // cas-bebc (GH #1023 finding 9): registering a worker under a name
+        // another live session's worker holds supersedes, and so reaps, that
+        // worker. Refuse the name instead of warning after the fact.
+        if let Some(refusal) = worker_names.iter().find_map(|name| {
+            crate::factory_session_scope::foreign_owner_in_store(
+                &self.inner.cas_root,
+                |agents, caller, now| {
+                    crate::factory_session_scope::foreign_owner_of_worker(agents, caller, name, now)
+                },
+            )
+            .map(|(owner, caller)| {
+                owner.refusal(&format!("spawn_workers worker_names={name}"), &caller)
+            })
+        }) {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                format!("{refusal} Pick a different worker name."),
+            ));
+        }
+
         // GH #699: spawning while a second supervisor session is live on this
         // clone puts two fleets on one `.cas/` state, where either supervisor's
         // reset/merge/shutdown can reap the other's workers. Say so in the
@@ -2848,6 +2890,23 @@ impl CasService {
                 .cloned()
                 .collect();
             if !refused.is_empty() {
+                // cas-bebc: name the session (and its supervisor) that owns
+                // each refused worker, so the operator knows which pane can
+                // act on it.
+                let owners: Vec<String> = refused
+                    .iter()
+                    .map(|target| {
+                        let owner = all_registry_workers
+                            .iter()
+                            .filter(|worker| worker_answers_to(worker, target))
+                            .max_by_key(|worker| worker.registered_at)
+                            .and_then(|worker| worker.factory_session.clone());
+                        match owner {
+                            Some(session) => format!("{target} (factory session {session})"),
+                            None => format!("{target} (no factory session)"),
+                        }
+                    })
+                    .collect();
                 return Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
@@ -2855,7 +2914,7 @@ impl CasService {
                          outside this session's shutdown scope (a different factory session \
                          owns them, or they are not workers of yours). Nothing was queued. \
                          Known workers in scope: {}.",
-                        refused.join(", "),
+                        owners.join(", "),
                         if known.is_empty() {
                             "(none)".to_string()
                         } else {
@@ -4128,7 +4187,11 @@ impl CasService {
                 } else {
                     ""
                 };
-                let worktree_status = collect_worker_worktree_status(&self.inner.cas_root, agent);
+                let held_task = in_progress_tasks.iter().chain(parked_tasks.iter()).find(|task| {
+                    task.assignee.as_deref() == Some(agent.name.as_str())
+                        || task.assignee.as_deref() == Some(agent.id.as_str())
+                });
+                let worktree_status = collect_worker_worktree_status(&self.inner.cas_root, agent, held_task);
                 let clone_path = worktree_status.clone_path;
                 let clone_info = worktree_status.clone_info;
                 // cas-844bf: git introspection — branch/HEAD/ahead-behind/dirty/PR
@@ -7248,11 +7311,15 @@ fn sync_skip_reason_for_clone_resolve(
 fn collect_worker_worktree_status(
     cas_root: &std::path::Path,
     agent: &cas_types::Agent,
+    task: Option<&cas_types::Task>,
 ) -> WorkerWorktreeStatus {
     match resolve_worker_clone_path(cas_root, agent) {
         WorkerClonePathResolve::Ready(path) => {
             let clone_path = path.display().to_string();
-            let gs = collect_worker_git_status(&path);
+            let mut gs = collect_worker_git_status(&path);
+            if let Some(task) = task {
+                apply_task_delivery_git_status(&path, task, &agent.name, &mut gs);
+            }
             WorkerWorktreeStatus {
                 clone_info: format!("\n    Clone: {clone_path}"),
                 git_info: format_worker_git_status(&gs),
@@ -7268,6 +7335,48 @@ fn collect_worker_worktree_status(
             }
         }
     }
+}
+
+/// The worker checkout can still point at an older lane after the task was
+/// delivered on `factory/<worker>-<task>`. Measure the bound delivery instead.
+fn apply_task_delivery_git_status(
+    repo: &std::path::Path,
+    task: &cas_types::Task,
+    worker: &str,
+    status: &mut WorkerGitStatus,
+) {
+    let branch = task.deliverables.parked_branch.clone().unwrap_or_else(|| {
+        crate::mcp::tools::core::task::lifecycle::close_ops::close_measured_factory_branch(
+            repo, task, worker,
+        )
+    });
+    let head_ref = task.deliverables.factory_branch_anchor.as_deref().unwrap_or(&branch);
+    let Ok(head) = run_git(repo, &["rev-parse", "--verify", &format!("{head_ref}^{{commit}}")]) else {
+        return;
+    };
+    let base = task.deliverables.work_target.as_ref()
+        .map(|target| target.target_branch.as_str())
+        .filter(|branch| !branch.is_empty())
+        .unwrap_or(&status.base_branch);
+    let Ok(counts) = run_git(repo, &["rev-list", "--left-right", "--count", &format!("{base}...{head}")]) else {
+        return;
+    };
+    let mut parts = counts.split_whitespace();
+    let (Some(behind), Some(ahead)) = (parts.next().and_then(|n| n.parse().ok()), parts.next().and_then(|n| n.parse().ok())) else {
+        return;
+    };
+    status.branch = branch;
+    status.head_sha = head;
+    status.base_branch = base.to_owned();
+    status.behind = behind;
+    status.ahead = ahead;
+    let pushed_ref = format!("origin/{}", status.branch);
+    status.pushed_ref = if run_git(repo, &["rev-parse", "--verify", &format!("refs/remotes/{pushed_ref}")]).is_ok() {
+        pushed_ref
+    } else {
+        "none".to_string()
+    };
+    status.pr_url = collect_worker_pr_url(repo, &status.branch, &status.pushed_ref, std::path::Path::new("gh"));
 }
 
 /// Gather the live dirty-worktree floor for `worker_activity`.
@@ -11084,6 +11193,33 @@ mod spawn_lifecycle_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shutdown_snapshot_renders_worker_specific_cleanup_verdict_gh_1035() {
+        let repo = tempfile::tempdir().expect("test repo");
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo.path())
+            .status()
+            .expect("git init")
+            .success());
+        let mut snapshot = ShutdownWorkerSnapshot {
+            worker_name: "calm-hawk-84".to_string(),
+            worker_id: "worker-id".to_string(),
+            task_states: vec![],
+            has_in_progress_task: false,
+            worktree_state: "worktree=/repo/.cas/worktrees/calm-hawk-84 (dirty_files=0)".to_string(),
+            worktree_cleanup_verdict: shutdown_worktree_cleanup_verdict(repo.path(), false),
+            unsafe_worktree: false,
+        };
+        assert!(snapshot.render().contains("will be removed at shutdown"));
+        std::fs::write(repo.path().join("unfinished.txt"), "work").expect("write dirty file");
+        snapshot.worktree_cleanup_verdict = shutdown_worktree_cleanup_verdict(repo.path(), false);
+        assert!(snapshot.render().contains("kept (dirty)"));
+        std::fs::remove_file(repo.path().join("unfinished.txt")).expect("remove dirty file");
+        snapshot.worktree_cleanup_verdict = shutdown_worktree_cleanup_verdict(repo.path(), true);
+        assert!(snapshot.render().contains("kept (nonterminal tasks)"));
+    }
 
     // -----------------------------------------------------------------
     // cas-2c05: shutdown_workers target resolution.
@@ -16052,6 +16188,29 @@ effort = "high"
         );
     }
 
+    #[test]
+    fn worker_status_measures_bound_task_branch_instead_of_older_lane_gh_1040() {
+        let (tmp, _) = setup_git_repo_with_factory_branch("worker");
+        let repo = tmp.path();
+        run_git_ok(repo, &["checkout", "main"]);
+        run_git_ok(repo, &["checkout", "-b", "factory/worker-cas-next"]);
+        std::fs::write(repo.join("next.py"), "print('next')\n").unwrap();
+        run_git_ok(repo, &["add", "next.py"]);
+        run_git_ok(repo, &["commit", "-m", "next task"]);
+        let tip = run_git(repo, &["rev-parse", "HEAD"]).unwrap();
+        run_git_ok(repo, &["checkout", "factory/worker"]);
+
+        let mut task = cas_types::Task::new("cas-next".into(), "next".into());
+        task.deliverables.parked_branch = Some("factory/worker-cas-next".into());
+        task.deliverables.factory_branch_anchor = Some(tip.clone());
+        let mut status = collect_worker_git_status(repo);
+        apply_task_delivery_git_status(repo, &task, "worker", &mut status);
+        assert_eq!(status.branch, "factory/worker-cas-next");
+        assert_eq!(status.head_sha, tip);
+        assert_eq!(status.ahead, 1);
+        assert_eq!(status.behind, 0);
+    }
+
     fn setup_mid_merge_with_incoming_and_worker_contributions() -> tempfile::TempDir {
         let repo = tempfile::TempDir::new().expect("tempdir");
         let path = repo.path();
@@ -16737,8 +16896,8 @@ effort = "high"
             AgentRole::Worker,
         );
 
-        let claude_status = collect_worker_worktree_status(&cas_root, &claude);
-        let codex_status = collect_worker_worktree_status(&cas_root, &codex);
+        let claude_status = collect_worker_worktree_status(&cas_root, &claude, None);
+        let codex_status = collect_worker_worktree_status(&cas_root, &codex, None);
 
         assert_eq!(
             codex_status.clone_path.as_deref(),
@@ -16775,7 +16934,7 @@ effort = "high"
             AgentRole::Worker,
         );
 
-        let status = collect_worker_worktree_status(&cas_root, &agent);
+        let status = collect_worker_worktree_status(&cas_root, &agent, None);
         let expected_path = cas_root.join("worktrees/codex-jester");
         let expected_path_str = expected_path.to_string_lossy().to_string();
 

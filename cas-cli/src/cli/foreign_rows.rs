@@ -352,9 +352,11 @@ impl ForeignRowReport {
     /// Safe remediation path (AC1) — always names the `(id,title)` constraint.
     pub fn remediation(&self) -> String {
         let mut text = String::from(
-            "Review the full list with `cas doctor --foreign-rows` (read-only), then remediate with \
-`cas cloud purge-foreign --dry-run` and re-run without `--dry-run` once the preview looks right; \
-it deletes cloud-backed content rows and re-pulls this project's own scope.",
+            "Review the full list with `cas doctor --foreign-rows` (read-only), then inspect the \
+eligible delete set with `cas cloud purge-foreign --dry-run`. Run the purge without `--dry-run` \
+only for rows present in that delete set; excluded rows need separate ownership review, and a \
+zero-row preview cannot clear this warning. The purge deletes eligible cloud-backed content rows \
+and re-pulls this project's own scope.",
         );
         if !self.collisions.is_empty() {
             text.push_str(&format!(

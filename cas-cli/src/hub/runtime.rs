@@ -97,7 +97,12 @@ impl HubRuntimePaths {
 
     pub fn default_for_user() -> Result<Self> {
         let home = dirs::home_dir().context("cannot determine home directory")?;
-        Ok(Self::new(home.join(".cas").join("hub")))
+        Ok(Self::for_home(&home))
+    }
+
+    /// The machine hub's host-level directory for this home: `~/.cas/hub`.
+    pub fn for_home(home: &Path) -> Self {
+        Self::new(home.join(".cas").join("hub"))
     }
 
     pub fn root(&self) -> &Path {

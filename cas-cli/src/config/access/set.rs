@@ -86,6 +86,18 @@ impl Config {
                 let command = value.trim();
                 factory.merge_sweep_command = (!command.is_empty()).then(|| command.to_string());
             }
+            // cas-8d54 (GH #1011): the runtime reads this key
+            // (Config::configured_epic_base_branch); empty clears it.
+            "factory.epic_base_branch" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                let branch = value.trim();
+                factory.epic_base_branch = (!branch.is_empty()).then(|| branch.to_string());
+            }
+            "factory.merge_sweep_cwd" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                let cwd = value.trim();
+                factory.merge_sweep_cwd = (!cwd.is_empty()).then(|| cwd.to_string());
+            }
             "factory.merge_sweep_timeout_secs" => {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
                 factory.merge_sweep_timeout_secs = value.parse().map_err(|_| {
@@ -93,6 +105,38 @@ impl Config {
                         "Invalid integer value for factory.merge_sweep_timeout_secs: {value}"
                     ))
                 })?;
+            }
+            // cas-1a05: registered factory keys that `set` did not accept.
+            "factory.artifacts_root" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                let root = value.trim();
+                factory.artifacts_root = (!root.is_empty()).then(|| root.to_string());
+            }
+            "factory.ai_enrichment.enabled" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.ai_enrichment.enabled = value
+                    .parse()
+                    .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
+            }
+            "factory.ai_enrichment.endpoint" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.ai_enrichment.endpoint = value.trim().to_string();
+            }
+            "factory.ai_enrichment.provider" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.ai_enrichment.provider = value.trim().to_string();
+            }
+            "factory.ai_enrichment.api_key_env" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.ai_enrichment.api_key_env = value.trim().to_string();
+            }
+            "factory.ai_enrichment.model" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.ai_enrichment.model = value.trim().to_string();
+            }
+            "factory.ai_enrichment.effort" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.ai_enrichment.effort = value.trim().to_string();
             }
             // Sync section
             "sync.enabled" => {
@@ -299,6 +343,72 @@ impl Config {
                 } else {
                     Some(value.trim().to_string())
                 };
+            }
+            "qa.deployed_origins" => {
+                let qa = self.qa.get_or_insert_with(QaConfig::default);
+                let mut origins = Vec::new();
+                for raw in value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|raw| !raw.is_empty())
+                {
+                    let origin = crate::qa_evidence::url_origin(raw).ok_or_else(|| {
+                        MemError::Parse(format!(
+                            "qa.deployed_origins: {raw:?} is not an http(s) origin"
+                        ))
+                    })?;
+                    if crate::qa_evidence::is_local_origin(&origin) {
+                        return Err(MemError::Parse(format!(
+                            "qa.deployed_origins: {origin} is local; a local build needs no deployed origin"
+                        )));
+                    }
+                    origins.push(origin);
+                }
+                qa.deployed_origins = origins;
+            }
+            "qa.preflight_gh_token" => {
+                let qa = self.qa.get_or_insert_with(QaConfig::default);
+                qa.preflight_gh_token = value
+                    .trim()
+                    .parse()
+                    .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
+            }
+            "qa.preflight_env_files" => {
+                let qa = self.qa.get_or_insert_with(QaConfig::default);
+                qa.preflight_env_files = value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect();
+            }
+            "qa.preflight_hook" => {
+                let qa = self.qa.get_or_insert_with(QaConfig::default);
+                qa.preflight_hook = if value.trim().is_empty() {
+                    None
+                } else {
+                    Some(value.trim().to_string())
+                };
+            }
+            "qa.preflight_hook_timeout_secs" => {
+                let qa = self.qa.get_or_insert_with(QaConfig::default);
+                let secs: u32 = value
+                    .trim()
+                    .parse()
+                    .map_err(|_| MemError::Parse(format!("Invalid seconds value: {value}")))?;
+                if secs == 0 {
+                    return Err(MemError::Parse(
+                        "qa.preflight_hook_timeout_secs must be at least 1".to_string(),
+                    ));
+                }
+                qa.preflight_hook_timeout_secs = secs;
+            }
+            "qa.github_status" => {
+                let qa = self.qa.get_or_insert_with(QaConfig::default);
+                qa.github_status = value
+                    .trim()
+                    .parse()
+                    .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
             }
             "qa.independent_pass" => {
                 let qa = self.qa.get_or_insert_with(QaConfig::default);

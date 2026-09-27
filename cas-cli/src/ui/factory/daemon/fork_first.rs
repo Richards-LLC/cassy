@@ -125,6 +125,9 @@ pub fn fork_first_daemon(
         Ok(NixForkResult::Child) => {
             // Child: daemonize first
             let _ = nix::unistd::setsid();
+            // The boot client and later TUI/GUI clients can vanish while the
+            // daemon writes to them; that must not kill it (cas-5918).
+            crate::server_signals::ignore_sigpipe_for_server();
 
             // Redirect stdio to log files
             let devnull = std::fs::File::open("/dev/null")?;
@@ -590,6 +593,7 @@ impl DaemonInitPhase {
             lifecycle_redelivery_counts: HashMap::new(),
             inbox_deferred_writes: std::collections::HashMap::new(),
             urgent_wake_probes: HashMap::new(),
+            send_receipts: super::runtime::send_dedupe::SendReceipts::default(),
             normal_delivery_probes: HashMap::new(),
             last_pane_output_bytes: HashMap::new(),
             pane_silent_since: HashMap::new(),

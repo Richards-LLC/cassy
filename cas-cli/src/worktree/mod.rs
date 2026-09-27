@@ -45,3 +45,12 @@ pub use manager::{
     WorktreeManager, WorktreeResult, node_modules_setup_instruction, symlink_project_config,
 };
 pub use salvage::{SalvageError, SalvageOutcome, SkipReason, salvage};
+
+/// The daemon's gate before attempting worktree removal at worker shutdown.
+/// The manager then checks dirt and inbound symlinks before deleting.
+pub(crate) fn should_finalize_worker_worktree(
+    preserve_worktree: bool,
+    has_open_tasks: bool,
+) -> bool {
+    !preserve_worktree && !has_open_tasks
+}

@@ -51,6 +51,10 @@ pub struct EvidenceContext<'a> {
     pub delivered_head: &'a str,
     /// The task's notes, where the `qa-bundle:` citation lives.
     pub notes: &'a str,
+    /// cas-a6ab: `qa.deployed_origins`, the remote deployments whose
+    /// authenticated runs may stand in for a local build when local auth is
+    /// impossible. Empty means local builds only.
+    pub deployed_origins: &'a [String],
 }
 
 /// Why evidence is refused. `problem` completes "its QA evidence bundle is …";
@@ -93,6 +97,49 @@ struct Manifest {
     files: ManifestFiles,
     #[serde(default)]
     critique_score: std::collections::BTreeMap<String, i64>,
+    /// cas-a6ab: present when the run was made against a deployed origin
+    /// because local auth is impossible.
+    #[serde(default)]
+    deployed: Option<DeployedEvidence>,
+}
+
+/// cas-a6ab (GH #1023 finding 4): the provenance of a run against a deployed
+/// origin instead of a local build. gabber-studio's staging backend rejects a
+/// localhost origin on `/auth/session` (CORS), so an authenticated page has
+/// no local real-build run. A deployed run counts only when it names the
+/// reason, a configured origin, and proof that the deployment served the
+/// delivered commit.
+#[derive(Debug, Deserialize)]
+struct DeployedEvidence {
+    /// `scheme://host[:port]` of the deployment the run checked.
+    #[serde(default)]
+    origin: String,
+    /// Why a local build could not be used (for example the backend's CORS
+    /// rejecting a localhost origin on its session endpoint).
+    #[serde(default)]
+    reason: String,
+    /// The commit the deployment serves.
+    #[serde(default)]
+    deployed_sha: String,
+    /// Bundle-relative file recording what the deployment reported about
+    /// itself (a version endpoint response, deployment metadata), naming
+    /// `deployed_sha`.
+    #[serde(default)]
+    deployment_proof: String,
+}
+
+/// Shortest recorded reason accepted for a deployed-origin run.
+const DEPLOYED_REASON_MIN_CHARS: usize = 20;
+
+/// `scheme://host[:port]` of a URL, lower-cased, or `None` if it is not an
+/// http(s) URL with a host.
+pub fn url_origin(target: &str) -> Option<String> {
+    let parsed = url::Url::parse(target.trim()).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    parsed.host_str()?;
+    Some(parsed.origin().ascii_serialization().to_ascii_lowercase())
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -111,6 +158,10 @@ struct ManifestFiles {
     visual_qa: Option<String>,
     visual_qa_json: Option<String>,
     visual_qa_stdout: Option<String>,
+    /// cas-e371: with `visual_qa_status: "scoped"`, the strict run of the
+    /// base build over the same pages, so findings already there are told
+    /// apart from findings the delivery introduced.
+    visual_qa_baseline_json: Option<String>,
     critique: Option<String>,
 }
 
@@ -248,7 +299,9 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
     // journey evaluation scores it. Supervisor decision (cas-0cd5): that
     // exception does not reach a delivery close; a delivery still needs its
     // own polish proof.
-    if manifest.producer == "journey" && manifest.visual_qa_status != "pass" {
+    if manifest.producer == "journey"
+        && !matches!(manifest.visual_qa_status.as_str(), "pass" | "scoped")
+    {
         return Err(EvidenceRefusal::new(
             format!(
                 "a journey bundle without polish proof (visual_qa_status {:?}); the journey polish exception covers the release evaluation, not a delivery close",
@@ -261,6 +314,13 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
             ),
         ));
     }
+
+    // cas-a6ab: a deployed-origin run names its reason and a configured
+    // origin up front; its commit binding and proof are checked below.
+    let deployed_origin = match manifest.deployed.as_ref() {
+        Some(deployed) => Some(check_deployed_declaration(ctx, deployed, &manifest_path)?),
+        None => None,
+    };
 
     // 2. Required files.
     let files = &manifest.files;
@@ -326,6 +386,16 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
         listed.push((
             format!("a11y[{index}]"),
             resolve_bundle_file(&bundle_dir, "a11y", relative)?,
+        ));
+    }
+    if let Some(deployed) = manifest.deployed.as_ref() {
+        listed.push((
+            "deployed.deployment_proof".to_string(),
+            resolve_bundle_file(
+                &bundle_dir,
+                "deployed.deployment_proof",
+                deployed.deployment_proof.trim(),
+            )?,
         ));
     }
     for (key, path) in &listed {
@@ -395,6 +465,9 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
             ),
             rerun,
         ));
+    }
+    if let Some(deployed) = manifest.deployed.as_ref() {
+        check_deployed_binding(ctx, deployed, &listed, &rerun)?;
     }
     let created = chrono::DateTime::parse_from_rfc3339(manifest.created_at.trim())
         .map(|time| time.timestamp())
@@ -471,59 +544,67 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
         ));
     }
 
-    // 5. Polish run passed.
-    if manifest.visual_qa_status != "pass" {
-        return Err(EvidenceRefusal::new(
-            format!(
-                "missing polish proof: visual_qa_status is {:?} (only \"pass\" closes without a supervisor override)",
-                manifest.visual_qa_status
-            ),
-            producing_command("visual_qa_stdout", &bundle_dir),
-        ));
-    }
-    let visual_qa =
-        std::fs::read_to_string(path_of("visual_qa").unwrap_or_default()).unwrap_or_default();
-    if !visual_qa
-        .lines()
-        .next()
-        .is_some_and(|line| line.contains("PASS"))
-    {
-        return Err(EvidenceRefusal::new(
-            "missing polish proof: files.visual_qa does not start with `# Visual QA — PASS`",
-            producing_command("visual_qa_stdout", &bundle_dir),
-        ));
-    }
-    let stdout = std::fs::read_to_string(path_of("visual_qa_stdout").unwrap_or_default())
-        .unwrap_or_default();
-    if stdout
-        .lines()
-        .rev()
-        .find(|line| !line.trim().is_empty())
-        .map(str::trim)
-        != Some("PASS")
-    {
-        return Err(EvidenceRefusal::new(
-            "missing polish proof: files.visual_qa_stdout does not end with `PASS`",
-            producing_command("visual_qa_stdout", &bundle_dir),
-        ));
+    // 5. Polish run passed, or (cas-e371, GH #1023 finding 1) introduced no
+    // finding the base build did not already have. A narrow delivery on a
+    // page with an older visual backlog is judged on what it changed; the
+    // backlog is the base run's, and the page's follow-up work.
+    let visual_qa_json = path_of("visual_qa_json").unwrap_or_default();
+    let delivered_label = format!("the delivered commit {}", short(ctx.delivered_head));
+    let run_command = || {
+        producing_command("visual_qa_json", &bundle_dir).replace(
+            "<url>",
+            "<a local URL serving a build of the delivered commit>",
+        )
+    };
+    match manifest.visual_qa_status.as_str() {
+        // Markdown and stdout are retained as evidence, but their presentation
+        // varies by script and source count. The JSON run report is the verdict
+        // authority (GH #1017/#1025); no hand-written PASS markers are needed.
+        "pass" => check_visual_qa_run_at(
+            &visual_qa_json,
+            delivered_time,
+            &delivered_label,
+            deployed_origin.as_deref(),
+        )
+        .map_err(|problem| EvidenceRefusal::new(problem, run_command()))?,
+        "scoped" => {
+            let Some(relative) = files
+                .visual_qa_baseline_json
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            else {
+                return Err(missing_key("visual_qa_baseline_json"));
+            };
+            let baseline =
+                resolve_bundle_file(&bundle_dir, "visual_qa_baseline_json", relative)?;
+            check_visual_qa_scoped_at(
+                &visual_qa_json,
+                &baseline,
+                delivered_time,
+                &delivered_label,
+                deployed_origin.as_deref(),
+            )
+                .map_err(|problem| {
+                    EvidenceRefusal::new(
+                        problem,
+                        producing_command("visual_qa_baseline_json", &bundle_dir),
+                    )
+                })?;
+        }
+        other => {
+            return Err(EvidenceRefusal::new(
+                format!(
+                    "missing polish proof: visual_qa_status is {other:?} (\"pass\", or \"scoped\" with a base-build run, closes without a supervisor override)"
+                ),
+                producing_command("visual_qa_stdout", &bundle_dir),
+            ));
+        }
     }
 
-    // The claim is backed by the run itself, of a local build, after the
-    // delivered commit (cas-a6a3).
-    check_visual_qa_run(
-        &path_of("visual_qa_json").unwrap_or_default(),
-        delivered_time,
-        &format!("the delivered commit {}", short(ctx.delivered_head)),
-    )
-    .map_err(|problem| {
-        EvidenceRefusal::new(
-            problem,
-            producing_command("visual_qa_json", &bundle_dir).replace(
-                "<url>",
-                "<a local URL serving a build of the delivered commit>",
-            ),
-        )
-    })?;
+    // cas-a6ab: an authenticated run must not carry its credentials.
+    if manifest.deployed.is_some() {
+        check_no_secrets(&bundle_dir, &listed)?;
+    }
 
     // 6. Critique floor.
     for dimension in RUBRIC {
@@ -563,20 +644,39 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
     })
 }
 
-/// The report `scripts/visual-qa.mjs` writes itself (`visual-qa.json`). A
-/// bundle's `visual_qa_status` is only a claim; this is the run's own record.
+/// The report a visual-QA script writes (`visual-qa.json`). A bundle's
+/// `visual_qa_status` is only a claim; this is the run's own record.
 #[derive(Debug, Deserialize)]
 struct VisualQaRun {
+    /// Every unsuppressed finding, as visual-qa.mjs records it (type,
+    /// selector or elementPath, url, scheme, viewport). A scoped comparison
+    /// needs it; the pass check does not.
+    #[serde(default)]
+    findings: Option<Vec<serde_json::Value>>,
     #[serde(default)]
     status: String,
     #[serde(default, rename = "generatedAt")]
     generated_at: String,
     #[serde(default)]
     urls: Vec<String>,
-    /// Written by visual-qa.mjs since cas-a6a3. Older copies of the script
-    /// omit it, so only an explicit `false` is refused.
+    #[serde(default)]
+    input: String,
+    #[serde(default, rename = "totalIssues")]
+    total_issues: Option<usize>,
+    #[serde(default, rename = "validRenders")]
+    valid_renders: Option<usize>,
+    #[serde(default)]
+    renders: Vec<VisualQaRender>,
+    /// Older canonical reports omit this field, so only an explicit `false`
+    /// is refused there. A single-source report must record `true`.
     #[serde(default)]
     strict: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VisualQaRender {
+    #[serde(default)]
+    valid: bool,
 }
 
 /// Whether a visual-QA target is a local build: loopback or unspecified
@@ -618,61 +718,483 @@ pub fn check_visual_qa_run(
     not_before: i64,
     not_before_label: &str,
 ) -> Result<(), String> {
+    check_visual_qa_run_at(report, not_before, not_before_label, None)
+}
+
+/// [`check_visual_qa_run`], also accepting targets on `deployed_origin`
+/// (cas-a6ab) when the bundle's deployed-origin declaration was validated.
+pub fn check_visual_qa_run_at(
+    report: &Path,
+    not_before: i64,
+    not_before_label: &str,
+    deployed_origin: Option<&str>,
+) -> Result<(), String> {
     let claim = "claims a visual-QA pass, but";
+    let run = read_visual_qa_run(report, claim)?;
+    let legacy_single_source = run.status.is_empty() && run.total_issues.is_some();
+    if legacy_single_source {
+        if run.total_issues != Some(0)
+            || run.renders.is_empty()
+            || run.valid_renders != Some(run.renders.len())
+            || run.renders.iter().any(|render| !render.valid)
+            || run.strict != Some(true)
+        {
+            return Err(format!(
+                "{claim} {} records totalIssues={:?}, validRenders={:?}/{}, strict={:?}; a single-source pass needs zero issues and every render valid under --strict",
+                report.display(), run.total_issues, run.valid_renders, run.renders.len(), run.strict
+            ));
+        }
+    } else if run.status != "PASS" || run.total_issues.is_some_and(|issues| issues > 0) {
+        return Err(format!(
+            "{claim} {} records status {:?} and totalIssues {:?}, not a passing run",
+            report.display(),
+            run.status,
+            run.total_issues
+        ));
+    }
+    check_run_provenance(
+        &run,
+        report,
+        claim,
+        Some((not_before, not_before_label)),
+        deployed_origin,
+    )?;
+    Ok(())
+}
+
+fn read_visual_qa_run(report: &Path, claim: &str) -> Result<VisualQaRun, String> {
     let raw = std::fs::read_to_string(report).map_err(|_| {
         format!(
             "{claim} the strict run's own report {} is missing or unreadable",
             report.display()
         )
     })?;
-    let run: VisualQaRun = serde_json::from_str(&raw).map_err(|error| {
+    serde_json::from_str(&raw).map_err(|error| {
         format!(
             "{claim} {} is not the JSON report visual-qa.mjs writes ({error})",
             report.display()
         )
-    })?;
-    if run.status != "PASS" {
-        return Err(format!(
-            "{claim} {} records status {:?}, not \"PASS\"",
-            report.display(),
-            run.status
-        ));
-    }
+    })
+}
+
+/// The run was strict, (when `fresh` is given) generated no earlier than
+/// that time, and checked local builds only. Returns the targets it checked.
+fn check_run_provenance(
+    run: &VisualQaRun,
+    report: &Path,
+    claim: &str,
+    fresh: Option<(i64, &str)>,
+    deployed_origin: Option<&str>,
+) -> Result<Vec<String>, String> {
     if run.strict == Some(false) {
         return Err(format!(
             "{claim} {} records a run without --strict",
             report.display()
         ));
     }
-    let generated = chrono::DateTime::parse_from_rfc3339(run.generated_at.trim())
-        .map(|time| time.timestamp())
-        .map_err(|_| {
-            format!(
-                "{claim} {} records no valid generatedAt ({:?}), so nothing shows when the run happened",
+    if let Some((not_before, not_before_label)) = fresh {
+        let generated = chrono::DateTime::parse_from_rfc3339(run.generated_at.trim())
+            .map(|time| time.timestamp())
+            .map_err(|_| {
+                format!(
+                    "{claim} {} records no valid generatedAt ({:?}), so nothing shows when the run happened",
+                    report.display(),
+                    run.generated_at
+                )
+            })?;
+        if generated < not_before {
+            return Err(format!(
+                "{claim} {} was generated at {}, before {not_before_label}: that run did not check this build",
                 report.display(),
-                run.generated_at
-            )
-        })?;
-    if generated < not_before {
-        return Err(format!(
-            "{claim} {} was generated at {}, before {not_before_label}: that run did not check this build",
-            report.display(),
-            run.generated_at.trim()
-        ));
+                run.generated_at.trim()
+            ));
+        }
     }
-    if run.urls.is_empty() {
+    let targets: Vec<String> = if !run.urls.is_empty() {
+        run.urls.clone()
+    } else if !run.input.trim().is_empty() {
+        vec![run.input.trim().to_string()]
+    } else {
+        Vec::new()
+    };
+    if targets.is_empty() {
         return Err(format!(
             "{claim} {} names no URL it checked",
             report.display()
         ));
     }
-    if let Some(remote) = run.urls.iter().find(|target| !is_local_origin(target)) {
+    if let Some(remote) = targets.iter().find(|target| {
+        !is_local_origin(target)
+            && !deployed_origin.is_some_and(|origin| url_origin(target).as_deref() == Some(origin))
+    }) {
         return Err(format!(
             "{claim} {} ran against {remote}, which is not a local build of the delivered commit (a production or remote origin shows what is deployed there, not this commit)",
             report.display()
         ));
     }
+    Ok(targets)
+}
+
+/// The page a visual-QA target names, without the origin: the delivered and
+/// the base build are served on different local ports.
+fn visual_qa_page(target: &str) -> String {
+    match url::Url::parse(target.trim()) {
+        Ok(parsed) if parsed.scheme() != "file" => {
+            let mut page = parsed.path().to_string();
+            if let Some(query) = parsed.query() {
+                page.push('?');
+                page.push_str(query);
+            }
+            page
+        }
+        _ => target.trim().to_string(),
+    }
+}
+
+/// What a finding is compared by across two runs: its type, element, the
+/// element it collides with, page, scheme and viewport.
+fn visual_qa_finding_key(finding: &serde_json::Value) -> String {
+    let text = |pointer: &str| {
+        finding
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let element = Some(text("/selector"))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| text("/elementPath"));
+    let viewport = Some(text("/viewport/name"))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| text("/viewport"));
+    [
+        text("/type"),
+        element,
+        text("/otherElementPath"),
+        visual_qa_page(&text("/url")),
+        text("/scheme"),
+        viewport,
+    ]
+    .join(" | ")
+}
+
+/// A scoped visual-QA check that passed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedVisualQa {
+    /// Findings of the delivered build, all of which the base build has.
+    pub pre_existing: usize,
+}
+
+/// cas-e371 (GH #1023 finding 1): the close gate measures what a delivery
+/// changed, not the page's whole visual backlog. `tip` is the strict run of
+/// the delivered build (fresh, local), `baseline` the strict run of the base
+/// build over the same pages (local). The check passes when every finding of
+/// the delivered build also appears in the base run, so the delivery
+/// introduced none; it fails naming the findings the base build does not
+/// have. The pre-existing ones are the page's follow-up work.
+pub fn check_visual_qa_scoped(
+    tip: &Path,
+    baseline: &Path,
+    not_before: i64,
+    not_before_label: &str,
+) -> Result<ScopedVisualQa, String> {
+    check_visual_qa_scoped_at(tip, baseline, not_before, not_before_label, None)
+}
+
+/// [`check_visual_qa_scoped`], also accepting targets on `deployed_origin`
+/// (cas-a6ab). The base run stays local: it serves the base commit.
+pub fn check_visual_qa_scoped_at(
+    tip: &Path,
+    baseline: &Path,
+    not_before: i64,
+    not_before_label: &str,
+    deployed_origin: Option<&str>,
+) -> Result<ScopedVisualQa, String> {
+    let claim = "claims a scoped visual-QA result, but";
+    let tip_run = read_visual_qa_run(tip, claim)?;
+    let tip_targets = check_run_provenance(
+        &tip_run,
+        tip,
+        claim,
+        Some((not_before, not_before_label)),
+        deployed_origin,
+    )?;
+    let base_run = read_visual_qa_run(baseline, claim)?;
+    let base_targets = check_run_provenance(&base_run, baseline, claim, None, None)?;
+    let (Some(tip_findings), Some(base_findings)) = (&tip_run.findings, &base_run.findings) else {
+        return Err(format!(
+            "{claim} {} and {} must both carry the `findings` list visual-qa.mjs writes, so the two runs can be compared",
+            tip.display(),
+            baseline.display()
+        ));
+    };
+    let base_pages: std::collections::BTreeSet<String> =
+        base_targets.iter().map(|target| visual_qa_page(target)).collect();
+    let missing: Vec<String> = tip_targets
+        .iter()
+        .map(|target| visual_qa_page(target))
+        .filter(|page| !base_pages.contains(page))
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "{claim} the base run {} did not check {}; run it over the same pages as the delivered build",
+            baseline.display(),
+            missing.join(", ")
+        ));
+    }
+    let mut available: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    for finding in base_findings {
+        *available.entry(visual_qa_finding_key(finding)).or_default() += 1;
+    }
+    let mut introduced = Vec::new();
+    for finding in tip_findings {
+        let key = visual_qa_finding_key(finding);
+        match available.get_mut(&key) {
+            Some(count) if *count > 0 => *count -= 1,
+            _ => introduced.push(key),
+        }
+    }
+    if !introduced.is_empty() {
+        let shown: Vec<&str> = introduced.iter().take(5).map(String::as_str).collect();
+        return Err(format!(
+            "the delivery introduced {} visual-QA finding(s) the base build does not have ({}): {}{}",
+            introduced.len(),
+            tip.display(),
+            shown.join("; "),
+            if introduced.len() > shown.len() { "; …" } else { "" }
+        ));
+    }
+    Ok(ScopedVisualQa {
+        pre_existing: tip_findings.len(),
+    })
+}
+
+/// cas-a6ab: the declaration half of a deployed-origin run: a recorded
+/// reason, and an origin that is remote and configured for this project.
+/// Returns the normalised origin.
+fn check_deployed_declaration(
+    ctx: &EvidenceContext<'_>,
+    deployed: &DeployedEvidence,
+    manifest_path: &Path,
+) -> Result<String, EvidenceRefusal> {
+    let fix = format!(
+        "record deployed.origin, deployed.reason, deployed.deployed_sha and deployed.deployment_proof in {} ({CONTRACT_REFERENCE})",
+        manifest_path.display()
+    );
+    if deployed.reason.trim().chars().count() < DEPLOYED_REASON_MIN_CHARS {
+        return Err(EvidenceRefusal::new(
+            "a deployed-origin run without its reason: deployed.reason must say why a local build could not be used (for example the backend's CORS rejecting localhost on its session endpoint)",
+            fix,
+        ));
+    }
+    let Some(origin) = url_origin(&deployed.origin) else {
+        return Err(EvidenceRefusal::new(
+            format!(
+                "a deployed-origin run whose deployed.origin {:?} is not an http(s) origin",
+                deployed.origin
+            ),
+            fix,
+        ));
+    };
+    if is_local_origin(&origin) {
+        return Err(EvidenceRefusal::new(
+            format!("a deployed-origin run that names a local origin ({origin}); a local build needs no deployed declaration"),
+            "remove `deployed` from bundle.json".to_string(),
+        ));
+    }
+    let allowed: Vec<String> = ctx
+        .deployed_origins
+        .iter()
+        .filter_map(|configured| url_origin(configured))
+        .collect();
+    if !allowed.iter().any(|configured| *configured == origin) {
+        return Err(EvidenceRefusal::new(
+            format!(
+                "from the wrong origin: {origin} is not a configured deployed origin (qa.deployed_origins: {})",
+                if allowed.is_empty() {
+                    "none".to_string()
+                } else {
+                    allowed.join(", ")
+                }
+            ),
+            format!(
+                "run against a configured deployment, or have the supervisor add it: `cas config set qa.deployed_origins {origin}`"
+            ),
+        ));
+    }
+    Ok(origin)
+}
+
+/// cas-a6ab: the binding half of a deployed-origin run: the deployment
+/// served the delivered commit (or a descendant of it), and the recorded
+/// proof says so.
+fn check_deployed_binding(
+    ctx: &EvidenceContext<'_>,
+    deployed: &DeployedEvidence,
+    listed: &[(String, PathBuf)],
+    rerun: &str,
+) -> Result<(), EvidenceRefusal> {
+    let sha = deployed.deployed_sha.trim();
+    if !is_full_sha(sha) {
+        return Err(EvidenceRefusal::new(
+            format!("unbound: deployed.deployed_sha {sha:?} is not a full 40-hex commit"),
+            rerun.to_string(),
+        ));
+    }
+    let covers = sha == ctx.delivered_head
+        || git(
+            ctx.repo,
+            &["merge-base", "--is-ancestor", ctx.delivered_head, sha],
+        )
+        .is_some();
+    if !covers {
+        return Err(EvidenceRefusal::new(
+            format!(
+                "stale: the deployment served {} but the delivery is {} (deploy the delivered commit, then re-run against it)",
+                short(sha),
+                short(ctx.delivered_head)
+            ),
+            rerun.to_string(),
+        ));
+    }
+    let proof = listed
+        .iter()
+        .find(|(key, _)| key == "deployed.deployment_proof")
+        .map(|(_, path)| path.clone())
+        .unwrap_or_default();
+    let recorded = std::fs::read_to_string(&proof).unwrap_or_default();
+    if !recorded.contains(sha) {
+        return Err(EvidenceRefusal::new(
+            format!(
+                "unproven: deployed.deployment_proof ({}) does not name the deployed commit {}",
+                proof.display(),
+                short(sha)
+            ),
+            "record what the deployment reports about itself (its version endpoint or deployment metadata, naming the full commit) into the proof file".to_string(),
+        ));
+    }
     Ok(())
+}
+
+/// Credential shapes an authenticated run can leak into its artifacts.
+fn secret_patterns() -> &'static [(&'static str, regex::Regex)] {
+    static PATTERNS: std::sync::OnceLock<Vec<(&'static str, regex::Regex)>> =
+        std::sync::OnceLock::new();
+    PATTERNS.get_or_init(|| {
+        [
+            (
+                "a JSON web token",
+                r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
+            ),
+            ("a bearer token", r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}"),
+            (
+                "an API token",
+                r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|sk_(?:live|test)_[A-Za-z0-9]{10,}|xox[abpr]-[A-Za-z0-9-]{10,})",
+            ),
+            (
+                "a cookie or authorization header value",
+                r#"(?i)"name"\s*:\s*"(?:cookie|set-cookie|authorization)"\s*,\s*"value"\s*:\s*"[^"]{8,}""#,
+            ),
+            (
+                "a cookie or authorization header value",
+                r"(?im)^\s*(?:cookie|set-cookie|authorization)\s*:\s*\S{8,}",
+            ),
+            (
+                "a saved browser storage state (cookies)",
+                r#""cookies"\s*:\s*\[\s*\{[^\]]*"value"\s*:\s*"[^"]{8,}""#,
+            ),
+        ]
+        .into_iter()
+        .map(|(kind, pattern)| (kind, regex::Regex::new(pattern).expect("secret pattern")))
+        .collect()
+    })
+}
+
+/// Largest single text or trace entry the secret scan reads.
+const SECRET_SCAN_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+fn first_secret(text: &str) -> Option<&'static str> {
+    secret_patterns()
+        .iter()
+        .find(|(_, pattern)| pattern.is_match(text))
+        .map(|(kind, _)| *kind)
+}
+
+/// cas-a6ab: an authenticated deployed run must not carry credentials into
+/// the bundle. Scans every listed text artifact, and every text entry of the
+/// trace (Playwright records request headers there), naming the file and
+/// the kind of secret, never its value. A saved storage-state file anywhere
+/// in the bundle is refused by name.
+fn check_no_secrets(bundle_dir: &Path, listed: &[(String, PathBuf)]) -> Result<(), EvidenceRefusal> {
+    let fix = "re-record without credentials: never copy a storage state, cookie, token or auth header into the bundle; redact header values from the trace before listing it".to_string();
+    if let Ok(entries) = std::fs::read_dir(bundle_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            if name.contains("storage-state") || name.contains("storagestate") {
+                return Err(EvidenceRefusal::new(
+                    format!(
+                        "carrying credentials: {} is a saved browser storage state",
+                        entry.path().display()
+                    ),
+                    fix,
+                ));
+            }
+        }
+    }
+    for (key, path) in listed {
+        let found = if key == "trace" {
+            scan_trace_for_secrets(path)
+        } else {
+            scan_text_file_for_secrets(path)
+        };
+        if let Some((kind, place)) = found {
+            return Err(EvidenceRefusal::new(
+                format!(
+                    "carrying credentials: files.{key} ({}{place}) contains {kind}",
+                    path.display()
+                ),
+                fix,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn scan_text_file_for_secrets(path: &Path) -> Option<(&'static str, String)> {
+    let meta = std::fs::metadata(path).ok()?;
+    if meta.len() > SECRET_SCAN_MAX_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    // Images and video are binary; only text can carry a copied header.
+    let text = std::str::from_utf8(&bytes).ok()?;
+    first_secret(text).map(|kind| (kind, String::new()))
+}
+
+fn scan_trace_for_secrets(path: &Path) -> Option<(&'static str, String)> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut archive = zip::ZipArchive::new(file).ok()?;
+    for index in 0..archive.len() {
+        let Ok(mut entry) = archive.by_index(index) else {
+            continue;
+        };
+        if entry.size() > SECRET_SCAN_MAX_BYTES {
+            continue;
+        }
+        let name = entry.name().to_string();
+        let mut bytes = Vec::new();
+        if entry.read_to_end(&mut bytes).is_err() {
+            continue;
+        }
+        let Ok(text) = std::str::from_utf8(&bytes) else {
+            continue;
+        };
+        if let Some(kind) = first_secret(text) {
+            return Some((kind, format!(" entry {name}")));
+        }
+    }
+    None
 }
 
 fn missing_key(key: &str) -> EvidenceRefusal {
@@ -699,8 +1221,11 @@ pub fn producing_command(key: &str, bundle_dir: &Path) -> String {
         "polish_screenshots" | "visual_qa" | "visual_qa_json" | "visual_qa_stdout" => format!(
             "node <skills-dir>/cas-ui-craft/scripts/visual-qa.mjs --strict --artifact-dir {dir}/visual-qa <url> > {dir}/visual-qa.stdout 2>&1"
         ),
+        "visual_qa_baseline_json" => format!(
+            "serve a build of the base commit (git merge-base <target> <head>) and run node <skills-dir>/cas-ui-craft/scripts/visual-qa.mjs --strict --artifact-dir {dir}/visual-qa-baseline <the same local pages>, then list visual-qa-baseline/visual-qa.json as files.visual_qa_baseline_json"
+        ),
         "critique" => format!(
-            "score the surface with the cas-ui-craft rubric into {dir}/critique.md and bundle.json critique_score"
+            "score what the delivery changed with the cas-ui-craft rubric into {dir}/critique.md and bundle.json critique_score"
         ),
         _ => format!("produce `{key}` per {CONTRACT_REFERENCE}"),
     }
@@ -782,9 +1307,10 @@ pub struct ExpectSummary {
     pub failed: usize,
 }
 
-/// Read `test.trace` from a Playwright trace zip and count Expect steps.
-/// A step fails when its `after` event carries an `error`; a top-level
-/// `error` event also counts as a failure.
+/// Read `test.trace` from a Playwright trace zip and count final Expect steps.
+/// Inner assertions retried by `expect.poll` or `toPass` are children of an
+/// outer Expect step; only that outer step's outcome describes the test.
+/// A top-level `error` event still counts as a failure.
 pub fn trace_expect_summary(trace_zip: &Path) -> Result<ExpectSummary, String> {
     let file =
         std::fs::File::open(trace_zip).map_err(|error| format!("cannot be opened ({error})"))?;
@@ -800,12 +1326,38 @@ pub fn trace_expect_summary(trace_zip: &Path) -> Result<ExpectSummary, String> {
 }
 
 fn expect_summary_from_events(body: &str) -> ExpectSummary {
-    let mut expects = std::collections::HashSet::new();
-    let mut summary = ExpectSummary::default();
-    for line in body.lines().filter(|line| !line.trim().is_empty()) {
-        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+    // Playwright writes callId=stepId and parentId=the enclosing test step.
+    // Collect the full graph before outcomes because a trace can interleave
+    // child and parent `after` events, and a custom poll message can hide the
+    // word "poll" in the outer title. An Expect ancestor identifies retries.
+    let mut steps = std::collections::HashMap::new();
+    for event in body
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+    {
+        if event.get("type").and_then(|value| value.as_str()) != Some("before") {
+            continue;
+        }
+        let Some(call) = event.get("callId").and_then(|value| value.as_str()) else {
             continue;
         };
+        let title = event
+            .get("title")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        let expect = event.get("method").and_then(|value| value.as_str()) == Some("expect")
+            || title.starts_with("Expect \"");
+        let parent = event
+            .get("parentId")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        steps.insert(call.to_string(), (parent, expect));
+    }
+    let mut summary = ExpectSummary::default();
+    for event in body
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+    {
         let kind = event
             .get("type")
             .and_then(|value| value.as_str())
@@ -815,20 +1367,8 @@ fn expect_summary_from_events(body: &str) -> ExpectSummary {
             .and_then(|value| value.as_str())
             .unwrap_or_default();
         match kind {
-            "before" => {
-                let title = event
-                    .get("title")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or_default();
-                let method = event
-                    .get("method")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or_default();
-                if method == "expect" || title.starts_with("Expect \"") {
-                    expects.insert(call.to_string());
-                }
-            }
-            "after" if expects.contains(call) => {
+            "after" if steps.get(call).is_some_and(|(_, expect)| *expect)
+                && !expect_has_expect_ancestor(call, &steps) => {
                 if event.get("error").is_some_and(|error| !error.is_null()) {
                     summary.failed += 1;
                 } else {
@@ -840,6 +1380,27 @@ fn expect_summary_from_events(body: &str) -> ExpectSummary {
         }
     }
     summary
+}
+
+fn expect_has_expect_ancestor(
+    call: &str,
+    steps: &std::collections::HashMap<String, (Option<String>, bool)>,
+) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    let mut parent = steps.get(call).and_then(|(parent, _)| parent.as_deref());
+    while let Some(id) = parent {
+        if !seen.insert(id) {
+            break;
+        }
+        let Some((next, is_expect)) = steps.get(id) else {
+            break;
+        };
+        if *is_expect {
+            return true;
+        }
+        parent = next.as_deref();
+    }
+    false
 }
 
 /// Validate `<task>/LEDGER.md` for a demo-only (non-web) delivery: present,
@@ -1143,10 +1704,11 @@ pub fn delivery_range(repo: &Path, head: &str, target: &str) -> Option<(String, 
     }
 }
 
-/// Paths changed over a range.
+/// Reviewable paths changed over a range; deletions and whitespace-only
+/// changes cannot require a UI evidence bundle.
 pub fn range_paths(repo: &Path, from: &str, to: &str) -> Option<Vec<String>> {
     Some(
-        git(repo, &["diff", "--name-only", from, to])?
+        git(repo, &["diff", "-w", "--diff-filter=ACMRT", "--name-only", from, to])?
             .lines()
             .map(str::trim)
             .filter(|line| !line.is_empty())

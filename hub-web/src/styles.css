@@ -325,7 +325,9 @@ pre { font-family: var(--font-mono); }
 
 .machine-row {
   display: grid;
-  grid-template-columns: var(--space-2) minmax(12ch, 1fr) minmax(0, 9ch);
+  /* The status column grows to fit a short state and wraps a long one, so
+     "Reconnecting" is never cut to "Reconnect…" (journey F9). */
+  grid-template-columns: var(--space-2) minmax(12ch, 1fr) fit-content(16ch);
   min-height: var(--button-height);
   align-items: center;
   gap: var(--space-2);
@@ -348,13 +350,11 @@ pre { font-family: var(--font-mono); }
 
 .machine-row small {
   min-width: 0;
-  overflow: hidden;
   color: var(--text-mid);
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
   text-align: right;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: break-word;
 }
 
 .session-tree {
@@ -455,6 +455,13 @@ pre { font-family: var(--font-mono); }
   color: var(--text-hi);
 }
 .fleet-hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: var(--space-6); align-items: start; }
+/* Journey F2: side by side, a board narrower than this leaves the figure too
+   little room for its state words; the verdict then sits above it instead. */
+.fleet-board { container: fleet-board / inline-size; }
+@container fleet-board (max-width: 60rem) {
+  .fleet-hero { grid-template-columns: minmax(0, 1fr); gap: var(--space-4); }
+  .fleet-verdict { max-width: none; }
+}
 .fleet-board-header { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2) var(--space-3); }
 .fleet-eyebrow { margin: 0; color: var(--text-mid); font: var(--weight-semibold) var(--fs-xs)/1.33 var(--font-mono); letter-spacing: var(--tracking-label); text-transform: uppercase; }
 .fleet-catalog-time { color: var(--text-mid); font: var(--fs-xs)/1.33 var(--font-mono); }
@@ -471,11 +478,17 @@ pre { font-family: var(--font-mono); }
 .fleet-plot tbody th, .fleet-track-cell { height: var(--button-compact-height); padding: 0; vertical-align: middle; }
 .fleet-plot tbody th { color: var(--text-mid); }
 .fleet-plot-name { display: block; padding: 0 var(--space-1); line-height: var(--button-compact-height); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* cas-598e QA F01: rows sharing a project carry a codename tag that never truncates; the project gives way first. */
+.fleet-plot-name.tagged { display: flex; align-items: baseline; gap: var(--space-1); }
+/* The project keeps at least a letter and its ellipsis beside any tag (cas-ae5e). */
+.fleet-plot-project { min-width: 2ch; overflow: hidden; text-overflow: ellipsis; }
+.fleet-plot-tag { flex: none; }
+.fleet-plot-tag::before { content: "· "; }
 .fleet-track-cell { position: relative; text-align: center; }
 .fleet-track-cell::before { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: var(--line-width); background: var(--line-subtle); }
 .fleet-plot-mark { position: relative; display: inline-flex; align-items: center; gap: var(--space-1); vertical-align: middle; white-space: nowrap; }
 .track-working .fleet-plot-mark { display: flex; padding: 0 var(--space-1); }
-.fleet-plot th:nth-child(3), .track-working { background: var(--bg-active); color: var(--text-hi); }
+.fleet-plot.has-working th:nth-child(3), .fleet-plot.has-working .track-working { background: var(--bg-active); color: var(--text-hi); }
 .fleet-dot { position: relative; display: inline-block; width: var(--space-2); height: var(--space-2); background: var(--text-mid); border-radius: var(--radius-pill); vertical-align: middle; }
 .needs-you .fleet-dot { background: var(--state-crit); outline: var(--rule-verdict) solid var(--color-verdict); outline-offset: var(--line-width); }
 .unreachable .fleet-dot { background: var(--state-warn); }
@@ -491,7 +504,7 @@ pre { font-family: var(--font-mono); }
   .fleet-track-legend > span { white-space: nowrap; }
 }
 .fleet-figure-caption { margin-top: var(--space-3); color: var(--text-mid); font: var(--fs-meta)/1.38 var(--font-mono); }
-.fleet-provenance { margin: 0; padding-top: var(--space-3); border-top: var(--rule-hero) solid var(--color-verdict); color: var(--text-mid); font: var(--fs-meta)/1.38 var(--font-mono); overflow-wrap: anywhere; }
+.fleet-provenance { margin: 0; padding-top: var(--space-3); border-top: var(--rule-hero) solid var(--color-verdict); color: var(--text-mid); font: var(--fs-meta)/1.38 var(--font-mono); overflow-wrap: anywhere; cursor: default; }
 .fleet-provenance:empty { display: none; }
 .fleet-evidence { display: grid; gap: var(--space-4); }
 .fleet-machine { display: grid; gap: var(--space-2); min-width: 0; }
@@ -556,9 +569,15 @@ main {
 }
 
 /* == Unit 3: header == */
+/* The actions (palette, control, Interrupt) never clip: they never shrink.
+   The title keeps its width first; the machine chip yields first (ellipsised),
+   and a header too narrow for the chips drops them in priority order (the
+   container rules below). At 900–1024px the header used to run 871px of
+   content in 640 and cut the actions off (cas-3400 QA F01). A phone header
+   keeps its grid (the 53rem block). */
 .session-header {
-  display: grid;
-  grid-template-columns: minmax(var(--mobile-header-chip-width), auto) auto auto auto minmax(0, 1fr);
+  display: flex;
+  container: session-header / inline-size;
   flex: 0 0 var(--session-header-height);
   height: var(--session-header-height);
   align-items: center;
@@ -596,14 +615,28 @@ main {
   gap: var(--space-1);
 }
 
+.session-back-label { font-size: var(--fs-meta); }
+
+/* cas-ac390 QA F01/F02: "Back" yields when the Terminal-view column has no
+   room for it (a 900px window with the drawer open, a phone): the glyph stays
+   and the accessible name is still "Back to …". Scoped to the back control;
+   the column is only the measuring container. */
+.shell > main { container: shell-main / inline-size; }
+@container shell-main (max-width: 36rem) {
+  .session-back-label { display: none; }
+  .session-back { padding: 0; }
+}
+
 .session-back {
   flex: 0 0 auto;
   display: inline-flex;
-  width: var(--space-8);
+  min-width: var(--space-8);
   min-height: var(--space-8);
   align-items: center;
   justify-content: center;
-  padding: 0;
+  gap: var(--space-1);
+  /* Journey F2: the glyph alone read as unlabelled; "Back" is on screen. */
+  padding: 0 var(--space-3) 0 var(--space-2);
   color: var(--text-mid);
   background: var(--bg-raised);
   border: none;
@@ -627,10 +660,20 @@ main {
   font: inherit;
 }
 
+/* The h1 clips at the toggle's own edges (overflow: hidden keeps the long-title
+   ellipsis), so an outset ring was cut off on every side. Draw it inside the
+   toggle's box instead, where the clip cannot reach it (cas-cf10 QA F01). */
+.session-picker-toggle:focus-visible { outline-offset: calc(-1 * var(--focus-ring-width)); }
+
 /* The caret is the only sign that the session name is a control, so the name
    yields width to it rather than pushing it out of the clipped header. */
 .session-picker-name {
-  flex: 0 1 auto;
+  /* It keeps its width while the codename has any to give (a proportional
+     shrink took a fraction of a pixel from it too, enough to show "cas-s…"
+     beside a truncated codename, cas-3400), and is capped short of the caret
+     when the project name alone is too long. */
+  flex: 0 0 auto;
+  max-width: calc(100% - var(--space-4));
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -713,6 +756,56 @@ main {
   white-space: nowrap;
 }
 
+/* Desktop header priorities: the title, then the actions, then the mode, the
+   connection and last the machine name, which ellipsises first (the full name
+   is in the chip's title attribute). */
+/* The title is the first to give way (cas-3400 QA round 3): no floor beyond
+   the Back glyph, which stays; the project name ellipsises. */
+.session-header > .session-identity { flex: 0 1 auto; min-width: 0; }
+.session-header > .machine-chip { flex: 0 1000 auto; min-width: 6ch; overflow: hidden; text-overflow: ellipsis; }
+.session-header > .mode-badge, .session-header > .connection-summary { flex: 0 0 auto; }
+.session-header > .actions { flex: 0 0 auto; }
+
+/* Header actions carry an icon for the narrowest header, hidden until then. */
+.session-header .action-icon { display: none; width: 16px; height: 16px; flex: 0 0 auto; }
+.session-header .actions button:has(.action-icon) { display: inline-flex; align-items: center; justify-content: center; }
+
+/* The header's own column decides, not the viewport: a desktop window with the
+   machine drawer open leaves the Terminal header 185–360px (cas-3400 QA rounds
+   2–3). Below 360px the palette, control and Interrupt buttons show their
+   icons; their accessible names stay "Open command palette (Ctrl K)",
+   "Release control"/"Take control" and "Interrupt selected pane". No control
+   is hidden: the title gives way instead (the 220px rule below). */
+@container session-header (max-width: 360px) {
+  .session-header .actions .action-label { display: none; }
+  .session-header .actions .action-icon { display: block; }
+  .session-header .actions button:has(.action-icon) { min-width: var(--space-8); padding: 0 var(--space-2); }
+}
+/* Narrower still (the drawer open in an 849px window): every control stays
+   (Back as its ‹ glyph, cas-ac390; the palette, control and Interrupt as
+   icons), and the title steps down a size and gives way instead (cas-3400 QA
+   round 3). */
+@container session-header (max-width: 220px) {
+  .session-header h1 { font-size: var(--fs-meta); }
+  /* The codename goes first: a sliver of it read as a stray bar beside the
+     project name. The full name is still the heading's accessible name. */
+  .session-header .session-picker-codename { display: none; }
+}
+
+/* The latency words ellipsise inside the chip rather than being cut, and the
+   dot keeps its size. */
+.connection-summary [data-machine-latency] { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.connection-summary .connection-dot { flex: 0 0 auto; }
+
+@media (min-width: 53.0625rem) {
+  /* A block box, so the long hostname ends in an ellipsis rather than a cut
+     glyph (an inline-flex chip cannot ellipsise its text). */
+  .session-header > .machine-chip { display: block; }
+  @container session-header (max-width: 820px) { .session-header > .machine-chip { display: none; } }
+  @container session-header (max-width: 720px) { .session-header > .connection-summary { display: none; } }
+  @container session-header (max-width: 560px) { .session-header > .mode-badge { display: none; } }
+}
+
 .mode-badge {
   color: var(--text-mid);
   background: var(--color-transparent);
@@ -731,6 +824,8 @@ main {
 .mode-badge[hidden] { display: none; }
 
 .session-header .actions {
+  /* In the phone grid: the last track, whichever chips are shown. */
+  grid-column: -2;
   display: flex;
   min-width: 0;
   justify-content: flex-end;
@@ -739,6 +834,28 @@ main {
 }
 
 .control-action { display: inline-flex; }
+
+/* Journey F9: a greyed header control says why on screen. Touch has no
+   tooltip, so title and aria text alone left the reason unreachable. The line
+   continues the header's panel, in the warning ink the composer's reason uses. */
+.session-controls-reason {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0 var(--space-3) var(--space-1);
+  color: var(--state-warn);
+  background: var(--bg-panel);
+  font-size: var(--fs-meta);
+  text-wrap: pretty;
+}
+
+.session-controls-reason[hidden] { display: none; }
+/* cas-71af (6929 QA F01): a click on a control this line explains calls
+   attention to the line (a brief warm wash) instead of repeating it in a toast. */
+.session-controls-reason.called { animation: controls-reason-called 1.2s ease-out; }
+@keyframes controls-reason-called { from { background: color-mix(in srgb, var(--state-warn) 22%, var(--bg-panel)); } to { background: var(--bg-panel); } }
+@media (prefers-reduced-motion: reduce) {
+  .session-controls-reason.called { animation: none; background: color-mix(in srgb, var(--state-warn) 14%, var(--bg-panel)); }
+}
 
 .session-header .actions button {
   min-height: var(--space-8);
@@ -1167,6 +1284,13 @@ main {
 
 .connection-timeline-detail { color: var(--text-mid); }
 
+/* An attach in progress keeps its attempt and relay stage behind "Details"
+   (journey F3): the default surface is the calm title alone. */
+.connection-details { width: 100%; text-align: left; }
+.connection-details > summary { width: fit-content; min-height: var(--space-6); margin-inline: auto; padding: var(--space-1) var(--space-3); border-radius: var(--radius-pill); color: var(--text-mid); font-size: var(--fs-meta); cursor: pointer; text-align: center; }
+.connection-details > summary:hover { color: var(--text-hi); }
+.connection-details[open] > summary { margin-bottom: var(--space-2); }
+
 .terminal-connecting-actions {
   display: flex;
   flex-wrap: wrap;
@@ -1195,6 +1319,16 @@ main {
   font-family: var(--font-ui);
   font-size: var(--fs-meta);
   border-left: var(--rule-verdict) solid var(--state-warn);
+}
+
+/* cas-d15c: the pairing-lost banner carries Re-pair beside its sentence,
+   since a phone hides the rail that otherwise offers it. */
+.terminal-disconnected-banner[data-scope="pairing"] { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.terminal-disconnected-banner .banner-repair { flex: none; min-height: 32px; padding: 0 var(--space-3); border: 1.5px solid var(--line-strong); border-radius: 999px; background: transparent; color: var(--text-hi); font: var(--weight-medium) var(--fs-meta)/1.2 var(--font-ui); cursor: pointer; }
+.terminal-disconnected-banner .banner-repair:hover { border-color: var(--text-hi); }
+.terminal-disconnected-banner .banner-repair:focus-visible { outline: 2px solid var(--text-hi); outline-offset: 2px; }
+@media (max-width: 53rem), (pointer: coarse) {
+  .terminal-disconnected-banner .banner-repair { min-height: 44px; }
 }
 
 /* Dims the terminal only. The conversation reading view lives inside the
@@ -2063,6 +2197,8 @@ dialog::backdrop { background: var(--overlay-backdrop); }
 .palette-command:disabled { opacity: 1; color: var(--text-mid); background: transparent; }
 .palette-command span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .palette-command small, .palette-empty { color: var(--text-mid); }
+/* A long unbroken filter query wraps inside the dialog instead of running out of it (cas-a8db QA F01). */
+#session-picker-no-match { overflow-wrap: anywhere; }
 /* Journey F20: the Appearance row in effect carries a check and "Current". */
 .palette-check { margin-inline-end: var(--space-2); color: var(--accent, var(--you-bg)); font-weight: var(--weight-semibold); }
 .palette-command small { justify-self: end; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2573,6 +2709,7 @@ dialog form > *,
   }
 
   .session-header {
+    display: grid;
     grid-template-columns: minmax(var(--mobile-header-chip-width), 1fr) auto auto minmax(0, auto);
     gap: var(--space-1);
     padding-inline: var(--space-2);
@@ -2582,7 +2719,7 @@ dialog form > *,
 
   /* Switching session and stepping back are the two phone gestures this header
      exists for, so they get the widest targets in it. */
-  .session-back { width: var(--button-height); }
+  .session-back { min-width: var(--button-height); }
   .session-picker-toggle { padding-right: var(--space-2); }
 
   .machine-chip { display: none; }
@@ -2965,7 +3102,7 @@ dialog form > *,
      this the actions overflowed under the attention rail and Interrupt was
      sliced in half. */
   /* == Unit 3: Appearance stays reachable by touch == */
-  .command-palette-trigger { display: inline-flex; }
+  .command-palette-trigger { display: inline-flex; align-items: center; white-space: nowrap; }
   .session-header .actions { gap: var(--space-1); }
   .session-header .actions button { min-width: 0; padding: 0 var(--space-2); }
 
@@ -2988,7 +3125,7 @@ dialog form > *,
   /* The ⌘K chord has no phone equivalent; its width belongs to the two controls
      a thumb actually uses, which stay wide enough to hit. */
   /* == Unit 3: Appearance stays reachable by touch == */
-  .command-palette-trigger { display: inline-flex; }
+  .command-palette-trigger { display: inline-flex; align-items: center; white-space: nowrap; }
   .session-header .actions { gap: var(--space-1); }
   .session-header .actions button { min-width: 0; padding: 0 var(--space-2); }
 }
@@ -3025,6 +3162,11 @@ dialog form > *,
  * something the header does not; .context-open gives it its 240px back. */
 .conversation-shell { display: grid; grid-template-columns: var(--conversation-rail-width) minmax(0, 1fr) var(--machine-rail-width); height: var(--keyboard-viewport-height, 100dvh); overflow: hidden; color: var(--ink); background: var(--canvas); }
 .conversation-shell.context-open { grid-template-columns: var(--conversation-rail-width) minmax(0, 1fr) var(--worker-collapsed-width); }
+/* No thread open: no context track at all, not even the folded 48px strip,
+   so the welcome centres in the whole canvas, the same on first load and
+   after coming back (journey F15, cas-9225). */
+.conversation-shell:not(.thread-open) { grid-template-columns: var(--conversation-rail-width) minmax(0, 1fr); }
+.conversation-shell:not(.thread-open) > .conversation-context { display: none; }
 .conversation-shell button { min-height: var(--rail-item-min); }
 /* == Pebble rail (EPIC cas-cac1) ==
    The rail is a panel lifted off the canvas by --lift-edge, not a hairline.
@@ -3134,6 +3276,22 @@ dialog form > *,
    state after it stays visible, instead of the line wrapping to three. */
 .conversation-identity .conversation-host { display: flex; margin-top: 1px; font: var(--weight-regular) 13px/1.25 var(--font-mono); color: var(--ink-mid); white-space: nowrap; }
 .conversation-identity .host-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* The codename is who the operator is talking to, so the machine name yields
+   first (journey F14, QA round 1 F01). The machine ellipsises, and the codename
+   keeps its full width up to the line less the 3ch separator (the reserve can
+   never exceed machine + separator, so a short label never cuts it); only a
+   codename that long ellipsises itself. */
+.conversation-identity .host-where:has(> .host-machine) { display: flex; }
+/* cas-71af (e918 QA F01): with no room the machine name used to shrink to a
+   2px glyph sliver. It keeps 2ch, one letter and its ellipsis ("D…"), and the
+   codename's reserve is that plus the 3ch separator. */
+.conversation-identity .host-machine { flex: 0 1 auto; min-width: 2ch; overflow: hidden; text-overflow: ellipsis; }
+.conversation-identity .host-sep { flex: none; white-space: pre; }
+.conversation-identity .host-machine ~ .codename { flex: none; max-width: calc(100% - 5ch); overflow: hidden; text-overflow: ellipsis; }
+/* With less room than that, the machine and its separator step aside
+   (fitMachineLine); the title keeps the whole "machine · codename". */
+.conversation-identity .host-where.machine-squeezed > :is(.host-machine, .host-sep) { display: none; }
+.conversation-identity .host-where.machine-squeezed > .codename { max-width: 100%; }
 #conversation-connection { flex: none; white-space: pre; }
 .conversation-pane-slot { flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
 .conversation-pane-slot .pane-grid { display: block; padding: 0; height: 100%; min-height: 0; background: var(--bg-root); color: var(--text-hi); }
@@ -3171,6 +3329,8 @@ dialog form > *,
 .thread .msgs { flex: 1; padding: 22px 30px 10px; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .thread .day { align-self: center; margin: 0 0 2px; font-size: 12px; color: var(--ink-mid); }
 .thread .session-divider, .thread .history-end { align-self: center; margin: 0; color: var(--ink-mid); font: var(--weight-medium) 11px/1.3 var(--font-mono); letter-spacing: 0.02em; text-align: center; }
+/* cas-71af: focus lands here when the last Load earlier hides. */
+.thread .history-end:focus-visible, .thread .msgs [data-key]:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; border-radius: 4px; }
 .thread .session-divider { padding: 5px 12px; border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-pill); background: color-mix(in srgb, var(--panel) 72%, transparent); }
 .thread .history-end { padding: 8px 0 2px; font-family: var(--font-ui); font-weight: var(--weight-regular); }
 .thread .turn { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; max-width: 70%; min-width: 0; }
@@ -3214,6 +3374,18 @@ dialog form > *,
  * critical red (--warn-text is text-grade in both schemes), with Retry only. */
 .thread .turn.you .bub[data-state="unconfirmed"] { border-color: var(--warn-text); }
 .thread .conversation-unconfirmed b, .thread .conversation-unconfirmed .warn { color: var(--warn-text); }
+/* Journey F10: once the supervisor has replied since, the unconfirmed send is
+ * a settled record: a quiet --line-strong outline, the label in --ink-mid,
+ * no warning glyph and no Retry. */
+.thread .turn.you .bub[data-state="unconfirmed"][data-settled="true"] { border-color: var(--line-strong); }
+.thread .conversation-unconfirmed.conversation-settled b { color: var(--ink-mid); }
+/* cas-470e: the settled card's way to resend is secondary to the record it
+ * sits on: a text-weight "Send again" in --ink-mid, underlined, no pill, so it
+ * never reads as the primary Retry it replaced. Same 32px (44px touch) target. */
+.thread .conversation-actions-quiet { margin-top: 4px; }
+.thread .conversation-send-again { min-height: 32px; padding: 0 4px; border: 0; background: transparent; color: var(--ink-mid); font: var(--weight-medium) 13px/1.2 var(--font-ui); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; cursor: pointer; }
+.thread .conversation-send-again:hover { color: var(--ink); }
+.thread .conversation-send-again:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; border-radius: 4px; }
 /* F6: once its edited version is sent, a refused send is only a record — a
  * quiet dashed outline in --line-strong, its text clamped to one line, the
  * "Not sent · replaced by your edit" line, and no actions. */
@@ -3230,11 +3402,15 @@ dialog form > *,
 .thread .conversation-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 10px; }
 .thread .conversation-edit, .thread .conversation-retry, .thread .conversation-take-control { min-height: 32px; padding: 0 14px; border-radius: 999px; border: 1.5px solid var(--line-strong); background: transparent; color: var(--ink); font: var(--weight-medium) 13px/1.2 var(--font-ui); cursor: pointer; }
 .thread .conversation-edit:hover, .thread .conversation-retry:hover, .thread .conversation-take-control:hover { border-color: var(--ink); }
+/* cas-88d86 QA F02: "Waiting for <device>" is not pressable, so it does not look pressable. */
+.thread .conversation-take-control[aria-disabled="true"] { cursor: default; }
+.thread .conversation-take-control[aria-disabled="true"]:hover { border-color: var(--line-strong); }
 .thread .conversation-edit:focus-visible, .thread .conversation-retry:focus-visible, .thread .conversation-take-control:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 /* cas-8e0a: on a phone or any touch screen the message's actions are 44px
  * targets (WCAG 2.5.5); 32px stays for a mouse on a wide screen. */
 @media (max-width: 53rem), (pointer: coarse) {
   .thread .conversation-edit, .thread .conversation-retry, .thread .conversation-take-control { min-height: 44px; padding: 0 18px; }
+  .thread .conversation-send-again { min-height: 44px; padding: 0 8px; }
 }
 /* coalesced statuses — one quiet box, never a ledger. Long or ask-bearing
  * statuses never land here (thread-model foldsAsStatus); what does is clamped
@@ -3243,6 +3419,13 @@ dialog form > *,
  * fourth line never peeks through. */
 .thread .coalesce { align-self: flex-start; max-width: 100%; background: var(--sup-bg); color: var(--ink-mid); border-radius: 16px; padding: 10px 16px 0; border-bottom: 10px solid transparent; font-size: 13px; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
 .thread .coalesce[data-expanded="true"] { display: block; -webkit-line-clamp: none; line-clamp: none; overflow: visible; }
+/* Forced colours repaint a transparent border in the text colour, which drew
+   a 10px bar under every coalesced line (journey F11). A system colour is kept
+   as written: Canvas, the fill forced colours give the box, keeps the spacer
+   invisible in light and dark. */
+@media (forced-colors: active) {
+  .thread .coalesce { border-bottom-color: Canvas; }
+}
 .thread .coalesce p { margin: 0; white-space: pre-wrap; }
 .thread .coalesce p + p { margin-top: 6px; }
 .thread .coalesce-expand { min-height: 32px; padding: 0 14px; border: var(--line-width) solid var(--line-strong); border-radius: 999px; background: transparent; color: var(--ink); font: var(--weight-medium) 13px/1.2 var(--font-ui); }
@@ -3288,6 +3471,21 @@ dialog form > *,
 .obj.t-a .obj-foot button.chip:focus-visible { outline-color: var(--tray-focus); }
 .obj.t-a.blk .obj-body { border-left-color: var(--crit-edge); background: var(--crit-tint); color: var(--crit-tint-fg); }
 .obj.t-a.blk .obj-foot { display: block; padding: 0 9px 9px 5px; border-left-color: var(--crit-edge); background: var(--crit-tint); }
+/* A waiting blocker says how it clears (journey F12). */
+.obj.t-a.blk .blk-hint { margin-top: 10px; font: var(--weight-semibold) 12.5px/1.3 var(--font-ui); letter-spacing: 0.01em; }
+/* An answered question is handled: it quiets to the supervisor's colour and
+   keeps only the tick on the chosen answer (journey F12). Only what still
+   waits keeps the attention treatment. */
+.obj.t-a[data-answered="true"] { box-shadow: var(--lift-sup); }
+.obj.t-a[data-answered="true"] .obj-body, .obj.t-a[data-answered="true"] .obj-foot { border-left-color: var(--color-transparent); background: var(--sup-bg); color: var(--sup-fg); }
+.obj.t-a[data-answered="true"] .obj-foot { padding-top: 0; }
+.obj.t-a[data-answered="true"] .obj-foot .chip.sent { flex: 0 1 auto; border-color: var(--line-subtle); background: var(--panel); color: var(--ink); }
+/* cas-71af (aac8 QA F01): an acknowledged blocker is handled too. It quiets
+   the same way and carries a ticked "Acknowledged — you replied" line. */
+.obj.t-a.blk[data-acknowledged="true"] { box-shadow: var(--lift-sup); }
+.obj.t-a.blk[data-acknowledged="true"] .obj-body, .obj.t-a.blk[data-acknowledged="true"] .obj-foot { border-left-color: var(--color-transparent); background: var(--sup-bg); color: var(--sup-fg); }
+.obj.t-a.blk .blk-handled { display: flex; align-items: center; gap: 5px; margin-top: 10px; color: var(--ink-mid); font: var(--weight-medium) 12.5px/1.3 var(--font-ui); }
+.obj.t-a.blk .blk-handled .tick { width: 13px; height: 13px; flex: none; color: currentColor; }
 .pinned-ask .obj.t-a .obj-body { border-left-color: var(--color-transparent); background: var(--ask-bg); color: var(--ask-fg); }
 .pinned-ask .obj.t-a .obj-foot { border-left-color: var(--color-transparent); background: var(--ask-deep); }
 .pinned-ask .obj.t-a .obj-foot .chip { border-color: var(--color-transparent); background: var(--pin-chip-bg); color: var(--pin-chip-fg); }
@@ -3320,6 +3518,65 @@ button.chip:disabled { cursor: default; }
 .pinned-ask { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 10px 30px 12px; background: var(--canvas); color: var(--ink); }
 .pinned-ask[hidden] { display: none; }
 .pinned-label { padding: 0 6px; font: var(--weight-medium) 12px/1.3 var(--font-ui); color: var(--warn-text); letter-spacing: 0.02em; }
+/* ---- Dismissable failed sends and questions (cas-16eed) -------------------
+ * Neither a failed send nor a question may crowd the conversation off a
+ * phone. The pinned question has a head row (label, Collapse, Dismiss) and
+ * folds to a one-line gold bar — the same --ask-bg/--ask-fg pair as the card,
+ * 9:1 in both schemes — while the operator writes on a small screen. Its body
+ * is capped so, open, it never takes the whole thread. Controls are 32px
+ * round icons for a mouse and 44px on touch (below). */
+.pinned-head { display: flex; align-items: center; gap: 2px; align-self: stretch; max-width: min(100%, 560px); }
+.pinned-head .pinned-label { flex: 1; min-width: 0; }
+.pinned-collapse, .pinned-dismiss { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 32px; min-width: 32px; height: 32px; min-height: 32px; padding: 0; border: 0; border-radius: 999px; background: var(--color-transparent); color: var(--ink-mid); cursor: pointer; }
+.pinned-collapse:hover, .pinned-dismiss:hover { background: var(--bg-hover); color: var(--ink); }
+.pinned-collapse:focus-visible, .pinned-dismiss:focus-visible, .pinned-expand:focus-visible, .conversation-unsent:focus-visible, .thread .conversation-dismiss:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.pinned-ask svg.chevron, .pinned-ask svg.close { width: 16px; height: 16px; flex: none; }
+.pinned-bar { display: flex; align-items: center; gap: 4px; align-self: stretch; max-width: min(100%, 560px); }
+.pinned-expand { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; min-height: 40px; padding: 0 14px 0 18px; border: 0; border-radius: 999px; background: var(--ask-bg); color: var(--ask-fg); box-shadow: var(--lift); font: var(--weight-regular) 14px/1.3 var(--font-ui); text-align: left; cursor: pointer; }
+.pinned-expand:hover { box-shadow: var(--lift-strong); }
+.pinned-bar-label { flex: none; font-weight: var(--weight-semibold); }
+.pinned-bar-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Open, the question scrolls inside its card past about a quarter of the screen; the choices stay in view. */
+.pinned-ask .obj-body { max-height: min(18rem, 28dvh); overflow-y: auto; overscroll-behavior: contain; }
+/* Scroll cues: the card's own fill (attached to the content) covers a soft
+   shadow at each end, so the shadow shows only where more text is hidden. */
+.pinned-ask .obj.t-a .obj-body {
+  background:
+    linear-gradient(var(--ask-bg) 30%, var(--color-transparent)) center top / 100% 36px no-repeat local,
+    linear-gradient(var(--color-transparent), var(--ask-bg) 70%) center bottom / 100% 36px no-repeat local,
+    radial-gradient(farthest-side at 50% 0, color-mix(in srgb, var(--ask-fg) 40%, transparent), transparent) center top / 100% 14px no-repeat scroll,
+    radial-gradient(farthest-side at 50% 100%, color-mix(in srgb, var(--ask-fg) 40%, transparent), transparent) center bottom / 100% 14px no-repeat scroll,
+    var(--ask-bg);
+}
+/* Swipe targets keep vertical scrolling and hand sideways movement to the gesture. */
+.pinned-ask, .thread .bub[data-swipe="dismiss"] { touch-action: pan-y; }
+.pinned-ask[data-swiping], .thread .bub[data-swiping] { user-select: none; -webkit-user-select: none; }
+/* Dismiss on a failed send: a quiet × in the card's top corner; the text keeps clear of it. */
+.thread .turn.you .bub[data-swipe="dismiss"] { position: relative; padding-inline-end: 40px; }
+.thread .conversation-dismiss { position: absolute; top: 2px; right: 2px; display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 999px; background: var(--color-transparent); color: var(--ink-mid); cursor: pointer; }
+.thread .conversation-dismiss svg.close { width: 16px; height: 16px; }
+.thread .conversation-dismiss:hover { color: var(--ink); background: var(--bg-hover); }
+/* "1 unsent message · Show": the way back, dashed like the card it restores. */
+.conversation-unsent { display: flex; align-items: center; gap: 6px; min-height: 32px; margin: var(--space-2) auto 0; padding: 0 14px; border: 1.5px dashed var(--crit-bg); border-radius: 999px; background: var(--canvas); color: var(--ink); font: var(--weight-medium) 13px/1.2 var(--font-ui); cursor: pointer; }
+.conversation-unsent[hidden] { display: none; }
+.conversation-unsent svg.warn { width: 14px; height: 14px; flex: none; color: var(--crit-bg); }
+.conversation-unsent-show { color: var(--color-action); font-weight: var(--weight-semibold); }
+.conversation-unsent:hover { background: var(--bg-hover); }
+/* A question that stopped waiting unanswered quiets like an answered one and says why. */
+.obj.t-a[data-retired] { box-shadow: var(--lift-sup); }
+.obj.t-a[data-retired] .obj-body, .obj.t-a[data-retired] .obj-foot { border-left-color: var(--color-transparent); background: var(--sup-bg); color: var(--sup-fg); }
+.obj.t-a[data-retired] .obj-foot { padding-top: 0; }
+.obj.t-a[data-retired] .obj-foot .chip { border-color: var(--line-strong); background: var(--color-transparent); color: var(--ink); }
+.obj.t-a .ask-retired { flex-basis: 100%; margin: 0; padding: 2px 10px 0; color: var(--ink-mid); font: var(--weight-semibold) 12.5px/1.35 var(--font-ui); }
+.obj.t-a.blk .blk-retired { margin-top: 10px; color: var(--ink-mid); font: var(--weight-semibold) 12.5px/1.3 var(--font-ui); }
+@media (max-width: 53rem), (pointer: coarse) {
+  .pinned-collapse, .pinned-dismiss { width: 44px; min-width: 44px; height: 44px; min-height: 44px; }
+  .pinned-expand { min-height: 44px; }
+  .thread .turn.you .bub[data-swipe="dismiss"] { padding-inline-end: 46px; }
+  .thread .conversation-dismiss { top: 0; right: 0; width: 44px; height: 44px; }
+  .conversation-unsent { min-height: 44px; }
+  .pinned-head { margin-block: -6px -4px; }
+}
 .conversation-jump { position: sticky; bottom: var(--space-2); display: block; margin: var(--space-4) auto 0; background: var(--bg-panel); color: var(--color-action); }
 .conversation-jump[hidden] { display: none; }
 /* Mounted above the composer (cas-97ea): an in-flow row that takes space from
@@ -3342,22 +3599,41 @@ button.chip:disabled { cursor: default; }
 .thread .fname { display: block; font: var(--weight-semibold) 14.5px/1.35 var(--font-ui); color: var(--ink); overflow-wrap: anywhere; }
 .thread .fsub { display: flex; align-items: center; gap: 6px; margin-top: 3px; font: var(--weight-regular) 12.5px/1.3 var(--font-ui); color: var(--ink-mid); }
 .thread .fsub:empty { display: none; }
+/* Journey F6: why the file did not open, on the card that was pressed. */
+.thread .fnote { display: block; margin-top: 4px; font: var(--weight-medium) 12.5px/1.35 var(--font-ui); color: var(--state-warn); overflow-wrap: anywhere; text-wrap: pretty; }
 /* An attachment-only turn is its sheet alone; the bubble would be a blank pebble. */
 .thread .bub.bub-empty { display: none; }
 
 /* Nothing waiting: the machine's monogram in its accent, the supervisor's
-   name, one quiet centred line, and the last message as a faint echo. */
-.thread .empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; min-width: 0; padding: 60px 40px; text-align: center; color: var(--ink); }
+   name, one quiet centred line, and the last message as a faint echo. The
+   card spans the thread (align-self: stretch overrides the global .empty
+   place-self), so a one-line ellipsised meta line is bounded by the thread,
+   not widened to its own unbroken length. */
+.thread .empty { flex: 1; align-self: stretch; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; min-width: 0; padding: 60px 40px; text-align: center; color: var(--ink); }
 .thread .empty[hidden], .thread .msgs[hidden] { display: none; }
 .thread .empty .mono { display: flex; align-items: center; justify-content: center; flex: none; width: 76px; height: 76px; border-radius: var(--radius-pill); background: var(--accent, var(--you-bg)); color: var(--accent-fg); font: var(--weight-semibold) 30px/1 var(--font-ui); box-shadow: var(--lift-strong); }
-.thread .empty b { max-width: 100%; font: var(--weight-semibold) 21px/1.2 var(--font-ui); letter-spacing: -0.015em; white-space: normal; overflow-wrap: anywhere; } /* b.codename: wrap, not the codename's nowrap (cas-1334 QA F2) */
-.thread .empty .proj2 { font: var(--weight-regular) 13px/1.3 var(--font-mono); color: var(--ink-mid); overflow-wrap: anywhere; }
-/* The project-led card puts the codename in .proj2; it wraps like the rest of
-   the line, not with the codename's nowrap (cas-1334 QA round 2). */
-.thread .empty .proj2 .codename { white-space: normal; overflow-wrap: anywhere; }
+.thread .empty b { max-width: 100%; font: var(--weight-semibold) 21px/1.2 var(--font-ui); letter-spacing: -0.015em; white-space: normal; overflow-wrap: anywhere; }
+/* A generated codename is never broken at its hyphens (journey F13): as the
+   title (no project) or in the meta line it stays on one line and ellipsises,
+   with the whole name in its title. No sideways scroll (cas-1334 QA F2). */
+.thread .empty b.codename { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.35; }
+.thread .empty .proj2 { max-width: 100%; font: var(--weight-regular) 13px/1.4 var(--font-mono); color: var(--ink-mid); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .thread .empty .proj2:empty { display: none; }
+/* cas-71af (e918 QA F02): the empty card's machine · codename line yields the
+   machine first, as the header does; the codename stays whole. */
+.thread .empty .proj2:has(> .proj2-machine) { display: flex; }
+.thread .empty .proj2-machine { flex: 0 1 auto; min-width: 2ch; overflow: hidden; text-overflow: ellipsis; }
+.thread .empty .proj2-sep { flex: none; white-space: pre; }
+.thread .empty .proj2-machine ~ .codename { flex: none; max-width: calc(100% - 5ch); overflow: hidden; text-overflow: ellipsis; }
+.thread .empty .proj2.machine-squeezed > :is(.proj2-machine, .proj2-sep) { display: none; }
+.thread .empty .proj2.machine-squeezed > .codename { max-width: 100%; }
 .thread .empty .said { margin: 0; max-width: 34ch; color: var(--ink-mid); font-size: 15px; overflow-wrap: anywhere; }
-.thread .empty .said .codename { font: var(--weight-medium) 0.93em/1 var(--font-mono); color: var(--ink); white-space: normal; overflow-wrap: anywhere; }
+/* In the sentence the codename is one unbroken token, capped at 20
+   characters and ellipsised beyond (the 2px keeps a rounded-down 20ch from
+   dropping the 19th character); overflow: clip keeps its text baseline on the
+   sentence's, and .said-who keeps the brackets on its line. */
+.thread .empty .said .said-who { white-space: nowrap; }
+.thread .empty .said .codename { display: inline-block; max-width: min(100%, calc(20ch + 2px)); overflow: clip; text-overflow: ellipsis; white-space: nowrap; vertical-align: baseline; font: var(--weight-medium) 0.93em/1.4 var(--font-mono); color: var(--ink); }
 .thread .empty .quiet { max-width: min(100%, 56ch); background: var(--sup-bg); color: var(--sup-fg); border-radius: 22px; padding: 12px 22px; box-shadow: var(--lift); overflow-wrap: anywhere; }
 .thread .empty .conversation-loading { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px; }
 
@@ -3367,10 +3643,8 @@ button.chip:disabled { cursor: default; }
    attachment transport yet and its title says so. The ids inside are the
    send handler's and the live-region updater's; only the dress changes. */
 /* The field has a floor, min(16rem, 45%), and the send column is `auto` over
-   shrinkable content (cas-1334): a normal "Send to <name>" takes its full
-   width, and only a name too long for the row ellipsises in the button
-   instead of crushing the message field to a sliver. The aria-label keeps
-   the whole name. */
+   shrinkable content (cas-1334). The button reads "Send" (journey F13); its
+   aria-label, "Send to <codename>", keeps the whole name. */
 .conversation-composer { position: relative; display: grid; grid-template-columns: auto minmax(min(16rem, 45%), 1fr) auto; grid-template-areas: "clip field send" "status status status"; align-items: center; column-gap: 11px; row-gap: var(--space-2); padding: 14px 30px 22px; padding-bottom: max(22px, env(safe-area-inset-bottom)); margin: 0; border-top: 0; background: var(--canvas); color: var(--ink); }
 .conversation-composer h2 { margin: 0; } /* .sr-only from dressComposer: the label is for the reader */
 /* Without the attach clip (cas-17e3) the field takes the first column. */
@@ -3442,6 +3716,7 @@ button.chip:disabled { cursor: default; }
 .conversation-context .context-kind { font-weight: var(--weight-semibold); color: var(--ink); }
 .conversation-context .context-jump[data-kind="blocker"] .context-kind { color: var(--warn-text); }
 .conversation-context .context-jump .context-text { color: var(--ink-mid); overflow-wrap: anywhere; }
+.conversation-context .context-jump .context-hint { color: var(--warn-text); font-size: 12px; font-weight: var(--weight-medium); }
 .conversation-context .context-attachment { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "plate name" "plate meta"; column-gap: var(--space-2); align-items: center; }
 .conversation-context .context-plate { grid-area: plate; display: flex; align-items: center; justify-content: center; min-width: 34px; height: 34px; padding: 0 4px; border-radius: 7px; background: var(--crit-bg); color: var(--crit-fg); font: var(--weight-semibold) 9px/1 var(--font-ui); letter-spacing: 0.06em; }
 .conversation-context .context-attachment .context-text { grid-area: name; min-width: 0; overflow-wrap: anywhere; }
@@ -3521,6 +3796,16 @@ button.chip:disabled { cursor: default; }
   .obj-body { padding: 13px 19px 12px; }
   /* 4px of the 19px inset is the tint edge (P9). */
   .obj.t-a .obj-body { padding-left: 15px; }
+}
+/* Below 500px the conversation header drops the machine's OS word before it
+   truncates the supervisor's codename (journey F14); .host-where's title keeps
+   the full label. A generated codename ("patient-pelican-9") beside its
+   machine then fits whole: the meta line is a touch smaller and Terminal a
+   touch narrower. After the phone block so it wins the cascade. */
+@media (max-width: 500px) {
+  .conversation-identity .host-os { display: none; }
+  .conversation-identity .conversation-host { font-size: 11.5px; }
+  #conversation-terminal { padding: 0 6px; }
 }
 @media (max-height: 30rem) {
   .conversation-heading { padding-top: var(--space-1); padding-bottom: var(--space-1); gap: var(--space-1); }

@@ -16,6 +16,7 @@ impl Config {
         let skill_validation = self.skill_validation.clone().unwrap_or_default();
         let skills = self.skills.clone().unwrap_or_default();
         let memory = self.memory.clone().unwrap_or_default();
+        let factory = self.factory();
         vec![
             // Sync section
             ("sync.enabled".to_string(), self.sync.enabled.to_string()),
@@ -140,6 +141,78 @@ impl Config {
                 "qa.telemetry_sweep".to_string(),
                 qa.telemetry_sweep.unwrap_or_default(),
             ),
+            // Factory section (cas-1a05): the keys `get` and `set` accept.
+            (
+                "factory.artifacts_root".to_string(),
+                factory
+                    .artifacts_root
+                    .clone()
+                    .unwrap_or_else(|| FACTORY_ARTIFACTS_ROOT_DEFAULT.to_string()),
+            ),
+            (
+                "factory.message_max_chars".to_string(),
+                factory.message_max_chars.to_string(),
+            ),
+            (
+                "factory.message_max_chars_escalation".to_string(),
+                factory.message_max_chars_escalation.to_string(),
+            ),
+            (
+                "factory.note_max_chars".to_string(),
+                factory.note_max_chars.to_string(),
+            ),
+            (
+                "factory.max_concurrent_builders".to_string(),
+                factory.max_concurrent_builders.to_string(),
+            ),
+            (
+                "factory.worker_build_jobs".to_string(),
+                factory.cargo_build_jobs.clone(),
+            ),
+            (
+                "factory.merge_sweep".to_string(),
+                factory.merge_sweep.to_string(),
+            ),
+            (
+                "factory.merge_sweep_command".to_string(),
+                factory.merge_sweep_command.clone().unwrap_or_default(),
+            ),
+            (
+                "factory.epic_base_branch".to_string(),
+                factory.epic_base_branch.clone().unwrap_or_default(),
+            ),
+            (
+                "factory.merge_sweep_cwd".to_string(),
+                factory.merge_sweep_cwd.clone().unwrap_or_default(),
+            ),
+            (
+                "factory.merge_sweep_timeout_secs".to_string(),
+                factory.merge_sweep_timeout_secs.to_string(),
+            ),
+            (
+                "factory.ai_enrichment.enabled".to_string(),
+                factory.ai_enrichment.enabled.to_string(),
+            ),
+            (
+                "factory.ai_enrichment.endpoint".to_string(),
+                factory.ai_enrichment.endpoint.clone(),
+            ),
+            (
+                "factory.ai_enrichment.provider".to_string(),
+                factory.ai_enrichment.provider.clone(),
+            ),
+            (
+                "factory.ai_enrichment.api_key_env".to_string(),
+                factory.ai_enrichment.api_key_env.clone(),
+            ),
+            (
+                "factory.ai_enrichment.model".to_string(),
+                factory.ai_enrichment.model.clone(),
+            ),
+            (
+                "factory.ai_enrichment.effort".to_string(),
+                factory.ai_enrichment.effort.clone(),
+            ),
             (
                 "qa.independent_pass".to_string(),
                 qa.independent_pass.to_string(),
@@ -158,6 +231,27 @@ impl Config {
                 qa.pass_timeout_mins.to_string(),
             ),
             ("qa.max_rounds".to_string(), qa.max_rounds.to_string()),
+            ("qa.github_status".to_string(), qa.github_status.to_string()),
+            (
+                "qa.deployed_origins".to_string(),
+                qa.deployed_origins.join(","),
+            ),
+            (
+                "qa.preflight_gh_token".to_string(),
+                qa.preflight_gh_token.to_string(),
+            ),
+            (
+                "qa.preflight_env_files".to_string(),
+                qa.preflight_env_files.join(","),
+            ),
+            (
+                "qa.preflight_hook".to_string(),
+                qa.preflight_hook.clone().unwrap_or_default(),
+            ),
+            (
+                "qa.preflight_hook_timeout_secs".to_string(),
+                qa.preflight_hook_timeout_secs.to_string(),
+            ),
             // Dev section
             ("dev.dev_mode".to_string(), dev.dev_mode.to_string()),
             (

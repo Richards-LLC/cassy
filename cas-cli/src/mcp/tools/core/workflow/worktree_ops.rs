@@ -25,6 +25,7 @@ enum BranchCiState {
     Green {
         sha: String,
         url: Option<String>,
+        test_checks: Vec<String>,
     },
     Red {
         sha: String,
@@ -197,7 +198,23 @@ fn classify_branch_ci_response(_branch: &str, sha: &str, output: GhApiOutput) ->
 
     let mut pending = false;
     let mut url = None;
+    let mut observed_checks = Vec::new();
+    let mut test_checks = Vec::new();
+    let mut passed_test_checks = Vec::new();
+    let mut passed_test_url = None;
     for run in runs {
+        if let Some(name) = run.get("name").and_then(serde_json::Value::as_str) {
+            observed_checks.push(name.to_string());
+            if is_test_check_run(run, name) {
+                test_checks.push(name.to_string());
+                if run.get("conclusion").and_then(serde_json::Value::as_str) == Some("success") {
+                    passed_test_checks.push(name.to_string());
+                    if let Some(run_url) = run.get("html_url").and_then(serde_json::Value::as_str) {
+                        passed_test_url = Some(run_url.to_string());
+                    }
+                }
+            }
+        }
         if let Some(run_url) = run.get("html_url").and_then(serde_json::Value::as_str) {
             url = Some(run_url.to_string());
         }
@@ -234,17 +251,52 @@ fn classify_branch_ci_response(_branch: &str, sha: &str, output: GhApiOutput) ->
             };
         }
     }
+    if test_checks.is_empty() {
+        return BranchCiState::Unknown {
+            sha: sha.to_string(),
+            reason: format!(
+                "no test check-runs found; observed: {}",
+                if observed_checks.is_empty() {
+                    "unnamed checks".to_string()
+                } else {
+                    observed_checks.join(", ")
+                }
+            ),
+        };
+    }
     if pending {
         BranchCiState::Pending {
             sha: sha.to_string(),
             url,
         }
+    } else if passed_test_checks.is_empty() {
+        BranchCiState::Unknown {
+            sha: sha.to_string(),
+            reason: format!("test check-runs did not execute successfully: {}", test_checks.join(", ")),
+        }
     } else {
         BranchCiState::Green {
             sha: sha.to_string(),
-            url,
+            url: passed_test_url,
+            test_checks: passed_test_checks,
         }
     }
+}
+
+/// A deployment preview is a check-run, but it is not test evidence. Require
+/// a named validation job before a merge receipt can call CI green.
+fn is_test_check_run(run: &serde_json::Value, name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let app = run.pointer("/app/slug").and_then(serde_json::Value::as_str);
+    if app == Some("vercel") || lower.contains("vercel") || lower.contains("preview") {
+        return false;
+    }
+    [
+        "test", "vitest", "jest", "playwright", "typescript", "typecheck", "lint", "eslint",
+        "clippy", "cargo", "validation", "verify",
+    ]
+    .iter()
+    .any(|term| lower.contains(term))
 }
 
 fn first_stderr_line(stderr: &[u8]) -> String {
@@ -320,12 +372,17 @@ fn redact_stderr_line(line: &str) -> String {
 
 fn describe_branch_ci_state(branch: &str, state: &BranchCiState) -> String {
     let (sha, detail, admission_path, receipt_id) = match state {
-        BranchCiState::Green { sha, url } => (
+        BranchCiState::Green {
+            sha,
+            url,
+            test_checks,
+        } => (
             sha,
             format!(
-                "CI state: green — checks for {sha} passed{}.",
+                "CI state: green — test checks for {sha} passed: {}{}.",
+                test_checks.join(", "),
                 url.as_deref()
-                    .map(|url| format!(": {url}"))
+                    .map(|url| format!(" ({url})"))
                     .unwrap_or_default()
             ),
             "CI check-run (green)",
@@ -565,6 +622,14 @@ pub(crate) fn resolve_worktree_merge_cleanup(
         false
     } else {
         config_cleanup_on_close
+    }
+}
+
+fn worktree_merge_cleanup_note(do_cleanup: bool) -> &'static str {
+    if do_cleanup {
+        " Worktree removed (cleanup=true)."
+    } else {
+        " Worktree preserved for this merge. A later shutdown_workers may remove it when clean and all tasks are terminal; pass cleanup=true to remove it now."
     }
 }
 
@@ -894,6 +959,25 @@ fn worktree_merge_mcp_error(
 /// True when `token` is the System-B worker name (bare or `factory/<name>`).
 fn worker_name_token_matches(token: &str, worker: &str) -> bool {
     token == worker || token.strip_prefix("factory/") == Some(worker)
+}
+
+/// Return the worktree owner and source ref for a System-B merge id.
+fn system_b_merge_source(id: &str, task_id: Option<&str>) -> (String, String) {
+    let token = id.strip_prefix("factory/").unwrap_or(id);
+    if let Some(worker) = task_id.and_then(|task_id| token.strip_suffix(&format!("-{task_id}"))) {
+        if !worker.is_empty() {
+            return (worker.to_string(), format!("factory/{token}"));
+        }
+    }
+    (token.to_string(), format!("factory/{token}"))
+}
+
+/// A branch-only merge request can name its task through the canonical
+/// `factory/<worker>-<task-id>` suffix. The task row still authorizes it.
+fn per_task_merge_identity(id: &str) -> Option<(&str, &str)> {
+    let token = id.strip_prefix("factory/")?;
+    let (worker, suffix) = token.rsplit_once("-cas-")?;
+    (!worker.is_empty() && !suffix.is_empty()).then_some((worker, suffix))
 }
 
 /// Resolve whether an identity token (assignee field or agent id/name) belongs
@@ -2462,6 +2546,42 @@ impl CasCore {
         use crate::worktree::{WorktreeConfig, WorktreeManager};
 
         let cas_root = self.cas_root.clone();
+        let inferred_task_id = if task_id.is_none() {
+            per_task_merge_identity(id).and_then(|(worker, suffix)| {
+                let candidate = format!("cas-{suffix}");
+                self.open_task_store()
+                    .ok()?
+                    .get(&candidate)
+                    .ok()
+                    .filter(|task| task.assignee.as_deref() == Some(worker))
+                    .map(|_| candidate)
+            })
+        } else {
+            None
+        };
+        let task_id = task_id.or(inferred_task_id.as_deref());
+        // cas-bebc (GH #1023 finding 9): never integrate another live factory
+        // session's worker branch or task from this session.
+        let scoped_task =
+            task_id.and_then(|task_id| self.open_task_store().ok()?.get(task_id).ok());
+        if let Some((owner, caller)) = crate::factory_session_scope::foreign_owner_in_store(
+            &cas_root,
+            |agents, caller, now| {
+                crate::factory_session_scope::foreign_owner_of_merge(
+                    agents,
+                    caller,
+                    id,
+                    scoped_task.as_ref(),
+                    now,
+                )
+            },
+        ) {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(owner.refusal(&format!("worktree_merge of {id}"), &caller)),
+                data: None,
+            });
+        }
         let config = Config::load(&cas_root).map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Failed to load config: {e}")),
@@ -2573,6 +2693,18 @@ impl CasCore {
                 data: None,
             });
         }
+        // A factory branch is already unambiguous without task_id. Guard it
+        // before worktree lookup, including when the source was cleaned up.
+        if task_id.is_none()
+            && id.starts_with("factory/")
+            && let Some(refusal) = crate::qa_pass::branch_merge_refusal(&cas_root, &cwd, id)
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(refusal),
+                data: None,
+            });
+        }
 
         let manager_config = WorktreeConfig {
             enabled: wt_config.enabled,
@@ -2605,8 +2737,10 @@ impl CasCore {
                     (wt, false, source_worktree_live, String::new(), false)
                 }
                 None => {
-                    let assignee = id.strip_prefix("factory/").unwrap_or(id);
-                    let path = manager.worktree_path_for_worker(assignee);
+                    // A per-task delivery branch shares the worker's worktree
+                    // path, but has its own Git ref (GH #1040).
+                    let (assignee, source_branch) = system_b_merge_source(id, task_id);
+                    let path = manager.worktree_path_for_worker(&assignee);
                     let source_worktree_live = is_git_worktree(&path);
                     if !source_worktree_live && transactional_delivery.is_none() {
                         return Err(McpError {
@@ -2634,7 +2768,7 @@ impl CasCore {
                         task_store.as_ref(),
                         agent_store.as_ref(),
                         task_id,
-                        assignee,
+                        &assignee,
                         allow_trunk, // NOT force — dirty bypass stays separate (cas-0b32 review P1)
                         || {
                             Config::configured_epic_base_branch(&cwd)
@@ -2651,7 +2785,7 @@ impl CasCore {
                     (
                         crate::types::Worktree::new(
                             format!("system-b-{assignee}"),
-                            format!("factory/{assignee}"),
+                            source_branch,
                             parent_branch,
                             path,
                         ),
@@ -2696,6 +2830,19 @@ impl CasCore {
                 message: Cow::from(message),
                 data: None,
             })?;
+        }
+
+        // GH #1024: callers commonly omit task_id. Resolve the worktree first,
+        // then bind its actual branch to any open QA round before Git can merge.
+        if task_id.is_none()
+            && let Some(refusal) =
+                crate::qa_pass::branch_merge_refusal(&cas_root, &cwd, &worktree.branch)
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(refusal),
+                data: None,
+            });
         }
 
         // A stale System-A row is not a live worktree. Preserve the legacy
@@ -3414,11 +3561,7 @@ impl CasCore {
             String::new()
         };
 
-        let cleanup_note = if do_cleanup {
-            " Worktree removed (cleanup=true)."
-        } else {
-            " Worktree preserved (mid-session merge; pass cleanup=true to remove)."
-        };
+        let cleanup_note = worktree_merge_cleanup_note(do_cleanup);
 
         // cas-5ee0 (GH #137): resolve push state for the non-transactional
         // path (the transactional one already published, before its close).
@@ -3846,6 +3989,50 @@ mod tests {
             pending_receipt.contains("actions/runs/44"),
             "{pending_receipt}"
         );
+    }
+
+    #[test]
+    fn vercel_preview_alone_never_reports_ci_green_gh_1032() {
+        let preview_only = lookup_branch_ci_with("factory/fox", "80ce2914d", |_, _| {
+            gh_output(
+                true,
+                "exit status: 0",
+                br#"{"check_runs":[{"name":"Vercel Preview Comments","app":{"slug":"vercel"},"status":"completed","conclusion":"success","html_url":"https://vercel.com/preview/42"}]}"#,
+                "",
+            )
+        });
+        let receipt = describe_branch_ci_state("factory/fox", &preview_only);
+        assert!(!receipt.contains("CI state: green"), "{receipt}");
+        assert!(receipt.contains("no test check-runs found"), "{receipt}");
+        assert!(receipt.contains("Vercel Preview Comments"), "{receipt}");
+        assert_eq!(admit_branch_ci(&preview_only, false, None), Ok(false));
+
+        let with_tests = lookup_branch_ci_with("factory/fox", "80ce2914d", |_, _| {
+            gh_output(
+                true,
+                "exit status: 0",
+                br#"{"check_runs":[{"name":"Frontend Vitest","app":{"slug":"github-actions"},"status":"completed","conclusion":"success","html_url":"https://github.com/acme/cas/actions/runs/43"},{"name":"TypeScript","app":{"slug":"github-actions"},"status":"completed","conclusion":"success"},{"name":"ESLint","app":{"slug":"github-actions"},"status":"completed","conclusion":"success"},{"name":"Vercel Preview Comments","app":{"slug":"vercel"},"status":"completed","conclusion":"success","html_url":"https://vercel.com/preview/42"}]}"#,
+                "",
+            )
+        });
+        let receipt = describe_branch_ci_state("factory/fox", &with_tests);
+        assert!(receipt.contains("CI state: green"), "{receipt}");
+        assert!(receipt.contains("Frontend Vitest, TypeScript, ESLint"), "{receipt}");
+        assert!(!receipt.contains("passed: Vercel"), "{receipt}");
+        assert!(receipt.contains("Receipt id: https://github.com/acme/cas/actions/runs/43"), "{receipt}");
+        assert!(!receipt.contains("vercel.com"), "{receipt}");
+
+        let skipped_tests = lookup_branch_ci_with("factory/fox", "80ce2914d", |_, _| {
+            gh_output(
+                true,
+                "exit status: 0",
+                br#"{"check_runs":[{"name":"Frontend Vitest","status":"completed","conclusion":"skipped"},{"name":"Vercel Preview Comments","status":"completed","conclusion":"success"}]}"#,
+                "",
+            )
+        });
+        let receipt = describe_branch_ci_state("factory/fox", &skipped_tests);
+        assert!(!receipt.contains("CI state: green"), "{receipt}");
+        assert!(receipt.contains("test check-runs did not execute successfully"), "{receipt}");
     }
 
     #[test]
@@ -4331,6 +4518,31 @@ mod tests {
             "System-B mid-session default must preserve even if config cleanup_on_close=true"
         );
         assert!(!resolve_worktree_merge_cleanup(None, true, false));
+    }
+
+    #[test]
+    fn preserved_merge_receipt_names_shutdown_lifetime_gh_1035() {
+        let note = super::worktree_merge_cleanup_note(false);
+        assert!(note.contains("preserved for this merge"));
+        assert!(note.contains("shutdown_workers may remove it"));
+        assert!(note.contains("clean and all tasks are terminal"));
+        assert!(super::worktree_merge_cleanup_note(true).contains("Worktree removed"));
+    }
+
+    #[test]
+    fn per_task_merge_id_uses_worker_worktree_and_task_branch_gh_1040() {
+        assert_eq!(
+            super::per_task_merge_identity("factory/daring-jay-42-cas-1e7d"),
+            Some(("daring-jay-42", "1e7d")),
+        );
+        assert_eq!(
+            super::system_b_merge_source("factory/daring-jay-42-cas-1e7d", Some("cas-1e7d")),
+            ("daring-jay-42".to_string(), "factory/daring-jay-42-cas-1e7d".to_string()),
+        );
+        assert_eq!(
+            super::system_b_merge_source("factory/daring-jay-42", Some("cas-1e7d")),
+            ("daring-jay-42".to_string(), "factory/daring-jay-42".to_string()),
+        );
     }
 
     #[test]

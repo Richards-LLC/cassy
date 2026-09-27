@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { toastPlacementInThread, toastTopClearOfBanner, type Box } from "./toast-placement";
+import { toastPlacementInThread, toastTopAboveAction, toastTopClearOfBanner, type Box } from "./toast-placement";
 
 const box = (left: number, top: number, width: number, height: number): Box => ({ left, top, width, height, right: left + width, bottom: top + height });
 
@@ -15,6 +15,20 @@ describe("toastTopClearOfBanner (cas-00cc)", () => {
   it("ignores a missing or hidden banner", () => {
     expect(toastTopClearOfBanner(64, box(12, 64, 366, 46), undefined)).toBeUndefined();
     expect(toastTopClearOfBanner(64, box(12, 64, 366, 46), box(0, 0, 0, 0))).toBeUndefined();
+  });
+});
+
+describe("toast below the list brand row (journey F8, dist 3126b032)", () => {
+  // Phone 390: the list's top row (brand + appearance) spans 12–56 px.
+  const brandRow = box(12, 12, 366, 44);
+  it("drops a toast at the phone's top edge below the brand row", () => {
+    expect(toastTopClearOfBanner(12, box(12, 12, 366, 46), brandRow)).toBe(64);
+  });
+  it("leaves the desktop toast alone: the list column is not under it", () => {
+    expect(toastTopClearOfBanner(16, box(1075, 16, 189, 46), box(16, 16, 328, 44))).toBeUndefined();
+  });
+  it("ignores a brand row scrolled off the top", () => {
+    expect(toastTopClearOfBanner(12, box(12, 12, 366, 46), box(12, -80, 366, 44))).toBeUndefined();
   });
 });
 
@@ -38,3 +52,15 @@ describe("toastPlacementInThread (3.30.0 journey F8)", () => {
   });
 });
 
+
+describe("toastTopAboveAction (cas-71af, dfb2 QA F01)", () => {
+  const box = (top: number, height: number, left = 12, width = 366): Box => ({ top, bottom: top + height, left, right: left + width, width, height });
+  it("puts the toast just above the list's bottom action, clear of the title row", () => {
+    expect(toastTopAboveAction(box(0, 46), box(752, 44), box(76, 40))).toBe(752 - 8 - 46);
+  });
+  it("gives up when there is no action on screen or no room below the title row", () => {
+    expect(toastTopAboveAction(box(0, 46), undefined, box(76, 40))).toBeUndefined();
+    expect(toastTopAboveAction(box(0, 46), box(0, 0, 0, 0), box(76, 40))).toBeUndefined();
+    expect(toastTopAboveAction(box(0, 46), box(150, 44), box(76, 40))).toBeUndefined();
+  });
+});

@@ -1,9 +1,12 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { ConversationHistory, RECEIPT_REPLY_GRACE_MS, RECEIPT_TIMEOUT_MS } from "./conversation-history";
 import { ConversationList, conversationRowMarkup, filterConversationRows, truncateConversationPreview, type ConversationRow } from "./conversation-list";
 import { ConversationView } from "./conversation-view";
-import { ATTACH_DISABLED_REASON, ATTACH_SUPPORTED, arrangeConversationShell, conversationNoMatchText, conversationShellMarkup, dressComposer, KEYBOARD_HINT_MEDIA_QUERY } from "./conversation-shell";
+import { applePlatform, appearanceButtonMarkup, ATTACH_DISABLED_REASON, ATTACH_SUPPORTED, arrangeConversationShell, conversationNoMatchText, conversationSearchPlaceholder, conversationShellMarkup, dressComposer, fitMachineLine, hostMarkup, KEYBOARD_HINT_MEDIA_QUERY, paletteShortcutLabel } from "./conversation-shell";
 import { renderConversationFixture } from "../fixtures/conversations";
 import { projectName, projectBadge } from "./cloud-brand";
 
@@ -290,6 +293,22 @@ describe('conversation evidence', () => {
     expect(toggle.querySelector('svg')?.getAttribute('aria-hidden')).toBe('true');
     expect(paired.querySelector('.conversation-sidebar footer #command-palette-toggle')).toBeNull();
   });
+  it('names the palette shortcut the way this keyboard prints it, the same on every surface (journey F16)', () => {
+    expect(applePlatform({ platform: 'Linux x86_64' })).toBe(false);
+    expect(applePlatform({ platform: 'Win32' })).toBe(false);
+    expect(applePlatform({ platform: 'MacIntel' })).toBe(true);
+    expect(applePlatform({ platform: 'iPad' })).toBe(true);
+    expect(applePlatform({ platform: '', userAgentData: { platform: 'macOS' } })).toBe(true);
+    expect(applePlatform({ platform: 'MacIntel', userAgentData: { platform: 'Windows' } })).toBe(false);
+    expect(applePlatform(undefined)).toBe(false);
+    expect(paletteShortcutLabel(false)).toBe('Ctrl K');
+    expect(paletteShortcutLabel(true)).toBe('⌘K');
+    expect(conversationSearchPlaceholder(true, 'Ctrl K')).toBe('Search conversations (Ctrl K)');
+    expect(conversationSearchPlaceholder(true, '⌘K')).toBe('Search conversations (⌘K)');
+    expect(conversationSearchPlaceholder(false, '⌘K')).toBe('Search conversations');
+    expect(appearanceButtonMarkup('⌘K')).toContain('title="Appearance &amp; commands (⌘K twice)"');
+    expect(appearanceButtonMarkup('Ctrl K')).toContain('title="Appearance &amp; commands (Ctrl K twice)"');
+  });
   it('puts a visible "Search conversations (Ctrl K)" field at the top of the list once a machine is paired (journey F8)', () => {
     const paired = document.createElement('div');
     paired.innerHTML = conversationShellMarkup({ selected: false, loaded: true, paired: true, searchQuery: 'gab"ber' });
@@ -395,6 +414,12 @@ describe('conversation evidence', () => {
     expect(header.querySelector('h1 .project-badge')).toBeNull();
     expect(header.textContent?.split('cas-src')).toHaveLength(2);
     expect(header.querySelector('.conversation-host')?.textContent).toBe('Atlas · Linux · patient-pelican-9');
+    // The OS word is its own span, so a phone can drop it before the codename (journey F14).
+    expect(header.querySelector('.host-where .host-os')?.textContent).toBe(' · Linux');
+    // Machine, separator and codename are separate flex items so the machine name yields first (cas-e918 QA F01).
+    expect([...header.querySelector('.host-where')!.children].map((node) => node.className)).toEqual(['host-machine', 'host-sep', 'codename']);
+    expect(header.querySelector('.host-machine')?.textContent).toBe('Atlas · Linux');
+    expect(header.querySelector('.host-where')?.getAttribute('title')).toBe('Atlas · Linux · patient-pelican-9');
     expect(header.querySelector('.conversation-host > .host-where > .codename')?.textContent).toBe('patient-pelican-9');
     expect(header.querySelector('.conversation-host > .host-where + #conversation-connection')).not.toBeNull();
     expect(header.querySelector('#conversation-connection')).not.toBeNull();
@@ -406,7 +431,7 @@ describe('conversation evidence', () => {
   it('dresses the composer as Pebble: pill field, no dead attach clip, send in the accent naming the supervisor', () => {
     const app = document.createElement('div');
     app.innerHTML = '<div class="shell"><div id="pane-grid"></div><div class="message"><h2><label for="message-text">Talk to x</label></h2><div class="operator-thread"></div><textarea id="message-text" placeholder="old"></textarea><div class="composer-actions"><button id="message-mic" type="button" aria-label="Start listening" aria-pressed="false"><svg class="mic-glyph" aria-hidden="true"></svg></button><button id="message-keyboard" type="button">Keyboard</button><button id="message-send" class="primary">Send message</button></div><p id="message-status" class="message-status" role="status" hidden></p></div><div id="status-view"></div><section id="attention-panel" hidden></section></div>';
-    arrangeConversationShell(app, { selected: true, supervisor: 'patient-pelican-9', machineId: 'atlas-linux', loaded: true, paired: true });
+    arrangeConversationShell(app, { selected: true, supervisor: 'patient-pelican-9', projectDir: '/projects/cas-src', machineId: 'atlas-linux', loaded: true, paired: true });
     const composer = app.querySelector<HTMLElement>('#conversation-composer-slot > .message.conversation-composer')!;
     expect(composer).not.toBeNull();
     expect(composer.querySelector('.operator-thread')).toBeNull();
@@ -418,10 +443,11 @@ describe('conversation evidence', () => {
     expect(mic.getAttribute('aria-label')).toBe('Start listening');
     expect(mic.querySelector('.mic-glyph')).not.toBeNull();
     expect(mic.textContent).toBe('');
-    expect(composer.querySelector<HTMLTextAreaElement>('#message-text')?.placeholder).toBe('Message patient-pelican-9');
+    expect(composer.querySelector<HTMLTextAreaElement>('#message-text')?.placeholder).toBe('Message the cas-src supervisor');
     const send = composer.querySelector<HTMLButtonElement>('#message-send')!;
     expect(send.classList.contains('send')).toBe(true);
-    expect(send.textContent).toBe('Send to patient-pelican-9');
+    expect(send.textContent).toBe('Send');
+    expect(send.getAttribute('aria-label')).toBe('Send to patient-pelican-9');
     expect(send.querySelector('.send-glyph')).not.toBeNull();
     expect(app.querySelector('.conversation-shell')?.classList.contains('machine-accent-0')).toBe(true);
     // Dressing twice (every re-render) never stacks a second clip or label.
@@ -479,7 +505,8 @@ it('routes correlated daemon, legacy Hub and multiplex Hub rejections to the add
   internals.handleDaemonObject('a', { Error: { client_ref: 'daemon', message: 'Refused by daemon' } });
   internals.handleDaemonObject('a', { error: 'forbidden', client_ref: 'legacy' });
   await internals.handleMachineMessage(JSON.stringify({ channel: 'pty:b', error: { code: 'forbidden', client_ref: 'mux' } }));
-  expect(onMessageRejected.mock.calls).toEqual([['a', 'daemon', 'Refused by daemon'], ['a', 'legacy', 'forbidden'], ['b', 'mux', 'forbidden']]);
+  const forbidden = { code: 'forbidden', retryable: false };
+  expect(onMessageRejected.mock.calls).toEqual([['a', 'daemon', 'Refused by daemon'], ['a', 'legacy', 'forbidden', forbidden], ['b', 'mux', 'forbidden', forbidden]]);
   expect(onSocketError).not.toHaveBeenCalled();
 });
 
@@ -494,4 +521,49 @@ it('retains a destination until a correlated reply or refusal settles each send'
   expect(history.hasPending()).toBe(false);
   history.submit('refused', 'supervisor', 'instruction'); history.reject('refused', 'no access');
   expect(history.hasPending()).toBe(false);
+});
+
+describe("hostMarkup (journey F14)", () => {
+  it("wraps only a trailing OS word, and escapes the label", () => {
+    expect(hostMarkup("Studio Mac · macOS")).toBe('Studio Mac<span class="host-os"> · macOS</span>');
+    expect(hostMarkup("Forge build box · Linux")).toBe('Forge build box<span class="host-os"> · Linux</span>');
+    expect(hostMarkup("hub · staging")).toBe("hub · staging");
+    expect(hostMarkup("pippenz-desktop")).toBe("pippenz-desktop");
+    expect(hostMarkup("<b> · Windows")).toBe('&lt;b&gt;<span class="host-os"> · Windows</span>');
+  });
+  it("lets the machine name ellipsise before the codename at every width", () => {
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
+    expect(css).toContain(".conversation-identity .host-machine { flex: 0 1 auto; min-width: 2ch; overflow: hidden; text-overflow: ellipsis; }");
+    expect(css).toContain(".conversation-identity .host-machine ~ .codename { flex: none; max-width: calc(100% - 5ch); overflow: hidden; text-overflow: ellipsis; }");
+  });
+  it("hides the OS word below 500px, after the phone block in the cascade", () => {
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
+    const rule = css.indexOf("@media (max-width: 500px) {\n  .conversation-identity .host-os { display: none; }");
+    expect(rule).toBeGreaterThan(css.indexOf("  .conversation-identity .host-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; }\n  #conversation-connection"));
+  });
+});
+
+describe("fitMachineLine (cas-71af, e918 QA F01)", () => {
+  const line = (codenameWidth: number) => {
+    const where = document.createElement("span"); where.className = "host-where";
+    where.innerHTML = '<span class="host-machine">Daniel\'s MacBook Pro</span><span class="host-sep"> · </span><span class="codename">vigilant-kingfisher-12</span>';
+    const codename = where.querySelector<HTMLElement>(".codename")!;
+    codename.style.fontSize = "10px";
+    Object.defineProperty(codename, "scrollWidth", { configurable: true, get: () => codenameWidth });
+    document.body.append(where);
+    return where;
+  };
+  it("drops the machine and separator when they cannot keep 2ch beside the whole codename", () => {
+    // 5ch at 10px mono is 30px.
+    const where = line(132);
+    fitMachineLine(where, 150);
+    expect(where.classList.contains("machine-squeezed")).toBe(true);
+    fitMachineLine(where, 170);
+    expect(where.classList.contains("machine-squeezed")).toBe(false);
+  });
+  it("hides it in the stylesheet, header and empty card alike, and gives the codename the line", () => {
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
+    expect(css).toContain(".conversation-identity .host-where.machine-squeezed > :is(.host-machine, .host-sep) { display: none; }");
+    expect(css).toContain(".thread .empty .proj2.machine-squeezed > :is(.proj2-machine, .proj2-sep) { display: none; }");
+  });
 });

@@ -1000,6 +1000,7 @@ fn host_checks(current: Option<&Path>) -> Vec<Check> {
         host_known_repos_check(),
         host_hub_service_check(),
         host_hub_transport_check(),
+        host_hub_audit_check(),
     ];
     #[cfg(feature = "mcp-proxy")]
     checks.push(host_proxy_check());
@@ -1120,7 +1121,9 @@ fn install_parity_check(reports: &[(String, crate::builtins::InstallParity)]) ->
 
 fn host_hub_service_check() -> Check {
     match crate::cli::hub_service::doctor_warning() {
-        Ok(Some(warning)) => Check::new("hub service", CheckStatus::Warning, warning),
+        // cas-621ec: an inactive installed service means nothing restarts the
+        // hub after a crash or reboot; the message carries the fix command.
+        Ok(Some(finding)) => Check::new("hub service", CheckStatus::Error, finding),
         Ok(None) => Check::new(
             "hub service",
             CheckStatus::Ok,
@@ -1212,6 +1215,28 @@ fn host_hub_transport_check() -> Check {
         },
         report.message_with_remedy(),
     )
+}
+
+/// cas-0140: a hub whose audit writer fails refuses every audited request,
+/// and the only sign used to be an audit log that stopped growing.
+fn host_hub_audit_check() -> Check {
+    let paths = match crate::hub::HubRuntimePaths::default_for_user() {
+        Ok(paths) => paths,
+        Err(error) => {
+            return Check::new("hub audit log", CheckStatus::Warning, format!("cannot locate hub runtime: {error}"));
+        }
+    };
+    hub_audit_check_for(paths.root(), chrono::Utc::now())
+}
+
+fn hub_audit_check_for(root: &Path, now: chrono::DateTime<chrono::Utc>) -> Check {
+    let report = crate::hub::audit_writer_report(root, now);
+    let status = match report.status {
+        "failing" => CheckStatus::Error,
+        "unknown" => CheckStatus::Warning,
+        _ => CheckStatus::Ok,
+    };
+    Check::new("hub audit log", status, report.message)
 }
 
 #[cfg(feature = "mcp-proxy")]
@@ -3291,10 +3316,19 @@ pub(crate) fn cloud_row_remediation_summary(
     let mut message = String::new();
     if !report.unattributed.is_empty() || quarantined > 0 {
         message.push_str(&format!(
-            ". unattributed: {} row(s) ({} open), {quarantined} quarantined locally — quarantined rows are hidden from the board and never pushed, and the row itself is untouched; run `cas doctor --fix --yes` to quarantine open rows (the focused form is `cas doctor --fix-cloud-rows --yes`, and reverse it with `cas doctor --release-cloud-rows --yes`; use `cas cloud purge-foreign --dry-run` only to inspect foreign cloud rows)",
+            ". unattributed: {} row(s) ({} open), {quarantined} quarantined locally — quarantined rows are hidden from the board and never pushed, and the row itself is untouched",
             report.unattributed.len(),
             report.unattributed_open(),
         ));
+        if report.unattributed_open() > quarantined {
+            message.push_str("; run `cas doctor --fix --yes` to quarantine remaining open rows (the focused form is `cas doctor --fix-cloud-rows --yes`, and reverse it with `cas doctor --release-cloud-rows --yes`)");
+        } else {
+            message.push_str("; the quarantine count already meets the open-row count, so `cas doctor --fix --yes` may have no work; review the remaining rows with `cas doctor --foreign-rows`");
+            if quarantined > 0 {
+                message.push_str("; reverse the quarantine with `cas doctor --release-cloud-rows --yes` if those rows belong on this board");
+            }
+        }
+        message.push_str("; use `cas cloud purge-foreign --dry-run` only to inspect foreign cloud rows");
     }
     if !report.collisions.is_empty() {
         message.push_str(&format!(
@@ -4773,10 +4807,18 @@ fn format_history_source_error(source: &str, error: &str) -> String {
                 truncate(error, 100)
             );
         }
-        return format!(
-            "github: {}. Run `gh auth login`",
-            truncate(error, 100)
-        );
+        if lower.contains("not authenticated")
+            || lower.contains("gh auth login")
+            || lower.contains("to get started with github cli")
+            || lower.contains("authentication required")
+            || lower.contains("http 401")
+        {
+            return format!(
+                "github: {}. Supply `GH_TOKEN` or `GITHUB_TOKEN` to the process running the history index (including a daemon started by `cas serve`), then restart that process; alternatively run `gh auth login` as that process's user",
+                truncate(error, 100)
+            );
+        }
+        return format!("github: {}. Check GitHub access and retry the history index", truncate(error, 100));
     }
     format!("{source}: {}", truncate(error, 100))
 }
@@ -5448,6 +5490,31 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    /// cas-0140: doctor errors on a failing hub audit writer and stays OK on a
+    /// log that is merely quiet.
+    #[test]
+    fn hub_audit_check_errors_only_on_a_recorded_writer_failure() {
+        let temp = TempDir::new().unwrap();
+        let now = chrono::Utc::now();
+        fs::write(temp.path().join(crate::hub::AUDIT_LOG_FILE), b"{}\n").unwrap();
+        let quiet = hub_audit_check_for(temp.path(), now + chrono::Duration::days(2));
+        assert!(matches!(quiet.status, CheckStatus::Ok), "{}", quiet.message);
+        assert!(quiet.message.starts_with("last row 2d ago"), "{}", quiet.message);
+        let failure = crate::hub::AuditHealth {
+            failing_since: now,
+            last_failure_at: now,
+            failures: 1,
+            last_action: "websocket_mutation".into(),
+            last_error: "No space left on device".into(),
+        };
+        fs::write(temp.path().join(crate::hub::AUDIT_HEALTH_FILE), serde_json::to_vec(&failure).unwrap()).unwrap();
+        let failing = hub_audit_check_for(temp.path(), now);
+        assert!(matches!(failing.status, CheckStatus::Error));
+        assert!(failing.message.contains("1 failure, last on websocket_mutation") && failing.message.contains("No space left"), "{}", failing.message);
+        fs::write(temp.path().join(crate::hub::AUDIT_HEALTH_FILE), b"not json").unwrap();
+        assert!(matches!(hub_audit_check_for(temp.path(), now).status, CheckStatus::Warning));
+    }
+
     /// cas-3a90: pulled rows this project didn't author are counted per type;
     /// an empty ledger adds no row to the report.
     #[test]
@@ -5962,7 +6029,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_changelog_is_info_and_github_auth_has_one_command() {
+    fn missing_changelog_is_info_and_github_auth_names_indexer_environment() {
         let check = history_index_check(HistoryIndexHealth {
             failing_sources: vec![
                 (
@@ -5976,7 +6043,8 @@ mod tests {
 
         assert!(matches!(check.status, CheckStatus::Warning));
         assert!(
-            check.message.contains("Run `gh auth login`"),
+            check.message.contains("`GH_TOKEN` or `GITHUB_TOKEN`")
+                && check.message.contains("cas serve"),
             "{}",
             check.message
         );
@@ -5988,6 +6056,10 @@ mod tests {
             ..healthy_history()
         });
         assert!(matches!(changelog_only.status, CheckStatus::Info));
+
+        let rate_limit = format_history_source_error("github", "GraphQL rate limit exceeded");
+        assert!(!rate_limit.contains("gh auth login"), "{rate_limit}");
+        assert!(rate_limit.contains("Check GitHub access"), "{rate_limit}");
     }
 
     #[test]
@@ -6415,8 +6487,9 @@ mod tests {
             check.message
         );
         assert!(
-            check.message.contains("cas doctor --fix-cloud-rows --yes"),
-            "the reversible remedy must be named: {}",
+            check.message.contains("may have no work")
+                && !check.message.contains("run `cas doctor --fix --yes` to quarantine"),
+            "already quarantined rows must not get a false fix recommendation: {}",
             check.message
         );
         assert!(
@@ -6433,6 +6506,51 @@ mod tests {
             !check.message.contains("neither category is deletable"),
             "the pre-remediation wording must be gone: {}",
             check.message
+        );
+    }
+
+    #[test]
+    fn exhausted_quarantine_and_empty_purge_do_not_promise_a_fix_gh_1009() {
+        use crate::cli::cloud::{PurgeDeleteSet, PurgeForeignAnalysis};
+        use crate::cli::foreign_rows::{ForeignRow, ForeignRowReport, UnattributedRow};
+
+        let report = ForeignRowReport {
+            local_project: "gabber-studio".to_string(),
+            peers_compared: vec!["cas-src".to_string()],
+            foreign: vec![ForeignRow {
+                id: "cas-f001".to_string(),
+                title: "Foreign task".to_string(),
+                closed: false,
+                origin_project: None,
+                home_project: "cas-src".to_string(),
+                also_present_in: Vec::new(),
+            }],
+            unattributed: vec![UnattributedRow {
+                id: "cas-u001".to_string(),
+                title: "Already quarantined".to_string(),
+                closed: false,
+                present_in: vec!["cas-src".to_string()],
+            }],
+            ..Default::default()
+        };
+        let analysis = PurgeForeignAnalysis {
+            foreign_task_count: 1,
+            delete_set: PurgeDeleteSet::default(),
+            retained_foreign_tasks: Vec::new(),
+            unattributed_task_count: 1,
+            collision_count: 0,
+        };
+        let check = foreign_rows_check(Ok(&report), Some(&analysis), 1);
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(check.message.contains("purge delete set: 0 task row(s)"));
+        assert!(check.message.contains("may have no work"));
+        assert!(!check.message.contains("then remediate with `cas cloud purge-foreign"));
+
+        let action_available = foreign_rows_check(Ok(&report), Some(&analysis), 0);
+        assert!(
+            action_available.message.contains("run `cas doctor --fix --yes` to quarantine remaining open rows"),
+            "{}",
+            action_available.message
         );
     }
 
@@ -8061,6 +8179,24 @@ mod tests {
             divergent_user_skills_check(&divergent).status,
             CheckStatus::Ok
         ));
+    }
+
+    #[test]
+    fn codex_supervisor_checklist_name_is_intentional_projection_gh_1009() {
+        let home = TempDir::new().unwrap();
+        let claude = home.path().join(".claude").join("skills");
+        let codex = home.path().join(".codex").join("skills");
+        write_skill(
+            &claude,
+            "cas-supervisor",
+            "---\nname: cas-supervisor\nmanaged_by: cas\n---\n\nUse `cas-supervisor-checklist`.\nCall `mcp__cas__factory`.\n",
+        );
+        write_skill(
+            &codex,
+            "cas-supervisor",
+            "---\nname: cas-supervisor\nmanaged_by: cas\n---\n\nUse `cas-codex-supervisor-checklist`.\nCall `mcp__cs__factory`.\n",
+        );
+        assert!(find_divergent_user_skills(&[claude.clone(), codex], &claude).is_empty());
     }
 
     #[test]

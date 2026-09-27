@@ -982,7 +982,7 @@ impl CasCore {
         // task-owned authority.
         let mut inherited_default_note = None;
         let mut inherited_delivery_mode = None;
-        let work_target = epic_id
+        let inherited_from_epic = epic_id
             .as_deref()
             .map(|epic_id| {
                 task_store.get(epic_id).map_err(|error| McpError {
@@ -1019,8 +1019,25 @@ impl CasCore {
                 } else {
                     None
                 }
-            })
-            .or(declared_work_target);
+            });
+        let (work_target, default_target_warning) = if let Some(target) =
+            inherited_from_epic.or(declared_work_target)
+        {
+            (Some(target), None)
+        } else if task_type == TaskType::Epic {
+            // The branch created below is the epic's canonical WorkTarget.
+            // A standalone trunk default here would persist `main` first and
+            // prevent that branch from replacing it (cas-70ec).
+            (None, None)
+        } else {
+            super::repo_context::standalone_work_target(&self.cas_root).map_err(|message| {
+                McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(message),
+                    data: None,
+                }
+            })?
+        };
         let delivery_mode = requested_delivery_mode
             .or(inherited_delivery_mode)
             .unwrap_or_default();
@@ -1169,7 +1186,8 @@ impl CasCore {
                     &task.labels,
                     &task.description,
                 ))
-                .unwrap_or_default();
+                .unwrap_or_default()
+            + default_target_warning.as_deref().unwrap_or_default();
 
         if let Ok(search) = self.open_search_index() {
             let _ = search.index_task(&task);
@@ -1526,6 +1544,15 @@ impl CasCore {
         // cas-619f: a QA work item may never be started by the implementer of
         // the delivery it reviews; starting it claims the round.
         let qa_claim_note = self.claim_qa_round_on_start(&task)?.unwrap_or_default();
+        // cas-31a3: the QA preflight (cas-d5c1) appends its report to this
+        // task's notes in the store. The start writes `task` back below, so
+        // take the notes as they are now; the copy read above would overwrite
+        // the ready report with the notes from before it.
+        if !qa_claim_note.is_empty()
+            && let Ok(fresh) = task_store.get(&req.id)
+        {
+            task.notes = fresh.notes;
+        }
 
         let open_blocker_ids = super::open_blocker_ids(task_store.as_ref(), &req.id)?;
         super::ensure_no_start_gates(task_store.as_ref(), &req.id)?;
@@ -2806,6 +2833,172 @@ mod related_recall_response_tests {
                 .is_empty(),
             "rejected create must not persist a task row"
         );
+    }
+
+    /// GH #1011: a standalone task must carry the integration target from
+    /// creation; otherwise close can silently measure its delivery against main.
+    #[tokio::test]
+    async fn standalone_create_anchors_configured_staging_or_warns_on_detected_main() {
+        use std::process::Command;
+
+        let _env = TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().expect("host registry");
+        let temp = TempDir::new().expect("temporary project");
+        let repo = temp.path();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["config", "user.email", "test@cas.test"],
+            vec!["config", "user.name", "Cassy Test"],
+            vec!["remote", "add", "origin", "https://github.com/example/target-test.git"],
+        ] {
+            assert!(
+                Command::new("git")
+                    .args(&args)
+                    .current_dir(repo)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        std::fs::write(repo.join("seed.txt"), "seed\n").unwrap();
+        for args in [
+            vec!["add", "seed.txt"],
+            vec!["commit", "-q", "-m", "seed"],
+            vec!["branch", "staging"],
+        ] {
+            assert!(
+                Command::new("git")
+                    .args(&args)
+                    .current_dir(repo)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let core = CasCore::with_daemon(repo.to_path_buf(), None, None);
+        let defaulted = text(
+            core
+            .cas_task_create(Parameters(plain_task_request("No implicit main")))
+            .await
+            .expect("detected trunk still permits creation"),
+        );
+        assert!(
+            defaulted.contains("WORK TARGET DEFAULTED")
+                && defaulted.contains("`main`")
+                && defaulted.contains("epic_base_branch"),
+            "{defaulted}"
+        );
+        let store = core.open_task_store().unwrap();
+        let defaulted_task = store
+            .list(None)
+            .unwrap()
+            .into_iter()
+            .find(|task| task.title == "No implicit main")
+            .expect("created task");
+        assert_eq!(
+            defaulted_task
+                .deliverables
+                .work_target
+                .expect("durable detected target")
+                .target_branch,
+            "main"
+        );
+
+        std::fs::create_dir_all(repo.join(".cas")).unwrap();
+        std::fs::write(
+            repo.join(".cas/config.toml"),
+            "[factory]\nepic_base_branch = \"staging\"\n",
+        )
+        .unwrap();
+        let configured = text(
+            core.cas_task_create(Parameters(plain_task_request("Use staging")))
+                .await
+                .expect("configured integration target permits creation"),
+        );
+        assert!(!configured.contains("WORK TARGET DEFAULTED"), "{configured}");
+        let task = store
+            .list(None)
+            .unwrap()
+            .into_iter()
+            .find(|task| task.title == "Use staging")
+            .expect("configured task");
+        assert_eq!(
+            task.deliverables
+                .work_target
+                .expect("durable target")
+                .target_branch,
+            "staging"
+        );
+    }
+
+    #[tokio::test]
+    async fn standalone_create_in_fresh_git_init_warns_without_blocking() {
+        let temp = TempDir::new().expect("temporary project");
+        let repo = temp.path();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q", "-b", "main"])
+                .current_dir(repo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let core = CasCore::with_daemon(repo.to_path_buf(), None, None);
+        let receipt = text(
+            core.cas_task_create(Parameters(plain_task_request("Fresh project task")))
+                .await
+                .expect("missing commit and origin must not block task creation"),
+        );
+        assert!(receipt.contains("WORK TARGET UNRESOLVED"), "{receipt}");
+        assert!(receipt.contains("epic_base_branch"), "{receipt}");
+        assert!(receipt.contains("target_branch"), "{receipt}");
+        let task = core
+            .open_task_store()
+            .unwrap()
+            .list(None)
+            .unwrap()
+            .pop()
+            .expect("task persisted");
+        assert!(task.deliverables.work_target.is_none());
+
+        std::fs::create_dir_all(repo.join(".cas")).unwrap();
+        std::fs::write(
+            repo.join(".cas/config.toml"),
+            "[factory]\nepic_base_branch = \"bad..branch\"\n",
+        )
+        .unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args([
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://github.com/example/fresh-project.git",
+                ])
+                .current_dir(repo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let invalid_target_receipt = text(
+            core.cas_task_create(Parameters(plain_task_request("Invalid target task")))
+                .await
+                .expect("invalid configured target must not block task creation"),
+        );
+        assert!(
+            invalid_target_receipt.contains("WORK TARGET UNRESOLVED")
+                && invalid_target_receipt.contains("target_branch"),
+            "{invalid_target_receipt}"
+        );
+        let invalid_target_task = core
+            .open_task_store()
+            .unwrap()
+            .list(None)
+            .unwrap()
+            .into_iter()
+            .find(|task| task.title == "Invalid target task")
+            .expect("task persisted despite invalid target");
+        assert!(invalid_target_task.deliverables.work_target.is_none());
     }
 
     #[tokio::test]

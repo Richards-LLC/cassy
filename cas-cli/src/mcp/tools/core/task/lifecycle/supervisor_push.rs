@@ -398,6 +398,49 @@ pub(crate) fn queue_auto_unblock_worker_wake(
     })
 }
 
+/// GH #1036: the verdict is durable before this is called. Wake the owning
+/// worker once per approved dispatch so an early close retry cannot leave the
+/// task waiting forever. The ordinary prompt queue also wakes an idle pane.
+pub(crate) fn queue_approved_verification_close_retry(
+    cas_root: &Path,
+    task: &cas_types::Task,
+    dispatch_id: &str,
+) -> Result<Option<i64>, String> {
+    if task.is_terminal() || !matches!(task.status, TaskStatus::InProgress | TaskStatus::AwaitingMerge) {
+        return Ok(None);
+    }
+    let AutoUnblockWorkerTarget::Worker(worker_name) = auto_unblock_worker_target(cas_root, task)? else {
+        return Ok(None);
+    };
+    let queue = crate::store::open_prompt_queue_store(cas_root)
+        .map_err(|error| format!("verification close-retry queue open failed: {error}"))?;
+    let factory_session = std::env::var("CAS_FACTORY_SESSION")
+        .ok()
+        .filter(|session| !session.trim().is_empty());
+    let key = format!("verification-approved-close:{dispatch_id}:worker:{worker_name}");
+    let prompt = format!(
+        "Verification approved for task {} (dispatch {dispatch_id}). Retry task close id={} now; the verdict is recorded.",
+        task.id, task.id
+    );
+    let summary = format!("Verification approved: retry close {}", task.id);
+    let result = queue.enqueue_idempotent(
+        "supervisor",
+        &worker_name,
+        &prompt,
+        factory_session.as_deref(),
+        Some(&summary),
+        Some(cas_store::NotificationPriority::Normal),
+        &key,
+        Some(&cas_store::QueueOrigin::Daemon),
+    ).map_err(|error| format!("verification close-retry enqueue failed: {error}"))?;
+    let prompt_id = match result {
+        cas_store::EnqueueIdempotentResult::Created(id)
+        | cas_store::EnqueueIdempotentResult::AlreadyExists(id) => id,
+    };
+    crate::ui::factory::daemon::runtime::delivery::wake_daemon_after_enqueue(cas_root);
+    Ok(Some(prompt_id))
+}
+
 /// Truthful repair guidance after task mutation succeeded but lifecycle push failed.
 ///
 /// Never claims that re-running the task operation is safe — status may already
@@ -857,7 +900,7 @@ pub fn emit_qa_dispatch_handoff(
     deadline: DateTime<Utc>,
     implementer: &str,
     reasons: &str,
-    merged_into: Option<&str>,
+    location: crate::prompt_revalidation::QaDeliveryLocation<'_>,
 ) -> Result<(), String> {
     let body = crate::prompt_revalidation::qa_dispatch_envelope(
         pass_id,
@@ -868,7 +911,7 @@ pub fn emit_qa_dispatch_handoff(
         &deadline.to_rfc3339(),
         implementer,
         reasons,
-        merged_into,
+        location,
     );
     let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
     let source = format!("{QA_DISPATCH_SOURCE_PREFIX}{pass_id}");
@@ -1448,6 +1491,49 @@ mod tests {
                 .notes
                 .contains("Auto-unblock wake queued for worker 'quiet-worker'")
         );
+    }
+
+    #[test]
+    fn approved_verification_wakes_worker_once_to_retry_close_gh_1036() {
+        let _env = TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "sess-verdict-wake")]);
+        let temp = TempDir::new().unwrap();
+        let agents = SqliteAgentStore::open(temp.path()).unwrap();
+        agents.init().unwrap();
+        let mut worker = agent_in_session(
+            "verdict-worker-id",
+            "verdict-worker",
+            AgentRole::Worker,
+            "sess-verdict-wake",
+        );
+        worker.status = AgentStatus::Idle;
+        agents.register(&worker).unwrap();
+
+        let mut task = Task::new("cas-verdict-wake".into(), "Approved close".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some("verdict-worker".into());
+        task.pending_verification = false; // verdict transaction already cleared it
+        let first = queue_approved_verification_close_retry(
+            temp.path(), &task, "vdispatch-approved-1",
+        ).unwrap();
+        let repeated = queue_approved_verification_close_retry(
+            temp.path(), &task, "vdispatch-approved-1",
+        ).unwrap();
+        assert_eq!(first, repeated);
+        let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        let rows = queue.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target, "verdict-worker");
+        assert!(rows[0].prompt.contains("Retry task close id=cas-verdict-wake now"));
+        assert!(!rows[0].urgent);
+
+        task.status = TaskStatus::Closed;
+        assert_eq!(
+            queue_approved_verification_close_retry(temp.path(), &task, "vdispatch-approved-2")
+                .unwrap(),
+            None,
+        );
+        assert_eq!(queue.peek_all(10).unwrap().len(), 1);
     }
 
     #[test]

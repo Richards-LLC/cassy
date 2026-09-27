@@ -102,6 +102,29 @@ fn prepare_welcome_for_relay(message: &mut DaemonMessage) -> Option<WelcomePrepa
     })
 }
 
+/// Wire code for a Commander send the hub could not hand to the session
+/// daemon (cas-a0e2). It is retryable: the message never reached the daemon,
+/// so sending it again once the session is back cannot duplicate it.
+pub const UPSTREAM_UNAVAILABLE: &str = "upstream_unavailable";
+
+/// The session has no live daemon upstream right now: none was ever
+/// attached, it is still starting, or it ended and has not reattached.
+/// `send` returns it so the hub can answer [`UPSTREAM_UNAVAILABLE`]
+/// instead of a permission refusal (cas-0978 field evidence: a transient
+/// upstream loss read as "this device isn't the one in control").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpstreamUnavailable {
+    pub reason: &'static str,
+}
+
+impl std::fmt::Display for UpstreamUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.reason)
+    }
+}
+
+impl std::error::Error for UpstreamUnavailable {}
+
 struct UpstreamSlot {
     running: AtomicBool,
     starts: AtomicUsize,
@@ -173,6 +196,11 @@ impl DaemonConnector {
                 if let Err(error) = run_upstream(&session, port, &mux, &events, receiver).await {
                     tracing::warn!(session, %error, "Commander hub daemon upstream closed");
                 }
+                // cas-a0e2: drop the dead channel before the slot reads as
+                // idle, so a send in the gap fails fast as unavailable
+                // instead of writing into a receiver nobody drains, and the
+                // next attach installs a fresh sender.
+                *slot.sender.lock().await = None;
                 slot.running.store(false, Ordering::Release);
                 let diagnostic =
                     diagnose_disconnect(identity.as_ref(), exit_evidence.as_ref()).await;
@@ -190,24 +218,28 @@ impl DaemonConnector {
             .map_or(0, |slot| slot.starts.load(Ordering::Relaxed))
     }
 
+    /// Hand a client message to the session's daemon upstream. Every
+    /// failure is an [`UpstreamUnavailable`] (cas-a0e2), which the hub maps
+    /// to the retryable [`UPSTREAM_UNAVAILABLE`] code.
     pub async fn send(&self, session: &str, message: ClientMessage) -> Result<()> {
+        let unavailable = |reason: &'static str| anyhow::Error::new(UpstreamUnavailable { reason });
         let slot = self
             .slots
             .lock()
             .await
             .get(session)
             .cloned()
-            .context("session has no Commander upstream")?;
+            .ok_or_else(|| unavailable("session has no Commander upstream"))?;
         let sender = slot
             .sender
             .lock()
             .await
             .clone()
-            .context("session upstream is not ready")?;
+            .ok_or_else(|| unavailable("session upstream is not ready"))?;
         sender
             .send(message)
             .await
-            .context("session upstream closed")
+            .map_err(|_| unavailable("session upstream closed"))
     }
 }
 
@@ -397,6 +429,65 @@ async fn run_upstream(
 mod tests {
     use super::*;
     use crate::ui::factory::{PaneInfo, PaneKind, SessionState};
+
+    /// cas-a0e2: an upstream that ends drops its sender, and every send
+    /// failure is the retryable [`UpstreamUnavailable`], never a refusal.
+    #[tokio::test]
+    async fn an_ended_upstream_drops_its_sender_and_sends_fail_as_unavailable_cas_a0e2() {
+        let connector = DaemonConnector::new(SessionMultiplexer::new(8), MachineEventBus::new(8));
+        let never_attached = connector
+            .send("factory-a", ClientMessage::Detach)
+            .await
+            .expect_err("no upstream yet");
+        assert_eq!(
+            never_attached.downcast_ref::<UpstreamUnavailable>(),
+            Some(&UpstreamUnavailable {
+                reason: "session has no Commander upstream"
+            })
+        );
+
+        // A daemon port nothing listens on: the upstream ends at once.
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let _viewer = connector
+            .attach("factory-a", port, std::iter::empty::<String>(), None)
+            .await
+            .unwrap();
+        let slot = connector
+            .slots
+            .lock()
+            .await
+            .get("factory-a")
+            .cloned()
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if !slot.running.load(Ordering::Acquire) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the upstream to a closed port ends");
+        assert!(
+            slot.sender.lock().await.is_none(),
+            "an ended upstream must not keep a sender into a dead channel"
+        );
+        let after_end = connector
+            .send("factory-a", ClientMessage::Detach)
+            .await
+            .expect_err("no live upstream");
+        assert_eq!(
+            after_end.downcast_ref::<UpstreamUnavailable>(),
+            Some(&UpstreamUnavailable {
+                reason: "session upstream is not ready"
+            })
+        );
+    }
 
     #[test]
     fn welcome_replay_drops_departed_panes_and_keeps_a_bounded_active_tail() {

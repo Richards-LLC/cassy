@@ -1,9 +1,20 @@
+// @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
 import {
+  ATTACH_QUIET_MS,
+  CONVERSATION_OPENING,
+  attachInProgress,
   connectionTimeline,
+  renderConnectionSurfaceInto,
   connectingView,
   disconnectedView,
   elapsedSeconds,
+  lostConnectionBanner,
+  pairingLostBanner,
+  sessionOutageControlsReason,
+  sessionReconnectingBanner,
+  outageControlsReason,
+  outageRefusal,
   shouldRetainDisconnectedFrame,
   transportFailureNeedsAttention,
   type ConnectionSnapshotView,
@@ -139,5 +150,96 @@ describe("transportFailureNeedsAttention", () => {
 
   it("raises a failure that will not retry", () => {
     expect(transportFailureNeedsAttention(snapshot({ phase: "failed", fatal: true, reason: "This browser cannot open the terminal stream." }))).toBe(true);
+  });
+});
+
+describe("the attach surface opens calmly (journey F3)", () => {
+  const JARGON = /relay|attempt|authori[sz]ation|handshake|heartbeat|resolving|dialing/i;
+  const card = () => { const target = document.createElement("div"); document.body.replaceChildren(target); return target; };
+
+  it("shows only the title during the quiet window", () => {
+    const target = card();
+    renderConnectionSurfaceInto(target, "patient-pelican-9", snapshot({ phase: "auth", stage: "auth" }), {}, startedAt + ATTACH_QUIET_MS - 1, { openingTitle: CONVERSATION_OPENING });
+    expect(target.textContent).toBe("Opening the conversation…");
+    expect(target.querySelector(".connection-timeline")).toBeNull();
+    expect(target.textContent).not.toContain("patient-pelican-9");
+  });
+
+  it("then offers the attempt and stage behind a closed Details, and keeps it open across repaints", () => {
+    const target = card();
+    const state = snapshot({ phase: "dialing", stage: "dialing" });
+    renderConnectionSurfaceInto(target, "patient-pelican-9", state, {}, startedAt + ATTACH_QUIET_MS, { openingTitle: CONVERSATION_OPENING });
+    const details = target.querySelector<HTMLDetailsElement>(":scope > details.connection-details")!;
+    expect(details.open).toBe(false);
+    expect(details.querySelector("summary")?.textContent).toBe("Details");
+    expect(details.querySelector(".connection-timeline")?.textContent).toContain("dialing the relay");
+    // Everything outside Details is free of relay vocabulary.
+    expect(target.querySelector(".terminal-connecting-title")?.textContent).not.toMatch(JARGON);
+    expect(target.querySelector(":scope > .connection-timeline")).toBeNull();
+    details.open = true;
+    renderConnectionSurfaceInto(target, "patient-pelican-9", state, {}, startedAt + 2_000, { openingTitle: CONVERSATION_OPENING });
+    expect(target.querySelector<HTMLDetailsElement>(".connection-details")?.open).toBe(true);
+  });
+
+  it("keeps the terminal's title and offers Retry and Diagnose once the attach is slow", () => {
+    const target = card();
+    renderConnectionSurfaceInto(target, "factory-a", snapshot(), { retry: () => {}, diagnose: () => {} }, startedAt + 15_000);
+    expect(target.querySelector(".terminal-connecting-title")?.textContent).toBe("Connecting to factory-a…");
+    expect(target.querySelector(".connection-details")).not.toBeNull();
+    expect([...target.querySelectorAll(".terminal-connecting-actions button")].map((button) => button.textContent)).toEqual(["Retry", "Diagnose"]);
+  });
+
+  it("shows a failure or a retry with its timeline in the open, not behind Details", () => {
+    for (const state of [snapshot({ phase: "backoff", retryInMs: 2_000 }), snapshot({ phase: "failed", reason: "hub did not answer" }), snapshot({ phase: "failed", fatal: true })]) {
+      expect(attachInProgress(state)).toBe(false);
+      const target = card();
+      renderConnectionSurfaceInto(target, "factory-a", state, {}, startedAt + 100, { openingTitle: CONVERSATION_OPENING });
+      expect(target.querySelector(".connection-details")).toBeNull();
+      expect(target.querySelector(":scope > .connection-timeline")).not.toBeNull();
+      expect(target.querySelector(".terminal-connecting-title")?.textContent).not.toBe(CONVERSATION_OPENING);
+    }
+    expect(attachInProgress(snapshot())).toBe(true);
+  });
+
+  it("keeps a never-live conversation's first retry calm: the opening title, the retry behind Details (cas-28df)", () => {
+    const target = card();
+    const retry = snapshot({ phase: "backoff", stage: "attaching", attempt: 1, retryInMs: 1_000, reason: "Terminal opened but sent no session state within 3s" });
+    renderConnectionSurfaceInto(target, "patient-pelican-9", retry, {}, startedAt + 3_200, { openingTitle: CONVERSATION_OPENING, quietRetry: true });
+    expect(target.querySelector(".terminal-connecting-title")?.textContent).toBe(CONVERSATION_OPENING);
+    expect(target.querySelector(":scope > .connection-timeline")).toBeNull();
+    const details = target.querySelector<HTMLDetailsElement>(":scope > details.connection-details")!;
+    expect(details.open).toBe(false);
+    // The evidence is all still there for whoever asks.
+    expect(details.querySelector(".connection-timeline")?.textContent).toContain("Retry scheduled");
+    expect(details.querySelector(".connection-timeline")?.textContent).toContain("no session state within 3s");
+    expect(target.textContent).not.toMatch(/interrupted|retrying/i);
+    // The 1 Hz repaint keeps keyboard focus on Details instead of dropping it to the page.
+    details.querySelector<HTMLElement>("summary")!.focus();
+    renderConnectionSurfaceInto(target, "patient-pelican-9", { ...retry, retryInMs: 0 }, {}, startedAt + 4_200, { openingTitle: CONVERSATION_OPENING, quietRetry: true });
+    expect(document.activeElement?.tagName).toBe("SUMMARY");
+    expect(target.contains(document.activeElement)).toBe(true);
+    // A fatal failure is never quieted.
+    const fatal = card();
+    renderConnectionSurfaceInto(fatal, "patient-pelican-9", snapshot({ phase: "failed", fatal: true }), {}, startedAt + 3_200, { openingTitle: CONVERSATION_OPENING, quietRetry: true });
+    expect(fatal.querySelector(".terminal-connecting-title")?.textContent).toBe("Connection failed — not retrying.");
+  });
+});
+
+describe("one outage, one vocabulary (journey F9)", () => {
+  it("words the refusal and the disabled controls the way the banner does", () => {
+    expect(lostConnectionBanner("Atlas · Linux", false)).toBe("Lost connection to Atlas · Linux. Reconnecting…");
+    expect(lostConnectionBanner("Atlas · Linux", true)).toBe("Lost connection to Atlas · Linux. Not retrying.");
+    // cas-d15c: one session's link, the machine still connected.
+    expect(sessionReconnectingBanner("cas-src", "Atlas · Linux", false)).toBe("Reconnecting to cas-src… Atlas · Linux is still connected.");
+    expect(sessionReconnectingBanner("cas-src", "Atlas · Linux", true)).toBe("Lost the link to cas-src. Not retrying. Atlas · Linux is still connected.");
+    expect(sessionOutageControlsReason("cas-src")).toBe("Reconnecting to cas-src. Control and interrupts return when it's back.");
+    // A refused pairing does not claim to be reconnecting.
+    expect(pairingLostBanner("Atlas · Linux")).toBe("Atlas · Linux needs pairing again.");
+    expect(outageRefusal("Atlas · Linux")).toBe("Not sent: lost connection to Atlas · Linux. Your message is kept; send it again when it's back.");
+    expect(outageControlsReason("Atlas · Linux")).toBe("Lost connection to Atlas · Linux. Control and interrupts return when it reconnects.");
+    for (const line of [outageRefusal("Atlas · Linux"), outageControlsReason("Atlas · Linux")]) {
+      expect(line.toLowerCase()).toContain("lost connection to atlas · linux");
+      expect(line).not.toMatch(/hub connection|session is live/);
+    }
   });
 });

@@ -42,6 +42,88 @@ pub enum PairingExchangeError {
     Opaque(#[from] anyhow::Error),
 }
 
+/// Why a DPoP-authenticated request was refused (cas-d636). Every refusal
+/// used to be the same bare 401, and hub-web read each one as a revoked
+/// pairing and stopped reconnecting, so a proof that was merely signed before
+/// the phone slept and sent after it woke (soundwave, 2026-09-26 22:58Z)
+/// silenced Commander until a reload. The 401 now names the reason, and only
+/// the definitive ones ask for a new pairing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum AuthRefusal {
+    /// The proof's `iat` is outside the hub's skew window; retry with a fresh proof.
+    #[error("authentication refused: stale proof ({skew_secs}s from the hub clock)")]
+    StaleProof { skew_secs: i64 },
+    /// The proof does not verify for this request (signature, method, target,
+    /// access-token hash or a missing jti); retry with a fresh proof.
+    #[error("authentication refused: invalid proof")]
+    InvalidProof,
+    /// The proof's jti was already used; retry with a fresh proof.
+    #[error("authentication refused: proof replayed")]
+    ProofReplay,
+    /// The proof was signed by a key other than the paired one.
+    #[error("authentication refused: proof key does not match the pairing")]
+    KeyMismatch,
+    /// No paired device holds this credential.
+    #[error("authentication refused: unknown credential")]
+    UnknownCredential,
+    /// The Authorization header is not a DPoP credential.
+    #[error("authentication refused: malformed credential")]
+    MalformedCredential,
+    #[error("authentication refused: pairing revoked")]
+    Revoked,
+    /// Past its absolute lifetime; the credential refresh route may still renew it.
+    #[error("authentication refused: credential expired")]
+    Expired,
+    /// Unused for longer than the idle limit.
+    #[error("authentication refused: credential idle too long")]
+    Idle,
+    #[error("authentication refused: origin does not match the pairing")]
+    OriginMismatch,
+}
+
+impl AuthRefusal {
+    /// The machine-readable reason carried on the 401 and in the audit row.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::StaleProof { .. } => "stale_proof",
+            Self::InvalidProof => "invalid_proof",
+            Self::ProofReplay => "proof_replay",
+            Self::KeyMismatch => "key_mismatch",
+            Self::UnknownCredential => "unknown_credential",
+            Self::MalformedCredential => "malformed_credential",
+            Self::Revoked => "revoked",
+            Self::Expired => "expired",
+            Self::Idle => "idle",
+            Self::OriginMismatch => "origin_mismatch",
+        }
+    }
+
+    /// Whether the same credential can succeed with a fresh proof.
+    pub fn retryable(self) -> bool {
+        matches!(self, Self::StaleProof { .. } | Self::InvalidProof | Self::ProofReplay)
+    }
+
+    /// RFC 9449 `WWW-Authenticate: DPoP error=...`: a proof problem is
+    /// `invalid_dpop_proof`, a credential problem `invalid_token`.
+    pub fn dpop_error(self) -> &'static str {
+        if self.retryable() { "invalid_dpop_proof" } else { "invalid_token" }
+    }
+
+    fn detail(self) -> Option<String> {
+        match self {
+            Self::StaleProof { skew_secs } if skew_secs < 0 => {
+                Some(format!("proof iat {}s behind the hub clock", -skew_secs))
+            }
+            Self::StaleProof { skew_secs } => Some(format!("proof iat {skew_secs}s ahead of the hub clock")),
+            _ => None,
+        }
+    }
+}
+
+fn refusal_of(error: &anyhow::Error) -> AuthRefusal {
+    error.downcast_ref::<AuthRefusal>().copied().unwrap_or(AuthRefusal::InvalidProof)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Scope {
@@ -494,6 +576,111 @@ struct LeaseRecord {
     expires_at: DateTime<Utc>,
 }
 
+/// File beside `audit.jsonl` that names a failing audit writer (cas-0140).
+pub const AUDIT_HEALTH_FILE: &str = "audit-health.json";
+/// The hub's append-only audit log.
+pub const AUDIT_LOG_FILE: &str = "audit.jsonl";
+
+/// A hub audit writer that is failing (cas-0140). An audit row that cannot be
+/// written refuses the request it was guarding, and nothing said so: the
+/// operator only saw requests fail and the log fall silent. The hub records
+/// the failure here (and in its log) on the first failed write and removes
+/// the file on the next successful one, so `cas hub status` and `cas doctor`
+/// can tell a broken writer from a hub that simply had no audited traffic.
+/// The file outlives a restart until a row is written again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditHealth {
+    pub failing_since: DateTime<Utc>,
+    pub last_failure_at: DateTime<Utc>,
+    pub failures: u64,
+    pub last_action: String,
+    pub last_error: String,
+}
+
+/// The persisted audit-writer failure under a hub state root, if any.
+pub fn read_audit_health(root: &Path) -> Result<Option<AuditHealth>> {
+    let path = root.join(AUDIT_HEALTH_FILE);
+    match fs::read(&path) {
+        Ok(bytes) => Ok(Some(
+            serde_json::from_slice(&bytes)
+                .with_context(|| format!("invalid {}", path.display()))?,
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("cannot read {}", path.display())),
+    }
+}
+
+/// What `cas hub status` and `cas doctor` say about the audit writer
+/// (cas-0140). A quiet log is not a failure: a hub with no authenticated
+/// traffic writes no rows. Only a recorded write failure is.
+#[derive(Debug, Clone, Serialize)]
+pub struct AuditWriterReport {
+    /// "ok", "failing" or "unknown" (the failure record could not be read).
+    pub status: &'static str,
+    pub path: String,
+    pub last_row_at: Option<DateTime<Utc>>,
+    pub failure: Option<AuditHealth>,
+    pub message: String,
+}
+
+impl AuditWriterReport {
+    pub fn is_failure(&self) -> bool {
+        self.status == "failing"
+    }
+}
+
+/// Build the audit-writer report for a hub state root.
+pub fn audit_writer_report(root: &Path, now: DateTime<Utc>) -> AuditWriterReport {
+    let log = root.join(AUDIT_LOG_FILE);
+    let last_row_at = fs::metadata(&log)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .map(DateTime::<Utc>::from);
+    let path = log.display().to_string();
+    let quiet = match last_row_at {
+        Some(at) => format!(
+            "last row {} ago; a hub writes rows only for authenticated requests",
+            age_label(now.signed_duration_since(at))
+        ),
+        None => "no audit rows yet".to_owned(),
+    };
+    match read_audit_health(root) {
+        Ok(None) => AuditWriterReport { status: "ok", path, last_row_at, failure: None, message: quiet },
+        Ok(Some(failure)) => AuditWriterReport {
+            status: "failing",
+            message: format!(
+                "writes failing since {} ({} failure{}, last on {}): {}. Audited requests are refused until a row can be written; check that {} is a regular 0600 file you own on a writable disk",
+                failure.failing_since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                failure.failures,
+                if failure.failures == 1 { "" } else { "s" },
+                failure.last_action,
+                failure.last_error,
+                path,
+            ),
+            path,
+            last_row_at,
+            failure: Some(failure),
+        },
+        Err(error) => AuditWriterReport {
+            status: "unknown",
+            message: format!("cannot read the audit failure record: {error:#}; {quiet}"),
+            path,
+            last_row_at,
+            failure: None,
+        },
+    }
+}
+
+fn age_label(age: Duration) -> String {
+    let seconds = age.num_seconds().max(0);
+    match seconds {
+        0..=59 => format!("{seconds}s"),
+        60..=3_599 => format!("{}m", seconds / 60),
+        3_600..=172_799 => format!("{}h", seconds / 3_600),
+        _ => format!("{}d", seconds / 86_400),
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct AuditRecord<'a> {
     timestamp: DateTime<Utc>,
@@ -508,6 +695,11 @@ struct AuditRecord<'a> {
     operator_label: Option<&'a str>,
     controller_origin: Option<&'a str>,
     target_session: Option<&'a str>,
+    /// cas-d636: why an authentication was denied (an AuthRefusal code).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
 }
 
 struct AuthInner {
@@ -516,6 +708,9 @@ struct AuthInner {
     gate: Mutex<()>,
     lock_file: File,
     revocations: broadcast::Sender<String>,
+    /// The writer's failure as last recorded, loaded from AUDIT_HEALTH_FILE at
+    /// open so a success after a restart still clears it (cas-0140).
+    audit_health: Mutex<Option<AuditHealth>>,
 }
 
 struct AuthFileLock<'a>(&'a File);
@@ -573,7 +768,24 @@ impl AuthStore {
             gate: Mutex::new(()),
             lock_file,
             revocations,
+            audit_health: Mutex::new(None),
         }));
+        // A failure recorded by a previous hub process stays visible until
+        // this one writes a row. An unreadable record says nothing true, so
+        // it is dropped rather than left to fail every status check.
+        match read_audit_health(&store.0.root) {
+            Ok(previous) => {
+                *store
+                    .0
+                    .audit_health
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("hub audit health poisoned"))? = previous;
+            }
+            Err(error) => {
+                tracing::warn!(error = %format!("{error:#}"), "dropping an unreadable hub audit failure record");
+                let _ = fs::remove_file(store.0.root.join(AUDIT_HEALTH_FILE));
+            }
+        }
         let state_path = store.0.root.join("auth.json");
         let state = store.lock()?;
         if !state_path.exists() {
@@ -735,10 +947,10 @@ impl AuthStore {
         target_uri: &str,
         now: DateTime<Utc>,
     ) -> Result<AuthContext> {
-        validate_origin(origin)?;
+        validate_origin(origin).map_err(|_| AuthRefusal::OriginMismatch)?;
         let credential = authorization
             .strip_prefix("DPoP ")
-            .context("authentication refused")?;
+            .ok_or(AuthRefusal::MalformedCredential)?;
         let credential_hash = hash_b64(credential.as_bytes());
         let mut state = self.lock()?;
         let device_index = state
@@ -746,16 +958,9 @@ impl AuthStore {
             .iter()
             .position(|device| constant_time_eq(&device.credential_hash, &credential_hash));
         let Some(device_index) = device_index else {
-            anyhow::bail!("authentication refused")
+            return Err(AuthRefusal::UnknownCredential.into());
         };
         let device = state.devices[device_index].clone();
-        anyhow::ensure!(
-            device.revoked_at.is_none()
-                && device.expires_at >= now
-                && device.last_used_at + Duration::days(CREDENTIAL_IDLE_DAYS) >= now
-                && device.controller_origin == origin,
-            "authentication refused"
-        );
         let context = AuthContext {
             device_id: device.device_id.clone(),
             credential_id: device.credential_id.clone(),
@@ -765,6 +970,24 @@ impl AuthStore {
             scopes: device.scopes.clone(),
             request_id: uuid::Uuid::new_v4().to_string(),
         };
+        // cas-d636: each credential refusal names itself, so the client can
+        // tell a revocation (re-pair) from an expiry (refresh).
+        let standing = if device.revoked_at.is_some() {
+            Some(AuthRefusal::Revoked)
+        } else if device.controller_origin != origin {
+            Some(AuthRefusal::OriginMismatch)
+        } else if device.last_used_at + Duration::days(CREDENTIAL_IDLE_DAYS) < now {
+            Some(AuthRefusal::Idle)
+        } else if device.expires_at < now {
+            Some(AuthRefusal::Expired)
+        } else {
+            None
+        };
+        if let Some(refused) = standing {
+            drop(state);
+            self.audit_refusal(&context, "dpop_auth", refused, now)?;
+            return Err(refused.into());
+        }
         let verified = match verify_dpop(
             proof,
             credential,
@@ -777,8 +1000,9 @@ impl AuthStore {
             Ok(verified) => verified,
             Err(error) => {
                 drop(state);
-                self.audit(Some(&context), "denied", "dpop_auth", None, None, now)?;
-                return Err(error);
+                let refused = refusal_of(&error);
+                self.audit_refusal(&context, "dpop_auth", refused, now)?;
+                return Err(refused.into());
             }
         };
         state.dpop_jtis.retain(|entry| entry.expires_at >= now);
@@ -788,8 +1012,8 @@ impl AuthStore {
             .any(|entry| entry.credential_id == device.credential_id && entry.jti == verified.jti)
         {
             drop(state);
-            self.audit(Some(&context), "denied", "dpop_replay", None, None, now)?;
-            anyhow::bail!("authentication refused")
+            self.audit_refusal(&context, "dpop_replay", AuthRefusal::ProofReplay, now)?;
+            return Err(AuthRefusal::ProofReplay.into());
         }
         state.dpop_jtis.push(ReplayRecord {
             credential_id: context.credential_id.clone(),
@@ -816,25 +1040,32 @@ impl AuthStore {
         target_uri: &str,
         now: DateTime<Utc>,
     ) -> Result<DeviceCredential> {
-        validate_origin(origin)?;
+        validate_origin(origin).map_err(|_| AuthRefusal::OriginMismatch)?;
         let credential = authorization
             .strip_prefix("DPoP ")
-            .context("authentication refused")?;
+            .ok_or(AuthRefusal::MalformedCredential)?;
         let credential_hash = hash_b64(credential.as_bytes());
         let mut state = self.lock()?;
         let device_index = state
             .devices
             .iter()
             .position(|device| constant_time_eq(&device.credential_hash, &credential_hash))
-            .context("authentication refused")?;
+            .ok_or(AuthRefusal::UnknownCredential)?;
         let device = state.devices[device_index].clone();
-        anyhow::ensure!(
-            device.revoked_at.is_none()
-                && device.controller_origin == origin
-                && device.last_used_at + Duration::days(CREDENTIAL_IDLE_DAYS) >= now
-                && device.expires_at + Duration::days(CREDENTIAL_REFRESH_GRACE_DAYS) >= now,
-            "authentication refused"
-        );
+        // cas-d636: a refresh refusal names itself too. Past the refresh
+        // grace, an expired credential is as final as a revoked one.
+        if device.revoked_at.is_some() {
+            return Err(AuthRefusal::Revoked.into());
+        }
+        if device.controller_origin != origin {
+            return Err(AuthRefusal::OriginMismatch.into());
+        }
+        if device.last_used_at + Duration::days(CREDENTIAL_IDLE_DAYS) < now {
+            return Err(AuthRefusal::Idle.into());
+        }
+        if device.expires_at + Duration::days(CREDENTIAL_REFRESH_GRACE_DAYS) < now {
+            return Err(AuthRefusal::Expired.into());
+        }
         let verified = verify_dpop(
             proof,
             credential,
@@ -845,12 +1076,13 @@ impl AuthStore {
             now,
         )?;
         state.dpop_jtis.retain(|entry| entry.expires_at >= now);
-        anyhow::ensure!(
-            !state.dpop_jtis.iter().any(|entry| {
-                entry.credential_id == device.credential_id && entry.jti == verified.jti
-            }),
-            "authentication refused"
-        );
+        if state
+            .dpop_jtis
+            .iter()
+            .any(|entry| entry.credential_id == device.credential_id && entry.jti == verified.jti)
+        {
+            return Err(AuthRefusal::ProofReplay.into());
+        }
         state.dpop_jtis.push(ReplayRecord {
             credential_id: device.credential_id.clone(),
             jti: verified.jti,
@@ -1110,6 +1342,31 @@ impl AuthStore {
         target_session: Option<&str>,
         now: DateTime<Utc>,
     ) -> Result<()> {
+        self.write_audit(context, outcome, action, required_scope, target_session, None, now)
+    }
+
+    /// A denied authentication, with its reason (cas-d636).
+    fn audit_refusal(
+        &self,
+        context: &AuthContext,
+        action: &str,
+        refusal: AuthRefusal,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        self.write_audit(Some(context), "denied", action, None, None, Some(refusal), now)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_audit(
+        &self,
+        context: Option<&AuthContext>,
+        outcome: &str,
+        action: &str,
+        required_scope: Option<Scope>,
+        target_session: Option<&str>,
+        refusal: Option<AuthRefusal>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
         let record = AuditRecord {
             timestamp: now,
             machine_id: &self.0.machine_id,
@@ -1123,9 +1380,83 @@ impl AuthStore {
             operator_label: context.map(|value| value.operator_label.as_str()),
             controller_origin: context.map(|value| value.controller_origin.as_str()),
             target_session,
+            reason: refusal.map(AuthRefusal::code),
+            detail: refusal.and_then(AuthRefusal::detail),
         };
-        let _state_lock = self.lock()?;
-        append_private_json_line(&self.0.root.join("audit.jsonl"), &record)
+        let written = self
+            .lock()
+            .and_then(|_state_lock| append_private_json_line(&self.0.root.join(AUDIT_LOG_FILE), &record));
+        self.record_audit_outcome(action, now, written.as_ref().err());
+        written
+    }
+
+    /// The audit writer's health as this process knows it (cas-0140).
+    pub fn audit_health(&self) -> Option<AuditHealth> {
+        self.0
+            .audit_health
+            .lock()
+            .ok()
+            .and_then(|health| health.clone())
+    }
+
+    /// Record whether an audit row was written. A failure is logged at error
+    /// level and persisted to AUDIT_HEALTH_FILE; the first success afterwards
+    /// clears both. Only transitions touch the disk, so a healthy writer adds
+    /// no I/O per row. The health record never refuses the request itself:
+    /// the audit error already does that.
+    fn record_audit_outcome(&self, action: &str, now: DateTime<Utc>, error: Option<&anyhow::Error>) {
+        let Ok(mut health) = self.0.audit_health.lock() else {
+            return;
+        };
+        let path = self.0.root.join(AUDIT_HEALTH_FILE);
+        match error {
+            None => {
+                if health.take().is_some() {
+                    if let Err(remove) = fs::remove_file(&path)
+                        && remove.kind() != std::io::ErrorKind::NotFound
+                    {
+                        tracing::warn!(error = %remove, path = %path.display(), "hub audit writer recovered but its failure record could not be removed");
+                    }
+                    tracing::info!(action, "hub audit writer recovered; rows are being written again");
+                }
+            }
+            Some(error) => {
+                let message = format!("{error:#}");
+                let next = match health.take() {
+                    Some(previous) => AuditHealth {
+                        failing_since: previous.failing_since,
+                        last_failure_at: now,
+                        failures: previous.failures.saturating_add(1),
+                        last_action: action.to_owned(),
+                        last_error: message.clone(),
+                    },
+                    None => AuditHealth {
+                        failing_since: now,
+                        last_failure_at: now,
+                        failures: 1,
+                        last_action: action.to_owned(),
+                        last_error: message.clone(),
+                    },
+                };
+                tracing::error!(action, failures = next.failures, error = %message, "hub audit row could not be written; the audited request is refused");
+                let persisted = serde_json::to_vec_pretty(&next)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|bytes| {
+                        let temporary = self.0.root.join(format!(
+                            ".audit-health.{}.{}.tmp",
+                            std::process::id(),
+                            uuid::Uuid::new_v4()
+                        ));
+                        write_private_file(&temporary, &bytes, true)?;
+                        fs::rename(&temporary, &path)?;
+                        Ok(())
+                    });
+                if let Err(persist) = persisted {
+                    tracing::error!(error = %persist, path = %path.display(), "hub audit failure record could not be written");
+                }
+                *health = Some(next);
+            }
+        }
     }
 
     pub fn ensure_active_context(&self, context: &AuthContext, now: DateTime<Utc>) -> Result<()> {
@@ -1218,32 +1549,47 @@ fn verify_dpop(
     target_uri: &str,
     now: DateTime<Utc>,
 ) -> Result<VerifiedDpop> {
+    let invalid = |_| AuthRefusal::InvalidProof;
     let parts: Vec<&str> = proof.split('.').collect();
-    anyhow::ensure!(parts.len() == 3, "authentication refused");
-    let header: DpopHeader = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[0])?)?;
-    let claims: DpopClaims = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1])?)?;
-    anyhow::ensure!(header.alg == "ES256", "authentication refused");
-    let thumbprint = header.jwk.thumbprint()?;
-    anyhow::ensure!(
-        constant_time_eq(&thumbprint, stored_thumbprint)
-            && constant_time_eq(&thumbprint, &stored_key.thumbprint()?),
-        "authentication refused"
-    );
-    let signature_bytes = URL_SAFE_NO_PAD.decode(parts[2])?;
-    let signature = Signature::from_slice(&signature_bytes).context("authentication refused")?;
+    if parts.len() != 3 {
+        return Err(AuthRefusal::InvalidProof.into());
+    }
+    let header: DpopHeader = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[0]).map_err(invalid)?)
+        .map_err(|_| AuthRefusal::InvalidProof)?;
+    let claims: DpopClaims = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1]).map_err(invalid)?)
+        .map_err(|_| AuthRefusal::InvalidProof)?;
+    if header.alg != "ES256" {
+        return Err(AuthRefusal::InvalidProof.into());
+    }
+    let thumbprint = header.jwk.thumbprint().map_err(|_| AuthRefusal::InvalidProof)?;
+    // A different key cannot become right on retry: the browser lost or
+    // replaced the key it paired with.
+    if !(constant_time_eq(&thumbprint, stored_thumbprint)
+        && constant_time_eq(&thumbprint, &stored_key.thumbprint()?))
+    {
+        return Err(AuthRefusal::KeyMismatch.into());
+    }
+    let signature_bytes = URL_SAFE_NO_PAD.decode(parts[2]).map_err(invalid)?;
+    let signature = Signature::from_slice(&signature_bytes).map_err(|_| AuthRefusal::InvalidProof)?;
     header
         .jwk
-        .validate()?
+        .validate()
+        .map_err(|_| AuthRefusal::InvalidProof)?
         .verify(format!("{}.{}", parts[0], parts[1]).as_bytes(), &signature)
-        .context("authentication refused")?;
-    anyhow::ensure!(
-        claims.htm.eq_ignore_ascii_case(method)
-            && claims.htu == target_uri
-            && constant_time_eq(&claims.ath, &hash_b64(credential.as_bytes()))
-            && (claims.iat - now.timestamp()).abs() <= DPOP_SKEW_SECONDS
-            && !claims.jti.is_empty(),
-        "authentication refused"
-    );
+        .map_err(|_| AuthRefusal::InvalidProof)?;
+    if !(claims.htm.eq_ignore_ascii_case(method)
+        && claims.htu == target_uri
+        && constant_time_eq(&claims.ath, &hash_b64(credential.as_bytes()))
+        && !claims.jti.is_empty())
+    {
+        return Err(AuthRefusal::InvalidProof.into());
+    }
+    // Checked last, so a stale verdict means the proof was otherwise good:
+    // most often signed before the device slept and sent after it woke.
+    let skew_secs = claims.iat - now.timestamp();
+    if skew_secs.abs() > DPOP_SKEW_SECONDS {
+        return Err(AuthRefusal::StaleProof { skew_secs }.into());
+    }
     Ok(VerifiedDpop { jti: claims.jti })
 }
 

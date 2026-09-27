@@ -1,7 +1,9 @@
+import { fitMachineLine } from "./conversation-shell";
 import { machineMonogram } from "./machine-accent";
 import { renderMarkdown } from "./markdown-renderer";
 import { refusal } from "./refusal";
 import { shouldFollowTail } from "./transcript";
+import { bindSwipeDismiss } from "./swipe-dismiss";
 import type { ConversationEvent, ConversationHistory, ConversationSend } from "./conversation-history";
 import type { ArtifactRef, OperatorReply, OperatorTurnKind } from "./types";
 import {
@@ -114,6 +116,12 @@ export interface ConversationViewOptions {
    */
   controlHeld?: () => boolean;
   /**
+   * Whether the conversation's session is live now (cas-d15c). A send that
+   * expired waiting for it then says Retry will go through, instead of
+   * "once the session is live again" under a header that reads Live.
+   */
+  sessionLive?: () => boolean;
+  /**
    * The device holding control when this one cannot take it over. A control
    * refusal then names it and says to take control once it is released, as
    * the composer does (cas-1730, cas-008f N01). Take control stays on the
@@ -139,10 +147,37 @@ export interface ConversationViewOptions {
   loadingHistory?: () => boolean;
   /** The loaded page reaches the beginning of the project history. */
   historyEnd?: () => boolean;
+  /**
+   * The operator dismissed or restored a failed send, or dismissed a question
+   * (cas-16eed). The caller refreshes what reads the history beside the thread
+   * (the list preview, the composer's pointer at the refused message) and
+   * keeps the dismissed questions across a reload.
+   */
+  dismissalsChanged?: () => void;
 }
 
 const TICK = '<svg class="tick" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.6 8.6l3.3 3.3L13.4 4.4"/></svg>';
 /** Warning triangle for a refused send; decorative — the "Not sent" text carries the meaning. */
+const CLOSE = '<svg class="close" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>';
+const CHEVRON_UP = '<svg class="chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10l4-4 4 4"/></svg>';
+const CHEVRON_DOWN = '<svg class="chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg>';
+
+/**
+ * The line the collapsed question bar shows (cas-16eed): the question itself
+ * when the message has one ("open the PR to main and cut a release?" out of
+ * "- **Ask:** open the PR…"), else its first line. Markdown marks and a
+ * leading "Ask:" / "Question:" label are dropped; the bar ellipsises.
+ */
+export function askLine(message: string): string {
+  const lines = message.split(/\r?\n/).map((line) => line
+    .replace(/^\s*(?:[-*•+]|\d+[.)])\s+/, "")
+    .replace(/\*\*|__|`/g, "")
+    .replace(/^\s*(?:ask|question|decision needed|decision)\s*:\s*/i, "")
+    .trim()).filter(Boolean);
+  const question = [...lines].reverse().find((line) => line.endsWith("?"));
+  return question ?? lines[0] ?? "";
+}
+
 const WARN = '<svg class="warn" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 1.9 14.6 13.6H1.4Z"/><path d="M8 6.2v3.4"/><path d="M8 11.7v.1"/></svg>';
 
 /**
@@ -177,12 +212,34 @@ export class ConversationView {
    * thread, so it takes its own row instead of floating over a turn (cas-97ea).
    */
   readonly jump: HTMLButtonElement;
+  /**
+   * "1 unsent message": shown while failed sends are dismissed (cas-16eed).
+   * Mount it above the composer beside Jump to latest; pressing it brings
+   * them back with their Edit and Retry.
+   */
+  readonly unsent: HTMLButtonElement;
   private readonly options: ConversationViewOptions;
+  /**
+   * The pinned question folds to a one-line bar while the operator composes
+   * on a small screen (cas-16eed). `pinnedChoice` is the operator's own
+   * collapse or expand, which wins over that; an expand lasts until the next
+   * time composing starts, a collapse until the question changes.
+   */
+  private composing = false;
+  private pinnedChoice?: { id: number; collapsed: boolean };
   private nodes = new Map<string, HTMLElement>();
   /** Coalesced status lines the operator opened with "Show full update"; survives repaints. */
   private expanded = new Set<string>();
   private following = true;
+  /**
+   * cas-71af (1584 QA F01): Load earlier held focus when pressed. It is
+   * disabled while the page loads and hidden once the last page lands, and
+   * either used to drop focus to the page body.
+   */
+  private loadEarlierFocus = false;
   private pinPending = false;
+  /** The thread's height at the last scroll or resize it saw (cas-16eed). */
+  private lastHeight?: number;
   private disposed = false;
   private resize?: ResizeObserver;
 
@@ -208,25 +265,47 @@ export class ConversationView {
     this.loadEarlier.className = "conversation-load-earlier";
     this.loadEarlier.textContent = "Load earlier";
     this.loadEarlier.hidden = true;
-    this.loadEarlier.onclick = () => this.options.loadEarlier?.();
+    // Asking for older turns is reading, not following the tail: the page
+    // lands above and the turn on screen stays put (journey F7).
+    this.loadEarlier.onclick = () => {
+      this.following = false;
+      this.loadEarlierFocus = this.element.ownerDocument.activeElement === this.loadEarlier;
+      this.options.loadEarlier?.();
+    };
     this.msgs = document.createElement("div"); this.msgs.className = "msgs";
     this.msgs.setAttribute("role", "log");
     this.empty = document.createElement("div"); this.empty.className = "empty"; this.empty.hidden = true;
     this.jump = document.createElement("button"); this.jump.type = "button";
     this.jump.className = "conversation-jump"; this.jump.textContent = "Jump to latest"; this.jump.hidden = true;
     this.jump.onclick = () => { this.following = true; this.update(); this.pin(); };
+    this.unsent = document.createElement("button"); this.unsent.type = "button";
+    this.unsent.className = "conversation-unsent"; this.unsent.hidden = true;
+    this.unsent.onclick = () => this.restoreUnsent();
     this.element.append(...(this.options.header === false ? [] : [this.head]), this.loadEarlier, this.msgs, this.empty, this.jump);
     this.pinned = document.createElement("div"); this.pinned.className = "pinned-ask"; this.pinned.hidden = true;
+    bindSwipeDismiss(this.pinned, { onDismiss: () => { const ask = this.history.pinnedAsk(); if (ask) this.dismissAsk(ask.notification_id, false); } });
     if (this.options.accentClass) this.pinned.classList.add(this.options.accentClass);
     this.pinned.setAttribute("role", "region"); this.pinned.setAttribute("aria-label", `Waiting on you: question from ${supervisor}`);
     this.element.addEventListener("scroll", () => {
       if (this.pinPending) return;
+      // cas-16eed: the phone keyboard shrinks the thread, and the browser's
+      // own scroll adjustment for that lands here before the resize observer
+      // does. A scroll that comes with a height change is layout, not the
+      // reader scrolling away: a thread following its tail keeps following.
+      const height = this.element.clientHeight;
+      if (this.lastHeight !== undefined && height !== this.lastHeight) {
+        this.lastHeight = height;
+        if (this.following) { this.pin(); return; }
+      }
+      this.lastHeight = height;
       this.following = shouldFollowTail(this.element);
       this.jump.hidden = this.following;
     }, { passive: true });
     if (typeof ResizeObserver !== "undefined") {
       this.resize = new ResizeObserver(() => {
         for (const node of this.msgs.querySelectorAll<HTMLElement>(".coalesce-turn")) syncClampPill(node);
+        this.lastHeight = this.element.clientHeight;
+        this.fitEmptyMeta();
         if (this.following) this.pin();
       });
       this.resize.observe(this.element);
@@ -236,12 +315,16 @@ export class ConversationView {
   /** Re-derive the thread from the history; nodes are keyed so grouping survives. */
   update(): void {
     if (this.disposed) return;
+    // Turns added above the reader (Load earlier) must not move what they are
+    // reading (journey F7): remember the first turn on screen and where it sat.
+    const anchor = this.following ? undefined : this.readingAnchor();
     const hasEarlier = this.options.hasEarlier?.() === true;
     const loadingEarlier = this.options.loadingEarlier?.() === true;
     this.loadEarlier.hidden = !hasEarlier;
     this.renderLoadEarlier(loadingEarlier);
     const working = this.options.working?.() === true;
-    const model = threadModel(this.history.events, { working, historyEnd: this.options.historyEnd?.() === true });
+    // A dismissed failed send leaves the thread (cas-16eed); the unsent chip brings it back.
+    const model = threadModel(this.history.visibleEvents(), { working, historyEnd: this.options.historyEnd?.() === true });
     const document = this.element.ownerDocument;
     const next = new Map<string, HTMLElement>();
     const children: HTMLElement[] = [];
@@ -259,8 +342,67 @@ export class ConversationView {
     const same = this.msgs.children.length === children.length && children.every((node, index) => this.msgs.children[index] === node);
     if (!same) this.msgs.replaceChildren(...children);
     this.renderPinned(document);
+    this.renderUnsent();
     this.renderEmpty(model.length === 0, this.options.loadingHistory?.() === true);
+    const held = anchor && this.anchorNode(anchor);
+    if (anchor && held) {
+      // The button sits above every turn, so the browser's own scroll
+      // anchoring has nothing to hold on to; hold the turn ourselves.
+      const drift = held.getBoundingClientRect().top - anchor.top;
+      if (Math.abs(drift) >= 1) this.element.scrollTop += drift;
+    }
     if (this.following && document.getSelection()?.isCollapsed !== false) this.pin();
+    if (this.loadEarlierFocus && !loadingEarlier) this.restoreLoadEarlierFocus(document);
+  }
+
+  /**
+   * Once the page it asked for lands, Load earlier gets its focus back; after
+   * the last page, where it hides, focus goes to the "No earlier history"
+   * line (else the oldest turn) at the top, where the button was. A reader
+   * who moved focus elsewhere meanwhile keeps it there.
+   */
+  private restoreLoadEarlierFocus(document: Document): void {
+    const active = document.activeElement;
+    const lost = !active || active === document.body || active === this.loadEarlier;
+    if (!this.loadEarlier.hidden) {
+      if (!lost) this.loadEarlierFocus = false;
+      else if (active !== this.loadEarlier) this.loadEarlier.focus({ preventScroll: true });
+      return;
+    }
+    this.loadEarlierFocus = false;
+    if (!lost) return;
+    const target = this.msgs.querySelector<HTMLElement>(":scope > .history-end") ?? this.msgs.querySelector<HTMLElement>("[data-key]");
+    if (!target) { this.element.focus({ preventScroll: true }); return; }
+    target.tabIndex = -1;
+    target.focus({ preventScroll: true });
+  }
+
+  /**
+   * The first turn still on screen (by its key), and its top edge, before a
+   * repaint. Keyed bubbles, not top-level items: an older page's turns from
+   * the same sender join the reader's group, which is rebuilt, and an older
+   * page from the same day slots in under the day line, which stays put.
+   */
+  private readingAnchor(): { key?: string; node: HTMLElement; top: number } | undefined {
+    if (this.msgs.hidden) return undefined;
+    const top = this.element.getBoundingClientRect().top;
+    const visible = (node: HTMLElement) => { const box = node.getBoundingClientRect(); return box.height > 0 && box.bottom > top ? box.top : undefined; };
+    for (const node of this.msgs.querySelectorAll<HTMLElement>("[data-key]")) {
+      const at = visible(node);
+      if (at !== undefined) return { key: node.dataset.key, node, top: at };
+    }
+    for (const child of this.msgs.children) {
+      const at = visible(child as HTMLElement);
+      if (at !== undefined) return { node: child as HTMLElement, top: at };
+    }
+    return undefined;
+  }
+
+  private anchorNode(anchor: { key?: string; node: HTMLElement }): HTMLElement | undefined {
+    if (anchor.key !== undefined) {
+      for (const node of this.msgs.querySelectorAll<HTMLElement>("[data-key]")) if (node.dataset.key === anchor.key) return node;
+    }
+    return anchor.node.isConnected ? anchor.node : undefined;
   }
 
   /**
@@ -281,24 +423,138 @@ export class ConversationView {
     this.loadEarlier.replaceChildren(dots, document.createTextNode("Loading earlier…"));
   }
 
-  /** The most recent unanswered ask, pinned above the composer; answering unpins it. */
+  /**
+   * The most recent unanswered ask, pinned above the composer; answering,
+   * dismissing or retiring it unpins it (cas-16eed). Collapsed, it is a
+   * one-line bar naming the question; expanded, the whole card with its
+   * choices. Either way it offers Dismiss, and on a touch screen it swipes off.
+   */
   private renderPinned(document: Document): void {
     const ask = this.history.pinnedAsk();
     const render = ask && turnRenderers.get("ask");
     if (!ask || !render) {
-      this.pinned.hidden = true; this.pinned.replaceChildren(); delete this.pinned.dataset.signature;
+      this.pinned.hidden = true; this.pinned.replaceChildren(); delete this.pinned.dataset.signature; delete this.pinned.dataset.collapsed;
       return;
     }
-    const signature = JSON.stringify([ask.notification_id, ask.message, ask.options]);
+    const collapsed = this.pinnedCollapsed(ask.notification_id);
+    const signature = JSON.stringify([ask.notification_id, ask.message, ask.options, collapsed]);
     if (!this.pinned.hidden && this.pinned.dataset.signature === signature) return;
+    const active = document.activeElement;
+    const hadFocus = active instanceof HTMLElement && this.pinned.contains(active) ? active.className : undefined;
     this.pinned.dataset.signature = signature;
-    const turn: ThreadTurn = { key: `reply:${ask.notification_id}`, side: "supervisor", kind: "ask", event: { kind: "reply", value: ask }, first: true, last: true };
-    const context = this.context(document, turn, ask, true);
-    const object = render(ask, context);
-    object.dataset.kind = "ask"; object.dataset.pinned = "true";
-    const label = document.createElement("span"); label.className = "pinned-label"; label.textContent = "Waiting on you";
-    this.pinned.replaceChildren(label, object);
+    this.pinned.dataset.collapsed = String(collapsed);
+    const dismiss = document.createElement("button"); dismiss.type = "button"; dismiss.className = "pinned-dismiss";
+    dismiss.setAttribute("aria-label", "Dismiss question");
+    dismiss.title = "Dismiss question";
+    dismiss.innerHTML = CLOSE;
+    dismiss.onclick = () => this.dismissAsk(ask.notification_id, true);
+    if (collapsed) {
+      const bar = document.createElement("div"); bar.className = "pinned-bar";
+      const expand = document.createElement("button"); expand.type = "button"; expand.className = "pinned-expand";
+      expand.setAttribute("aria-expanded", "false");
+      const label = document.createElement("span"); label.className = "pinned-bar-label"; label.textContent = "Waiting on you:";
+      const text = document.createElement("span"); text.className = "pinned-bar-text"; text.textContent = askLine(ask.message);
+      const glyph = document.createElement("template"); glyph.innerHTML = CHEVRON_UP;
+      expand.append(label, " ", text, glyph.content.firstElementChild!);
+      expand.title = "Show the question";
+      expand.onclick = () => {
+        this.pinnedChoice = { id: ask.notification_id, collapsed: false };
+        this.renderPinned(document);
+        this.pinned.querySelector<HTMLElement>(".pinned-collapse")?.focus({ preventScroll: true });
+      };
+      bar.append(expand, dismiss);
+      this.pinned.replaceChildren(bar);
+    } else {
+      const turn: ThreadTurn = { key: `reply:${ask.notification_id}`, side: "supervisor", kind: "ask", event: { kind: "reply", value: ask }, first: true, last: true };
+      const context = this.context(document, turn, ask, true);
+      const object = render(ask, context);
+      object.dataset.kind = "ask"; object.dataset.pinned = "true";
+      const head = document.createElement("div"); head.className = "pinned-head";
+      const label = document.createElement("span"); label.className = "pinned-label"; label.textContent = "Waiting on you";
+      const collapse = document.createElement("button"); collapse.type = "button"; collapse.className = "pinned-collapse";
+      collapse.setAttribute("aria-expanded", "true");
+      collapse.setAttribute("aria-label", "Collapse question");
+      collapse.title = "Collapse question";
+      collapse.innerHTML = CHEVRON_DOWN;
+      collapse.onclick = () => {
+        this.pinnedChoice = { id: ask.notification_id, collapsed: true };
+        this.renderPinned(document);
+        this.pinned.querySelector<HTMLElement>(".pinned-expand")?.focus({ preventScroll: true });
+      };
+      head.append(label, collapse, dismiss);
+      this.pinned.replaceChildren(head, object);
+    }
     this.pinned.hidden = false;
+    // A control rebuilt under keyboard focus hands it to its counterpart.
+    if (hadFocus && !this.pinned.contains(document.activeElement)) {
+      [...this.pinned.querySelectorAll<HTMLElement>("button")].find((button) => button.className === hadFocus)?.focus({ preventScroll: true });
+    }
+  }
+
+  private pinnedCollapsed(id: number): boolean {
+    if (this.pinnedChoice?.id === id) return this.pinnedChoice.collapsed;
+    return this.composing;
+  }
+
+  /**
+   * The operator is writing (the composer has focus on a small or touch
+   * screen, or the phone keyboard is up): the pinned question folds to its
+   * bar so the latest conversation stays readable above the field
+   * (cas-16eed). Starting to compose again folds a question the operator had
+   * opened; their own collapse stays.
+   */
+  setComposing(composing: boolean): void {
+    if (this.disposed || this.composing === composing) return;
+    this.composing = composing;
+    if (composing && this.pinnedChoice && !this.pinnedChoice.collapsed) this.pinnedChoice = undefined;
+    this.renderPinned(this.element.ownerDocument);
+    if (this.following) this.pin();
+  }
+
+  /** Dismiss a waiting ask: it unpins, stops waiting, and its copy in the thread keeps its choices. */
+  private dismissAsk(id: number, byKeyboard: boolean): void {
+    if (!this.history.dismissAsk(id)) return;
+    this.update();
+    this.options.dismissalsChanged?.();
+    // The control that had focus is gone; the composer is where the operator goes next.
+    if (byKeyboard) this.element.ownerDocument.querySelector<HTMLElement>("#message-text")?.focus({ preventScroll: true });
+  }
+
+  /** Dismiss a failed send out of the thread; the unsent chip keeps a way back. */
+  private dismissSend(send: ConversationSend, bubble: HTMLElement): void {
+    const hadFocus = bubble.contains(this.element.ownerDocument.activeElement);
+    if (!this.history.dismissSend(send.id)) return;
+    this.update();
+    this.options.dismissalsChanged?.();
+    if (hadFocus && !this.unsent.hidden) this.unsent.focus({ preventScroll: true });
+  }
+
+  /** Bring the dismissed failed sends back, and land on the first one's Retry. */
+  private restoreUnsent(): void {
+    const restored = this.history.restoreDismissed();
+    if (!restored.length) return;
+    this.update();
+    this.options.dismissalsChanged?.();
+    const key = `send:${restored[0]!.id}`;
+    const first = [...this.msgs.querySelectorAll<HTMLElement>(".conversation-turn")].find((node) => node.dataset.key === key);
+    if (!first) return;
+    first.scrollIntoView?.({ block: "nearest" });
+    landFocusIn(first, "conversation-retry");
+  }
+
+  private renderUnsent(): void {
+    const count = this.history.dismissedSends().length;
+    this.unsent.hidden = count === 0;
+    if (!count) { delete this.unsent.dataset.count; return; }
+    if (this.unsent.dataset.count === String(count)) return;
+    this.unsent.dataset.count = String(count);
+    const noun = count === 1 ? "1 unsent message" : `${count} unsent messages`;
+    const document = this.element.ownerDocument;
+    const glyph = document.createElement("template"); glyph.innerHTML = WARN;
+    const text = document.createElement("span"); text.textContent = noun;
+    const action = document.createElement("span"); action.className = "conversation-unsent-show"; action.setAttribute("aria-hidden", "true"); action.textContent = "Show";
+    this.unsent.replaceChildren(glyph.content.firstElementChild!, text, action);
+    this.unsent.setAttribute("aria-label", `Show ${noun}`);
   }
 
   private context(document: Document, turn: ThreadTurn, reply: OperatorReply, pinned = false): TurnRenderContext {
@@ -319,11 +575,17 @@ export class ConversationView {
     const waiting = reply?.kind === "blocker" ? this.history.waiting().some((item) => item.notification_id === reply.notification_id) : undefined;
     // The pinned ask's flow copy is collapsed; it expands again when a newer ask takes the pin.
     const pinned = reply?.kind === "ask" ? this.history.pinnedAsk()?.notification_id === reply.notification_id : undefined;
-    const delivered = turn.event.kind === "send" ? this.history.delivered() === turn.event.value : undefined;
+    // A question that stops waiting (dismissed, or its session ended) repaints quiet (cas-16eed).
+    const retired = reply?.kind === "ask" || reply?.kind === "blocker" ? this.history.retirement(reply.notification_id) : undefined;
+    const delivered = turn.event.kind === "send" ? this.history.showsDelivered(turn.event.value) : undefined;
     // A refused send repaints when control changes hands (cas-8e0a).
     const held = turn.event.kind === "send" && turn.event.value.state === "error" ? this.options.controlHeld?.() === true : undefined;
     const holder = turn.event.kind === "send" && turn.event.value.state === "error" ? this.options.controlHolder?.() : undefined;
-    return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting, pinned, delivered, held, holder]);
+    // ...and when its session comes back (cas-d15c).
+    const live = turn.event.kind === "send" && turn.event.value.state === "error" ? this.options.sessionLive?.() === true : undefined;
+    // An unconfirmed send settles once the supervisor speaks after it (journey F10).
+    const settled = turn.event.kind === "send" && turn.event.value.state === "unconfirmed" ? this.history.repliedSince(turn.event.value) : undefined;
+    return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting, pinned, retired, delivered, held, holder, settled, live]);
   }
 
   /**
@@ -345,7 +607,7 @@ export class ConversationView {
       const line = document.createElement("p"); line.className = "said conversation-loading"; line.setAttribute("role", "status");
       const dots = document.createElement("span"); dots.className = "dots"; dots.setAttribute("aria-hidden", "true");
       dots.append(document.createElement("i"), document.createElement("i"), document.createElement("i"));
-      const codename = document.createElement("span"); codename.className = "codename"; codename.textContent = supervisor;
+      const codename = document.createElement("span"); codename.className = "codename"; codename.textContent = supervisor; codename.title = supervisor;
       const text = document.createElement("span"); text.append("Loading your conversation with ", codename, "…");
       line.append(dots, text);
       this.empty.replaceChildren(line);
@@ -362,21 +624,39 @@ export class ConversationView {
     // The project titles the card, as it titles the header and every list row
     // (journey F7); machine and codename sit beneath it. Without a project the
     // codename is the only name there is, and it keeps the title.
-    const name = document.createElement("b"); name.textContent = project || supervisor;
+    const name = document.createElement("b"); name.textContent = project || supervisor; name.title = project || supervisor;
     if (!project) name.className = "codename";
     const where = document.createElement("span"); where.className = "proj2";
-    if (machine) where.append(machine);
+    where.title = [machine, project ? supervisor : undefined].filter(Boolean).join(" · ");
+    // cas-71af (e918 QA F02): as in the header, the machine name yields to the
+    // codename: it ellipsises in its own span, down to a letter and "…".
+    const host = document.createElement("span"); host.className = "proj2-machine"; host.textContent = machine ?? "";
+    if (machine) where.append(host);
     if (project) {
       const secondary = document.createElement("span"); secondary.className = "codename"; secondary.textContent = supervisor;
-      where.append(...(machine ? [" · "] : []), secondary);
+      const separator = document.createElement("span"); separator.className = "proj2-sep"; separator.textContent = " · ";
+      where.append(...(machine ? [separator] : []), secondary);
     }
     const said = document.createElement("p"); said.className = "said"; said.setAttribute("role", "status");
-    // The codename is an identifier: mono and never broken at its hyphen, even inside prose.
-    const codename = document.createElement("span"); codename.className = "codename"; codename.textContent = supervisor;
-    said.append("Nothing waiting on you. ", codename, " will write here when it needs a decision.");
+    // The sentence names the role, not the generated codename (journey F13).
+    // The codename follows in brackets as an identifier: mono, one unbroken
+    // line, ellipsised past a cap, and whole in its title and the DOM.
+    const codename = document.createElement("span"); codename.className = "codename"; codename.textContent = supervisor; codename.title = supervisor;
+    // The brackets travel with it: no line break between "(" and the name.
+    const who = document.createElement("span"); who.className = "said-who"; who.append("(", codename, ")");
+    said.append("Nothing waiting on you. The supervisor ", who, " will write here when it needs a decision.");
     const children: HTMLElement[] = [mono, name, where, said];
     if (echo) { const quiet = document.createElement("div"); quiet.className = "quiet"; quiet.textContent = echo; children.push(quiet); }
     this.empty.replaceChildren(...children);
+    if (typeof requestAnimationFrame !== "undefined") requestAnimationFrame(() => this.fitEmptyMeta());
+  }
+
+  /** The empty card's machine · codename line, fitted like the header's (cas-71af). */
+  private fitEmptyMeta(): void {
+    const line = this.empty.querySelector<HTMLElement>(":scope > .proj2");
+    if (!line || this.empty.hidden) return;
+    const style = getComputedStyle(this.empty);
+    fitMachineLine(line, this.empty.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight));
   }
 
   /** Cheap liveness poll: repaints only when the working state actually flipped. */
@@ -498,31 +778,58 @@ export class ConversationView {
     bubble.append(...paragraphs(document, send.text));
     if (send.state === "sending") {
       const state = document.createElement("span");
-      state.className = "conversation-delivery"; state.setAttribute("role", "status");
-      state.textContent = "Sending…";
+      state.className = `conversation-delivery${send.held ? " conversation-held" : ""}`; state.setAttribute("role", "status");
+      // Held while the machine is unreachable (cas-0978): not on the wire yet,
+      // and it will be sent by itself, once, when the machine is back.
+      state.textContent = send.held ? "Waiting for the connection — sends when it's back" : "Sending…";
       bubble.append(state);
-    } else if (send.state === "acknowledged" && this.history.delivered() === send) {
-      // F5: the hub's receipt is the difference between a delivered message
-      // and a lost one, so the latest delivered send says so until the reply
-      // lands (then the answer itself is the evidence).
+    } else if (this.history.showsDelivered(send)) {
+      // F5: the receipt is the difference between a delivered message and a
+      // lost one, so a delivered send says so until the reply linked to it
+      // lands (then the answer itself is the evidence). Journey F4: an
+      // unrelated supervisor turn crossing it no longer hides the tick.
       const state = document.createElement("span");
       state.className = "conversation-delivery conversation-delivered"; state.setAttribute("role", "status");
       const tick = document.createElement("template"); tick.innerHTML = TICK;
       const label = document.createElement("span"); label.textContent = "Delivered";
       state.append(tick.content.firstElementChild!, label);
       bubble.append(state);
+    } else if (send.state === "unconfirmed" && this.history.repliedSince(send)) {
+      // Journey F10: the supervisor has spoken since, so this send most
+      // likely arrived. The card settles to a quiet record: no warning and no
+      // primary Retry inviting a duplicate. cas-470e: the copy says to send
+      // it again only if it was missed, so a quiet text-weight "Send again"
+      // is right there; the operator never has to retype the message.
+      bubble.dataset.settled = "true";
+      const state = document.createElement("span");
+      state.className = "conversation-delivery conversation-refused conversation-unconfirmed conversation-settled"; state.setAttribute("role", "status");
+      const label = document.createElement("b"); label.textContent = "Not confirmed";
+      const separator = document.createElement("span"); separator.className = "sr-only"; separator.textContent = " · ";
+      const reason = document.createElement("span"); reason.className = "conversation-refused-reason";
+      reason.textContent = "The supervisor has replied since; send it again only if it missed this.";
+      state.append(label, separator, reason);
+      bubble.append(state);
+      if (this.options.retryMessage) {
+        const actions = document.createElement("div"); actions.className = "conversation-actions conversation-actions-quiet";
+        const again = document.createElement("button"); again.type = "button"; again.className = "conversation-send-again"; again.textContent = "Send again";
+        again.setAttribute("aria-label", "Send this message again");
+        again.onclick = () => this.options.retryMessage?.(send);
+        actions.append(again);
+        bubble.append(actions);
+      }
     } else if (send.state === "unconfirmed") {
-      // cas-1622: the hub never sent this send's receipt. It is not refused —
+      // cas-1622: the receipt for this send never came. It is not refused —
       // it may well have arrived — so it does not claim "Not sent". It stops
-      // saying "Sending…" forever, says what is unknown, and offers Retry,
-      // warning that a retry may reach the supervisor twice.
+      // saying "Sending…" forever, says what is unknown in the operator's
+      // words (Cassy, not "the hub": journey F10), and offers Retry, warning
+      // that a retry may reach the supervisor twice.
       const state = document.createElement("span");
       state.className = "conversation-delivery conversation-refused conversation-unconfirmed"; state.setAttribute("role", "status");
       const glyph = document.createElement("template"); glyph.innerHTML = WARN;
       const label = document.createElement("b"); label.textContent = "Not confirmed";
       const separator = document.createElement("span"); separator.className = "sr-only"; separator.textContent = " · ";
       const reason = document.createElement("span"); reason.className = "conversation-refused-reason";
-      reason.textContent = `The hub never confirmed this reached ${this.options.supervisor}.`;
+      reason.textContent = `Cassy couldn't confirm delivery to ${this.options.supervisor}.`;
       const next = document.createElement("span"); next.className = "conversation-refused-next"; next.textContent = " Retry sends it again.";
       reason.append(next);
       state.append(glyph.content.firstElementChild!, label, separator, reason);
@@ -535,6 +842,7 @@ export class ConversationView {
         actions.append(retry);
         bubble.append(actions);
       }
+      this.dismissable(document, bubble, send);
     } else if (send.state === "error" && send.replaced) {
       // F6: the edited version went out, so this one is only a record. It
       // collapses and offers no Retry — one tap would resend the text the
@@ -568,15 +876,28 @@ export class ConversationView {
       const holder = plain.action === "take-control" && !resolved ? this.options.controlHolder?.() : undefined;
       const reason = document.createElement("span"); reason.className = "conversation-refused-reason"; reason.textContent = resolved ? "This device controls the session now." : plain.reason;
       const next = document.createElement("span"); next.className = "conversation-refused-next";
-      next.textContent = resolved ? " Retry to send it." : holder ? ` ${holder} is in control. Take control when it's released, then retry.` : ` ${plain.next}`;
+      const sessionBack = plain.action === "await-session" && this.options.sessionLive?.() === true;
+      next.textContent = resolved || sessionBack ? " Retry to send it." : holder ? ` ${holder} is in control. Take control when it's released, then retry.` : ` ${plain.next}`;
       reason.append(next);
       state.append(glyph.content.firstElementChild!, label, separator, reason);
       bubble.append(state);
       const actions = document.createElement("div"); actions.className = "conversation-actions";
       if (plain.action === "take-control" && !resolved && this.options.takeControl) {
-        const take = document.createElement("button"); take.type = "button"; take.className = "conversation-take-control"; take.textContent = "Take control";
-        take.setAttribute("aria-label", "Take control of the session");
-        take.onclick = () => this.options.takeControl?.(send);
+        const take = document.createElement("button"); take.type = "button"; take.className = "conversation-take-control";
+        if (holder) {
+          // Journey F5: a take the hub will refuse again is not offered as
+          // pressable. It says who is being waited on, keeps its place (and
+          // keyboard focus) in the message, and turns back into Take control
+          // when the lease is released.
+          take.textContent = `Waiting for ${holder}`;
+          take.setAttribute("aria-label", `Waiting for ${holder} to release control`);
+          take.setAttribute("aria-disabled", "true");
+          take.dataset.waiting = "true";
+        } else {
+          take.textContent = "Take control";
+          take.setAttribute("aria-label", "Take control of the session");
+          take.onclick = () => this.options.takeControl?.(send);
+        }
         actions.append(take);
       }
       if (this.options.editMessage) {
@@ -592,8 +913,26 @@ export class ConversationView {
         actions.append(retry);
       }
       if (actions.childElementCount) bubble.append(actions);
+      this.dismissable(document, bubble, send);
     }
     return bubble;
+  }
+
+  /**
+   * cas-16eed: a failed send can leave the thread, and the unsent chip brings
+   * it back. On a touch screen it swipes off sideways; for a mouse or the
+   * keyboard a Dismiss control sits in the card's corner, last in its tab
+   * order, so Take control, Edit and Retry keep their row.
+   */
+  private dismissable(document: Document, bubble: HTMLElement, send: ConversationSend): void {
+    bubble.dataset.swipe = "dismiss";
+    const dismiss = document.createElement("button"); dismiss.type = "button"; dismiss.className = "conversation-dismiss";
+    dismiss.setAttribute("aria-label", "Dismiss unsent message");
+    dismiss.title = "Dismiss";
+    dismiss.innerHTML = CLOSE;
+    dismiss.onclick = () => this.dismissSend(send, bubble);
+    bubble.append(dismiss);
+    bindSwipeDismiss(bubble, { onDismiss: () => this.dismissSend(send, bubble) });
   }
 
   /**

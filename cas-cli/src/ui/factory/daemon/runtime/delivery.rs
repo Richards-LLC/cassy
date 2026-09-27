@@ -674,8 +674,12 @@ impl FactoryDaemon {
     /// Targeted interrupt reaches the same `Mux::break_turn` primitive used by
     /// urgent coordination delivery, and semantic messages reach the same
     /// durable queue consumed by `process_prompt_queue`.
+    ///
+    /// cas-bea6: a `SendMessage` repeated with the same `client_ref` (a client
+    /// resending after a lost receipt) is answered with the first receipt and
+    /// enqueues nothing (`send_dedupe`).
     pub(super) async fn dispatch_commander_control(
-        &self,
+        &mut self,
         control: CommanderControl,
     ) -> anyhow::Result<Option<crate::ui::factory::DaemonMessage>> {
         match control {
@@ -692,19 +696,49 @@ impl FactoryDaemon {
                 in_reply_to,
                 attribution,
             } => {
-                let outcome = self.enqueue_attributed_message(
-                    &target,
-                    &text,
-                    summary.as_deref(),
-                    urgent,
-                    in_reply_to,
-                    &attribution,
-                )?;
+                use super::send_dedupe::{
+                    SendKey, SendOutcome, SendReceipt, dedupe_send, send_fingerprint,
+                };
+
+                let key = SendKey::new(attribution.device_id.as_deref(), client_ref.as_deref());
+                let fingerprint = send_fingerprint(&target, &text, in_reply_to, urgent);
+                let mut receipts = std::mem::take(&mut self.send_receipts);
+                let outcome = dedupe_send(
+                    &mut receipts,
+                    key,
+                    fingerprint,
+                    std::time::Instant::now(),
+                    || {
+                        let outcome = self.enqueue_attributed_message(
+                            &target,
+                            &text,
+                            summary.as_deref(),
+                            urgent,
+                            in_reply_to,
+                            &attribution,
+                        )?;
+                        Ok(SendReceipt {
+                            notification_id: outcome.id(),
+                            stamped: operator_stamp(&attribution).verified,
+                        })
+                    },
+                );
+                self.send_receipts = receipts;
+                let outcome = outcome?;
+                if let SendOutcome::Duplicate(receipt) = outcome {
+                    tracing::info!(
+                        target: "cas::commander",
+                        notification_id = receipt.notification_id,
+                        client_ref = client_ref.as_deref().unwrap_or_default(),
+                        "cas-bea6: repeated SendMessage answered with its first receipt; nothing enqueued"
+                    );
+                }
+                let receipt = outcome.receipt();
                 Ok(Some(crate::ui::factory::DaemonMessage::MessageQueued {
                     client_ref,
-                    notification_id: outcome.id(),
+                    notification_id: receipt.notification_id,
                     target,
-                    stamped: operator_stamp(&attribution).verified,
+                    stamped: receipt.stamped,
                 }))
             }
         }

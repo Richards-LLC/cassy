@@ -30,6 +30,10 @@ mod worker_gate;
 
 pub(crate) use attention::spawn_attention_enricher;
 pub use auth::{
+    AUDIT_HEALTH_FILE, AUDIT_LOG_FILE, AuditHealth, AuditWriterReport, AuthRefusal, audit_writer_report,
+    read_audit_health,
+};
+pub use auth::{
     AuthContext, AuthStore, DeviceCredential, DeviceSession, DeviceSummary, LeaseSummary,
     PairingExchange, PairingExchangeError, PairingInvitation, PairingPrefill, PublicJwk, Scope,
     WsTicket, required_scope,

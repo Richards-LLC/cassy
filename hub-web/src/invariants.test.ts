@@ -1,7 +1,7 @@
 import { createHash, webcrypto } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { HubConnectionSupervisor, type ConnectionState, type HubCallbacks } from "./connection";
+import { HubConnectionSupervisor, TransientAuthError, type ConnectionState, type HubCallbacks } from "./connection";
 import { connectingView } from "./connection-state-view";
 import { createDeviceKey, dpopHeaders } from "./dpop";
 import { consumePairingFragment } from "./fragment";
@@ -205,7 +205,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     // duplicate message to the supervisor.
     expect(source).toContain("function sendControl(machineId: string, session: string, message: unknown): boolean {");
     expect(source).toContain("const clientRef = crypto.randomUUID();");
-    expect(source).toContain("const sent = sendControl(machine.id, session, supervisorMessage(supervisor, text, clientRef, replyTo));");
+    expect(source).toContain("const sent = !queued && sendControl(machine.id, session, supervisorMessage(supervisor, text, clientRef, replyTo));");
     expect(source).toContain("messageDelivery = { session: sessionKey(machine.id, session), target: supervisor, clientRef };");
     expect(source).toContain("toast(`Sending to ${supervisor}`);");
   });
@@ -323,6 +323,7 @@ describe("binding Cassy Cloud browser invariants", () => {
       'class="control-action"',
       'id="control-disabled-reason"',
       'id="interrupt"',
+      '<p id="session-controls-reason" class="session-controls-reason" role="note"',
       'class="status-stale" role="status"',
       'class="control-disabled-reason" role="note"',
       'id="message-send"',
@@ -347,7 +348,8 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(main).toContain('<p id="message-status" class="message-status');
     expect(main).toContain('function showComposerStatus(text: string, tone: "info" | "error", transport = false): void {');
     // A reconnecting refusal clears when the session is live again (cas-b789).
-    expect(main).toContain('"The hub connection is reconnecting, so this message was not delivered. Try again once the session is live.", "error", true);');
+    // In the banner's words (journey F9).
+    expect(main).toContain("showComposerStatus(outageRefusal(machine.label), \"error\", true);");
     expect(main).toContain("sessionsEverLive.add(key);\n        clearTransportStatus(key);");
     expect(css).toContain(".message-status {");
     expect(css).toContain(".message-status.error {");
@@ -358,7 +360,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     // The hub refuses SendMessage without this device's session lease
     // (hub/server.rs handle_client_message), so observe-mode sends need the
     // lease the operator would otherwise have to take by hand.
-    expect(source).toContain('if (plan.kind === "take-control-then-send") {');
+    expect(source).toContain('if (plan.kind === "take-control-then-send" && (sessionIsUp(machine.id, session) || !machineWillReconnect(machine.id))) {');
     expect(source).toContain("async function takeControlForMessage(machine: StoredMachine, session: string): Promise<boolean> {");
     expect(source).toContain("await connections.get(machine.id)?.requestControl(session, false);");
     expect(source).toContain("return leases.get(sessionKey(machine.id, session))?.held_by_me === true;");
@@ -858,14 +860,18 @@ describe("binding Cassy Cloud browser invariants", () => {
     // cas-5d94: the hub derives the roster from the live agent registry, so the
     // count is stated — including a real zero — instead of being suppressed.
     expect(main).not.toContain("const workers = entry.workerCount > 0 ?");
-    expect(main).toContain("escapeHtml(workerCountLabel(session.workers.length))");
+    // The drawer row states it through the picker's row meta (workerCountLabel), project first (journey F1).
+    expect(main).toContain("workerCount: session.workers.length, status: sessionStatusLabel(");
+    expect(main).toContain('<small class="session-meta">${escapeHtml(sessionPickerRowMeta(entry))}</small>');
     expect(main).toContain('if (entry.current) button.setAttribute("aria-current", "true");');
     // A five-second heartbeat render must not close the picker mid-choice.
     expect(main).toContain('if (sessionPickerOpen) document.querySelector<HTMLDialogElement>("#session-picker")?.showModal();');
     expect(css).toContain(".session-identity {");
     expect(css).toContain(".session-back {");
     expect(css).toContain('.session-picker-entry[aria-current="true"]');
-    expect(css).toContain(".session-back { width: var(--button-height); }");
+    expect(css).toContain(".session-back { min-width: var(--button-height); }");
+    // Journey F2: the back control says "Back" on screen, inside its accessible name.
+    expect(main).toContain('<span class="session-back-label" aria-hidden="true">Back</span>');
   });
 
   it("keeps palette and picker states readable and distinct in every colour mode (cas-78c81)", async () => {
@@ -997,8 +1003,10 @@ describe("binding Cassy Cloud browser invariants", () => {
       phase: "failed", stage: "auth", authFailure: "needs-pairing",
     });
     expect(callbacks.onState).not.toHaveBeenCalledWith(expect.objectContaining({ phase: "backoff" }));
+    // cas-d636: an opaque failure is confirmed before it ends the pairing: the
+    // hub still answers its health probe and an authenticated read still fails.
     expect(fetchMock.mock.calls.map(([input]) => new URL(String(input)).pathname)).toEqual([
-      "/v1/health", "/v1/machine", "/v1/sessions",
+      "/v1/health", "/v1/machine", "/v1/sessions", "/v1/health", "/v1/machine",
     ]);
     const [main, connectionView] = await Promise.all([
       readSource("main.ts"),
@@ -1042,7 +1050,11 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(connection).toContain("export class UnsupportedBrowserError extends Error {}");
     expect(connection).toContain("if (unsupported) throw new UnsupportedBrowserError(unsupported);");
     expect(connection).toContain("this.transition(\"failed\", stage, { reason: error.message, fatal: true });");
-    expect(connection).not.toContain("error instanceof TypeError");
+    // A TypeError is only ever classified as a network failure (cas-0978),
+    // in one helper that no fatal path calls.
+    expect(connection.match(/instanceof TypeError/g)).toHaveLength(1);
+    expect(connection).toContain("function isNetworkFailure(error: unknown): boolean {");
+    expect(connection).not.toMatch(/isNetworkFailure\([^)]*\)[^;\n]*fatal: true/);
     // The connect clock survives the transitions that reset `since`.
     expect(connection).toContain("connectingSince: connectingAnchor(this.lifecycle, phase, now),");
     // One line naming the missing API and the minimum browsers.
@@ -1201,7 +1213,12 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain("openConnectionLog(machineId)");
     expect(source).toContain("const view = disconnectedView(snapshot, now)");
     // Plain words naming the machine (cas-a447), not the protocol retry line.
-    expect(source).toContain("`Lost connection to ${where}. Reconnecting…`");
+    // The words now live in connection-state-view so the refusal and the
+    // disabled controls share them (journey F9).
+    expect(source).toContain(": lostConnectionBanner(where, snapshot.fatal === true);");
+    // cas-d15c: a stream the hub closed below a still-connected machine names the conversation.
+    expect(source).toContain("? sessionReconnectingBanner(conversationLabel(machineId, session), where, snapshot.fatal === true)");
+    expect(connectionView).toContain("`Lost connection to ${machineLabel}. Reconnecting…`");
     expect(source).not.toContain("Connection interrupted — ${view.retryLabel}");
     // Header, row and footer read one conversation connection, and the
     // transport alarm resolves itself once the socket is live again.
@@ -1227,7 +1244,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   it("drives pane recovery from the selected session attach lifecycle", async () => {
     const source = await readSource("main.ts");
     expect(source).toContain("onAttachState: (session, state) =>");
-    expect(source).toContain("const key = sessionKey(machine.id, session);\n      attachStates.set(key, state);");
+    expect(source).toContain("const key = sessionKey(machine.id, session);\n      const attachWasLive = attachStates.get(key)?.phase === \"live\";\n      attachStates.set(key, state);");
     expect(source).toContain("connection.attachSnapshot(selectedSession) ?? connection.snapshot()");
     expect(source).toContain("connection.attachSnapshot(session) ?? connection.snapshot()");
     expect(source).toContain("const connectionSnapshot = terminalAttachSnapshot ?? machineConnectionSnapshot");
@@ -1459,7 +1476,7 @@ describe("3.30.0 journey polish (cas-b128)", () => {
     expect(conversations.slice(0, firstGroupEnd)).not.toContain("data-palette-action");
     expect(conversations.slice(0, firstGroupEnd)).not.toContain("palette-paired-machines");
     expect(conversations).toContain('${showSessionControls ? `<section class="palette-group" data-palette-group="session"');
-    expect(conversations).toContain('<h3 id="palette-group-session" class="palette-group-heading">This session</h3>');
+    expect(conversations).toContain('<h3 id="palette-group-session" class="palette-group-heading">This conversation</h3>');
     expect(conversations).toContain('<h3 id="palette-group-machines" class="palette-group-heading">Machines</h3>');
     expect(conversations).toContain('${infoItems.length > 0 ? `<button type="button" class="palette-command" data-palette-action="dismiss-info">');
     // A new info item brings the command back: the shell rebuilds on that change.
@@ -1470,9 +1487,89 @@ describe("3.30.0 journey polish (cas-b128)", () => {
     const [main, paired] = await Promise.all([readSource("main.ts"), readSource("paired-machines.ts")]);
     expect(main).toContain('const visibleToast = document.querySelector<HTMLElement>("#toast.visible");');
     expect(main).toContain("toastPlacementInThread(");
+    // Journey F8 (dist 3126b032): on the list the toast drops below the brand row.
+    expect(main).toContain('document.querySelector<HTMLElement>(".conversation-shell:not(.thread-open) .conversation-list-top")');
     expect(main).toContain("Last seen ${relativeTimestamp(Date.parse(updated))} · ${clockLabel(Date.parse(updated))}");
     expect(main).not.toContain("toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })");
     expect(paired).toContain("'Version unknown until it connects'");
     expect(paired).not.toContain("Runtime not yet received");
+  });
+});
+
+/**
+ * cas-d636: on soundwave a phone's proofs were signed before it slept and sent
+ * when it woke, 266 s later; the hub refused them and every 401 read as a
+ * revoked pairing, so Commander went dark until a reload. A refusal now says
+ * why: a retryable one is tried again with a fresh proof on the hub's clock,
+ * and only a definitive one ends the pairing.
+ */
+describe("a refused DPoP proof is not a lost pairing (cas-d636)", () => {
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  type Reply = { status: number; ok: boolean; json: () => Promise<unknown>; clone: () => Reply };
+  const reply = (status: number, body: unknown = {}): Reply => ({ status, ok: status >= 200 && status < 300, json: async () => body, clone: () => reply(status, body) });
+  const claims = (init: RequestInit | undefined): { iat: number; jti: string } => {
+    const proof = (init?.headers as Record<string, string>).DPoP;
+    return JSON.parse(Buffer.from(proof.split(".")[1]!, "base64url").toString("utf8"));
+  };
+  async function supervisorWith(replies: (path: string, call: number) => Reply | Promise<never>) {
+    vi.stubGlobal("window", globalThis);
+    const { privateKey, publicKey } = await createDeviceKey();
+    const machine = {
+      id: "machine", label: "Machine", baseUrl: "https://hub.example", deviceId: "device",
+      credentialId: "credential-id", credential: "opaque-credential", expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+      scopes: ["machine-read"], publicKey, privateKey,
+    } satisfies StoredMachine;
+    const callbacks = {
+      onState: vi.fn(), onAuthFailure: vi.fn(), onSessions: vi.fn(), onMachineEvent: vi.fn(),
+      onSessionState: vi.fn(), onOutput: vi.fn(), onPaneKeyframe: vi.fn(), onSocketError: vi.fn(),
+    } satisfies HubCallbacks;
+    let calls = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => replies(new URL(String(input)).pathname, calls++));
+    vi.stubGlobal("fetch", fetchMock);
+    return { supervisor: new HubConnectionSupervisor(machine, callbacks), callbacks, fetchMock };
+  }
+
+  it("retries a stale proof once with a fresh one on the hub's clock, and recovers", async () => {
+    const hubNow = Math.floor(Date.now() / 1000) + 600;
+    const { supervisor, fetchMock } = await supervisorWith((_path, call) => call === 0
+      ? reply(401, { error: "unauthorized", reason: "stale_proof", retryable: true, server_time: hubNow })
+      : reply(200, { schema_version: 1 }));
+    await expect(supervisor.request("GET", "/v1/machine")).resolves.toEqual({ schema_version: 1 });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [first, second] = fetchMock.mock.calls.map(([, init]) => claims(init));
+    expect(second!.jti).not.toBe(first!.jti);
+    // Signed on the hub's clock, ten minutes ahead of this device's.
+    expect(Math.abs(second!.iat - hubNow)).toBeLessThanOrEqual(2);
+  });
+
+  it("reads a definitive refusal as a lost pairing at once, without a retry", async () => {
+    const { supervisor, fetchMock } = await supervisorWith(() => reply(401, { reason: "revoked", retryable: false, server_time: Math.floor(Date.now() / 1000) }));
+    await expect(supervisor.request("GET", "/v1/machine")).rejects.toMatchObject({ kind: "revoked", message: "pairing was revoked" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const expired = await supervisorWith(() => reply(401, { reason: "expired", retryable: false }));
+    await expect(expired.supervisor.request("GET", "/v1/machine")).rejects.toMatchObject({ kind: "expired" });
+    const key = await supervisorWith(() => reply(401, { reason: "key_mismatch", retryable: false }));
+    await expect(key.supervisor.request("GET", "/v1/machine")).rejects.toMatchObject({ kind: "revoked", message: "this browser's key no longer matches the pairing" });
+  });
+
+  it("keeps a legacy hub's bare 401 a lost pairing, after one fresh proof", async () => {
+    const { supervisor, fetchMock } = await supervisorWith(() => reply(401, { error: "unauthorized" }));
+    await expect(supervisor.request("GET", "/v1/machine")).rejects.toMatchObject({ kind: "revoked" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries a proof refused twice like a network failure, never as re-pair", async () => {
+    const { supervisor, callbacks } = await supervisorWith((path) => path === "/v1/health"
+      ? reply(200, { status: "ok" })
+      : reply(401, { reason: "stale_proof", retryable: true, server_time: Math.floor(Date.now() / 1000) }));
+    await expect(supervisor.request("GET", "/v1/machine")).rejects.toBeInstanceOf(TransientAuthError);
+    supervisor.start();
+    await vi.waitFor(() => {
+      expect(callbacks.onState).toHaveBeenCalledWith(expect.objectContaining({ phase: "backoff", stage: "auth" }));
+    });
+    expect(callbacks.onAuthFailure).not.toHaveBeenCalled();
+    expect(supervisor.snapshot().authFailure).toBeUndefined();
+    supervisor.stop();
   });
 });

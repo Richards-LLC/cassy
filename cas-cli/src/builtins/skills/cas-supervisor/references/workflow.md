@@ -175,6 +175,11 @@ Run the canonical merge-time diff review ([Required merge-review discipline](#re
 factory action=worktree_merge id=<worker> task_id=<task-id>
 ```
 
+The default merge preserves the worker checkout for continued work. A later
+`shutdown_workers` may remove that checkout once it is clean and the worker
+has no nonterminal tasks. Keep the worker running while another process
+depends on its checkout path.
+
 After a successful merge into an `epic/` branch, the factory daemon launches a
 bounded sweep of the project's detected test runner (`cargo nextest run --workspace
 --no-fail-fast` for a Cargo project, the `test` script for a Node project) in a reusable
@@ -185,7 +190,10 @@ detached merged-tip worktree. The sweep is asynchronous and capped by
 only when the host cannot absorb this additional validation load.
 A project whose suites need their own script or environment sets
 `[factory].merge_sweep_command` (run via `sh -c` instead of the detected
-runner) and a `[factory.merge_sweep_env]` table in `config.toml`; the sweep
+runner) and a `[factory.merge_sweep_env]` table in `config.toml`. Set
+`[factory].merge_sweep_cwd = "web"` to run the command or detected runner in
+that subdirectory; without it, detection searches the checkout and nested
+directories for a test manifest. The sweep
 log shows only the variable names. A sweep the build guard defers is noted on
 the epic without a relay; the run that finally goes ahead sends one relay
 naming its result and integration tip.

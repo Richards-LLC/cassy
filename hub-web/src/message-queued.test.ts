@@ -41,7 +41,7 @@ describe("Commander rejected-message callback", () => {
 
     internals.handleDaemonObject("factory-a", { error: "forbidden", client_ref: "send-42" });
 
-    expect(onMessageRejected).toHaveBeenCalledWith("factory-a", "send-42", "forbidden");
+    expect(onMessageRejected).toHaveBeenCalledWith("factory-a", "send-42", "forbidden", { code: "forbidden", retryable: false });
     expect(onSocketError).not.toHaveBeenCalled();
   });
 
@@ -59,7 +59,7 @@ describe("Commander rejected-message callback", () => {
       error: { code: "forbidden", client_ref: "send-42" },
     }));
 
-    expect(onMessageRejected).toHaveBeenCalledWith("factory-a", "send-42", "forbidden");
+    expect(onMessageRejected).toHaveBeenCalledWith("factory-a", "send-42", "forbidden", { code: "forbidden", retryable: false });
     expect(onSocketError).not.toHaveBeenCalled();
   });
 

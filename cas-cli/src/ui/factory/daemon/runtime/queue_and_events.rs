@@ -1015,6 +1015,30 @@ pub struct PaneWakeState {
     pub tool_call: ToolCallEvidence,
 }
 
+/// cas-f84d (GH #1023 finding 8): durable evidence that a worker is parked
+/// waiting on its supervisor, as opposed to merely looking quiet.
+///
+/// Both halves are states the worker cannot drift out of between two ticks
+/// without doing something observable: the transcript records the end of its
+/// last turn, and a `blocked` task stays blocked until someone changes it.
+/// Pane silence is neither. A worker sitting at its prompt still repaints its
+/// status line, so the 45-second bar for active-looking recipients was never
+/// met, and each supervisor decision needed an urgent interrupt.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorkerWaitState {
+    /// The worker's harness transcript says its last turn ended
+    /// (`Liveness::WaitingForInput`).
+    pub harness_waiting_for_input: bool,
+    /// The worker is the assignee of a task in `blocked` status.
+    pub task_blocked: bool,
+}
+
+impl WorkerWaitState {
+    fn is_waiting(self) -> bool {
+        self.harness_waiting_for_input || self.task_blocked
+    }
+}
+
 /// cas-9e81: what the transcript actually told us about an in-flight tool
 /// call — three states, not two.
 ///
@@ -4035,6 +4059,102 @@ impl FactoryDaemon {
         }
     }
 
+    /// cas-f84d (GH #1023 finding 8): may a decision from this factory's own
+    /// supervisor wake a worker that is durably waiting on it? `None` means
+    /// the row is not in this class, and the ordinary worker policy
+    /// ([`Self::delivery_wake_decision`]) decides as before.
+    ///
+    /// In the class only when every part holds:
+    /// - WHO: the server-stamped sender resolves to a registered Supervisor
+    ///   whose registry name is this factory's supervisor. An unstamped,
+    ///   unattributed or deregistered sender, a worker, and a supervisor of
+    ///   another session never qualify; nothing the sender typed is read.
+    /// - WHOM: a worker, not the supervisor pane.
+    /// - STATE: [`WorkerWaitState`] says the worker is parked: its transcript
+    ///   shows the turn ended, or it holds a `blocked` task.
+    ///
+    /// Inside the class, pane silence is no longer required when the
+    /// transcript shows the turn ended, because a parked harness repaints its
+    /// pane and the silence bar was what kept declining these wakes. The hard
+    /// vetoes stay: an operator draft, a pane not ready for injection, or a
+    /// tool call in flight (an approval dialog the submit CR would answer).
+    /// A `blocked` task without transcript evidence is held to the short
+    /// idle-recipient settle instead of the 45-second bar.
+    pub fn supervisor_decision_wake(
+        pane_target: &str,
+        supervisor_name: &str,
+        sender: &WakeSender,
+        wait: WorkerWaitState,
+        pane: PaneWakeState,
+    ) -> Option<WakeDecision> {
+        if pane_target == supervisor_name || !wait.is_waiting() {
+            return None;
+        }
+        let WakeSender::Registered {
+            role: cas_types::AgentRole::Supervisor,
+            name,
+        } = sender
+        else {
+            return None;
+        };
+        if !name.eq_ignore_ascii_case(supervisor_name) {
+            return None;
+        }
+        if let Some(reason) = pane.pane_typing_veto() {
+            return Some(WakeDecision::deny(reason));
+        }
+        if pane.tool_call == ToolCallEvidence::InFlight {
+            return Some(WakeDecision::deny("recipient has a tool call in flight"));
+        }
+        if wait.harness_waiting_for_input {
+            return Some(WakeDecision::allow(
+                "supervisor decision to a worker whose turn has ended (waiting for input)",
+            ));
+        }
+        Some(match pane.silence_veto(SILENCE_FOR_IDLE_RECIPIENT_WAKE) {
+            Some(reason) => WakeDecision::deny(reason),
+            None => WakeDecision::allow("supervisor decision to a worker holding a blocked task"),
+        })
+    }
+
+    /// The durable wait evidence for [`Self::supervisor_decision_wake`], read
+    /// only for rows from this factory's own supervisor, so no other traffic
+    /// pays for the transcript and task reads.
+    fn worker_wait_state_for(&self, sender: &WakeSender, worker: &str) -> Option<WorkerWaitState> {
+        let WakeSender::Registered {
+            role: cas_types::AgentRole::Supervisor,
+            name,
+        } = sender
+        else {
+            return None;
+        };
+        if !name.eq_ignore_ascii_case(self.app.supervisor_name()) {
+            return None;
+        }
+        let cas_dir = self.app.cas_dir();
+        let harness_waiting_for_input = crate::ui::factory::director::idle_worker_liveness(
+            cas_dir, worker,
+        )
+        .is_some_and(|observation| {
+            observation.state
+                == crate::mcp::tools::service::worker_liveness::Liveness::WaitingForInput
+        });
+        let task_blocked = crate::store::open_task_store(cas_dir)
+            .ok()
+            .and_then(|store| store.list(Some(cas_types::TaskStatus::Blocked)).ok())
+            .is_some_and(|tasks| {
+                tasks.iter().any(|task| {
+                    task.assignee
+                        .as_deref()
+                        .is_some_and(|assignee| assignee.eq_ignore_ascii_case(worker))
+                })
+            });
+        Some(WorkerWaitState {
+            harness_waiting_for_input,
+            task_blocked,
+        })
+    }
+
     /// Minimum settle floor between an urgent turn-break (Esc) and the
     /// follow-up inject (cas-c931 / cas-4208).
     ///
@@ -5793,16 +5913,35 @@ impl FactoryDaemon {
                     // cas-9e81: keep the REASON, not just the verdict — it is
                     // persisted as the row's wake_attempt_detail below.
                     let wake_decision = if wake_slot_available {
-                        Self::delivery_wake_decision(
-                            self.app.director_data(),
-                            &pane_target,
-                            self.app.supervisor_name(),
-                            &wake_sender,
-                            &queued.source,
-                            &queued.prompt,
-                            pane_state,
-                            chrono::Utc::now(),
-                        )
+                        // cas-f84d: a decision from this factory's supervisor
+                        // to a worker parked on it wakes promptly; everything
+                        // else keeps the ordinary policy.
+                        let supervisor_decision = if is_supervisor_target {
+                            None
+                        } else {
+                            self.worker_wait_state_for(&wake_sender, &pane_target)
+                                .and_then(|wait| {
+                                    Self::supervisor_decision_wake(
+                                        &pane_target,
+                                        self.app.supervisor_name(),
+                                        &wake_sender,
+                                        wait,
+                                        pane_state,
+                                    )
+                                })
+                        };
+                        supervisor_decision.unwrap_or_else(|| {
+                            Self::delivery_wake_decision(
+                                self.app.director_data(),
+                                &pane_target,
+                                self.app.supervisor_name(),
+                                &wake_sender,
+                                &queued.source,
+                                &queued.prompt,
+                                pane_state,
+                                chrono::Utc::now(),
+                            )
+                        })
                     } else {
                         WakeDecision::deny(
                             "no wake slot left this pass (a supervisor wake already fired)",
@@ -7764,6 +7903,7 @@ impl FactoryDaemon {
                 &supervisor_queue,
                 &prompt_queue,
                 &self.session_name,
+                self.app.supervisor_name(),
                 agent_id_to_name,
                 None,
                 self.app.cas_dir(),
@@ -7777,6 +7917,7 @@ impl FactoryDaemon {
                 &supervisor_queue,
                 &prompt_queue,
                 &self.session_name,
+                self.app.supervisor_name(),
                 agent_id_to_name,
                 Some(context),
                 self.app.cas_dir(),
@@ -7809,6 +7950,7 @@ impl FactoryDaemon {
                         &supervisor_queue,
                         &prompt_queue,
                         &self.session_name,
+                        self.app.supervisor_name(),
                         agent_id_to_name,
                         Some(&context),
                         self.app.cas_dir(),
@@ -7940,9 +8082,8 @@ fn commander_history_message_text(text: &str) -> (Option<i64>, String) {
 /// Fire a reminder by delivering it to both the notification queue
 /// (for web UI / structured data) and the prompt queue (for PTY injection).
 ///
-/// `agent_id_to_name` maps agent UUIDs to pane names that the prompt queue
-/// can route to. Falls back to `"supervisor"` when the target agent ID is
-/// not found in the map.
+/// `agent_id_to_name` maps agents in this factory to pane names. A target
+/// missing from that map must be resolved before the reminder is marked fired.
 ///
 /// `triggering_event` is the event or external condition that caused this
 /// reminder to fire. Its context is included in the durable payload and
@@ -7974,16 +8115,57 @@ impl ReminderTriggerContext {
     }
 }
 
+/// Choose a recipient from this project's agent store before consuming a
+/// cross-session reminder. The director snapshot contains only this factory's
+/// live agents; its missing target must never become an arbitrary pane.
+fn resolve_reminder_delivery_target(
+    reminder: &cas_store::Reminder,
+    supervisor_name: &str,
+    agent_id_to_name: &std::collections::HashMap<String, String>,
+    cas_dir: &std::path::Path,
+) -> Option<String> {
+    if let Some(name) = agent_id_to_name.get(&reminder.target_id) {
+        return Some(name.clone());
+    }
+    // Cross-session rows can outlive their original daemon. A replacement
+    // factory may take over only after this project's store says the target
+    // shut down in the factory that created the reminder. Unknown, stale, or
+    // still-active agents leave the row pending.
+    let agent = crate::store::open_agent_store(cas_dir)
+        .ok()?
+        .get(&reminder.target_id)
+        .ok()?;
+    if reminder.session_id.is_some()
+        && agent.factory_session.as_deref() != reminder.session_id.as_deref()
+    {
+        return None;
+    }
+    (agent.status == cas_types::AgentStatus::Shutdown).then(|| supervisor_name.to_string())
+}
+
 fn fire_reminder(
     reminder: &cas_store::Reminder,
     reminder_store: &std::sync::Arc<dyn cas_store::ReminderStore>,
     supervisor_queue: &Option<std::sync::Arc<dyn cas_store::SupervisorQueueStore>>,
     prompt_queue: &Option<std::sync::Arc<dyn cas_store::PromptQueueStore>>,
     session_name: &str,
+    supervisor_name: &str,
     agent_id_to_name: &std::collections::HashMap<String, String>,
     triggering_event: Option<&ReminderTriggerContext>,
     cas_dir: &std::path::Path,
 ) {
+    let Some(target) = resolve_reminder_delivery_target(
+        reminder,
+        supervisor_name,
+        agent_id_to_name,
+        cas_dir,
+    ) else {
+        // Another factory can see a cross-session due row in the shared
+        // project DB. Keep it pending until the target or a proven fallback
+        // can receive it; marking it fired here would lose the owner wake.
+        return;
+    };
+
     // Build event JSON for persistence
     let event_json = triggering_event.map(|event| {
         serde_json::json!({
@@ -8024,15 +8206,8 @@ fn fire_reminder(
         }
     }
 
-    // Enqueue to prompt queue for PTY injection into the target agent's session.
-    // Resolve the target agent UUID to its pane name. process_prompt_queue also
-    // resolves the logical name "supervisor" to the actual pane name, so we use
-    // that as fallback when the target ID isn't in the map.
+    // Enqueue to prompt queue for PTY injection into the resolved recipient.
     if let Some(queue) = prompt_queue {
-        let target = agent_id_to_name
-            .get(&reminder.target_id)
-            .map(|s| s.as_str())
-            .unwrap_or("supervisor");
 
         // Include triggering event context for event-based reminders.
         //
@@ -8062,7 +8237,7 @@ fn fire_reminder(
         };
 
         if let Err(e) =
-            queue.enqueue_with_session(&reminder.owner_id, target, &prompt, session_name)
+            queue.enqueue_with_session(&reminder.owner_id, &target, &prompt, session_name)
         {
             tracing::error!("Failed to enqueue reminder prompt: {}", e);
         } else {
@@ -8173,6 +8348,11 @@ mod tests {
         let prompt_store: Arc<dyn cas_store::PromptQueueStore> =
             Arc::new(cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap());
         prompt_store.init().unwrap();
+        let agent_store = crate::store::open_agent_store(temp.path()).unwrap();
+        let mut old_owner = cas_types::Agent::new("supervisor-1".into(), "old-supervisor".into());
+        old_owner.status = cas_types::AgentStatus::Shutdown;
+        old_owner.factory_session = Some("old-factory-session".into());
+        agent_store.register(&old_owner).unwrap();
 
         let id = reminder_store
             .create_with_scope(
@@ -8219,6 +8399,7 @@ mod tests {
             &supervisor,
             &prompt,
             "new-factory-session",
+            "new-supervisor",
             &HashMap::new(),
             Some(&context),
             temp.path(),
@@ -8241,6 +8422,7 @@ mod tests {
         assert!(notifications[0].payload.contains("tag_exists"));
         let prompts = prompt_store.peek_all(10).unwrap();
         assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].target, "new-supervisor");
         assert!(prompts[0].prompt.contains("external condition satisfied"));
 
         // A stale pre-restart snapshot cannot create a second delivery: the
@@ -8251,12 +8433,98 @@ mod tests {
             &supervisor,
             &prompt,
             "new-factory-session",
+            "new-supervisor",
             &HashMap::new(),
             Some(&context),
             temp.path(),
         );
         assert_eq!(supervisor_store.peek("supervisor-1", 10).unwrap().len(), 1);
         assert_eq!(prompt_store.peek_all(10).unwrap().len(), 1);
+    }
+
+    /// GH #1015: a foreign factory must not consume a time reminder while
+    /// its original target is still active in this project's agent store.
+    #[test]
+    fn cross_session_time_reminder_waits_for_its_target_across_factories() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let reminder_store: Arc<dyn cas_store::ReminderStore> =
+            Arc::new(cas_store::SqliteReminderStore::open(temp.path()).unwrap());
+        reminder_store.init().unwrap();
+        let supervisor_store: Arc<dyn cas_store::SupervisorQueueStore> =
+            Arc::new(cas_store::SqliteSupervisorQueueStore::open(temp.path()).unwrap());
+        supervisor_store.init().unwrap();
+        let prompt_store: Arc<dyn cas_store::PromptQueueStore> =
+            Arc::new(cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap());
+        prompt_store.init().unwrap();
+        let agent_store = crate::store::open_agent_store(temp.path()).unwrap();
+        let mut owner = cas_types::Agent::new("owner-id".into(), "young-swan-22".into());
+        owner.role = cas_types::AgentRole::Supervisor;
+        owner.factory_session = Some("origin-factory".into());
+        agent_store.register(&owner).unwrap();
+
+        let id = reminder_store
+            .create_with_scope(
+                "owner-id",
+                None,
+                "check PR 2514",
+                cas_store::ReminderTriggerType::Time,
+                Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
+                None,
+                None,
+                3600,
+                Some("origin-factory"),
+                Some("creator-session"),
+                true,
+                None,
+            )
+            .unwrap();
+        let reminder = reminder_store
+            .get_due_time_reminders()
+            .unwrap()
+            .into_iter()
+            .find(|reminder| reminder.id == id)
+            .unwrap();
+        assert!(super::reminder_matches_factory_session(
+            reminder.session_id.as_deref(),
+            reminder.cross_session,
+            "foreign-factory"
+        ));
+
+        // The foreign daemon lacks owner-id in its own pane map. Its fallback
+        // supervisor (golden-spider-80) must not receive the prompt.
+        super::fire_reminder(
+            &reminder,
+            &reminder_store,
+            &Some(Arc::clone(&supervisor_store)),
+            &Some(Arc::clone(&prompt_store)),
+            "foreign-factory",
+            "golden-spider-80",
+            &HashMap::new(),
+            None,
+            temp.path(),
+        );
+        assert_eq!(reminder_store.get_due_time_reminders().unwrap().len(), 1);
+        assert!(prompt_store.peek_all(10).unwrap().is_empty());
+        assert!(supervisor_store.peek("owner-id", 10).unwrap().is_empty());
+
+        // The owner is present in its factory's map, so the same due row can
+        // fire to that exact pane without changing the cross-session gate.
+        super::fire_reminder(
+            &reminder,
+            &reminder_store,
+            &Some(Arc::clone(&supervisor_store)),
+            &Some(Arc::clone(&prompt_store)),
+            "origin-factory",
+            "origin-supervisor",
+            &HashMap::from([("owner-id".into(), "young-swan-22".into())]),
+            None,
+            temp.path(),
+        );
+        let prompts = prompt_store.peek_all(10).unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].target, "young-swan-22");
+        assert_eq!(prompts[0].factory_session.as_deref(), Some("origin-factory"));
+        assert!(reminder_store.get_due_time_reminders().unwrap().is_empty());
     }
 
     #[test]
@@ -9374,7 +9642,7 @@ mod tests {
             "2026-09-23T18:00:00+00:00",
             "swift-fox",
             "demo_statement",
-            None,
+            crate::prompt_revalidation::QaDeliveryLocation::ParkedForMerge,
         );
         let source = "qa-dispatch:qapass-1";
         let decision = FactoryDaemon::supervisor_wake_decision(
@@ -13102,5 +13370,234 @@ mod urgent_wake_probe_tests {
             "quiet-ibis",
             "supervisor-pane"
         ));
+    }
+}
+
+/// cas-f84d (GH #1023 finding 8): supervisor decisions to workers parked on
+/// them. In the field, decisions to blocked or waiting workers (cas-f056,
+/// cas-65d7, cas-e983) were recorded `wake_declined_by_policy: pane has not
+/// been silent long enough`, and each needed an urgent interrupt.
+#[cfg(test)]
+mod supervisor_decision_wake_tests {
+    use super::{
+        PaneWakeState, SILENCE_FOR_ACTIVE_RECIPIENT_WAKE, ToolCallEvidence, WakeOutcome,
+        WakeSender, WorkerWaitState,
+    };
+    use crate::ui::factory::daemon::FactoryDaemon;
+    use crate::ui::factory::director::{AgentSummary, DirectorData};
+    use cas_types::{AgentRole, AgentStatus};
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    const SUPERVISOR: &str = "bright-merlin-99";
+    const WORKER: &str = "gentle-otter-12";
+
+    fn registered(role: AgentRole, name: &str) -> WakeSender {
+        WakeSender::Registered {
+            role,
+            name: name.to_string(),
+        }
+    }
+
+    /// A parked worker's pane: its harness repaints (a status line, a
+    /// spinner), so it has been silent for well under a second.
+    fn repainting_pane(tool_call: ToolCallEvidence) -> PaneWakeState {
+        PaneWakeState {
+            composer_dirty: false,
+            ready_for_injection: true,
+            silent_for: Some(Duration::from_millis(300)),
+            tool_call,
+        }
+    }
+
+    const WAITING: WorkerWaitState = WorkerWaitState {
+        harness_waiting_for_input: true,
+        task_blocked: false,
+    };
+    const BLOCKED: WorkerWaitState = WorkerWaitState {
+        harness_waiting_for_input: false,
+        task_blocked: true,
+    };
+    const RUNNING: WorkerWaitState = WorkerWaitState {
+        harness_waiting_for_input: false,
+        task_blocked: false,
+    };
+
+    /// The worker holds its (blocked) task, and the registry calls it active
+    /// from a fresh heartbeat and recent activity: the field shape.
+    fn data() -> DirectorData {
+        let now = chrono::Utc::now();
+        let agent = |name: &str, task: Option<&str>| AgentSummary {
+            id: format!("id-{name}"),
+            name: name.to_string(),
+            status: AgentStatus::Active,
+            registered_at: now,
+            current_task: task.map(str::to_string),
+            latest_activity: Some(("checkpoint".to_string(), now)),
+            last_heartbeat: Some(now),
+            pending_messages: 0,
+            pending_supervisor_messages: 0,
+            latest_supervisor_message_at: None,
+            active_lease: None,
+            effort: None,
+        };
+        DirectorData {
+            ready_tasks: vec![],
+            in_progress_tasks: vec![],
+            epic_tasks: vec![],
+            agents: vec![
+                agent(SUPERVISOR, Some("cas-epic")),
+                agent(WORKER, Some("cas-f056")),
+            ],
+            activity: vec![],
+            agent_id_to_name: HashMap::new(),
+            changes: vec![],
+            git_loaded: true,
+            reminders: vec![],
+            epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
+        }
+    }
+
+    fn ordinary_policy(sender: &WakeSender, pane: PaneWakeState) -> super::WakeDecision {
+        FactoryDaemon::delivery_wake_decision(
+            &data(),
+            WORKER,
+            SUPERVISOR,
+            sender,
+            "supervisor",
+            "Decision: take option B and re-park.",
+            pane,
+            chrono::Utc::now(),
+        )
+    }
+
+    #[test]
+    fn same_session_supervisor_decision_wakes_a_parked_worker_promptly() {
+        let supervisor = registered(AgentRole::Supervisor, SUPERVISOR);
+        for tool_call in [ToolCallEvidence::Idle, ToolCallEvidence::Unknown] {
+            let pane = repainting_pane(tool_call);
+            // The regression: the ordinary policy declines this exact row.
+            let before = ordinary_policy(&supervisor, pane);
+            assert!(!before.allowed, "{tool_call:?}: {}", before.reason);
+            assert_eq!(before.kind, WakeOutcome::DeclinedByPolicy);
+
+            let decision = FactoryDaemon::supervisor_decision_wake(
+                WORKER,
+                SUPERVISOR,
+                &supervisor,
+                WAITING,
+                pane,
+            )
+            .expect("a waiting worker is in the supervisor-decision class");
+            assert!(decision.allowed, "{tool_call:?}: {}", decision.reason);
+            assert_eq!(decision.kind, WakeOutcome::Allowed);
+        }
+
+        // A blocked task is durable too; it only needs the short settle.
+        let settled = PaneWakeState {
+            silent_for: Some(Duration::from_secs(3)),
+            ..repainting_pane(ToolCallEvidence::Unknown)
+        };
+        assert!(
+            FactoryDaemon::supervisor_decision_wake(
+                WORKER,
+                SUPERVISOR,
+                &supervisor,
+                BLOCKED,
+                settled
+            )
+            .unwrap()
+            .allowed
+        );
+        assert!(settled.silent_for < Some(SILENCE_FOR_ACTIVE_RECIPIENT_WAKE));
+        assert!(!ordinary_policy(&supervisor, settled).allowed);
+    }
+
+    #[test]
+    fn hard_vetoes_still_hold_for_a_supervisor_decision() {
+        let supervisor = registered(AgentRole::Supervisor, SUPERVISOR);
+        let in_flight = repainting_pane(ToolCallEvidence::InFlight);
+        let draft = PaneWakeState {
+            composer_dirty: true,
+            ..repainting_pane(ToolCallEvidence::Idle)
+        };
+        let not_ready = PaneWakeState {
+            ready_for_injection: false,
+            ..repainting_pane(ToolCallEvidence::Idle)
+        };
+        for pane in [in_flight, draft, not_ready] {
+            let decision = FactoryDaemon::supervisor_decision_wake(
+                WORKER,
+                SUPERVISOR,
+                &supervisor,
+                WAITING,
+                pane,
+            )
+            .unwrap();
+            assert!(!decision.allowed, "{pane:?}");
+        }
+        // A blocked task that is still repainting waits for the short settle.
+        let unsettled = FactoryDaemon::supervisor_decision_wake(
+            WORKER,
+            SUPERVISOR,
+            &supervisor,
+            BLOCKED,
+            repainting_pane(ToolCallEvidence::Unknown),
+        )
+        .unwrap();
+        assert!(!unsettled.allowed, "{}", unsettled.reason);
+    }
+
+    #[test]
+    fn ordinary_message_to_a_running_worker_keeps_the_normal_policy() {
+        let supervisor = registered(AgentRole::Supervisor, SUPERVISOR);
+        let pane = repainting_pane(ToolCallEvidence::Idle);
+        assert_eq!(
+            FactoryDaemon::supervisor_decision_wake(WORKER, SUPERVISOR, &supervisor, RUNNING, pane),
+            None,
+            "a worker mid-turn is not in the class"
+        );
+        assert!(!ordinary_policy(&supervisor, pane).allowed);
+        // The supervisor pane is never this class's target.
+        assert_eq!(
+            FactoryDaemon::supervisor_decision_wake(
+                SUPERVISOR,
+                SUPERVISOR,
+                &supervisor,
+                WAITING,
+                pane
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn forged_or_foreign_session_senders_cannot_use_the_supervisor_decision_wake() {
+        let pane = repainting_pane(ToolCallEvidence::Idle);
+        for sender in [
+            WakeSender::Unstamped,
+            WakeSender::Unattributed,
+            WakeSender::Unresolvable,
+            WakeSender::Daemon,
+            // A worker naming itself after the supervisor is still a worker.
+            registered(AgentRole::Worker, SUPERVISOR),
+            // A supervisor of another factory session sharing the store.
+            registered(AgentRole::Supervisor, "other-session-supervisor"),
+        ] {
+            for wait in [WAITING, BLOCKED] {
+                assert_eq!(
+                    FactoryDaemon::supervisor_decision_wake(
+                        WORKER, SUPERVISOR, &sender, wait, pane
+                    ),
+                    None,
+                    "{sender:?} must not use the supervisor-decision wake"
+                );
+            }
+            assert!(
+                !ordinary_policy(&sender, pane).allowed,
+                "{sender:?} falls back to the ordinary policy, which declines"
+            );
+        }
     }
 }

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_ASK_OPTIONS, WAITING_LINE, askOptions, installAttentionObjects, renderAskObject, renderBlockerObject } from "./attention-objects";
-import { ConversationHistory } from "./conversation-history";
+import { ConversationHistory, RECEIPT_TIMEOUT_MS } from "./conversation-history";
 import { ConversationView, type TurnRenderContext } from "./conversation-view";
 import type { ThreadTurn } from "./thread-model";
 import type { OperatorReply } from "./types";
@@ -124,6 +124,53 @@ describe("blocker object", () => {
     expect(node.getAttribute("aria-label")).toBe("Blocker from atlas-sup");
     expect(node.querySelector(".obj-body p")?.textContent).toBe("The release gate went red. The train is held.");
     expect(node.querySelector(".obj-foot code.window")?.textContent).toBe("attention.rs:212 · needless_borrow");
+  });
+  it("says how to clear it while it waits, and drops the hint once a send acknowledges it (journey F12)", () => {
+    const history = new ConversationHistory();
+    const blocker = reply(51, "blocker", "The release gate went red.\nattention.rs:212 · needless_borrow");
+    history.reply(blocker, at(9, 58));
+    const waiting = renderBlockerObject(blocker, context(blocker, history));
+    expect(waiting.dataset.waiting).toBe("true");
+    expect(waiting.querySelector(".obj-body .blk-hint")?.textContent).toBe("Reply to unblock");
+    // The hint sits in the body, above the evidence window.
+    expect(waiting.querySelector(".obj-body")?.lastElementChild?.className).toBe("blk-hint");
+    history.submit("ack", "atlas-sup", "Looking now.", at(10, 0));
+    const acknowledged = renderBlockerObject(blocker, context(blocker, history));
+    expect(acknowledged.dataset.waiting).toBe("false");
+    expect(acknowledged.querySelector(".blk-hint")).toBeNull();
+    // cas-71af (aac8 QA F01): handled, it says so and quiets like an answered ask.
+    expect(acknowledged.dataset.acknowledged).toBe("true");
+    expect(acknowledged.querySelector(".blk-handled")?.textContent).toBe("Acknowledged — you replied");
+    expect(acknowledged.querySelector(".blk-handled svg.tick")).not.toBeNull();
+    expect(acknowledged.getAttribute("aria-label")).toBe("Blocker from atlas-sup, acknowledged");
+    // A refused send never reached the supervisor: the blocker still waits and still says how.
+    history.reject("ack", "no access");
+    expect(renderBlockerObject(blocker, context(blocker, history)).querySelector(".blk-hint")?.textContent).toBe("Reply to unblock");
+  });
+  it("keeps waiting beside a send whose receipt never came (cas-71af, aac8 QA F02)", () => {
+    const history = new ConversationHistory();
+    const blocker = reply(51, "blocker", "The release gate went red.");
+    history.reply(blocker, at(9, 58));
+    history.submit("ack", "atlas-sup", "Rotating the key.", at(10, 0));
+    history.unconfirmSilent(at(10, 0) + RECEIPT_TIMEOUT_MS);
+    const node = renderBlockerObject(blocker, context(blocker, history));
+    expect(node.dataset.waiting).toBe("true");
+    expect(node.querySelector(".blk-hint")?.textContent).toBe("Reply to unblock");
+    expect(node.dataset.acknowledged).toBeUndefined();
+    // The receipt lands late: now it is acknowledged.
+    expect(history.acknowledge({ client_ref: "ack", notification_id: 60, target: "atlas-sup", stamped: true })).toBe(true);
+    expect(renderBlockerObject(blocker, context(blocker, history)).dataset.acknowledged).toBe("true");
+  });
+  it("quiets an acknowledged blocker in the stylesheet (cas-71af)", async () => {
+    const [{ readFileSync }, { dirname, join }, { fileURLToPath }] = await Promise.all([import("node:fs"), import("node:path"), import("node:url")]);
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
+    expect(css).toContain('.obj.t-a.blk[data-acknowledged="true"] .obj-body, .obj.t-a.blk[data-acknowledged="true"] .obj-foot { border-left-color: var(--color-transparent); background: var(--sup-bg); color: var(--sup-fg); }');
+  });
+  it("quiets an answered question in the stylesheet: supervisor colour, the tick kept (journey F12)", async () => {
+    const [{ readFileSync }, { dirname, join }, { fileURLToPath }] = await Promise.all([import("node:fs"), import("node:path"), import("node:url")]);
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
+    expect(css).toContain('.obj.t-a[data-answered="true"] .obj-body, .obj.t-a[data-answered="true"] .obj-foot { border-left-color: var(--color-transparent); background: var(--sup-bg); color: var(--sup-fg); }');
+    expect(css).toContain('.obj.t-a[data-answered="true"] { box-shadow: var(--lift-sup); }');
   });
   it("has no tray without evidence", () => {
     const blocker = reply(51, "blocker", "The release gate went red.");

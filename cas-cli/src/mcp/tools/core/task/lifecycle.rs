@@ -1024,6 +1024,11 @@ impl CasCore {
             inherited_from_epic.or(declared_work_target)
         {
             (Some(target), None)
+        } else if task_type == TaskType::Epic {
+            // The branch created below is the epic's canonical WorkTarget.
+            // A standalone trunk default here would persist `main` first and
+            // prevent that branch from replacing it (cas-70ec).
+            (None, None)
         } else {
             super::repo_context::standalone_work_target(&self.cas_root).map_err(|message| {
                 McpError {

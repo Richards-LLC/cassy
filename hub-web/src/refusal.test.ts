@@ -31,8 +31,13 @@ describe("refusal (F6: plain reasons with a next step)", () => {
       expect(refusal(detail).action).toBe("take-control");
       expect(refusal(detail).next).not.toMatch(/header/i);
     }
-    for (const detail of ["in_reply_to gone", "authentication required", "stream closed", "enqueue failed", "machine protocol error", undefined]) {
+    for (const detail of ["in_reply_to gone", "authentication required", "enqueue failed", "machine protocol error", undefined]) {
       expect(refusal(detail).action).toBeUndefined();
+    }
+    // cas-d15c: a refusal that waits for the session says so, so the view can
+    // say Retry goes through once the session is live again.
+    for (const detail of ["stream closed", "upstream_unavailable", outageRefusal("Atlas · Linux")]) {
+      expect(refusal(detail).action).toBe("await-session");
     }
   });
   it("never repeats the protocol code to the operator", () => {

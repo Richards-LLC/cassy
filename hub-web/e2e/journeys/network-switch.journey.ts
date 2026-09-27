@@ -138,14 +138,21 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
       new MutationObserver(sample).observe(document.body, { subtree: true, childList: true, characterData: true });
     });
     hub.upstreamLost(PELICAN);
-    // The resubscribe answers after 2 s, so the reattach is on screen.
-    hub.delayAttach(PELICAN, 2_000);
+    // The resubscribe answers after 5 s, past the 3 s session-state window,
+    // so the reattach is on screen and outlives its first timeout (QA F01).
+    hub.delayAttach(PELICAN, 5_000);
     const refusalsBefore = hub.upstreamRefusals.length;
     await sendNow("While the daemon link is down");
     expect(await until(() => hub.upstreamRefusals.length, (n) => n > refusalsBefore, 5_000)).toBeGreaterThan(refusalsBefore);
     await expect(held).toHaveText("Waiting for the connection — sends when it's back");
     await expect(banner).toHaveText("Reconnecting to cas-src… Atlas · Linux is still connected.", { timeout: 10_000 });
     await expect(banner).toHaveAttribute("data-scope", "session");
+    // Past the 3 s window the wording still names the conversation, and the
+    // footer still reads Connected (cas-d15c QA F01).
+    await page.waitForTimeout(3_500);
+    await expect(banner).toHaveText("Reconnecting to cas-src… Atlas · Linux is still connected.");
+    await expect(banner).toHaveAttribute("data-scope", "session");
+    await expect(footer).toHaveText("Connected");
     await expect(page.locator("#message-status")).toHaveText("cas-src on Atlas · Linux is reconnecting. Your message will go out by itself when it's back.");
     expect(sentTimes("While the daemon link is down")).toBe(0);
     hub.upstreamBack(PELICAN);
@@ -173,6 +180,10 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
     const log = page.getByRole("log");
     await expect(log.getByText("Not sent", { exact: true })).toBeVisible({ timeout: 10_000 });
     await expect(log.getByText("The session didn't come back while it waited.")).toBeVisible();
+    // cas-a355 N2: the session itself is live (only its daemon link refuses
+    // sends), so the card does not ask to wait for it (cas-d15c).
+    await expect(header).toHaveText(" · Live");
+    await expect(log.locator('.bub[data-state="error"] .conversation-refused-next').last()).toHaveText(" Retry to send it.");
     await expect(log.getByText(/re-pair/i)).toHaveCount(0);
     await expect(held).toHaveCount(0);
     await expect(page.locator("#message-status")).not.toContainText("go out by itself");

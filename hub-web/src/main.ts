@@ -376,6 +376,9 @@ function mountConversation(key: string, mount: HTMLElement): void {
       // refused message because the conversation header has none (cas-3433).
       takeControl: () => { void takeControlForRefused(threadMachineId, threadSession); },
       controlHeld: () => controlTakenAfterRefusal.has(threadKey) && leases.get(threadKey)?.held_by_me === true,
+      // The header's own state: a send that expired waiting for the session
+      // says Retry will go through once this reads live (cas-d15c).
+      sessionLive: () => conversationConnection(threadMachineId, threadSession)?.phase === "live",
       // cas-1730 (cas-008f N01): while another device holds control and this
       // one cannot force a takeover, the refused message names that device
       // and says to take control once it is released, as the composer does.

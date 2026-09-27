@@ -1019,7 +1019,9 @@ export class HubConnectionSupervisor {
     if (timeouts.ready !== undefined) window.clearTimeout(timeouts.ready);
     timeouts.ready = window.setTimeout(() => {
       if (!this.machineSocketReady || this.attachLifecycles.get(session)?.phase === "live") return;
-      this.transitionAttach(session, "failed", "attaching", { reason: "Machine stream sent no session state within 3s" });
+      // cas-d15c (QA F01): the machine socket is still ready, so a session
+      // whose stream the hub closed is still a session-only outage.
+      this.transitionAttach(session, "failed", "attaching", { reason: "Machine stream sent no session state within 3s", sessionOnly: this.attachLifecycles.get(session)?.sessionOnly });
       this.callbacks.onSocketError(session, "Machine stream sent no session state within 3s. Retrying…");
       this.scheduleAttach(session);
     }, STAGE_TIMEOUT_MS.attaching);

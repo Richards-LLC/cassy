@@ -21,7 +21,7 @@ export interface Refusal {
    * carry it. The copy names only controls the operator can reach from the
    * message itself (cas-3433): the conversation header has no Take control.
    */
-  readonly action?: "take-control";
+  readonly action?: "take-control" | "await-session";
 }
 
 const RULES: ReadonlyArray<readonly [RegExp, Refusal]> = [
@@ -32,6 +32,9 @@ const RULES: ReadonlyArray<readonly [RegExp, Refusal]> = [
   [/^Not sent: lost connection to /, {
     reason: "The session didn't come back while it waited.",
     next: "Retry once the session is live again.",
+    // cas-d15c (cas-a355 N2): once the session is live again the view says
+    // Retry will go through instead.
+    action: "await-session",
   }],
   [/in_reply_to|not a supervisor turn|belongs to factory session/i, {
     reason: "The question it answered is no longer open.",
@@ -51,6 +54,7 @@ const RULES: ReadonlyArray<readonly [RegExp, Refusal]> = [
   [/upstream_unavailable|reconnect|disconnect|closed|timed? ?out|unreachable|offline/i, {
     reason: "The connection to the machine dropped.",
     next: "Retry once the session is live again.",
+    action: "await-session",
   }],
   [/enqueue failed|queue/i, {
     reason: "The supervisor's machine couldn't take the message.",

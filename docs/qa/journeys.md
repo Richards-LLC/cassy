@@ -85,7 +85,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** `/commander/` with two paired machines, each running one supervisor
 - **Goal:** I can tell which conversation has something new and get to it quickly
-- **Touches:** `hub-web/src/conversation-list.ts`, `hub-web/src/palette-commands.ts`, `hub-web/src/worker-visibility.ts`, `hub-web/src/dormant-visibility.ts`, `hub-web/src/session-selection.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/attention*.ts`, `hub-web/src/time.ts`
+- **Touches:** `hub-web/src/conversation-list.ts`, `hub-web/src/palette-commands.ts`, `hub-web/src/worker-visibility.ts`, `hub-web/src/dormant-visibility.ts`, `hub-web/src/session-selection.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/attention*.ts`, `hub-web/src/time.ts`, `hub-web/src/session-connection.ts`, `hub-web/src/connection-state-view.ts`
 - **Suite:** `hub-web/e2e/journeys/find-conversation.journey.ts`
 - **Gaps:** none
 
@@ -100,6 +100,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 5. Jump to a supervisor by name — the command palette ("Type a command or conversation"; grouped Conversations / This conversation / Machines / Appearance / Advanced, Advanced collapsed; "Dismiss all info" only when something is outstanding) filters by supervisor or project and opens the conversation; each "Jump to" row leads with the project, the codename first in its description (right of the title on a desktop, on the line beneath on a phone); the control command names what the device can do ("Let other devices type here"), the control term as its hint; a filter that matches nothing says "No commands or conversations match"
 6. Jump to a supervisor from the keyboard — Ctrl+K twice opens the palette, type the name, Enter: the palette closes, the conversation is open and the reply box has focus
    - Open Paired machines from the palette, then a conversation — the palette gives way to Paired machines and stays closed afterwards; it never comes back over the next conversation opened
+7. Open a conversation over a slow relay: one calm line, and the footer stays Connected — "Opening the conversation…", the attempt and relay stage only behind a closed Details
+   - A first open that misses the 3-second mark retries calmly, and the footer stays Connected — the first retry of a conversation that has never opened still reads "Opening the conversation…" with the retry behind Details; no "Terminal unavailable", no retry timeline, and the footer never drops to "1 connected"; a second failure shows as a real one
 
 **Expected experience**
 

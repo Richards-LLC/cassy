@@ -40,6 +40,11 @@ export interface ConnectionSurfaceActions {
 export interface ConnectionSurfaceOptions {
   /** Title while the attach is in progress; defaults to "Connecting to <session>…". */
   readonly openingTitle?: string;
+  /**
+   * cas-28df: this snapshot is a never-live conversation's first retry. It
+   * still reads as opening: the calm title, and the retry behind "Details".
+   */
+  readonly quietRetry?: boolean;
 }
 
 const STAGE_COPY: Record<ConnectionSnapshot["stage"], string> = {
@@ -169,7 +174,7 @@ export function renderConnectionSurfaceInto(
   const document = target.ownerDocument;
   const view = connectingView(snapshot, now);
   const fatal = snapshot.fatal === true;
-  const opening = attachInProgress(snapshot);
+  const opening = attachInProgress(snapshot) || (options.quietRetry === true && !fatal);
   // A repaint (the 1 Hz ticker, a hub push) keeps "Details" as the operator left it.
   const detailsOpen = target.querySelector<HTMLDetailsElement>(":scope > .connection-details")?.open === true;
   target.className = `empty terminal-state terminal-connecting${fatal ? " terminal-connect-failed" : ""}`;
@@ -180,6 +185,8 @@ export function renderConnectionSurfaceInto(
   // the D3 overlay: it reads as progress. State the outcome instead.
   title.textContent = fatal
     ? "Connection failed — not retrying."
+    : opening
+      ? options.openingTitle ?? `Connecting to ${session}…`
     : snapshot.phase === "failed"
       ? snapshot.authFailure ? "Connection failed — re-pair required." : "Connection failed — retry available."
     : snapshot.phase === "backoff"

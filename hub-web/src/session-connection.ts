@@ -22,7 +22,36 @@ export function sessionConnection(
   if (!machine || machine.phase !== "live") return machine;
   if (!attach || attach.phase === "live" || attach.phase === "idle") return machine;
   if (attach.fatal === true || attach.authFailure) return attach;
-  return wasLive ? { ...attach, phase: "backoff" } : attach;
+  if (wasLive) return { ...attach, phase: "backoff" };
+  // cas-28df: the first retry of a conversation that has never opened is
+  // still the conversation opening, not a drop: it reads as connecting.
+  return firstAttachRetry(attach, wasLive) ? { ...attach, phase: openingPhase(attach) } : attach;
+}
+
+/**
+ * How many failed attempts can pass before a first attach stops reading as a
+ * conversation still opening (cas-28df). One transient miss (the 3 s "no
+ * session state" rule, a socket closed before it was ready) is routine on a
+ * live machine, so the first retry stays calm; a second failure is a real
+ * problem and shows as one.
+ */
+export const FIRST_ATTACH_QUIET_FAILURES = 1;
+
+/**
+ * A conversation that has never been live, on its first retry: the attempt
+ * failed for a reason retrying can fix and one more is scheduled or about to
+ * be. `attempt` counts retries scheduled so far, so a failed snapshot has one
+ * more failure behind it than its attempt number, a backoff one exactly as many.
+ */
+export function firstAttachRetry(attach: AttachSnapshot | undefined, wasLive: boolean): boolean {
+  if (!attach || wasLive || attach.fatal === true || attach.authFailure) return false;
+  if (attach.phase !== "failed" && attach.phase !== "backoff") return false;
+  const failures = attach.phase === "failed" ? attach.attempt + 1 : attach.attempt;
+  return failures <= FIRST_ATTACH_QUIET_FAILURES;
+}
+
+function openingPhase(attach: AttachSnapshot): ConnectionSnapshot["phase"] {
+  return attach.stage === "live" || attach.stage === "idle" ? "attaching" : attach.stage;
 }
 
 /**
@@ -31,7 +60,8 @@ export function sessionConnection(
  * (never live, not failed, no retry scheduled) is a conversation attaching,
  * not the machine dropping: it does not count against the machine, so the
  * footer does not say Reconnecting or lower its connected count while a
- * conversation opens (journey F3).
+ * conversation opens (journey F3). Nor does its first retry (cas-28df): the
+ * machine's hub is connected; only a second failure counts against it.
  */
 export function machineConnection(
   machine: ConnectionSnapshot | undefined,
@@ -39,7 +69,7 @@ export function machineConnection(
 ): ConnectionSnapshot | undefined {
   if (!machine || machine.phase !== "live") return machine;
   for (const { attach, wasLive } of sessions) {
-    if (!wasLive && attach && firstAttachInProgress(attach)) continue;
+    if (!wasLive && attach && (firstAttachInProgress(attach) || firstAttachRetry(attach, wasLive))) continue;
     const effective = sessionConnection(machine, attach, wasLive);
     if (effective && effective.phase !== "live") return effective;
   }

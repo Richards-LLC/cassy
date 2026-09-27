@@ -835,7 +835,9 @@ export async function runVisualQa(options) {
             };
             const context = await browser.newContext({ colorScheme: scheme, viewport: { width: viewport.width, height: viewport.height } });
             const holds = [];
-            await context.tracing.start({ screenshots: true, snapshots: true, title: `${journey.name} · ${state.name} · ${scheme} · ${viewport.name}` });
+            // Inside a Playwright test the runner already traces every context; its trace then holds these steps.
+            const tracing = await context.tracing.start({ screenshots: true, snapshots: true, title: `${journey.name} · ${state.name} · ${scheme} · ${viewport.name}` }).then(() => true, () => false);
+            if (!tracing) run.trace = undefined;
             const page = await context.newPage();
             try {
               for (const route of state.routes) await installRoute(page, route, holds);
@@ -877,7 +879,7 @@ export async function runVisualQa(options) {
               recordFinding({ type: 'journey-step-failed', selector: 'journey', elementPath: 'journey', reason: `${state.name}: ${(error instanceof Error ? error.message : String(error)).split('\n')[0]}` });
             } finally {
               for (const release of holds) release();
-              await context.tracing.stop({ path: join(artifactDir, run.trace) }).catch(() => { run.trace = undefined; });
+              if (tracing) await context.tracing.stop({ path: join(artifactDir, run.trace) }).catch(() => { run.trace = undefined; });
               await context.close();
             }
           }

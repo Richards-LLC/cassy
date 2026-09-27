@@ -144,7 +144,10 @@ impl Config {
             // Factory section (cas-1a05): the keys `get` and `set` accept.
             (
                 "factory.artifacts_root".to_string(),
-                factory.artifacts_root.clone().unwrap_or_default(),
+                factory
+                    .artifacts_root
+                    .clone()
+                    .unwrap_or_else(|| FACTORY_ARTIFACTS_ROOT_DEFAULT.to_string()),
             ),
             (
                 "factory.message_max_chars".to_string(),

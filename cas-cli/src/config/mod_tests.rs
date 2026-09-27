@@ -991,6 +991,15 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
 
     let temp = TempDir::new().unwrap();
     let mut config = Config::default();
+    // Unset, every registered key reads as its registry default, so
+    // `config list --modified` stays empty on a fresh config.
+    for key in registry.all_keys().into_iter().filter(|key| key.starts_with("factory.")) {
+        assert_eq!(
+            config.get(key).as_deref(),
+            Some(registry.get(key).unwrap().default),
+            "{key}: default read does not match the registry default"
+        );
+    }
     for (key, _, _) in table {
         assert!(config.get(key).is_some(), "{key}: settable but `get` does not know it");
         let listed: std::collections::HashMap<String, String> = config.list().into_iter().collect();
@@ -1021,9 +1030,15 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
     assert_eq!(loaded.get("factory.worker_build_jobs").as_deref(), Some("5"));
 
     // Optional keys clear back to unset with an empty value.
-    for key in ["factory.artifacts_root", "factory.merge_sweep_command", "factory.merge_sweep_cwd", "factory.epic_base_branch"] {
+    for key in ["factory.merge_sweep_command", "factory.merge_sweep_cwd", "factory.epic_base_branch"] {
         config.set(key, "").unwrap();
         assert_eq!(config.get(key).as_deref(), Some(""), "{key} cleared");
     }
+    config.set("factory.artifacts_root", "").unwrap();
     assert_eq!(config.factory().artifacts_root, None);
+    assert_eq!(
+        config.get("factory.artifacts_root").as_deref(),
+        Some(FACTORY_ARTIFACTS_ROOT_DEFAULT),
+        "an unset artifacts_root reads as its default"
+    );
 }

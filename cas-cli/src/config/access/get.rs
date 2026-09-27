@@ -63,8 +63,14 @@ impl Config {
             "qa.user_facing_labels" => Some(qa.user_facing_labels.join(",")),
             "qa.telemetry_sweep" => Some(qa.telemetry_sweep.unwrap_or_default()),
             // Factory section (cas-1a05): every key `set` accepts is readable.
-            // An unset optional key reads as "" (its runtime default applies).
-            "factory.artifacts_root" => Some(factory.artifacts_root.clone().unwrap_or_default()),
+            // An unset optional key reads as its registry default, so
+            // `config list --modified` shows only what was changed.
+            "factory.artifacts_root" => Some(
+                factory
+                    .artifacts_root
+                    .clone()
+                    .unwrap_or_else(|| FACTORY_ARTIFACTS_ROOT_DEFAULT.to_string()),
+            ),
             "factory.message_max_chars" => Some(factory.message_max_chars.to_string()),
             "factory.message_max_chars_escalation" => {
                 Some(factory.message_max_chars_escalation.to_string())

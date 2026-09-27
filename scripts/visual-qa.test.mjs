@@ -76,6 +76,52 @@ test('passes the clean fixture in light and dark at both required widths', async
   assert.deepEqual(json.viewports.map(({ width }) => width), [1280, 390]);
 });
 
+test('parses computed OKLCH colors without false invisible-text findings', async () => {
+  const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-oklch-'));
+  const oklchPage = join(artifactDir, 'oklch.html');
+  await writeFile(oklchPage, `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { margin: 0; font: 16px/1.4 Arial, sans-serif; color: oklch(20% 0 0); background: oklch(100% 0 0); }
+    p { margin: 16px; }
+    #opaque { color: oklch(20% 0 0); }
+    #half { color: oklch(20% 0 0 / 50%); }
+    #colored { color: oklch(42% 0.15 250); }
+    #colored-background { color: oklch(95% 0.02 250); background: oklch(25% 0.04 250); }
+    #transparent { color: oklch(20% 0 0 / 0); }
+    #low-contrast { color: oklch(95% 0 0); }
+    #unsupported { color: color(display-p3 0 0 0); }
+  </style>
+</head>
+<body>
+  <p id="opaque">Opaque OKLCH text is visible.</p>
+  <p id="half">Half alpha OKLCH text is visible.</p>
+  <p id="colored">Colored OKLCH text is visible.</p>
+  <p id="colored-background">OKLCH text on OKLCH background is visible.</p>
+  <p id="transparent">Transparent OKLCH text is invisible.</p>
+  <p id="low-contrast">Pale OKLCH text has low contrast.</p>
+  <p id="unsupported">Other CSS color formats need a contrast check.</p>
+</body>
+</html>
+`);
+  const result = await runVisualQa({
+    urls: [oklchPage],
+    artifactDir,
+    strict: true,
+    schemes: ['light'],
+    viewports: [{ name: 'desktop', width: 1280, height: 800 }],
+  });
+
+  const invisible = result.findings.filter((finding) => finding.type === 'invisible-text');
+  assert.deepEqual(invisible.map((finding) => finding.selector), ['#transparent']);
+  assert.equal(invisible[0].reason, 'color-alpha-0');
+  assert.ok(result.findings.some((finding) => finding.type === 'contrast' && finding.selector === '#low-contrast'));
+  assert.deepEqual(result.infoFindings.filter((finding) => finding.type === 'unverifiable-contrast').map((finding) => finding.selector), ['#unsupported']);
+});
+
 test('allowlist requires a reason and suppresses intentional findings', async () => {
   const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-allowlist-'));
   const allowlistPath = join(artifactDir, 'allowlist.json');

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { HubConnectionSupervisor, type HubCallbacks } from "./connection";
+import { HubConnectionSupervisor, messageRejection, type HubCallbacks } from "./connection";
 import { ConversationHistory } from "./conversation-history";
 import { MACHINE_RETRY_CEILING_MS, SOCKET_PROBE_TIMEOUT_MS } from "./connection-state";
 import type { StoredMachine } from "./types";
@@ -141,5 +141,65 @@ describe("held sends (cas-0978)", () => {
     history.hold("send-2", "patient-pelican-9", "Hello?", 1_000);
     expect(history.reject("send-2", "Not sent: lost connection to Atlas · Linux.")).toBe(true);
     expect(history.preview()).toBe("Not sent: Hello?");
+  });
+});
+
+// cas-0653: the hub answers `upstream_unavailable` (retryable) when the
+// session's daemon link is missing; the send is held and goes out once on the
+// next live attach instead of reading "Not sent".
+describe("a send the hub could not forward (cas-0653)", () => {
+  it("reads the code and retry hint from both socket shapes, and nothing else as retryable", () => {
+    expect(messageRejection({ code: "upstream_unavailable", retryable: true, client_ref: "send-1" }))
+      .toEqual({ code: "upstream_unavailable", retryable: true });
+    expect(messageRejection("upstream_unavailable", { error: "upstream_unavailable", retryable: true }))
+      .toEqual({ code: "upstream_unavailable", retryable: true });
+    expect(messageRejection({ code: "forbidden", client_ref: "send-1" })).toEqual({ code: "forbidden", retryable: false });
+    expect(messageRejection("forbidden", { error: "forbidden" })).toEqual({ code: "forbidden", retryable: false });
+    expect(messageRejection(undefined)).toEqual({ retryable: false });
+  });
+
+  it("puts a refused, unreceipted send back on hold with no receipt clock", () => {
+    const history = new ConversationHistory();
+    history.submit("send-3", "patient-pelican-9", "Do the burn down", 1_000);
+    const held = history.rehold("send-3");
+    expect(held).toMatchObject({ id: "send-3", text: "Do the burn down", held: true, state: "sending" });
+    expect(held && "sentAt" in held ? held.sentAt : undefined).toBeUndefined();
+    expect(history.nextReceiptCheck(5_000), "a held send cannot time out").toBeUndefined();
+    expect(history.release("send-3", 9_000), "it goes out once more").toBe(true);
+
+    history.acknowledge({ client_ref: "send-3", notification_id: 812, target: "patient-pelican-9", stamped: true });
+    expect(history.rehold("send-3"), "a delivered send is never held again").toBeUndefined();
+    expect(history.rehold("unknown")).toBeUndefined();
+  });
+
+  it("hands a retryable refusal over with its hint, and reattaches when the hub closes the stream", () => {
+    vi.stubGlobal("window", globalThis);
+    const onMessageRejected = vi.fn();
+    const { sup, internals } = supervisor({ onMessageRejected, onSocketError: vi.fn(), onAttachState: vi.fn() });
+    const machine = internals as unknown as { machineSubscriptions: Set<string>; desired: boolean; attachRetryTimers: Map<string, number>; handleMachineMessage(input: string): Promise<void> };
+    machine.desired = true;
+    machine.machineSubscriptions.add("factory-a");
+    void machine.handleMachineMessage(JSON.stringify({
+      channel: "pty:factory-a",
+      error: { code: "upstream_unavailable", retryable: true, message: "The session's daemon connection is reconnecting.", client_ref: "send-4" },
+    }));
+    expect(onMessageRejected).toHaveBeenCalledWith("factory-a", "send-4", "The session's daemon connection is reconnecting.", { code: "upstream_unavailable", retryable: true });
+    // The hub drops the session's stream right after (cas-0653).
+    void machine.handleMachineMessage(JSON.stringify({ channel: "pty:factory-a", closed: true }));
+    expect(machine.machineSubscriptions.has("factory-a"), "the next attach subscribes afresh").toBe(false);
+    expect(machine.attachRetryTimers.has("factory-a"), "an attach is scheduled").toBe(true);
+    sup.stop();
+  });
+
+  it("reports a refusal that is not retryable as before", () => {
+    vi.stubGlobal("window", globalThis);
+    const onMessageRejected = vi.fn();
+    const { internals } = supervisor({ onMessageRejected, onSocketError: vi.fn(), onAttachState: vi.fn() });
+    const machine = internals as unknown as { machineSubscriptions: Set<string>; desired: boolean; handleMachineMessage(input: string): Promise<void> };
+    machine.desired = true;
+    machine.machineSubscriptions.add("factory-a");
+    void machine.handleMachineMessage(JSON.stringify({ channel: "pty:factory-a", error: { code: "forbidden", client_ref: "send-5" } }));
+    expect(onMessageRejected).toHaveBeenCalledWith("factory-a", "send-5", "forbidden", { code: "forbidden", retryable: false });
+    expect(machine.machineSubscriptions.has("factory-a")).toBe(true);
   });
 });

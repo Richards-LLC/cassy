@@ -909,6 +909,14 @@ async fn proxy_socket(
                         }
                         let error = legacy_send_error(&failure, client_ref.as_deref());
                         let _ = sink.send(Message::Text(error.to_string().into())).await;
+                        // cas-0653: this socket's daemon upstream is gone.
+                        // Closing it (not with 1000) makes the browser attach
+                        // again, which restarts the upstream, and the held
+                        // send goes out on that live attach.
+                        if is_upstream_unavailable(&failure) {
+                            let _ = sink.send(Message::Close(None)).await;
+                            break;
+                        }
                     }
                 }
                 Some(Ok(Message::Binary(bytes))) => {
@@ -922,6 +930,14 @@ async fn proxy_socket(
                         }
                         let error = legacy_send_error(&failure, client_ref.as_deref());
                         let _ = sink.send(Message::Text(error.to_string().into())).await;
+                        // cas-0653: this socket's daemon upstream is gone.
+                        // Closing it (not with 1000) makes the browser attach
+                        // again, which restarts the upstream, and the held
+                        // send goes out on that live attach.
+                        if is_upstream_unavailable(&failure) {
+                            let _ = sink.send(Message::Close(None)).await;
+                            break;
+                        }
                     }
                 }
             },
@@ -1735,6 +1751,18 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                         }
                         let error = multiplex_send_error(&failure, &session, client_ref.as_deref());
                         if sink.send(Message::Text(error.to_string().into())).await.is_err() { break; }
+                        // cas-0653: a re-subscribe is ignored while this
+                        // session's subscription exists, so drop it and say
+                        // the stream closed. The browser then subscribes
+                        // again, `attach` restarts the daemon upstream, and
+                        // the held send goes out on that live attach.
+                        if is_upstream_unavailable(&failure) {
+                            if let Some(handle) = subscriptions.remove(&session) {
+                                handle.abort();
+                            }
+                            let closed = serde_json::json!({"channel":format!("pty:{session}"),"closed":true});
+                            if sink.send(Message::Text(closed.to_string().into())).await.is_err() { break; }
+                        }
                     }
                 }
             },

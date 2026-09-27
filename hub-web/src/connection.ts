@@ -48,6 +48,22 @@ export interface HubMachineInfo {
   capabilities: string[];
 }
 
+/**
+ * What the hub said about a refused send beyond its text (cas-0653). The hub
+ * answers `upstream_unavailable` with `retryable: true` when the session's
+ * daemon link was missing: the message never reached the machine, so it can
+ * be held and sent again, once, when the session is live again.
+ */
+export type MessageRejection = { code?: string; retryable?: boolean };
+
+/** The machine-channel or legacy error object's code and retry hint. */
+export function messageRejection(error: unknown, envelope?: Record<string, unknown>): MessageRejection {
+  const object = typeof error === "object" && error !== null ? error as Record<string, unknown> : undefined;
+  const code = typeof error === "string" ? error : typeof object?.code === "string" ? object.code : undefined;
+  const retryable = object?.retryable === true || envelope?.retryable === true || code === "upstream_unavailable";
+  return { ...(code === undefined ? {} : { code }), retryable };
+}
+
 export interface HubCallbacks {
   onState(state: ConnectionState): void;
   onAttachState?(session: string, state: AttachSnapshot): void;
@@ -60,7 +76,7 @@ export interface HubCallbacks {
   onSessionState(session: string, state: SessionState, scrollback?: Record<string, number[][]>, authoritativeKeyframes?: boolean): void;
   onOutput(session: string, paneId: string, data: Uint8Array): void;
   onMessageQueued?(session: string, queued: MessageQueued): void;
-  onMessageRejected?(session: string, clientRef: string, detail: string): void;
+  onMessageRejected?(session: string, clientRef: string, detail: string, rejection?: MessageRejection): void;
   onOperatorReply?(session: string, reply: OperatorReply): void;
   onConversationHistory?(session: string, page: ConversationHistoryPage): void;
   /** The first history page was requested on attach; its answer is onConversationHistory. */
@@ -1178,7 +1194,11 @@ export class HubConnectionSupervisor {
     }
     if (envelope.error) {
       const detail = String(envelope.error.message ?? envelope.error.code ?? "machine protocol error");
-      if (typeof envelope.error.client_ref === "string") this.callbacks.onMessageRejected?.(session, envelope.error.client_ref, detail);
+      const rejection = messageRejection(envelope.error);
+      // A retryable refusal is followed by the hub closing this session's
+      // stream (`closed` above), which reattaches it; the held send goes out
+      // on that live attach (cas-0653).
+      if (typeof envelope.error.client_ref === "string") this.callbacks.onMessageRejected?.(session, envelope.error.client_ref, detail, rejection);
       else this.callbacks.onSocketError(session, detail);
       return;
     }
@@ -1264,11 +1284,15 @@ export class HubConnectionSupervisor {
     } else if (message.PaneAdded || message.PaneRemoved || message.PaneExited) {
       this.send(session, "GetState");
     } else if (message.error) {
+      // The legacy socket puts the operator text beside the code (cas-a0e2).
       const detail = typeof message.error === "string"
-        ? message.error
+        ? (typeof message.message === "string" ? message.message : message.error)
         : String(message.error.message ?? message.error.code ?? "Message refused");
       const clientRef = message.client_ref ?? (typeof message.error === "object" ? message.error.client_ref : undefined);
-      if (typeof clientRef === "string") this.callbacks.onMessageRejected?.(session, clientRef, detail);
+      const rejection = messageRejection(message.error, message);
+      // The hub closes the legacy socket after a retryable refusal, and its
+      // close handler reattaches (cas-0653).
+      if (typeof clientRef === "string") this.callbacks.onMessageRejected?.(session, clientRef, detail, rejection);
       else this.callbacks.onSocketError(session, detail);
     } else if (message.Error) {
       if (typeof message.Error.client_ref === "string") this.callbacks.onMessageRejected?.(session, message.Error.client_ref, message.Error.message);

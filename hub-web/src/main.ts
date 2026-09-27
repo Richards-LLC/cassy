@@ -760,8 +760,23 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       if (messageDelivery?.session === sessionKey(machine.id, session) && messageDelivery.clientRef === receipt.client_ref) { messageDelivery = undefined; document.querySelector<HTMLElement>("#message-delivery")?.setAttribute("hidden", ""); }
       updateConversationViews(); renderConversationList();
     },
-    onMessageRejected: (session, clientRef, detail) => {
+    onMessageRejected: (session, clientRef, detail, rejection) => {
       const key = sessionKey(machine.id, session);
+      // cas-0653: the hub could not reach the session's daemon, so the
+      // message never arrived there. It waits in the thread and goes out once
+      // on the next live attach (the connection reattaches for it), instead
+      // of reading "Not sent".
+      if (rejection?.retryable && reholdRefusedSend(machine, session, clientRef)) {
+        if (messageDelivery?.session === key && messageDelivery.clientRef === clientRef) {
+          messageDelivery = undefined;
+          document.querySelector<HTMLElement>("#message-delivery")?.setAttribute("hidden", "");
+        }
+        if (selectedMachineId === machine.id && selectedSession === session && heldSends.get(key)?.some((held) => held.clientRef === clientRef)) {
+          showComposerStatus(`${session} on ${machine.label} is reconnecting. Your message will go out by itself when it's back.`, "info", true);
+        }
+        updateConversationViews(); renderConversationList();
+        return;
+      }
       // A control refusal proves the cached lease is stale: control counts as
       // held again only after a take succeeds (cas-8e0a). Other refusals say
       // nothing about the lease and leave it alone.
@@ -2432,6 +2447,39 @@ function sessionIsUp(machineId: string, session: string): boolean {
 function holdSupervisorMessage(machine: StoredMachine, session: string, clientRef: string, supervisor: string, text: string, replyTo?: number): void {
   const key = sessionKey(machine.id, session);
   conversationHistory(key).hold(clientRef, supervisor, text, Date.now(), replyTo, session);
+  queueHeldSend(machine, key, clientRef, supervisor, text, replyTo, HELD_SEND_MS);
+}
+
+/** When each send was first held, so a send held again keeps its original expiry (cas-0653). */
+const heldSince = new Map<string, number>();
+
+/**
+ * The hub refused a send as retryable (cas-0653, `upstream_unavailable`): the
+ * machine's daemon never received it. Hold it again, as a send made while the
+ * machine was away, to go out once on the next live attach, or turn "Not
+ * sent" when HELD_SEND_MS has passed since it was first held. Returns false
+ * when there is no such send to hold (already receipted, or unknown).
+ */
+function reholdRefusedSend(machine: StoredMachine, session: string, clientRef: string): boolean {
+  const key = sessionKey(machine.id, session);
+  const history = conversationHistory(key);
+  const send = history.rehold(clientRef);
+  if (!send) return false;
+  const now = Date.now();
+  const first = heldSince.get(clientRef) ?? now;
+  heldSince.set(clientRef, first);
+  const remaining = HELD_SEND_MS - (now - first);
+  if (remaining <= 0) {
+    heldSince.delete(clientRef);
+    history.reject(clientRef, outageRefusal(machine.label));
+    return true;
+  }
+  queueHeldSend(machine, key, clientRef, send.target, send.text, send.replyTo, remaining);
+  return true;
+}
+
+function queueHeldSend(machine: StoredMachine, key: string, clientRef: string, supervisor: string, text: string, replyTo: number | undefined, expiresInMs: number): void {
+  heldSince.set(clientRef, heldSince.get(clientRef) ?? Date.now());
   const expiry = setTimeout(() => {
     const queue = heldSends.get(key) ?? [];
     const index = queue.findIndex((held) => held.clientRef === clientRef);
@@ -2439,9 +2487,10 @@ function holdSupervisorMessage(machine: StoredMachine, session: string, clientRe
     queue.splice(index, 1);
     if (queue.length === 0) heldSends.delete(key);
     // Still unreachable: say so on the message, with Retry and Edit.
+    heldSince.delete(clientRef);
     conversationHistory(key).reject(clientRef, outageRefusal(machine.label));
     updateConversationViews(); renderConversationList();
-  }, HELD_SEND_MS);
+  }, expiresInMs);
   const queue = heldSends.get(key) ?? [];
   queue.push({ clientRef, supervisor, text, replyTo, expiry });
   heldSends.set(key, queue);

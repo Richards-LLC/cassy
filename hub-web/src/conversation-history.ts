@@ -137,6 +137,20 @@ export class ConversationHistory {
     this.insert({ kind: "send", value: { id, target, text, state: "sending", held: true, ...(replyTo === undefined ? {} : { replyTo }) }, at: key, ...(key === at ? {} : { shownAt: at }), session });
   }
 
+  /**
+   * A send the hub refused as retryable (cas-0653, `upstream_unavailable`):
+   * it never reached the machine's daemon, so it waits in this browser again,
+   * with no receipt deadline, until it goes out once more. Returns what to
+   * resend, or undefined when the send is not a live unreceipted one.
+   */
+  rehold(id: string): ConversationSend | undefined {
+    const send = this.events.find((event) => event.kind === "send" && event.value.id === id);
+    if (!send || send.kind !== "send" || send.value.notificationId !== undefined || send.value.state !== "sending") return undefined;
+    send.value.held = true;
+    delete send.value.sentAt;
+    return send.value;
+  }
+
   /** The held send went out now: its receipt clock starts. */
   release(id: string, at: number = Date.now()): boolean {
     const send = this.events.find((event) => event.kind === "send" && event.value.id === id);

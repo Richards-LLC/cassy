@@ -196,8 +196,15 @@ function writeProvenance(line: HTMLElement, model: FleetBoardModel): void {
 /** A plot row's label: the project (or trimmed session), and a tag when that label repeats. */
 export interface FleetPlotLabel { name: string; tag?: string }
 
-/** A twin's whole tag fits the narrow label column beside at least a letter of the project (cas-ae5e). */
-export const FLEET_TWIN_TAG_MAX = 14;
+/**
+ * A twin's whole tag fits the narrow label column beside at least a letter of
+ * the project (cas-ae5e). The narrowest column is 132px at 390 (124px of
+ * content). Beside the project's 2ch minimum and the gap, that leaves about
+ * 105px for "· " and the tag: 14 glyphs of 7.2px. QA round 2 measured 13
+ * characters fitting and 14 clipped, so 12 keeps a margin for wider phone
+ * monospace fonts.
+ */
+export const FLEET_TWIN_TAG_MAX = 12;
 
 /** A machine's own name, letters and digits only: "Atlas" from "Atlas · Linux". */
 function machineName(label: string): string {

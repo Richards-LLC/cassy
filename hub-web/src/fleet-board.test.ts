@@ -153,7 +153,7 @@ describe("fleet board region lifecycle", () => {
       entry({ ...forge, session: "patient-pelican-9", supervisor: "patient-pelican-9", project: "cas-src" }),
       entry({ ...forge, session: "brisk-otter-5", supervisor: "brisk-otter-5", project: "cas-src" }),
     ]);
-    expect([...mixed.values()].map((label) => label.tag)).toEqual(["pelican-9 · AT", "pelican-9 · FO", "otter-5"]);
+    expect([...mixed.values()].map((label) => label.tag)).toEqual(["…ican-9 · AT", "…ican-9 · FO", "otter-5"]);
     // cas-ae5e QA F01: initials that collide (Atlas, Attic: both AT) use the
     // shortest differing prefix of the machine's name, never the full label.
     const sameInitials = fleetPlotLabels([
@@ -162,7 +162,7 @@ describe("fleet board region lifecycle", () => {
       entry({ machineId: "m-c", machineLabel: "Studio Mac · macOS", session: "brisk-otter-5", supervisor: "brisk-otter-5", project: "cas-src" }),
       entry({ machineId: "m-a", machineLabel: "Atlas · Linux", session: "patient-pelican-9", supervisor: "patient-pelican-9", project: "cas-src" }),
     ]);
-    expect([...sameInitials.values()].map((label) => label.tag)).toEqual(["otter-5 · Atl", "otter-5 · Att", "otter-5 · SM", "pelican-9"]);
+    expect([...sameInitials.values()].map((label) => label.tag)).toEqual(["…ter-5 · Atl", "…ter-5 · Att", "otter-5 · SM", "pelican-9"]);
     // Names that share four letters fall back to the initials and an ordinal, in label order.
     const numbered = fleetPlotLabels([
       entry({ machineId: "b2", machineLabel: "Build Server 2", session: "keen-lynx-1", supervisor: "keen-lynx-1", project: "p" }),
@@ -174,7 +174,7 @@ describe("fleet board region lifecycle", () => {
       entry({ machineId: "x1", machineLabel: "Atlas · Linux", session: "extraordinarily-patient-pelican-19", supervisor: "extraordinarily-patient-pelican-19", project: "p" }),
       entry({ machineId: "x2", machineLabel: "Attic · Linux", session: "extraordinarily-patient-pelican-19", supervisor: "extraordinarily-patient-pelican-19", project: "p" }),
     ]);
-    expect([...long.values()].map((label) => label.tag)).toEqual(["…ican-19 · Atl", "…ican-19 · Att"]);
+    expect([...long.values()].map((label) => label.tag)).toEqual(["…an-19 · Atl", "…an-19 · Att"]);
     for (const labels of [twins, mixed, sameInitials, numbered, long]) {
       for (const label of labels.values()) if (label.tag?.includes(" · ")) expect(label.tag.length, label.tag).toBeLessThanOrEqual(FLEET_TWIN_TAG_MAX);
     }

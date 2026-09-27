@@ -2573,6 +2573,18 @@ impl CasCore {
                 data: None,
             });
         }
+        // A factory branch is already unambiguous without task_id. Guard it
+        // before worktree lookup, including when the source was cleaned up.
+        if task_id.is_none()
+            && id.starts_with("factory/")
+            && let Some(refusal) = crate::qa_pass::branch_merge_refusal(&cas_root, &cwd, id)
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(refusal),
+                data: None,
+            });
+        }
 
         let manager_config = WorktreeConfig {
             enabled: wt_config.enabled,
@@ -2696,6 +2708,19 @@ impl CasCore {
                 message: Cow::from(message),
                 data: None,
             })?;
+        }
+
+        // GH #1024: callers commonly omit task_id. Resolve the worktree first,
+        // then bind its actual branch to any open QA round before Git can merge.
+        if task_id.is_none()
+            && let Some(refusal) =
+                crate::qa_pass::branch_merge_refusal(&cas_root, &cwd, &worktree.branch)
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(refusal),
+                data: None,
+            });
         }
 
         // A stale System-A row is not a live worktree. Preserve the legacy

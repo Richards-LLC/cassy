@@ -289,9 +289,14 @@ pub fn factory_branches_merged_by(command: &str) -> Vec<String> {
 /// the close backstop still refuses such a task later.
 pub fn supervisor_merge_refusal(cas_root: &Path, cwd: &Path, command: &str) -> Option<String> {
     let branches = factory_branches_merged_by(command);
-    if branches.is_empty() {
-        return None;
-    }
+    branches
+        .into_iter()
+        .find_map(|branch| branch_merge_refusal(cas_root, cwd, &branch))
+}
+
+/// Check the branch selected by `worktree_merge`, including calls without a
+/// task_id. The raw-git hook uses the same lookup so both merge paths agree.
+pub fn branch_merge_refusal(cas_root: &Path, cwd: &Path, branch: &str) -> Option<String> {
     let config = crate::config::Config::load(cas_root).ok()?;
     let qa = config.qa();
     if !qa.independent_pass {
@@ -302,43 +307,48 @@ pub fn supervisor_merge_refusal(cas_root: &Path, cwd: &Path, command: &str) -> O
     // delivery remains InProgress. The recorded round, not the park status,
     // determines whether this merge needs an independent verdict.
     let deliveries = task_store.list(None).ok()?;
-    for branch in branches {
-        let worker = branch.trim_start_matches("factory/");
-        for task in deliveries
-            .iter()
-            .filter(|task| task.status != cas_types::TaskStatus::Closed)
-        {
-            let passes = cas_store::list_qa_passes(cas_root, &task.id).unwrap_or_default();
-            if !gate_applies(task, &qa, &passes) {
-                continue;
-            }
-            if task.deliverables.parked_branch.as_deref() != Some(branch.as_str())
-                && task.assignee.as_deref() != Some(worker)
-                && !passes.iter().any(|pass| pass.branch == branch)
-            {
-                continue;
-            }
-            let head = Command::new("git")
-                .args(["rev-parse", "--verify", &branch])
-                .current_dir(cwd)
-                .output()
-                .ok()
-                .filter(|out| out.status.success())
-                .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
-                .filter(|sha| !sha.is_empty());
-            let refusal = match head {
-                Some(head) => merge_gate(task, &qa, &passes, &head).err(),
-                None => Some(format!(
-                    "INDEPENDENT QA REQUIRED before {} merges, and {branch} does not resolve here.",
-                    task.id
-                )),
-            };
-            if let Some(refusal) = refusal {
-                return Some(format!("🚫 {refusal}"));
-            }
+    let worker = branch.trim_start_matches("factory/");
+    for task in deliveries
+        .iter()
+        .filter(|task| task.status != cas_types::TaskStatus::Closed)
+    {
+        let passes = cas_store::list_qa_passes(cas_root, &task.id).unwrap_or_default();
+        if !branch_binds_task(task, &qa, &passes, branch, worker) {
+            continue;
+        }
+        let head = Command::new("git")
+            .args(["rev-parse", "--verify", branch])
+            .current_dir(cwd)
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .filter(|sha| !sha.is_empty());
+        let refusal = match head {
+            Some(head) => merge_gate(task, &qa, &passes, &head).err(),
+            None => Some(format!(
+                "INDEPENDENT QA REQUIRED before {} merges, and {branch} does not resolve here.",
+                task.id
+            )),
+        };
+        if let Some(refusal) = refusal {
+            return Some(format!("🚫 {refusal}"));
         }
     }
     None
+}
+
+fn branch_binds_task(
+    task: &Task,
+    qa: &QaConfig,
+    passes: &[QaPass],
+    branch: &str,
+    worker: &str,
+) -> bool {
+    gate_applies(task, qa, passes)
+        && (task.deliverables.parked_branch.as_deref() == Some(branch)
+            || task.assignee.as_deref() == Some(worker)
+            || passes.iter().any(|pass| pass.branch == branch))
 }
 
 /// Paths the delivery changes: `merge-base(parent, branch)..branch`.
@@ -775,6 +785,31 @@ mod tests {
         // A pass for an older tip does not cover new commits.
         assert!(merge_gate(&demo, &qa, &[pass("aaaa1111bbbb", Passed)], "cccc2222").is_err());
         assert!(merge_gate(&demo, &qa, &[pass("aaaa1111bbbb", Failed)], "aaaa1111bbbb").is_err());
+    }
+
+    #[test]
+    fn branch_lookup_binds_the_recorded_round_after_reassignment() {
+        use cas_types::QaPassState::*;
+        let qa = QaConfig::default();
+        let mut delivery = task();
+        delivery.assignee = Some("replacement".to_string());
+        let pending = pass("aaaa1111", Pending);
+        assert!(branch_binds_task(
+            &delivery,
+            &qa,
+            &[pending.clone()],
+            "factory/impl",
+            "impl"
+        ));
+        assert!(!branch_binds_task(
+            &delivery,
+            &qa,
+            &[pending.clone()],
+            "factory/unrelated",
+            "unrelated"
+        ));
+        assert!(merge_gate(&delivery, &qa, &[pending], "aaaa1111").is_err());
+        assert!(merge_gate(&delivery, &qa, &[pass("aaaa1111", Waived)], "aaaa1111").is_ok());
     }
 
     #[test]

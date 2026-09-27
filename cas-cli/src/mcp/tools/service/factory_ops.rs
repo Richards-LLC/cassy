@@ -4150,7 +4150,11 @@ impl CasService {
                 } else {
                     ""
                 };
-                let worktree_status = collect_worker_worktree_status(&self.inner.cas_root, agent);
+                let held_task = in_progress_tasks.iter().chain(parked_tasks.iter()).find(|task| {
+                    task.assignee.as_deref() == Some(agent.name.as_str())
+                        || task.assignee.as_deref() == Some(agent.id.as_str())
+                });
+                let worktree_status = collect_worker_worktree_status(&self.inner.cas_root, agent, held_task);
                 let clone_path = worktree_status.clone_path;
                 let clone_info = worktree_status.clone_info;
                 // cas-844bf: git introspection — branch/HEAD/ahead-behind/dirty/PR
@@ -7270,11 +7274,15 @@ fn sync_skip_reason_for_clone_resolve(
 fn collect_worker_worktree_status(
     cas_root: &std::path::Path,
     agent: &cas_types::Agent,
+    task: Option<&cas_types::Task>,
 ) -> WorkerWorktreeStatus {
     match resolve_worker_clone_path(cas_root, agent) {
         WorkerClonePathResolve::Ready(path) => {
             let clone_path = path.display().to_string();
-            let gs = collect_worker_git_status(&path);
+            let mut gs = collect_worker_git_status(&path);
+            if let Some(task) = task {
+                apply_task_delivery_git_status(&path, task, &agent.name, &mut gs);
+            }
             WorkerWorktreeStatus {
                 clone_info: format!("\n    Clone: {clone_path}"),
                 git_info: format_worker_git_status(&gs),
@@ -7290,6 +7298,48 @@ fn collect_worker_worktree_status(
             }
         }
     }
+}
+
+/// The worker checkout can still point at an older lane after the task was
+/// delivered on `factory/<worker>-<task>`. Measure the bound delivery instead.
+fn apply_task_delivery_git_status(
+    repo: &std::path::Path,
+    task: &cas_types::Task,
+    worker: &str,
+    status: &mut WorkerGitStatus,
+) {
+    let branch = task.deliverables.parked_branch.clone().unwrap_or_else(|| {
+        crate::mcp::tools::core::task::lifecycle::close_ops::close_measured_factory_branch(
+            repo, task, worker,
+        )
+    });
+    let head_ref = task.deliverables.factory_branch_anchor.as_deref().unwrap_or(&branch);
+    let Ok(head) = run_git(repo, &["rev-parse", "--verify", &format!("{head_ref}^{{commit}}")]) else {
+        return;
+    };
+    let base = task.deliverables.work_target.as_ref()
+        .map(|target| target.target_branch.as_str())
+        .filter(|branch| !branch.is_empty())
+        .unwrap_or(&status.base_branch);
+    let Ok(counts) = run_git(repo, &["rev-list", "--left-right", "--count", &format!("{base}...{head}")]) else {
+        return;
+    };
+    let mut parts = counts.split_whitespace();
+    let (Some(behind), Some(ahead)) = (parts.next().and_then(|n| n.parse().ok()), parts.next().and_then(|n| n.parse().ok())) else {
+        return;
+    };
+    status.branch = branch;
+    status.head_sha = head;
+    status.base_branch = base.to_owned();
+    status.behind = behind;
+    status.ahead = ahead;
+    let pushed_ref = format!("origin/{}", status.branch);
+    status.pushed_ref = if run_git(repo, &["rev-parse", "--verify", &format!("refs/remotes/{pushed_ref}")]).is_ok() {
+        pushed_ref
+    } else {
+        "none".to_string()
+    };
+    status.pr_url = collect_worker_pr_url(repo, &status.branch, &status.pushed_ref, std::path::Path::new("gh"));
 }
 
 /// Gather the live dirty-worktree floor for `worker_activity`.
@@ -16101,6 +16151,29 @@ effort = "high"
         );
     }
 
+    #[test]
+    fn worker_status_measures_bound_task_branch_instead_of_older_lane_gh_1040() {
+        let (tmp, _) = setup_git_repo_with_factory_branch("worker");
+        let repo = tmp.path();
+        run_git_ok(repo, &["checkout", "main"]);
+        run_git_ok(repo, &["checkout", "-b", "factory/worker-cas-next"]);
+        std::fs::write(repo.join("next.py"), "print('next')\n").unwrap();
+        run_git_ok(repo, &["add", "next.py"]);
+        run_git_ok(repo, &["commit", "-m", "next task"]);
+        let tip = run_git(repo, &["rev-parse", "HEAD"]).unwrap();
+        run_git_ok(repo, &["checkout", "factory/worker"]);
+
+        let mut task = cas_types::Task::new("cas-next".into(), "next".into());
+        task.deliverables.parked_branch = Some("factory/worker-cas-next".into());
+        task.deliverables.factory_branch_anchor = Some(tip.clone());
+        let mut status = collect_worker_git_status(repo);
+        apply_task_delivery_git_status(repo, &task, "worker", &mut status);
+        assert_eq!(status.branch, "factory/worker-cas-next");
+        assert_eq!(status.head_sha, tip);
+        assert_eq!(status.ahead, 1);
+        assert_eq!(status.behind, 0);
+    }
+
     fn setup_mid_merge_with_incoming_and_worker_contributions() -> tempfile::TempDir {
         let repo = tempfile::TempDir::new().expect("tempdir");
         let path = repo.path();
@@ -16786,8 +16859,8 @@ effort = "high"
             AgentRole::Worker,
         );
 
-        let claude_status = collect_worker_worktree_status(&cas_root, &claude);
-        let codex_status = collect_worker_worktree_status(&cas_root, &codex);
+        let claude_status = collect_worker_worktree_status(&cas_root, &claude, None);
+        let codex_status = collect_worker_worktree_status(&cas_root, &codex, None);
 
         assert_eq!(
             codex_status.clone_path.as_deref(),
@@ -16824,7 +16897,7 @@ effort = "high"
             AgentRole::Worker,
         );
 
-        let status = collect_worker_worktree_status(&cas_root, &agent);
+        let status = collect_worker_worktree_status(&cas_root, &agent, None);
         let expected_path = cas_root.join("worktrees/codex-jester");
         let expected_path_str = expected_path.to_string_lossy().to_string();
 

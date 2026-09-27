@@ -904,6 +904,25 @@ fn worker_name_token_matches(token: &str, worker: &str) -> bool {
     token == worker || token.strip_prefix("factory/") == Some(worker)
 }
 
+/// Return the worktree owner and source ref for a System-B merge id.
+fn system_b_merge_source(id: &str, task_id: Option<&str>) -> (String, String) {
+    let token = id.strip_prefix("factory/").unwrap_or(id);
+    if let Some(worker) = task_id.and_then(|task_id| token.strip_suffix(&format!("-{task_id}"))) {
+        if !worker.is_empty() {
+            return (worker.to_string(), format!("factory/{token}"));
+        }
+    }
+    (token.to_string(), format!("factory/{token}"))
+}
+
+/// A branch-only merge request can name its task through the canonical
+/// `factory/<worker>-<task-id>` suffix. The task row still authorizes it.
+fn per_task_merge_identity(id: &str) -> Option<(&str, &str)> {
+    let token = id.strip_prefix("factory/")?;
+    let (worker, suffix) = token.rsplit_once("-cas-")?;
+    (!worker.is_empty() && !suffix.is_empty()).then_some((worker, suffix))
+}
+
 /// Resolve whether an identity token (assignee field or agent id/name) belongs
 /// to the System-B worker being merged (cas-bd5f).
 fn identity_belongs_to_worker(
@@ -2470,6 +2489,20 @@ impl CasCore {
         use crate::worktree::{WorktreeConfig, WorktreeManager};
 
         let cas_root = self.cas_root.clone();
+        let inferred_task_id = if task_id.is_none() {
+            per_task_merge_identity(id).and_then(|(worker, suffix)| {
+                let candidate = format!("cas-{suffix}");
+                self.open_task_store()
+                    .ok()?
+                    .get(&candidate)
+                    .ok()
+                    .filter(|task| task.assignee.as_deref() == Some(worker))
+                    .map(|_| candidate)
+            })
+        } else {
+            None
+        };
+        let task_id = task_id.or(inferred_task_id.as_deref());
         let config = Config::load(&cas_root).map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Failed to load config: {e}")),
@@ -2581,6 +2614,18 @@ impl CasCore {
                 data: None,
             });
         }
+        // A factory branch is already unambiguous without task_id. Guard it
+        // before worktree lookup, including when the source was cleaned up.
+        if task_id.is_none()
+            && id.starts_with("factory/")
+            && let Some(refusal) = crate::qa_pass::branch_merge_refusal(&cas_root, &cwd, id)
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(refusal),
+                data: None,
+            });
+        }
 
         let manager_config = WorktreeConfig {
             enabled: wt_config.enabled,
@@ -2613,8 +2658,10 @@ impl CasCore {
                     (wt, false, source_worktree_live, String::new(), false)
                 }
                 None => {
-                    let assignee = id.strip_prefix("factory/").unwrap_or(id);
-                    let path = manager.worktree_path_for_worker(assignee);
+                    // A per-task delivery branch shares the worker's worktree
+                    // path, but has its own Git ref (GH #1040).
+                    let (assignee, source_branch) = system_b_merge_source(id, task_id);
+                    let path = manager.worktree_path_for_worker(&assignee);
                     let source_worktree_live = is_git_worktree(&path);
                     if !source_worktree_live && transactional_delivery.is_none() {
                         return Err(McpError {
@@ -2642,7 +2689,7 @@ impl CasCore {
                         task_store.as_ref(),
                         agent_store.as_ref(),
                         task_id,
-                        assignee,
+                        &assignee,
                         allow_trunk, // NOT force — dirty bypass stays separate (cas-0b32 review P1)
                         || {
                             Config::configured_epic_base_branch(&cwd)
@@ -2659,7 +2706,7 @@ impl CasCore {
                     (
                         crate::types::Worktree::new(
                             format!("system-b-{assignee}"),
-                            format!("factory/{assignee}"),
+                            source_branch,
                             parent_branch,
                             path,
                         ),
@@ -2704,6 +2751,19 @@ impl CasCore {
                 message: Cow::from(message),
                 data: None,
             })?;
+        }
+
+        // GH #1024: callers commonly omit task_id. Resolve the worktree first,
+        // then bind its actual branch to any open QA round before Git can merge.
+        if task_id.is_none()
+            && let Some(refusal) =
+                crate::qa_pass::branch_merge_refusal(&cas_root, &cwd, &worktree.branch)
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(refusal),
+                data: None,
+            });
         }
 
         // A stale System-A row is not a live worktree. Preserve the legacy
@@ -4344,6 +4404,22 @@ mod tests {
         assert!(note.contains("shutdown_workers may remove it"));
         assert!(note.contains("clean and all tasks are terminal"));
         assert!(worktree_merge_cleanup_note(true).contains("Worktree removed"));
+    }
+
+    #[test]
+    fn per_task_merge_id_uses_worker_worktree_and_task_branch_gh_1040() {
+        assert_eq!(
+            super::per_task_merge_identity("factory/daring-jay-42-cas-1e7d"),
+            Some(("daring-jay-42", "1e7d")),
+        );
+        assert_eq!(
+            super::system_b_merge_source("factory/daring-jay-42-cas-1e7d", Some("cas-1e7d")),
+            ("daring-jay-42".to_string(), "factory/daring-jay-42-cas-1e7d".to_string()),
+        );
+        assert_eq!(
+            super::system_b_merge_source("factory/daring-jay-42", Some("cas-1e7d")),
+            ("daring-jay-42".to_string(), "factory/daring-jay-42".to_string()),
+        );
     }
 
     #[test]

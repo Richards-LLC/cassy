@@ -480,3 +480,12 @@ describe("ConversationView (Pebble thread)", () => {
     expect(view.element.querySelector<HTMLElement>('[data-kind="ask"]')?.classList.contains("bub")).toBe(true);
   });
 });
+
+describe("coalesced status lines under forced colours (journey F11)", () => {
+  it("keeps the 10px clamp spacer in Canvas, never a bar in the text colour", async () => {
+    const [{ readFileSync }, { dirname, join }, { fileURLToPath }] = await Promise.all([import("node:fs"), import("node:path"), import("node:url")]);
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
+    expect(css).toContain("border-bottom: 10px solid transparent;");
+    expect(css).toMatch(/@media \(forced-colors: active\) \{\s*\.thread \.coalesce \{ border-bottom-color: Canvas; \}\s*\}/);
+  });
+});

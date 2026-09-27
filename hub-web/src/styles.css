@@ -3250,6 +3250,13 @@ dialog form > *,
  * fourth line never peeks through. */
 .thread .coalesce { align-self: flex-start; max-width: 100%; background: var(--sup-bg); color: var(--ink-mid); border-radius: 16px; padding: 10px 16px 0; border-bottom: 10px solid transparent; font-size: 13px; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
 .thread .coalesce[data-expanded="true"] { display: block; -webkit-line-clamp: none; line-clamp: none; overflow: visible; }
+/* Forced colours repaint a transparent border in the text colour, which drew
+   a 10px bar under every coalesced line (journey F11). A system colour is kept
+   as written: Canvas, the fill forced colours give the box, keeps the spacer
+   invisible in light and dark. */
+@media (forced-colors: active) {
+  .thread .coalesce { border-bottom-color: Canvas; }
+}
 .thread .coalesce p { margin: 0; white-space: pre-wrap; }
 .thread .coalesce p + p { margin-top: 6px; }
 .thread .coalesce-expand { min-height: 32px; padding: 0 14px; border: var(--line-width) solid var(--line-strong); border-radius: 999px; background: transparent; color: var(--ink); font: var(--weight-medium) 13px/1.2 var(--font-ui); }

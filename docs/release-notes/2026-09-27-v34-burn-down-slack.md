@@ -29,6 +29,8 @@ Was: the hub could die and a network switch could strand Commander. → Now: bot
 
 • *Session blips* — Was: a message sent while a session briefly lost its link read "Not sent". → Now: it waits in the conversation and goes out once the session is back.
 
+• *Messages that wait too long* — Was: after two minutes a waiting message told you to re-pair this device, while the line below still promised it would go out. → Now: it says the session didn't come back, with a Retry.
+
 • *No double messages* — Was: a message sent again after a reconnect could arrive twice. → Now: it arrives once.
 
 *Conversations*
@@ -89,6 +91,10 @@ Was: SIGPIPE killed long-lived servers and GitHub merges could skip independent 
 • *Hub service* — Was: the systemd unit left a signal-killed hub down. → Now: it restarts after signal deaths, and doctor flags an inactive service.
 
 • *upstream_unavailable* — Was: a missing daemon upstream was refused as `forbidden`. → Now: an audited, retryable `upstream_unavailable`; the hub closes the session stream and the page re-holds the send and resends it once.
+
+• *Held-send retries* — Was: while the daemon link stayed down the page resent about once a second, and a legacy-socket send after a refusal ended Not confirmed. → Now: retries back off 1, 2, 4, then 8 s, and later legacy sends are re-held.
+
+• *Held-send expiry* — Was: the expired bubble fell through to "re-pair this device" and the composer still said "will go out by itself". → Now: "The session didn't come back while it waited", Retry, and the composer points at the message.
 
 • *SendMessage dedupe* — Was: a resent SendMessage could queue twice. → Now: the daemon answers a repeated `client_ref` with its first receipt and queues it once.
 

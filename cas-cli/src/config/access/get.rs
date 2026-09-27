@@ -17,6 +17,7 @@ impl Config {
         let skill_validation = self.skill_validation.clone().unwrap_or_default();
         let skills = self.skills.clone().unwrap_or_default();
         let memory = self.memory.clone().unwrap_or_default();
+        let factory = self.factory();
         match key {
             // Sync section
             "sync.enabled" => Some(self.sync.enabled.to_string()),
@@ -61,12 +62,31 @@ impl Config {
             "tasks.block_exit_on_open" => Some(tasks.block_exit_on_open.to_string()),
             "qa.user_facing_labels" => Some(qa.user_facing_labels.join(",")),
             "qa.telemetry_sweep" => Some(qa.telemetry_sweep.unwrap_or_default()),
-            "factory.epic_base_branch" => Some(
-                self.factory
-                    .as_ref()
-                    .and_then(|factory| factory.epic_base_branch.clone())
-                    .unwrap_or_default(),
-            ),
+            // Factory section (cas-1a05): every key `set` accepts is readable.
+            // An unset optional key reads as "" (its runtime default applies).
+            "factory.artifacts_root" => Some(factory.artifacts_root.clone().unwrap_or_default()),
+            "factory.message_max_chars" => Some(factory.message_max_chars.to_string()),
+            "factory.message_max_chars_escalation" => {
+                Some(factory.message_max_chars_escalation.to_string())
+            }
+            "factory.note_max_chars" => Some(factory.note_max_chars.to_string()),
+            "factory.max_concurrent_builders" => Some(factory.max_concurrent_builders.to_string()),
+            "factory.worker_build_jobs" | "factory.cargo_build_jobs" => {
+                Some(factory.cargo_build_jobs.clone())
+            }
+            "factory.merge_sweep" => Some(factory.merge_sweep.to_string()),
+            "factory.merge_sweep_command" => {
+                Some(factory.merge_sweep_command.clone().unwrap_or_default())
+            }
+            "factory.epic_base_branch" => Some(factory.epic_base_branch.clone().unwrap_or_default()),
+            "factory.merge_sweep_cwd" => Some(factory.merge_sweep_cwd.clone().unwrap_or_default()),
+            "factory.merge_sweep_timeout_secs" => Some(factory.merge_sweep_timeout_secs.to_string()),
+            "factory.ai_enrichment.enabled" => Some(factory.ai_enrichment.enabled.to_string()),
+            "factory.ai_enrichment.endpoint" => Some(factory.ai_enrichment.endpoint.clone()),
+            "factory.ai_enrichment.provider" => Some(factory.ai_enrichment.provider.clone()),
+            "factory.ai_enrichment.api_key_env" => Some(factory.ai_enrichment.api_key_env.clone()),
+            "factory.ai_enrichment.model" => Some(factory.ai_enrichment.model.clone()),
+            "factory.ai_enrichment.effort" => Some(factory.ai_enrichment.effort.clone()),
             "qa.independent_pass" => Some(qa.independent_pass.to_string()),
             "qa.evidence_gate" => Some(qa.evidence_gate.to_string()),
             "qa.terminal_render_paths" => Some(qa.terminal_render_paths.join(",")),

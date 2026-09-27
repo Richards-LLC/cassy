@@ -953,3 +953,77 @@ fn factory_epic_base_branch_is_registered_and_round_trips_cas_8d54() {
     assert_eq!(config.factory().epic_base_branch, None);
     assert_eq!(config.get("factory.epic_base_branch"), Some(String::new()));
 }
+
+/// cas-1a05: every factory key `cas config set` accepts is also returned by
+/// `get` and `list`, and a set value reads back. The table is the settable
+/// set; it must cover every registered `factory.*` key, so a key added to the
+/// registry or to `set` without `get`/`list` fails here.
+#[test]
+fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
+    // (key, value to set, value get returns)
+    let table: &[(&str, &str, &str)] = &[
+        ("factory.artifacts_root", " /mnt/scratch/artifacts ", "/mnt/scratch/artifacts"),
+        ("factory.message_max_chars", "3000", "3000"),
+        ("factory.message_max_chars_escalation", "6000", "6000"),
+        ("factory.note_max_chars", "1800", "1800"),
+        ("factory.max_concurrent_builders", "3", "3"),
+        ("factory.worker_build_jobs", "6", "6"),
+        ("factory.cargo_build_jobs", "5", "5"),
+        ("factory.merge_sweep", "false", "false"),
+        ("factory.merge_sweep_command", "pnpm test:ci", "pnpm test:ci"),
+        ("factory.epic_base_branch", "staging", "staging"),
+        ("factory.merge_sweep_cwd", "web", "web"),
+        ("factory.merge_sweep_timeout_secs", "900", "900"),
+        ("factory.ai_enrichment.enabled", "true", "true"),
+        ("factory.ai_enrichment.endpoint", "http://127.0.0.1:11434/v1/responses", "http://127.0.0.1:11434/v1/responses"),
+        ("factory.ai_enrichment.provider", "openai-compatible", "openai-compatible"),
+        ("factory.ai_enrichment.api_key_env", "LOCAL_MODEL_KEY", "LOCAL_MODEL_KEY"),
+        ("factory.ai_enrichment.model", "local-summary-1", "local-summary-1"),
+        ("factory.ai_enrichment.effort", "low", "low"),
+    ];
+    let registry = meta::registry();
+    for key in registry.all_keys().into_iter().filter(|key| key.starts_with("factory.")) {
+        assert!(
+            table.iter().any(|(settable, _, _)| *settable == key),
+            "registered key {key} is missing from this round-trip table"
+        );
+    }
+
+    let temp = TempDir::new().unwrap();
+    let mut config = Config::default();
+    for (key, _, _) in table {
+        assert!(config.get(key).is_some(), "{key}: settable but `get` does not know it");
+        let listed: std::collections::HashMap<String, String> = config.list().into_iter().collect();
+        // cargo_build_jobs is the accepted alias of worker_build_jobs; `list` shows the canonical key.
+        let listed_key = if *key == "factory.cargo_build_jobs" { "factory.worker_build_jobs" } else { key };
+        assert!(listed.contains_key(listed_key), "{key}: settable but `list` omits it");
+    }
+    for (key, value, expected) in table {
+        config
+            .set(key, value)
+            .unwrap_or_else(|error| panic!("{key} = {value:?}: {error}"));
+        assert_eq!(config.get(key).as_deref(), Some(*expected), "{key} after set");
+        let listed_key = if *key == "factory.cargo_build_jobs" { "factory.worker_build_jobs" } else { key };
+        let listed: std::collections::HashMap<String, String> = config.list().into_iter().collect();
+        assert_eq!(listed.get(listed_key).map(String::as_str), Some(*expected), "{key} in list");
+    }
+
+    // The values survive a save and load.
+    config.save(temp.path()).unwrap();
+    let loaded = Config::load(temp.path()).unwrap();
+    for (key, _, expected) in table {
+        if *key == "factory.worker_build_jobs" {
+            // Overwritten by the later cargo_build_jobs alias row.
+            continue;
+        }
+        assert_eq!(loaded.get(key).as_deref(), Some(*expected), "{key} after reload");
+    }
+    assert_eq!(loaded.get("factory.worker_build_jobs").as_deref(), Some("5"));
+
+    // Optional keys clear back to unset with an empty value.
+    for key in ["factory.artifacts_root", "factory.merge_sweep_command", "factory.merge_sweep_cwd", "factory.epic_base_branch"] {
+        config.set(key, "").unwrap();
+        assert_eq!(config.get(key).as_deref(), Some(""), "{key} cleared");
+    }
+    assert_eq!(config.factory().artifacts_root, None);
+}

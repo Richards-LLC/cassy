@@ -1,3 +1,4 @@
+import { machineInitials } from "./machine-accent";
 import { sessionPickerHeadline, sessionPickerRowMeta, type SessionPickerEntry } from "./session-selection";
 
 /**
@@ -198,29 +199,37 @@ export interface FleetPlotLabel { name: string; tag?: string }
 /**
  * Plot row labels lead with the project (journey F1). When several rows share
  * a project, each also carries the shortest tail of its codename that tells
- * them apart ("pelican-9", "otter-5"): at least its last two words, the whole
- * codename if needed, and the machine when two machines run the same
- * codename (cas-598e QA F01). Keyed by machine/session.
+ * the codenames apart ("pelican-9", "otter-5"): at least its last two words
+ * (cas-598e QA F01). The same codename running on two machines adds the
+ * machine's rail initials ("pelican-9 · AT"), short enough for the narrow
+ * label column (cas-ae5e). The machine's full label is used only when the
+ * initials collide too. Keyed by machine/session.
  */
 export function fleetPlotLabels(sessions: readonly FleetSessionView[]): Map<string, FleetPlotLabel> {
   const key = (entry: FleetSessionView) => `${entry.machineId}/${entry.session}`;
   const name = (entry: FleetSessionView) => entry.project ?? entry.session.split("-").slice(-3).join("-");
+  const codename = (entry: FleetSessionView) => entry.supervisor ?? entry.session;
   const labels = new Map<string, FleetPlotLabel>();
   const groups = new Map<string, FleetSessionView[]>();
   for (const entry of sessions) groups.set(name(entry), [...(groups.get(name(entry)) ?? []), entry]);
   for (const [label, group] of groups) {
     if (group.length === 1) { labels.set(key(group[0]!), { name: label }); continue; }
-    const codenames = group.map((entry) => (entry.supervisor ?? entry.session).split("-"));
-    const longest = Math.max(...codenames.map((words) => words.length));
-    let tags = codenames.map((words) => words.join("-"));
-    for (let length = 2; length <= longest; length += 1) {
-      const tails = codenames.map((words) => words.slice(-length).join("-"));
-      if (new Set(tails).size === tails.length) { tags = tails; break; }
+    // Tails are chosen over the distinct codenames, so a twin on another
+    // machine does not lengthen every other row's tag.
+    const distinct = [...new Set(group.map(codename))].map((value) => value.split("-"));
+    const longest = Math.max(...distinct.map((words) => words.length));
+    let length = longest;
+    for (let candidate = 2; candidate < longest; candidate += 1) {
+      if (new Set(distinct.map((words) => words.slice(-candidate).join("-"))).size === distinct.length) { length = candidate; break; }
     }
-    group.forEach((entry, index) => {
-      const repeated = tags.filter((tag) => tag === tags[index]).length > 1;
-      labels.set(key(entry), { name: label, tag: repeated ? `${tags[index]} · ${entry.machineLabel}` : tags[index] });
-    });
+    const tail = (entry: FleetSessionView) => codename(entry).split("-").slice(-length).join("-");
+    for (const entry of group) {
+      const twins = group.filter((other) => codename(other) === codename(entry));
+      if (twins.length === 1) { labels.set(key(entry), { name: label, tag: tail(entry) }); continue; }
+      const initials = machineInitials(entry.machineLabel);
+      const initialsClash = twins.filter((other) => machineInitials(other.machineLabel) === initials).length > 1;
+      labels.set(key(entry), { name: label, tag: `${tail(entry)} · ${initialsClash ? entry.machineLabel : initials}` });
+    }
   }
   return labels;
 }

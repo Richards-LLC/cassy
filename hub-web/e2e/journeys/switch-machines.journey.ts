@@ -600,18 +600,28 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
       { name: "quiet-heron-8", supervisor: "quiet-heron-8", project_dir: "/projects/cas-src", workers: [], liveness: "live" },
     ] as Machine["sessions"];
     alpha.push(...extra);
+    // cas-ae5e: the same codename on a second machine (brisk-otter-5 on Atlas
+    // too) is told apart by the machine's rail initials, which fit the narrow
+    // label column where the full machine name did not.
+    const atlasSessions = hub.machine("atlas").sessions;
+    const twin = { ...extra[0]!, workers: [] } as Machine["sessions"][number];
+    atlasSessions.push(twin);
     const plotName = (session: string) => board.locator(`.fleet-plot-row[data-fleet-session="${session}"] .fleet-plot-name`);
     await expect(plotName("quiet-heron-8")).toBeVisible({ timeout: 15_000 });
+    await expect(plotName("brisk-otter-5")).toHaveCount(2, { timeout: 15_000 });
     const plotLabels = async () => board.locator(".fleet-plot-row").evaluateAll((rows) => rows.map((row) => {
       const name = row.querySelector<HTMLElement>(".fleet-plot-name")!;
       const tag = name.querySelector<HTMLElement>(".fleet-plot-tag");
-      return { session: (row as HTMLElement).dataset.fleetSession!, project: name.querySelector(".fleet-plot-project")?.textContent ?? name.textContent ?? "", tag: tag?.textContent ?? "", tagWhole: !tag || tag.scrollWidth <= tag.clientWidth + 1 && tag.getBoundingClientRect().right <= name.getBoundingClientRect().right + 1 };
+      const project = name.querySelector<HTMLElement>(".fleet-plot-project");
+      return { session: (row as HTMLElement).dataset.fleetSession!, project: project?.textContent ?? name.textContent ?? "", projectWidth: project ? project.getBoundingClientRect().width : name.getBoundingClientRect().width, tag: tag?.textContent ?? "", tagWhole: !tag || tag.scrollWidth <= tag.clientWidth + 1 && tag.getBoundingClientRect().right <= name.getBoundingClientRect().right + 1 };
     }));
     for (const width of [viewport.width, 390]) {
       await page.setViewportSize({ width, height: viewport.height });
       const labels = await plotLabels();
       const casSrc = labels.filter((label) => label.project === "cas-src");
-      expect(casSrc.map((label) => label.tag).sort(), `cas-src plot rows at ${width}px`).toEqual(["heron-8", "otter-5", "pelican-9"]);
+      expect(casSrc.map((label) => label.tag).sort(), `cas-src plot rows at ${width}px`).toEqual(["heron-8", "otter-5 · AL", "otter-5 · AT", "pelican-9"]);
+      // The project keeps at least a letter beside the tag; it never collapses to a bare "·".
+      expect(casSrc.every((label) => label.projectWidth >= 8), `the project stays visible beside the tag at ${width}px: ${JSON.stringify(casSrc)}`).toBe(true);
       expect(new Set(labels.map((label) => `${label.project} ${label.tag}`)).size, `every plot row reads differently at ${width}px`).toBe(labels.length);
       expect(casSrc.every((label) => label.tagWhole), `the tag is never cut at ${width}px`).toBe(true);
       // A project that appears once carries no tag.
@@ -619,7 +629,9 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     }
     await page.setViewportSize(viewport);
     alpha.splice(alpha.length - extra.length, extra.length);
+    atlasSessions.splice(atlasSessions.indexOf(twin), 1);
     await expect(plotName("quiet-heron-8")).toHaveCount(0, { timeout: 15_000 });
+    await expect(plotName("brisk-otter-5")).toHaveCount(0, { timeout: 15_000 });
     await expect(board.locator(".fleet-plot-tag")).toHaveCount(0);
   });
 

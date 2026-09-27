@@ -577,6 +577,11 @@ pub struct FactoryConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_sweep_command: Option<String>,
 
+    /// Directory relative to the detached merge checkout where the sweep
+    /// command or detected runner runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_sweep_cwd: Option<String>,
+
     /// Environment for the post-merge sweep's test process (GH #1006), for
     /// example the database URL a suite needs. Set in `config.toml` as a
     /// `[factory.merge_sweep_env]` table. Values are never logged or written
@@ -782,6 +787,7 @@ impl Default for FactoryConfig {
             merge_sweep: true,
             merge_sweep_timeout_secs: default_merge_sweep_timeout_secs(),
             merge_sweep_command: None,
+            merge_sweep_cwd: None,
             merge_sweep_env: SweepEnv::default(),
         }
     }
@@ -1699,7 +1705,7 @@ mod tests {
     /// values never appear in the config's Debug output.
     #[test]
     fn factory_merge_sweep_command_and_env_are_configurable_and_redacted() {
-        let toml_str = "[factory]\nmerge_sweep_command = \"pnpm test:ci\"\n\
+        let toml_str = "[factory]\nmerge_sweep_command = \"pnpm test:ci\"\nmerge_sweep_cwd = \"web\"\n\
                         [factory.merge_sweep_env]\n\
                         SYNC_PUSH_POSTGRES_URL = \"postgres://user:hunter2@db/test\"\n\
                         \"bad-name\" = \"x\"\n";
@@ -1707,6 +1713,7 @@ mod tests {
             toml::from_str(toml_str).expect("valid toml");
         let fc = parsed.get("factory").expect("section present");
         assert_eq!(fc.merge_sweep_command.as_deref(), Some("pnpm test:ci"));
+        assert_eq!(fc.merge_sweep_cwd.as_deref(), Some("web"));
         assert_eq!(
             fc.merge_sweep_env
                 .0
@@ -1726,6 +1733,7 @@ mod tests {
             vec!["SYNC_PUSH_POSTGRES_URL"]
         );
         assert!(FactoryConfig::default().merge_sweep_command.is_none());
+        assert!(FactoryConfig::default().merge_sweep_cwd.is_none());
         assert!(FactoryConfig::default().merge_sweep_env.is_empty());
     }
 

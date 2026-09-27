@@ -126,6 +126,20 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
     });
 
     registry.register(ConfigMeta {
+        key: "factory.merge_sweep_cwd",
+        section: "factory",
+        name: "Post-Merge Sweep Working Directory",
+        description: "Directory relative to the merged-tip checkout for the sweep command or detected runner. Empty uses automatic runner discovery.",
+        value_type: ConfigType::String,
+        default: "",
+        constraint: Constraint::None,
+        advanced: true,
+        requires_feature: None,
+        keywords: &["factory", "merge", "sweep", "cwd", "directory", "test"],
+        use_cases: &["Run a web app suite from web/", "Select one runner in a multi-app repository"],
+    });
+
+    registry.register(ConfigMeta {
         key: "factory.merge_sweep_timeout_secs",
         section: "factory",
         name: "Post-Merge Sweep Timeout",

@@ -3295,6 +3295,15 @@ dialog form > *,
 .obj.t-a .obj-foot button.chip:focus-visible { outline-color: var(--tray-focus); }
 .obj.t-a.blk .obj-body { border-left-color: var(--crit-edge); background: var(--crit-tint); color: var(--crit-tint-fg); }
 .obj.t-a.blk .obj-foot { display: block; padding: 0 9px 9px 5px; border-left-color: var(--crit-edge); background: var(--crit-tint); }
+/* A waiting blocker says how it clears (journey F12). */
+.obj.t-a.blk .blk-hint { margin-top: 10px; font: var(--weight-semibold) 12.5px/1.3 var(--font-ui); letter-spacing: 0.01em; }
+/* An answered question is handled: it quiets to the supervisor's colour and
+   keeps only the tick on the chosen answer (journey F12). Only what still
+   waits keeps the attention treatment. */
+.obj.t-a[data-answered="true"] { box-shadow: var(--lift-sup); }
+.obj.t-a[data-answered="true"] .obj-body, .obj.t-a[data-answered="true"] .obj-foot { border-left-color: var(--color-transparent); background: var(--sup-bg); color: var(--sup-fg); }
+.obj.t-a[data-answered="true"] .obj-foot { padding-top: 0; }
+.obj.t-a[data-answered="true"] .obj-foot .chip.sent { flex: 0 1 auto; border-color: var(--line-subtle); background: var(--panel); color: var(--ink); }
 .pinned-ask .obj.t-a .obj-body { border-left-color: var(--color-transparent); background: var(--ask-bg); color: var(--ask-fg); }
 .pinned-ask .obj.t-a .obj-foot { border-left-color: var(--color-transparent); background: var(--ask-deep); }
 .pinned-ask .obj.t-a .obj-foot .chip { border-color: var(--color-transparent); background: var(--pin-chip-bg); color: var(--pin-chip-fg); }
@@ -3456,6 +3465,7 @@ button.chip:disabled { cursor: default; }
 .conversation-context .context-kind { font-weight: var(--weight-semibold); color: var(--ink); }
 .conversation-context .context-jump[data-kind="blocker"] .context-kind { color: var(--warn-text); }
 .conversation-context .context-jump .context-text { color: var(--ink-mid); overflow-wrap: anywhere; }
+.conversation-context .context-jump .context-hint { color: var(--warn-text); font-size: 12px; font-weight: var(--weight-medium); }
 .conversation-context .context-attachment { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "plate name" "plate meta"; column-gap: var(--space-2); align-items: center; }
 .conversation-context .context-plate { grid-area: plate; display: flex; align-items: center; justify-content: center; min-width: 34px; height: 34px; padding: 0 4px; border-radius: 7px; background: var(--crit-bg); color: var(--crit-fg); font: var(--weight-semibold) 9px/1 var(--font-ui); letter-spacing: 0.06em; }
 .conversation-context .context-attachment .context-text { grid-area: name; min-width: 0; overflow-wrap: anywhere; }

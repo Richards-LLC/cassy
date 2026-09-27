@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { ConversationHistory } from "./conversation-history";
 import { conversationShellMarkup } from "./conversation-shell";
 import { ConversationView } from "./conversation-view";
-import { CONTEXT_ENTRY_LIMIT, contextSections, entryText, syncContextRail, threadAttachments } from "./context-rail";
+import { CONTEXT_ENTRY_LIMIT, contextSections, entryText, syncContextRail, threadAttachments, BLOCKER_HINT } from "./context-rail";
 import type { ArtifactRef, OperatorReply, OperatorTurnKind } from "./types";
 
 const at = (hh: number, mm: number) => new Date(2026, 8, 22, hh, mm).getTime();
@@ -87,6 +87,9 @@ describe("desktop context rail (P10)", () => {
       ["blocker", "Blocker", "The release gate went red."],
       ["ask", "Question", "Keep the old runner pool for now?"],
     ]);
+    // A blocker's entry says how it clears; a question's does not need to (journey F12).
+    expect(jumps.map((jump) => jump.querySelector(".context-hint")?.textContent ?? null)).toEqual([BLOCKER_HINT, null]);
+    expect(BLOCKER_HINT).toBe("Reply to unblock");
     jumps[0]!.click();
     const turn = document.querySelector<HTMLElement>('.thread [data-key="reply:10"]')!;
     expect(document.activeElement).toBe(turn);

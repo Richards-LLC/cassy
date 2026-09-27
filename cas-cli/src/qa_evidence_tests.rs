@@ -384,9 +384,14 @@ fn polish_proof_and_critique_floor_are_enforced() {
 
     let fx = Fixture::new();
     fx.write_bundle(|_| {});
-    std::fs::write(fx.bundle_dir().join("visual-qa.stdout"), "FAIL\n").unwrap();
+    write_visual_qa_report(
+        &fx.bundle_dir(),
+        "FAIL",
+        chrono::Utc::now(),
+        "http://127.0.0.1:4173/",
+    );
     let refusal = fx.validate(&fx.notes()).unwrap_err();
-    assert!(refusal.problem.contains("visual_qa_stdout"), "{refusal:?}");
+    assert!(refusal.problem.contains("status \"FAIL\""), "{refusal:?}");
 
     let fx = Fixture::new();
     fx.write_bundle(|manifest| manifest["critique_score"]["fit"] = serde_json::json!(3));

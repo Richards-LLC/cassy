@@ -3299,6 +3299,9 @@ pub(crate) fn cloud_row_remediation_summary(
             message.push_str("; run `cas doctor --fix --yes` to quarantine remaining open rows (the focused form is `cas doctor --fix-cloud-rows --yes`, and reverse it with `cas doctor --release-cloud-rows --yes`)");
         } else {
             message.push_str("; the quarantine count already meets the open-row count, so `cas doctor --fix --yes` may have no work; review the remaining rows with `cas doctor --foreign-rows`");
+            if quarantined > 0 {
+                message.push_str("; reverse the quarantine with `cas doctor --release-cloud-rows --yes` if those rows belong on this board");
+            }
         }
         message.push_str("; use `cas cloud purge-foreign --dry-run` only to inspect foreign cloud rows");
     }

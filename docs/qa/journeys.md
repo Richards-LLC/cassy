@@ -376,6 +376,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 4. Wi-Fi hands over to cellular — going offline says Reconnecting at once; a message written meanwhile waits; coming online reconnects within 5 s and sends it once
 5. The page wakes on a half-open socket — waking checks the socket and replaces it within seconds, well before the heartbeat would notice; a message then goes out once
 6. The session's daemon link drops for a moment — the hub is reachable but cannot reach the session's daemon, so it refuses the send as retryable (upstream_unavailable); the message waits in the thread instead of reading "Not sent", and goes out once when the session is live again
+7. A proof refused after a switch retries on its own — the hub refuses the first proofs after a switch as stale (a 401 that names its reason); they are retried with a fresh proof, and a proof refused twice backs off like a lost network; it is Live again by itself, a message goes out once, and nothing asks to re-pair. Only a definitive refusal (revoked, unknown key) shows re-pair
 
 **Expected experience**
 

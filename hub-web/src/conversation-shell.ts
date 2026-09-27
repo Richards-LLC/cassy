@@ -80,13 +80,17 @@ const SEND_GLYPH = '<svg class="send-glyph" viewBox="0 0 20 20" fill="currentCol
 
 /**
  * Pebble composer (cas-3800): the field is a pill on --panel with --lift, the
- * send button takes the machine accent from the shell root and names the
- * supervisor, and the attach clip sits beside the field, present but
- * disabled. Dresses the existing `.message` region in place so the ids the
- * live-region updater and the send handler bind to are untouched.
+ * send button takes the machine accent from the shell root, and the attach
+ * clip sits beside the field, present but disabled. Dresses the existing
+ * `.message` region in place so the ids the live-region updater and the send
+ * handler bind to are untouched.
+ *
+ * The field and the button lead with the project, never the generated
+ * codename (journey F13): "Message the cas-src supervisor" and "Send". The
+ * codename is an identifier, not a name to read in prose; the header shows it,
+ * and the button's accessible name, "Send to <codename>", keeps it whole.
  */
-export function dressComposer(composer: HTMLElement, supervisor?: string): void {
-  const name = supervisor || "the supervisor";
+export function dressComposer(composer: HTMLElement, supervisor?: string, project?: string): void {
   composer.classList.add("conversation-composer");
   composer.querySelector(".operator-thread")?.remove();
   const label = composer.querySelector("label"); if (label) label.textContent = "Your message";
@@ -94,9 +98,8 @@ export function dressComposer(composer: HTMLElement, supervisor?: string): void 
   const input = composer.querySelector("textarea");
   if (input) {
     // A placeholder that cannot fit is ellipsised here as well as by the
-    // stylesheet, so no engine wraps it into a taller field (journey F9); the
-    // header and the Send button's accessible name carry the name whole.
-    input.placeholder = `Message ${composerNameHint(name)}`;
+    // stylesheet, so no engine wraps it into a taller field (journey F9).
+    input.placeholder = composerPlaceholder(project);
     input.rows = 1;
     // Hidden until attaching works (cas-17e3): a control that can never be
     // used is noise for every reader, and a dead stop for keyboard users.
@@ -109,12 +112,18 @@ export function dressComposer(composer: HTMLElement, supervisor?: string): void 
     button.setAttribute("aria-label", `Send to ${supervisor || "supervisor"}`);
     button.replaceChildren();
     button.insertAdjacentHTML("afterbegin", SEND_GLYPH);
-    const text = composer.ownerDocument.createElement("span"); text.className = "send-label"; text.textContent = `Send to ${supervisor || "supervisor"}`;
+    const text = composer.ownerDocument.createElement("span"); text.className = "send-label"; text.textContent = "Send";
     button.append(text);
   }
 }
 
-/** Longest supervisor name the composer placeholder spells out in full. */
+/** The composer's resting placeholder: the project's supervisor, or just "the supervisor". */
+export function composerPlaceholder(project?: string): string {
+  const name = project?.trim();
+  return name ? `Message the ${composerNameHint(name)} supervisor` : "Message the supervisor";
+}
+
+/** Longest project name the composer placeholder spells out in full. */
 export const COMPOSER_NAME_MAX_CHARS = 20;
 
 /** The name as the placeholder shows it: whole, or cut with an ellipsis. */
@@ -215,7 +224,7 @@ export function arrangeConversationShell(app: HTMLElement, model: ConversationSh
   if (model.selected) {
     if (grid) shell.querySelector("#conversation-pane-slot")!.append(grid);
     if (composer) {
-      dressComposer(composer, model.supervisor);
+      dressComposer(composer, model.supervisor, projectTitle(model.projectDir));
       shell.querySelector("#conversation-composer-slot")!.append(composer);
     }
     if (status) shell.querySelector("#conversation-status-slot")!.append(status);

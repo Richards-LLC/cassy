@@ -3346,18 +3346,27 @@ button.chip:disabled { cursor: default; }
 .thread .bub.bub-empty { display: none; }
 
 /* Nothing waiting: the machine's monogram in its accent, the supervisor's
-   name, one quiet centred line, and the last message as a faint echo. */
-.thread .empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; min-width: 0; padding: 60px 40px; text-align: center; color: var(--ink); }
+   name, one quiet centred line, and the last message as a faint echo. The
+   card spans the thread (align-self: stretch overrides the global .empty
+   place-self), so a one-line ellipsised meta line is bounded by the thread,
+   not widened to its own unbroken length. */
+.thread .empty { flex: 1; align-self: stretch; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; min-width: 0; padding: 60px 40px; text-align: center; color: var(--ink); }
 .thread .empty[hidden], .thread .msgs[hidden] { display: none; }
 .thread .empty .mono { display: flex; align-items: center; justify-content: center; flex: none; width: 76px; height: 76px; border-radius: var(--radius-pill); background: var(--accent, var(--you-bg)); color: var(--accent-fg); font: var(--weight-semibold) 30px/1 var(--font-ui); box-shadow: var(--lift-strong); }
-.thread .empty b { max-width: 100%; font: var(--weight-semibold) 21px/1.2 var(--font-ui); letter-spacing: -0.015em; white-space: normal; overflow-wrap: anywhere; } /* b.codename: wrap, not the codename's nowrap (cas-1334 QA F2) */
-.thread .empty .proj2 { font: var(--weight-regular) 13px/1.3 var(--font-mono); color: var(--ink-mid); overflow-wrap: anywhere; }
-/* The project-led card puts the codename in .proj2; it wraps like the rest of
-   the line, not with the codename's nowrap (cas-1334 QA round 2). */
-.thread .empty .proj2 .codename { white-space: normal; overflow-wrap: anywhere; }
+.thread .empty b { max-width: 100%; font: var(--weight-semibold) 21px/1.2 var(--font-ui); letter-spacing: -0.015em; white-space: normal; overflow-wrap: anywhere; }
+/* A generated codename is never broken at its hyphens (journey F13): as the
+   title (no project) or in the meta line it stays on one line and ellipsises,
+   with the whole name in its title. No sideways scroll (cas-1334 QA F2). */
+.thread .empty b.codename { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.35; }
+.thread .empty .proj2 { max-width: 100%; font: var(--weight-regular) 13px/1.4 var(--font-mono); color: var(--ink-mid); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .thread .empty .proj2:empty { display: none; }
 .thread .empty .said { margin: 0; max-width: 34ch; color: var(--ink-mid); font-size: 15px; overflow-wrap: anywhere; }
-.thread .empty .said .codename { font: var(--weight-medium) 0.93em/1 var(--font-mono); color: var(--ink); white-space: normal; overflow-wrap: anywhere; }
+/* In the sentence the codename is one unbroken token, capped at 20
+   characters and ellipsised beyond (the 2px keeps a rounded-down 20ch from
+   dropping the 19th character); overflow: clip keeps its text baseline on the
+   sentence's, and .said-who keeps the brackets on its line. */
+.thread .empty .said .said-who { white-space: nowrap; }
+.thread .empty .said .codename { display: inline-block; max-width: min(100%, calc(20ch + 2px)); overflow: clip; text-overflow: ellipsis; white-space: nowrap; vertical-align: baseline; font: var(--weight-medium) 0.93em/1.4 var(--font-mono); color: var(--ink); }
 .thread .empty .quiet { max-width: min(100%, 56ch); background: var(--sup-bg); color: var(--sup-fg); border-radius: 22px; padding: 12px 22px; box-shadow: var(--lift); overflow-wrap: anywhere; }
 .thread .empty .conversation-loading { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px; }
 
@@ -3367,10 +3376,8 @@ button.chip:disabled { cursor: default; }
    attachment transport yet and its title says so. The ids inside are the
    send handler's and the live-region updater's; only the dress changes. */
 /* The field has a floor, min(16rem, 45%), and the send column is `auto` over
-   shrinkable content (cas-1334): a normal "Send to <name>" takes its full
-   width, and only a name too long for the row ellipsises in the button
-   instead of crushing the message field to a sliver. The aria-label keeps
-   the whole name. */
+   shrinkable content (cas-1334). The button reads "Send" (journey F13); its
+   aria-label, "Send to <codename>", keeps the whole name. */
 .conversation-composer { position: relative; display: grid; grid-template-columns: auto minmax(min(16rem, 45%), 1fr) auto; grid-template-areas: "clip field send" "status status status"; align-items: center; column-gap: 11px; row-gap: var(--space-2); padding: 14px 30px 22px; padding-bottom: max(22px, env(safe-area-inset-bottom)); margin: 0; border-top: 0; background: var(--canvas); color: var(--ink); }
 .conversation-composer h2 { margin: 0; } /* .sr-only from dressComposer: the label is for the reader */
 /* Without the attach clip (cas-17e3) the field takes the first column. */

@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { CHECKING_VOICE_INPUT, LISTENING_PLACEHOLDER, VOICE_INPUT_UNSUPPORTED, applyMicState, composerMarkup, micPresentation, type MicState } from "./composer-markup";
-import { COMPOSER_NAME_MAX_CHARS, composerNameHint, dressComposer } from "./conversation-shell";
+import { COMPOSER_NAME_MAX_CHARS, composerNameHint, composerPlaceholder, dressComposer } from "./conversation-shell";
 
 // WCAG 2.x contrast, the same arithmetic as machine-accent.test.ts.
 const luminance = (hex: string) => [1, 3, 5].map((o) => Number.parseInt(hex.slice(o, o + 2), 16) / 255).map((c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4)).reduce((sum, c, i) => sum + c * [0.2126, 0.7152, 0.0722][i], 0);
@@ -14,7 +14,7 @@ const contrast = (a: string, b: string) => { const [hi, lo] = [luminance(a), lum
 function composer(): { mic: HTMLButtonElement; field: HTMLTextAreaElement } {
   const slot = document.createElement("div");
   slot.innerHTML = composerMarkup("patient-pelican-9");
-  dressComposer(slot.querySelector<HTMLElement>(".message")!, "patient-pelican-9");
+  dressComposer(slot.querySelector<HTMLElement>(".message")!, "patient-pelican-9", "cas-src");
   document.body.replaceChildren(slot);
   return { mic: slot.querySelector<HTMLButtonElement>("#message-mic")!, field: slot.querySelector<HTMLTextAreaElement>("#message-text")! };
 }
@@ -32,13 +32,13 @@ describe("mic states say what they mean (P6, cas-0c80)", () => {
     expect(mic.getAttribute("aria-label")).toBe("Checking voice input");
     expect(mic.getAttribute("aria-description")).toBe(CHECKING_VOICE_INPUT);
     expect(mic.getAttribute("aria-pressed")).toBe("false");
-    expect(field.placeholder).toBe("Message patient-pelican-9");
+    expect(field.placeholder).toBe("Message the cas-src supervisor");
   });
 
   it.each([
-    ["checking", CHECKING, { disabled: true, label: "Checking voice input", pressed: "false", listening: false, description: CHECKING_VOICE_INPUT, title: CHECKING_VOICE_INPUT, placeholder: "Message patient-pelican-9" }],
-    ["unavailable", UNAVAILABLE, { disabled: true, label: "Voice input unavailable", pressed: "false", listening: false, description: VOICE_INPUT_UNSUPPORTED, title: VOICE_INPUT_UNSUPPORTED, placeholder: "Message patient-pelican-9" }],
-    ["idle", IDLE, { disabled: false, label: "Start listening", pressed: "false", listening: false, description: null, title: "Start listening", placeholder: "Message patient-pelican-9" }],
+    ["checking", CHECKING, { disabled: true, label: "Checking voice input", pressed: "false", listening: false, description: CHECKING_VOICE_INPUT, title: CHECKING_VOICE_INPUT, placeholder: "Message the cas-src supervisor" }],
+    ["unavailable", UNAVAILABLE, { disabled: true, label: "Voice input unavailable", pressed: "false", listening: false, description: VOICE_INPUT_UNSUPPORTED, title: VOICE_INPUT_UNSUPPORTED, placeholder: "Message the cas-src supervisor" }],
+    ["idle", IDLE, { disabled: false, label: "Start listening", pressed: "false", listening: false, description: null, title: "Start listening", placeholder: "Message the cas-src supervisor" }],
     ["listening", LISTENING, { disabled: false, label: "Stop listening", pressed: "true", listening: true, description: null, title: "Stop listening", placeholder: LISTENING_PLACEHOLDER }],
   ] as const)("paints %s: class, accessible name and state, and the field placeholder", (name, state, expected) => {
     const { mic, field } = composer();
@@ -61,16 +61,16 @@ describe("mic states say what they mean (P6, cas-0c80)", () => {
     applyMicState(mic, LISTENING);
     expect(field.placeholder).toBe(LISTENING_PLACEHOLDER);
     // A heartbeat re-render re-dresses the composer mid-dictation; the next sync re-applies Listening.
-    dressComposer(field.closest<HTMLElement>(".message")!, "patient-pelican-9");
+    dressComposer(field.closest<HTMLElement>(".message")!, "patient-pelican-9", "cas-src");
     applyMicState(mic, LISTENING);
     expect(field.placeholder).toBe(LISTENING_PLACEHOLDER);
     applyMicState(mic, IDLE);
-    expect(field.placeholder).toBe("Message patient-pelican-9");
+    expect(field.placeholder).toBe("Message the cas-src supervisor");
     expect(field.dataset.restingPlaceholder).toBeUndefined();
     // A permission denial ends dictation in the unavailable state; the field is restored there too.
     applyMicState(mic, LISTENING);
     applyMicState(mic, { mode: "typing", listening: false, detail: "Mic permission was not granted. Type your message instead." });
-    expect(field.placeholder).toBe("Message patient-pelican-9");
+    expect(field.placeholder).toBe("Message the cas-src supervisor");
     expect(mic.getAttribute("aria-description")).toBe("Mic permission was not granted. Type your message instead.");
   });
 
@@ -139,12 +139,22 @@ describe("a long supervisor name keeps the composer one line (3.30.0 journey F9)
     expect(Array.from(composerNameHint(LONG))).toHaveLength(COMPOSER_NAME_MAX_CHARS);
     expect(composerNameHint(LONG)).toBe(`${LONG.slice(0, COMPOSER_NAME_MAX_CHARS - 1)}…`);
   });
-  it("dresses the field with the shortened placeholder and the Send button with the full name", () => {
+  it("addresses the project's supervisor, never the codename, and keeps the full name in Send's accessible name (journey F13)", () => {
     const slot = document.createElement("div");
     slot.innerHTML = composerMarkup(LONG);
+    dressComposer(slot.querySelector<HTMLElement>(".message")!, LONG, "forge-tools");
+    const field = slot.querySelector<HTMLTextAreaElement>("#message-text")!;
+    expect(field.placeholder).toBe("Message the forge-tools supervisor");
+    expect(field.placeholder).not.toContain("truncation");
+    const send = slot.querySelector("#message-send")!;
+    expect(send.querySelector(".send-label")?.textContent).toBe("Send");
+    expect(send.getAttribute("aria-label")).toBe(`Send to ${LONG}`);
+    // No project: the role alone, still no codename.
     dressComposer(slot.querySelector<HTMLElement>(".message")!, LONG);
-    expect(slot.querySelector<HTMLTextAreaElement>("#message-text")!.placeholder).toBe(`Message ${composerNameHint(LONG)}`);
-    expect(slot.querySelector("#message-send")!.getAttribute("aria-label")).toBe(`Send to ${LONG}`);
+    expect(field.placeholder).toBe("Message the supervisor");
+    // A long project name is cut with an ellipsis like any placeholder name.
+    expect(composerPlaceholder(LONG)).toBe(`Message the ${composerNameHint(LONG)} supervisor`);
+    expect(composerPlaceholder("  ")).toBe("Message the supervisor");
   });
   it("keeps the empty field to one line in the stylesheet", () => {
     const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");

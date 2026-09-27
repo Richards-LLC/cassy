@@ -25,8 +25,24 @@ export const CONVERSATION_SEARCH_PLACEHOLDER_TOUCH = "Search conversations";
  * keyboard) and wide enough that the palette it leads to is on screen. */
 export const KEYBOARD_HINT_MEDIA_QUERY = "(any-pointer: fine) and (min-width: 500px)";
 
-export function conversationSearchPlaceholder(keyboardHint: boolean): string {
-  return keyboardHint ? CONVERSATION_SEARCH_PLACEHOLDER : CONVERSATION_SEARCH_PLACEHOLDER_TOUCH;
+type PlatformNavigator = { readonly platform?: string; readonly userAgentData?: { readonly platform?: string } };
+
+/** Apple keyboards print ⌘ where every other keyboard prints Ctrl. */
+export function applePlatform(nav: PlatformNavigator | undefined = typeof navigator === "undefined" ? undefined : navigator as PlatformNavigator): boolean {
+  return /mac|iphone|ipad|ipod/i.test(nav?.userAgentData?.platform || nav?.platform || "");
+}
+
+/** The palette shortcut as this keyboard prints it: every surface that names
+ * it (the list search, the Terminal view button, the Appearance tooltip)
+ * reads the same one, so a Linux browser never shows ⌘K beside Ctrl K
+ * (journey F16). Both chords work everywhere. */
+export function paletteShortcutLabel(apple = applePlatform()): string {
+  return apple ? "⌘K" : "Ctrl K";
+}
+
+export function conversationSearchPlaceholder(keyboardHint: boolean, shortcut = paletteShortcutLabel()): string {
+  if (!keyboardHint) return CONVERSATION_SEARCH_PLACEHOLDER_TOUCH;
+  return shortcut === "Ctrl K" ? CONVERSATION_SEARCH_PLACEHOLDER : `${CONVERSATION_SEARCH_LABEL} (${shortcut})`;
 }
 
 /** The list's visible name search (journey F8): filters rows by project,
@@ -179,7 +195,7 @@ function contextRailMarkup(selected: boolean): string {
 }
 
 /** Appearance & commands as a header icon button (P13): out of the phone thumb zone, named for assistive tech. */
-export const appearanceButtonMarkup = '<button id="command-palette-toggle" class="icon-button" type="button" aria-label="Appearance &amp; commands" title="Appearance &amp; commands (Ctrl K twice)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg></button>';
+export const appearanceButtonMarkup = (shortcut = paletteShortcutLabel()): string => `<button id="command-palette-toggle" class="icon-button" type="button" aria-label="Appearance &amp; commands" title="Appearance &amp; commands (${shortcut} twice)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg></button>`;
 
 export function conversationShellMarkup(model: ConversationShellModel): string {
   // First run: the welcome carries the one primary "Pair a machine". The list
@@ -189,7 +205,7 @@ export function conversationShellMarkup(model: ConversationShellModel): string {
   const welcomePairs = !model.selected && model.loaded && !model.paired;
   return `<div class="conversation-shell${model.selected ? " thread-open" : ""}${welcomePairs ? " welcome-pairs" : ""}${model.machineId ? ` ${machineAccentClass(model.machineId)}` : ""}">
     <aside class="conversation-sidebar" aria-label="Supervisor conversations">
-      <header class="conversation-list-heading"><div class="conversation-list-top">${cloudBrand()}${appearanceButtonMarkup}</div><div class="conversation-list-title"><h1>Conversations</h1><button id="pair-toggle"${welcomePairs ? ' class="primary"' : ""} type="button">Pair a machine</button></div><p>Your projects. Your supervisors.</p>${model.paired ? conversationSearchMarkup(model.searchQuery, model.keyboardHint ?? true) : ""}</header>
+      <header class="conversation-list-heading"><div class="conversation-list-top">${cloudBrand()}${appearanceButtonMarkup()}</div><div class="conversation-list-title"><h1>Conversations</h1><button id="pair-toggle"${welcomePairs ? ' class="primary"' : ""} type="button">Pair a machine</button></div><p>Your projects. Your supervisors.</p>${model.paired ? conversationSearchMarkup(model.searchQuery, model.keyboardHint ?? true) : ""}</header>
       <nav id="conversation-list" aria-label="Choose a supervisor"></nav>
       <div id="conversation-empty" class="conversation-empty" hidden></div>
       ${model.paired ? composeFabMarkup : ""}

@@ -66,8 +66,12 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     const picker = page.locator("#session-picker");
     const toggle = page.locator("#session-picker-toggle");
     const palette = page.locator("#command-palette");
+    // The list search and the Terminal view button name the palette chord the
+    // same way on this (Linux) browser: Ctrl K, not ⌘K (journey F16).
+    await expect(page.getByRole("searchbox", { name: "Search conversations" })).toHaveAttribute("placeholder", "Search conversations (Ctrl K)");
     await page.getByRole("button", { name: "Terminal view" }).click();
     await expect(toggle).toBeVisible();
+    await expect(page.getByRole("button", { name: "Open command palette" })).toHaveText("Ctrl K");
     // Closing the picker does not rebuild the shell, and the next periodic
     // render papers over a stale "open" state within a few seconds. So each
     // check is short: the picker must open, and say so, at once — not when a

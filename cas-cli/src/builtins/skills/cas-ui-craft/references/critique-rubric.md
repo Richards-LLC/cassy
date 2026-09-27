@@ -35,6 +35,16 @@ PASS receipt (`visual-qa.md`, JSON, and screenshots) under `--artifact-dir`. If 
 report is committed, commit only its small `visual-qa.md` beside it, never JSON or screenshots.
 Review every allowlist entry for its finding type, selector, and specific reason.
 
+A resting page can pass while the states a user reaches do not. For a surface with a submit, a
+request, or a connection to lose, add `--journey <file>.json`. Each declared state loads the
+page, answers or holds its routed requests (`status` and `json`, `hold`, `abort`), goes
+`offline` if the state sets it, and runs its steps (`fill`, `click`, `press`, `waitFor`, and
+`expect` with `focused`/`text`). The script then inspects the page the steps reached, the same
+way it inspects a resting page. It writes a screenshot and a trace for each state, scheme, and
+viewport. A step that fails, or an expectation it does not meet, fails a strict run. See the
+header comment in `visual-qa.mjs` and the example `scripts/visual-qa-fixtures/journey-start.json`
+in the Cassy source repo (it does not ship with this skill).
+
 **Fallback, stated once:** where Playwright or Chromium cannot run, make the same four checks by
 eye on the renders in Procedure step 1, in both schemes, and write "visual-QA unavailable:
 <reason>; checked by hand" in the craft evidence. A factory close gate that demands the receipt

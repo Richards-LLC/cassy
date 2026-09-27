@@ -1248,6 +1248,25 @@ pub(crate) struct QaDispatchEnvelope {
     pub deadline: String,
 }
 
+/// The delivery facts known when a QA round is opened. A close backstop can
+/// run with a recorded tip that is not on its target, so reaching that path
+/// alone is not evidence of a merge or of any earlier park.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum QaDeliveryLocation<'a> {
+    ParkedForMerge,
+    ContainedIn(&'a str),
+    UnmergedFrom(&'a str),
+}
+
+impl QaDeliveryLocation<'_> {
+    pub(crate) fn gate(self) -> &'static str {
+        match self {
+            Self::ContainedIn(_) => "close",
+            Self::ParkedForMerge | Self::UnmergedFrom(_) => "merge",
+        }
+    }
+}
+
 /// Build the independent-QA handoff CAS enqueues for the supervisor when a
 /// user-facing delivery parks for merge (cas-619f). Whole-prompt shaped like
 /// the verification-dispatch envelope, so free text cannot impersonate it.
@@ -1260,25 +1279,30 @@ pub(crate) fn qa_dispatch_envelope(
     deadline: &str,
     implementer: &str,
     reasons: &str,
-    merged_into: Option<&str>,
+    location: QaDeliveryLocation<'_>,
 ) -> String {
-    // cas-5c38 (GH #999): say what actually happened. The close backstop
-    // dispatches for a delivery that was merged without ever parking, and
-    // calling that "parked for merge" sent supervisors to a qa_waive that
-    // needs a parked tip.
-    let (stage, gate) = match merged_into {
-        None => (
+    let head8 = &bound_head[..bound_head.len().min(8)];
+    let (stage, gate) = match location {
+        QaDeliveryLocation::ParkedForMerge => (
             "parked for merge. It needs an independent QA and polish pass before it merges"
                 .to_string(),
             "merge",
         ),
-        Some(target) => (
+        QaDeliveryLocation::ContainedIn(target) => (
             format!(
-                "was merged into {} before any QA round (it never parked). \
+                "has a delivered tip @{head8} contained in {}. \
                  It needs an independent QA and polish pass before it closes",
                 xml_attribute_value(target)
             ),
             "close",
+        ),
+        QaDeliveryLocation::UnmergedFrom(target) => (
+            format!(
+                "has a delivered tip @{head8} not contained in {}. \
+                 It needs an independent QA and polish pass before it merges",
+                xml_attribute_value(target)
+            ),
+            "merge",
         ),
     };
     format!(
@@ -2969,12 +2993,12 @@ mod cas_3dcb_worker_died_relay_tests {
             "2026-09-23T18:00:00+00:00",
             "swift-fox",
             "label:ui",
-            None,
+            QaDeliveryLocation::ParkedForMerge,
         );
         assert!(body.contains("and parked for merge"), "{body}");
         assert!(body.contains("Do not merge cas-619f"), "{body}");
-        // cas-5c38 (GH #999): a delivery the close backstop found already
-        // merged is never described as parked.
+        // The close backstop reports only the target ancestry it measured;
+        // it cannot infer whether the delivery ever parked or when QA began.
         let merged = qa_dispatch_envelope(
             "qapass-2",
             "cas-0019",
@@ -2984,14 +3008,32 @@ mod cas_3dcb_worker_died_relay_tests {
             "2026-09-23T18:00:00+00:00",
             "swift-fox",
             "demo_statement",
-            Some("epic/burn-down"),
+            QaDeliveryLocation::ContainedIn("epic/burn-down"),
         );
         assert!(!merged.contains("parked for merge"), "{merged}");
         assert!(
-            merged.contains("was merged into epic/burn-down before any QA round (it never parked)"),
+            merged.contains("delivered tip @cccc3333 contained in epic/burn-down"),
             "{merged}"
         );
+        assert!(!merged.contains("never parked"), "{merged}");
         assert!(merged.contains("Do not close cas-0019"), "{merged}");
+        let unmerged = qa_dispatch_envelope(
+            "qapass-3",
+            "cas-0019",
+            "cas-qa03",
+            1,
+            "eeee5555ffff6666",
+            "2026-09-23T18:00:00+00:00",
+            "swift-fox",
+            "demo_statement",
+            QaDeliveryLocation::UnmergedFrom("epic/burn-down"),
+        );
+        assert!(
+            unmerged.contains("delivered tip @eeee5555 not contained in epic/burn-down"),
+            "{unmerged}"
+        );
+        assert!(!unmerged.contains("parked for merge"), "{unmerged}");
+        assert!(unmerged.contains("Do not merge cas-0019"), "{unmerged}");
         assert_eq!(
             parse_qa_dispatch_envelope(&merged).map(|parsed| parsed.bound_head),
             Some("cccc3333dddd4444".to_string())

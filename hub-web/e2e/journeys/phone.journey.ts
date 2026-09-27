@@ -6,15 +6,36 @@ import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
 const SHED: Machine = { id: "shed", label: "Shed NAS · Linux", sessions: [] };
 /** A machine paired from the phone mid-journey (cas-002e). */
 const FORGE: Machine = { id: "forge", label: "Forge · Linux", sessions: [{ name: "steady-wren-3", supervisor: "steady-wren-3", project_dir: "/projects/forge-tools", workers: ["quick-finch-8"], liveness: "live" }] };
+/** Ordinary hostname-style machine names, 19–23 characters (cas-e918 QA F01). */
+const LONG_LABELS: Machine[] = [
+  { id: "workstation", label: "pippenz-workstation · Linux", sessions: [{ name: "tiny-wren-3", supervisor: "tiny-wren-3", project_dir: "/projects/lab", workers: [], liveness: "live" }] },
+  { id: "macbook", label: "Daniel's MacBook Pro · macOS", sessions: [{ name: "brisk-lark-5", supervisor: "brisk-lark-5", project_dir: "/projects/notes", workers: [], liveness: "live" }] },
+  { id: "rack", label: "Build Server Rack Seven · Windows", sessions: [{ name: "patient-heron-12", supervisor: "patient-heron-12", project_dir: "/projects/infra", workers: [], liveness: "live" }] },
+];
 
 test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
 test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, journey }) => {
-  const hub = await journey.hub({ machines: [ATLAS, STUDIO, SHED, FORGE], paired: ["atlas", "studio", "shed"], relay: { machine: "forge", claimAfter: 2, authorizeAfter: 4 } });
+  const hub = await journey.hub({ machines: [ATLAS, STUDIO, SHED, FORGE, ...LONG_LABELS], paired: ["atlas", "studio", "shed", ...LONG_LABELS.map((machine) => machine.id)], relay: { machine: "forge", claimAfter: 2, authorizeAfter: 4 } });
   await page.route("https://shed.test/**", (route) => route.abort("connectionrefused"));
   await page.routeWebSocket(/shed\.test/, (ws) => { void ws.close({ code: 1006 }); });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
   const composer = page.getByRole("textbox", { name: "Your message" });
+  /** At 390 px the header reads "<machine> · <codename> · <state>": no OS word, the codename whole, the state visible. */
+  const expectHeaderKeepsCodename = async (machine: string, codename: string, machineWhole = true) => {
+    const where = page.locator(".conversation-identity .host-where");
+    await expect(where).toHaveAttribute("title", new RegExp(`· ${codename}$`));
+    await expect(page.locator(".conversation-identity .host-os")).toBeHidden();
+    // Rendered text only (the hidden OS word drops out); flex items come back one per line.
+    expect((await where.innerText()).split("\n").join("")).toBe(`${machine} · ${codename}`);
+    // The codename is never the part that is cut (QA F01); the machine name yields first.
+    const name = where.locator(".codename");
+    expect(await name.evaluate((element) => element.scrollWidth > element.clientWidth + 1), `the header shows ${codename} whole at 390 px`).toBe(false);
+    const machineCut = await where.locator(".host-machine").evaluate((element) => element.scrollWidth > element.clientWidth + 1);
+    if (machineWhole) expect(machineCut, `${machine} fits beside ${codename}`).toBe(false);
+    else expect(machineCut, `${machine} is the part that ellipsises`).toBe(true);
+    await expect(page.locator("#conversation-connection")).toBeVisible();
+  };
 
   await journey.stage("Open the list on a phone", async () => {
     // Record every word the list and the footer badge show during the cold
@@ -32,7 +53,7 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
       new MutationObserver(record).observe(document, { subtree: true, childList: true, characterData: true, attributes: true });
     });
     await journey.open();
-    await expect(list.getByRole("button")).toHaveCount(2);
+    await expect(list.getByRole("button")).toHaveCount(5);
     const coldLoad = await page.evaluate(() => [...(window as unknown as { __coldLoadText: Set<string> }).__coldLoadText]);
     expect(coldLoad.join(" | "), "cold-load list and footer text").not.toMatch(/Not paired|No live supervisors|Reconnecting/);
     expect(coldLoad.some((text) => text.includes("Loading")), "the cold load shows it is loading").toBe(true);
@@ -50,6 +71,8 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     await list.getByRole("button", { name: /cas-src/ }).tap();
     await expect(list).toBeHidden();
     await expect(page.getByRole("button", { name: "‹ Conversations", exact: true })).toBeVisible();
+    // The header drops the OS word before it cuts the codename (journey F14).
+    await expectHeaderKeepsCodename("Atlas", PELICAN);
   });
 
   await journey.stage("Reply with the phone keyboard", async () => {
@@ -83,6 +106,7 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     await page.getByRole("button", { name: /Jump to gabber-studio/ }).tap();
     await expect(page.locator("#command-palette")).toBeHidden();
     await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();
+    await expectHeaderKeepsCodename("Studio Mac", OTTER);
     // Like a tap on a list row: land to read, with no soft keyboard raised
     // over the conversation just opened.
     await expect(composer).not.toBeFocused();
@@ -136,12 +160,24 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     expect(ring).toMatchObject({ style: "solid", width: "2px", color: ring.focus });
   });
 
+  await journey.stage("A long machine name yields to the codename in the header", async () => {
+    // cas-e918 QA F01: hostname-style names of 19–23 characters used to keep
+    // their room and cut the codename to "ti…" or drop it entirely.
+    for (const [project, machine, codename] of [["lab", "pippenz-workstation", "tiny-wren-3"], ["notes", "Daniel's MacBook Pro", "brisk-lark-5"], ["infra", "Build Server Rack Seven", "patient-heron-12"]] as const) {
+      const back = page.getByRole("button", { name: "‹ Conversations", exact: true });
+      if (await back.isVisible()) await back.tap();
+      await list.getByRole("button", { name: new RegExp(project) }).tap();
+      await expect(page.locator(".conversation-identity h1")).toHaveText(project);
+      await expectHeaderKeepsCodename(machine, codename, false);
+    }
+  });
+
   await journey.stage("See the switched-off machine named plainly", async () => {
     // Never live and failing: "Can't reach · retrying" in the dialog, not
     // "Connecting…" forever; the footer counts it and its dot is not all-clear.
     await page.getByRole("button", { name: "‹ Conversations", exact: true }).tap();
     const footer = page.locator("#paired-machines-toggle");
-    await expect(footer).toContainText("2 connected");
+    await expect(footer).toContainText("5 connected");
     await expect(footer.locator(".pairing-dot")).toHaveClass("pairing-dot partial");
     await footer.tap();
     const dialog = page.locator("#paired-machines-dialog");
@@ -169,8 +205,12 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     await expect(dialog).toBeHidden();
     const toast = page.locator("#toast");
     await expect(toast).toHaveText("Forge · Linux connected", { timeout: 15_000 });
-    await list.getByRole("button", { name: /forge-tools/ }).tap();
-    await expect(page.locator(".conversation-identity h1")).toHaveText("forge-tools");
+    // Pairing from the phone opens the new machine's conversation; no list
+    // tap in between (journey F8).
+    await expect(page.locator(".conversation-identity h1")).toHaveText("forge-tools", { timeout: 15_000 });
+    // cas-71af (dfb2 QA F02): focus lands on the opened thread, not the page
+    // body (and not the reply box, which would raise the phone keyboard).
+    await expect(page.locator(".conversation-reading.thread")).toBeFocused();
     // The "connected" toast sits below the thread header, never over the
     // back link, project and host (cas-002e).
     const [notice, heading] = await Promise.all([toast.boundingBox(), page.locator(".conversation-heading").boundingBox()]);

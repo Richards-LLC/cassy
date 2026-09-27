@@ -25,8 +25,16 @@ const LAUNCHD_TEST_PORT_ENV: &str = "CAS_HUB_SERVICE_PORT";
 const LAUNCHD_CLI_PATH: &str = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
 const SYSTEMD_UNIT: &str = "cas-hub.service";
 const SYSTEMCTL_PATH_ENV: &str = "CAS_HUB_SYSTEMCTL";
-pub(crate) const INACTIVE_DETACHED_HUB_WARNING: &str =
-    "service installed but inactive, detached hub running";
+/// Signals that systemd classes as a clean exit, and so never restarts under
+/// `Restart=on-failure`, but that are never a deliberate stop of the hub.
+/// SIGTERM is left out on purpose: `systemctl stop` and `cas hub stop` both
+/// deliver it and both mean "stay stopped". A hub killed by SIGPIPE on
+/// soundwave (2026-09-26) sat dead for hours because of this gap (cas-621ec).
+const SYSTEMD_FORCE_RESTART_SIGNALS: &str = "SIGHUP SIGINT SIGPIPE";
+// Both findings below point at `cas hub restart`: it stops a detached hub if
+// one is running and (re)starts the installed service.
+pub(crate) const INACTIVE_DETACHED_HUB_WARNING: &str = "service installed but inactive, detached hub running without restart supervision. Fix: run `cas hub restart` to hand the hub back to the service";
+pub(crate) const INACTIVE_SERVICE_NO_HUB_ERROR: &str = "service installed but inactive, and no hub is running. Fix: run `cas hub restart` to start the hub under the service";
 const LAUNCHD_TAILSCALE_REFUSAL: &str = "`cas hub service install --tailscale-serve` is not supported for launchd: Tailscale Serve needs the interactive user's GUI namespace, while launchd starts in its bootstrap namespace. Install the loopback-only service with `cas hub service install`, or run `cas hub service uninstall && cas hub start --tailscale-serve` from an interactive shell when Commander pairing needs a public URL.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,6 +236,7 @@ pub(super) fn restart_supervised(
             if service_publication_repair_needed(tailscale_serve, service_tailscale) {
                 repair_systemd_publication_flags(&path, tailscale_port)?;
             }
+            refresh_systemd_unit(&path)?;
             let paths = HubRuntimePaths::default_for_user()?;
             let active = command_succeeds(
                 "systemctl",
@@ -489,6 +498,71 @@ fn repair_systemd_publication_flags(path: &Path, tailscale_port: u16) -> Result<
     run_manager("systemctl", ["--user", "daemon-reload"], None)
 }
 
+/// Bring an installed unit's restart policy up to the current template
+/// (cas-621ec) without touching anything else in it: binary, ports,
+/// publication flags and any operator edits survive. Returns `None` when the
+/// unit already carries the policy, or has no `[Service]` section to amend.
+fn upgrade_systemd_restart_policy(definition: &str) -> Option<String> {
+    let desired = format!("RestartForceExitStatus={SYSTEMD_FORCE_RESTART_SIGNALS}");
+    if definition.lines().any(|line| line.trim() == desired) {
+        return None;
+    }
+    let mut lines = Vec::new();
+    let mut inserted = false;
+    for line in definition.lines() {
+        // Replace, rather than duplicate, a stale force-restart list.
+        if line.trim_start().starts_with("RestartForceExitStatus=") {
+            continue;
+        }
+        lines.push(line.to_owned());
+        if !inserted && line.trim_start().starts_with("Restart=") {
+            lines.push(desired.clone());
+            inserted = true;
+        }
+    }
+    if !inserted {
+        let service = lines.iter().position(|line| line.trim() == "[Service]")?;
+        lines.insert(service + 1, desired);
+        lines.insert(service + 1, "Restart=on-failure".to_owned());
+    }
+    let mut upgraded = lines.join("\n");
+    if definition.ends_with('\n') {
+        upgraded.push('\n');
+    }
+    Some(upgraded)
+}
+
+/// Rewrite an installed systemd unit whose restart policy predates the
+/// current template. `daemon-reload` applies the new policy to the running
+/// service without restarting it. Returns whether the unit changed.
+fn refresh_systemd_unit(path: &Path) -> Result<bool> {
+    let Some(upgraded) = upgrade_systemd_restart_policy(&fs::read_to_string(path)?) else {
+        return Ok(false);
+    };
+    write_service_file(path, &upgraded)?;
+    run_manager("systemctl", ["--user", "daemon-reload"], None)?;
+    Ok(true)
+}
+
+/// `cas update` entry point: bring an installed hub service definition up to
+/// the current template even when the hub itself needs no restart. launchd
+/// plists have carried `KeepAlive` since the service was introduced, so only
+/// systemd units need rewriting.
+pub(crate) fn refresh_installed_service() -> Result<bool> {
+    match native_platform() {
+        ServicePlatform::Systemd => {
+            let path = systemd_path()?;
+            if !path.is_file() {
+                return Ok(false);
+            }
+            refresh_systemd_unit(&path)
+        }
+        ServicePlatform::Launchd | ServicePlatform::ManualLinux | ServicePlatform::Unsupported => {
+            Ok(false)
+        }
+    }
+}
+
 fn systemd_service_binary(path: &Path) -> Result<PathBuf> {
     let command = fs::read_to_string(path)?
         .lines()
@@ -504,8 +578,9 @@ fn systemd_service_binary(path: &Path) -> Result<PathBuf> {
     Ok(command)
 }
 
-/// Return the operator-facing warning used by `cas hub status` and `cas doctor`
-/// when an installed service has been bypassed by a detached hub.
+/// Return the operator-facing error used by `cas hub status` and `cas doctor`
+/// when an installed service is inactive: bypassed by a detached hub, or with
+/// no hub running at all. Both messages name the fix command.
 pub(super) fn inactive_detached_warning(
     paths: &HubRuntimePaths,
     record: Option<&HubProcessRecord>,
@@ -570,8 +645,16 @@ pub(crate) fn inactive_detached_warning_for(
     hub_live: bool,
     launched_by: Option<&str>,
 ) -> Option<&'static str> {
-    (installed && active == Some(false) && hub_live && launched_by != Some("service"))
-        .then_some(INACTIVE_DETACHED_HUB_WARNING)
+    if !installed || active != Some(false) {
+        return None;
+    }
+    if !hub_live {
+        // cas-621ec: an installed service that is not running leaves nothing
+        // to restart the hub on the next crash or reboot, so it is reported
+        // even when no detached hub is covering for it.
+        return Some(INACTIVE_SERVICE_NO_HUB_ERROR);
+    }
+    (launched_by != Some("service")).then_some(INACTIVE_DETACHED_HUB_WARNING)
 }
 
 fn service_file_requests_tailscale(path: &Path) -> Result<bool> {
@@ -1074,7 +1157,7 @@ fn systemd_unit(binary: &Path, tailscale_serve: bool, tailscale_port: u16) -> St
         .collect::<Vec<_>>()
         .join(" ");
     format!(
-        "[Unit]\nDescription=Cassy Commander hub\nAfter=network-online.target tailscaled.service\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={command}\nRestart=on-failure\nRestartSec=3\nStandardOutput=append:%h/.cas/hub/hub.log\nStandardError=append:%h/.cas/hub/hub.log\n\n[Install]\nWantedBy=default.target\n"
+        "[Unit]\nDescription=Cassy Commander hub\nAfter=network-online.target tailscaled.service\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={command}\nRestart=on-failure\nRestartForceExitStatus={SYSTEMD_FORCE_RESTART_SIGNALS}\nRestartSec=3\nStandardOutput=append:%h/.cas/hub/hub.log\nStandardError=append:%h/.cas/hub/hub.log\n\n[Install]\nWantedBy=default.target\n"
     )
 }
 
@@ -1373,6 +1456,131 @@ mod tests {
         assert!(unit.contains("StandardError=append:%h/.cas/hub/hub.log"));
     }
 
+    /// The unit as generated before cas-621ec, with `Restart=on-failure` only.
+    const LEGACY_SYSTEMD_UNIT: &str = "[Unit]\nDescription=Cassy Commander hub\nAfter=network-online.target tailscaled.service\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=/opt/cas/bin/cas hub serve --bind 127.0.0.1 --port 4173 --launched-by service --tailscale-serve --tailscale-serve-port 8443\nRestart=on-failure\nRestartSec=3\nStandardOutput=append:%h/.cas/hub/hub.log\nStandardError=append:%h/.cas/hub/hub.log\n\n[Install]\nWantedBy=default.target\n";
+
+    fn service_lines(unit: &str) -> Vec<&str> {
+        unit.lines()
+            .skip_while(|line| *line != "[Service]")
+            .take_while(|line| !line.is_empty())
+            .collect()
+    }
+
+    #[test]
+    fn systemd_unit_restarts_after_a_signal_death_but_not_a_deliberate_stop() {
+        let unit = systemd_unit(Path::new("/opt/cas/bin/cas"), false, 443);
+        let service = service_lines(&unit);
+        // systemd treats SIGHUP/SIGINT/SIGTERM/SIGPIPE deaths as clean, so
+        // Restart=on-failure alone left a SIGPIPE-killed hub dead.
+        assert!(service.contains(&"Restart=on-failure"), "{unit}");
+        let forced = service
+            .iter()
+            .find_map(|line| line.strip_prefix("RestartForceExitStatus="))
+            .expect("unit forces restart after clean-classed signals");
+        let forced: Vec<&str> = forced.split_whitespace().collect();
+        for signal in ["SIGPIPE", "SIGHUP", "SIGINT"] {
+            assert!(forced.contains(&signal), "{signal} missing from {forced:?}");
+        }
+        // `systemctl stop` and `cas hub stop` send SIGTERM and mean "stay
+        // stopped"; forcing a restart on it would undo an explicit stop.
+        assert!(!forced.contains(&"SIGTERM"), "{forced:?}");
+        assert!(service.contains(&"RestartSec=3"), "{unit}");
+    }
+
+    #[test]
+    fn legacy_systemd_unit_upgrades_to_the_current_template() {
+        let upgraded =
+            upgrade_systemd_restart_policy(LEGACY_SYSTEMD_UNIT).expect("legacy unit needs upgrade");
+        assert_eq!(
+            upgraded,
+            systemd_unit(Path::new("/opt/cas/bin/cas"), true, 8443)
+        );
+        assert_eq!(upgrade_systemd_restart_policy(&upgraded), None, "upgrade is idempotent");
+        assert_eq!(
+            upgrade_systemd_restart_policy(&systemd_unit(Path::new("/opt/cas/bin/cas"), false, 443)),
+            None,
+            "a current unit is left alone"
+        );
+    }
+
+    #[test]
+    fn systemd_restart_upgrade_preserves_operator_edits_and_replaces_stale_lists() {
+        let edited = LEGACY_SYSTEMD_UNIT.replace(
+            "RestartSec=3\n",
+            "RestartSec=10\nEnvironment=TAILSCALE=/opt/ts/bin/tailscale\n",
+        );
+        let upgraded = upgrade_systemd_restart_policy(&edited).unwrap();
+        assert!(upgraded.contains("RestartSec=10\nEnvironment=TAILSCALE=/opt/ts/bin/tailscale\n"));
+        assert!(upgraded.contains(
+            "Restart=on-failure\nRestartForceExitStatus=SIGHUP SIGINT SIGPIPE\nRestartSec=10\n"
+        ));
+
+        let stale = LEGACY_SYSTEMD_UNIT.replace(
+            "RestartSec=3\n",
+            "RestartSec=3\nRestartForceExitStatus=SIGHUP\n",
+        );
+        let upgraded = upgrade_systemd_restart_policy(&stale).unwrap();
+        assert_eq!(upgraded.matches("RestartForceExitStatus=").count(), 1, "{upgraded}");
+        assert!(upgraded.contains("RestartForceExitStatus=SIGHUP SIGINT SIGPIPE\n"));
+
+        let no_restart_line = LEGACY_SYSTEMD_UNIT.replace("Restart=on-failure\n", "");
+        let upgraded = upgrade_systemd_restart_policy(&no_restart_line).unwrap();
+        assert!(upgraded.contains(
+            "[Service]\nRestart=on-failure\nRestartForceExitStatus=SIGHUP SIGINT SIGPIPE\nType=simple\n"
+        ));
+
+        assert_eq!(
+            upgrade_systemd_restart_policy("[Unit]\nDescription=not a service\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn launchd_plist_keeps_the_hub_alive_after_any_exit() {
+        let plist = launchd_plist(
+            Path::new("/opt/cas/bin/cas"),
+            Path::new("/Users/test/.cas/hub/hub.log"),
+            false,
+            443,
+        );
+        // KeepAlive=true relaunches on every exit, signal deaths included; it
+        // is launchd's equivalent of the systemd force-restart list.
+        assert!(plist.contains("<key>KeepAlive</key>\n  <true/>"), "{plist}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn installed_legacy_unit_is_rewritten_and_reloaded_once() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let fixture = tempfile::tempdir().unwrap();
+        let systemctl = fixture.path().join("systemctl");
+        crate::test_paths::warm_stub(
+            &systemctl,
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "$CAS_SYSTEMCTL_LOG"
+exit 0
+"#,
+        );
+        env.set(SYSTEMCTL_PATH_ENV, &systemctl);
+        let log = fixture.path().join("systemctl.log");
+        env.set("CAS_SYSTEMCTL_LOG", &log);
+        let unit = fixture.path().join("cas-hub.service");
+        write_service_file(&unit, LEGACY_SYSTEMD_UNIT).unwrap();
+
+        assert!(refresh_systemd_unit(&unit).unwrap(), "legacy unit is rewritten");
+        assert_eq!(
+            fs::read_to_string(&unit).unwrap(),
+            systemd_unit(Path::new("/opt/cas/bin/cas"), true, 8443)
+        );
+        assert!(!refresh_systemd_unit(&unit).unwrap(), "current unit is left alone");
+        let reloads = fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .filter(|line| *line == "--user daemon-reload")
+            .count();
+        assert_eq!(reloads, 1);
+    }
+
     #[test]
     fn manual_linux_status_has_an_honest_reboot_fallback() {
         let instructions = manual_linux_instructions();
@@ -1463,10 +1671,36 @@ mod tests {
             inactive_detached_warning_for(false, Some(false), true, Some("update")),
             None
         );
+        // cas-621ec: an inactive service with no hub at all is the state a
+        // SIGPIPE-killed service left behind; it is reported, not skipped.
         assert_eq!(
             inactive_detached_warning_for(true, Some(false), false, Some("update")),
+            Some(INACTIVE_SERVICE_NO_HUB_ERROR)
+        );
+        assert_eq!(
+            inactive_detached_warning_for(true, Some(false), false, None),
+            Some(INACTIVE_SERVICE_NO_HUB_ERROR)
+        );
+        assert_eq!(
+            inactive_detached_warning_for(false, Some(false), false, None),
             None
         );
+        assert_eq!(
+            inactive_detached_warning_for(true, Some(true), false, None),
+            None
+        );
+        assert_eq!(inactive_detached_warning_for(true, None, false, None), None);
+    }
+
+    #[test]
+    fn inactive_service_findings_name_the_exact_fix_command() {
+        for finding in [INACTIVE_DETACHED_HUB_WARNING, INACTIVE_SERVICE_NO_HUB_ERROR] {
+            assert!(
+                finding.starts_with("service installed but inactive"),
+                "{finding}"
+            );
+            assert!(finding.contains("Fix: run `cas hub restart`"), "{finding}");
+        }
     }
 
     #[cfg(target_os = "linux")]

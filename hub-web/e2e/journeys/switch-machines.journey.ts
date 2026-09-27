@@ -1,4 +1,4 @@
-import { test, expect } from "./journey";
+import { test, expect, expectWholeFocusRing } from "./journey";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
 import type { Machine } from "./hub-double";
 
@@ -22,7 +22,8 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
   // Fourteen stages including a pairing, palette/picker sweeps, two render
   // waits (6 s each) and a phone viewport: past the 60 s default, and a loaded
   // factory host needs the headroom.
-  test.setTimeout(120_000);
+  // Plus a failing-heartbeat window (cas-bf07): about 25 s more.
+  test.setTimeout(160_000);
   const hub = await journey.hub({ machines: [ATLAS, STUDIO, ALPHA], paired: ["atlas", "studio"] });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
   const composer = page.getByRole("textbox", { name: "Your message" });
@@ -66,8 +67,18 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     const picker = page.locator("#session-picker");
     const toggle = page.locator("#session-picker-toggle");
     const palette = page.locator("#command-palette");
+    // The list search and the Terminal view button name the palette chord the
+    // same way on this (Linux) browser: Ctrl K, not ⌘K (journey F16).
+    await expect(page.getByRole("searchbox", { name: "Search conversations" })).toHaveAttribute("placeholder", "Search conversations (Ctrl K)");
     await page.getByRole("button", { name: "Terminal view" }).click();
     await expect(toggle).toBeVisible();
+    // Its accessible name carries the visible chord, so "click Ctrl K" works
+    // for a voice user (label in name, cas-3400 QA F02).
+    const paletteButton = page.getByRole("button", { name: "Open command palette (Ctrl K)", exact: true });
+    await expect(paletteButton).toHaveText("Ctrl K");
+    await expect(paletteButton).toHaveAttribute("aria-keyshortcuts", "Control+K Meta+K");
+    // The tab names the open conversation too.
+    await expect(page).toHaveTitle("cas-src patient-pelican-9 — Cassy Cloud");
     // Closing the picker does not rebuild the shell, and the next periodic
     // render papers over a stale "open" state within a few seconds. So each
     // check is short: the picker must open, and say so, at once — not when a
@@ -88,6 +99,10 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     // The first open rebuilt the shell; Escape still lands on the session
     // title, and Enter there reopens the picker (cas-7eaf).
     await expect(toggle).toBeFocused();
+    // Focus there is visible: the whole ring shows, not clipped away by the
+    // title's ellipsis clip (cas-cf10 QA F01).
+    expect(await toggle.evaluate((element) => element.matches(":focus-visible"))).toBe(true);
+    await expectWholeFocusRing(toggle, { vertical: true });
     await page.keyboard.press("Enter");
     await expect(picker).toBeVisible();
     await page.getByRole("button", { name: "Close session picker" }).click();
@@ -112,11 +127,26 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     ]) {
       await filter.fill("zz");
       await expect(picker.locator(".session-picker-entry:visible")).toHaveCount(0);
+      // An empty result says so, not an empty dialog (journey F18).
+      await expect(picker.getByRole("status")).toHaveText("No sessions match “zz”.");
+      // A long unbroken query wraps inside the dialog (cas-a8db QA F01).
+      const long = "z".repeat(120);
+      await filter.fill(long);
+      const status = picker.getByRole("status");
+      await expect(status).toHaveText(`No sessions match “${long}”.`);
+      const fit = await status.evaluate((line) => {
+        const dialog = line.closest("dialog")!.getBoundingClientRect();
+        const box = line.getBoundingClientRect();
+        return { overflow: line.scrollWidth > line.clientWidth + 1, inside: box.left >= dialog.left && box.right <= dialog.right + 0.5 };
+      });
+      expect(fit, "the no-match line wraps inside the picker").toEqual({ overflow: false, inside: true });
+      await filter.fill("zz");
       await close();
       await closed();
       await open();
       await expect(filter).toHaveValue("");
       await expect(picker.locator(".session-picker-entry:visible")).toHaveCount(everySession);
+      await expect(picker.locator("#session-picker-no-match")).toBeHidden();
     }
     // A closed picker must not pop back open over the next dialog either.
     await page.keyboard.press("Escape");
@@ -340,7 +370,99 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await list.getByRole("button", { name: /cas-src/ }).click();
     await page.getByRole("button", { name: "Terminal view" }).click();
     await expect(page.locator(".session-picker-name")).toHaveText("cas-src");
+    // Just after the reload there is no latency sample yet: the header says it
+    // is checking, never "Status unavailable" beside a green dot, and then
+    // shows the first sample (journey F17).
+    const latency = page.locator(".connection-summary [data-machine-latency]");
+    await expect(latency).toHaveText(/^(Checking…|\d+ms)$/);
+    // Read together, so a sample landing in between cannot split them: while it
+    // says Checking… the dot is neutral, not green (cas-bf07 QA F02).
+    const early = await page.locator(".connection-summary").evaluate((summary) => ({ text: summary.querySelector("[data-machine-latency]")?.textContent, live: summary.classList.contains("live") }));
+    if (early.text === "Checking…") expect(early.live, "no green dot beside Checking…").toBe(false);
+    await expect(latency).toHaveText(/^\d+ms$/, { timeout: 12_000 });
+    // Heartbeats that keep failing: the header names the degradation with the
+    // amber dot, as the rail does for the same machine, rather than promising a
+    // check beside a green dot (cas-bf07 QA F01). Then it recovers.
+    const chip = page.locator(".connection-summary");
+    const railDot = page.locator("#machine-rail-list .machine-icon").filter({ hasText: "AT" }).locator(".machine-state");
+    const heartbeat = "https://atlas.test/v1/machine";
+    await page.route(heartbeat, (route) => route.abort());
+    await expect(latency).toHaveText("Degraded", { timeout: 20_000 });
+    await expect(chip).toHaveClass(/\bdegraded\b/);
+    await expect(railDot).toHaveClass(/\bdegraded\b/);
+    // cas-71af (bf07 QA F01): the chip's tooltip reads the same machine state
+    // as the chip, not the terminal attach's "live".
+    await expect(chip).toHaveAttribute("title", /^degraded · \d+ missed$/);
+    // bf07 QA F02: a longer outage does not leave the chip Degraded. After
+    // four missed heartbeats the machine reconnects, and it comes back.
+    await expect(latency).not.toHaveText("Degraded", { timeout: 20_000 });
+    await page.unroute(heartbeat);
+    await expect(latency).toHaveText(/^\d+ms$/, { timeout: 30_000 });
+    await expect(chip).not.toHaveClass(/\bdegraded\b/);
+    await expect(chip).toHaveAttribute("title", /^live · \d+ms$/);
     await expect(page.locator(".session-picker-codename")).toHaveText(PELICAN);
+    // The title is announced as the open conversation and its machine, the
+    // switch after it (journey F19): not "Switch session — 4 available".
+    await expect(page.getByRole("heading", { level: 1, name: `cas-src ${PELICAN} on Atlas · Linux — switch session (4 available)`, exact: true })).toBeVisible();
+    // The header's actions stay whole at every width, the title and chips
+    // yielding instead, even beside a long machine name (cas-3400 QA F01: at
+    // 900–1024px they were clipped out of the header).
+    const header = page.locator(".session-header");
+    for (const width of [390, 600, 849, 900, 1024, 1280]) {
+      await page.setViewportSize({ width, height: 720 });
+      for (const label of ["Atlas · Linux", "Build Server With A Very Long Hostname · Linux"]) {
+        const fit = await header.evaluate((element, text) => {
+          const chip = element.querySelector<HTMLElement>(".machine-chip");
+          if (chip) chip.textContent = text;
+          const box = element.getBoundingClientRect();
+          const right = box.right - parseFloat(getComputedStyle(element).paddingRight) + 0.5;
+          const clipped = [...element.querySelectorAll<HTMLElement>(".actions button")]
+            .filter((button) => button.getBoundingClientRect().width > 0 && button.getBoundingClientRect().right > right)
+            .map((button) => button.textContent);
+          return { overflow: element.scrollWidth > element.clientWidth + 1, clipped };
+        }, label);
+        expect(fit, `header at ${width}px with "${label}"`).toEqual({ overflow: false, clipped: [] });
+      }
+    }
+    // The same with the machine drawer open, which leaves the header 185–620px
+    // of an 849–1440px window: the header sizes to its own column. Every
+    // control stays on screen and clickable, inside the main column and not
+    // under the context panel (cas-ac390); in the narrowest columns ⌘K, the
+    // control and Interrupt become icons under their full accessible names,
+    // Back keeps its ‹, and the title is what gives way (cas-3400 QA rounds
+    // 2 and 3).
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await page.locator("#machine-drawer-toggle").click();
+    await expect(page.locator(".machine-navigation.drawer-open")).toHaveCount(1);
+    for (const width of [849, 900, 990, 1024, 1280, 1440]) {
+      await page.setViewportSize({ width, height: 720 });
+      await expect(page.getByRole("button", { name: /^Open command palette \((Ctrl K|⌘K)\)$/ })).toBeVisible();
+      await expect(page.getByRole("button", { name: /^(Release control|Take control|Force takeover)$/ })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Interrupt selected pane", exact: true })).toBeVisible();
+      const fit = await header.evaluate((element) => {
+        const box = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        const left = box.left + parseFloat(style.paddingLeft) - 0.5;
+        const right = box.right - parseFloat(style.paddingRight) + 0.5;
+        const controls = [...element.querySelectorAll<HTMLElement>("#session-back, .actions button")];
+        const unreachable = controls
+          .filter((button) => {
+            const b = button.getBoundingClientRect();
+            if (b.width === 0) return true;
+            const hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+            return b.right > right || b.left < left || b.right > innerWidth || !hit || !button.contains(hit);
+          })
+          .map((button) => button.getAttribute("aria-label"));
+        return { overflow: element.scrollWidth > element.clientWidth + 1, unreachable, controls: controls.length };
+      });
+      expect(fit.unreachable, `every header control is on screen and clickable with the drawer open at ${width}px`).toEqual([]);
+      expect(fit.overflow, `header overflow at ${width}px`).toBe(false);
+      expect(fit.controls, "palette, control and Interrupt at least").toBeGreaterThanOrEqual(3);
+      if (await page.locator("#session-back").count()) await expect(page.locator("#session-back")).toBeVisible();
+    }
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await page.locator("#machine-drawer-close").click();
+    await expect(page.locator(".machine-navigation.drawer-open")).toHaveCount(0);
     const initials = page.locator("#machine-rail-list .machine-initials");
     await expect(initials).toHaveCount(3);
     expect((await initials.allTextContents()).sort()).toEqual(["AL", "AT", "SM"]);
@@ -393,7 +515,7 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     const pickerRows = await picker.locator(".session-picker-entry").count();
     expect(pickerRows).toBe(4);
     expect(jumpCount, "palette Jump rows").toBe(pickerRows);
-    await expect(toggle).toHaveAttribute("aria-label", `Switch session — ${pickerRows} available`);
+    await expect(toggle).toHaveAttribute("aria-label", `cas-src ${PELICAN} on Atlas · Linux — switch session (${pickerRows} available)`);
     expect(listRows, "conversation list rows").toBe(pickerRows);
     const pickerSessions = (await picker.locator(".session-picker-entry").evaluateAll((rows) => rows.map((row) => (row as HTMLElement).dataset.pickerSession))).sort();
     await page.keyboard.press("Escape");
@@ -405,11 +527,178 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await expect(board.locator("button.fleet-session")).toHaveCount(pickerRows);
     expect((await board.locator("button.fleet-session").evaluateAll((cards) => cards.map((card) => (card as HTMLElement).dataset.fleetSession))).sort(), "fleet board sessions").toEqual(pickerSessions);
     await expect(board.locator(".fleet-board-summary")).toHaveText(new RegExp(`^3 machines · ${pickerRows} sessions`));
+    // Nothing open: the tab is the app's name alone.
+    await expect(page).toHaveTitle("Cassy Cloud");
     // The summary and the refresh time start with their own words, not a
     // separator drawn before them (cas-e503): "2 machines · 2 sessions",
     // "16:56". The " · " stays only between the summary's items.
-    for (const selector of [".fleet-board-summary", ".fleet-catalog-time"]) {
+    for (const selector of [".fleet-board-summary", ".fleet-provenance"]) {
       expect(await board.locator(selector).evaluate((element) => getComputedStyle(element, "::before").content), selector).toBe("none");
     }
+    // Journey F2: the Fleet overview reads as a product page, not a debug one.
+    // Column headers are words at desktop width, not a numbered key.
+    const plot = board.locator("table.fleet-plot");
+    for (const label of ["Needs you", "Working", "Idle", "Stale", "Unreachable"]) {
+      await expect(plot.locator("thead .fleet-track-label").filter({ hasText: new RegExp(`^${label}$`) }), label).toBeVisible();
+    }
+    await expect(plot.locator("thead .fleet-track-key")).toHaveCount(5);
+    for (const key of await plot.locator("thead .fleet-track-key").all()) await expect(key).toBeHidden();
+    // No session is working, so the Working column is not shaded.
+    expect(await plot.locator("thead th").nth(2).evaluate((element) => getComputedStyle(element).backgroundColor), "Working header unshaded").toBe("rgba(0, 0, 0, 0)");
+    await expect(board.locator(".fleet-figure-caption")).not.toContainText("Shaded");
+    // One short line says when it was refreshed; the details are its hover title.
+    await expect(board.locator(".fleet-provenance")).toHaveText(/^Last updated \d{2}:\d{2}$/);
+    await expect(board.locator(".fleet-provenance")).toHaveAttribute("title", /Alpha · Linux · Live · Hub /);
+    // Remove names the machine; the back control says Back on screen.
+    await expect(page.locator("#remove-machine")).toHaveText("Remove Alpha · Linux from this browser");
+    await expect(page.locator("#session-back")).toBeVisible();
+    await expect(page.locator("#session-back .session-back-label")).toHaveText("Back");
+    await expect(page.locator("#session-back")).toHaveAccessibleName(/^Back to /);
+    // cas-ac390 QA F01: in a narrow column (900px with the drawer open) Back
+    // yields to its glyph instead of running under ⌘K; its name is unchanged.
+    const viewport = page.viewportSize()!;
+    await page.setViewportSize({ width: 900, height: 720 });
+    await expect(page.locator(".shell.drawer-open")).toHaveCount(1);
+    await expect(page.locator("#session-back .session-back-label")).toBeHidden();
+    await expect(page.locator("#session-back")).toHaveAccessibleName(/^Back to /);
+    // Back and ⌘K both stay (cas-3400 QA round 3): neither is hidden to make room.
+    await expect(page.locator("#session-back")).toBeVisible();
+    await expect(page.locator("#command-palette-toggle")).toBeVisible();
+    const [back, paletteKey] = await Promise.all([page.locator("#session-back").boundingBox(), page.locator("#command-palette-toggle").boundingBox()]);
+    expect(back!.x + back!.width <= paletteKey!.x || paletteKey!.x + paletteKey!.width <= back!.x, "Back and ⌘K do not overlap at 900 with the drawer open").toBe(true);
+    await page.setViewportSize(viewport);
+    await expect(page.locator("#session-back .session-back-label")).toBeVisible();
+    // Journey F1: every Fleet overview row leads with its project; the
+    // codename is named once, in the line beneath.
+    const row = (session: string) => board.locator(`button.fleet-session[data-fleet-session="${session}"]`);
+    await expect(row("keen-lynx-1").locator(".session-name")).toHaveText("orion");
+    await expect(row("keen-lynx-1").locator(".session-meta")).toHaveText("supervisor keen-lynx-1 · 1 worker · live");
+    await expect(row(PELICAN).locator(".session-name")).toHaveText("cas-src");
+    await expect(board.locator('.fleet-plot-row[data-fleet-session="keen-lynx-1"] .fleet-plot-name')).toHaveText("orion");
+    for (const session of ["keen-lynx-1", "lone-heron-2", PELICAN, OTTER]) {
+      expect((await row(session).innerText()).split(session).length - 1, `${session} named once in its Fleet overview row`).toBe(1);
+    }
+    // The machine drawer, opened by the rail click above, reads the same way.
+    const drawer = page.locator("#machine-tree");
+    await expect(drawer.locator(".nav-item .session-name").first()).toBeVisible();
+    const drawerRows = await drawer.locator(".nav-item").evaluateAll((items) => items.map((item) => [item.querySelector(".session-name")?.textContent ?? "", item.querySelector(".session-meta, .session-summary-title")?.textContent ?? ""]));
+    for (const [headline, meta] of drawerRows) {
+      expect(["cas-src", "gabber-studio", "orion", "lighthouse"], `drawer row headline ${headline}`).toContain(headline);
+      expect(meta, `drawer row ${headline} names its codename once, beneath`).not.toContain(headline);
+    }
+    // With nothing open, the title says so: the fleet, then the switch.
+    await expect(page.getByRole("heading", { level: 1, name: `Fleet overview — switch session (${pickerRows} available)`, exact: true })).toBeVisible();
+    // cas-598e QA F01: when several sessions share a project, each plot row
+    // also carries the shortest tail of its codename that tells it apart, so
+    // three cas-src rows never read "cas-src / cas-src / cas-src". Alpha
+    // starts two more cas-src supervisors for a moment (the catalog refreshes
+    // every 5 s), then stops them so the stages after this one see the fleet
+    // they expect.
+    const alpha = hub.machine("alpha").sessions;
+    const extra = [
+      { name: "brisk-otter-5", supervisor: "brisk-otter-5", project_dir: "/projects/cas-src", workers: ["w5"], liveness: "live" },
+      { name: "quiet-heron-8", supervisor: "quiet-heron-8", project_dir: "/projects/cas-src", workers: [], liveness: "live" },
+    ] as Machine["sessions"];
+    alpha.push(...extra);
+    // cas-ae5e: the same codename on a second machine (brisk-otter-5 on Atlas
+    // too) is told apart by the machine's rail initials, which fit the narrow
+    // label column where the full machine name did not.
+    const atlasSessions = hub.machine("atlas").sessions;
+    const twin = { ...extra[0]!, workers: [] } as Machine["sessions"][number];
+    atlasSessions.push(twin);
+    const plotName = (session: string) => board.locator(`.fleet-plot-row[data-fleet-session="${session}"] .fleet-plot-name`);
+    await expect(plotName("quiet-heron-8")).toBeVisible({ timeout: 15_000 });
+    await expect(plotName("brisk-otter-5")).toHaveCount(2, { timeout: 15_000 });
+    const plotLabels = async () => board.locator(".fleet-plot-row").evaluateAll((rows) => rows.map((row) => {
+      const name = row.querySelector<HTMLElement>(".fleet-plot-name")!;
+      const tag = name.querySelector<HTMLElement>(".fleet-plot-tag");
+      const project = name.querySelector<HTMLElement>(".fleet-plot-project");
+      return { session: (row as HTMLElement).dataset.fleetSession!, project: project?.textContent ?? name.textContent ?? "", projectWidth: project ? project.getBoundingClientRect().width : name.getBoundingClientRect().width, tag: tag?.textContent ?? "", tagWhole: !tag || tag.scrollWidth <= tag.clientWidth + 1 && tag.getBoundingClientRect().right <= name.getBoundingClientRect().right + 1 };
+    }));
+    for (const width of [viewport.width, 390]) {
+      await page.setViewportSize({ width, height: viewport.height });
+      const labels = await plotLabels();
+      const casSrc = labels.filter((label) => label.project === "cas-src");
+      expect(casSrc.map((label) => label.tag).sort(), `cas-src plot rows at ${width}px`).toEqual(["heron-8", "otter-5 · AL", "otter-5 · AT", "pelican-9"]);
+      // The project keeps at least a letter beside the tag; it never collapses to a bare "·".
+      expect(casSrc.every((label) => label.projectWidth >= 8), `the project stays visible beside the tag at ${width}px: ${JSON.stringify(casSrc)}`).toBe(true);
+      expect(new Set(labels.map((label) => `${label.project} ${label.tag}`)).size, `every plot row reads differently at ${width}px`).toBe(labels.length);
+      expect(casSrc.every((label) => label.tagWhole), `the tag is never cut at ${width}px`).toBe(true);
+      // A project that appears once carries no tag.
+      expect(labels.find((label) => label.session === "keen-lynx-1")?.tag).toBe("");
+    }
+    await page.setViewportSize(viewport);
+    alpha.splice(alpha.length - extra.length, extra.length);
+    atlasSessions.splice(atlasSessions.indexOf(twin), 1);
+    await expect(plotName("quiet-heron-8")).toHaveCount(0, { timeout: 15_000 });
+    await expect(plotName("brisk-otter-5")).toHaveCount(0, { timeout: 15_000 });
+    await expect(board.locator(".fleet-plot-tag")).toHaveCount(0);
+  });
+
+  await journey.stage("Hear the open conversation as the Terminal view title", async () => {
+    // Journey F19: the goal state (final.aria.yml) names the open conversation
+    // and its machine in the page heading, the switch after it.
+    await page.locator('#fleet-board button.fleet-session[data-fleet-session="patient-pelican-9"]').click();
+    await expect(page.locator(".session-picker-name")).toHaveText("cas-src");
+    await expect(page.locator("body")).toMatchAriaSnapshot(`- heading "cas-src ${PELICAN} on Atlas · Linux — switch session (4 available)" [level=1]`);
+    expect(await page.locator("body").ariaSnapshot()).not.toContain('heading "Switch session');
+  });
+
+  await journey.stage("Tell one codename apart on two machines whose initials match", async () => {
+    // cas-ae5e QA F01: Atlas and Attic share the rail initials AT. The paired
+    // Alpha is renamed Attic in this browser, and brisk-otter-5 and
+    // patient-pelican-9 run on both machines. The plot marks each machine by
+    // the shortest part of its name that differs ("Atl" / "Att"), never the
+    // full label. A twin tag is capped to fit the 132px column at 390 (QA
+    // round 2), so a long tail is trimmed from the left: "…ter-5 · Atl",
+    // "…can-9 · Att". The tag stays whole and the project keeps a letter, at
+    // 1280 and 390.
+    await page.evaluate(async () => {
+      const db: IDBDatabase = await new Promise((ok, fail) => { const req = indexedDB.open("cas-commander-v1"); req.onsuccess = () => ok(req.result); req.onerror = () => fail(req.error); });
+      await new Promise<void>((ok, fail) => {
+        const tx = db.transaction("machines", "readwrite");
+        const store = tx.objectStore("machines");
+        const get = store.get("alpha");
+        // A machine paired in the page keeps its visible record as the install's candidate.
+        get.onsuccess = () => {
+          const record = get.result;
+          const renamed = { ...record, label: "Attic · Linux" };
+          if (record.pairingInstall?.candidate) renamed.pairingInstall = { ...record.pairingInstall, candidate: { ...record.pairingInstall.candidate, label: "Attic · Linux" } };
+          store.put(renamed);
+        };
+        tx.oncomplete = () => ok();
+        tx.onerror = () => fail(tx.error);
+      });
+      db.close();
+    });
+    const twin = (): Machine["sessions"][number] => ({ name: "brisk-otter-5", supervisor: "brisk-otter-5", project_dir: "/projects/cas-src", workers: [], liveness: "live" });
+    hub.machine("alpha").sessions.push(twin(), { name: PELICAN, supervisor: PELICAN, project_dir: "/projects/cas-src", workers: [], liveness: "live" });
+    hub.machine("atlas").sessions.push(twin());
+    await page.reload();
+    const terminal = page.getByRole("button", { name: "Terminal view" });
+    if (await terminal.isVisible()) await terminal.click();
+    await page.locator("#machine-rail-list .machine-icon").filter({ hasText: "AT" }).first().click();
+    const board = page.locator("#fleet-board");
+    const rows = board.locator(`.fleet-plot-row:is([data-fleet-session="brisk-otter-5"], [data-fleet-session="${PELICAN}"])`);
+    await expect(rows).toHaveCount(4, { timeout: 20_000 });
+    const viewport = page.viewportSize()!;
+    for (const width of [viewport.width, 390]) {
+      await page.setViewportSize({ width, height: viewport.height });
+      const twins = await rows.evaluateAll((items) => items.map((row) => {
+        const name = row.querySelector<HTMLElement>(".fleet-plot-name")!;
+        const tag = name.querySelector<HTMLElement>(".fleet-plot-tag")!;
+        const project = name.querySelector<HTMLElement>(".fleet-plot-project")!;
+        return {
+          project: project.textContent,
+          projectWidth: project.getBoundingClientRect().width,
+          tag: tag.textContent,
+          tagWhole: tag.scrollWidth <= tag.clientWidth + 1 && tag.getBoundingClientRect().right <= name.getBoundingClientRect().right + 1,
+        };
+      }));
+      expect(twins.map((row) => row.tag).sort(), `twin tags at ${width}px`).toEqual(["…can-9 · Atl", "…can-9 · Att", "…ter-5 · Atl", "…ter-5 · Att"]);
+      expect(twins.every((row) => row.project === "cas-src" && row.projectWidth >= 8), `the project keeps a letter at ${width}px: ${JSON.stringify(twins)}`).toBe(true);
+      expect(twins.every((row) => row.tagWhole), `the tag is never cut at ${width}px: ${JSON.stringify(twins)}`).toBe(true);
+    }
+    await page.setViewportSize(viewport);
   });
 });

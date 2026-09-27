@@ -711,6 +711,11 @@ const AI_VOCABULARY_ALLOWLIST: &[(&str, &str, &str)] = &[
         "Journey diagram is a specific visual checked for print legibility.",
     ),
     (
+        "skills/cas-ui-craft/references/critique-rubric.md",
+        "journey",
+        "Names visual-qa.mjs's literal --journey flag and its journey-start.json example file.",
+    ),
+    (
         "skills/cas-qa-craft/SKILL.md",
         "journey",
         "User journey is the QA evidence unit defined by this skill.",

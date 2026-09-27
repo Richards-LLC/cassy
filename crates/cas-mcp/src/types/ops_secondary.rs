@@ -358,7 +358,7 @@ pub struct VerificationRequest {
     /// Action to perform
     #[schemars(
         schema_with = "crate::actions::verification_action_schema",
-        description = "Operation. qa_record records an independent QA reviewer's verdict, never the implementer's; qa_waive is a logged supervisor waiver; external_verify is registered-supervisor-only receipted external verification."
+        description = "Operation. qa_record records an independent QA reviewer's verdict, never the implementer's; qa_waive is a logged supervisor waiver; qa_request is a logged supervisor request that opens a round for a parked delivery Cassy did not judge user-facing; external_verify is registered-supervisor-only receipted external verification."
     )]
     pub action: String,
 

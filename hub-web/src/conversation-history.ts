@@ -33,7 +33,25 @@ export interface ConversationSend {
   /** A refused send whose edited version has since gone out: it stays in the
    * thread as a record, but offers nothing to retry. */
   replaced?: boolean;
+  /** When this browser gave up on the receipt (ms epoch; `unconfirmed` only). */
+  unconfirmedAt?: number;
+  /** The operator swiped or dismissed this failed send out of the thread
+   * (cas-16eed). It is kept, not deleted: the "unsent" chip brings it back. */
+  dismissed?: boolean;
+  /** Held in this browser while the machine is unreachable: never on the
+   * wire yet, so it goes out once (with its own client_ref) when the
+   * session is back, or turns "Not sent" if it is not back in time (cas-0978). */
+  held?: boolean;
 }
+
+/**
+ * Why an unanswered ask (or blocker) no longer waits on the operator
+ * (cas-16eed): the operator dismissed it, or the supervisor session that asked
+ * has ended. Nothing the supervisor says in the meantime retires it: a
+ * supervisor posts progress while it waits, and a question it is still
+ * waiting on keeps its pin and its choices (cas-16eed QA F01).
+ */
+export type AskRetirement = "dismissed" | "session-ended";
 /** `at` is when this client saw the event (ms epoch); it stamps the thread's
  * day separators and group timestamps and is never a delivery receipt. */
 /** `at` is the sort key. `shownAt`, when set, is the time to display: a live
@@ -66,6 +84,13 @@ const CLOCK_AHEAD_MS = 60_000;
 /** In-memory per-thread evidence. A submitted socket frame is never a receipt. */
 export class ConversationHistory {
   readonly events: ConversationEvent[] = [];
+  /**
+   * The supervisor session this thread is attached to now. A question stamped
+   * with another session was asked by one that has since ended (cas-16eed).
+   */
+  currentSession?: string;
+  /** Asks and blockers the operator dismissed (notification ids). */
+  private readonly dismissedAsks = new Set<number>();
   /** A durable stamp from this thread's machine has been seen in this browser's future. */
   private machineAhead = false;
   private insert(event: ConversationEvent): void {
@@ -119,6 +144,39 @@ export class ConversationHistory {
   submit(id: string, target: string, text: string, at: number = Date.now(), replyTo?: number, session?: string): void {
     const key = Math.max(at, this.latestAt());
     this.insert({ kind: "send", value: { id, target, text, state: "sending", sentAt: at, ...(replyTo === undefined ? {} : { replyTo }) }, at: key, ...(key === at ? {} : { shownAt: at }), session });
+  }
+
+  /**
+   * A send the page could not put on the wire because the machine is
+   * unreachable. It shows in the thread as waiting and has no receipt
+   * deadline until `release` puts it on the wire.
+   */
+  hold(id: string, target: string, text: string, at: number = Date.now(), replyTo?: number, session?: string): void {
+    const key = Math.max(at, this.latestAt());
+    this.insert({ kind: "send", value: { id, target, text, state: "sending", held: true, ...(replyTo === undefined ? {} : { replyTo }) }, at: key, ...(key === at ? {} : { shownAt: at }), session });
+  }
+
+  /**
+   * A send the hub refused as retryable (cas-0653, `upstream_unavailable`):
+   * it never reached the machine's daemon, so it waits in this browser again,
+   * with no receipt deadline, until it goes out once more. Returns what to
+   * resend, or undefined when the send is not a live unreceipted one.
+   */
+  rehold(id: string): ConversationSend | undefined {
+    const send = this.events.find((event) => event.kind === "send" && event.value.id === id);
+    if (!send || send.kind !== "send" || send.value.notificationId !== undefined || send.value.state !== "sending") return undefined;
+    send.value.held = true;
+    delete send.value.sentAt;
+    return send.value;
+  }
+
+  /** The held send went out now: its receipt clock starts. */
+  release(id: string, at: number = Date.now()): boolean {
+    const send = this.events.find((event) => event.kind === "send" && event.value.id === id);
+    if (!send || send.kind !== "send" || !send.value.held) return false;
+    delete send.value.held;
+    send.value.sentAt = at;
+    return true;
   }
 
   /** The latest stamp already in the thread; live events are placed at or after it. */
@@ -175,7 +233,8 @@ export class ConversationHistory {
    * Asks and blockers still waiting on the operator, oldest first. An ask is
    * answered by a send carrying its id; a blocker is acknowledged by any
    * operator send after it that was not refused. A refused send never reached
-   * the supervisor, so the blocker keeps waiting beside it; a sending send
+   * the supervisor, so the blocker keeps waiting beside it, and so does one
+   * whose receipt never came (Not confirmed, cas-71af); a sending send
    * acknowledges optimistically and gives the blocker back if refused, and a
    * successful retry acknowledges it. Drives the list's waiting affordance and
    * the pin.
@@ -185,8 +244,9 @@ export class ConversationHistory {
     this.events.forEach((event, index) => {
       if (event.kind !== "reply") return;
       const reply = event.value;
+      if ((reply.kind === "ask" || reply.kind === "blocker") && this.retirementAt(index)) return;
       if (reply.kind === "ask" && !this.answered(reply.notification_id)) out.push(reply);
-      else if (reply.kind === "blocker" && !this.events.slice(index + 1).some((later) => later.kind === "send" && later.value.state !== "error")) out.push(reply);
+      else if (reply.kind === "blocker" && !this.events.slice(index + 1).some((later) => later.kind === "send" && later.value.state !== "error" && later.value.state !== "unconfirmed")) out.push(reply);
     });
     return out;
   }
@@ -194,12 +254,71 @@ export class ConversationHistory {
   pinnedAsk(): OperatorReply | undefined {
     return this.waiting().filter((reply) => reply.kind === "ask").at(-1);
   }
+  /**
+   * Why an ask or blocker that was never answered no longer waits (cas-16eed),
+   * or undefined while it still does. An answered ask is the answer's story,
+   * not a retirement.
+   */
+  retirement(notificationId: number): AskRetirement | undefined {
+    const index = this.events.findIndex((event) => event.kind === "reply" && event.value.notification_id === notificationId);
+    return index < 0 ? undefined : this.retirementAt(index);
+  }
+  private retirementAt(index: number): AskRetirement | undefined {
+    const event = this.events[index];
+    if (event?.kind !== "reply" || (event.value.kind !== "ask" && event.value.kind !== "blocker")) return undefined;
+    const reply = event.value;
+    if (reply.kind === "ask" && this.answered(reply.notification_id)) return undefined;
+    if (this.dismissedAsks.has(reply.notification_id)) return "dismissed";
+    const later = this.events.slice(index + 1);
+    // Asked by a session that has ended: the thread is attached to another
+    // one now, or a later turn already came from another one.
+    if (event.session && ((this.currentSession !== undefined && event.session !== this.currentSession) || later.some((next) => next.session !== undefined && next.session !== event.session))) return "session-ended";
+    return undefined;
+  }
+  /** The operator dismissed a waiting ask or blocker: it unpins and stops waiting. */
+  dismissAsk(notificationId: number): boolean {
+    if (this.dismissedAsks.has(notificationId)) return false;
+    this.dismissedAsks.add(notificationId);
+    return true;
+  }
+  /** Notification ids of the asks and blockers the operator dismissed. */
+  dismissedAskIds(): number[] { return [...this.dismissedAsks]; }
+  /**
+   * Hide a failed send (refused, or unconfirmed and not yet settled) from the
+   * thread (cas-16eed). Its Edit and Retry come back with it on restore.
+   */
+  dismissSend(id: string): boolean {
+    const event = this.events.find((candidate) => candidate.kind === "send" && candidate.value.id === id);
+    if (event?.kind !== "send" || event.value.dismissed || !this.isFailedSend(event.value)) return false;
+    event.value.dismissed = true;
+    return true;
+  }
+  /** Failed sends the operator dismissed and can still bring back. */
+  dismissedSends(): ConversationSend[] {
+    return this.events.flatMap((event) => event.kind === "send" && event.value.dismissed && this.isFailedSend(event.value) ? [event.value] : []);
+  }
+  /** Bring every dismissed failed send back into the thread; returns them. */
+  restoreDismissed(): ConversationSend[] {
+    const restored = this.dismissedSends();
+    for (const send of restored) delete send.dismissed;
+    return restored;
+  }
+  /** A send that did not go and still offers a way to send it: refused, or unconfirmed with no reply since. */
+  isFailedSend(send: ConversationSend): boolean {
+    return (send.state === "error" && !send.replaced) || (send.state === "unconfirmed" && !this.repliedSince(send));
+  }
+  /** Events as the thread shows them: without the failed sends the operator dismissed. */
+  visibleEvents(): ConversationEvent[] {
+    return this.events.filter((event) => !(event.kind === "send" && event.value.dismissed && this.isFailedSend(event.value)));
+  }
   acknowledge(receipt: MessageQueued): boolean {
     const send = this.events.find((event) => event.kind === "send" && event.value.id === receipt.client_ref && event.value.target === receipt.target)
       ?? this.events.find((event) => event.kind === "send" && event.value.notificationId === receipt.notification_id && event.value.target === receipt.target);
     if (!send || send.kind !== "send") return false;
     send.value.notificationId = receipt.notification_id;
     send.value.stamped = receipt.stamped;
+    // A late receipt means it did go: a dismissed "failed" send is back in the thread as delivered.
+    delete send.value.dismissed;
     send.value.state = this.events.some((event) => event.kind === "reply" && event.value.reply_to === receipt.notification_id) ? "replied" : "acknowledged";
     delete send.value.error;
     return true;
@@ -209,6 +328,7 @@ export class ConversationHistory {
     if (!send || send.kind !== "send" || send.value.notificationId !== undefined) return false;
     send.value.state = "error";
     send.value.error = message;
+    delete send.value.held;
     return true;
   }
   /**
@@ -224,6 +344,7 @@ export class ConversationHistory {
       const deadline = this.receiptDeadline(index);
       if (deadline === undefined || now < deadline || event.kind !== "send") return;
       event.value.state = "unconfirmed";
+      event.value.unconfirmedAt = now;
       changed.push(event.value.id);
     });
     return changed;
@@ -275,14 +396,29 @@ export class ConversationHistory {
    * no supervisor turn has landed since. Sends still in flight or refused after
    * it do not hide it — it is still the latest message known to have arrived.
    */
-  delivered(): ConversationSend | undefined {
-    for (let index = this.events.length - 1; index >= 0; index -= 1) {
-      const event = this.events[index]!;
-      if (event.kind === "reply") return undefined;
-      if (event.value.state === "replied") return undefined;
-      if (event.value.state === "acknowledged") return event.value;
-    }
-    return undefined;
+  /**
+   * True when the supervisor has spoken since an unconfirmed send gave up on
+   * its receipt (journey F10): the send most likely arrived, so its card
+   * settles instead of inviting a blind resend. A turn that arrived before
+   * the give-up does not count: it is the crossing turn that made the
+   * receipt overdue in the first place (cas-1185).
+   */
+  repliedSince(send: ConversationSend): boolean {
+    const index = this.events.findIndex((event) => event.kind === "send" && event.value === send);
+    if (index < 0) return false;
+    const since = send.unconfirmedAt;
+    return this.events.slice(index + 1).some((event) => event.kind === "reply" && (since === undefined || (event.arrivedAt ?? event.at ?? 0) > since));
+  }
+  /**
+   * Whether `send` says "Delivered" (journey F4): a send this visit put on the
+   * wire whose receipt came, until a reply linked to it (reply_to) makes it
+   * "replied". An unrelated supervisor turn crossing it no longer hides the
+   * tick, and a receipt that lands after such a turn still shows one.
+   * Hydrated history (no sentAt) stays unmarked, so an old thread is not a
+   * column of ticks.
+   */
+  showsDelivered(send: ConversationSend): boolean {
+    return send.state === "acknowledged" && send.sentAt !== undefined;
   }
   /**
    * The conversation list's one-line preview of the last turn. A refused send
@@ -293,6 +429,8 @@ export class ConversationHistory {
     for (let index = this.events.length - 1; index >= 0; index -= 1) {
       const event = this.events[index]!;
       if (event.kind === "reply") return event.value.message;
+      // A failed send the operator dismissed is out of the thread, so out of the preview too.
+      if (event.value.dismissed && this.isFailedSend(event.value)) continue;
       if (event.value.state !== "error") return `You: ${event.value.text}`;
       if (!event.value.replaced) return `Not sent: ${event.value.text}`;
     }

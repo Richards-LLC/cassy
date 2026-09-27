@@ -9,6 +9,7 @@
 use std::path::Path;
 
 use crate::mcp::tools::core::imports::*;
+use crate::prompt_revalidation::QaDeliveryLocation;
 use crate::qa_pass::{
     QA_PASS_LABEL, changed_paths_for_delivery, delivery_eligibility, qa_task_description,
     qa_task_title, round_dir,
@@ -32,6 +33,18 @@ fn is_ancestor(repo: &Path, commit: &str, target: &str) -> bool {
         .current_dir(repo)
         .status()
         .is_ok_and(|status| status.success())
+}
+
+fn close_delivery_location<'a>(repo: &Path, head: &str, target: &'a str) -> QaDeliveryLocation<'a> {
+    // The merge gate accepts an origin target that is ahead of this checkout's
+    // local ref. Use the same integration evidence for the supervisor text.
+    let on_target = is_ancestor(repo, head, target)
+        || (!target.starts_with("origin/") && is_ancestor(repo, head, &format!("origin/{target}")));
+    if on_target {
+        QaDeliveryLocation::ContainedIn(target)
+    } else {
+        QaDeliveryLocation::UnmergedFrom(target)
+    }
 }
 
 fn resolve_commit(repo: &Path, reference: &str) -> Option<String> {
@@ -97,15 +110,90 @@ impl CasCore {
                 pass.id, pass.state
             )));
         }
+        // cas-d5c1 (GH #1023 finding 6): check the reviewer's credentials,
+        // env files and test-account capacity before the round is claimed,
+        // so a setup gap is a clear blocker instead of a stalled round.
+        let preflight = self.qa_reviewer_preflight(qa_task, &pass);
+        if let Some(report) = preflight.as_ref().filter(|report| !report.is_ready()) {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!(
+                    "QA PREFLIGHT BLOCKED: {} was not started and round {} for {} @{} was not \
+                     claimed, because this reviewer's environment is not ready:\n{}\n\
+                     Tell the supervisor: `{}coordination action=message target=supervisor \
+                     blocker=true summary=\"QA preflight blocked {}\" message=\"...\"` with the \
+                     lines above, then start {} again once they are fixed.",
+                    qa_task.id,
+                    pass.round,
+                    pass.task_id,
+                    pass.head8(),
+                    report.render(),
+                    crate::mcp::tools::core::guidance::caller_prefix(),
+                    qa_task.id,
+                    qa_task.id,
+                )),
+                data: None,
+            });
+        }
         let claimed = cas_store::claim_qa_pass(&self.cas_root, &pass.task_id, &name, chrono::Utc::now())
             .map_err(reject)?;
+        let preflight_note = preflight
+            .map(|report| format!("\nQA preflight:\n{}", report.render()))
+            .unwrap_or_default();
         Ok(Some(format!(
-            "\nIndependent QA round {} claimed for {} @{} — you are the reviewer; deadline {}.",
+            "\nIndependent QA round {} claimed for {} @{} — you are the reviewer; deadline {}.{preflight_note}",
             claimed.round,
             claimed.task_id,
             claimed.head8(),
             claimed.deadline_at.to_rfc3339()
         )))
+    }
+
+    /// cas-d5c1: the project's QA preflight for this reviewer, or `None` when
+    /// the project declares none. The report is also recorded on the QA work
+    /// item; it holds no secret values (see `qa_pass::preflight`).
+    fn qa_reviewer_preflight(
+        &self,
+        qa_task: &Task,
+        pass: &QaPass,
+    ) -> Option<crate::qa_pass::preflight::PreflightReport> {
+        let config = crate::config::Config::load(&self.cas_root).ok()?;
+        let qa = config.qa();
+        if !crate::qa_pass::preflight::is_configured(&qa) {
+            return None;
+        }
+        let repo_root = super::close_ops::resolve_close_gate_repo_root(&self.cas_root)
+            .unwrap_or_else(|_| {
+                self.cas_root
+                    .parent()
+                    .unwrap_or(&self.cas_root)
+                    .to_path_buf()
+            });
+        let report = crate::qa_pass::preflight::run(
+            &qa,
+            &repo_root,
+            crate::qa_pass::preflight::PreflightContext {
+                delivery_task: &pass.task_id,
+                qa_task: &qa_task.id,
+                head: &pass.bound_head,
+            },
+        )?;
+        if let Ok(store) = self.open_task_store() {
+            let note = format!(
+                "[{}] QA preflight for round {} @{}: {}\n{}",
+                chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+                pass.round,
+                pass.head8(),
+                if report.is_ready() {
+                    "ready"
+                } else {
+                    "BLOCKED"
+                },
+                report.render()
+            );
+            let _ = store.append_note(&qa_task.id, &note);
+        }
+        Some(report)
     }
 
     /// Open the independent QA round for a delivery that just parked (or
@@ -124,42 +212,155 @@ impl CasCore {
             return None;
         }
         let implementer = task.assignee.as_deref()?;
-        let branch = format!("factory/{implementer}");
-        let changed = match changed_paths_for_delivery(repo, parent_branch, &branch) {
+        let branch = super::close_ops::close_measured_factory_branch(repo, task, implementer);
+        // The close gate has already selected this task's delivery tip. A
+        // worker's older lane may contain unrelated UI changes (GH #1040).
+        let delivery_ref = head.unwrap_or(&branch);
+        let changed = match changed_paths_for_delivery(repo, parent_branch, delivery_ref) {
             Ok(paths) => Some(paths),
             Err(error) => {
                 tracing::warn!(task_id = %task.id, error = %error, "cas-619f: delivery diff unavailable; eligibility uses the demo_statement only");
                 None
             }
         };
-        self.independent_qa_for_paths(task, repo, parent_branch, head, changed, None)
+        self.independent_qa_for_paths(
+            task,
+            repo,
+            parent_branch,
+            &branch,
+            head,
+            changed,
+            QaDeliveryLocation::ParkedForMerge,
+            None,
+        )
+    }
+
+    /// cas-74284: a supervisor asks for an independent QA round on a parked
+    /// delivery that Cassy did not judge user-facing at the park (no
+    /// demo_statement, no surface path or journey in its diff). Opens the
+    /// round for the parked tip exactly as the park would, with the
+    /// supervisor's reason recorded as the eligibility reason, so the merge
+    /// gates wait for a verdict from then on. Returns the dispatch text, or
+    /// why no round could be opened.
+    pub(crate) fn request_independent_qa(
+        &self,
+        task: &Task,
+        reason: &str,
+    ) -> Result<String, String> {
+        let config = crate::config::Config::load(&self.cas_root)
+            .map_err(|error| format!("could not load config: {error}"))?;
+        if !config.qa().independent_pass {
+            return Err(
+                "qa.independent_pass is off for this project, so no merge gate would wait for the round"
+                    .to_string(),
+            );
+        }
+        if task.status != TaskStatus::AwaitingMerge {
+            return Err(format!(
+                "{} is {:?}, not parked awaiting merge. A round binds a parked delivery tip;                  the worker's close parks it (and dispatches QA itself when the diff is user-facing).",
+                task.id, task.status
+            ));
+        }
+        let implementer = task.assignee.as_deref().ok_or_else(|| {
+            format!(
+                "{} has no assignee, so there is no implementer to keep out of the review",
+                task.id
+            )
+        })?;
+        // Resolve the delivery's repository and target the way the close
+        // does: the task's (or its epic's) work target, else this Cassy
+        // root's repository and the epic branch or trunk.
+        let parent_epic = self
+            .open_task_store()
+            .ok()
+            .and_then(|store| store.get_parent_epic(&task.id).ok().flatten());
+        let (repo_root, target_branch) =
+            match super::close_ops::effective_close_work_target(task, parent_epic.as_ref()) {
+                Some(target) => {
+                    let context =
+                        crate::mcp::tools::core::task::repo_context::resolve_repo_context(
+                            &self.cas_root,
+                            &target,
+                        )?;
+                    (context.repo_root, context.target_branch)
+                }
+                None => {
+                    let repo_root = super::close_ops::resolve_close_gate_repo_root(&self.cas_root)
+                        .unwrap_or_else(|_| {
+                            self.cas_root
+                                .parent()
+                                .unwrap_or(&self.cas_root)
+                                .to_path_buf()
+                        });
+                    let target_branch =
+                        match parent_epic.as_ref().and_then(|epic| epic.branch.clone()) {
+                            Some(branch) => branch,
+                            None => {
+                                crate::mcp::tools::core::task::repo_context::resolve_default_branch(
+                                    &repo_root,
+                                )?
+                            }
+                        };
+                    (repo_root, target_branch)
+                }
+            };
+        let branch = super::close_ops::close_measured_factory_branch(&repo_root, task, implementer);
+        let head = task
+            .deliverables
+            .factory_branch_anchor
+            .clone()
+            .or_else(|| super::close_ops::resolve_branch_sha(&repo_root, &branch))
+            .ok_or_else(|| {
+                format!(
+                    "the parked tip of {} could not be resolved ({branch} does not resolve and no anchor is recorded)",
+                    task.id
+                )
+            })?;
+        let changed = changed_paths_for_delivery(&repo_root, &target_branch, &head).ok();
+        self.independent_qa_for_paths(
+            task,
+            &repo_root,
+            &target_branch,
+            &branch,
+            Some(&head),
+            changed,
+            QaDeliveryLocation::ParkedForMerge,
+            Some(reason),
+        )
+        .ok_or_else(|| format!("Cassy could not open a round for {} @{head}", task.id))
     }
 
     /// Shared tail of the park and the close backstop: decide eligibility
     /// from a known (or unknown) change set, then open the round.
     ///
-    /// `merged_into` names the target when the delivery was already merged
-    /// there before any round (the close backstop). It is `None` for a park,
-    /// and the supervisor's handoff must describe which one happened.
+    /// The location is measured at dispatch: reaching the close backstop
+    /// does not prove the delivered tip was merged or that it never parked.
     fn independent_qa_for_paths(
         &self,
         task: &Task,
         repo: &Path,
         parent_branch: &str,
+        branch: &str,
         head: Option<&str>,
         changed: Option<Vec<String>>,
-        merged_into: Option<&str>,
+        location: QaDeliveryLocation<'_>,
+        requested: Option<&str>,
     ) -> Option<String> {
         let config = crate::config::Config::load(&self.cas_root).ok()?;
         let qa = config.qa();
         let implementer = task.assignee.as_deref()?;
-        let branch = format!("factory/{implementer}");
         let journeys = changed
             .as_deref()
             .map(|paths| crate::qa_pass::catalog_journeys_for(repo, paths))
             .unwrap_or_default();
         let mut eligibility = delivery_eligibility(task, &qa, changed.as_deref(), &journeys);
-        if !eligibility.is_eligible() {
+        if let Some(reason) = requested.map(str::trim).filter(|reason| !reason.is_empty()) {
+            // cas-74284: the supervisor's request is the reason on record,
+            // whatever the diff alone would have said.
+            eligibility
+                .reasons
+                .push(format!("requested by supervisor: {reason}"));
+        } else if !eligibility.is_eligible() {
             // GH #1001 (cas-627c): once a round is on record the delivery is
             // gated (`gate_applies`), so a re-park must open the next round
             // even when this park's diff alone looks non-user-facing: a
@@ -168,6 +369,11 @@ impl CasCore {
             // left the merge refused with no round a reviewer could record.
             let prior = cas_store::list_qa_passes(&self.cas_root, &task.id).unwrap_or_default();
             if !crate::qa_pass::gate_applies(task, &qa, &prior) {
+                // cas-2ee2: a required GitHub check must still turn green for
+                // a delivery that needs no independent QA.
+                if let Some(head) = head {
+                    crate::qa_pass::github_gate::publish_not_required(&self.cas_root, repo, head);
+                }
                 return None;
             }
             let latest = prior.iter().find(|pass| !pass.is_withdrawn())?;
@@ -186,7 +392,7 @@ impl CasCore {
         let new = NewQaPass {
             task_id: &task.id,
             implementer_agent_id: implementer,
-            branch: &branch,
+            branch,
             bound_head: head,
             deadline_at: now + chrono::Duration::minutes(i64::from(qa.pass_timeout_mins.max(1))),
             max_rounds: qa.max_rounds,
@@ -211,13 +417,13 @@ impl CasCore {
         };
         let mut status = match outcome {
             QaPassOpen::Dispatched(pass) => {
-                self.materialize_qa_round(task, pass, &reasons, parent_branch, &config, merged_into)
+                self.materialize_qa_round(task, pass, &reasons, parent_branch, &config, location)
             }
             QaPassOpen::AlreadyOpen(pass) => {
                 if pass.qa_task_id.is_none() {
                     // A previous park opened the round but crashed before
                     // its work item existed; finish the job.
-                    self.materialize_qa_round(task, pass, &reasons, parent_branch, &config, merged_into)
+                    self.materialize_qa_round(task, pass, &reasons, parent_branch, &config, location)
                 } else {
                     format!(
                         "\n\nINDEPENDENT QA PENDING: pass {} (round {}) for {} is {}{}; QA task {}. \
@@ -231,7 +437,7 @@ impl CasCore {
                             .map(|reviewer| format!(" by {reviewer}"))
                             .unwrap_or_default(),
                         pass.qa_task_id.as_deref().unwrap_or("-"),
-                        if merged_into.is_some() { "close" } else { "merge" },
+                        location.gate(),
                     )
                 }
             }
@@ -244,7 +450,7 @@ impl CasCore {
                 },
                 pass.id,
                 pass.head8(),
-                if merged_into.is_some() { "close" } else { "merge" },
+                location.gate(),
             ),
             QaPassOpen::Escalate {
                 failed_rounds,
@@ -268,6 +474,14 @@ impl CasCore {
                     .find(|pass| pass.id == id)
             });
             status.push_str(&self.retire_superseded_qa_round(&retired, next.as_ref()));
+        }
+        // cas-2ee2: mirror the round covering this head onto GitHub.
+        if let Some(current) = cas_store::list_qa_passes(&self.cas_root, &task.id)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|pass| pass.bound_head == head && !pass.is_withdrawn())
+        {
+            crate::qa_pass::github_gate::publish_pass_status(&self.cas_root, &current);
         }
         Some(status)
     }
@@ -394,8 +608,8 @@ impl CasCore {
         crate::qa_pass::merge_gate(&task, &qa, &passes, &head).err()
     }
 
-    /// cas-619f close backstop: after a merge, an independently reviewed tip
-    /// must be contained in the target branch. Returns the refusal when not,
+    /// cas-619f close backstop: an independently reviewed tip must be
+    /// contained in the target branch. Returns the refusal when not,
     /// dispatching a round first if none is open so the task can progress.
     ///
     /// cas-5c38 (GH #999): a delivery merged before it was ever closed (the
@@ -545,21 +759,26 @@ impl CasCore {
                 &head[..head.len().min(8)],
             ));
         }
+        let location = close_delivery_location(repo, &head, target_branch);
         let dispatch = self
             .independent_qa_for_paths(
                 task,
                 repo,
                 target_branch,
+                &branch,
                 Some(&head),
                 changed,
-                Some(target_branch),
+                location,
+                None,
             )
             .unwrap_or_default();
         QaCloseGate::Refuse(format!(
-            "INDEPENDENT QA REQUIRED: {} is user-facing and no passed or waived QA round covers a tip \
-             merged into {target_branch}. The close waits for the reviewer's verdict (or a logged \
-             supervisor waiver: `{}verification action=qa_waive task_id={} summary=\"...\"`).{dispatch}",
+            "INDEPENDENT QA REQUIRED: {} is user-facing and no passed or waived QA round covers \
+             its delivered tip @{} for {target_branch}. The {} waits for the reviewer's verdict \
+             (or a logged supervisor waiver: `{}verification action=qa_waive task_id={} summary=\"...\"`).{dispatch}",
             task.id,
+            &head[..head.len().min(8)],
+            location.gate(),
             crate::mcp::tools::core::guidance::supervisor_prefix(),
             task.id,
         ))
@@ -572,7 +791,7 @@ impl CasCore {
         reasons: &str,
         parent_branch: &str,
         config: &crate::config::Config,
-        merged_into: Option<&str>,
+        location: QaDeliveryLocation<'_>,
     ) -> String {
         let artifacts_root =
             crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
@@ -605,7 +824,7 @@ impl CasCore {
                     pass.deadline_at,
                     &pass.implementer_agent_id,
                     reasons,
-                    merged_into,
+                    location,
                 ) {
                     tracing::warn!(task_id = %task.id, error = %error, "cas-619f: QA handoff not queued");
                     handoff = "NOT queued — message the supervisor".to_string();
@@ -623,7 +842,7 @@ impl CasCore {
             pass.id,
             pass.round,
             pass.head8(),
-            if merged_into.is_some() { "close" } else { "merge" },
+            location.gate(),
             ledger_dir.display(),
         )
     }
@@ -785,5 +1004,55 @@ pub(crate) fn unresolved_delivery_refusal(
              resolve here. If it merged into {target_branch}, close with \
              commit_receipt=<merged sha>. {remedy}."
         ),
+    }
+}
+
+#[cfg(test)]
+mod delivery_location_tests {
+    use super::*;
+    use std::process::Command;
+
+    #[test]
+    fn close_dispatch_location_follows_target_ancestry_gh_1026() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(repo)
+                .env("GIT_AUTHOR_NAME", "CAS Test")
+                .env("GIT_AUTHOR_EMAIL", "cas@example.test")
+                .env("GIT_COMMITTER_NAME", "CAS Test")
+                .env("GIT_COMMITTER_EMAIL", "cas@example.test")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(&["init", "-q", "-b", "epic/ui"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "base"]);
+        git(&["checkout", "-q", "-b", "factory/worker"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "delivery"]);
+        let head = git(&["rev-parse", "HEAD"]);
+
+        assert!(matches!(
+            close_delivery_location(repo, &head, "epic/ui"),
+            QaDeliveryLocation::UnmergedFrom("epic/ui")
+        ));
+        // The remote target may contain the delivery while this checkout's
+        // local epic ref is stale.
+        git(&["update-ref", "refs/remotes/origin/epic/ui", &head]);
+        assert!(matches!(
+            close_delivery_location(repo, &head, "epic/ui"),
+            QaDeliveryLocation::ContainedIn("epic/ui")
+        ));
+        git(&["checkout", "-q", "epic/ui"]);
+        git(&["merge", "-q", "--no-ff", "-m", "merge", "factory/worker"]);
+        assert!(matches!(
+            close_delivery_location(repo, &head, "epic/ui"),
+            QaDeliveryLocation::ContainedIn("epic/ui")
+        ));
     }
 }

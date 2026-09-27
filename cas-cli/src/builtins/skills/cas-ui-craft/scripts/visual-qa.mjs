@@ -44,6 +44,33 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
         const alpha = rgb[4] === undefined ? 1 : (rgb[4].endsWith('%') ? Number.parseFloat(rgb[4]) / 100 : Number.parseFloat(rgb[4]));
         return [Number(rgb[1]), Number(rgb[2]), Number(rgb[3]), alpha];
       }
+      const oklch = value.match(/^oklch\(\s*([^)]*)\s*\)$/i);
+      if (oklch) {
+        const [channels, opacity, ...extra] = oklch[1].split('/').map((part) => part.trim());
+        const parts = channels.split(/\s+/);
+        if (extra.length || parts.length !== 3 || (opacity !== undefined && !opacity)) return null;
+        const [lightness, chroma, hue] = parts;
+        const l = Number.parseFloat(lightness) / (lightness.endsWith('%') ? 100 : 1);
+        const c = Number.parseFloat(chroma) * (chroma.endsWith('%') ? 0.004 : 1);
+        const angle = Number.parseFloat(hue) * (hue.endsWith('turn') ? 360 : hue.endsWith('rad') ? 180 / Math.PI : hue.endsWith('grad') ? 0.9 : 1);
+        const alpha = opacity === undefined ? 1 : Number.parseFloat(opacity) / (opacity.endsWith('%') ? 100 : 1);
+        if (![l, c, angle, alpha].every(Number.isFinite)) return null;
+        const a = c * Math.cos(angle * Math.PI / 180);
+        const b = c * Math.sin(angle * Math.PI / 180);
+        const linearL = (l + 0.3963377774 * a + 0.2158037573 * b) ** 3;
+        const linearM = (l - 0.1055613458 * a - 0.0638541728 * b) ** 3;
+        const linearS = (l - 0.0894841775 * a - 1.2914855480 * b) ** 3;
+        const srgb = (linear) => {
+          const gamma = linear <= 0.0031308 ? 12.92 * linear : 1.055 * linear ** (1 / 2.4) - 0.055;
+          return Math.min(255, Math.max(0, gamma * 255));
+        };
+        return [
+          srgb(4.0767416621 * linearL - 3.3077115913 * linearM + 0.2309699292 * linearS),
+          srgb(-1.2684380046 * linearL + 2.6097574011 * linearM - 0.3413193965 * linearS),
+          srgb(-0.0041960863 * linearL - 0.7034186147 * linearM + 1.7076147010 * linearS),
+          alpha,
+        ];
+      }
       return null;
     };
     const over = (foreground, background) => {
@@ -147,7 +174,7 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
         ariaHidden: ariaHidden(element),
         fontSize: Number.parseFloat(style.fontSize) || 16,
         fontWeight: Number.parseInt(style.fontWeight, 10) || 400,
-        colorAlpha: fg ? round(fg[3]) : 0,
+        colorAlpha: fg ? fg[3] : null,
         ignored: Boolean(ignoredReason),
         ignoredReason,
         statusLike: Boolean(element.closest('.tag, .status, [role="status"]')),
@@ -196,8 +223,8 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
     const visibleText = textNodes.filter((item) => !item.ignored && !item.hidden && !item.ariaHidden && item.box.width > 0 && item.box.height > 0);
     for (const item of textNodes) {
       if (item.ignored || item.ariaHidden || item.box.width <= 0 || item.box.height <= 0) continue;
-      if (item.hidden || item.opacity <= 0 || item.colorAlpha <= 0) {
-        add('invisible-text', item, { reason: item.opacity <= 0 ? 'opacity-0' : item.box.width <= 0 || item.box.height <= 0 ? 'zero-size' : 'visibility-hidden' });
+      if (item.hidden || item.opacity <= 0 || item.colorAlpha === 0) {
+        add('invisible-text', item, { reason: item.opacity <= 0 ? 'opacity-0' : item.colorAlpha === 0 ? 'color-alpha-0' : 'visibility-hidden' });
         continue;
       }
       if (!item.foreground || item.hasUnverifiableImage) {
@@ -536,7 +563,7 @@ function markdownReport(result) {
   ];
   if (!result.findings.length) lines.push('No findings.');
   for (const finding of result.findings) {
-    const location = `${finding.url} · ${finding.scheme} · ${finding.viewport.name}`;
+    const location = `${finding.url}${finding.state ? ` · state ${finding.state}` : ''} · ${finding.scheme} · ${finding.viewport.name}`;
     lines.push(`- **${finding.type}** — \`${finding.elementPath}\` — ${finding.textSample ? JSON.stringify(finding.textSample) : finding.reason || 'see JSON'} (${location})`);
     if (finding.ratio !== undefined) lines.push(`  - Contrast: ${finding.ratio}:1 (required ${finding.threshold}:1); foreground ${finding.foreground?.join(', ')}; background ${finding.background?.join(', ')}`);
   }
@@ -547,20 +574,169 @@ function markdownReport(result) {
     lines.push(`- **${finding.type}** — \`${finding.elementPath}\` — ${finding.reason || 'see JSON'} (${location})`);
     if (finding.sampledBackground) lines.push(`  - Screenshot sample: background ${finding.sampledBackground.join(', ')}${finding.sampledRatio === undefined ? '' : `; ratio ${finding.sampledRatio}:1`}`);
   }
+  if (result.journeyRuns) {
+    lines.push('', `## Journey states — ${result.journey.name}`, '');
+    for (const run of result.journeyRuns) {
+      lines.push(`- **${run.state}** · ${run.scheme} · ${run.viewport.name} — screenshot [${run.screenshot}](${run.screenshot})${run.trace ? ` · trace [${run.trace}](${run.trace})` : ''}`);
+      for (const step of run.steps) lines.push(`  ${step.index}. ${step.status === 'ok' ? 'ok' : step.status.toUpperCase()} — \`${step.step}\`${step.error ? ` — ${step.error}` : ''}`);
+    }
+  }
   lines.push('', '## Screenshots', '');
-  for (const screenshot of result.screenshots) lines.push(`- [${screenshot.path}](${screenshot.path}) — ${screenshot.url} · ${screenshot.scheme} · ${screenshot.viewport.name}`);
-  lines.push('', '## Method', '', 'Headless Chromium rendered each URL under the requested color schemes and viewports. Text nodes were checked for effective WCAG contrast, clipping, overlap, visibility, viewport escape, and fixed-size truncation.');
+  for (const screenshot of result.screenshots) lines.push(`- [${screenshot.path}](${screenshot.path}) — ${screenshot.url}${screenshot.state ? ` · state ${screenshot.state}` : ''} · ${screenshot.scheme} · ${screenshot.viewport.name}`);
+  lines.push('', '## Method', '', `Headless Chromium rendered each URL under the requested color schemes and viewports${result.journeyRuns ? ', then drove each declared journey state (routed responses, offline, steps) and inspected the page it reached' : ''}. Text nodes were checked for effective WCAG contrast, clipping, overlap, visibility, viewport escape, and fixed-size truncation.`);
   return `${lines.join('\n')}\n`;
+}
+
+/* ---- Declared journeys ---------------------------------------------------
+ * A resting page can pass while the states a user reaches do not: a submit
+ * that fails, a request still loading, the connection gone. A journey file
+ * declares those states so strict visual QA renders and inspects them too,
+ * on every scheme and viewport, with a screenshot and a Playwright trace each:
+ *
+ *   {
+ *     "name": "start",
+ *     "url": "start.html",            // relative to the journey file, or a URL
+ *     "timeoutMs": 5000,              // per step (optional)
+ *     "states": [
+ *       { "name": "submit-error",
+ *         "routes": [{ "url": "**\/api/start", "status": 500, "json": { "error": "boom" } }],
+ *         "steps": [
+ *           { "fill": "#email", "value": "ada@example.com" },
+ *           { "click": "button[type=submit]" },
+ *           { "waitFor": "[role=alert]" },
+ *           { "expect": "#email", "focused": true }
+ *         ] },
+ *       { "name": "loading", "routes": [{ "url": "**\/api/**", "hold": true }], "steps": [ ... ] },
+ *       { "name": "offline", "offline": true, "steps": [ ... ] }
+ *     ]
+ *   }
+ *
+ * Routes answer matching requests (status, json | body, contentType, headers,
+ * delayMs), hold them open (loading), or abort them. `offline` goes offline
+ * after the page has loaded, before the steps. Steps: fill (+value), click,
+ * press (+on), focus, hover, check, select (+value), waitFor (+state), wait
+ * (ms), offline (true/false), expect (+visible, hidden, text, focused). A step
+ * that cannot run is a `journey-step-failed` finding; an expectation that does
+ * not hold is a `journey-expectation` finding; either fails a strict run. The
+ * page is then inspected exactly as a resting page is.
+ */
+const STEP_ACTIONS = ['fill', 'click', 'press', 'focus', 'hover', 'check', 'select', 'waitFor', 'wait', 'offline', 'expect'];
+
+function stepAction(step) {
+  const actions = STEP_ACTIONS.filter((action) => Object.hasOwn(step, action));
+  if (actions.length !== 1) throw new Error(`Journey step ${JSON.stringify(step)} must name exactly one action: ${STEP_ACTIONS.join(', ')}.`);
+  return actions[0];
+}
+
+function describeStep(step) {
+  const action = stepAction(step);
+  const target = step[action];
+  if (action === 'wait') return `wait ${target}ms`;
+  if (action === 'offline') return `offline ${target}`;
+  const extras = ['value', 'on', 'state', 'text', 'visible', 'hidden', 'focused'].filter((key) => Object.hasOwn(step, key)).map((key) => `${key}=${JSON.stringify(step[key])}`);
+  return [action, typeof target === 'string' ? target : JSON.stringify(target), ...extras].join(' ');
+}
+
+/**
+ * Read and check a journey: a path to a JSON file, or the object itself.
+ * Relative URLs resolve against the journey file's directory (or the cwd).
+ */
+export async function loadJourney(journey) {
+  const fromFile = typeof journey === 'string';
+  const parsed = fromFile ? JSON.parse(await readFile(journey, 'utf8')) : journey;
+  if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.states) || !parsed.states.length) throw new Error('A journey needs a non-empty states array.');
+  const base = fromFile ? dirname(resolve(journey)) : process.cwd();
+  const url = parsed.url === undefined ? undefined : /^(?:file|https?):\/\//i.test(parsed.url) ? parsed.url : pathToFileURL(resolve(base, parsed.url)).href;
+  const names = new Set();
+  const states = parsed.states.map((state, index) => {
+    if (!state || typeof state !== 'object' || typeof state.name !== 'string' || !state.name.trim()) throw new Error(`Journey state ${index + 1} needs a name.`);
+    if (names.has(state.name)) throw new Error(`Journey state name ${state.name} is used twice.`);
+    names.add(state.name);
+    const steps = state.steps ?? [];
+    if (!Array.isArray(steps)) throw new Error(`Journey state ${state.name}: steps must be an array.`);
+    for (const step of steps) stepAction(step);
+    const routes = state.routes ?? [];
+    if (!Array.isArray(routes) || routes.some((route) => !route || typeof route.url !== 'string')) throw new Error(`Journey state ${state.name}: every route needs a url pattern.`);
+    return { name: state.name, offline: state.offline === true, routes, steps };
+  });
+  return { name: parsed.name || 'journey', url, timeoutMs: Number(parsed.timeoutMs) > 0 ? Number(parsed.timeoutMs) : 5000, states };
+}
+
+async function installRoute(page, route, holds) {
+  await page.route(route.url, async (request) => {
+    try {
+      if (route.hold) { await new Promise((release) => holds.push(release)); await request.abort(); return; }
+      if (route.abort) { await request.abort(typeof route.abort === 'string' ? route.abort : 'failed'); return; }
+      if (route.delayMs) await new Promise((wake) => setTimeout(wake, route.delayMs));
+      const json = Object.hasOwn(route, 'json');
+      await request.fulfill({
+        status: route.status ?? 200,
+        contentType: route.contentType ?? (json ? 'application/json' : 'text/plain'),
+        // A file: page's fetch is cross-origin; the declared answer must reach it.
+        headers: { 'access-control-allow-origin': '*', ...(route.headers ?? {}) },
+        body: json ? JSON.stringify(route.json) : String(route.body ?? ''),
+      });
+    } catch {
+      // The context closed while the request was held: nothing left to answer.
+    }
+  });
+}
+
+async function runStep(page, context, step, timeout) {
+  const action = stepAction(step);
+  const target = step[action];
+  const locator = typeof target === 'string' ? page.locator(target).first() : undefined;
+  switch (action) {
+    case 'fill': await locator.fill(String(step.value ?? ''), { timeout }); return undefined;
+    case 'click': await locator.click({ timeout }); return undefined;
+    case 'press': if (step.on) await page.locator(step.on).first().press(target, { timeout }); else await page.keyboard.press(target); return undefined;
+    case 'focus': await locator.focus({ timeout }); return undefined;
+    case 'hover': await locator.hover({ timeout }); return undefined;
+    case 'check': await locator.check({ timeout }); return undefined;
+    case 'select': await locator.selectOption(String(step.value ?? ''), { timeout }); return undefined;
+    case 'waitFor': await locator.waitFor({ state: step.state ?? 'visible', timeout }); return undefined;
+    case 'wait': await page.waitForTimeout(Number(target) || 0); return undefined;
+    case 'offline': await context.setOffline(target !== false); return undefined;
+    case 'expect': {
+      const deadline = Date.now() + timeout;
+      let last = '';
+      for (;;) {
+        last = await page.evaluate(({ selector, expected }) => {
+          const element = document.querySelector(selector);
+          const shown = Boolean(element && element.getClientRects().length && getComputedStyle(element).visibility !== 'hidden');
+          if (expected.hidden === true) return shown ? 'is visible' : '';
+          if (!element) return 'is missing';
+          if (expected.visible !== false && !shown) return 'is not visible';
+          if (expected.text !== undefined && !(element.innerText || element.textContent || '').includes(expected.text)) return `does not contain ${JSON.stringify(expected.text)} (has ${JSON.stringify((element.innerText || '').trim().slice(0, 80))})`;
+          if (expected.focused === true && document.activeElement !== element) {
+            const active = document.activeElement;
+            return `is not focused (focus is on ${active === document.body || !active ? 'the page body' : active.tagName.toLowerCase() + (active.id ? '#' + active.id : '')})`;
+          }
+          return '';
+        }, { selector: target, expected: step });
+        if (!last || Date.now() >= deadline) break;
+        await page.waitForTimeout(50);
+      }
+      return last ? `${target} ${last}` : undefined;
+    }
+    default: throw new Error(`Unknown journey step ${action}.`);
+  }
 }
 
 /**
  * Render and inspect one or more HTML URLs.
- * @param {{urls: string[], artifactDir?: string, schemes?: string[], viewports?: Array<{name?: string,width:number,height:number}|string>, allowlistPath?: string, strict?: boolean}} options
+ * With `journey` (a journey file path or object, see loadJourney), its
+ * declared states are rendered and inspected after the resting pages.
+ * @param {{urls?: string[], artifactDir?: string, schemes?: string[], viewports?: Array<{name?: string,width:number,height:number}|string>, allowlistPath?: string, strict?: boolean, journey?: string | object}} options
  */
 export async function runVisualQa(options) {
-  if (!options?.urls?.length) throw new Error('At least one file:// or http(s) URL is required.');
+  const journey = options?.journey ? await loadJourney(options.journey) : undefined;
+  const inputUrls = [...(options?.urls ?? [])];
+  // The journey's page is checked at rest too, like any URL given.
+  if (journey?.url && !inputUrls.includes(journey.url)) inputUrls.push(journey.url);
+  if (!inputUrls.length) throw new Error('At least one file:// or http(s) URL is required.');
+  if (journey && !journey.url && inputUrls.length !== 1) throw new Error('A journey without a url needs exactly one URL to run on.');
   const artifactDir = resolve(options.artifactDir || join(process.cwd(), 'docs/factory/data/visual-qa'));
-  const inputUrls = options.urls;
   const urls = inputUrls.map((url) => /^(?:file|https?):\/\//i.test(url) ? url : pathToFileURL(resolve(url)).href);
   const schemes = options.schemes || DEFAULT_SCHEMES;
   const viewports = (options.viewports || DEFAULT_VIEWPORTS).map(normalizeViewport);
@@ -573,6 +749,7 @@ export async function runVisualQa(options) {
   const infoFindings = [];
   const suppressed = [];
   const screenshots = [];
+  const journeyRuns = [];
   const seen = new Set();
   try {
     for (const [urlIndex, url] of urls.entries()) {
@@ -586,7 +763,7 @@ export async function runVisualQa(options) {
             await page.waitForTimeout(50);
             const recordFinding = (finding, informational = false) => {
               const enriched = { ...finding, url: source, scheme, viewport };
-              const key = [informational ? 'info' : 'finding', enriched.type, enriched.selector || enriched.elementPath, enriched.otherElementPath || '', scheme, viewport.name].join('|');
+              const key = [informational ? 'info' : 'finding', 'rest', enriched.type, enriched.selector || enriched.elementPath, enriched.otherElementPath || '', scheme, viewport.name].join('|');
               if (seen.has(key)) return;
               seen.add(key);
               const exception = enriched.allowlistedBy?.[0] ?? allowlist.find((entry) =>
@@ -635,6 +812,80 @@ export async function runVisualQa(options) {
         }
       }
     }
+    if (journey) {
+      const source = journey.url ?? inputUrls[0];
+      const url = /^(?:file|https?):\/\//i.test(source) ? source : pathToFileURL(resolve(source)).href;
+      for (const state of journey.states) {
+        for (const scheme of schemes) {
+          for (const viewport of viewports) {
+            const base = `${slug(source)}-${slug(state.name)}-${scheme}-${viewport.name}`;
+            const run = { journey: journey.name, state: state.name, url: source, scheme, viewport, steps: [], screenshot: `${base}.png`, trace: `${base}.trace.zip` };
+            journeyRuns.push(run);
+            const recordFinding = (finding, informational = false) => {
+              const enriched = { ...finding, url: source, state: state.name, scheme, viewport };
+              const key = [informational ? 'info' : 'finding', `state:${state.name}`, enriched.type, enriched.selector || enriched.elementPath, enriched.otherElementPath || '', scheme, viewport.name].join('|');
+              if (seen.has(key)) return;
+              seen.add(key);
+              const exception = enriched.allowlistedBy?.[0] ?? allowlist.find((entry) =>
+                (entry.type === '*' || entry.type === enriched.type)
+                && (entry.selector === '*' || (entry.selector === enriched.selector && !enriched.allowlistedBy)));
+              if (exception) suppressed.push({ ...enriched, reason: exception.reason });
+              else if (informational) infoFindings.push(enriched);
+              else findings.push(enriched);
+            };
+            const context = await browser.newContext({ colorScheme: scheme, viewport: { width: viewport.width, height: viewport.height } });
+            const holds = [];
+            // Inside a Playwright test the runner already traces every context; its trace then holds these steps.
+            const tracing = await context.tracing.start({ screenshots: true, snapshots: true, title: `${journey.name} · ${state.name} · ${scheme} · ${viewport.name}` }).then(() => true, () => false);
+            if (!tracing) run.trace = undefined;
+            const page = await context.newPage();
+            try {
+              for (const route of state.routes) await installRoute(page, route, holds);
+              await page.goto(url, { waitUntil: 'load' });
+              if (state.offline) await context.setOffline(true);
+              let failed = false;
+              for (const [index, step] of state.steps.entries()) {
+                const entry = { index: index + 1, step: describeStep(step), status: 'skipped' };
+                run.steps.push(entry);
+                if (failed) continue;
+                const started = Date.now();
+                try {
+                  const unmet = await runStep(page, context, step, journey.timeoutMs);
+                  entry.status = unmet ? 'unmet' : 'ok';
+                  if (unmet) {
+                    entry.error = unmet;
+                    recordFinding({ type: 'journey-expectation', selector: typeof step.expect === 'string' ? step.expect : 'journey', elementPath: typeof step.expect === 'string' ? step.expect : 'journey', reason: unmet, step: entry.index });
+                  }
+                } catch (error) {
+                  failed = true;
+                  entry.status = 'failed';
+                  entry.error = (error instanceof Error ? error.message : String(error)).split('\n')[0];
+                  recordFinding({ type: 'journey-step-failed', selector: `step ${entry.index}`, elementPath: `step ${entry.index}`, reason: `${entry.step}: ${entry.error}`, step: entry.index });
+                }
+                entry.ms = Date.now() - started;
+              }
+              await page.waitForTimeout(50);
+              const inspection = await page.evaluate(PAGE_INSPECTION, { colorScheme: scheme, contrastLimit: CONTRAST_LIMIT, largeTextLimit: LARGE_TEXT_LIMIT, boxTolerance: BOX_TOLERANCE, allowlistEntries: allowlist });
+              for (const invalid of inspection.invalidAllowlistSelectors) recordFinding(invalid, true);
+              for (const finding of inspection.findings) recordFinding(finding);
+              const screenshotBuffer = await page.screenshot({ path: join(artifactDir, run.screenshot), fullPage: true });
+              for (const info of inspection.infos) {
+                const sampledBackground = sampleScreenshotBackground(screenshotBuffer, info.box);
+                const sampledRatio = sampledBackground && info.foreground ? rgbContrast(info.foreground, sampledBackground) : undefined;
+                recordFinding({ ...info, sampledBackground, sampledRatio }, true);
+              }
+              screenshots.push({ path: run.screenshot, url: source, state: state.name, scheme, viewport });
+            } catch (error) {
+              recordFinding({ type: 'journey-step-failed', selector: 'journey', elementPath: 'journey', reason: `${state.name}: ${(error instanceof Error ? error.message : String(error)).split('\n')[0]}` });
+            } finally {
+              for (const release of holds) release();
+              if (tracing) await context.tracing.stop({ path: join(artifactDir, run.trace) }).catch(() => { run.trace = undefined; });
+              await context.close();
+            }
+          }
+        }
+      }
+    }
   } finally {
     await browser.close();
   }
@@ -648,6 +899,7 @@ export async function runVisualQa(options) {
     schemes,
     viewports,
     urls: inputUrls,
+    ...(journey ? { journey: { name: journey.name, url: journey.url, states: journey.states.map((state) => state.name) }, journeyRuns } : {}),
     findings,
     infoFindings,
     suppressed,
@@ -669,6 +921,7 @@ function parseArgs(argv) {
     if (arg === '--strict') options.strict = true;
     else if (arg === '--artifact-dir') options.artifactDir = argv[++index];
     else if (arg === '--allowlist') options.allowlistPath = argv[++index];
+    else if (arg === '--journey') options.journey = argv[++index];
     else if (arg === '--scheme') options.schemes = [argv[++index]];
     else if (arg === '--viewport') options.viewports = [argv[++index]];
     else if (arg === '--help' || arg === '-h') options.help = true;
@@ -679,8 +932,8 @@ function parseArgs(argv) {
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const options = parseArgs(process.argv.slice(2));
-  if (options.help || !options.urls.length) {
-    console.log('Usage: npm exec --yes --package=playwright -- node scripts/visual-qa.mjs [--strict] [--artifact-dir DIR] [--allowlist FILE] [--scheme light|dark] [--viewport WIDTHxHEIGHT] URL...');
+  if (options.help || (!options.urls.length && !options.journey)) {
+    console.log('Usage: npm exec --yes --package=playwright -- node scripts/visual-qa.mjs [--strict] [--artifact-dir DIR] [--allowlist FILE] [--journey FILE] [--scheme light|dark] [--viewport WIDTHxHEIGHT] [URL...]');
     process.exitCode = options.help ? 0 : 2;
   } else {
     try {
@@ -688,7 +941,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       if (result.status === 'PASS') console.log('PASS');
       else for (const finding of result.findings) {
         const colors = finding.foreground && finding.background ? ` foreground=${finding.foreground.join(',')} background=${finding.background.join(',')} ratio=${finding.ratio ?? 'n/a'}` : '';
-        console.log(`FAIL ${finding.type} ${finding.elementPath} text=${JSON.stringify(finding.textSample || '')}${colors}`);
+        console.log(`FAIL ${finding.type}${finding.state ? ` [${finding.state}]` : ''} ${finding.elementPath} text=${JSON.stringify(finding.textSample || (finding.type.startsWith('journey-') ? finding.reason : '') || '')}${colors}`);
       }
       process.exitCode = result.exitCode;
     } catch (error) {

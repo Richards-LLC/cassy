@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AttachSnapshot, ConnectionSnapshot } from "./connection-state";
-import { machineConnection, sessionConnection } from "./session-connection";
+import { firstAttachRetry, machineConnection, sessionConnection } from "./session-connection";
 
 const machine = (phase: ConnectionSnapshot["phase"], extra: Partial<ConnectionSnapshot> = {}): ConnectionSnapshot => ({ phase, stage: phase === "live" ? "live" : "dialing", since: 0, attempt: 0, missedHeartbeats: 0, degraded: false, ...extra });
 const attach = (phase: AttachSnapshot["phase"], extra: Partial<AttachSnapshot> = {}): AttachSnapshot => ({ session: "s", phase, stage: phase === "live" ? "live" : "attaching", since: 0, attempt: 1, missedHeartbeats: 0, degraded: false, ...extra });
@@ -34,8 +34,53 @@ describe("machineConnection (the footer)", () => {
     const live = machine("live");
     expect(machineConnection(live, [])).toBe(live);
     expect(machineConnection(live, [{ attach: attach("live"), wasLive: true }])).toBe(live);
+    // cas-d15c: a live session reconnecting on a connected machine is that
+    // session's state; a failure retrying cannot fix still counts.
+    expect(machineConnection(live, [{ attach: attach("live"), wasLive: true }, { attach: attach("backoff", { sessionOnly: true }), wasLive: true }])).toBe(live);
+    // A socket that simply dropped, or a failure retrying cannot fix, still counts.
     expect(machineConnection(live, [{ attach: attach("live"), wasLive: true }, { attach: attach("failed"), wasLive: true }])?.phase).toBe("backoff");
+    expect(machineConnection(live, [{ attach: attach("live"), wasLive: true }, { attach: attach("failed", { fatal: true, sessionOnly: true }), wasLive: true }])?.phase).toBe("failed");
     const down = machine("failed");
     expect(machineConnection(down, [{ attach: attach("live"), wasLive: true }])).toBe(down);
+  });
+  it("does not count a conversation opening for the first time against its machine (journey F3)", () => {
+    const live = machine("live");
+    for (const phase of ["resolving", "dialing", "auth", "attaching"] as const) {
+      expect(machineConnection(live, [{ attach: attach(phase, { stage: phase === "resolving" ? "resolving" : phase }), wasLive: false }])).toBe(live);
+    }
+    // A first attach failing a second time and a pairing loss still count.
+    expect(machineConnection(live, [{ attach: attach("failed", { attempt: 1 }), wasLive: false }])?.phase).toBe("failed");
+    expect(machineConnection(live, [{ attach: attach("backoff", { attempt: 2 }), wasLive: false }])?.phase).toBe("backoff");
+    expect(machineConnection(live, [{ attach: attach("auth", { authFailure: "revoked" }), wasLive: false }])?.authFailure).toBe("revoked");
+    expect(machineConnection(live, [{ attach: attach("attaching"), wasLive: true }])?.phase).toBe("backoff");
+    // An opening conversation beside a dropped one: the drop still shows.
+    expect(machineConnection(live, [{ attach: attach("attaching"), wasLive: false }, { attach: attach("dialing"), wasLive: true }])?.phase).toBe("backoff");
+    // A stream the hub closed on a connected machine does not (cas-d15c).
+    expect(machineConnection(live, [{ attach: attach("attaching", { sessionOnly: true }), wasLive: true }])).toBe(live);
+  });
+});
+
+describe("a never-live conversation's first retry (cas-28df)", () => {
+  const live = machine("live");
+  it("is the first failure and its scheduled retry, never a second failure, a drop, or a hopeless one", () => {
+    expect(firstAttachRetry(attach("failed", { attempt: 0 }), false)).toBe(true);
+    expect(firstAttachRetry(attach("backoff", { attempt: 1 }), false)).toBe(true);
+    expect(firstAttachRetry(attach("failed", { attempt: 1 }), false)).toBe(false);
+    expect(firstAttachRetry(attach("backoff", { attempt: 2 }), false)).toBe(false);
+    expect(firstAttachRetry(attach("backoff", { attempt: 1 }), true)).toBe(false);
+    expect(firstAttachRetry(attach("failed", { attempt: 0, fatal: true }), false)).toBe(false);
+    expect(firstAttachRetry(attach("failed", { attempt: 0, authFailure: "revoked" }), false)).toBe(false);
+    expect(firstAttachRetry(attach("attaching", { attempt: 1 }), false)).toBe(false);
+    expect(firstAttachRetry(undefined, false)).toBe(false);
+  });
+  it("keeps the footer Connected: the machine's hub is up", () => {
+    expect(machineConnection(live, [{ attach: attach("failed", { attempt: 0 }), wasLive: false }])).toBe(live);
+    expect(machineConnection(live, [{ attach: attach("backoff", { attempt: 1 }), wasLive: false }])).toBe(live);
+  });
+  it("reads as connecting in the header and the row, not reconnecting", () => {
+    const state = sessionConnection(live, attach("backoff", { attempt: 1, stage: "attaching", reason: "no session state within 3s" }), false);
+    expect(state?.phase).toBe("attaching");
+    expect(state?.reason).toBe("no session state within 3s");
+    expect(sessionConnection(live, attach("backoff", { attempt: 2 }), false)?.phase).toBe("backoff");
   });
 });

@@ -29,6 +29,10 @@ pub enum ProtocolCapability {
     PagedScrollback,
     /// Durable operator/supervisor conversation turns can be replayed.
     ConversationHistory,
+    /// A `SendMessage` repeated with the same `client_ref` is answered with its
+    /// first `MessageQueued` receipt and queued once (cas-bea6), so a client
+    /// may resend a send whose receipt it never saw.
+    MessageClientRefDedupe,
 }
 
 pub fn daemon_capabilities() -> Vec<ProtocolCapability> {
@@ -38,11 +42,42 @@ pub fn daemon_capabilities() -> Vec<ProtocolCapability> {
         ProtocolCapability::AuthoritativePaneKeyframes,
         ProtocolCapability::PagedScrollback,
         ProtocolCapability::ConversationHistory,
+        ProtocolCapability::MessageClientRefDedupe,
     ]
 }
 
 fn legacy_protocol_version() -> u32 {
     LEGACY_PROTOCOL_VERSION
+}
+
+/// Decode an advertised capability list, keeping the capabilities this build
+/// knows and skipping the rest (cas-da6b).
+///
+/// The list is additive: a newer daemon names features an older hub or TUI
+/// has never heard of, for example across an update window. Decoding into the
+/// closed enum alone failed the whole `Welcome` on the first unfamiliar entry.
+/// The enum stays closed, so an unknown entry is never represented and never
+/// re-emitted; it is only dropped here.
+fn deserialize_known_capabilities<'de, D>(
+    deserializer: D,
+) -> Result<Vec<ProtocolCapability>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Advertised {
+        Known(ProtocolCapability),
+        Unknown(serde::de::IgnoredAny),
+    }
+    let advertised = Vec::<Advertised>::deserialize(deserializer)?;
+    Ok(advertised
+        .into_iter()
+        .filter_map(|entry| match entry {
+            Advertised::Known(capability) => Some(capability),
+            Advertised::Unknown(_) => None,
+        })
+        .collect())
 }
 
 /// Attribution supplied by the authenticated hub boundary for semantic messages.
@@ -390,8 +425,9 @@ pub enum DaemonMessage {
         /// Additive version negotiation. Missing means the legacy protocol.
         #[serde(default = "legacy_protocol_version")]
         protocol_version: u32,
-        /// Independently negotiable features. Missing means no new controls.
-        #[serde(default)]
+        /// Independently negotiable features. Missing means no new controls;
+        /// entries this build does not know are skipped (cas-da6b).
+        #[serde(default, deserialize_with = "deserialize_known_capabilities")]
         capabilities: Vec<ProtocolCapability>,
         /// Content-free attach metadata used by protocol v3 clients.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1099,6 +1135,64 @@ mod tests {
         assert!(daemon_capabilities().contains(&ProtocolCapability::AuthoritativePaneKeyframes));
         assert!(daemon_capabilities().contains(&ProtocolCapability::PagedScrollback));
         assert!(daemon_capabilities().contains(&ProtocolCapability::ConversationHistory));
+        assert!(daemon_capabilities().contains(&ProtocolCapability::MessageClientRefDedupe));
+        assert_eq!(
+            serde_json::to_value(ProtocolCapability::MessageClientRefDedupe).unwrap(),
+            serde_json::json!("message_client_ref_dedupe")
+        );
+    }
+
+    /// cas-da6b: a newer daemon may advertise capabilities this build has
+    /// never heard of. The Welcome still decodes, the known capabilities are
+    /// kept in order, and the unknown ones are dropped and never re-emitted.
+    #[test]
+    fn welcome_ignores_capabilities_this_build_does_not_know() {
+        let json = r#"{"Welcome":{"session_name":"factory-1","state":{"focused_pane":null,"panes":[],"epic_id":null,"epic_title":null,"cols":120,"rows":40},"scrollback":null,"protocol_version":9,"capabilities":["targeted_interrupt","a_capability_from_the_future",{"structured":"entry"},42,"conversation_history","message_client_ref_dedupe"]}}"#;
+        let decoded: DaemonMessage = serde_json::from_str(json).unwrap();
+        match &decoded {
+            DaemonMessage::Welcome {
+                protocol_version,
+                capabilities,
+                ..
+            } => {
+                assert_eq!(*protocol_version, 9);
+                assert_eq!(
+                    capabilities,
+                    &vec![
+                        ProtocolCapability::TargetedInterrupt,
+                        ProtocolCapability::ConversationHistory,
+                        ProtocolCapability::MessageClientRefDedupe,
+                    ]
+                );
+            }
+            _ => panic!("Wrong message type decoded"),
+        }
+        let reencoded = serde_json::to_string(&decoded).unwrap();
+        assert!(
+            !reencoded.contains("a_capability_from_the_future"),
+            "{reencoded}"
+        );
+        assert!(!reencoded.contains("structured"), "{reencoded}");
+        // An empty list stays empty, and the enum itself stays closed: an
+        // unknown name is still not a ProtocolCapability anywhere else.
+        let empty = r#"{"Welcome":{"session_name":"f","state":{"focused_pane":null,"panes":[],"epic_id":null,"epic_title":null,"cols":1,"rows":1},"scrollback":null,"capabilities":[]}}"#;
+        match serde_json::from_str::<DaemonMessage>(empty).unwrap() {
+            DaemonMessage::Welcome { capabilities, .. } => assert!(capabilities.is_empty()),
+            _ => panic!("Wrong message type decoded"),
+        }
+        assert!(
+            serde_json::from_str::<ProtocolCapability>(r#""a_capability_from_the_future""#)
+                .is_err()
+        );
+        // The current daemon's own advertisement round-trips unchanged.
+        let current = serde_json::to_value(daemon_capabilities()).unwrap();
+        let wrapped = serde_json::json!({"Welcome":{"session_name":"f","state":{"focused_pane":null,"panes":[],"epic_id":null,"epic_title":null,"cols":1,"rows":1},"scrollback":null,"capabilities":current}});
+        match serde_json::from_value::<DaemonMessage>(wrapped).unwrap() {
+            DaemonMessage::Welcome { capabilities, .. } => {
+                assert_eq!(capabilities, daemon_capabilities())
+            }
+            _ => panic!("Wrong message type decoded"),
+        }
     }
 
     #[test]

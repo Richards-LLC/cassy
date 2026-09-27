@@ -77,6 +77,10 @@ pub fn serve(args: &ServeArgs, cli: &Cli) -> Result<()> {
             println!("  Token:    (disabled)");
         }
     }
+    // From here on this is a long-lived server: a client that drops an SSE
+    // stream or a response mid-write must not kill it (cas-5918). The startup
+    // banner above still exits quietly if its reader is already gone.
+    crate::server_signals::ignore_sigpipe_for_server();
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let cors = args.cors_allow_origin.as_deref().map(|s| s.to_string());

@@ -2951,3 +2951,214 @@ fn dormant_supervisor_metadata_is_not_a_live_catalog_row() {
         "a non-empty supervisor name is not proof of a live supervisor"
     );
 }
+
+/// cas-0140: an audit row that cannot be written refuses its request, and the
+/// hub records why: in memory, in audit-health.json, and so in `cas hub
+/// status` and doctor. The record outlives a restart and the next written row
+/// clears it. A quiet but healthy log is not reported as a failure.
+#[cfg(unix)]
+#[test]
+fn cas_0140_audit_writer_failure_is_visible_and_clears_after_restart() {
+    use chrono::Utc;
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = private_tempdir();
+    let state_dir = temp.path().join("hub");
+    let log = state_dir.join(super::AUDIT_LOG_FILE);
+    let health = state_dir.join(super::AUDIT_HEALTH_FILE);
+    let store = AuthStore::open(&state_dir, "machine-test").unwrap();
+    store.audit(None, "allowed", "before-failure", None, None, Utc::now()).unwrap();
+    let report = super::audit_writer_report(&state_dir, Utc::now());
+    assert_eq!(report.status, "ok");
+    assert!(report.last_row_at.is_some());
+    assert!(!health.exists());
+
+    // The log stops being a private regular file: every write now fails.
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(store.audit(None, "allowed", "during-failure", None, None, Utc::now()).is_err());
+    assert!(store.audit(None, "denied", "dpop_auth", None, None, Utc::now()).is_err());
+    let recorded = store.audit_health().expect("the failure is recorded in memory");
+    assert_eq!(recorded.failures, 2);
+    assert_eq!(recorded.last_action, "dpop_auth");
+    assert!(recorded.last_error.contains("0600"), "{}", recorded.last_error);
+    assert_eq!(super::read_audit_health(&state_dir).unwrap(), Some(recorded.clone()));
+    let report = super::audit_writer_report(&state_dir, Utc::now());
+    assert!(report.is_failure());
+    assert!(report.message.contains("2 failures") && report.message.contains("dpop_auth"), "{}", report.message);
+
+    // A restarted hub still reports it until a row lands.
+    drop(store);
+    let restarted = AuthStore::open(&state_dir, "machine-test").unwrap();
+    assert_eq!(restarted.audit_health(), Some(recorded));
+    assert!(super::audit_writer_report(&state_dir, Utc::now()).is_failure());
+
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o600)).unwrap();
+    restarted.audit(None, "allowed", "after-restart", None, None, Utc::now()).unwrap();
+    assert_eq!(restarted.audit_health(), None);
+    assert!(!health.exists(), "the first written row clears the failure record");
+    assert_eq!(super::audit_writer_report(&state_dir, Utc::now()).status, "ok");
+    let actions = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["action"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(actions, ["before-failure", "after-restart"]);
+}
+
+/// cas-d636: the soundwave denials (2026-09-26 22:58:05Z) were proofs signed
+/// before the phone slept and sent when it woke, 266 s later. A stale proof is
+/// now refused as `stale_proof` (retryable, with the skew in its audit row),
+/// and a fresh proof from the same pairing recovers at once. Only a
+/// definitive refusal (revoked) reads as one.
+#[test]
+fn cas_d636_a_stale_proof_is_a_retryable_refusal_and_a_fresh_proof_recovers() {
+    use chrono::{Duration, Utc};
+    use p256::ecdsa::SigningKey;
+    use p256::elliptic_curve::rand_core::OsRng;
+
+    let temp = private_tempdir();
+    let auth = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
+    let now = Utc::now();
+    let signing = SigningKey::random(&mut OsRng);
+    let invitation = auth
+        .mint_pairing("https://controller.example", Scope::default_read_only(), now)
+        .unwrap();
+    let mut exchange = PairingExchange::test_fixture(
+        invitation.token,
+        "machine-test",
+        "https://controller.example",
+        Scope::default_read_only(),
+    );
+    exchange.public_key_jwk = public_jwk(&signing);
+    let credential = auth.exchange_pairing(exchange, now).unwrap();
+    let authorization = format!("DPoP {}", credential.credential);
+    let authenticate = |proof: &str| {
+        auth.authenticate_dpop(&authorization, proof, "https://controller.example", "GET", "/v1/machine", now)
+    };
+    let refused = |proof: &str| *authenticate(proof).unwrap_err().downcast_ref::<AuthRefusal>().expect("a typed refusal");
+
+    let asleep = sign_dpop(&signing, &credential.credential, "GET", "/v1/machine", now - Duration::seconds(266), "slept");
+    let stale = refused(&asleep);
+    assert_eq!(stale, AuthRefusal::StaleProof { skew_secs: -266 });
+    assert!(stale.retryable());
+    assert_eq!(stale.code(), "stale_proof");
+    assert_eq!(stale.dpop_error(), "invalid_dpop_proof");
+
+    let fresh = sign_dpop(&signing, &credential.credential, "GET", "/v1/machine", now, "woke");
+    authenticate(&fresh).expect("a fresh proof from the same pairing recovers");
+    assert_eq!(refused(&fresh), AuthRefusal::ProofReplay);
+    let wrong_target = sign_dpop(&signing, &credential.credential, "GET", "/v1/sessions", now, "target");
+    assert_eq!(refused(&wrong_target), AuthRefusal::InvalidProof);
+    let other_key = SigningKey::random(&mut OsRng);
+    let foreign = sign_dpop(&other_key, &credential.credential, "GET", "/v1/machine", now, "foreign");
+    assert_eq!(refused(&foreign), AuthRefusal::KeyMismatch);
+    assert!(!AuthRefusal::KeyMismatch.retryable());
+
+    auth.revoke_device(&credential.device_id, now).unwrap();
+    let after_revoke = sign_dpop(&signing, &credential.credential, "GET", "/v1/machine", now, "revoked");
+    let revoked = refused(&after_revoke);
+    assert_eq!(revoked, AuthRefusal::Revoked);
+    assert_eq!(revoked.dpop_error(), "invalid_token");
+    assert!(!revoked.retryable());
+    let unknown = auth
+        .authenticate_dpop("DPoP not-a-credential", &after_revoke, "https://controller.example", "GET", "/v1/machine", now)
+        .unwrap_err();
+    assert_eq!(unknown.downcast_ref::<AuthRefusal>(), Some(&AuthRefusal::UnknownCredential));
+
+    // Every denial names its reason in the audit log; the stale one its skew.
+    let rows = std::fs::read_to_string(temp.path().join("hub/audit.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|row| row["outcome"] == "denied")
+        .map(|row| (row["action"].as_str().unwrap().to_owned(), row["reason"].as_str().unwrap().to_owned(), row["detail"].as_str().map(str::to_owned)))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rows,
+        [
+            ("dpop_auth".to_owned(), "stale_proof".to_owned(), Some("proof iat 266s behind the hub clock".to_owned())),
+            ("dpop_replay".to_owned(), "proof_replay".to_owned(), None),
+            ("dpop_auth".to_owned(), "invalid_proof".to_owned(), None),
+            ("dpop_auth".to_owned(), "key_mismatch".to_owned(), None),
+            ("dpop_auth".to_owned(), "revoked".to_owned(), None),
+        ]
+    );
+}
+
+/// cas-d636: the hub's 401 says why, readable cross-origin: the reason,
+/// whether a fresh proof can succeed, the hub's clock, and RFC 9449's
+/// `WWW-Authenticate: DPoP error=...`.
+#[tokio::test]
+async fn cas_d636_the_401_carries_a_machine_readable_reason_and_the_hub_clock() {
+    use chrono::{Duration, Utc};
+    use p256::ecdsa::SigningKey;
+    use p256::elliptic_curve::rand_core::OsRng;
+
+    let temp = private_tempdir();
+    let auth = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
+    let now = Utc::now();
+    let signing = SigningKey::random(&mut OsRng);
+    let invitation = auth
+        .mint_pairing("https://controller.example", Scope::default_read_only(), now)
+        .unwrap();
+    let mut exchange = PairingExchange::test_fixture(
+        invitation.token,
+        "machine-test",
+        "https://controller.example",
+        Scope::default_read_only(),
+    );
+    exchange.public_key_jwk = public_jwk(&signing);
+    let credential = auth.exchange_pairing(exchange, now).unwrap();
+    let events = MachineEventBus::new(16);
+    let app = router(
+        HubState::new(
+            SessionCatalog::new(RecordingReadModel::with_sessions(vec![fixture_session("factory-a")])),
+            Arc::new(PreAuthAuthorizer),
+            MachineIdentity { id: "machine-test".into() },
+            DaemonConnector::new(SessionMultiplexer::new(8), events.clone()),
+            events,
+        )
+        .with_auth(auth.clone()),
+    );
+    let get = |proof: String, authorization: String| {
+        Request::get("/v1/machine")
+            .header("origin", "https://controller.example")
+            .header("authorization", authorization)
+            .header("dpop", proof)
+            .body(Body::empty())
+            .unwrap()
+    };
+    let authorization = format!("DPoP {}", credential.credential);
+    let stale = app
+        .clone()
+        .oneshot(get(sign_dpop(&signing, &credential.credential, "GET", "/v1/machine", now - Duration::seconds(266), "slept"), authorization.clone()))
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(stale.headers()["access-control-allow-origin"], "https://controller.example");
+    assert_eq!(stale.headers()["www-authenticate"], "DPoP error=\"invalid_dpop_proof\", error_description=\"stale_proof\"");
+    assert_eq!(stale.headers()["access-control-expose-headers"], "WWW-Authenticate");
+    let body: serde_json::Value = serde_json::from_slice(&to_bytes(stale.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(body["reason"], "stale_proof");
+    assert_eq!(body["retryable"], true);
+    assert!((body["server_time"].as_i64().unwrap() - Utc::now().timestamp()).abs() <= 5);
+
+    let fresh = app
+        .clone()
+        .oneshot(get(sign_dpop(&signing, &credential.credential, "GET", "/v1/machine", Utc::now(), "woke"), authorization.clone()))
+        .await
+        .unwrap();
+    assert_eq!(fresh.status(), StatusCode::OK, "the retry with a fresh proof recovers");
+
+    auth.revoke_device(&credential.device_id, Utc::now()).unwrap();
+    let revoked = app
+        .clone()
+        .oneshot(get(sign_dpop(&signing, &credential.credential, "GET", "/v1/machine", Utc::now(), "after"), authorization))
+        .await
+        .unwrap();
+    assert_eq!(revoked.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(revoked.headers()["www-authenticate"], "DPoP error=\"invalid_token\", error_description=\"revoked\"");
+    let body: serde_json::Value = serde_json::from_slice(&to_bytes(revoked.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(body["reason"], "revoked");
+    assert_eq!(body["retryable"], false);
+}

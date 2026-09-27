@@ -51,6 +51,7 @@ fn task_delivery_ranges(
     if !is_safe_git_refname(parent) {
         return None;
     }
+    let historical_receipt = tip.is_some() && window.supervisor_override_reason.is_some();
     let target = preferred_diff_target_ref(repo, parent);
     let tip = tip.unwrap_or("HEAD");
     let base = git_text(repo, &["merge-base", tip, &target])?;
@@ -67,7 +68,10 @@ fn task_delivery_ranges(
         "--reverse".into(),
         "--format=%H%x1f%P%x1f%ct%x1f%B%x1e".into(),
     ];
-    if let Some(since) = task_commit_receipt_since(window.task_floor) {
+    // An explicit supervisor override may adopt a delivery made before the
+    // task existed. Keep that history visible when an identified receipt is
+    // supplied; the receipt itself is still validated by the close gates.
+    if !historical_receipt && let Some(since) = task_commit_receipt_since(window.task_floor) {
         history_args.push(format!("--since-as-filter={since}"));
     }
     history_args.push(tip.into());
@@ -92,7 +96,8 @@ fn task_delivery_ranges(
             }
             let sha = fields[0].to_string();
             let message = fields[3];
-            let owned = window.identity.matches_known_commit(&sha)
+            let owned = (historical_receipt && sha == tip)
+                || window.identity.matches_known_commit(&sha)
                 || window
                     .identity
                     .task_id
@@ -131,7 +136,7 @@ fn task_delivery_ranges(
             !c.parent.is_empty()
                 && !c.foreign
                 && (c.owned || unmerged.contains(&c.sha))
-                && in_work_window(window, c.epoch, c.owned)
+                && (in_work_window(window, c.epoch, c.owned) || (historical_receipt && c.owned))
         })
         .collect();
     // The end of a delivery is an upper boundary, not its only commit.
@@ -148,7 +153,7 @@ fn task_delivery_ranges(
             if previous.parent.is_empty()
                 || previous.foreign
                 || previous.merge
-                || previous.epoch < floor
+                || (!historical_receipt && previous.epoch < floor)
             {
                 break;
             }
@@ -254,7 +259,10 @@ pub(super) fn paths(
     let ranges = task_delivery_ranges(repo, target, window, receipt.as_deref())?;
     let mut paths = Vec::new();
     for range in ranges {
-        let changed = git_text(repo, &["diff", "--name-only", &range.base, &range.tip, "--"])?;
+        let changed = git_text(
+            repo,
+            &["diff", "--name-only", &range.base, &range.tip, "--"],
+        )?;
         paths.extend(
             changed
                 .lines()
@@ -262,6 +270,31 @@ pub(super) fn paths(
                 .filter(|path| !path.is_empty())
                 .map(ToOwned::to_owned),
         );
+    }
+    paths.sort();
+    paths.dedup();
+    Some(paths)
+}
+
+/// Reviewable paths from selected task ranges. An empty result is meaningful
+/// when the task only merged history or changed whitespace/deletions.
+pub(super) fn qa_paths(
+    repo: &Path,
+    target: &str,
+    window: &TaskCommitReceiptWindow,
+    receipt: Option<&str>,
+) -> Option<Vec<String>> {
+    let receipt = receipt
+        .map(|receipt| resolve_task_commit_receipt_sha(repo, receipt))
+        .transpose()
+        .ok()?;
+    let ranges = task_delivery_ranges(repo, target, window, receipt.as_deref())?;
+    if ranges.is_empty() {
+        return None;
+    }
+    let mut paths = Vec::new();
+    for range in ranges {
+        paths.extend(crate::qa_pass::delivery_content_paths(repo, &range.base, &range.tip).ok()?);
     }
     paths.sort();
     paths.dedup();
@@ -322,6 +355,7 @@ pub(super) fn merge_tip_content_presence(
     identity: &TaskCommitIdentity,
     validated_receipt: Option<&str>,
 ) -> Option<DeliveryContentPresence> {
+    let has_work_window = window.is_some();
     let fallback_window = TaskCommitReceiptWindow {
         supervisor_override_reason: None,
         not_before: chrono::DateTime::from_timestamp(0, 0)?,
@@ -365,6 +399,66 @@ pub(super) fn merge_tip_content_presence(
         commits.push(receipt);
     }
 
+    // GH #1018: once the worker's target-sync merge lands, the ordinary
+    // target-relative range is empty. An unnamed content commit on the
+    // merge's first-parent side is still task work when it was made inside
+    // this work cycle and contributes a path to the merge's tree beyond its
+    // target-sync parent. The latter condition keeps an empty sync merge
+    // from masquerading as delivery.
+    if commits.is_empty() && has_work_window {
+        let parents = git_text(repo, &["rev-list", "--parents", "-n", "1", merge_tip])?;
+        let parents = parents.split_whitespace().collect::<Vec<_>>();
+        if parents.len() >= 3 {
+            let first = parents[1];
+            let second = parents[2];
+            let delivered_paths =
+                git_text(repo, &["diff", "--name-only", second, merge_tip, "--"])?
+                    .lines()
+                    .map(str::to_owned)
+                    .collect::<HashSet<_>>();
+            if !delivered_paths.is_empty() {
+                let base = git_text(repo, &["merge-base", first, second])?;
+                let range = format!("{base}..{first}");
+                let history = git_text(
+                    repo,
+                    &[
+                        "log",
+                        "--first-parent",
+                        "--no-merges",
+                        "--reverse",
+                        "--format=%H%x1f%ct%x1e",
+                        &range,
+                    ],
+                )?;
+                for record in history.split('\u{1e}') {
+                    let Some((sha, epoch)) = record.trim().split_once('\u{1f}') else {
+                        continue;
+                    };
+                    let Ok(epoch) = epoch.trim().parse::<i64>() else {
+                        continue;
+                    };
+                    // The recorded merge anchor binds this first-parent range
+                    // to the task. A later administrative restart may move
+                    // not_before past these unnamed commits, but cannot move
+                    // the task's creation floor.
+                    if epoch
+                        < window
+                            .task_floor
+                            .timestamp()
+                            .saturating_sub(COMMIT_RECEIPT_CLOCK_SKEW_SECS)
+                    {
+                        continue;
+                    }
+                    let parent = git_text(repo, &["rev-parse", &format!("{sha}^1")])?;
+                    let paths = git_text(repo, &["diff", "--name-only", &parent, sha, "--"])?;
+                    if paths.lines().any(|path| delivered_paths.contains(path)) {
+                        commits.push(sha.to_string());
+                    }
+                }
+            }
+        }
+    }
+
     if commits.is_empty() {
         return None;
     }
@@ -379,8 +473,8 @@ pub(super) fn merge_tip_content_presence(
     let mut superseding_commits = Vec::new();
     let mut dropped_paths = Vec::new();
     let mut unknown_reason = None;
-    for commit in commits {
-        match super::delivery_content_presence_in_parent(repo, &commit, target) {
+    for (index, commit) in commits.iter().enumerate() {
+        match super::delivery_content_presence_in_parent(repo, commit, target) {
             DeliveryContentPresence::Present { paths } => {
                 append_unique(&mut present_paths, paths);
             }
@@ -389,13 +483,24 @@ pub(super) fn merge_tip_content_presence(
                 append_unique(&mut superseding_commits, commits);
             }
             DeliveryContentPresence::Dropped { paths } => {
-                append_unique(
-                    &mut dropped_paths,
-                    paths
-                        .into_iter()
-                        .filter(|path| !merge_tip_paths.contains(path))
-                        .collect(),
-                );
+                let later = &commits[index + 1..];
+                for path in paths
+                    .into_iter()
+                    .filter(|path| !merge_tip_paths.contains(path))
+                {
+                    // cas-3f8c: the task's own later commit replaced this
+                    // hunk (cas-bf07: 8f6121a9 added `headerLatencyLabel`,
+                    // fc578d02 swapped it for `headerConnectionChip`). The
+                    // later commit's own check proves the path's delivery;
+                    // the earlier hunk was never meant to survive.
+                    match rewritten_by_later_task_commit(repo, commit, &path, later) {
+                        Some(rewriter) => {
+                            append_unique(&mut superseded_paths, vec![path]);
+                            append_unique(&mut superseding_commits, vec![rewriter]);
+                        }
+                        None => append_unique(&mut dropped_paths, vec![path]),
+                    }
+                }
             }
             DeliveryContentPresence::Unknown { reason } => {
                 unknown_reason.get_or_insert(reason);
@@ -419,6 +524,28 @@ pub(super) fn merge_tip_content_presence(
             paths: present_paths,
         })
     }
+}
+
+/// The last later commit of the same delivery that touches `path`, when
+/// `commit`'s effect on `path` does not survive there: the task itself
+/// replaced that hunk before handing the branch over (cas-3f8c). `None`
+/// when no later task commit touches the path, or when the earlier hunk is
+/// still intact at the task's final version of it. In that case its absence
+/// from the target is a real drop, and the caller keeps reporting it.
+fn rewritten_by_later_task_commit(
+    repo: &Path,
+    commit: &str,
+    path: &str,
+    later: &[String],
+) -> Option<String> {
+    let last_touch = later.iter().rev().find(|later_commit| {
+        super::commit_changes_path(repo, later_commit, path).unwrap_or(false)
+    })?;
+    let parent = git_text(repo, &["rev-parse", &format!("{commit}^1")])?;
+    let survives =
+        super::delivery_path_effect_survives_on_tree(repo, &parent, commit, last_touch, path)
+            .ok()?;
+    (!survives).then(|| last_touch.clone())
 }
 
 fn is_merge_commit(repo: &Path, commit: &str) -> bool {
@@ -599,6 +726,36 @@ mod tests {
                 .expect("paths must resolve")
                 .is_empty(),
             "the proof surface must not be empty: that is what made the gate unsatisfiable"
+        );
+    }
+
+    #[test]
+    fn qa_attribution_ignores_incoming_merge_and_whitespace_only_vue_gh_1037() {
+        let dir = fixture();
+        let repo = dir.path();
+        assert_eq!(qa_paths(repo, "main", &window(), None), None);
+        git(repo, &["checkout", "-q", "main"]);
+        commit(repo, "incoming.vue", "<template><p>Incoming</p></template>\n", "staging UI");
+        git(repo, &["checkout", "-q", "factory/worker"]);
+        git(repo, &["merge", "-q", "--no-ff", "-m", "sync staging", "main"]);
+        let merge_tip = git(repo, &["rev-parse", "HEAD"]);
+        assert!(
+            paths(repo, "main", &window(), Some(&merge_tip))
+                .unwrap()
+                .contains(&"incoming.vue".into())
+        );
+        assert_eq!(qa_paths(repo, "main", &window(), Some(&merge_tip)), Some(vec![]));
+
+        commit(repo, "app.vue", "<template><p>Hello</p></template>\n", "initial UI");
+        let base = git(repo, &["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("app.vue"), "<template> <p>Hello</p> </template>\n").unwrap();
+        git(repo, &["add", "app.vue"]);
+        git(repo, &["commit", "-qm", "format only"]);
+        let formatted = git(repo, &["rev-parse", "HEAD"]);
+        assert!(
+            crate::qa_pass::delivery_content_paths(repo, &base, &formatted)
+                .unwrap()
+                .is_empty()
         );
     }
 

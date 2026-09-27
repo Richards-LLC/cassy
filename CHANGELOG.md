@@ -7,6 +7,100 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.34.0] - 2026-09-27
+
+### Added
+
+- Failed sends in Commander can be dismissed with a swipe or a × button, and
+  a chip counts them and restores them. A pinned question folds to a one-line
+  bar that can be dismissed, and it keeps its choices while the supervisor is
+  still waiting on it.
+- Independent QA reviewers get a preflight for credentials, env files and
+  test-account capacity. Deployed authenticated staging runs satisfy the
+  evidence gate when local auth is impossible, and supervisors can request QA
+  for a user-facing park without a demo.
+- `cas hub status` and doctor show a failing hub audit writer, and doctor
+  flags an inactive hub service.
+- `cas config get`, `set` and `list` cover every settable `factory.*` key,
+  including `factory.epic_base_branch`. An unset `factory.artifacts_root`
+  reads as its default (GH #1011).
+
+### Changed
+
+- Independent QA judges only what the delivery changed. Only regressions it
+  introduced, or unmet acceptance criteria, reject it; pre-existing findings
+  become linked follow-ups.
+- Raw GitHub merges and taskless worktree merges are held to the independent
+  QA verdict (GH #1023, #1024).
+- Commander leads with the project in the machine drawer, the Fleet overview,
+  headers and the composer. Codenames stay whole, and a machine name that
+  cannot fit steps aside. The Fleet overview reads as a product page, and
+  plot rows that share a project carry the shortest distinct codename tag.
+  When one codename runs on two machines, each row also carries a short
+  machine tag (the rail initials, a short name prefix such as "Atl" or
+  "Att", or an ordinal), capped so it stays whole at any width.
+- The Terminal header shows Checking… until the first latency sample and
+  then the machine's own state, names the palette shortcut as Ctrl K or ⌘K
+  per platform, and yields the title before Back or ⌘K on narrow screens.
+- A detached `cas hub serve` writes its traces to `~/.cas/hub/logs` instead
+  of the project it was started from.
+
+### Fixed
+
+- The hub, the MCP server, the bridge and the factory daemon ignore SIGPIPE,
+  so a peer that goes away mid-write no longer kills them. The systemd unit
+  restarts the hub after a signal death.
+- Commander survives network switches: a half-open socket is probed and
+  replaced, and messages written while it is in doubt are held and sent
+  exactly once.
+- A send the hub refuses because the session's daemon link is missing is an
+  audited, retryable `upstream_unavailable` rather than `forbidden`. It is
+  held and resent once the session is live again. While the link stays
+  down, the page backs off its retries (about 1, 2, 4, then 8 s), and a
+  message written to the legacy socket after the refused one is held too.
+  The backoff starts afresh once the session has stayed live for 10 s, so the
+  next brief drop retries within about a second.
+- A held message that waits past two minutes says Not sent because the
+  session didn't come back, with Retry, instead of advising to re-pair the
+  device. The composer no longer promises it will go out by itself.
+- When only one conversation's daemon link drops, Commander says
+  "Reconnecting to" that conversation in the banner, the composer note and
+  the disabled controls, and the machine stays Connected. "Lost connection
+  to <machine>" is kept for a real machine drop.
+- A revoked pairing reads "needs pairing again" everywhere, with Re-pair on
+  the banner, and nothing on screen still says reconnecting. The auth-loss
+  alarm resolves once a pairing works again.
+- The factory daemon answers a resent `SendMessage` with its first receipt
+  and queues it once.
+- A refused DPoP proof is retried instead of being read as a revoked
+  pairing, so a phone waking from a long idle no longer goes dark. The audit
+  row records the denial reason.
+- An older client decodes a Welcome that advertises an unknown capability.
+- Not confirmed settles once the supervisor replies, a late receipt shows
+  Delivered, and a settled card offers a quiet Send again. An acknowledged
+  blocker reads as handled.
+- Load earlier keeps the reading position. Keyboard focus lands in the
+  conversation or on the control after pairing, opening a conversation or
+  reaching the start of history.
+- A file that fails to open says so on its card and leaves no tab, and
+  outage notes clear on reconnect.
+- Close no longer reports a hunk the task itself rewrote as DELIVERY CONTENT
+  DROPPED, and the refusal names the missing lines. B2, the pre-close check,
+  QA and merge honour per-task delivery branches (GH #1040).
+- Close receipts follow the task's commits and targets for merge-tip proof,
+  epic close headlines, target-sync merges and historical closes (GH #895,
+  #1018, #1028, #1038).
+- visual-qa parses OKLCH colours, accepts single-source JSON, ignores
+  non-content surfaces and counts final Playwright Expect outcomes (GH #1013,
+  #1017, #1025, #1027, #1037). Declared journeys capture interaction, loading
+  and error states.
+- Shared-clone supervisors can no longer reap each other's workers. A
+  supervisor decision, or an approved verification commit, wakes a worker
+  parked on it (GH #1036). Codex workers no longer read as dead after MCP
+  reparenting.
+- Cross-session reminders reach their verified recipient, and the rolling
+  sweep finds its runner (GH #1039).
+
 ## [3.33.0] - 2026-09-25
 
 ### Added

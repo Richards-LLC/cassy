@@ -1855,6 +1855,60 @@ fn proof_targets_scope_fix_command(task: &Task, uncovered: &[String]) -> String 
     )
 }
 
+/// File kinds that are web or documentation content. A delivery made only
+/// of these cannot need a macOS native-command platform proof (cas-b4cc).
+const WEB_ONLY_EXTENSIONS: &[&str] = &[
+    "css", "scss", "sass", "less", "html", "htm", "js", "jsx", "mjs", "cjs", "ts", "tsx", "mts",
+    "cts", "vue", "svelte", "astro", "json", "svg", "png", "jpg", "jpeg", "gif", "webp", "avif",
+    "ico", "woff", "woff2", "md", "mdx", "rst", "adoc", "txt", "snap",
+];
+
+fn is_web_only_path(path: &str) -> bool {
+    let file = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+    file.rsplit_once('.')
+        .is_some_and(|(_, extension)| WEB_ONLY_EXTENSIONS.contains(&extension))
+}
+
+/// cas-b4cc (GH #1023 finding 5): `risk=platform` declared on a delivery
+/// whose every changed path is web or documentation content. cas-7d62, a web
+/// CSS test, was asked for a macOS native-command receipt. The declared risk
+/// is kept; this only says it looks wrong and names the logged supervisor
+/// correction (cas-8d38). `None` when the risk is not platform, the diff is
+/// unknown, or any path could be native.
+pub(crate) fn platform_risk_implausibility(
+    task: &Task,
+    changed_paths: &[String],
+) -> Option<String> {
+    if !task.risk.contains(&TaskRisk::Platform)
+        || changed_paths.is_empty()
+        || !changed_paths.iter().all(|path| is_web_only_path(path))
+    {
+        return None;
+    }
+    let shown = changed_paths
+        .iter()
+        .take(3)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let more = changed_paths.len().saturating_sub(3);
+    Some(format!(
+        "⚠️ PLATFORM RISK LOOKS IMPLAUSIBLE: task {id} declares risk=platform, but every one of its \
+         {count} changed path(s) is web or documentation content ({shown}{more}). A platform proof is a \
+         macOS native-command receipt and does not apply to web-only work. The declared risk stays in \
+         force until a supervisor corrects it: `{supervisor}task action=update id={id} risk=none \
+         proof_scope_fix=true reason=\"web-only delivery; platform risk declared in error\"`.",
+        id = task.id,
+        count = changed_paths.len(),
+        more = if more > 0 {
+            format!(", and {more} more")
+        } else {
+            String::new()
+        },
+        supervisor = crate::mcp::tools::core::guidance::supervisor_prefix(),
+    ))
+}
+
 fn declared_risk_close_gaps(task: &Task, changed_paths: &[String]) -> Vec<String> {
     let mut gaps = Vec::new();
     if task.risk.contains(&TaskRisk::Platform) && !has_platform_proof_note(&task.notes) {
@@ -1895,6 +1949,17 @@ fn assembly_proof_line(notes: &str) -> Option<String> {
                 .then(|| proof.to_string())
         })
         .last()
+}
+
+fn close_delivered_tip(
+    repo: &std::path::Path,
+    receipt: Option<&str>,
+    merged_anchor: Option<&str>,
+) -> Option<String> {
+    receipt
+        .and_then(|receipt| resolve_branch_sha(repo, receipt))
+        .or_else(|| merged_anchor.map(str::to_string))
+        .or_else(|| resolve_branch_sha(repo, "HEAD"))
 }
 
 /// Whether a close must carry its own Rust build proofs (cas-4cbb).
@@ -2013,8 +2078,13 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
              the missing evidence is recorded on the task.",
             id = task.id,
         );
+        // cas-b4cc: lead with the mismatch when the diff is web-only, so the
+        // correction is read before anyone chases a macOS receipt.
+        let implausible = platform_risk_implausibility(task, changed_paths)
+            .map(|warning| format!("{warning}\n\n"))
+            .unwrap_or_default();
         return Err(format!(
-            "TASK CLOSE REJECTED: task {id} declares risk=platform but its platform_proof receipt is incomplete (missing evidence: {missing}). \
+            "{implausible}TASK CLOSE REJECTED: task {id} declares risk=platform but its platform_proof receipt is incomplete (missing evidence: {missing}). \
              Add one with `{caller}task action=notes id={id} note_type=platform_proof notes=\"...\"` containing macOS, a platform command, and a passing result, \
              then retry `{caller}task action=close id={id}`. {correction}",
             id = task.id,
@@ -2295,6 +2365,72 @@ mod risk_proof_tests {
         task.notes = "[2026-09-10] 🧪 PLATFORM_PROOF macOS command: cargo test -p cas --lib; result: PASS\n[2026-09-10] 🧪 LOADED_PROOF whole target under -j16, 3 loops; result: PASS".into();
         validate_risk_close_proofs(&task, &[], std::path::Path::new("."))
             .expect("complete proof notes should pass");
+    }
+
+    fn paths(items: &[&str]) -> Vec<String> {
+        items.iter().map(|item| item.to_string()).collect()
+    }
+
+    /// cas-b4cc (GH #1023 finding 5): cas-7d62, a web CSS test declared
+    /// risk=platform, is told the risk looks wrong and how a supervisor
+    /// corrects it. The risk itself is not downgraded, and the platform proof
+    /// is still owed until that correction.
+    #[test]
+    fn web_only_platform_risk_warns_and_names_the_supervisor_correction_cas_b4cc() {
+        let mut task = Task::new("cas-7d62".into(), "composer spacing test".into());
+        task.risk = vec![TaskRisk::Platform];
+        let web = paths(&[
+            "web/src/composer.css",
+            "web/e2e/composer.spec.ts",
+            "docs/qa/notes.md",
+        ]);
+
+        let error = validate_risk_close_proofs(&task, &web, std::path::Path::new("."))
+            .expect_err("platform proof is still owed until a supervisor corrects the risk");
+        assert!(
+            error.starts_with("⚠️ PLATFORM RISK LOOKS IMPLAUSIBLE: task cas-7d62"),
+            "{error}"
+        );
+        assert!(error.contains("web/src/composer.css"), "{error}");
+        assert!(
+            error.contains("task action=update id=cas-7d62 risk=none proof_scope_fix=true"),
+            "{error}"
+        );
+        assert!(error.contains("TASK CLOSE REJECTED"), "{error}");
+        assert_eq!(task.risk, vec![TaskRisk::Platform], "the declared risk is never downgraded");
+
+        // A satisfied platform proof still closes; the warning is advisory.
+        task.notes = "[2026-09-10] 🧪 PLATFORM_PROOF macOS command: cargo test -p cas --lib; result: PASS".into();
+        validate_risk_close_proofs(&task, &web, std::path::Path::new("."))
+            .expect("a complete receipt still satisfies the declared risk");
+    }
+
+    #[test]
+    fn native_platform_risk_keeps_its_proof_without_the_warning_cas_b4cc() {
+        let mut task = Task::new("cas-native".into(), "macOS keychain".into());
+        task.risk = vec![TaskRisk::Platform];
+        for native in [
+            paths(&["crates/cas-mux/src/pty.rs", "web/src/a.css"]),
+            paths(&["macos/App/KeychainStore.swift"]),
+            paths(&["macos/App/Info.plist"]),
+        ] {
+            assert_eq!(
+                platform_risk_implausibility(&task, &native),
+                None,
+                "{native:?}"
+            );
+            let error = validate_risk_close_proofs(&task, &native, std::path::Path::new("."))
+                .expect_err("native work keeps its platform proof");
+            assert!(error.starts_with("TASK CLOSE REJECTED"), "{error}");
+            assert!(!error.contains("IMPLAUSIBLE"), "{error}");
+        }
+        // Unknown diff, or no platform risk: nothing to say.
+        assert_eq!(platform_risk_implausibility(&task, &[]), None);
+        task.risk = vec![TaskRisk::None];
+        assert_eq!(
+            platform_risk_implausibility(&task, &paths(&["web/src/a.css"])),
+            None
+        );
     }
 
     #[test]
@@ -5624,7 +5760,21 @@ impl CasCore {
         // disposition: a detached, stale, or already-retired worker worktree
         // must not make the supervisor's recorded decision unclosable. Worker
         // delivery dispositions retain the resolution and branch gate below.
-        let worker_worktree_path = if close_disposition == TaskCloseDisposition::Decision {
+        // cas-46c2: once the immutable parked SHA is already on the declared
+        // target, a supervisor's override close concerns that merged delivery.
+        // The assignee may now be on another task's branch in the same
+        // checkout; validating its current branch would reject the old task.
+        let supervisor_closing_merged_anchor = declared_repo_context.as_ref().is_some_and(|context| {
+            supervisor_merged_anchor_close(
+                supervisor_override,
+                task.deliverables.factory_branch_anchor.as_deref(),
+                &context.repo_root,
+                &context.target_branch,
+            )
+        });
+        let worker_worktree_path = if close_disposition == TaskCloseDisposition::Decision
+            || supervisor_closing_merged_anchor
+        {
             None
         } else {
             match self.resolve_worker_worktree_path(&task, declared_repo_context.as_ref()) {
@@ -5955,7 +6105,7 @@ impl CasCore {
             // branch otherwise charged an earlier, already-merged task's UI
             // commits to a backend-only task.
             let attributed_paths = commit_receipt_window.as_ref().and_then(|window| {
-                task_attribution::paths(
+                task_attribution::qa_paths(
                     &evidence_repo,
                     &resolved_parent_branch,
                     window,
@@ -7448,7 +7598,24 @@ impl CasCore {
         // `shared_checkout_has_reviewable_changes` for the exact fallbacks
         // (code tasks with no no-code declaration, and unknowable git state,
         // keep the previous signal).
-        let effective_has_reviewable = task.execution_note.as_deref() == Some("value-only")
+        // A supervisor-adopted historical receipt may predate the task floor.
+        // The ordinary work-window probe intentionally omits it; the
+        // receipt-scoped paths must still trigger review and QA on close.
+        let receipt_has_reviewable = req.commit_receipt.as_deref().is_some_and(|receipt| {
+            commit_receipt_window.as_ref().is_some_and(|window| {
+                task_attribution::paths(
+                    worker_worktree_path
+                        .as_deref()
+                        .unwrap_or(close_project_root.as_path()),
+                    &resolved_parent_branch,
+                    window,
+                    Some(receipt),
+                )
+                .is_some_and(|paths| paths.iter().any(|path| is_reviewable_path(path)))
+            })
+        });
+        let effective_has_reviewable = receipt_has_reviewable
+            || task.execution_note.as_deref() == Some("value-only")
             || if let Some(worker_wt) = worker_worktree_path.as_ref() {
                 commit_receipt_window
                     .as_ref()
@@ -7544,12 +7711,16 @@ impl CasCore {
             }
             let mut scoped_proof_cache = ScopedProofTargetCache::default();
             // The tip this close delivers: the named commit receipt, else the
-            // proof checkout's HEAD (the worker's branch).
-            let delivered_tip = req
-                .commit_receipt
-                .as_deref()
-                .and_then(|receipt| resolve_branch_sha(proof_repo, receipt))
-                .or_else(|| resolve_branch_sha(proof_repo, "HEAD"));
+            // already merged parked anchor, else the proof checkout's HEAD.
+            let delivered_tip = close_delivered_tip(
+                proof_repo,
+                req.commit_receipt.as_deref(),
+                if supervisor_closing_merged_anchor {
+                    task.deliverables.factory_branch_anchor.as_deref()
+                } else {
+                    None
+                },
+            );
             // cas-4cbb: workers never build; their build proof is the
             // supervisor's epic-assembly run. An ASSEMBLY_PROOF on the parent
             // epic whose tested head contains this delivery also stands for a
@@ -7592,6 +7763,14 @@ impl CasCore {
                     } else {
                         format!("{}\n\n{}", task.notes, note)
                     };
+                }
+                // cas-b4cc: a deferred platform proof would otherwise surface
+                // only at the supervisor's close. Record the mismatch now, on
+                // the task the supervisor reviews, without touching the risk.
+                if let Some(warning) = platform_risk_implausibility(&task, &changed_paths)
+                    && !task.notes.contains("PLATFORM RISK LOOKS IMPLAUSIBLE")
+                {
+                    task.notes = format!("{}\n\n[{ts}] {warning}", task.notes);
                 }
             }
             if let Err(message) = validate_risk_close_proofs_with_base_and_target_and_cache(
@@ -8483,7 +8662,12 @@ impl CasCore {
             validate_pre_close_worktree(&worktree.path, expected, Some(&worktree.branch))
                 .map_err(|error| error.to_string())?;
             if let Some(assignee) = task.assignee.as_deref() {
-                let expected_branch = format!("factory/{assignee}");
+                // cas-8606 follow-through: any of the worker's own branches,
+                // including a per-task branch, as on the System-B path.
+                let expected_branch = system_b_expected_branch(
+                    assignee,
+                    crate::factory_isolation::branch_at(&worktree.path).as_deref(),
+                );
                 validate_pre_close_worktree(&worktree.path, expected, Some(&expected_branch))
                     .map_err(|error| error.to_string())?;
             }
@@ -8494,16 +8678,10 @@ impl CasCore {
                 .assignee
                 .as_deref()
                 .expect("System B requires assignee");
-            // cas-73b8: a worktree on the worker's per-task branch for this
-            // task is the task's worktree too.
-            let task_branch = crate::factory_isolation::worker_task_branch(assignee, &task.id);
-            let expected_branch = if crate::factory_isolation::branch_at(path).as_deref()
-                == Some(task_branch.as_str())
-            {
-                task_branch
-            } else {
-                format!("factory/{assignee}")
-            };
+            let expected_branch = system_b_expected_branch(
+                assignee,
+                crate::factory_isolation::branch_at(path).as_deref(),
+            );
             validate_pre_close_worktree(path, expected, Some(&expected_branch))
                 .map_err(|error| error.to_string())?;
         }
@@ -10246,6 +10424,87 @@ fn enrich_merge_required_with_conflict_check(
     }
 }
 
+/// cas-3f8c: name the delivered lines the target lacks, so a supervisor can
+/// confirm a DELIVERY CONTENT DROPPED in seconds instead of diffing trees.
+/// The delivery's own effect is measured against its first parent, or
+/// against the target side of a worker's target-sync merge. Up to three
+/// lines per path are shown, truncated. Empty when nothing can be named.
+fn dropped_line_samples(
+    repo_path: &std::path::Path,
+    anchor: &str,
+    parent_branch: &str,
+    paths: &[String],
+) -> String {
+    const PER_PATH: usize = 3;
+    const MAX_CHARS: usize = 140;
+    let git = |args: &[&str]| -> Option<String> {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo_path)
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+    };
+    let base = if git_commit_parent_count(repo_path, anchor) >= 2 {
+        format!("{anchor}^2")
+    } else {
+        format!("{anchor}^1")
+    };
+    let target = {
+        let origin = format!("origin/{parent_branch}");
+        if git_ref_exists(repo_path, &origin) && git_commit_is_ancestor(repo_path, anchor, &origin)
+        {
+            origin
+        } else {
+            parent_branch.to_string()
+        }
+    };
+    let mut report = String::new();
+    for path in paths {
+        let Some(patch) = git(&[
+            "diff",
+            "--unified=0",
+            "--no-renames",
+            &base,
+            anchor,
+            "--",
+            path,
+        ]) else {
+            continue;
+        };
+        let target_text = git(&["show", &format!("{target}:{path}")]).unwrap_or_default();
+        let target_lines: std::collections::HashSet<&str> =
+            target_text.lines().map(str::trim).collect();
+        let missing: Vec<String> = patch
+            .lines()
+            .filter(|line| line.starts_with('+') && !line.starts_with("+++"))
+            .map(|line| line[1..].trim())
+            .filter(|line| !line.is_empty() && !target_lines.contains(line))
+            .take(PER_PATH)
+            .map(|line| {
+                let mut shown: String = line.chars().take(MAX_CHARS).collect();
+                if line.chars().count() > MAX_CHARS {
+                    shown.push('…');
+                }
+                format!("\n  {path}: `{shown}`")
+            })
+            .collect();
+        for line in missing {
+            report.push_str(&line);
+        }
+    }
+    if report.is_empty() {
+        report
+    } else {
+        format!(
+            "\n\nDelivered line(s) not found verbatim on the target (first {PER_PATH} per path):{report}"
+        )
+    }
+}
+
 fn anchored_delivery_content_gate(
     task_id: &str,
     repo_path: &std::path::Path,
@@ -10288,12 +10547,13 @@ fn anchored_delivery_content_gate(
                  task close rejected: delivery anchor `{anchor}` is reachable from \
                  `{parent_branch}`, but its tree effect is absent from the current \
                  target tree. Reachability alone cannot prove delivery.\n\n\
-                 Dropped path(s): {}\n\n\
+                 Dropped path(s): {}{}\n\n\
                  Cassy measured the missing tree effect; it cannot identify the \
                  change that removed it. Restore the missing delivery content on \
                  the assigned factory branch, commit it, and retry close; do not \
                  re-merge the already-reachable anchor for task {task_id}.",
-            paths.join(", ")
+            paths.join(", "),
+            dropped_line_samples(repo_path, anchor, parent_branch, &paths),
         ))),
         DeliveryContentPresence::Unknown { reason } => {
             Some(MergeStateGateOutcome::Reject(format!(
@@ -10326,14 +10586,11 @@ fn delivery_content_anchor_at_close<'a>(
     parent_branch: &str,
     validated_receipt: Option<&'a str>,
 ) -> &'a str {
-    // GH #846: a supervisor merge can advance the worker's mutable factory
-    // ref to the target merge commit before the worker retries close. A
-    // validated non-merge commit receipt is durable delivery evidence and is
-    // the narrowest content anchor in that shape; the merge tip's
-    // first-parent history does not contain the worker commit. Do not accept
-    // an arbitrary receipt here: callers provide this only after the normal
-    // receipt validator has proved its topology, attribution, diff, and
-    // target content predicates.
+    // GH #895 / GH #846: a target-sync merge can advance the factory tip
+    // without changing the delivered file; a supervisor merge can later
+    // advance that mutable ref again. The validated non-merge receipt is the
+    // narrowest durable content anchor. Do not accept an arbitrary receipt:
+    // callers first prove its topology, attribution, diff, and target content.
     if let Some(receipt) = validated_receipt
         && git_commit_parent_count(repo_path, receipt) < 2
         && commit_is_merged_into_parent(repo_path, receipt, parent_branch)
@@ -11144,6 +11401,26 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
         )
     });
     if attributable == Some(0) {
+        // GH #1028: a supervisor can attach work that was committed before
+        // task creation. With no receipt there is no way to distinguish that
+        // delivery from old lane residue. Require an explicit commit identity
+        // before an override can dismiss the unmerged branch as unrelated.
+        if attribution
+            .window
+            .is_some_and(|window| window.supervisor_override_reason.is_some())
+            && attribution.receipt.is_none()
+            && task.execution_note.as_deref() != Some("no-code")
+        {
+            return MergeStateGateOutcome::Reject(format!(
+                "⚠️ MERGE REQUIRED\n\nTask {} has {stranded} unmerged commit(s) on {factory_branch}, \
+                 but none can be attributed to its work window. A supervisor override \
+                 cannot classify pre-task delivery as unrelated residue without a \
+                 commit_receipt. Retry with commit_receipt=<delivery-tip-sha> so the \
+                 delivery is checked for merge and QA evidence, or record explicit \
+                 no-code intent with its external proof.",
+                task.id
+            ));
+        }
         return MergeStateGateOutcome::ProceedWithNote(format!(
             "decision: merge-state guard cleared — no commit on {factory_branch} is \
              attributable to this task's work cycle (basis: {}). The branch still \
@@ -12054,7 +12331,22 @@ pub(crate) fn check_factory_branch_merge_reality_with_delivery_mode(
     delivery_mode: cas_types::DeliveryMode,
     task_id: Option<&str>,
 ) -> MergeRealityOutcome {
-    let factory_branch = format!("factory/{assignee}");
+    // cas-8606: a per-task delivery lives on `factory/<assignee>-<task>`, not
+    // on the worker's base branch. Measuring `factory/<assignee>` refused
+    // every merged, verified per-task delivery whose worker never pushed its
+    // base branch (it sits at the epic tip with no commits of its own).
+    // `worker_task_branch_ref` answers `origin/<branch>` when only the pushed
+    // copy remains; that is a published delivery, so the local-ref check
+    // below lets it through.
+    let factory_branch = task_id
+        .and_then(|task_id| worker_task_branch_ref(repo_path, assignee, task_id))
+        .map(|branch| {
+            branch
+                .strip_prefix("origin/")
+                .map(str::to_string)
+                .unwrap_or(branch)
+        })
+        .unwrap_or_else(|| format!("factory/{assignee}"));
 
     // Branch absent locally → push+merge+prune path; treat as merged.
     if !git_ref_exists(repo_path, &factory_branch) {
@@ -12230,7 +12522,9 @@ fn scoped_proof_base_for_work_target(
 /// layouts bound to the owning repository while refusing roots that are not
 /// contained in a git checkout at all. A `.git` file is accepted as well as a
 /// directory so linked worktrees use the same path.
-fn resolve_close_gate_repo_root(cas_root: &std::path::Path) -> Result<std::path::PathBuf, String> {
+pub(crate) fn resolve_close_gate_repo_root(
+    cas_root: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
     use std::process::Command;
 
     for ancestor in cas_root.ancestors() {
@@ -12346,7 +12640,7 @@ fn resolve_standalone_merge_target(repo_path: &std::path::Path) -> Result<String
 /// worker-spawn normalization, so a late parent link cannot leave close
 /// checking the stale trunk. A distinct task target remains explicit
 /// supervisor authority and is never overwritten.
-fn effective_close_work_target(
+pub(crate) fn effective_close_work_target(
     task: &Task,
     parent_epic: Option<&Task>,
 ) -> Option<cas_types::WorkTarget> {
@@ -12865,6 +13159,36 @@ fn resolve_system_b_worktree_path_for_repo(
     }
     let path = system_b_worktree_base_for_repo(cas_root, repo_root).join(assignee);
     path.join(".git").exists().then_some(path)
+}
+
+/// The branch a System-B worker worktree must be on for a close to run its
+/// gates there. cas-73b8 accepted the worker's per-task branch for *this*
+/// task; cas-8606 accepts any of the worker's own branches. A worker whose
+/// `factory/<name>` is frozen commits each task on `factory/<name>-<task>`,
+/// so re-closing a merged, verified task A while checked out on task B's
+/// branch is ordinary, and was refused for cas-ac390, cas-bf07 and five
+/// cas-459b deliveries. A sibling worker's branch, trunk, or a detached HEAD
+/// is still refused.
+fn system_b_expected_branch(assignee: &str, current: Option<&str>) -> String {
+    match current {
+        Some(branch)
+            if crate::factory_isolation::classify_worker_binding(assignee, Some(branch))
+                == crate::factory_isolation::WorkerBinding::Own =>
+        {
+            branch.to_string()
+        }
+        _ => format!("factory/{}", assignee.trim()),
+    }
+}
+
+fn supervisor_merged_anchor_close(
+    supervisor_override: bool,
+    anchor: Option<&str>,
+    repo: &std::path::Path,
+    target_branch: &str,
+) -> bool {
+    supervisor_override
+        && anchor.is_some_and(|anchor| commit_is_merged_into_parent(repo, anchor, target_branch))
 }
 
 fn validate_pre_close_worktree(
@@ -14527,6 +14851,13 @@ impl EpicGitSnapshot {
             patterns.push(format!("refs/heads/{parent_branch}"));
             patterns.push(format!("refs/remotes/origin/{parent_branch}"));
         }
+        for child in subtasks {
+            let target = child_delivery_target(child, parent_branch);
+            if target != parent_branch && is_safe_git_refname(target) {
+                patterns.push(format!("refs/heads/{target}"));
+                patterns.push(format!("refs/remotes/origin/{target}"));
+            }
+        }
         let mut args = vec![
             "for-each-ref".to_string(),
             "--format=%(refname) %(objectname) %(committerdate:unix)".to_string(),
@@ -14934,6 +15265,16 @@ pub(crate) fn collect_epic_branch_statuses(
     .statuses
 }
 
+fn child_delivery_target<'a>(child: &'a Task, epic_target: &'a str) -> &'a str {
+    child
+        .deliverables
+        .work_target
+        .as_ref()
+        .map(|target| target.target_branch.trim())
+        .filter(|branch| !branch.is_empty() && is_safe_git_refname(branch))
+        .unwrap_or(epic_target)
+}
+
 /// Collect an epic-status view with an explicit page and deadline. The close
 /// gate uses the full-fidelity mode with its own bounded deadline, while the
 /// public status action selects its page and summary mode independently.
@@ -14960,6 +15301,9 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
             budget_exhausted = true;
             break;
         }
+        // GH #1038: retargeting the epic for a follow-up does not retarget
+        // children already delivered to their own recorded WorkTarget.
+        let parent_branch = child_delivery_target(t, parent_branch);
         // cas-6c50: a measured negative result deliberately has no
         // delivery to integrate. Its structured supervisor receipt is
         // durable close evidence, so neither the historical parked branch
@@ -16176,6 +16520,11 @@ fn run_epic_close_merge_gate_with_budget(
     let mut cleaned_worktree_guidance = String::new();
     let mut any_merge_withheld = false;
     for s in &stranded {
+        let child_target = subtasks
+            .iter()
+            .find(|child| child.id == s.task_id)
+            .map(|child| child_delivery_target(child, parent_branch))
+            .unwrap_or(parent_branch);
         // Round-1 cas-code-review autofix: use idiomatic `writeln!`
         // rather than the explicit `Write::write_fmt(format_args!(...))`
         // desugaring. `writeln!` returns Result; the surrounding
@@ -16192,7 +16541,7 @@ fn run_epic_close_merge_gate_with_budget(
                 "  - {task} ({branch}): anchor is reachable from {parent}, but delivery content is absent from path(s): {paths}{recorded_anchor}",
                 task = s.task_id,
                 branch = s.factory_branches_label(),
-                parent = parent_branch,
+                parent = child_target,
                 paths = s.dropped_paths.join(", "),
                 recorded_anchor = recorded_anchor,
             );
@@ -16202,7 +16551,7 @@ fn run_epic_close_merge_gate_with_budget(
                 "  - {task} ({branch}): delivery content could not be proven on {parent}: {reason}{recorded_anchor}",
                 task = s.task_id,
                 branch = s.factory_branches_label(),
-                parent = parent_branch,
+                parent = child_target,
                 recorded_anchor = recorded_anchor,
             );
         } else {
@@ -16212,7 +16561,7 @@ fn run_epic_close_merge_gate_with_budget(
                 task = s.task_id,
                 branch = s.factory_branches_label(),
                 n = s.unmerged_count,
-                parent = parent_branch,
+                parent = child_target,
                 recorded_anchor = recorded_anchor,
             );
         }
@@ -16231,7 +16580,7 @@ fn run_epic_close_merge_gate_with_budget(
                 .iter()
                 .find(|(measured_branch, _)| measured_branch == branch)
                 .map(|(_, direction)| direction.clone())
-                .unwrap_or_else(|| branch_content_direction(repo_path, branch, parent_branch));
+                .unwrap_or_else(|| branch_content_direction(repo_path, branch, child_target));
             match &direction {
                 BranchContentDirection::ContentAbsent { .. } => {
                     let _ = writeln!(
@@ -16241,7 +16590,7 @@ fn run_epic_close_merge_gate_with_budget(
                          remote-tracking ref remains) — content measured as absent from \
                          {parent}, so this merge delivers work rather than reverting it",
                         task = s.task_id,
-                        parent = parent_branch,
+                        parent = child_target,
                     );
                 }
                 BranchContentDirection::ContentPresent { .. } => {
@@ -16252,7 +16601,7 @@ fn run_epic_close_merge_gate_with_budget(
                          cherry-pick loses ancestry, not content); merging would only pollute \
                          history. Nothing to do for this child.",
                         task = s.task_id,
-                        parent = parent_branch,
+                        parent = child_target,
                     );
                 }
                 BranchContentDirection::BehindTarget {
@@ -16266,7 +16615,7 @@ fn run_epic_close_merge_gate_with_budget(
                             "Inspect these path(s) by hand before discarding the branch — they \
                              differ and {parent} has NOT touched them, so they may hold real \
                              unlanded work: {paths}.",
-                            parent = parent_branch,
+                            parent = child_target,
                             paths = candidate_paths.join(", "),
                         )
                     };
@@ -16276,7 +16625,7 @@ fn run_epic_close_merge_gate_with_budget(
                          delivered path(s) differ because {parent} moved them after this lane \
                          branched ({sample}), so merging re-opens superseded content. {rescue}",
                         task = s.task_id,
-                        parent = parent_branch,
+                        parent = child_target,
                         n = stale_paths.len(),
                         sample = stale_paths
                             .iter()
@@ -16294,7 +16643,7 @@ fn run_epic_close_merge_gate_with_budget(
                          {parent}: {reason}. No merge instruction is offered, because a merge \
                          that cannot be measured may revert shipped work. Resolve by hand.",
                         task = s.task_id,
-                        parent = parent_branch,
+                        parent = child_target,
                     );
                 }
             }
@@ -17882,7 +18231,9 @@ pub(crate) fn run_declared_pre_close_hook(
                 .ok_or_else(|| {
                     "PRE-CLOSE HOOK CONTEXT REJECTED: declared task repository resolved, but no \
                      task-owned worktree, commit receipt, or factory anchor identifies the code \
-                     to check. No close-time executable gate was run."
+                     to check. Retry with commit_receipt=<merged-commit-sha> for the delivered \
+                     epic tip (or a target commit carrying its content). No close-time \
+                     executable gate was run."
                         .to_string()
                 })?;
             if !git_ref_exists(&repo_context.repo_root, tip) {
@@ -17914,7 +18265,11 @@ pub(crate) fn run_declared_pre_close_hook(
                     supervisor_override,
                 ));
             }
-            let lint_parent = if normalized_receipt.is_some() || derived_epic_anchor.is_some() {
+            let lint_parent = if normalized_receipt.is_some()
+                || derived_epic_anchor.is_some()
+                || (supervisor_override
+                    && task.deliverables.factory_branch_anchor.as_deref() == Some(tip))
+            {
                 target_only_receipt_lint_parent(&repo_context.repo_root, tip)?
             } else {
                 live_target_ref.clone()
@@ -20890,6 +21245,34 @@ mod merge_state_gate_tests {
         }
     }
 
+    #[test]
+    fn supervisor_override_uses_merged_anchor_after_worker_branch_moves_cas_46c2() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        commit_file_at(p, "delivered.rs", "// delivered\n", "2026-08-04T12:00:00Z");
+        let anchor = head_sha(p);
+        assert!(!supervisor_merged_anchor_close(true, Some(&anchor), p, "main"));
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", &anchor, "-m", "merge exact SHA"]);
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git(p, &["checkout", "-q", "-b", "factory/worker-cas-next"]);
+        assert!(supervisor_merged_anchor_close(true, Some(&anchor), p, "main"));
+        assert!(!supervisor_merged_anchor_close(false, Some(&anchor), p, "main"));
+        assert!(!supervisor_merged_anchor_close(true, None, p, "main"));
+        commit_file_at(p, "next.rs", "// unrelated next task\n", "2026-08-04T12:02:00Z");
+        let next_head = head_sha(p);
+        assert_eq!(close_delivered_tip(p, None, Some(&anchor)), Some(anchor.clone()));
+        assert_ne!(close_delivered_tip(p, None, Some(&anchor)), Some(next_head.clone()));
+        let assembly_head = rev_parse_local(p, "main");
+        let assembly_note = format!("ASSEMBLY_PROOF: head={assembly_head} result=PASS");
+        let line = assembly_proof_line(&assembly_note).unwrap();
+        let tested_head = scoped_proof_receipt_field(&line, "head=").unwrap();
+        let delivered = close_delivered_tip(p, None, Some(&anchor)).unwrap();
+        assert!(git_commit_is_ancestor(p, &delivered, &tested_head));
+        assert!(!git_commit_is_ancestor(p, &next_head, &tested_head));
+        assert!(commit_is_merged_into_parent(p, &anchor, "main"));
+    }
+
     /// cas-dc1b (M03): PreToolUse denies `git push origin` for local_merge
     /// delivery, so MERGE REQUIRED must not tell such a worker to push or
     /// open a PR; it asks the supervisor for the local merge instead. Both
@@ -21538,6 +21921,107 @@ mod merge_state_gate_tests {
         );
     }
 
+    #[test]
+    fn qa_paths_use_task_tip_not_older_worker_lane_gh_1040() {
+        let (dir, _bare) = handoff_repo();
+        let repo = dir.path();
+        let task = worker_task("worker");
+        git(repo, &["checkout", "-q", "factory/worker"]);
+        std::fs::create_dir_all(repo.join("web/src/components")).unwrap();
+        std::fs::write(repo.join("web/src/components/EntryBox.tsx"), "export default null;\n").unwrap();
+        git(repo, &["add", "web/src/components/EntryBox.tsx"]);
+        git(repo, &["commit", "-q", "-m", "older UI task"]);
+        let task_branch = format!("factory/worker-{}", task.id);
+        git(repo, &["checkout", "-q", "-b", &task_branch, "main"]);
+        std::fs::write(repo.join("next.py"), "print('next')\n").unwrap();
+        git(repo, &["add", "next.py"]);
+        git(repo, &["commit", "-q", "-m", "next task"]);
+        let head = rev_parse_local(repo, "HEAD");
+
+        assert_eq!(close_measured_factory_branch(repo, &task, "worker"), task_branch);
+        let paths = crate::qa_pass::changed_paths_for_delivery(repo, "main", &head).unwrap();
+        assert_eq!(paths, vec!["next.py"]);
+        assert!(
+            !crate::qa_pass::user_facing_reasons(
+                &task,
+                &crate::config::QaConfig::default(),
+                Some(&paths),
+                &[],
+            )
+            .is_eligible(),
+            "the older lane's EntryBox.tsx must not dispatch QA for this Python delivery",
+        );
+    }
+
+    /// cas-a472: a release-note park (CHANGELOG.md plus a docs/release-notes
+    /// draft) opened hub QA on "journeys:HUB-J1..HUB-J11". The installed
+    /// binary measured the worker's base lane, which still held a
+    /// hub-web/src/main.ts delivery (a Surface-wide path in the catalog).
+    /// Measured from the task's own tip, through the real journey catalog
+    /// and its helper, a docs-only diff maps to no journey and dispatches no
+    /// QA, while the hub-web source path still maps to its journeys.
+    #[test]
+    fn docs_only_park_maps_to_no_journey_while_hub_source_still_does_cas_a472() {
+        let (dir, _bare) = handoff_repo();
+        let repo = dir.path();
+        let task = worker_task("worker");
+        git(repo, &["checkout", "-q", "factory/worker"]);
+        std::fs::create_dir_all(repo.join("hub-web/src")).unwrap();
+        std::fs::write(repo.join("hub-web/src/main.ts"), "export {};\n").unwrap();
+        git(repo, &["add", "hub-web/src/main.ts"]);
+        git(repo, &["commit", "-q", "-m", "older hub-web task"]);
+        let task_branch = format!("factory/worker-{}", task.id);
+        git(repo, &["checkout", "-q", "-b", &task_branch, "main"]);
+        std::fs::create_dir_all(repo.join("docs/release-notes")).unwrap();
+        std::fs::write(repo.join("CHANGELOG.md"), "# Changelog\n").unwrap();
+        std::fs::write(repo.join("docs/release-notes/2026-09-27-v34-slack.md"), "# Draft\n").unwrap();
+        git(repo, &["add", "CHANGELOG.md", "docs/release-notes/2026-09-27-v34-slack.md"]);
+        git(repo, &["commit", "-q", "-m", "release notes"]);
+        let head = rev_parse_local(repo, "HEAD");
+        // The project's real catalog and helper, left untracked so they are
+        // in neither diff.
+        // Embedded at build time: an archived test runs away from the
+        // producer checkout, so it must not read it at runtime.
+        std::fs::create_dir_all(repo.join("scripts")).unwrap();
+        std::fs::create_dir_all(repo.join("docs/qa")).unwrap();
+        std::fs::write(
+            repo.join("scripts/journeys-for-diff.py"),
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/journeys-for-diff.py")),
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("docs/qa/journeys.md"),
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../docs/qa/journeys.md")),
+        )
+        .unwrap();
+        let qa = crate::config::QaConfig::default();
+
+        let docs = crate::qa_pass::changed_paths_for_delivery(repo, "main", &head).unwrap();
+        assert_eq!(docs, vec!["CHANGELOG.md", "docs/release-notes/2026-09-27-v34-slack.md"]);
+        let docs_journeys = crate::qa_pass::catalog_journeys_for(repo, &docs);
+        assert!(docs_journeys.is_empty(), "a docs-only diff maps to no journey: {docs_journeys:?}");
+        assert!(
+            !crate::qa_pass::user_facing_reasons(&task, &qa, Some(&docs), &docs_journeys).is_eligible(),
+            "a docs-only park dispatches no independent QA",
+        );
+
+        let lane = crate::qa_pass::changed_paths_for_delivery(repo, "main", "factory/worker").unwrap();
+        assert!(lane.contains(&"hub-web/src/main.ts".to_string()), "{lane:?}");
+        let lane_journeys = crate::qa_pass::catalog_journeys_for(repo, &lane);
+        assert!(
+            ["HUB-J1", "HUB-J8", "HUB-J12"].iter().all(|id| lane_journeys.iter().any(|journey| journey == id)),
+            "hub-web/src/main.ts is Surface-wide and maps to every hub journey: {lane_journeys:?}",
+        );
+        let reasons = crate::qa_pass::user_facing_reasons(&task, &qa, Some(&lane), &lane_journeys).reasons;
+        assert!(reasons.iter().any(|reason| reason.starts_with("journeys:HUB-J1")), "{reasons:?}");
+
+        let one = crate::qa_pass::catalog_journeys_for(repo, &["hub-web/src/connection.ts".to_string()]);
+        assert!(
+            !one.is_empty() && one.len() < lane_journeys.len(),
+            "a narrower hub-web source path maps to its own journeys, not all: {one:?}",
+        );
+    }
+
     /// Without a per-task branch the worker's own branch is measured, as
     /// before.
     #[test]
@@ -21937,6 +22421,82 @@ mod merge_state_gate_tests {
                 panic!("zero task-attributable commits must not trip the guard, got {other:?}")
             }
         }
+    }
+
+    /// GH #1028: an override cannot silently discard a pre-task delivery as
+    /// lane residue. A receipt identifies the historical tip for the normal
+    /// merge gate, and after integration it supplies the QA path attribution.
+    #[test]
+    fn supervisor_override_requires_receipt_for_pre_task_delivery_gh_1028() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        commit_file_at(p, "delivery.rs", "// delivered\n", "2020-01-01T00:00:00Z");
+        let receipt = head_sha(p);
+        let task = worker_task("worker");
+        let mut req = base_req(&task.id);
+        req.supervisor_override = Some(true);
+        req.reason = Some("adopt historical delivery".into());
+        let mut window = window_at(1_700_000_000, "latest task lease claim/transfer");
+        window.supervisor_override_reason = req.reason.clone();
+        window.identity = task_commit_identity(&task, None);
+
+        let close_gate = |request: &TaskCloseRequest, window: &TaskCommitReceiptWindow| {
+            run_factory_branch_merge_gate_with_attribution(
+                &task,
+                request,
+                "main",
+                p,
+                TaskCommitAttribution {
+                    receipt: request.commit_receipt.as_deref(),
+                    window: Some(window),
+                },
+            )
+        };
+        match close_gate(&req, &window) {
+            MergeStateGateOutcome::Reject(message) => {
+                assert!(message.contains("MERGE REQUIRED"), "{message}");
+                assert!(message.contains("commit_receipt"), "{message}");
+            }
+            other => panic!("historical delivery closed without receipt: {other:?}"),
+        }
+
+        let mut test_first_task = task.clone();
+        test_first_task.execution_note = Some("test-first".into());
+        match run_factory_branch_merge_gate_with_attribution(
+            &test_first_task,
+            &req,
+            "main",
+            p,
+            TaskCommitAttribution {
+                receipt: None,
+                window: Some(&window),
+            },
+        ) {
+            MergeStateGateOutcome::Reject(message) => {
+                assert!(message.contains("MERGE REQUIRED"), "{message}");
+                assert!(message.contains("commit_receipt"), "{message}");
+            }
+            other => panic!("test-first historical delivery closed without receipt: {other:?}"),
+        }
+
+        req.commit_receipt = Some(receipt.clone());
+        window.identity.known_commits.push(receipt.clone());
+        match close_gate(&req, &window) {
+            MergeStateGateOutcome::Reject(message) => {
+                assert!(message.contains("MERGE REQUIRED"), "{message}");
+            }
+            other => panic!("unmerged historical receipt closed: {other:?}"),
+        }
+
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/worker", "-m", "merge delivery"]);
+        git(p, &["checkout", "-q", "factory/worker"]);
+        assert!(matches!(close_gate(&req, &window), MergeStateGateOutcome::Proceed));
+        assert!(
+            task_attribution::paths(p, "main", &window, Some(&receipt))
+                .is_some_and(|paths| paths.iter().any(|path| path == "delivery.rs")),
+            "QA must inspect the historical delivery path after merge"
+        );
     }
 
     /// The scoping must not become a bypass: commits made inside the task's
@@ -23357,6 +23917,70 @@ mod merge_state_gate_tests {
         );
     }
 
+    /// GH #895: GitHub updates a worker branch by merging the target into it,
+    /// then the target accepts the PR and an unrelated commit. The receipt
+    /// names the worker's last content commit, not the target-sync merge tip.
+    #[test]
+    fn receipt_survives_target_sync_merge_and_later_unrelated_target_commit_gh895() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let upload = "apps/frontend/app/src/composables/useUpload.ts";
+        std::fs::create_dir_all(p.join("apps/frontend/app/src/composables")).unwrap();
+        std::fs::write(p.join(upload), "export const upload = 1;\n").unwrap();
+        git(p, &["add", upload]);
+        git(p, &["commit", "-q", "-m", "feat(cas-test1): add upload"]);
+        std::fs::write(p.join(upload), "export const upload = 2;\n").unwrap();
+        git(p, &["add", upload]);
+        git(p, &["commit", "-q", "-m", "fix(cas-test1): finish upload"]);
+        let receipt = rev_parse_local(p, "HEAD");
+
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::write(p.join("en.json"), "{}\n").unwrap();
+        git(p, &["add", "en.json"]);
+        git(p, &["commit", "-q", "-m", "advance target for CI"]);
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git(p, &["merge", "-q", "--no-ff", "main", "-m", "update worker branch"]);
+        let merge_tip = rev_parse_local(p, "HEAD");
+        assert!(
+            git_command(p, &["diff", "--quiet", &format!("{merge_tip}^1"), &merge_tip, "--", upload])
+                .status()
+                .unwrap()
+                .success(),
+            "target-sync merge must not itself change the delivery path"
+        );
+
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/worker", "-m", "accept delivery"]);
+        std::fs::write(p.join("en.json"), "{\"later\":true}\n").unwrap();
+        git(p, &["add", "en.json"]);
+        git(p, &["commit", "-q", "-m", "unrelated locale edit"]);
+
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(merge_tip.clone());
+        let mut req = base_req(&task.id);
+        req.commit_receipt = Some(receipt.clone());
+        let window = window_at(0, "GH #895 receipt regression");
+        assert!(validate_task_commit_receipt(p, &receipt, "main", &window).is_ok());
+        assert_eq!(
+            delivery_content_anchor_at_close(p, &merge_tip, "factory/worker", "main", Some(&receipt)),
+            receipt
+        );
+        assert!(matches!(
+            run_factory_branch_merge_gate_with_attribution(
+                &task,
+                &req,
+                "main",
+                p,
+                TaskCommitAttribution {
+                    receipt: Some(&receipt),
+                    window: Some(&window),
+                },
+            ),
+            MergeStateGateOutcome::Proceed
+        ));
+    }
+
     /// GH #840: a worker's own conflict-resolution merge can intentionally
     /// replace the hunks from an earlier task commit before the final worker
     /// tip is merged. That merge resolution is task content, not a dropped
@@ -23499,6 +24123,143 @@ mod merge_state_gate_tests {
         ));
     }
 
+    /// cas-3f8c, the cas-bf07 shape: an earlier task commit added
+    /// `headerLatencyLabel`, and the same task's later commit replaced it with
+    /// `headerConnectionChip`. The worker then synced the target, the
+    /// delivery merged, and a later target commit extended the import line.
+    /// The earlier commit's hunk was rewritten by the task itself, so it is
+    /// not dropped delivery content.
+    #[test]
+    fn a_hunk_the_same_task_later_rewrote_is_not_dropped_content_cas_3f8c() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let commit_main_ts = |body: &str, message: &str| {
+            std::fs::write(p.join("main.ts"), body).unwrap();
+            git(p, &["add", "main.ts"]);
+            git(p, &["commit", "-q", "-m", message]);
+        };
+        commit_main_ts(
+            "import { attach, headerLatencyLabel } from \"./connection-state\";\nexport const latency = headerLatencyLabel();\n",
+            "fix(cas-test1): say Checking until the first latency sample",
+        );
+        commit_main_ts(
+            "import { attach, headerConnectionChip } from \"./connection-state\";\nexport const latency = headerConnectionChip();\n",
+            "fix(cas-test1): header chip reads the machine's state",
+        );
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::write(p.join("target-only.rs"), "// target-only\n").unwrap();
+        git(p, &["add", "target-only.rs"]);
+        git(p, &["commit", "-q", "-m", "chore: advance target"]);
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "main",
+                "-m",
+                "Merge branch 'main' into factory/worker",
+            ],
+        );
+        let worker_tip = rev_parse_local(p, "HEAD");
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "factory/worker",
+                "-m",
+                "merge worker delivery",
+            ],
+        );
+        // A later target change extends the delivered import line, so the
+        // merge tip no longer matches the target for this path.
+        commit_main_ts(
+            "import { attach, headerConnectionChip, type AttachSnapshot } from \"./connection-state\";\nexport const latency = headerConnectionChip();\n",
+            "feat: extend the connection-state import",
+        );
+
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(worker_tip);
+        let req = base_req(&task.id);
+        let outcome = run_factory_branch_merge_gate(&task, &req, "main", p);
+        assert!(
+            matches!(outcome, MergeStateGateOutcome::Proceed),
+            "a hunk the task rewrote itself must not read as dropped: {outcome:?}"
+        );
+    }
+
+    /// cas-3f8c: a real drop still rejects, and the refusal now names the
+    /// delivered lines the target lacks. The earlier hunk survives the same
+    /// task's later commit, but the integration discarded the delivery.
+    #[test]
+    fn a_real_drop_still_rejects_and_names_the_missing_lines_cas_3f8c() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        std::fs::write(p.join("main.ts"), "export const keep = 1;\n").unwrap();
+        git(p, &["add", "main.ts"]);
+        git(p, &["commit", "-q", "-m", "feat(cas-test1): keep"]);
+        std::fs::write(
+            p.join("main.ts"),
+            "export const keep = 1;\nexport const other = 2;\n",
+        )
+        .unwrap();
+        git(p, &["add", "main.ts"]);
+        git(p, &["commit", "-q", "-m", "feat(cas-test1): other"]);
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::write(p.join("target-only.rs"), "// target-only\n").unwrap();
+        git(p, &["add", "target-only.rs"]);
+        git(p, &["commit", "-q", "-m", "chore: advance target"]);
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "main",
+                "-m",
+                "Merge branch 'main' into factory/worker",
+            ],
+        );
+        let worker_tip = rev_parse_local(p, "HEAD");
+        git(p, &["checkout", "-q", "main"]);
+        // The integration keeps the target's tree: the delivery is lost.
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "-s",
+                "ours",
+                "factory/worker",
+                "-m",
+                "merge worker delivery (resolution dropped it)",
+            ],
+        );
+
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(worker_tip);
+        let req = base_req(&task.id);
+        let MergeStateGateOutcome::Reject(message) =
+            run_factory_branch_merge_gate(&task, &req, "main", p)
+        else {
+            panic!("a delivery the integration discarded must still be rejected");
+        };
+        assert!(message.contains("DELIVERY CONTENT DROPPED"), "{message}");
+        assert!(message.contains("main.ts"), "{message}");
+        assert!(
+            message.contains("Delivered line(s) not found verbatim on the target"),
+            "{message}"
+        );
+        assert!(message.contains("`export const keep = 1;`"), "{message}");
+    }
     /// A target-sync merge with no task-attributed content must remain
     /// fail-closed; the presence of a merge commit alone is not delivery.
     #[test]
@@ -23556,6 +24317,57 @@ mod merge_state_gate_tests {
             }
             other => panic!("an empty target-sync delivery must reject, got {other:?}"),
         }
+        let window = window_at(0, "task work cycle");
+        assert!(matches!(
+            run_factory_branch_merge_gate_with_attribution(
+                &task,
+                &req,
+                "main",
+                p,
+                TaskCommitAttribution {
+                    receipt: None,
+                    window: Some(&window),
+                },
+            ),
+            MergeStateGateOutcome::Reject(_)
+        ));
+    }
+
+    /// GH #1018: the task's unnamed content commit becomes target-reachable
+    /// after the worker's target-sync merge ships. The recorded merge tip and
+    /// current work window must still prove its non-merge content.
+    #[test]
+    fn shipped_unnamed_content_under_merge_tip_closes_gh_1018() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        commit_file_at(p, "delivered.rs", "// shipped\n", "2026-08-04T12:00:00Z");
+        git(p, &["checkout", "-q", "main"]);
+        commit_file_at(p, "target.rs", "// target\n", "2026-08-04T12:01:00Z");
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git(p, &["merge", "-q", "--no-ff", "main", "-m", "sync target"]);
+        let merge_tip = rev_parse_local(p, "HEAD");
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/worker", "-m", "ship delivery"]);
+
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(merge_tip);
+        let mut window = window_at(1_700_000_000, "task work cycle");
+        window.not_before = chrono::DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        let req = base_req(&task.id);
+        assert!(matches!(
+            run_factory_branch_merge_gate_with_attribution(
+                &task,
+                &req,
+                "main",
+                p,
+                TaskCommitAttribution {
+                    receipt: None,
+                    window: Some(&window),
+                },
+            ),
+            MergeStateGateOutcome::Proceed
+        ));
     }
 
     /// cas-2598: review can require deleting content that was present when a
@@ -27093,6 +27905,40 @@ mod epic_status_gate_tests {
     }
 
     #[test]
+    fn epic_retarget_checks_child_squash_against_its_delivered_target_gh1038() {
+        let dir = init_squash_landed_repo(None);
+        let p = dir.path();
+        let anchor = epic_git_stdout(p, &["rev-parse", "factory/lane"]);
+        // A later child deliberately removes the shipped route on main.
+        git(p, &["rm", "feature.rs"]);
+        git(p, &["commit", "-q", "-m", "remove superseded feature route"]);
+        // The epic is then retargeted to a follow-up branch from before the
+        // squash. That branch cannot be evidence for this already-shipped child.
+        git(p, &["checkout", "-q", "-b", "epic/follow-up", "main~2"]);
+
+        let mut landed = child("cas-shipped", TaskStatus::Closed, Some("lane"));
+        landed.deliverables.factory_branch_anchor = Some(anchor);
+        landed.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:fixture".into(),
+            target_branch: "main".into(),
+        });
+        let task = epic("cas-epic-retargeted");
+        let req = base_req(&task.id);
+        let statuses = collect_epic_branch_statuses(std::slice::from_ref(&landed), "epic/follow-up", p);
+        assert!(!statuses[0].blocks_epic_close(), "{statuses:?}");
+        assert!(matches!(
+            run_epic_close_merge_gate(&task, &req, "epic/follow-up", p, &[landed.clone()]),
+            EpicCloseGateOutcome::ProceedWithNote(_)
+        ));
+
+        landed.deliverables.work_target = None;
+        assert!(matches!(
+            run_epic_close_merge_gate(&task, &req, "epic/follow-up", p, &[landed]),
+            EpicCloseGateOutcome::Reject(_)
+        ));
+    }
+
+    #[test]
     fn content_reconciliation_does_not_clear_a_branch_that_delivers_nothing() {
         // Caught by an existing test while building cas-b192, and worth pinning
         // directly: a recycled / reset-to-parent branch trivially has "nothing
@@ -28384,6 +29230,22 @@ mod zero_change_close_tests {
         )
         .expect("local target merge must satisfy the local_merge pre-close hook");
         assert_eq!(evidence.task_tip.as_deref(), Some(anchor.as_str()));
+    }
+
+    #[test]
+    fn epic_pre_close_missing_anchor_names_commit_receipt_remedy_gh1038() {
+        let dir = init_worker_repo();
+        let mut task = Task::new("cas-epic-receipt".into(), "retargeted epic".into());
+        task.task_type = TaskType::Epic;
+        let error = run_declared_pre_close_hook(
+            &task,
+            &declared_main_context(dir.path()),
+            None,
+            None,
+            false,
+        )
+        .expect_err("an epic without an anchor needs an explicit receipt");
+        assert!(error.contains("commit_receipt=<merged-commit-sha>"), "{error}");
     }
 
     #[test]
@@ -30522,6 +31384,116 @@ mod merge_reality_tests {
         assert!(msg.contains("task action=close id=<task-id>`"), "{msg}");
     }
 
+    /// cas-8606: the cas-459b shape. The worker's base `factory/test-worker`
+    /// sits at the target with no commits and was never pushed. Task
+    /// cas-8606 was delivered on `factory/test-worker-cas-8606`, pushed, and
+    /// merged. Re-closing it measures its own branch and proceeds.
+    #[test]
+    fn merged_per_task_delivery_closes_while_the_base_branch_is_unpushed_cas_8606() {
+        let dir = init_repo_worker_branch_empty();
+        let p = dir.path();
+        git(
+            p,
+            &[
+                "checkout",
+                "-q",
+                "-b",
+                "factory/test-worker-cas-8606",
+                "main",
+            ],
+        );
+        std::fs::write(p.join("delivery.rs"), "fn delivered() {}\n").unwrap();
+        git(p, &["add", "delivery.rs"]);
+        git(p, &["commit", "-q", "-m", "cas-8606 delivery"]);
+        let tip = git_output(p, &["rev-parse", "HEAD"]);
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "-m",
+                "merge cas-8606",
+                "factory/test-worker-cas-8606",
+            ],
+        );
+        git(
+            p,
+            &[
+                "update-ref",
+                "refs/remotes/origin/factory/test-worker-cas-8606",
+                &tip,
+            ],
+        );
+
+        let own = check_factory_branch_merge_reality_with_delivery_mode(
+            p,
+            "test-worker",
+            "main",
+            cas_types::DeliveryMode::PushBranch,
+            Some("cas-8606"),
+        );
+        assert!(
+            matches!(own, MergeRealityOutcome::Proceed),
+            "a merged, pushed per-task delivery must not be judged by the unpushed base branch"
+        );
+
+        // Only the pushed copy remains (local per-task branch pruned).
+        git(p, &["branch", "-D", "factory/test-worker-cas-8606"]);
+        let pruned = check_factory_branch_merge_reality_with_delivery_mode(
+            p,
+            "test-worker",
+            "main",
+            cas_types::DeliveryMode::PushBranch,
+            Some("cas-8606"),
+        );
+        assert!(matches!(pruned, MergeRealityOutcome::Proceed));
+
+        // A task with no per-task branch is still measured on the base
+        // branch, so the cas-762e wrong-branch guard keeps its bite.
+        let base = check_factory_branch_merge_reality_with_delivery_mode(
+            p,
+            "test-worker",
+            "main",
+            cas_types::DeliveryMode::PushBranch,
+            Some("cas-other"),
+        );
+        let MergeRealityOutcome::Refuse(message) = base else {
+            panic!("the unpushed empty base branch must still be refused for a base-branch task");
+        };
+        assert!(
+            message.contains("factory/test-worker has no commits"),
+            "{message}"
+        );
+    }
+
+    /// cas-8606: the pre-close worktree check accepts any of the worker's own
+    /// branches, including another task's per-task branch, and still refuses
+    /// a sibling worker's branch, trunk or a detached HEAD.
+    #[test]
+    fn pre_close_worktree_accepts_any_own_worker_branch_cas_8606() {
+        for own in [
+            "factory/happy-octopus-83",
+            "factory/happy-octopus-83-cas-2ee2",
+            "factory/happy-octopus-83-cas-8606",
+        ] {
+            assert_eq!(system_b_expected_branch("happy-octopus-83", Some(own)), own);
+        }
+        for foreign in [
+            Some("factory/wild-heron-20"),
+            Some("factory/wild-heron-20-cas-470e"),
+            Some("main"),
+            Some("epic/consolidated-burn-down-v34"),
+            None,
+        ] {
+            assert_eq!(
+                system_b_expected_branch("happy-octopus-83", foreign),
+                "factory/happy-octopus-83",
+                "{foreign:?}"
+            );
+        }
+    }
     // -------------------------------------------------------------------------
     // AC3a: branch has ≥1 unmerged commit → PROCEED
     // (cas-95ce already guards this; B2 must not double-reject)

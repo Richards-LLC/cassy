@@ -25,8 +25,24 @@ export const CONVERSATION_SEARCH_PLACEHOLDER_TOUCH = "Search conversations";
  * keyboard) and wide enough that the palette it leads to is on screen. */
 export const KEYBOARD_HINT_MEDIA_QUERY = "(any-pointer: fine) and (min-width: 500px)";
 
-export function conversationSearchPlaceholder(keyboardHint: boolean): string {
-  return keyboardHint ? CONVERSATION_SEARCH_PLACEHOLDER : CONVERSATION_SEARCH_PLACEHOLDER_TOUCH;
+type PlatformNavigator = { readonly platform?: string; readonly userAgentData?: { readonly platform?: string } };
+
+/** Apple keyboards print ⌘ where every other keyboard prints Ctrl. */
+export function applePlatform(nav: PlatformNavigator | undefined = typeof navigator === "undefined" ? undefined : navigator as PlatformNavigator): boolean {
+  return /mac|iphone|ipad|ipod/i.test(nav?.userAgentData?.platform || nav?.platform || "");
+}
+
+/** The palette shortcut as this keyboard prints it: every surface that names
+ * it (the list search, the Terminal view button, the Appearance tooltip)
+ * reads the same one, so a Linux browser never shows ⌘K beside Ctrl K
+ * (journey F16). Both chords work everywhere. */
+export function paletteShortcutLabel(apple = applePlatform()): string {
+  return apple ? "⌘K" : "Ctrl K";
+}
+
+export function conversationSearchPlaceholder(keyboardHint: boolean, shortcut = paletteShortcutLabel()): string {
+  if (!keyboardHint) return CONVERSATION_SEARCH_PLACEHOLDER_TOUCH;
+  return shortcut === "Ctrl K" ? CONVERSATION_SEARCH_PLACEHOLDER : `${CONVERSATION_SEARCH_LABEL} (${shortcut})`;
 }
 
 /** The list's visible name search (journey F8): filters rows by project,
@@ -60,15 +76,29 @@ export const composeFabMarkup = '<button id="compose-fab" class="compose-fab" ty
  * keeps its accessible name ("‹ Conversations", "Terminal view") the same at
  * every width. The project ellipsises (its title carries it whole) and the
  * host line ellipsises its machine · codename part while the connection state
- * after it stays visible.
+ * after it stays visible. The codename has priority over the machine name
+ * (journey F14, QA round 1 F01): the machine name ellipsises first, and
+ * below 500px its OS word is dropped before that.
  */
+/** A machine label's trailing operating-system word, as in "Studio Mac · macOS". */
+const HOST_OS = /^(.*\S)(\s·\s(?:macOS|Linux|Windows|FreeBSD|OpenBSD|NetBSD|ChromeOS|iPadOS|iOS|Android|Ubuntu|Debian|Fedora|WSL))$/i;
+
+/**
+ * The machine label with its OS word in its own span (journey F14): on a
+ * phone the header drops " · macOS" before it truncates the codename.
+ */
+export function hostMarkup(host: string): string {
+  const match = HOST_OS.exec(host);
+  return match ? `${escapeHtml(match[1])}<span class="host-os">${escapeHtml(match[2])}</span>` : escapeHtml(host);
+}
+
 export function conversationHeaderMarkup(model: ConversationShellModel): string {
   const host = model.host || "";
   // No project named: the codename is the title and the host line names only the machine (cas-1ca1 F03).
   const project = projectTitle(model.projectDir);
   const supervisor = model.supervisor || "Supervisor unavailable";
   const title = project ?? supervisor;
-  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button" aria-label="‹ Conversations"><span class="back-glyph">‹</span><span class="back-label"> Conversations</span></button>${cloudBrand()}<button id="conversation-terminal" type="button" aria-label="Terminal view">Terminal<span class="terminal-suffix"> view</span></button></div><div class="conversation-identity"><span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(host || model.supervisor || "?"))}</span><div class="id"><h1><b title="${escapeHtml(title)}"${project ? "" : ' class="codename"'}>${escapeHtml(title)}</b></h1><span class="conversation-host"><span class="host-where" title="${escapeHtml(project ? [host, supervisor].filter(Boolean).join(" · ") : host)}">${project ? `${host ? `${escapeHtml(host)} · ` : ""}<span class="codename">${escapeHtml(supervisor)}</span>` : escapeHtml(host)}</span><span id="conversation-connection" role="status"></span></span></div></div></header>`;
+  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button" aria-label="‹ Conversations"><span class="back-glyph">‹</span><span class="back-label"> Conversations</span></button>${cloudBrand()}<button id="conversation-terminal" type="button" aria-label="Terminal view">Terminal<span class="terminal-suffix"> view</span></button></div><div class="conversation-identity"><span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(host || model.supervisor || "?"))}</span><div class="id"><h1><b title="${escapeHtml(title)}"${project ? "" : ' class="codename"'}>${escapeHtml(title)}</b></h1><span class="conversation-host"><span class="host-where" title="${escapeHtml(project ? [host, supervisor].filter(Boolean).join(" · ") : host)}">${project ? `${host ? `<span class="host-machine">${hostMarkup(host)}</span><span class="host-sep"> · </span>` : ""}<span class="codename">${escapeHtml(supervisor)}</span>` : `<span class="host-machine">${hostMarkup(host)}</span>`}</span><span id="conversation-connection" role="status"></span></span></div></div></header>`;
 }
 
 /** Attaching files from this browser has no transport yet; the clip stays out of the composer until it does. */
@@ -80,23 +110,33 @@ const SEND_GLYPH = '<svg class="send-glyph" viewBox="0 0 20 20" fill="currentCol
 
 /**
  * Pebble composer (cas-3800): the field is a pill on --panel with --lift, the
- * send button takes the machine accent from the shell root and names the
- * supervisor, and the attach clip sits beside the field, present but
- * disabled. Dresses the existing `.message` region in place so the ids the
- * live-region updater and the send handler bind to are untouched.
+ * send button takes the machine accent from the shell root, and the attach
+ * clip sits beside the field, present but disabled. Dresses the existing
+ * `.message` region in place so the ids the live-region updater and the send
+ * handler bind to are untouched.
+ *
+ * The field and the button lead with the project, never the generated
+ * codename (journey F13): "Message the cas-src supervisor" and "Send". The
+ * codename is an identifier, not a name to read in prose; the header shows it,
+ * and the button's accessible name, "Send to <codename>", keeps it whole.
  */
-export function dressComposer(composer: HTMLElement, supervisor?: string): void {
-  const name = supervisor || "the supervisor";
+export function dressComposer(composer: HTMLElement, supervisor?: string, project?: string): void {
   composer.classList.add("conversation-composer");
   composer.querySelector(".operator-thread")?.remove();
   const label = composer.querySelector("label"); if (label) label.textContent = "Your message";
   composer.querySelector("h2")?.classList.add("sr-only");
   const input = composer.querySelector("textarea");
   if (input) {
-    // A placeholder that cannot fit is ellipsised here as well as by the
-    // stylesheet, so no engine wraps it into a taller field (journey F9); the
-    // header and the Send button's accessible name carry the name whole.
-    input.placeholder = `Message ${composerNameHint(name)}`;
+    // The longest wording that fits the field is chosen when the field is
+    // laid out and again whenever it resizes, so a phone never shows a cut
+    // "Message the gabber-studio supervi…" (cas-1e0f QA F01). The stylesheet
+    // still ellipsises on one line as the last guard (journey F9).
+    input.dataset.placeholders = JSON.stringify(composerPlaceholders(project));
+    fitComposerPlaceholder(input);
+    // dressComposer runs before a rebuild re-attaches the composer: fit again
+    // once it is back in the document.
+    queueMicrotask(() => fitComposerPlaceholder(input));
+    watchComposerPlaceholder(input);
     input.rows = 1;
     // Hidden until attaching works (cas-17e3): a control that can never be
     // used is noise for every reader, and a dead stop for keyboard users.
@@ -109,18 +149,74 @@ export function dressComposer(composer: HTMLElement, supervisor?: string): void 
     button.setAttribute("aria-label", `Send to ${supervisor || "supervisor"}`);
     button.replaceChildren();
     button.insertAdjacentHTML("afterbegin", SEND_GLYPH);
-    const text = composer.ownerDocument.createElement("span"); text.className = "send-label"; text.textContent = `Send to ${supervisor || "supervisor"}`;
+    const text = composer.ownerDocument.createElement("span"); text.className = "send-label"; text.textContent = "Send";
     button.append(text);
   }
 }
 
-/** Longest supervisor name the composer placeholder spells out in full. */
-export const COMPOSER_NAME_MAX_CHARS = 20;
+/**
+ * The composer's placeholder wordings, longest first: the project's
+ * supervisor, then the project alone, then the role. Never the codename, and
+ * never a name cut inside the text (cas-1e0f QA F02).
+ */
+export function composerPlaceholders(project?: string): string[] {
+  const name = project?.trim();
+  return name ? [`Message the ${name} supervisor`, `Message ${name}`, COMPOSER_ROLE_PLACEHOLDER] : [COMPOSER_ROLE_PLACEHOLDER];
+}
 
-/** The name as the placeholder shows it: whole, or cut with an ellipsis. */
-export function composerNameHint(name: string): string {
-  const characters = Array.from(name);
-  return characters.length <= COMPOSER_NAME_MAX_CHARS ? name : `${characters.slice(0, COMPOSER_NAME_MAX_CHARS - 1).join("")}…`;
+export const COMPOSER_ROLE_PLACEHOLDER = "Message the supervisor";
+
+/** The composer's resting placeholder before it is measured: the fullest wording. */
+export function composerPlaceholder(project?: string): string {
+  return composerPlaceholders(project)[0];
+}
+
+/** The first wording whose width fits `available` px; the last (shortest) when none does. */
+export function fittingPlaceholder(candidates: readonly string[], available: number, measure: (text: string) => number): string {
+  return candidates.find((text) => measure(text) <= available) ?? candidates[candidates.length - 1];
+}
+
+/**
+ * Measure the field's placeholder wordings in its own font and keep the
+ * longest that fits its text box. Not laid out yet (no width): keep the
+ * fullest; the resize watch fits it once there is a box. While dictation
+ * holds the placeholder, the fitted wording becomes the one it restores.
+ */
+export function fitComposerPlaceholder(field: HTMLTextAreaElement): void {
+  let candidates: string[];
+  try { candidates = JSON.parse(field.dataset.placeholders ?? "[]") as string[]; } catch { return; }
+  if (!candidates.length) return;
+  const document = field.ownerDocument;
+  const view = document.defaultView;
+  const current = field.dataset.restingPlaceholder ?? field.placeholder;
+  // Unmeasurable (detached mid-rebuild, not laid out): keep a wording already
+  // fitted for these candidates; the microtask and resize watch refit it.
+  let chosen = candidates.includes(current) ? current : candidates[0];
+  if (view && field.isConnected && field.clientWidth > 0) {
+    const style = view.getComputedStyle(field);
+    const available = field.clientWidth - parseFloat(style.paddingLeft || "0") - parseFloat(style.paddingRight || "0");
+    const probe = document.createElement("span");
+    probe.setAttribute("aria-hidden", "true");
+    probe.style.cssText = "position:absolute;left:-10000px;top:0;visibility:hidden;white-space:pre;";
+    probe.style.font = style.font;
+    probe.style.letterSpacing = style.letterSpacing;
+    document.body.append(probe);
+    chosen = fittingPlaceholder(candidates, available, (text) => { probe.textContent = text; return probe.getBoundingClientRect().width; });
+    probe.remove();
+  }
+  if (field.dataset.restingPlaceholder !== undefined) field.dataset.restingPlaceholder = chosen;
+  else if (field.placeholder !== chosen) field.placeholder = chosen;
+}
+
+const watchedComposerFields = new WeakSet<HTMLTextAreaElement>();
+
+/** Refit on every size change of the field (a rotation, a breakpoint, the rail opening) and once web fonts land. */
+function watchComposerPlaceholder(field: HTMLTextAreaElement): void {
+  if (watchedComposerFields.has(field)) return;
+  watchedComposerFields.add(field);
+  const view = field.ownerDocument.defaultView as (Window & typeof globalThis) | null;
+  if (view && typeof view.ResizeObserver === "function") new view.ResizeObserver(() => fitComposerPlaceholder(field)).observe(field);
+  void field.ownerDocument.fonts?.ready.then(() => fitComposerPlaceholder(field));
 }
 
 /** The list's empty line: loading, unpaired, or paired with nothing live. */
@@ -179,7 +275,7 @@ function contextRailMarkup(selected: boolean): string {
 }
 
 /** Appearance & commands as a header icon button (P13): out of the phone thumb zone, named for assistive tech. */
-export const appearanceButtonMarkup = '<button id="command-palette-toggle" class="icon-button" type="button" aria-label="Appearance &amp; commands" title="Appearance &amp; commands (Ctrl K twice)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg></button>';
+export const appearanceButtonMarkup = (shortcut = paletteShortcutLabel()): string => `<button id="command-palette-toggle" class="icon-button" type="button" aria-label="Appearance &amp; commands" title="Appearance &amp; commands (${shortcut} twice)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg></button>`;
 
 export function conversationShellMarkup(model: ConversationShellModel): string {
   // First run: the welcome carries the one primary "Pair a machine". The list
@@ -189,7 +285,7 @@ export function conversationShellMarkup(model: ConversationShellModel): string {
   const welcomePairs = !model.selected && model.loaded && !model.paired;
   return `<div class="conversation-shell${model.selected ? " thread-open" : ""}${welcomePairs ? " welcome-pairs" : ""}${model.machineId ? ` ${machineAccentClass(model.machineId)}` : ""}">
     <aside class="conversation-sidebar" aria-label="Supervisor conversations">
-      <header class="conversation-list-heading"><div class="conversation-list-top">${cloudBrand()}${appearanceButtonMarkup}</div><div class="conversation-list-title"><h1>Conversations</h1><button id="pair-toggle"${welcomePairs ? ' class="primary"' : ""} type="button">Pair a machine</button></div><p>Your projects. Your supervisors.</p>${model.paired ? conversationSearchMarkup(model.searchQuery, model.keyboardHint ?? true) : ""}</header>
+      <header class="conversation-list-heading"><div class="conversation-list-top">${cloudBrand()}${appearanceButtonMarkup()}</div><div class="conversation-list-title"><h1>Conversations</h1><button id="pair-toggle"${welcomePairs ? ' class="primary"' : ""} type="button">Pair a machine</button></div><p>Your projects. Your supervisors.</p>${model.paired ? conversationSearchMarkup(model.searchQuery, model.keyboardHint ?? true) : ""}</header>
       <nav id="conversation-list" aria-label="Choose a supervisor"></nav>
       <div id="conversation-empty" class="conversation-empty" hidden></div>
       ${model.paired ? composeFabMarkup : ""}
@@ -203,6 +299,39 @@ export function conversationShellMarkup(model: ConversationShellModel): string {
 }
 
 /** Rehouse existing owned regions; retain terminal surfaces and composer APIs. */
+/**
+ * cas-71af (e918 QA F01): a "machine · codename" line whose machine name cannot
+ * keep a letter and its ellipsis (2ch) beside the whole codename drops the
+ * machine and its separator instead of shrinking it to a glyph sliver; the
+ * line's title still names it. `available` is the width the line may take.
+ * Decided from widths that do not depend on the current state (the codename's
+ * full width, the space on offer), so it never flips back and forth.
+ */
+export function fitMachineLine(line: HTMLElement | null | undefined, available: number): void {
+  if (!line) return;
+  const codename = line.querySelector<HTMLElement>(":scope > .codename");
+  const machine = line.querySelector<HTMLElement>(":scope > .host-machine, :scope > .proj2-machine");
+  if (!codename || !machine || !(available > 0)) { line.classList.remove("machine-squeezed"); return; }
+  const ch = parseFloat(getComputedStyle(codename).fontSize) * 0.6;
+  line.classList.toggle("machine-squeezed", codename.scrollWidth + 5 * ch > available + 1);
+}
+
+/** The conversation header's host line, fitted to the room beside its connection state. */
+export function fitConversationHost(root: ParentNode): void {
+  const identity = root.querySelector<HTMLElement>(".conversation-identity");
+  const host = identity?.querySelector<HTMLElement>(".conversation-host");
+  if (!identity || !host) return;
+  // The room is the identity row less the avatar, not the host line's own
+  // width: that line is sized to its content, so it shrinks once the machine
+  // steps aside and would keep it aside for good.
+  const avatar = identity.querySelector<HTMLElement>(":scope > .conversation-avatar");
+  const style = getComputedStyle(identity);
+  const room = identity.clientWidth - parseFloat(style.paddingLeft || "0") - parseFloat(style.paddingRight || "0")
+    - (avatar ? avatar.getBoundingClientRect().width + (parseFloat(style.columnGap) || 0) : 0);
+  const connection = host.querySelector<HTMLElement>("#conversation-connection");
+  fitMachineLine(host.querySelector<HTMLElement>(":scope > .host-where"), room - (connection?.getBoundingClientRect().width ?? 0));
+}
+
 export function arrangeConversationShell(app: HTMLElement, model: ConversationShellModel): void {
   const old = app.querySelector<HTMLElement>(".shell");
   if (!old) return;
@@ -215,7 +344,7 @@ export function arrangeConversationShell(app: HTMLElement, model: ConversationSh
   if (model.selected) {
     if (grid) shell.querySelector("#conversation-pane-slot")!.append(grid);
     if (composer) {
-      dressComposer(composer, model.supervisor);
+      dressComposer(composer, model.supervisor, projectTitle(model.projectDir));
       shell.querySelector("#conversation-composer-slot")!.append(composer);
     }
     if (status) shell.querySelector("#conversation-status-slot")!.append(status);

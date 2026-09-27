@@ -121,6 +121,17 @@ export function restorableSession(
   return sessions.some((session) => session.name === stored.session) ? stored.session : undefined;
 }
 
+/**
+ * The conversation a phone opens right after pairing a machine (journey F8):
+ * the machine's first session that can actually be attached. Pairing then
+ * lands on that conversation instead of a list the operator must tap through.
+ * A dormant, unreachable or not-yet-live session is never opened on the
+ * operator's behalf; with none live, the list stays as it was.
+ */
+export function pairedSessionToOpen(sessions: readonly HubSession[]): string | undefined {
+  return sessions.find((session) => session.liveness === "live" && !session.dormant && !session.unreachable)?.name;
+}
+
 export interface SessionPickerEntry {
   readonly machineId: string;
   readonly machineLabel: string;
@@ -153,14 +164,6 @@ export interface SessionPickerInput {
 export function workerCountLabel(count: number): string {
   if (count === 0) return "no workers";
   return `${count} ${count === 1 ? "worker" : "workers"}`;
-}
-
-/** The one-line summary under a session name: who runs it, how many, how it is. */
-export function sessionPickerMeta(entry: SessionPickerEntry): string {
-  const role = entry.supervisor ? `${entry.role} ${entry.supervisor}` : entry.role;
-  // Project first, as the conversation list reads (cas-7260); the machine is
-  // the group heading above the row.
-  return [entry.project, role, workerCountLabel(entry.workerCount), entry.status].filter(Boolean).join(" · ");
 }
 
 /**

@@ -494,6 +494,49 @@ pub(crate) fn declare_work_target(
     }))
 }
 
+/// Anchor a targetless Git task to the integration branch at creation.
+/// Non-Git task stores retain their legacy target-free behavior.
+pub(crate) fn standalone_work_target(
+    cas_root: &Path,
+) -> Result<(Option<WorkTarget>, Option<String>), String> {
+    let Ok((checkout_root, _)) = git_checkout_layout(cas_root) else {
+        return Ok((None, None));
+    };
+    let unresolved_warning = |reason: &str| {
+        format!(
+            "\n\n⚠️ WORK TARGET UNRESOLVED: no target could be detected or persisted ({reason}). \
+             This task has no work target. Run `cas config set factory.epic_base_branch <branch>` \
+             or pass target_branch when creating the task."
+        )
+    };
+    let configured = crate::config::Config::configured_epic_base_branch(&checkout_root);
+    let branch = match configured.as_deref() {
+        Some(branch) => branch.to_string(),
+        None => match resolve_default_branch(&checkout_root) {
+            Ok(branch) => branch,
+            Err(error) => return Ok((None, Some(unresolved_warning(&error)))),
+        },
+    };
+    let target = match declare_work_target(
+        cas_root,
+        Some(checkout_root.to_string_lossy().as_ref()),
+        Some(&branch),
+    ) {
+        Ok(target) => target,
+        Err(error) => return Ok((None, Some(unresolved_warning(&error)))),
+    };
+    let warning = configured.is_none().then(|| {
+        format!(
+            "\n\n⚠️ WORK TARGET DEFAULTED: no [factory] epic_base_branch is configured. \
+             This task is explicitly targeted to detected trunk `{branch}`. \
+             If your integration branch differs, run \
+             `cas config set factory.epic_base_branch <branch>` or pass target_branch when \
+             creating the task."
+        )
+    });
+    Ok((target, warning))
+}
+
 /// Select the durable WorkTarget a child should inherit from an epic.
 ///
 /// The live epic branch is the delivery lane whenever it is recorded.  Its

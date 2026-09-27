@@ -29,3 +29,17 @@ export function toastPlacementInThread(header: Box | undefined, column: Box | un
   if (column.left <= 0 && column.right >= viewportWidth) return undefined;
   return { top: Math.ceil(header.bottom + gap), right: Math.max(gap, Math.floor(viewportWidth - column.right + gap)) };
 }
+
+/**
+ * cas-71af (dfb2 QA F01): on the phone's conversation list, below the brand
+ * row the toast sat over the "Conversations" title and Pair a machine for its
+ * whole life. It sits just above the list's bottom action instead, where a
+ * phone keeps its passing notes, clear of every heading. Returns the top in
+ * pixels, or undefined when there is no such action on screen or no room.
+ */
+export function toastTopAboveAction(toast: Box, action: Box | undefined, clearOf: Box | undefined, gap = 8): number | undefined {
+  if (!action || action.width === 0 || action.top <= 0) return undefined;
+  const top = Math.floor(action.top - gap - Math.max(toast.height, 1));
+  if (clearOf && top < clearOf.bottom + gap) return undefined;
+  return top;
+}

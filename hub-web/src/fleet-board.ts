@@ -1,4 +1,5 @@
-import { sessionPickerMeta, type SessionPickerEntry } from "./session-selection";
+import { machineInitials } from "./machine-accent";
+import { sessionPickerHeadline, sessionPickerRowMeta, type SessionPickerEntry } from "./session-selection";
 
 /**
  * The fleet board: the canvas with machines paired and no session open. It is
@@ -39,7 +40,7 @@ export interface FleetBoardCallbacks {
 export function fleetBoardSignature(model: FleetBoardModel): string {
   return [
     ...model.machines.map((machine) => `${machine.id}|${machine.label}|${machine.state}|${machine.phase}|${machine.selected ? 1 : 0}|${machine.hubVersion ?? ""}`),
-    ...model.sessions.map((entry) => `${entry.machineId}/${entry.session}|${entry.supervisor ?? ""}|${entry.workerCount}|${entry.status}|${entry.title ?? ""}|${entry.phase ?? ""}|${entry.attentionSeverity ?? ""}|${entry.lastActivity ?? ""}`),
+    ...model.sessions.map((entry) => `${entry.machineId}/${entry.session}|${entry.project ?? ""}|${entry.supervisor ?? ""}|${entry.workerCount}|${entry.status}|${entry.title ?? ""}|${entry.phase ?? ""}|${entry.attentionSeverity ?? ""}|${entry.lastActivity ?? ""}`),
   ].join("~");
 }
 
@@ -60,10 +61,14 @@ function sessionCard(entry: FleetSessionView, callbacks: FleetBoardCallbacks): H
   button.className = `fleet-session${fleetSessionState(entry) === "needs-you" ? " needs-you" : ""}`;
   button.dataset.fleetMachine = entry.machineId;
   button.dataset.fleetSession = entry.session;
-  button.setAttribute("aria-label", `Open ${entry.session} on ${entry.machineLabel}`);
+  // Project first, codename once in the line beneath (journey F1), as the
+  // session picker, the list and the palette read.
+  const headline = sessionPickerHeadline(entry);
+  const codename = entry.project ? entry.supervisor ?? entry.session : undefined;
+  button.setAttribute("aria-label", `Open ${headline}${codename ? `, ${codename}` : ""} on ${entry.machineLabel}`);
   const name = document.createElement("span");
   name.className = "session-name";
-  name.textContent = entry.session;
+  name.textContent = headline;
   button.append(name);
   if (entry.phase) {
     const chip = document.createElement("span");
@@ -79,7 +84,7 @@ function sessionCard(entry: FleetSessionView, callbacks: FleetBoardCallbacks): H
   }
   const meta = document.createElement("small");
   meta.className = "session-meta";
-  meta.textContent = sessionPickerMeta(entry);
+  meta.textContent = sessionPickerRowMeta(entry);
   button.append(meta);
   // A region re-creates this node, so it carries its own handler.
   button.onclick = () => callbacks.open(entry.machineId, entry.session);
@@ -169,8 +174,121 @@ function clockText(timestamp: string | undefined): string {
   return new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
 }
 
-function provenance(model: FleetBoardModel): string {
-  return model.machines.map((machine) => `${machine.label} · ${machine.phase} · Hub ${machine.hubVersion ?? "version not reported"} · catalog ${clockText(machine.catalogUpdatedAt)}`).join(" / ");
+/**
+ * One short line under the figure (journey F2): when the board's catalog was
+ * last refreshed. The per-machine details that used to run on as a paragraph
+ * are the line's hover title, one machine per line.
+ */
+export function fleetProvenance(model: FleetBoardModel): { readonly text: string; readonly details: string } {
+  const refreshed = model.machines.map((machine) => machine.catalogUpdatedAt).filter((value): value is string => Boolean(value && Number.isFinite(Date.parse(value)))).sort().at(-1);
+  return {
+    text: model.machines.length ? (refreshed ? `Last updated ${clockText(refreshed)}` : "Waiting for the first update") : "",
+    details: model.machines.map((machine) => `${machine.label} · ${machine.phase} · Hub ${machine.hubVersion ?? "version not reported"} · updated ${clockText(machine.catalogUpdatedAt)}`).join("\n"),
+  };
+}
+
+function writeProvenance(line: HTMLElement, model: FleetBoardModel): void {
+  const { text, details } = fleetProvenance(model);
+  line.textContent = text;
+  line.title = details;
+}
+
+/** A plot row's label: the project (or trimmed session), and a tag when that label repeats. */
+export interface FleetPlotLabel { name: string; tag?: string }
+
+/**
+ * A twin's whole tag fits the narrow label column beside at least a letter of
+ * the project (cas-ae5e). The narrowest column is 132px at 390 (124px of
+ * content). Beside the project's 2ch minimum and the gap, that leaves about
+ * 105px for "· " and the tag: 14 glyphs of 7.2px. QA round 2 measured 13
+ * characters fitting and 14 clipped, so 12 keeps a margin for wider phone
+ * monospace fonts.
+ */
+export const FLEET_TWIN_TAG_MAX = 12;
+
+/** A machine's own name, letters and digits only: "Atlas" from "Atlas · Linux". */
+function machineName(label: string): string {
+  const name = label.split(/\s+[·•|—–]\s+/u)[0] ?? label;
+  return (name.match(/[\p{L}\p{N}]+/gu) ?? []).join("") || label;
+}
+
+/**
+ * The short machine mark that tells rows of one codename apart (cas-ae5e):
+ * the rail initials ("AT"). When two of those machines share initials (Atlas
+ * and Attic), the shortest prefix of the machine's own name that differs
+ * ("Atl" / "Att"), at most four letters. Failing that, the initials and an
+ * ordinal in label order ("BS1" / "BS2"). It is never the full machine label,
+ * which the narrow label column cannot hold (cas-ae5e QA F01).
+ */
+function machineMarks(entries: readonly FleetSessionView[]): Map<FleetSessionView, string> {
+  const marks = new Map<FleetSessionView, string>();
+  const byInitials = new Map<string, FleetSessionView[]>();
+  for (const entry of entries) {
+    const initials = machineInitials(entry.machineLabel);
+    byInitials.set(initials, [...(byInitials.get(initials) ?? []), entry]);
+  }
+  for (const [initials, clash] of byInitials) {
+    if (clash.length === 1) { marks.set(clash[0]!, initials); continue; }
+    let settled = false;
+    for (let length = 3; length <= 4 && !settled; length += 1) {
+      const prefixes = clash.map((entry) => Array.from(machineName(entry.machineLabel)).slice(0, length).join(""));
+      if (new Set(prefixes.map((prefix) => prefix.toLocaleLowerCase())).size === clash.length) {
+        clash.forEach((entry, index) => marks.set(entry, prefixes[index]!));
+        settled = true;
+      }
+    }
+    if (!settled) {
+      [...clash].sort((a, b) => a.machineLabel.localeCompare(b.machineLabel) || a.machineId.localeCompare(b.machineId))
+        .forEach((entry, index) => marks.set(entry, `${initials}${index + 1}`));
+    }
+  }
+  return marks;
+}
+
+/**
+ * Plot row labels lead with the project (journey F1). When several rows share
+ * a project, each also carries the shortest tail of its codename that tells
+ * the codenames apart ("pelican-9", "otter-5"): at least its last two words
+ * (cas-598e QA F01). The same codename running on two machines adds a short
+ * machine mark (machineMarks: "otter-5 · AT", or "otter-5 · Atl" when initials
+ * collide). That tag is capped at FLEET_TWIN_TAG_MAX characters, trimming the
+ * codename from the left ("…er-5 · Atl"), so it always fits the narrow label
+ * column (cas-ae5e). Keyed by machine/session.
+ */
+export function fleetPlotLabels(sessions: readonly FleetSessionView[]): Map<string, FleetPlotLabel> {
+  const key = (entry: FleetSessionView) => `${entry.machineId}/${entry.session}`;
+  const name = (entry: FleetSessionView) => entry.project ?? entry.session.split("-").slice(-3).join("-");
+  const codename = (entry: FleetSessionView) => entry.supervisor ?? entry.session;
+  const labels = new Map<string, FleetPlotLabel>();
+  const groups = new Map<string, FleetSessionView[]>();
+  for (const entry of sessions) groups.set(name(entry), [...(groups.get(name(entry)) ?? []), entry]);
+  for (const [label, group] of groups) {
+    if (group.length === 1) { labels.set(key(group[0]!), { name: label }); continue; }
+    // Tails are chosen over the distinct codenames, so a twin on another
+    // machine does not lengthen every other row's tag.
+    const distinct = [...new Set(group.map(codename))].map((value) => value.split("-"));
+    const longest = Math.max(...distinct.map((words) => words.length));
+    let length = longest;
+    for (let candidate = 2; candidate < longest; candidate += 1) {
+      if (new Set(distinct.map((words) => words.slice(-candidate).join("-"))).size === distinct.length) { length = candidate; break; }
+    }
+    const tail = (entry: FleetSessionView) => codename(entry).split("-").slice(-length).join("-");
+    const twinSets = new Map<string, FleetSessionView[]>();
+    for (const entry of group) twinSets.set(codename(entry), [...(twinSets.get(codename(entry)) ?? []), entry]);
+    const tags = new Map<FleetSessionView, string>();
+    for (const twins of twinSets.values()) {
+      if (twins.length === 1) { tags.set(twins[0]!, tail(twins[0]!)); continue; }
+      const marks = machineMarks(twins);
+      for (const entry of twins) {
+        const mark = marks.get(entry)!;
+        const room = FLEET_TWIN_TAG_MAX - mark.length - " · ".length;
+        const short = tail(entry).length <= room ? tail(entry) : `…${tail(entry).slice(-(room - 1))}`;
+        tags.set(entry, `${short} · ${mark}`);
+      }
+    }
+    for (const entry of group) labels.set(key(entry), { name: label, tag: tags.get(entry)! });
+  }
+  return labels;
 }
 
 function fleetFigure(model: FleetBoardModel): HTMLElement {
@@ -178,7 +296,9 @@ function fleetFigure(model: FleetBoardModel): HTMLElement {
   figure.className = "fleet-figure";
   figure.setAttribute("aria-label", "Sessions on the work-state track");
   const table = document.createElement("table");
-  table.className = "fleet-plot";
+  // Journey F2: the Working column is shaded only when a session is in it.
+  const anyWorking = model.sessions.some((entry) => fleetSessionState(entry) === "working");
+  table.className = `fleet-plot${anyWorking ? " has-working" : ""}`;
   const head = table.createTHead().insertRow();
   for (const [index, label] of ["Session", ...TRACK.map((state) => STATE_LABEL[state])].entries()) {
     const cell = document.createElement("th");
@@ -193,6 +313,7 @@ function fleetFigure(model: FleetBoardModel): HTMLElement {
     head.append(cell);
   }
   const body = table.createTBody();
+  const labels = fleetPlotLabels(model.sessions);
   for (const entry of orderedSessions(model)) {
     const state = fleetSessionState(entry);
     const row = body.insertRow();
@@ -201,9 +322,21 @@ function fleetFigure(model: FleetBoardModel): HTMLElement {
     row.dataset.state = state;
     const name = document.createElement("th");
     name.scope = "row";
-    name.title = entry.session;
-    name.setAttribute("aria-label", `${entry.session} on ${entry.machineLabel}`);
-    name.append(textNode("span", "fleet-plot-name", entry.session.split("-").slice(-3).join("-")));
+    // The plot's row labels lead with the project too (journey F1); without
+    // one, the session name, trimmed to its last three words as before.
+    const codename = entry.project ? entry.supervisor ?? entry.session : undefined;
+    name.title = codename ? `${entry.project} · ${codename}` : entry.session;
+    name.setAttribute("aria-label", `${sessionPickerHeadline(entry)}${codename ? `, ${codename}` : ""} on ${entry.machineLabel}`);
+    const label = labels.get(`${entry.machineId}/${entry.session}`)!;
+    const plotName = textNode("span", "fleet-plot-name", "");
+    if (label.tag) {
+      // The project gives way before the tag does, so repeated rows stay apart at any width.
+      plotName.classList.add("tagged");
+      plotName.append(textNode("span", "fleet-plot-project", label.name), textNode("span", "fleet-plot-tag", label.tag));
+    } else {
+      plotName.textContent = label.name;
+    }
+    name.append(plotName);
     row.append(name);
     for (const position of TRACK) {
       const cell = row.insertCell();
@@ -228,7 +361,7 @@ function fleetFigure(model: FleetBoardModel): HTMLElement {
   const legend = textNode("div", "fleet-track-legend", "");
   legend.setAttribute("aria-hidden", "true");
   TRACK.forEach((state, index) => legend.append(textNode("span", "", `${index + 1} ${STATE_LABEL[state]}`)));
-  figure.append(scroll, legend, textNode("figcaption", "fleet-figure-caption", "One dot per session. Ringed: needs you. Shaded: working."));
+  figure.append(scroll, legend, textNode("figcaption", "fleet-figure-caption", `One dot per session. Ringed: needs you.${anyWorking ? " Shaded: working." : ""}`));
   return figure;
 }
 
@@ -241,14 +374,14 @@ export function renderFleetBoardInto(board: HTMLElement, model: FleetBoardModel,
   const verdict = textNode("h2", "fleet-verdict", fleetVerdict(model));
   verdict.setAttribute("role", "status");
   verdict.setAttribute("aria-live", "polite");
-  const refreshed = model.machines.map((machine) => machine.catalogUpdatedAt).filter((value): value is string => Boolean(value)).sort().at(-1);
-  const time = textNode("time", "fleet-catalog-time", refreshed ? clockText(refreshed) : "Catalog awaiting refresh");
-  if (refreshed) time.setAttribute("datetime", refreshed);
-  header.append(time, verdict);
+  // The refresh time is said once, on the line under the figure (journey F2).
+  header.append(verdict);
   hero.append(header);
   if (model.sessions.length) hero.append(fleetFigure(model));
   else hero.append(textNode("p", "fleet-empty-sessions", model.machines.length ? "Start a Cassy session on a paired machine. It will appear here." : "Pair the machine your sessions run on to see their state here."));
-  board.append(hero, textNode("p", "fleet-provenance", provenance(model)));
+  const provenanceLine = textNode("p", "fleet-provenance", "");
+  writeProvenance(provenanceLine, model);
+  board.append(hero, provenanceLine);
   const ordered = [...model.machines].sort((a, b) => Number(b.selected) - Number(a.selected));
   const ledger = textNode("section", "fleet-evidence", "");
   if (ordered.length) ledger.append(textNode("h3", "fleet-eyebrow", "Session ledger"));
@@ -275,11 +408,8 @@ export class FleetBoardRenderer {
     }
     const signature = fleetBoardSignature(model);
     if (board === this.board && board.isConnected && signature === this.signature && board.childElementCount > 0) {
-      const source = board.querySelector(".fleet-provenance");
-      if (source) source.textContent = provenance(model);
-      const refreshed = model.machines.map((machine) => machine.catalogUpdatedAt).filter((value): value is string => Boolean(value)).sort().at(-1);
-      const time = board.querySelector(".fleet-catalog-time");
-      if (time && refreshed) { time.textContent = clockText(refreshed); time.setAttribute("datetime", refreshed); }
+      const source = board.querySelector<HTMLElement>(".fleet-provenance");
+      if (source) writeProvenance(source, model);
       return false;
     }
     renderFleetBoardInto(board, model, callbacks);

@@ -108,21 +108,27 @@ export const test = base.extend<{ journey: Journey }>({
  * plus offset) fits inside the nearest clipping ancestor, so no side is cut
  * off into stray bars (cas-b2e4 F03).
  */
-export async function expectWholeFocusRing(field: import("@playwright/test").Locator): Promise<void> {
+export async function expectWholeFocusRing(field: import("@playwright/test").Locator, options: { vertical?: boolean } = {}): Promise<void> {
   await expect(field).toBeFocused();
-  const ring = await field.evaluate((el) => {
+  const ring = await field.evaluate((el, vertical) => {
     const style = getComputedStyle(el);
     const extent = parseFloat(style.outlineWidth) + parseFloat(style.outlineOffset);
     const box = el.getBoundingClientRect();
     let clip = el.parentElement;
-    while (clip && !/auto|scroll|hidden|clip/.test(getComputedStyle(clip).overflowX)) clip = clip.parentElement;
+    while (clip && !/auto|scroll|hidden|clip/.test(getComputedStyle(clip).overflowX + (vertical ? getComputedStyle(clip).overflowY : ""))) clip = clip.parentElement;
     if (!clip) return { outline: style.outlineStyle, fits: true };
     const bounds = clip.getBoundingClientRect();
     const clipStyle = getComputedStyle(clip);
     const left = bounds.left + parseFloat(clipStyle.borderLeftWidth);
     const right = bounds.right - parseFloat(clipStyle.borderRightWidth);
-    return { outline: style.outlineStyle, fits: box.left - extent >= left - 0.5 && box.right + extent <= right + 0.5 };
-  });
+    const top = bounds.top + parseFloat(clipStyle.borderTopWidth);
+    const bottom = bounds.bottom - parseFloat(clipStyle.borderBottomWidth);
+    const across = box.left - extent >= left - 0.5 && box.right + extent <= right + 0.5;
+    // A control that fills a clipping heading (the Terminal view title) loses
+    // its ring top and bottom as well (cas-cf10 QA F01).
+    const down = !vertical || (box.top - extent >= top - 0.5 && box.bottom + extent <= bottom + 0.5);
+    return { outline: style.outlineStyle, fits: across && down };
+  }, options.vertical === true);
   expect(ring, "the focused field shows its whole focus ring").toEqual({ outline: "solid", fits: true });
 }
 

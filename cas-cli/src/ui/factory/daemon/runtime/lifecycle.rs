@@ -1745,6 +1745,7 @@ impl FactoryDaemon {
             lifecycle_redelivery_counts: HashMap::new(),
             inbox_deferred_writes: std::collections::HashMap::new(),
             urgent_wake_probes: HashMap::new(),
+            send_receipts: crate::ui::factory::daemon::runtime::send_dedupe::SendReceipts::default(),
             normal_delivery_probes: HashMap::new(),
             last_pane_output_bytes: HashMap::new(),
             pane_silent_since: HashMap::new(),
@@ -1764,6 +1765,9 @@ impl FactoryDaemon {
 
     /// Run the daemon main loop with TUI rendering
     pub async fn run(&mut self) -> anyhow::Result<()> {
+        // Backstop for every entry path: a gone client must not kill the
+        // daemon (cas-5918). The process entry points set it earlier.
+        crate::server_signals::ignore_sigpipe_for_server();
         // Bind WebSocket listener if not already bound (fork-first and legacy paths
         // set ws_listener=None because they run before the Tokio runtime exists).
         if self.ws_listener.is_none() {

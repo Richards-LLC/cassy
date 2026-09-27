@@ -1855,6 +1855,60 @@ fn proof_targets_scope_fix_command(task: &Task, uncovered: &[String]) -> String 
     )
 }
 
+/// File kinds that are web or documentation content. A delivery made only
+/// of these cannot need a macOS native-command platform proof (cas-b4cc).
+const WEB_ONLY_EXTENSIONS: &[&str] = &[
+    "css", "scss", "sass", "less", "html", "htm", "js", "jsx", "mjs", "cjs", "ts", "tsx", "mts",
+    "cts", "vue", "svelte", "astro", "json", "svg", "png", "jpg", "jpeg", "gif", "webp", "avif",
+    "ico", "woff", "woff2", "md", "mdx", "rst", "adoc", "txt", "snap",
+];
+
+fn is_web_only_path(path: &str) -> bool {
+    let file = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+    file.rsplit_once('.')
+        .is_some_and(|(_, extension)| WEB_ONLY_EXTENSIONS.contains(&extension))
+}
+
+/// cas-b4cc (GH #1023 finding 5): `risk=platform` declared on a delivery
+/// whose every changed path is web or documentation content. cas-7d62, a web
+/// CSS test, was asked for a macOS native-command receipt. The declared risk
+/// is kept; this only says it looks wrong and names the logged supervisor
+/// correction (cas-8d38). `None` when the risk is not platform, the diff is
+/// unknown, or any path could be native.
+pub(crate) fn platform_risk_implausibility(
+    task: &Task,
+    changed_paths: &[String],
+) -> Option<String> {
+    if !task.risk.contains(&TaskRisk::Platform)
+        || changed_paths.is_empty()
+        || !changed_paths.iter().all(|path| is_web_only_path(path))
+    {
+        return None;
+    }
+    let shown = changed_paths
+        .iter()
+        .take(3)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let more = changed_paths.len().saturating_sub(3);
+    Some(format!(
+        "⚠️ PLATFORM RISK LOOKS IMPLAUSIBLE: task {id} declares risk=platform, but every one of its \
+         {count} changed path(s) is web or documentation content ({shown}{more}). A platform proof is a \
+         macOS native-command receipt and does not apply to web-only work. The declared risk stays in \
+         force until a supervisor corrects it: `{supervisor}task action=update id={id} risk=none \
+         proof_scope_fix=true reason=\"web-only delivery; platform risk declared in error\"`.",
+        id = task.id,
+        count = changed_paths.len(),
+        more = if more > 0 {
+            format!(", and {more} more")
+        } else {
+            String::new()
+        },
+        supervisor = crate::mcp::tools::core::guidance::supervisor_prefix(),
+    ))
+}
+
 fn declared_risk_close_gaps(task: &Task, changed_paths: &[String]) -> Vec<String> {
     let mut gaps = Vec::new();
     if task.risk.contains(&TaskRisk::Platform) && !has_platform_proof_note(&task.notes) {
@@ -2024,8 +2078,13 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
              the missing evidence is recorded on the task.",
             id = task.id,
         );
+        // cas-b4cc: lead with the mismatch when the diff is web-only, so the
+        // correction is read before anyone chases a macOS receipt.
+        let implausible = platform_risk_implausibility(task, changed_paths)
+            .map(|warning| format!("{warning}\n\n"))
+            .unwrap_or_default();
         return Err(format!(
-            "TASK CLOSE REJECTED: task {id} declares risk=platform but its platform_proof receipt is incomplete (missing evidence: {missing}). \
+            "{implausible}TASK CLOSE REJECTED: task {id} declares risk=platform but its platform_proof receipt is incomplete (missing evidence: {missing}). \
              Add one with `{caller}task action=notes id={id} note_type=platform_proof notes=\"...\"` containing macOS, a platform command, and a passing result, \
              then retry `{caller}task action=close id={id}`. {correction}",
             id = task.id,
@@ -2306,6 +2365,72 @@ mod risk_proof_tests {
         task.notes = "[2026-09-10] 🧪 PLATFORM_PROOF macOS command: cargo test -p cas --lib; result: PASS\n[2026-09-10] 🧪 LOADED_PROOF whole target under -j16, 3 loops; result: PASS".into();
         validate_risk_close_proofs(&task, &[], std::path::Path::new("."))
             .expect("complete proof notes should pass");
+    }
+
+    fn paths(items: &[&str]) -> Vec<String> {
+        items.iter().map(|item| item.to_string()).collect()
+    }
+
+    /// cas-b4cc (GH #1023 finding 5): cas-7d62, a web CSS test declared
+    /// risk=platform, is told the risk looks wrong and how a supervisor
+    /// corrects it. The risk itself is not downgraded, and the platform proof
+    /// is still owed until that correction.
+    #[test]
+    fn web_only_platform_risk_warns_and_names_the_supervisor_correction_cas_b4cc() {
+        let mut task = Task::new("cas-7d62".into(), "composer spacing test".into());
+        task.risk = vec![TaskRisk::Platform];
+        let web = paths(&[
+            "web/src/composer.css",
+            "web/e2e/composer.spec.ts",
+            "docs/qa/notes.md",
+        ]);
+
+        let error = validate_risk_close_proofs(&task, &web, std::path::Path::new("."))
+            .expect_err("platform proof is still owed until a supervisor corrects the risk");
+        assert!(
+            error.starts_with("⚠️ PLATFORM RISK LOOKS IMPLAUSIBLE: task cas-7d62"),
+            "{error}"
+        );
+        assert!(error.contains("web/src/composer.css"), "{error}");
+        assert!(
+            error.contains("task action=update id=cas-7d62 risk=none proof_scope_fix=true"),
+            "{error}"
+        );
+        assert!(error.contains("TASK CLOSE REJECTED"), "{error}");
+        assert_eq!(task.risk, vec![TaskRisk::Platform], "the declared risk is never downgraded");
+
+        // A satisfied platform proof still closes; the warning is advisory.
+        task.notes = "[2026-09-10] 🧪 PLATFORM_PROOF macOS command: cargo test -p cas --lib; result: PASS".into();
+        validate_risk_close_proofs(&task, &web, std::path::Path::new("."))
+            .expect("a complete receipt still satisfies the declared risk");
+    }
+
+    #[test]
+    fn native_platform_risk_keeps_its_proof_without_the_warning_cas_b4cc() {
+        let mut task = Task::new("cas-native".into(), "macOS keychain".into());
+        task.risk = vec![TaskRisk::Platform];
+        for native in [
+            paths(&["crates/cas-mux/src/pty.rs", "web/src/a.css"]),
+            paths(&["macos/App/KeychainStore.swift"]),
+            paths(&["macos/App/Info.plist"]),
+        ] {
+            assert_eq!(
+                platform_risk_implausibility(&task, &native),
+                None,
+                "{native:?}"
+            );
+            let error = validate_risk_close_proofs(&task, &native, std::path::Path::new("."))
+                .expect_err("native work keeps its platform proof");
+            assert!(error.starts_with("TASK CLOSE REJECTED"), "{error}");
+            assert!(!error.contains("IMPLAUSIBLE"), "{error}");
+        }
+        // Unknown diff, or no platform risk: nothing to say.
+        assert_eq!(platform_risk_implausibility(&task, &[]), None);
+        task.risk = vec![TaskRisk::None];
+        assert_eq!(
+            platform_risk_implausibility(&task, &paths(&["web/src/a.css"])),
+            None
+        );
     }
 
     #[test]
@@ -7638,6 +7763,14 @@ impl CasCore {
                     } else {
                         format!("{}\n\n{}", task.notes, note)
                     };
+                }
+                // cas-b4cc: a deferred platform proof would otherwise surface
+                // only at the supervisor's close. Record the mismatch now, on
+                // the task the supervisor reviews, without touching the risk.
+                if let Some(warning) = platform_risk_implausibility(&task, &changed_paths)
+                    && !task.notes.contains("PLATFORM RISK LOOKS IMPLAUSIBLE")
+                {
+                    task.notes = format!("{}\n\n[{ts}] {warning}", task.notes);
                 }
             }
             if let Err(message) = validate_risk_close_proofs_with_base_and_target_and_cache(

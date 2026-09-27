@@ -138,7 +138,16 @@ let contextProgress = false;
 let contextAttention = 0;
 function syncConversationContext(): void {
   if (hubPresentation !== "conversation") return;
-  const history = selectedMachineId && selectedSession ? conversationHistories.get(sessionKey(selectedMachineId, selectedSession)) : undefined;
+  // With no thread open there is nothing for the rail to hold: the last
+  // thread's progress and attention must not keep it open as an empty column
+  // (journey F15, cas-9225).
+  if (!selectedMachineId || !selectedSession) {
+    contextProgress = false;
+    contextAttention = 0;
+    syncContextRail(document, { history: undefined, progress: false, attention: 0 });
+    return;
+  }
+  const history = conversationHistories.get(sessionKey(selectedMachineId, selectedSession));
   syncContextRail(document, { history, progress: contextProgress, attention: contextAttention });
 }
 let workingRefresh: ReturnType<typeof setTimeout> | undefined;

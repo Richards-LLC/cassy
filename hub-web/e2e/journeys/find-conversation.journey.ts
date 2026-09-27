@@ -28,9 +28,28 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(filter).toBeFocused();
   };
 
+  // The no-selection canvas: no context column (not even the folded strip),
+  // the welcome centred in the canvas (journey F15, cas-9225).
+  const welcomeLayout = () => page.evaluate(() => {
+    const shell = document.querySelector<HTMLElement>(".conversation-shell")!;
+    const main = document.querySelector<HTMLElement>(".conversation-main")!.getBoundingClientRect();
+    const welcome = document.querySelector<HTMLElement>(".conversation-welcome h2")!.getBoundingClientRect();
+    const rail = document.querySelector<HTMLElement>(".conversation-context");
+    return {
+      contextOpen: shell.classList.contains("context-open"),
+      railWidth: rail ? Math.round(rail.getBoundingClientRect().width) : 0,
+      mainRight: Math.round(main.right),
+      welcomeLeft: Math.round(welcome.left),
+      centred: Math.abs((welcome.left + welcome.right) / 2 - (main.left + main.right) / 2) <= 1,
+    };
+  });
+  let firstWelcome: Awaited<ReturnType<typeof welcomeLayout>> | undefined;
+
   await journey.stage("See every machine's supervisors in one list", async () => {
     await journey.open();
     await expect(list.getByRole("button")).toHaveCount(3);
+    firstWelcome = await welcomeLayout();
+    expect(firstWelcome).toMatchObject({ contextOpen: false, railWidth: 0, mainRight: 1280, centred: true });
     // Machines list in id order (atlas, forge, studio). Rows are titled by project, then machine; the codename is tertiary.
     await expect(list.locator(".conversation-project")).toHaveText(["cas-src", "lighthouse", "gabber-studio"]);
     await expect(list.locator(".conversation-machine")).toHaveText(["Atlas", "Forge build box with an unusual hostname", "Studio Mac"]);
@@ -142,6 +161,11 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     // Receipt beside the stage screenshots: the 390 px list with the long name.
     await page.screenshot({ path: join(RECEIPTS, journey.id, "long-machine-phone.png") });
     await page.setViewportSize({ width: 1280, height: 720 });
+    // Back at desktop width with nothing open, after a thread had filled the
+    // context rail: the canvas is the first load's, not an empty 240px column
+    // beside a shifted welcome (journey F15).
+    await expect(page.locator(".conversation-welcome")).toBeVisible();
+    expect(await welcomeLayout()).toEqual(firstWelcome);
   });
 
   await journey.stage("Jump to a supervisor by name", async () => {

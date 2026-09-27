@@ -179,6 +179,21 @@ export class HubDouble {
 
   private reachable(machineId: string): boolean { return !this.outages.has(machineId); }
 
+  private readonly proofRefusals = new Map<string, { count: number; reason: string; retryable: boolean }>();
+  /** Authenticated HTTP requests the double refused with a reasoned 401 (cas-d636). */
+  readonly refusedProofs: Array<{ machine: string; path: string; reason: string }> = [];
+
+  /**
+   * Refuse a machine's next `count` authenticated HTTP requests with the real
+   * hub's reasoned 401 (cas-d636): by default `stale_proof`, a proof signed
+   * before the phone slept and sent when it woke.
+   */
+  refuseProofs(machineId: string, count: number, reason = "stale_proof", retryable = true): void {
+    this.proofRefusals.set(machineId, { count, reason, retryable });
+  }
+
+  proofRefusalsLeft(machineId: string): number { return this.proofRefusals.get(machineId)?.count ?? 0; }
+
   /** Seed paired machines in IndexedDB exactly as a completed pairing stores them. */
   async seedPaired(): Promise<void> {
     const machines = (this.options.paired ?? []).map((id) => ({ id, label: this.machine(id).label }));
@@ -328,6 +343,16 @@ export class HubDouble {
     const method = route.request().method();
     if (!this.reachable(machineId)) return route.abort("internetdisconnected");
     if (path === "/v1/health") return route.fulfill({ json: { ok: true } });
+    const refusal = this.proofRefusals.get(machineId);
+    if (refusal && refusal.count > 0 && route.request().headers()["dpop"]) {
+      refusal.count -= 1;
+      this.refusedProofs.push({ machine: machineId, path, reason: refusal.reason });
+      return route.fulfill({
+        status: 401,
+        headers: { "www-authenticate": `DPoP error="${refusal.retryable ? "invalid_dpop_proof" : "invalid_token"}", error_description="${refusal.reason}"` },
+        json: { error: "unauthorized", reason: refusal.reason, retryable: refusal.retryable, server_time: Math.floor(Date.now() / 1000) },
+      });
+    }
     if (path === "/v1/machine") {
       const capabilities = ["session_index", "daemon_attach", "machine_events", ...(this.options.multiplex ? ["machine_multiplex_v2"] : [])];
       return route.fulfill({ json: { schema_version: 1, version: "journey-double", capabilities } });

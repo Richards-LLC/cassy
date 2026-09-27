@@ -5,8 +5,8 @@ import { ATLAS, STUDIO, PELICAN } from "./world";
 // machine protocol (one socket, health ping/pong) so a half-open socket, the
 // failure a network switch actually leaves, can be reproduced.
 test("HUB-J12 switch networks without losing the conversation", async ({ page, journey }) => {
-  // Four transitions, one of them a 25 s outage with four missed heartbeats.
-  test.setTimeout(180_000);
+  // Five transitions, one of them a 25 s outage with four missed heartbeats.
+  test.setTimeout(210_000);
   const hub = await journey.hub({ machines: [ATLAS, STUDIO], paired: ["atlas", "studio"], multiplex: true });
   const composer = page.getByRole("textbox", { name: "Your message" });
   const send = page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true });
@@ -110,5 +110,22 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
     await sendNow("After waking");
     expect(await until(() => sentTimes("After waking"), (n) => n >= 1, 5_000)).toBe(1);
     expect(sentTimes("Right after waking"), "sent once").toBe(1);
+  });
+
+  await journey.stage("A proof refused after a switch retries on its own", async () => {
+    // cas-d636 (soundwave, 22:58Z): after the phone slept through a network
+    // switch its first proofs reached the hub stale and were refused, and
+    // every 401 read as a revoked pairing, so Commander went dark. The first
+    // is now retried with a fresh proof; one refused twice backs off like a
+    // lost network. It recovers by itself and never asks to re-pair.
+    await hub.down("atlas", { sockets: "close" });
+    hub.refuseProofs("atlas", 3);
+    await hub.up("atlas");
+    await expect.poll(() => hub.proofRefusalsLeft("atlas"), { timeout: 20_000, message: "the refused proofs were exercised" }).toBe(0);
+    await expect(header).toHaveText(" · Live", { timeout: 20_000 });
+    expect(hub.refusedProofs.every((refusal) => refusal.reason === "stale_proof")).toBe(true);
+    await expect(page.getByText(/re-pair|needs pairing|no longer paired|was revoked/i)).toHaveCount(0);
+    await sendNow("After a refused proof");
+    expect(await until(() => sentTimes("After a refused proof"), (n) => n >= 1, 5_000)).toBe(1);
   });
 });

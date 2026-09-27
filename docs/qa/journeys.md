@@ -368,6 +368,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 3. Tailscale goes off, then on again — no browser event says so; the dead socket is noticed, everything says Reconnecting, a message written meanwhile waits in the thread; within 15 s of Tailscale returning it is Live again without a reload, and the waiting message goes out once and is delivered
 4. Wi-Fi hands over to cellular — going offline says Reconnecting at once; a message written meanwhile waits; coming online reconnects within 5 s and sends it once
 5. The page wakes on a half-open socket — waking checks the socket and replaces it within seconds, well before the heartbeat would notice; a message then goes out once
+6. A proof refused after a switch retries on its own — the hub refuses the first proofs after a switch as stale (a 401 that names its reason); they are retried with a fresh proof, and a proof refused twice backs off like a lost network; it is Live again by itself, a message goes out once, and nothing asks to re-pair. Only a definitive refusal (revoked, unknown key) shows re-pair
 
 **Expected experience**
 

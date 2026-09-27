@@ -124,15 +124,18 @@ impl CasCore {
             return None;
         }
         let implementer = task.assignee.as_deref()?;
-        let branch = format!("factory/{implementer}");
-        let changed = match changed_paths_for_delivery(repo, parent_branch, &branch) {
+        let branch = super::close_ops::close_measured_factory_branch(repo, task, implementer);
+        // The close gate has already selected this task's delivery tip. A
+        // worker's older lane may contain unrelated UI changes (GH #1040).
+        let delivery_ref = head.unwrap_or(&branch);
+        let changed = match changed_paths_for_delivery(repo, parent_branch, delivery_ref) {
             Ok(paths) => Some(paths),
             Err(error) => {
                 tracing::warn!(task_id = %task.id, error = %error, "cas-619f: delivery diff unavailable; eligibility uses the demo_statement only");
                 None
             }
         };
-        self.independent_qa_for_paths(task, repo, parent_branch, head, changed, None)
+        self.independent_qa_for_paths(task, repo, parent_branch, &branch, head, changed, None)
     }
 
     /// Shared tail of the park and the close backstop: decide eligibility
@@ -146,6 +149,7 @@ impl CasCore {
         task: &Task,
         repo: &Path,
         parent_branch: &str,
+        branch: &str,
         head: Option<&str>,
         changed: Option<Vec<String>>,
         merged_into: Option<&str>,
@@ -153,7 +157,6 @@ impl CasCore {
         let config = crate::config::Config::load(&self.cas_root).ok()?;
         let qa = config.qa();
         let implementer = task.assignee.as_deref()?;
-        let branch = format!("factory/{implementer}");
         let journeys = changed
             .as_deref()
             .map(|paths| crate::qa_pass::catalog_journeys_for(repo, paths))
@@ -186,7 +189,7 @@ impl CasCore {
         let new = NewQaPass {
             task_id: &task.id,
             implementer_agent_id: implementer,
-            branch: &branch,
+            branch,
             bound_head: head,
             deadline_at: now + chrono::Duration::minutes(i64::from(qa.pass_timeout_mins.max(1))),
             max_rounds: qa.max_rounds,
@@ -550,6 +553,7 @@ impl CasCore {
                 task,
                 repo,
                 target_branch,
+                &branch,
                 Some(&head),
                 changed,
                 Some(target_branch),

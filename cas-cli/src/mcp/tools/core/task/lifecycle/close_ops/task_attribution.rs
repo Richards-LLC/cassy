@@ -51,6 +51,7 @@ fn task_delivery_ranges(
     if !is_safe_git_refname(parent) {
         return None;
     }
+    let historical_receipt = tip.is_some() && window.supervisor_override_reason.is_some();
     let target = preferred_diff_target_ref(repo, parent);
     let tip = tip.unwrap_or("HEAD");
     let base = git_text(repo, &["merge-base", tip, &target])?;
@@ -67,7 +68,10 @@ fn task_delivery_ranges(
         "--reverse".into(),
         "--format=%H%x1f%P%x1f%ct%x1f%B%x1e".into(),
     ];
-    if let Some(since) = task_commit_receipt_since(window.task_floor) {
+    // An explicit supervisor override may adopt a delivery made before the
+    // task existed. Keep that history visible when an identified receipt is
+    // supplied; the receipt itself is still validated by the close gates.
+    if !historical_receipt && let Some(since) = task_commit_receipt_since(window.task_floor) {
         history_args.push(format!("--since-as-filter={since}"));
     }
     history_args.push(tip.into());
@@ -92,7 +96,8 @@ fn task_delivery_ranges(
             }
             let sha = fields[0].to_string();
             let message = fields[3];
-            let owned = window.identity.matches_known_commit(&sha)
+            let owned = (historical_receipt && sha == tip)
+                || window.identity.matches_known_commit(&sha)
                 || window
                     .identity
                     .task_id
@@ -131,7 +136,8 @@ fn task_delivery_ranges(
             !c.parent.is_empty()
                 && !c.foreign
                 && (c.owned || unmerged.contains(&c.sha))
-                && in_work_window(window, c.epoch, c.owned)
+                && (in_work_window(window, c.epoch, c.owned)
+                    || (historical_receipt && c.owned))
         })
         .collect();
     // The end of a delivery is an upper boundary, not its only commit.
@@ -148,7 +154,7 @@ fn task_delivery_ranges(
             if previous.parent.is_empty()
                 || previous.foreign
                 || previous.merge
-                || previous.epoch < floor
+                || (!historical_receipt && previous.epoch < floor)
             {
                 break;
             }

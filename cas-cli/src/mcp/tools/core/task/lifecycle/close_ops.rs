@@ -7448,7 +7448,24 @@ impl CasCore {
         // `shared_checkout_has_reviewable_changes` for the exact fallbacks
         // (code tasks with no no-code declaration, and unknowable git state,
         // keep the previous signal).
-        let effective_has_reviewable = task.execution_note.as_deref() == Some("value-only")
+        // A supervisor-adopted historical receipt may predate the task floor.
+        // The ordinary work-window probe intentionally omits it; the
+        // receipt-scoped paths must still trigger review and QA on close.
+        let receipt_has_reviewable = req.commit_receipt.as_deref().is_some_and(|receipt| {
+            commit_receipt_window.as_ref().is_some_and(|window| {
+                task_attribution::paths(
+                    worker_worktree_path
+                        .as_deref()
+                        .unwrap_or(close_project_root.as_path()),
+                    &resolved_parent_branch,
+                    window,
+                    Some(receipt),
+                )
+                .is_some_and(|paths| paths.iter().any(|path| is_reviewable_path(path)))
+            })
+        });
+        let effective_has_reviewable = receipt_has_reviewable
+            || task.execution_note.as_deref() == Some("value-only")
             || if let Some(worker_wt) = worker_worktree_path.as_ref() {
                 commit_receipt_window
                     .as_ref()
@@ -10326,14 +10343,11 @@ fn delivery_content_anchor_at_close<'a>(
     parent_branch: &str,
     validated_receipt: Option<&'a str>,
 ) -> &'a str {
-    // GH #846: a supervisor merge can advance the worker's mutable factory
-    // ref to the target merge commit before the worker retries close. A
-    // validated non-merge commit receipt is durable delivery evidence and is
-    // the narrowest content anchor in that shape; the merge tip's
-    // first-parent history does not contain the worker commit. Do not accept
-    // an arbitrary receipt here: callers provide this only after the normal
-    // receipt validator has proved its topology, attribution, diff, and
-    // target content predicates.
+    // GH #895 / GH #846: a target-sync merge can advance the factory tip
+    // without changing the delivered file; a supervisor merge can later
+    // advance that mutable ref again. The validated non-merge receipt is the
+    // narrowest durable content anchor. Do not accept an arbitrary receipt:
+    // callers first prove its topology, attribution, diff, and target content.
     if let Some(receipt) = validated_receipt
         && git_commit_parent_count(repo_path, receipt) < 2
         && commit_is_merged_into_parent(repo_path, receipt, parent_branch)
@@ -11144,6 +11158,26 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
         )
     });
     if attributable == Some(0) {
+        // GH #1028: a supervisor can attach work that was committed before
+        // task creation. With no receipt there is no way to distinguish that
+        // delivery from old lane residue. Require an explicit commit identity
+        // before an override can dismiss the unmerged branch as unrelated.
+        if attribution
+            .window
+            .is_some_and(|window| window.supervisor_override_reason.is_some())
+            && attribution.receipt.is_none()
+            && task.execution_note.as_deref() != Some("no-code")
+        {
+            return MergeStateGateOutcome::Reject(format!(
+                "⚠️ MERGE REQUIRED\n\nTask {} has {stranded} unmerged commit(s) on {factory_branch}, \
+                 but none can be attributed to its work window. A supervisor override \
+                 cannot classify pre-task delivery as unrelated residue without a \
+                 commit_receipt. Retry with commit_receipt=<delivery-tip-sha> so the \
+                 delivery is checked for merge and QA evidence, or record explicit \
+                 no-code intent with its external proof.",
+                task.id
+            ));
+        }
         return MergeStateGateOutcome::ProceedWithNote(format!(
             "decision: merge-state guard cleared — no commit on {factory_branch} is \
              attributable to this task's work cycle (basis: {}). The branch still \
@@ -21538,6 +21572,38 @@ mod merge_state_gate_tests {
         );
     }
 
+    #[test]
+    fn qa_paths_use_task_tip_not_older_worker_lane_gh_1040() {
+        let (dir, _bare) = handoff_repo();
+        let repo = dir.path();
+        let task = worker_task("worker");
+        git(repo, &["checkout", "-q", "factory/worker"]);
+        std::fs::create_dir_all(repo.join("web/src/components")).unwrap();
+        std::fs::write(repo.join("web/src/components/EntryBox.tsx"), "export default null;\n").unwrap();
+        git(repo, &["add", "web/src/components/EntryBox.tsx"]);
+        git(repo, &["commit", "-q", "-m", "older UI task"]);
+        let task_branch = format!("factory/worker-{}", task.id);
+        git(repo, &["checkout", "-q", "-b", &task_branch, "main"]);
+        std::fs::write(repo.join("next.py"), "print('next')\n").unwrap();
+        git(repo, &["add", "next.py"]);
+        git(repo, &["commit", "-q", "-m", "next task"]);
+        let head = rev_parse_local(repo, "HEAD");
+
+        assert_eq!(close_measured_factory_branch(repo, &task, "worker"), task_branch);
+        let paths = crate::qa_pass::changed_paths_for_delivery(repo, "main", &head).unwrap();
+        assert_eq!(paths, vec!["next.py"]);
+        assert!(
+            !crate::qa_pass::user_facing_reasons(
+                &task,
+                &crate::config::QaConfig::default(),
+                Some(&paths),
+                &[],
+            )
+            .is_eligible(),
+            "the older lane's EntryBox.tsx must not dispatch QA for this Python delivery",
+        );
+    }
+
     /// Without a per-task branch the worker's own branch is measured, as
     /// before.
     #[test]
@@ -21937,6 +22003,82 @@ mod merge_state_gate_tests {
                 panic!("zero task-attributable commits must not trip the guard, got {other:?}")
             }
         }
+    }
+
+    /// GH #1028: an override cannot silently discard a pre-task delivery as
+    /// lane residue. A receipt identifies the historical tip for the normal
+    /// merge gate, and after integration it supplies the QA path attribution.
+    #[test]
+    fn supervisor_override_requires_receipt_for_pre_task_delivery_gh_1028() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        commit_file_at(p, "delivery.rs", "// delivered\n", "2020-01-01T00:00:00Z");
+        let receipt = head_sha(p);
+        let task = worker_task("worker");
+        let mut req = base_req(&task.id);
+        req.supervisor_override = Some(true);
+        req.reason = Some("adopt historical delivery".into());
+        let mut window = window_at(1_700_000_000, "latest task lease claim/transfer");
+        window.supervisor_override_reason = req.reason.clone();
+        window.identity = task_commit_identity(&task, None);
+
+        let close_gate = |request: &TaskCloseRequest, window: &TaskCommitReceiptWindow| {
+            run_factory_branch_merge_gate_with_attribution(
+                &task,
+                request,
+                "main",
+                p,
+                TaskCommitAttribution {
+                    receipt: request.commit_receipt.as_deref(),
+                    window: Some(window),
+                },
+            )
+        };
+        match close_gate(&req, &window) {
+            MergeStateGateOutcome::Reject(message) => {
+                assert!(message.contains("MERGE REQUIRED"), "{message}");
+                assert!(message.contains("commit_receipt"), "{message}");
+            }
+            other => panic!("historical delivery closed without receipt: {other:?}"),
+        }
+
+        let mut test_first_task = task.clone();
+        test_first_task.execution_note = Some("test-first".into());
+        match run_factory_branch_merge_gate_with_attribution(
+            &test_first_task,
+            &req,
+            "main",
+            p,
+            TaskCommitAttribution {
+                receipt: None,
+                window: Some(&window),
+            },
+        ) {
+            MergeStateGateOutcome::Reject(message) => {
+                assert!(message.contains("MERGE REQUIRED"), "{message}");
+                assert!(message.contains("commit_receipt"), "{message}");
+            }
+            other => panic!("test-first historical delivery closed without receipt: {other:?}"),
+        }
+
+        req.commit_receipt = Some(receipt.clone());
+        window.identity.known_commits.push(receipt.clone());
+        match close_gate(&req, &window) {
+            MergeStateGateOutcome::Reject(message) => {
+                assert!(message.contains("MERGE REQUIRED"), "{message}");
+            }
+            other => panic!("unmerged historical receipt closed: {other:?}"),
+        }
+
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/worker", "-m", "merge delivery"]);
+        git(p, &["checkout", "-q", "factory/worker"]);
+        assert!(matches!(close_gate(&req, &window), MergeStateGateOutcome::Proceed));
+        assert!(
+            task_attribution::paths(p, "main", &window, Some(&receipt))
+                .is_some_and(|paths| paths.iter().any(|path| path == "delivery.rs")),
+            "QA must inspect the historical delivery path after merge"
+        );
     }
 
     /// The scoping must not become a bypass: commits made inside the task's
@@ -23355,6 +23497,70 @@ mod merge_state_gate_tests {
             ),
             "a target-sync merge tip must be proven from task content commits"
         );
+    }
+
+    /// GH #895: GitHub updates a worker branch by merging the target into it,
+    /// then the target accepts the PR and an unrelated commit. The receipt
+    /// names the worker's last content commit, not the target-sync merge tip.
+    #[test]
+    fn receipt_survives_target_sync_merge_and_later_unrelated_target_commit_gh895() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let upload = "apps/frontend/app/src/composables/useUpload.ts";
+        std::fs::create_dir_all(p.join("apps/frontend/app/src/composables")).unwrap();
+        std::fs::write(p.join(upload), "export const upload = 1;\n").unwrap();
+        git(p, &["add", upload]);
+        git(p, &["commit", "-q", "-m", "feat(cas-test1): add upload"]);
+        std::fs::write(p.join(upload), "export const upload = 2;\n").unwrap();
+        git(p, &["add", upload]);
+        git(p, &["commit", "-q", "-m", "fix(cas-test1): finish upload"]);
+        let receipt = rev_parse_local(p, "HEAD");
+
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::write(p.join("en.json"), "{}\n").unwrap();
+        git(p, &["add", "en.json"]);
+        git(p, &["commit", "-q", "-m", "advance target for CI"]);
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git(p, &["merge", "-q", "--no-ff", "main", "-m", "update worker branch"]);
+        let merge_tip = rev_parse_local(p, "HEAD");
+        assert!(
+            git_command(p, &["diff", "--quiet", &format!("{merge_tip}^1"), &merge_tip, "--", upload])
+                .status()
+                .unwrap()
+                .success(),
+            "target-sync merge must not itself change the delivery path"
+        );
+
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/worker", "-m", "accept delivery"]);
+        std::fs::write(p.join("en.json"), "{\"later\":true}\n").unwrap();
+        git(p, &["add", "en.json"]);
+        git(p, &["commit", "-q", "-m", "unrelated locale edit"]);
+
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(merge_tip.clone());
+        let mut req = base_req(&task.id);
+        req.commit_receipt = Some(receipt.clone());
+        let window = window_at(0, "GH #895 receipt regression");
+        assert!(validate_task_commit_receipt(p, &receipt, "main", &window).is_ok());
+        assert_eq!(
+            delivery_content_anchor_at_close(p, &merge_tip, "factory/worker", "main", Some(&receipt)),
+            receipt
+        );
+        assert!(matches!(
+            run_factory_branch_merge_gate_with_attribution(
+                &task,
+                &req,
+                "main",
+                p,
+                TaskCommitAttribution {
+                    receipt: Some(&receipt),
+                    window: Some(&window),
+                },
+            ),
+            MergeStateGateOutcome::Proceed
+        ));
     }
 
     /// GH #840: a worker's own conflict-resolution merge can intentionally

@@ -4399,11 +4399,11 @@ mod tests {
 
     #[test]
     fn preserved_merge_receipt_names_shutdown_lifetime_gh_1035() {
-        let note = worktree_merge_cleanup_note(false);
+        let note = super::worktree_merge_cleanup_note(false);
         assert!(note.contains("preserved for this merge"));
         assert!(note.contains("shutdown_workers may remove it"));
         assert!(note.contains("clean and all tasks are terminal"));
-        assert!(worktree_merge_cleanup_note(true).contains("Worktree removed"));
+        assert!(super::worktree_merge_cleanup_note(true).contains("Worktree removed"));
     }
 
     #[test]

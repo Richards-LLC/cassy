@@ -169,8 +169,23 @@ function clockText(timestamp: string | undefined): string {
   return new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
 }
 
-function provenance(model: FleetBoardModel): string {
-  return model.machines.map((machine) => `${machine.label} · ${machine.phase} · Hub ${machine.hubVersion ?? "version not reported"} · catalog ${clockText(machine.catalogUpdatedAt)}`).join(" / ");
+/**
+ * One short line under the figure (journey F2): when the board's catalog was
+ * last refreshed. The per-machine details that used to run on as a paragraph
+ * are the line's hover title, one machine per line.
+ */
+export function fleetProvenance(model: FleetBoardModel): { readonly text: string; readonly details: string } {
+  const refreshed = model.machines.map((machine) => machine.catalogUpdatedAt).filter((value): value is string => Boolean(value && Number.isFinite(Date.parse(value)))).sort().at(-1);
+  return {
+    text: model.machines.length ? (refreshed ? `Last updated ${clockText(refreshed)}` : "Waiting for the first update") : "",
+    details: model.machines.map((machine) => `${machine.label} · ${machine.phase} · Hub ${machine.hubVersion ?? "version not reported"} · updated ${clockText(machine.catalogUpdatedAt)}`).join("\n"),
+  };
+}
+
+function writeProvenance(line: HTMLElement, model: FleetBoardModel): void {
+  const { text, details } = fleetProvenance(model);
+  line.textContent = text;
+  line.title = details;
 }
 
 function fleetFigure(model: FleetBoardModel): HTMLElement {
@@ -178,7 +193,9 @@ function fleetFigure(model: FleetBoardModel): HTMLElement {
   figure.className = "fleet-figure";
   figure.setAttribute("aria-label", "Sessions on the work-state track");
   const table = document.createElement("table");
-  table.className = "fleet-plot";
+  // Journey F2: the Working column is shaded only when a session is in it.
+  const anyWorking = model.sessions.some((entry) => fleetSessionState(entry) === "working");
+  table.className = `fleet-plot${anyWorking ? " has-working" : ""}`;
   const head = table.createTHead().insertRow();
   for (const [index, label] of ["Session", ...TRACK.map((state) => STATE_LABEL[state])].entries()) {
     const cell = document.createElement("th");
@@ -228,7 +245,7 @@ function fleetFigure(model: FleetBoardModel): HTMLElement {
   const legend = textNode("div", "fleet-track-legend", "");
   legend.setAttribute("aria-hidden", "true");
   TRACK.forEach((state, index) => legend.append(textNode("span", "", `${index + 1} ${STATE_LABEL[state]}`)));
-  figure.append(scroll, legend, textNode("figcaption", "fleet-figure-caption", "One dot per session. Ringed: needs you. Shaded: working."));
+  figure.append(scroll, legend, textNode("figcaption", "fleet-figure-caption", `One dot per session. Ringed: needs you.${anyWorking ? " Shaded: working." : ""}`));
   return figure;
 }
 
@@ -241,14 +258,14 @@ export function renderFleetBoardInto(board: HTMLElement, model: FleetBoardModel,
   const verdict = textNode("h2", "fleet-verdict", fleetVerdict(model));
   verdict.setAttribute("role", "status");
   verdict.setAttribute("aria-live", "polite");
-  const refreshed = model.machines.map((machine) => machine.catalogUpdatedAt).filter((value): value is string => Boolean(value)).sort().at(-1);
-  const time = textNode("time", "fleet-catalog-time", refreshed ? clockText(refreshed) : "Catalog awaiting refresh");
-  if (refreshed) time.setAttribute("datetime", refreshed);
-  header.append(time, verdict);
+  // The refresh time is said once, on the line under the figure (journey F2).
+  header.append(verdict);
   hero.append(header);
   if (model.sessions.length) hero.append(fleetFigure(model));
   else hero.append(textNode("p", "fleet-empty-sessions", model.machines.length ? "Start a Cassy session on a paired machine. It will appear here." : "Pair the machine your sessions run on to see their state here."));
-  board.append(hero, textNode("p", "fleet-provenance", provenance(model)));
+  const provenanceLine = textNode("p", "fleet-provenance", "");
+  writeProvenance(provenanceLine, model);
+  board.append(hero, provenanceLine);
   const ordered = [...model.machines].sort((a, b) => Number(b.selected) - Number(a.selected));
   const ledger = textNode("section", "fleet-evidence", "");
   if (ordered.length) ledger.append(textNode("h3", "fleet-eyebrow", "Session ledger"));
@@ -275,11 +292,8 @@ export class FleetBoardRenderer {
     }
     const signature = fleetBoardSignature(model);
     if (board === this.board && board.isConnected && signature === this.signature && board.childElementCount > 0) {
-      const source = board.querySelector(".fleet-provenance");
-      if (source) source.textContent = provenance(model);
-      const refreshed = model.machines.map((machine) => machine.catalogUpdatedAt).filter((value): value is string => Boolean(value)).sort().at(-1);
-      const time = board.querySelector(".fleet-catalog-time");
-      if (time && refreshed) { time.textContent = clockText(refreshed); time.setAttribute("datetime", refreshed); }
+      const source = board.querySelector<HTMLElement>(".fleet-provenance");
+      if (source) writeProvenance(source, model);
       return false;
     }
     renderFleetBoardInto(board, model, callbacks);

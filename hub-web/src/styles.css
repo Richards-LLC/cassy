@@ -455,6 +455,13 @@ pre { font-family: var(--font-mono); }
   color: var(--text-hi);
 }
 .fleet-hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: var(--space-6); align-items: start; }
+/* Journey F2: side by side, a board narrower than this leaves the figure too
+   little room for its state words; the verdict then sits above it instead. */
+.fleet-board { container: fleet-board / inline-size; }
+@container fleet-board (max-width: 60rem) {
+  .fleet-hero { grid-template-columns: minmax(0, 1fr); gap: var(--space-4); }
+  .fleet-verdict { max-width: none; }
+}
 .fleet-board-header { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2) var(--space-3); }
 .fleet-eyebrow { margin: 0; color: var(--text-mid); font: var(--weight-semibold) var(--fs-xs)/1.33 var(--font-mono); letter-spacing: var(--tracking-label); text-transform: uppercase; }
 .fleet-catalog-time { color: var(--text-mid); font: var(--fs-xs)/1.33 var(--font-mono); }
@@ -475,7 +482,7 @@ pre { font-family: var(--font-mono); }
 .fleet-track-cell::before { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: var(--line-width); background: var(--line-subtle); }
 .fleet-plot-mark { position: relative; display: inline-flex; align-items: center; gap: var(--space-1); vertical-align: middle; white-space: nowrap; }
 .track-working .fleet-plot-mark { display: flex; padding: 0 var(--space-1); }
-.fleet-plot th:nth-child(3), .track-working { background: var(--bg-active); color: var(--text-hi); }
+.fleet-plot.has-working th:nth-child(3), .fleet-plot.has-working .track-working { background: var(--bg-active); color: var(--text-hi); }
 .fleet-dot { position: relative; display: inline-block; width: var(--space-2); height: var(--space-2); background: var(--text-mid); border-radius: var(--radius-pill); vertical-align: middle; }
 .needs-you .fleet-dot { background: var(--state-crit); outline: var(--rule-verdict) solid var(--color-verdict); outline-offset: var(--line-width); }
 .unreachable .fleet-dot { background: var(--state-warn); }
@@ -491,7 +498,7 @@ pre { font-family: var(--font-mono); }
   .fleet-track-legend > span { white-space: nowrap; }
 }
 .fleet-figure-caption { margin-top: var(--space-3); color: var(--text-mid); font: var(--fs-meta)/1.38 var(--font-mono); }
-.fleet-provenance { margin: 0; padding-top: var(--space-3); border-top: var(--rule-hero) solid var(--color-verdict); color: var(--text-mid); font: var(--fs-meta)/1.38 var(--font-mono); overflow-wrap: anywhere; }
+.fleet-provenance { margin: 0; padding-top: var(--space-3); border-top: var(--rule-hero) solid var(--color-verdict); color: var(--text-mid); font: var(--fs-meta)/1.38 var(--font-mono); overflow-wrap: anywhere; cursor: default; }
 .fleet-provenance:empty { display: none; }
 .fleet-evidence { display: grid; gap: var(--space-4); }
 .fleet-machine { display: grid; gap: var(--space-2); min-width: 0; }
@@ -596,14 +603,28 @@ main {
   gap: var(--space-1);
 }
 
+.session-back-label { font-size: var(--fs-meta); }
+
+/* cas-ac390 QA F01/F02: "Back" yields when the Terminal-view column has no
+   room for it (a 900px window with the drawer open, a phone): the glyph stays
+   and the accessible name is still "Back to …". Scoped to the back control;
+   the column is only the measuring container. */
+.shell > main { container: shell-main / inline-size; }
+@container shell-main (max-width: 36rem) {
+  .session-back-label { display: none; }
+  .session-back { padding: 0; }
+}
+
 .session-back {
   flex: 0 0 auto;
   display: inline-flex;
-  width: var(--space-8);
+  min-width: var(--space-8);
   min-height: var(--space-8);
   align-items: center;
   justify-content: center;
-  padding: 0;
+  gap: var(--space-1);
+  /* Journey F2: the glyph alone read as unlabelled; "Back" is on screen. */
+  padding: 0 var(--space-3) 0 var(--space-2);
   color: var(--text-mid);
   background: var(--bg-raised);
   border: none;
@@ -2611,7 +2632,7 @@ dialog form > *,
 
   /* Switching session and stepping back are the two phone gestures this header
      exists for, so they get the widest targets in it. */
-  .session-back { width: var(--button-height); }
+  .session-back { min-width: var(--button-height); }
   .session-picker-toggle { padding-right: var(--space-2); }
 
   .machine-chip { display: none; }

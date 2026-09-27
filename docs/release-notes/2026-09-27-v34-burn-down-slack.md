@@ -55,6 +55,8 @@ Was: the hub could die and a network switch could strand Commander. → Now: bot
 
 • *Fleet overview* — Was: it read like a debug page, and projects that repeated looked identical. → Now: it reads as a product page, and repeated projects carry a short name tag.
 
+• *Same session on two machines* — Was: in the Fleet overview, one session name running on two machines showed as two identical rows. → Now: each row carries a short machine tag that stays whole at any width.
+
 • *Connection status* — Was: the header could say "live" next to Degraded, or "Status unavailable". → Now: it says Checking… and then the machine's real state, and Degraded clears once the machine is back.
 
 • *Keyboard* — Was: focus fell to the page after pairing or opening a conversation. → Now: it lands where you were going.
@@ -117,6 +119,8 @@ Was: SIGPIPE killed long-lived servers and GitHub merges could skip independent 
 • *Status and focus* — Was: the header chip said "live" beside Degraded, and focus dropped to body after pairing, Load earlier or opening. → Now: Checking… then the machine's state, and focus lands on the control or conversation.
 
 • *Fleet overview* — Was: a debug page whose plot rows repeated the same project label. → Now: a product page with the shortest distinct codename tag on repeated projects.
+
+• *Fleet twin tags* — Was: one codename on two machines fell back to the full machine label and collapsed to " · <codename>". → Now: rail initials, a short name prefix ("Atl"/"Att") or an ordinal ("BS1"), capped at 12 characters so the tag stays whole in the 132px column.
 
 *QA and close gates*
 

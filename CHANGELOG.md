@@ -34,6 +34,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   headers and the composer. Codenames stay whole, and a machine name that
   cannot fit steps aside. The Fleet overview reads as a product page, and
   plot rows that share a project carry the shortest distinct codename tag.
+  When one codename runs on two machines, each row also carries a short
+  machine tag (the rail initials, a short name prefix such as "Atl" or
+  "Att", or an ordinal), capped so it stays whole at any width.
 - The Terminal header shows Checking… until the first latency sample and
   then the machine's own state, names the palette shortcut as Ctrl K or ⌘K
   per platform, and yields the title before Back or ⌘K on narrow screens.

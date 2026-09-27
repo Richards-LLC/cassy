@@ -1232,7 +1232,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   it("drives pane recovery from the selected session attach lifecycle", async () => {
     const source = await readSource("main.ts");
     expect(source).toContain("onAttachState: (session, state) =>");
-    expect(source).toContain("const key = sessionKey(machine.id, session);\n      attachStates.set(key, state);");
+    expect(source).toContain("const key = sessionKey(machine.id, session);\n      const attachWasLive = attachStates.get(key)?.phase === \"live\";\n      attachStates.set(key, state);");
     expect(source).toContain("connection.attachSnapshot(selectedSession) ?? connection.snapshot()");
     expect(source).toContain("connection.attachSnapshot(session) ?? connection.snapshot()");
     expect(source).toContain("const connectionSnapshot = terminalAttachSnapshot ?? machineConnectionSnapshot");

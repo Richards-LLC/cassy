@@ -126,7 +126,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 1. Open the conversation and see the recent turns — the latest exchange is on screen at once
 2. Load earlier turns — "Load earlier" fetches the previous page
 3. Reach the start of the conversation — "No earlier history" appears, with day separators
-4. Open a report the supervisor sent — tapping the file opens the hosted copy in a new tab through a short-lived signed link from the machine; a file that was never uploaded to Cloud says so instead of opening a blank tab; Cloud failing ("wait a minute, then tap it again") and the machine not answering ("check that it's on and connected") each say what to do
+4. Open a report the supervisor sent — opening the file shows the hosted copy in a new tab through a short-lived signed link from the machine; every failure is said on the file card itself, never in a toast far from it, and leaves no tab open; a file that was never uploaded to Cloud says so, and opening it again opens no tab at all; Cloud failing ("wait a minute, then open it again") says what to do; a connected machine that sends nothing says it is connected but didn't send the file, never that it is off
 
 **Expected experience**
 

@@ -1,4 +1,4 @@
-import { test, expect } from "./journey";
+import { test, expect, expectWholeFocusRing } from "./journey";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
 import type { Machine } from "./hub-double";
 
@@ -22,7 +22,8 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
   // Fourteen stages including a pairing, palette/picker sweeps, two render
   // waits (6 s each) and a phone viewport: past the 60 s default, and a loaded
   // factory host needs the headroom.
-  test.setTimeout(120_000);
+  // Plus a failing-heartbeat window (cas-bf07): about 25 s more.
+  test.setTimeout(160_000);
   const hub = await journey.hub({ machines: [ATLAS, STUDIO, ALPHA], paired: ["atlas", "studio"] });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
   const composer = page.getByRole("textbox", { name: "Your message" });
@@ -88,6 +89,10 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     // The first open rebuilt the shell; Escape still lands on the session
     // title, and Enter there reopens the picker (cas-7eaf).
     await expect(toggle).toBeFocused();
+    // Focus there is visible: the whole ring shows, not clipped away by the
+    // title's ellipsis clip (cas-cf10 QA F01).
+    expect(await toggle.evaluate((element) => element.matches(":focus-visible"))).toBe(true);
+    await expectWholeFocusRing(toggle, { vertical: true });
     await page.keyboard.press("Enter");
     await expect(picker).toBeVisible();
     await page.getByRole("button", { name: "Close session picker" }).click();
@@ -114,6 +119,18 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
       await expect(picker.locator(".session-picker-entry:visible")).toHaveCount(0);
       // An empty result says so, not an empty dialog (journey F18).
       await expect(picker.getByRole("status")).toHaveText("No sessions match “zz”.");
+      // A long unbroken query wraps inside the dialog (cas-a8db QA F01).
+      const long = "z".repeat(120);
+      await filter.fill(long);
+      const status = picker.getByRole("status");
+      await expect(status).toHaveText(`No sessions match “${long}”.`);
+      const fit = await status.evaluate((line) => {
+        const dialog = line.closest("dialog")!.getBoundingClientRect();
+        const box = line.getBoundingClientRect();
+        return { overflow: line.scrollWidth > line.clientWidth + 1, inside: box.left >= dialog.left && box.right <= dialog.right + 0.5 };
+      });
+      expect(fit, "the no-match line wraps inside the picker").toEqual({ overflow: false, inside: true });
+      await filter.fill("zz");
       await close();
       await closed();
       await open();
@@ -343,7 +360,33 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await list.getByRole("button", { name: /cas-src/ }).click();
     await page.getByRole("button", { name: "Terminal view" }).click();
     await expect(page.locator(".session-picker-name")).toHaveText("cas-src");
+    // Just after the reload there is no latency sample yet: the header says it
+    // is checking, never "Status unavailable" beside a green dot, and then
+    // shows the first sample (journey F17).
+    const latency = page.locator(".connection-summary [data-machine-latency]");
+    await expect(latency).toHaveText(/^(Checking…|\d+ms)$/);
+    // Read together, so a sample landing in between cannot split them: while it
+    // says Checking… the dot is neutral, not green (cas-bf07 QA F02).
+    const early = await page.locator(".connection-summary").evaluate((summary) => ({ text: summary.querySelector("[data-machine-latency]")?.textContent, live: summary.classList.contains("live") }));
+    if (early.text === "Checking…") expect(early.live, "no green dot beside Checking…").toBe(false);
+    await expect(latency).toHaveText(/^\d+ms$/, { timeout: 12_000 });
+    // Heartbeats that keep failing: the header names the degradation with the
+    // amber dot, as the rail does for the same machine, rather than promising a
+    // check beside a green dot (cas-bf07 QA F01). Then it recovers.
+    const chip = page.locator(".connection-summary");
+    const railDot = page.locator("#machine-rail-list .machine-icon").filter({ hasText: "AT" }).locator(".machine-state");
+    const heartbeat = "https://atlas.test/v1/machine";
+    await page.route(heartbeat, (route) => route.abort());
+    await expect(latency).toHaveText("Degraded", { timeout: 20_000 });
+    await expect(chip).toHaveClass(/\bdegraded\b/);
+    await expect(railDot).toHaveClass(/\bdegraded\b/);
+    await page.unroute(heartbeat);
+    await expect(latency).toHaveText(/^\d+ms$/, { timeout: 15_000 });
+    await expect(chip).not.toHaveClass(/\bdegraded\b/);
     await expect(page.locator(".session-picker-codename")).toHaveText(PELICAN);
+    // The title is announced as the open conversation and its machine, the
+    // switch after it (journey F19): not "Switch session — 4 available".
+    await expect(page.getByRole("heading", { level: 1, name: `cas-src ${PELICAN} on Atlas · Linux — switch session (4 available)`, exact: true })).toBeVisible();
     const initials = page.locator("#machine-rail-list .machine-initials");
     await expect(initials).toHaveCount(3);
     expect((await initials.allTextContents()).sort()).toEqual(["AL", "AT", "SM"]);
@@ -396,7 +439,7 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     const pickerRows = await picker.locator(".session-picker-entry").count();
     expect(pickerRows).toBe(4);
     expect(jumpCount, "palette Jump rows").toBe(pickerRows);
-    await expect(toggle).toHaveAttribute("aria-label", `Switch session — ${pickerRows} available`);
+    await expect(toggle).toHaveAttribute("aria-label", `cas-src ${PELICAN} on Atlas · Linux — switch session (${pickerRows} available)`);
     expect(listRows, "conversation list rows").toBe(pickerRows);
     const pickerSessions = (await picker.locator(".session-picker-entry").evaluateAll((rows) => rows.map((row) => (row as HTMLElement).dataset.pickerSession))).sort();
     await page.keyboard.press("Escape");
@@ -444,5 +487,16 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     expect(back!.x + back!.width <= paletteKey!.x || paletteKey!.x + paletteKey!.width <= back!.x, "Back and ⌘K do not overlap at 900 with the drawer open").toBe(true);
     await page.setViewportSize(viewport);
     await expect(page.locator("#session-back .session-back-label")).toBeVisible();
+    // With nothing open, the title says so: the fleet, then the switch.
+    await expect(page.getByRole("heading", { level: 1, name: `Fleet overview — switch session (${pickerRows} available)`, exact: true })).toBeVisible();
+  });
+
+  await journey.stage("Hear the open conversation as the Terminal view title", async () => {
+    // Journey F19: the goal state (final.aria.yml) names the open conversation
+    // and its machine in the page heading, the switch after it.
+    await page.locator('#fleet-board button.fleet-session[data-fleet-session="patient-pelican-9"]').click();
+    await expect(page.locator(".session-picker-name")).toHaveText("cas-src");
+    await expect(page.locator("body")).toMatchAriaSnapshot(`- heading "cas-src ${PELICAN} on Atlas · Linux — switch session (4 available)" [level=1]`);
+    expect(await page.locator("body").ariaSnapshot()).not.toContain('heading "Switch session');
   });
 });

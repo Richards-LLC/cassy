@@ -27,7 +27,11 @@ export function sessionConnection(
 
 /**
  * The machine as the footer shows it: its own state, or the first of its
- * attached sessions that is not live.
+ * attached sessions that is not live. A session opening for the first time
+ * (never live, not failed, no retry scheduled) is a conversation attaching,
+ * not the machine dropping: it does not count against the machine, so the
+ * footer does not say Reconnecting or lower its connected count while a
+ * conversation opens (journey F3).
  */
 export function machineConnection(
   machine: ConnectionSnapshot | undefined,
@@ -35,8 +39,13 @@ export function machineConnection(
 ): ConnectionSnapshot | undefined {
   if (!machine || machine.phase !== "live") return machine;
   for (const { attach, wasLive } of sessions) {
+    if (!wasLive && attach && firstAttachInProgress(attach)) continue;
     const effective = sessionConnection(machine, attach, wasLive);
     if (effective && effective.phase !== "live") return effective;
   }
   return machine;
+}
+
+function firstAttachInProgress(attach: AttachSnapshot): boolean {
+  return attach.fatal !== true && !attach.authFailure && attach.phase !== "failed" && attach.phase !== "backoff" && attach.phase !== "live";
 }

@@ -63,6 +63,15 @@ test("HUB-J10 switch to dark and keep reading", async ({ page, journey }) => {
       await row.focus();
       expect(await bg(row), `${colorScheme}: the open row keeps its fill with focus`).toBe(filled);
       await page.mouse.move(700, 300);
+      // The coalesced status line's 10px clamp spacer is a border; forced
+      // colours must not paint it as a bar in the text colour (journey F11).
+      const spacer = await page.getByRole("log").locator(".coalesce").first().evaluate((element) => {
+        const style = getComputedStyle(element);
+        return { width: style.borderBottomWidth, border: style.borderBottomColor, fill: style.backgroundColor, text: style.color };
+      });
+      expect(spacer.width, `${colorScheme}: the clamp spacer is still there`).toBe("10px");
+      expect(spacer.border, `${colorScheme}: the spacer is the box's own fill`).toBe(spacer.fill);
+      expect(spacer.border, `${colorScheme}: the spacer is not a bar in the text colour`).not.toBe(spacer.text);
     }
     await page.emulateMedia({ colorScheme: "dark", forcedColors: null });
   });

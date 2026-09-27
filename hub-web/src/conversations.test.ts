@@ -1,9 +1,12 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { ConversationHistory, RECEIPT_REPLY_GRACE_MS, RECEIPT_TIMEOUT_MS } from "./conversation-history";
 import { ConversationList, conversationRowMarkup, filterConversationRows, truncateConversationPreview, type ConversationRow } from "./conversation-list";
 import { ConversationView } from "./conversation-view";
-import { ATTACH_DISABLED_REASON, ATTACH_SUPPORTED, arrangeConversationShell, conversationNoMatchText, conversationShellMarkup, dressComposer, KEYBOARD_HINT_MEDIA_QUERY } from "./conversation-shell";
+import { ATTACH_DISABLED_REASON, ATTACH_SUPPORTED, arrangeConversationShell, conversationNoMatchText, hostMarkup, conversationShellMarkup, dressComposer, KEYBOARD_HINT_MEDIA_QUERY } from "./conversation-shell";
 import { renderConversationFixture } from "../fixtures/conversations";
 import { projectName, projectBadge } from "./cloud-brand";
 
@@ -395,6 +398,12 @@ describe('conversation evidence', () => {
     expect(header.querySelector('h1 .project-badge')).toBeNull();
     expect(header.textContent?.split('cas-src')).toHaveLength(2);
     expect(header.querySelector('.conversation-host')?.textContent).toBe('Atlas · Linux · patient-pelican-9');
+    // The OS word is its own span, so a phone can drop it before the codename (journey F14).
+    expect(header.querySelector('.host-where .host-os')?.textContent).toBe(' · Linux');
+    // Machine, separator and codename are separate flex items so the machine name yields first (cas-e918 QA F01).
+    expect([...header.querySelector('.host-where')!.children].map((node) => node.className)).toEqual(['host-machine', 'host-sep', 'codename']);
+    expect(header.querySelector('.host-machine')?.textContent).toBe('Atlas · Linux');
+    expect(header.querySelector('.host-where')?.getAttribute('title')).toBe('Atlas · Linux · patient-pelican-9');
     expect(header.querySelector('.conversation-host > .host-where > .codename')?.textContent).toBe('patient-pelican-9');
     expect(header.querySelector('.conversation-host > .host-where + #conversation-connection')).not.toBeNull();
     expect(header.querySelector('#conversation-connection')).not.toBeNull();
@@ -406,7 +415,7 @@ describe('conversation evidence', () => {
   it('dresses the composer as Pebble: pill field, no dead attach clip, send in the accent naming the supervisor', () => {
     const app = document.createElement('div');
     app.innerHTML = '<div class="shell"><div id="pane-grid"></div><div class="message"><h2><label for="message-text">Talk to x</label></h2><div class="operator-thread"></div><textarea id="message-text" placeholder="old"></textarea><div class="composer-actions"><button id="message-mic" type="button" aria-label="Start listening" aria-pressed="false"><svg class="mic-glyph" aria-hidden="true"></svg></button><button id="message-keyboard" type="button">Keyboard</button><button id="message-send" class="primary">Send message</button></div><p id="message-status" class="message-status" role="status" hidden></p></div><div id="status-view"></div><section id="attention-panel" hidden></section></div>';
-    arrangeConversationShell(app, { selected: true, supervisor: 'patient-pelican-9', machineId: 'atlas-linux', loaded: true, paired: true });
+    arrangeConversationShell(app, { selected: true, supervisor: 'patient-pelican-9', projectDir: '/projects/cas-src', machineId: 'atlas-linux', loaded: true, paired: true });
     const composer = app.querySelector<HTMLElement>('#conversation-composer-slot > .message.conversation-composer')!;
     expect(composer).not.toBeNull();
     expect(composer.querySelector('.operator-thread')).toBeNull();
@@ -418,10 +427,11 @@ describe('conversation evidence', () => {
     expect(mic.getAttribute('aria-label')).toBe('Start listening');
     expect(mic.querySelector('.mic-glyph')).not.toBeNull();
     expect(mic.textContent).toBe('');
-    expect(composer.querySelector<HTMLTextAreaElement>('#message-text')?.placeholder).toBe('Message patient-pelican-9');
+    expect(composer.querySelector<HTMLTextAreaElement>('#message-text')?.placeholder).toBe('Message the cas-src supervisor');
     const send = composer.querySelector<HTMLButtonElement>('#message-send')!;
     expect(send.classList.contains('send')).toBe(true);
-    expect(send.textContent).toBe('Send to patient-pelican-9');
+    expect(send.textContent).toBe('Send');
+    expect(send.getAttribute('aria-label')).toBe('Send to patient-pelican-9');
     expect(send.querySelector('.send-glyph')).not.toBeNull();
     expect(app.querySelector('.conversation-shell')?.classList.contains('machine-accent-0')).toBe(true);
     // Dressing twice (every re-render) never stacks a second clip or label.
@@ -494,4 +504,24 @@ it('retains a destination until a correlated reply or refusal settles each send'
   expect(history.hasPending()).toBe(false);
   history.submit('refused', 'supervisor', 'instruction'); history.reject('refused', 'no access');
   expect(history.hasPending()).toBe(false);
+});
+
+describe("hostMarkup (journey F14)", () => {
+  it("wraps only a trailing OS word, and escapes the label", () => {
+    expect(hostMarkup("Studio Mac · macOS")).toBe('Studio Mac<span class="host-os"> · macOS</span>');
+    expect(hostMarkup("Forge build box · Linux")).toBe('Forge build box<span class="host-os"> · Linux</span>');
+    expect(hostMarkup("hub · staging")).toBe("hub · staging");
+    expect(hostMarkup("pippenz-desktop")).toBe("pippenz-desktop");
+    expect(hostMarkup("<b> · Windows")).toBe('&lt;b&gt;<span class="host-os"> · Windows</span>');
+  });
+  it("lets the machine name ellipsise before the codename at every width", () => {
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
+    expect(css).toContain(".conversation-identity .host-machine { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }");
+    expect(css).toContain(".conversation-identity .host-machine ~ .codename { flex: none; max-width: calc(100% - 3ch); overflow: hidden; text-overflow: ellipsis; }");
+  });
+  it("hides the OS word below 500px, after the phone block in the cascade", () => {
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
+    const rule = css.indexOf("@media (max-width: 500px) {\n  .conversation-identity .host-os { display: none; }");
+    expect(rule).toBeGreaterThan(css.indexOf("  .conversation-identity .host-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; }\n  #conversation-connection"));
+  });
 });

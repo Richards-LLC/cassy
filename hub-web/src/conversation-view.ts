@@ -208,7 +208,9 @@ export class ConversationView {
     this.loadEarlier.className = "conversation-load-earlier";
     this.loadEarlier.textContent = "Load earlier";
     this.loadEarlier.hidden = true;
-    this.loadEarlier.onclick = () => this.options.loadEarlier?.();
+    // Asking for older turns is reading, not following the tail: the page
+    // lands above and the turn on screen stays put (journey F7).
+    this.loadEarlier.onclick = () => { this.following = false; this.options.loadEarlier?.(); };
     this.msgs = document.createElement("div"); this.msgs.className = "msgs";
     this.msgs.setAttribute("role", "log");
     this.empty = document.createElement("div"); this.empty.className = "empty"; this.empty.hidden = true;
@@ -236,6 +238,9 @@ export class ConversationView {
   /** Re-derive the thread from the history; nodes are keyed so grouping survives. */
   update(): void {
     if (this.disposed) return;
+    // Turns added above the reader (Load earlier) must not move what they are
+    // reading (journey F7): remember the first turn on screen and where it sat.
+    const anchor = this.following ? undefined : this.readingAnchor();
     const hasEarlier = this.options.hasEarlier?.() === true;
     const loadingEarlier = this.options.loadingEarlier?.() === true;
     this.loadEarlier.hidden = !hasEarlier;
@@ -260,7 +265,42 @@ export class ConversationView {
     if (!same) this.msgs.replaceChildren(...children);
     this.renderPinned(document);
     this.renderEmpty(model.length === 0, this.options.loadingHistory?.() === true);
+    const held = anchor && this.anchorNode(anchor);
+    if (anchor && held) {
+      // The button sits above every turn, so the browser's own scroll
+      // anchoring has nothing to hold on to; hold the turn ourselves.
+      const drift = held.getBoundingClientRect().top - anchor.top;
+      if (Math.abs(drift) >= 1) this.element.scrollTop += drift;
+    }
     if (this.following && document.getSelection()?.isCollapsed !== false) this.pin();
+  }
+
+  /**
+   * The first turn still on screen (by its key), and its top edge, before a
+   * repaint. Keyed bubbles, not top-level items: an older page's turns from
+   * the same sender join the reader's group, which is rebuilt, and an older
+   * page from the same day slots in under the day line, which stays put.
+   */
+  private readingAnchor(): { key?: string; node: HTMLElement; top: number } | undefined {
+    if (this.msgs.hidden) return undefined;
+    const top = this.element.getBoundingClientRect().top;
+    const visible = (node: HTMLElement) => { const box = node.getBoundingClientRect(); return box.height > 0 && box.bottom > top ? box.top : undefined; };
+    for (const node of this.msgs.querySelectorAll<HTMLElement>("[data-key]")) {
+      const at = visible(node);
+      if (at !== undefined) return { key: node.dataset.key, node, top: at };
+    }
+    for (const child of this.msgs.children) {
+      const at = visible(child as HTMLElement);
+      if (at !== undefined) return { node: child as HTMLElement, top: at };
+    }
+    return undefined;
+  }
+
+  private anchorNode(anchor: { key?: string; node: HTMLElement }): HTMLElement | undefined {
+    if (anchor.key !== undefined) {
+      for (const node of this.msgs.querySelectorAll<HTMLElement>("[data-key]")) if (node.dataset.key === anchor.key) return node;
+    }
+    return anchor.node.isConnected ? anchor.node : undefined;
   }
 
   /**
@@ -323,7 +363,9 @@ export class ConversationView {
     // A refused send repaints when control changes hands (cas-8e0a).
     const held = turn.event.kind === "send" && turn.event.value.state === "error" ? this.options.controlHeld?.() === true : undefined;
     const holder = turn.event.kind === "send" && turn.event.value.state === "error" ? this.options.controlHolder?.() : undefined;
-    return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting, pinned, delivered, held, holder]);
+    // An unconfirmed send settles once the supervisor speaks after it (journey F10).
+    const settled = turn.event.kind === "send" && turn.event.value.state === "unconfirmed" ? this.history.repliedSince(turn.event.value) : undefined;
+    return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting, pinned, delivered, held, holder, settled]);
   }
 
   /**
@@ -345,7 +387,7 @@ export class ConversationView {
       const line = document.createElement("p"); line.className = "said conversation-loading"; line.setAttribute("role", "status");
       const dots = document.createElement("span"); dots.className = "dots"; dots.setAttribute("aria-hidden", "true");
       dots.append(document.createElement("i"), document.createElement("i"), document.createElement("i"));
-      const codename = document.createElement("span"); codename.className = "codename"; codename.textContent = supervisor;
+      const codename = document.createElement("span"); codename.className = "codename"; codename.textContent = supervisor; codename.title = supervisor;
       const text = document.createElement("span"); text.append("Loading your conversation with ", codename, "…");
       line.append(dots, text);
       this.empty.replaceChildren(line);
@@ -362,18 +404,23 @@ export class ConversationView {
     // The project titles the card, as it titles the header and every list row
     // (journey F7); machine and codename sit beneath it. Without a project the
     // codename is the only name there is, and it keeps the title.
-    const name = document.createElement("b"); name.textContent = project || supervisor;
+    const name = document.createElement("b"); name.textContent = project || supervisor; name.title = project || supervisor;
     if (!project) name.className = "codename";
     const where = document.createElement("span"); where.className = "proj2";
+    where.title = [machine, project ? supervisor : undefined].filter(Boolean).join(" · ");
     if (machine) where.append(machine);
     if (project) {
       const secondary = document.createElement("span"); secondary.className = "codename"; secondary.textContent = supervisor;
       where.append(...(machine ? [" · "] : []), secondary);
     }
     const said = document.createElement("p"); said.className = "said"; said.setAttribute("role", "status");
-    // The codename is an identifier: mono and never broken at its hyphen, even inside prose.
-    const codename = document.createElement("span"); codename.className = "codename"; codename.textContent = supervisor;
-    said.append("Nothing waiting on you. ", codename, " will write here when it needs a decision.");
+    // The sentence names the role, not the generated codename (journey F13).
+    // The codename follows in brackets as an identifier: mono, one unbroken
+    // line, ellipsised past a cap, and whole in its title and the DOM.
+    const codename = document.createElement("span"); codename.className = "codename"; codename.textContent = supervisor; codename.title = supervisor;
+    // The brackets travel with it: no line break between "(" and the name.
+    const who = document.createElement("span"); who.className = "said-who"; who.append("(", codename, ")");
+    said.append("Nothing waiting on you. The supervisor ", who, " will write here when it needs a decision.");
     const children: HTMLElement[] = [mono, name, where, said];
     if (echo) { const quiet = document.createElement("div"); quiet.className = "quiet"; quiet.textContent = echo; children.push(quiet); }
     this.empty.replaceChildren(...children);
@@ -511,18 +558,32 @@ export class ConversationView {
       const label = document.createElement("span"); label.textContent = "Delivered";
       state.append(tick.content.firstElementChild!, label);
       bubble.append(state);
+    } else if (send.state === "unconfirmed" && this.history.repliedSince(send)) {
+      // Journey F10: the supervisor has spoken since, so this send most
+      // likely arrived. The card settles to a quiet record: no warning, no
+      // Retry inviting a duplicate, and a note to resend only if it was missed.
+      bubble.dataset.settled = "true";
+      const state = document.createElement("span");
+      state.className = "conversation-delivery conversation-refused conversation-unconfirmed conversation-settled"; state.setAttribute("role", "status");
+      const label = document.createElement("b"); label.textContent = "Not confirmed";
+      const separator = document.createElement("span"); separator.className = "sr-only"; separator.textContent = " · ";
+      const reason = document.createElement("span"); reason.className = "conversation-refused-reason";
+      reason.textContent = "The supervisor has replied since; resend only if it missed this.";
+      state.append(label, separator, reason);
+      bubble.append(state);
     } else if (send.state === "unconfirmed") {
-      // cas-1622: the hub never sent this send's receipt. It is not refused —
+      // cas-1622: the receipt for this send never came. It is not refused —
       // it may well have arrived — so it does not claim "Not sent". It stops
-      // saying "Sending…" forever, says what is unknown, and offers Retry,
-      // warning that a retry may reach the supervisor twice.
+      // saying "Sending…" forever, says what is unknown in the operator's
+      // words (Cassy, not "the hub": journey F10), and offers Retry, warning
+      // that a retry may reach the supervisor twice.
       const state = document.createElement("span");
       state.className = "conversation-delivery conversation-refused conversation-unconfirmed"; state.setAttribute("role", "status");
       const glyph = document.createElement("template"); glyph.innerHTML = WARN;
       const label = document.createElement("b"); label.textContent = "Not confirmed";
       const separator = document.createElement("span"); separator.className = "sr-only"; separator.textContent = " · ";
       const reason = document.createElement("span"); reason.className = "conversation-refused-reason";
-      reason.textContent = `The hub never confirmed this reached ${this.options.supervisor}.`;
+      reason.textContent = `Cassy couldn't confirm delivery to ${this.options.supervisor}.`;
       const next = document.createElement("span"); next.className = "conversation-refused-next"; next.textContent = " Retry sends it again.";
       reason.append(next);
       state.append(glyph.content.firstElementChild!, label, separator, reason);
@@ -574,9 +635,21 @@ export class ConversationView {
       bubble.append(state);
       const actions = document.createElement("div"); actions.className = "conversation-actions";
       if (plain.action === "take-control" && !resolved && this.options.takeControl) {
-        const take = document.createElement("button"); take.type = "button"; take.className = "conversation-take-control"; take.textContent = "Take control";
-        take.setAttribute("aria-label", "Take control of the session");
-        take.onclick = () => this.options.takeControl?.(send);
+        const take = document.createElement("button"); take.type = "button"; take.className = "conversation-take-control";
+        if (holder) {
+          // Journey F5: a take the hub will refuse again is not offered as
+          // pressable. It says who is being waited on, keeps its place (and
+          // keyboard focus) in the message, and turns back into Take control
+          // when the lease is released.
+          take.textContent = `Waiting for ${holder}`;
+          take.setAttribute("aria-label", `Waiting for ${holder} to release control`);
+          take.setAttribute("aria-disabled", "true");
+          take.dataset.waiting = "true";
+        } else {
+          take.textContent = "Take control";
+          take.setAttribute("aria-label", "Take control of the session");
+          take.onclick = () => this.options.takeControl?.(send);
+        }
         actions.append(take);
       }
       if (this.options.editMessage) {

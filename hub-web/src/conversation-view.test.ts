@@ -64,7 +64,7 @@ describe("ConversationView (Pebble thread)", () => {
     view.update();
 
     expect(view.element.querySelector<HTMLElement>(".empty")?.hidden).toBe(false);
-    expect(view.element.querySelector(".said")?.textContent).toBe("Nothing waiting on you. sup will write here when it needs a decision.");
+    expect(view.element.querySelector(".said")?.textContent).toBe("Nothing waiting on you. The supervisor (sup) will write here when it needs a decision.");
     expect(view.element.querySelector(".history-end")).toBeNull();
     expect(view.element.querySelector(".working")).toBeNull();
   });
@@ -83,7 +83,7 @@ describe("ConversationView (Pebble thread)", () => {
     // The page lands empty: now the empty state is the truth.
     loading = false; view.update();
     expect(empty.dataset.state).toBeUndefined();
-    expect(empty.querySelector(".said")?.textContent).toBe("Nothing waiting on you. sup will write here when it needs a decision.");
+    expect(empty.querySelector(".said")?.textContent).toBe("Nothing waiting on you. The supervisor (sup) will write here when it needs a decision.");
     // A page with turns shows the turns, whatever the flag says.
     loading = true; history.reply(reply(1, "answer", "Ready."), at(9, 0)); view.update();
     expect(empty.hidden).toBe(true);
@@ -174,6 +174,37 @@ describe("ConversationView (Pebble thread)", () => {
     loading = false; view.update();
     expect(view.element.hasAttribute("aria-busy")).toBe(false);
     expect(button.disabled).toBe(false); expect(button.textContent).toBe("Load earlier"); expect(button.querySelector(".dots")).toBeNull();
+  });
+  it("keeps the turn on screen in place when Load earlier adds turns above it (journey F7)", () => {
+    const history = new ConversationHistory();
+    const view = new ConversationView(document, history, { supervisor: "sup", hasEarlier: () => true, loadEarlier: () => {} });
+    document.body.replaceChildren(view.element);
+    history.reply(reply(30, "answer", "Is the gate green?"), at(10, 0));
+    history.reply(reply(31, "answer", "Yes, all fourteen targets."), at(10, 1));
+    view.update();
+    // A stand-in layout: every element in the thread, in document order, is 50px tall, stacked from the thread's top edge and moved by scrollTop.
+    const msgs = view.element.querySelector<HTMLElement>(".msgs")!;
+    const rect = (top: number, height: number) => ({ top, bottom: top + height, height, left: 0, right: 100, width: 100, x: 0, y: top, toJSON: () => ({}) }) as DOMRect;
+    const original = Element.prototype.getBoundingClientRect;
+    Element.prototype.getBoundingClientRect = function (this: Element) {
+      if (this === view.element) return rect(0, 200);
+      const index = [...msgs.querySelectorAll("*")].indexOf(this);
+      return index >= 0 ? rect(40 + index * 50 - view.element.scrollTop, 50) : original.call(this);
+    };
+    const bubble = (key: string) => [...msgs.querySelectorAll<HTMLElement>("[data-key]")].find((node) => node.dataset.key === key);
+    try {
+      const key = "reply:30";
+      const before = bubble(key)!.getBoundingClientRect().top;
+      view.element.querySelector<HTMLButtonElement>(".conversation-load-earlier")!.click();
+      // An older page from the same day lands above, from the same sender: its turns join the reader's group.
+      history.reply(reply(10, "answer", "Scheduled for 09:00."), at(9, 0));
+      history.reply(reply(11, "answer", "Three workers."), at(9, 1));
+      view.update();
+      expect(view.element.scrollTop).toBeGreaterThan(0);
+      expect(bubble(key)!.getBoundingClientRect().top).toBe(before);
+    } finally {
+      Element.prototype.getBoundingClientRect = original;
+    }
   });
   it("falls back to data-kind bubbles for ask and blocker when nothing is registered", () => {
     const history = new ConversationHistory();
@@ -279,8 +310,24 @@ describe("ConversationView (Pebble thread)", () => {
     holder = "Studio iPad"; contested.update();
     expect(contestedBubble().querySelector(".conversation-refused-next")?.textContent).toBe(" Studio iPad is in control. Take control when it's released, then retry.");
     expect(document.activeElement).toBe(contestedBubble().querySelector(".conversation-take-control"));
+    // Journey F5: a take the hub would refuse again is not offered as
+    // pressable; it names who is being waited on.
+    const waiting = contestedBubble().querySelector<HTMLButtonElement>(".conversation-take-control")!;
+    expect(waiting.textContent).toBe("Waiting for Studio iPad");
+    expect(waiting.getAttribute("aria-label")).toBe("Waiting for Studio iPad to release control");
+    expect(waiting.getAttribute("aria-disabled")).toBe("true");
+    const takesBefore = take.mock.calls.length;
+    waiting.click();
+    expect(take.mock.calls.length, "a waiting control does not ask the hub again").toBe(takesBefore);
     holder = undefined; contested.update();
     expect(contestedBubble().querySelector(".conversation-refused-next")?.textContent).toBe(" Take control, then retry.");
+    // Released: Take control is back, pressable.
+    const released = contestedBubble().querySelector<HTMLButtonElement>(".conversation-take-control")!;
+    expect(released.textContent).toBe("Take control");
+    expect(released.getAttribute("aria-label")).toBe("Take control of the session");
+    expect(released.hasAttribute("aria-disabled")).toBe(false);
+    released.click();
+    expect(take.mock.calls.length).toBe(takesBefore + 1);
     // Only a control refusal offers it: taking control fixes nothing else.
     const other = new ConversationHistory();
     other.submit("z", "sup", "Late answer", at(9, 2), 7); other.reject("z", "semantic message enqueue failed: in_reply_to notification 7 does not exist");
@@ -311,7 +358,9 @@ describe("ConversationView (Pebble thread)", () => {
     const label = bubble.querySelector<HTMLElement>(".conversation-unconfirmed")!;
     expect(label.getAttribute("role")).toBe("status");
     expect(label.querySelector("svg.warn")?.getAttribute("aria-hidden")).toBe("true");
-    expect(label.textContent).toBe("Not confirmed · The hub never confirmed this reached sup. Retry sends it again.");
+    expect(label.textContent).toBe("Not confirmed · Cassy couldn't confirm delivery to sup. Retry sends it again.");
+    // Journey F10: the operator's words, not "the hub".
+    expect(label.textContent).not.toMatch(/\bhub\b/i);
     // It may have arrived: no "Not sent", and only Retry (an edit could reach the supervisor twice as easily).
     expect(label.textContent).not.toContain("Not sent");
     const buttons = [...bubble.querySelectorAll<HTMLButtonElement>(".conversation-actions button")];
@@ -322,6 +371,31 @@ describe("ConversationView (Pebble thread)", () => {
     view.update();
     expect(view.element.querySelector(".conversation-unconfirmed")).toBeNull();
     expect(view.element.querySelector(".conversation-delivered")?.textContent).toBe("Delivered");
+  });
+  it("settles a Not confirmed send once the supervisor replies after it: no warning, no Retry (journey F10)", () => {
+    const history = new ConversationHistory();
+    const retry = vi.fn();
+    const view = new ConversationView(document, history, { supervisor: "calm-otter-4", retryMessage: retry }); document.body.replaceChildren(view.element);
+    history.submit("x", "calm-otter-4", "Kick off the Mac tests.", at(9, 0));
+    // The turn that crossed the send and made its receipt overdue (cas-1185) does not settle it.
+    history.reply(reply(60, "answer", "Still building."), at(9, 0) + 1_000, undefined, undefined, at(9, 0) + 1_000);
+    history.unconfirmSilent(at(9, 0) + RECEIPT_TIMEOUT_MS);
+    view.update();
+    const bubble = () => view.element.querySelector<HTMLElement>('.turn.you .bub[data-state="unconfirmed"]')!;
+    expect(bubble().dataset.settled).toBeUndefined();
+    expect(bubble().querySelectorAll(".conversation-retry")).toHaveLength(1);
+    // A turn arriving after the give-up does.
+    history.reply(reply(61, "answer", "Tests are running on the Mac."), at(9, 2), undefined, undefined, at(9, 2));
+    view.update();
+    const settled = bubble();
+    expect(settled.dataset.settled).toBe("true");
+    const label = settled.querySelector<HTMLElement>(".conversation-unconfirmed.conversation-settled")!;
+    expect(label.getAttribute("role")).toBe("status");
+    expect(label.textContent).toBe("Not confirmed · The supervisor has replied since; resend only if it missed this.");
+    expect(label.querySelector("svg.warn")).toBeNull();
+    expect(settled.querySelector(".conversation-retry")).toBeNull();
+    expect(label.textContent).not.toMatch(/\bhub\b/i);
+    expect(history.repliedSince(history.events.find((event) => event.kind === "send")!.value as never)).toBe(true);
   });
   it("names each message group's speaker and time for assistive tech (cas-17e3)", () => {
     const history = new ConversationHistory();
@@ -442,9 +516,11 @@ describe("ConversationView (Pebble thread)", () => {
     expect(empty.querySelector("b")?.textContent).toBe("cas-hub-static");
     expect(empty.querySelector(".proj2")?.textContent).toBe("Bench · calm-heron-5");
     expect(empty.querySelector(".proj2 > .codename")?.textContent).toBe("calm-heron-5");
-    expect(empty.querySelector(".said")?.textContent).toBe("Nothing waiting on you. calm-heron-5 will write here when it needs a decision.");
+    expect(empty.querySelector(".said")?.textContent).toBe("Nothing waiting on you. The supervisor (calm-heron-5) will write here when it needs a decision.");
     // The codename in the sentence is an identifier span that never breaks at its hyphen.
     expect(empty.querySelector(".said .codename")?.textContent).toBe("calm-heron-5");
+    expect(empty.querySelector<HTMLElement>(".said .codename")?.title).toBe("calm-heron-5");
+    expect(empty.querySelector<HTMLElement>(".proj2")?.title).toBe("Bench · calm-heron-5");
     expect(empty.querySelector("b")?.classList.contains("codename")).toBe(false);
     expect(empty.querySelector(".quiet")?.textContent).toBe("Promoted the hub to production on Monday.");
     echo = undefined; view.update();
@@ -476,5 +552,14 @@ describe("ConversationView (Pebble thread)", () => {
     const history = new ConversationHistory(); const view = new ConversationView(document, history, "sup");
     history.reply(reply(3, "ask"), at(10, 0)); view.update();
     expect(view.element.querySelector<HTMLElement>('[data-kind="ask"]')?.classList.contains("bub")).toBe(true);
+  });
+});
+
+describe("coalesced status lines under forced colours (journey F11)", () => {
+  it("keeps the 10px clamp spacer in Canvas, never a bar in the text colour", async () => {
+    const [{ readFileSync }, { dirname, join }, { fileURLToPath }] = await Promise.all([import("node:fs"), import("node:path"), import("node:url")]);
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
+    expect(css).toContain("border-bottom: 10px solid transparent;");
+    expect(css).toMatch(/@media \(forced-colors: active\) \{\s*\.thread \.coalesce \{ border-bottom-color: Canvas; \}\s*\}/);
   });
 });

@@ -40,6 +40,30 @@ export const HEARTBEAT_INTERVAL_MS = 5_000;
 export const DEGRADED_AFTER_MISSED_HEARTBEATS = 2;
 export const RECONNECT_AFTER_MISSED_HEARTBEATS = 4;
 
+/**
+ * The Terminal view header's connection chip (dot class and words) while the
+ * session is up, read from the machine's own connection, the same state the
+ * machine rail shows (cas-bf07 QA F01):
+ * - no latency sample yet, or one missed heartbeat: a neutral dot and
+ *   "Checking…", never a green dot beside "Status unavailable" (journey F17,
+ *   QA F02);
+ * - degraded (heartbeats keep failing): the amber dot and "Degraded", as the
+ *   rail, whatever the terminal attach says;
+ * - a sample: `attachState` (normally live) and the latency;
+ * - not live: the machine's phase and `notLiveLabel`.
+ */
+export function headerConnectionChip(
+  machine: ConnectionSnapshot | undefined,
+  attachState: string,
+  notLiveLabel: string,
+): { readonly state: string; readonly text: string } {
+  if (!machine) return { state: "checking", text: "Checking…" };
+  if (machine.phase !== "live") return { state: machine.phase, text: notLiveLabel };
+  if (machine.degraded) return { state: "degraded", text: "Degraded" };
+  if (machine.latencyMs === undefined) return { state: "checking", text: "Checking…" };
+  return { state: attachState, text: `${machine.latencyMs}ms` };
+}
+
 export function backoffDelay(attempt: number, random = Math.random): number {
   const base = Math.min(30_000, 1_000 * 2 ** Math.max(0, attempt));
   const jitter = 0.8 + random() * 0.4;

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
-import { sessionJumpCommandMarkup } from "./palette-commands";
+import { controlCommandCopy, sessionJumpCommandMarkup } from "./palette-commands";
 
 function row(markup: string): HTMLButtonElement {
   const host = document.createElement("div");
@@ -41,5 +41,25 @@ describe("palette Jump to rows (cas-cfcb)", () => {
     const command = row(sessionJumpCommandMarkup(studio, { name: "calm-otter-4", supervisor: "", project_dir: "/projects/gabber-studio" }));
     expect(command.querySelector("span")?.textContent).toBe("Jump to gabber-studio");
     expect(command.querySelector("small")?.textContent).toBe("calm-otter-4 · Studio Mac · macOS");
+  });
+});
+
+describe("palette control command (journey F16)", () => {
+  it("names what this device can do, keeping the control term in the hint", () => {
+    expect(controlCommandCopy({ heldByMe: true, forceTakeover: false })).toEqual({ title: "Let other devices type here", hint: "Release control of this conversation" });
+    expect(controlCommandCopy({ heldByMe: false, forceTakeover: false })).toEqual({ title: "Type here from this device", hint: "Take control of this conversation" });
+    expect(controlCommandCopy({ heldByMe: false, forceTakeover: true, controller: "Studio iPad" })).toEqual({ title: "Type here from this device", hint: "Force takeover from Studio iPad" });
+    expect(controlCommandCopy({ heldByMe: false, forceTakeover: true })).toEqual({ title: "Type here from this device", hint: "Force takeover" });
+  });
+
+  it("says why when the command is unavailable", () => {
+    expect(controlCommandCopy({ heldByMe: false, forceTakeover: false, disabledReason: "Studio iPad is in control." })).toEqual({ title: "Type here from this device", hint: "Studio iPad is in control." });
+  });
+
+  it("never says session", () => {
+    for (const heldByMe of [true, false]) for (const forceTakeover of [true, false]) {
+      const copy = controlCommandCopy({ heldByMe, forceTakeover, controller: "Studio iPad" });
+      expect(`${copy.title} ${copy.hint}`).not.toMatch(/session/i);
+    }
   });
 });

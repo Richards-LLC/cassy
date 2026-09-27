@@ -53,6 +53,13 @@ export function threadAttachments(history: ConversationHistory | undefined): Thr
   return out;
 }
 
+/**
+ * How a waiting blocker is cleared (journey F12): any message the operator
+ * sends after it acknowledges it (ConversationHistory.waiting), so the thread
+ * and the rail say so.
+ */
+export const BLOCKER_HINT = "Reply to unblock";
+
 /** Open asks and blockers the rail lists: everything waiting except the pinned ask. */
 export function railWaiting(history: ConversationHistory | undefined): OperatorReply[] {
   if (!history) return [];
@@ -102,6 +109,8 @@ function renderWaiting(document: Document, list: HTMLElement, waiting: readonly 
     const kind = document.createElement("span"); kind.className = "context-kind"; kind.textContent = reply.kind === "blocker" ? "Blocker" : "Question";
     const text = document.createElement("span"); text.className = "context-text"; text.textContent = entryText(reply.message);
     jump.append(kind, text);
+    // A blocker says how it clears (journey F12); the jump alone did not.
+    if (reply.kind === "blocker") { const hint = document.createElement("span"); hint.className = "context-hint"; hint.textContent = BLOCKER_HINT; jump.append(hint); }
     jump.onclick = () => jumpToTurn(document, reply.notification_id);
     item.append(jump);
     return item;

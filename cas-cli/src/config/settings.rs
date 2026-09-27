@@ -843,6 +843,10 @@ impl Default for FactoryConfig {
 /// Resolve the durable artifact parent shared by the factory workspace
 /// contract and completion-receipt boundary. `~/.cas/artifacts` is a
 /// real-disk fallback, never `/tmp`.
+/// What `[factory] artifacts_root` means when unset, as `cas config get`
+/// shows it and the registry documents it (cas-1a05).
+pub const FACTORY_ARTIFACTS_ROOT_DEFAULT: &str = "~/.cas/artifacts";
+
 pub fn resolved_factory_artifacts_root(configured: Option<&str>) -> std::path::PathBuf {
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     match configured.map(str::trim).filter(|value| !value.is_empty()) {

@@ -106,6 +106,38 @@ impl Config {
                     ))
                 })?;
             }
+            // cas-1a05: registered factory keys that `set` did not accept.
+            "factory.artifacts_root" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                let root = value.trim();
+                factory.artifacts_root = (!root.is_empty()).then(|| root.to_string());
+            }
+            "factory.ai_enrichment.enabled" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.ai_enrichment.enabled = value
+                    .parse()
+                    .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
+            }
+            "factory.ai_enrichment.endpoint" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.ai_enrichment.endpoint = value.trim().to_string();
+            }
+            "factory.ai_enrichment.provider" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.ai_enrichment.provider = value.trim().to_string();
+            }
+            "factory.ai_enrichment.api_key_env" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.ai_enrichment.api_key_env = value.trim().to_string();
+            }
+            "factory.ai_enrichment.model" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.ai_enrichment.model = value.trim().to_string();
+            }
+            "factory.ai_enrichment.effort" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.ai_enrichment.effort = value.trim().to_string();
+            }
             // Sync section
             "sync.enabled" => {
                 self.sync.enabled = value

@@ -6,6 +6,7 @@ import { ATLAS, STUDIO, PELICAN } from "./world";
 // failure a network switch actually leaves, can be reproduced.
 test("HUB-J12 switch networks without losing the conversation", async ({ page, journey }) => {
   // Seven transitions, one of them a 25 s outage with four missed heartbeats,
+  // Eight transitions, one of them a 25 s outage with four missed heartbeats,
   // plus the held-send backoff wait and the legacy-socket stage.
   test.setTimeout(330_000);
   // Time flows as usual; the fake clock only lets the daemon-link stage jump
@@ -248,5 +249,24 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
     expect(await until(() => sentTimes("After the session stayed live"), (n) => n >= 1, 15_000)).toBe(1);
     await page.waitForTimeout(1_000);
     expect(sentTimes("After the session stayed live"), "sent once").toBe(1);
+  });
+
+  await journey.stage("A revoked pairing says so and offers Re-pair, on a phone too", async () => {
+    // cas-d15c (cas-d636 QA F01): a definitive refusal ends the pairing. The
+    // banner beside "Needs pairing" used to say "Reconnecting…", and a phone,
+    // which hides the attention rail, had no Re-pair anywhere.
+    await page.setViewportSize({ width: 390, height: 844 });
+    const banner = page.locator(".terminal-disconnected-banner");
+    hub.refuseProofs("atlas", 1_000, "revoked", false);
+    await hub.down("atlas", { sockets: "close" });
+    await hub.up("atlas");
+    await expect(header).toHaveText(" · Needs pairing", { timeout: 25_000 });
+    await expect(banner.locator(".banner-text")).toHaveText("Atlas · Linux needs pairing again.");
+    await expect(banner).not.toContainText("Reconnecting");
+    const repair = banner.getByRole("button", { name: "Re-pair Atlas · Linux" });
+    await expect(repair).toBeVisible();
+    expect((await repair.boundingBox())!.height, "a 44 px target on a phone").toBeGreaterThanOrEqual(44);
+    await repair.click();
+    await expect(page.locator("#pair-dialog")).toBeVisible();
   });
 });

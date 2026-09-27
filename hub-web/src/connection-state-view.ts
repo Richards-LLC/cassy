@@ -291,7 +291,7 @@ export function lostConnectionBanner(machineLabel: string, fatal: boolean): stri
  * reconnecting, so the banner beside "Needs pairing" must not say it is.
  */
 export function pairingLostBanner(machineLabel: string): string {
-  return `${machineLabel} needs pairing again. Re-pair to reconnect.`;
+  return `${machineLabel} needs pairing again.`;
 }
 
 /**

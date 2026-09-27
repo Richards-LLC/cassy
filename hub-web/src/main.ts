@@ -702,7 +702,11 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
           fingerprint: `${machine.id}:auth_loss`,
         });
       }
-      if (state.phase === "live") resolveAttention(`${machine.id}:hub_disconnected`);
+      if (state.phase === "live") {
+        resolveAttention(`${machine.id}:hub_disconnected`);
+        // cas-d636 QA F02: a pairing that works again is no longer blocked.
+        resolveAttention(`${machine.id}:auth_loss`);
+      }
       if (state.phase === "backoff") {
         void addAttention(machine, undefined, "hub_disconnected", {
           headline: "Reconnecting to hub",
@@ -1448,11 +1452,33 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
     // A refused pairing is not reconnecting: say what the header's "Needs
     // pairing" means instead (cas-d15c).
     const pairingLost = Boolean(snapshot.authFailure ?? connectionStates.get(machineId)?.authFailure);
-    banner.textContent = pairingLost
+    // The words sit in their own span so the 1 Hz repaint updates them
+    // without rebuilding the Re-pair control (and dropping its focus).
+    let words = banner.querySelector<HTMLElement>(":scope > .banner-text");
+    if (!words) {
+      words = document.createElement("span");
+      words.className = "banner-text";
+      banner.replaceChildren(words);
+    }
+    words.textContent = pairingLost
       ? pairingLostBanner(where)
       : sessionOnly
         ? sessionReconnectingBanner(conversationLabel(machineId, session), where, snapshot.fatal === true)
         : lostConnectionBanner(where, snapshot.fatal === true);
+    // cas-d636 QA F01: a phone hides the rail's Re-pair, so the banner that
+    // says the pairing is gone carries it.
+    const repair = banner.querySelector<HTMLButtonElement>(":scope > .banner-repair");
+    if (pairingLost && !repair) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "banner-repair";
+      button.textContent = "Re-pair";
+      button.setAttribute("aria-label", `Re-pair ${where}`);
+      button.onclick = () => openRepairDialog(machineId);
+      banner.append(button);
+    } else if (!pairingLost && repair) {
+      repair.remove();
+    }
     banner.dataset.scope = pairingLost ? "pairing" : sessionOnly ? "session" : "machine";
     banner.dataset.attempt = String(view.attempt);
     grid.classList.add("terminal-disconnected");

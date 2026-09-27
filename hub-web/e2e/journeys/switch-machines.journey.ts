@@ -380,9 +380,16 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await expect(latency).toHaveText("Degraded", { timeout: 20_000 });
     await expect(chip).toHaveClass(/\bdegraded\b/);
     await expect(railDot).toHaveClass(/\bdegraded\b/);
+    // cas-71af (bf07 QA F01): the chip's tooltip reads the same machine state
+    // as the chip, not the terminal attach's "live".
+    await expect(chip).toHaveAttribute("title", /^degraded · \d+ missed$/);
+    // bf07 QA F02: a longer outage does not leave the chip Degraded. After
+    // four missed heartbeats the machine reconnects, and it comes back.
+    await expect(latency).not.toHaveText("Degraded", { timeout: 20_000 });
     await page.unroute(heartbeat);
-    await expect(latency).toHaveText(/^\d+ms$/, { timeout: 15_000 });
+    await expect(latency).toHaveText(/^\d+ms$/, { timeout: 30_000 });
     await expect(chip).not.toHaveClass(/\bdegraded\b/);
+    await expect(chip).toHaveAttribute("title", /^live · \d+ms$/);
     await expect(page.locator(".session-picker-codename")).toHaveText(PELICAN);
     // The title is announced as the open conversation and its machine, the
     // switch after it (journey F19): not "Switch session — 4 available".

@@ -100,6 +100,10 @@ export function applyLiveRegions(root: ParentNode, view: LiveRegionView): void {
   if (interrupt) {
     interrupt.title = view.interruptReason ?? "Interrupt selected pane";
     setDisabledReason(interrupt, view.interruptReason);
+    // cas-71af: the reason under the header is its description, so a click
+    // (or a screen reader) finds it there instead of in a repeating toast.
+    if (view.interruptReason) interrupt.setAttribute("aria-describedby", "session-controls-reason");
+    else interrupt.removeAttribute("aria-describedby");
   }
   setNotice(root.querySelector<HTMLElement>("#session-controls-reason"), view.controlsNotice);
 

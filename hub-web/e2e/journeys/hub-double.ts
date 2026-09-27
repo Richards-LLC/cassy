@@ -87,7 +87,15 @@ export class HubDouble {
       window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
         const url = new URL(String(input instanceof Request ? input.url : input), location.href);
         if (url.hostname.endsWith(".test") && url.pathname === "/v1/events") {
-          const body = new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(": double connected\n\n")); } });
+          // A real fetch body errors when its signal aborts; the bundle's
+          // heartbeat relies on that to reconnect after missed heartbeats
+          // (cas-71af, bf07 QA F02: without it the double stayed Degraded).
+          const signal = init?.signal;
+          const body = new ReadableStream({ start(c) {
+            c.enqueue(new TextEncoder().encode(": double connected\n\n"));
+            signal?.addEventListener("abort", () => { try { c.error(new DOMException("The operation was aborted.", "AbortError")); } catch { /* already closed */ } });
+          } });
+          if (signal?.aborted) return Promise.reject(new DOMException("The operation was aborted.", "AbortError"));
           return Promise.resolve(new Response(body, { headers: { "content-type": "text/event-stream" } }));
         }
         return original(input, init);

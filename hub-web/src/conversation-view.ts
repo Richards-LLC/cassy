@@ -182,6 +182,12 @@ export class ConversationView {
   /** Coalesced status lines the operator opened with "Show full update"; survives repaints. */
   private expanded = new Set<string>();
   private following = true;
+  /**
+   * cas-71af (1584 QA F01): Load earlier held focus when pressed. It is
+   * disabled while the page loads and hidden once the last page lands, and
+   * either used to drop focus to the page body.
+   */
+  private loadEarlierFocus = false;
   private pinPending = false;
   private disposed = false;
   private resize?: ResizeObserver;
@@ -210,7 +216,11 @@ export class ConversationView {
     this.loadEarlier.hidden = true;
     // Asking for older turns is reading, not following the tail: the page
     // lands above and the turn on screen stays put (journey F7).
-    this.loadEarlier.onclick = () => { this.following = false; this.options.loadEarlier?.(); };
+    this.loadEarlier.onclick = () => {
+      this.following = false;
+      this.loadEarlierFocus = this.element.ownerDocument.activeElement === this.loadEarlier;
+      this.options.loadEarlier?.();
+    };
     this.msgs = document.createElement("div"); this.msgs.className = "msgs";
     this.msgs.setAttribute("role", "log");
     this.empty = document.createElement("div"); this.empty.className = "empty"; this.empty.hidden = true;
@@ -273,6 +283,29 @@ export class ConversationView {
       if (Math.abs(drift) >= 1) this.element.scrollTop += drift;
     }
     if (this.following && document.getSelection()?.isCollapsed !== false) this.pin();
+    if (this.loadEarlierFocus && !loadingEarlier) this.restoreLoadEarlierFocus(document);
+  }
+
+  /**
+   * Once the page it asked for lands, Load earlier gets its focus back; after
+   * the last page, where it hides, focus goes to the "No earlier history"
+   * line (else the oldest turn) at the top, where the button was. A reader
+   * who moved focus elsewhere meanwhile keeps it there.
+   */
+  private restoreLoadEarlierFocus(document: Document): void {
+    const active = document.activeElement;
+    const lost = !active || active === document.body || active === this.loadEarlier;
+    if (!this.loadEarlier.hidden) {
+      if (!lost) this.loadEarlierFocus = false;
+      else if (active !== this.loadEarlier) this.loadEarlier.focus({ preventScroll: true });
+      return;
+    }
+    this.loadEarlierFocus = false;
+    if (!lost) return;
+    const target = this.msgs.querySelector<HTMLElement>(":scope > .history-end") ?? this.msgs.querySelector<HTMLElement>("[data-key]");
+    if (!target) { this.element.focus({ preventScroll: true }); return; }
+    target.tabIndex = -1;
+    target.focus({ preventScroll: true });
   }
 
   /**
@@ -408,10 +441,14 @@ export class ConversationView {
     if (!project) name.className = "codename";
     const where = document.createElement("span"); where.className = "proj2";
     where.title = [machine, project ? supervisor : undefined].filter(Boolean).join(" · ");
-    if (machine) where.append(machine);
+    // cas-71af (e918 QA F02): as in the header, the machine name yields to the
+    // codename: it ellipsises in its own span, down to a letter and "…".
+    const host = document.createElement("span"); host.className = "proj2-machine"; host.textContent = machine ?? "";
+    if (machine) where.append(host);
     if (project) {
       const secondary = document.createElement("span"); secondary.className = "codename"; secondary.textContent = supervisor;
-      where.append(...(machine ? [" · "] : []), secondary);
+      const separator = document.createElement("span"); separator.className = "proj2-sep"; separator.textContent = " · ";
+      where.append(...(machine ? [separator] : []), secondary);
     }
     const said = document.createElement("p"); said.className = "said"; said.setAttribute("role", "status");
     // The sentence names the role, not the generated codename (journey F13).

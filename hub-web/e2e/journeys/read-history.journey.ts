@@ -69,6 +69,9 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
     expect(hub.historyRequests.at(-1)).toMatchObject({ before: 10 });
     await expect(page.getByText("No earlier history")).toBeVisible();
     await expect(page.getByRole("button", { name: "Load earlier" })).toBeHidden();
+    // cas-71af (1584 QA F01): the pressed button hides on the last page, and
+    // focus lands on the line that took its place, not the page body.
+    await expect(page.getByText("No earlier history")).toBeFocused();
     await expect(log.getByText("Yesterday")).toBeVisible();
   });
 

@@ -192,6 +192,14 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     const reason = page.locator("#session-controls-reason");
     await expect(reason).toBeVisible();
     await expect(reason).toHaveText(outage);
+    // cas-71af (6929 QA F01): a click on the greyed Interrupt calls attention
+    // to that line instead of adding a toast that repeats it a third time;
+    // the line is also the button's description.
+    await expect(page.locator("#interrupt")).toHaveAttribute("aria-describedby", "session-controls-reason");
+    // Playwright will not click an aria-disabled control; a person can.
+    await page.locator("#interrupt").dispatchEvent("click");
+    await expect(reason).toHaveClass(/\bcalled\b/);
+    await expect(page.locator("#toast.visible")).toHaveCount(0);
     // The drawer's machine status reads whole, at a desktop and a phone width.
     for (const width of [1280, 390]) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 720 });

@@ -780,6 +780,13 @@ main {
 }
 
 .session-controls-reason[hidden] { display: none; }
+/* cas-71af (6929 QA F01): a click on a control this line explains calls
+   attention to the line (a brief warm wash) instead of repeating it in a toast. */
+.session-controls-reason.called { animation: controls-reason-called 1.2s ease-out; }
+@keyframes controls-reason-called { from { background: color-mix(in srgb, var(--state-warn) 22%, var(--bg-panel)); } to { background: var(--bg-panel); } }
+@media (prefers-reduced-motion: reduce) {
+  .session-controls-reason.called { animation: none; background: color-mix(in srgb, var(--state-warn) 14%, var(--bg-panel)); }
+}
 
 .session-header .actions button {
   min-height: var(--space-8);
@@ -3195,9 +3202,12 @@ dialog form > *,
    never exceed machine + separator, so a short label never cuts it); only a
    codename that long ellipsises itself. */
 .conversation-identity .host-where:has(> .host-machine) { display: flex; }
-.conversation-identity .host-machine { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* cas-71af (e918 QA F01): with no room the machine name used to shrink to a
+   2px glyph sliver. It keeps 2ch, one letter and its ellipsis ("D…"), and the
+   codename's reserve is that plus the 3ch separator. */
+.conversation-identity .host-machine { flex: 0 1 auto; min-width: 2ch; overflow: hidden; text-overflow: ellipsis; }
 .conversation-identity .host-sep { flex: none; white-space: pre; }
-.conversation-identity .host-machine ~ .codename { flex: none; max-width: calc(100% - 3ch); overflow: hidden; text-overflow: ellipsis; }
+.conversation-identity .host-machine ~ .codename { flex: none; max-width: calc(100% - 5ch); overflow: hidden; text-overflow: ellipsis; }
 #conversation-connection { flex: none; white-space: pre; }
 .conversation-pane-slot { flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
 .conversation-pane-slot .pane-grid { display: block; padding: 0; height: 100%; min-height: 0; background: var(--bg-root); color: var(--text-hi); }
@@ -3235,6 +3245,8 @@ dialog form > *,
 .thread .msgs { flex: 1; padding: 22px 30px 10px; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .thread .day { align-self: center; margin: 0 0 2px; font-size: 12px; color: var(--ink-mid); }
 .thread .session-divider, .thread .history-end { align-self: center; margin: 0; color: var(--ink-mid); font: var(--weight-medium) 11px/1.3 var(--font-mono); letter-spacing: 0.02em; text-align: center; }
+/* cas-71af: focus lands here when the last Load earlier hides. */
+.thread .history-end:focus-visible, .thread .msgs [data-key]:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; border-radius: 4px; }
 .thread .session-divider { padding: 5px 12px; border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-pill); background: color-mix(in srgb, var(--panel) 72%, transparent); }
 .thread .history-end { padding: 8px 0 2px; font-family: var(--font-ui); font-weight: var(--weight-regular); }
 .thread .turn { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; max-width: 70%; min-width: 0; }
@@ -3384,6 +3396,12 @@ dialog form > *,
 .obj.t-a[data-answered="true"] .obj-body, .obj.t-a[data-answered="true"] .obj-foot { border-left-color: var(--color-transparent); background: var(--sup-bg); color: var(--sup-fg); }
 .obj.t-a[data-answered="true"] .obj-foot { padding-top: 0; }
 .obj.t-a[data-answered="true"] .obj-foot .chip.sent { flex: 0 1 auto; border-color: var(--line-subtle); background: var(--panel); color: var(--ink); }
+/* cas-71af (aac8 QA F01): an acknowledged blocker is handled too. It quiets
+   the same way and carries a ticked "Acknowledged — you replied" line. */
+.obj.t-a.blk[data-acknowledged="true"] { box-shadow: var(--lift-sup); }
+.obj.t-a.blk[data-acknowledged="true"] .obj-body, .obj.t-a.blk[data-acknowledged="true"] .obj-foot { border-left-color: var(--color-transparent); background: var(--sup-bg); color: var(--sup-fg); }
+.obj.t-a.blk .blk-handled { display: flex; align-items: center; gap: 5px; margin-top: 10px; color: var(--ink-mid); font: var(--weight-medium) 12.5px/1.3 var(--font-ui); }
+.obj.t-a.blk .blk-handled .tick { width: 13px; height: 13px; flex: none; color: currentColor; }
 .pinned-ask .obj.t-a .obj-body { border-left-color: var(--color-transparent); background: var(--ask-bg); color: var(--ask-fg); }
 .pinned-ask .obj.t-a .obj-foot { border-left-color: var(--color-transparent); background: var(--ask-deep); }
 .pinned-ask .obj.t-a .obj-foot .chip { border-color: var(--color-transparent); background: var(--pin-chip-bg); color: var(--pin-chip-fg); }
@@ -3458,6 +3476,12 @@ button.chip:disabled { cursor: default; }
 .thread .empty b.codename { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.35; }
 .thread .empty .proj2 { max-width: 100%; font: var(--weight-regular) 13px/1.4 var(--font-mono); color: var(--ink-mid); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .thread .empty .proj2:empty { display: none; }
+/* cas-71af (e918 QA F02): the empty card's machine · codename line yields the
+   machine first, as the header does; the codename stays whole. */
+.thread .empty .proj2:has(> .proj2-machine) { display: flex; }
+.thread .empty .proj2-machine { flex: 0 1 auto; min-width: 2ch; overflow: hidden; text-overflow: ellipsis; }
+.thread .empty .proj2-sep { flex: none; white-space: pre; }
+.thread .empty .proj2-machine ~ .codename { flex: none; max-width: calc(100% - 5ch); overflow: hidden; text-overflow: ellipsis; }
 .thread .empty .said { margin: 0; max-width: 34ch; color: var(--ink-mid); font-size: 15px; overflow-wrap: anywhere; }
 /* In the sentence the codename is one unbroken token, capped at 20
    characters and ellipsised beyond (the 2px keeps a rounded-down 20ch from

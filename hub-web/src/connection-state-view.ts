@@ -286,6 +286,31 @@ export function lostConnectionBanner(machineLabel: string, fatal: boolean): stri
   return fatal ? `Lost connection to ${machineLabel}. Not retrying.` : `Lost connection to ${machineLabel}. Reconnecting…`;
 }
 
+/**
+ * cas-d15c: a pairing the hub refused (revoked, unknown key) is not
+ * reconnecting, so the banner beside "Needs pairing" must not say it is.
+ */
+export function pairingLostBanner(machineLabel: string): string {
+  return `${machineLabel} needs pairing again. Re-pair to reconnect.`;
+}
+
+/**
+ * cas-d15c: one session's daemon link dropped while its machine stayed
+ * connected (the hub closed that session's stream after upstream_unavailable).
+ * The banner names the conversation, and says the machine is fine, instead of
+ * "Lost connection to <machine>", which is kept for a real machine drop.
+ */
+export function sessionReconnectingBanner(sessionLabel: string, machineLabel: string, fatal: boolean): string {
+  return fatal
+    ? `Lost the link to ${sessionLabel}. Not retrying. ${machineLabel} is still connected.`
+    : `Reconnecting to ${sessionLabel}… ${machineLabel} is still connected.`;
+}
+
+/** Why the session's controls wait while only its own link reconnects (cas-d15c). */
+export function sessionOutageControlsReason(sessionLabel: string): string {
+  return `Reconnecting to ${sessionLabel}. Control and interrupts return when it's back.`;
+}
+
 /** A message the outage refused. The composer keeps the draft, so it says so. */
 export function outageRefusal(machineLabel: string): string {
   return `Not sent: lost connection to ${machineLabel}. Your message is kept; send it again when it's back.`;

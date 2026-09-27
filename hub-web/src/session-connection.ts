@@ -62,6 +62,11 @@ function openingPhase(attach: AttachSnapshot): ConnectionSnapshot["phase"] {
  * footer does not say Reconnecting or lower its connected count while a
  * conversation opens (journey F3). Nor does its first retry (cas-28df): the
  * machine's hub is connected; only a second failure counts against it.
+ * Nor does a live session whose daemon link dropped and is reconnecting
+ * (cas-d15c): the hub closed that one session's stream (`sessionOnly`) while
+ * the machine stayed connected, and the conversation's own header, row and
+ * banner say so. A socket that simply dropped, or a failure retrying cannot
+ * fix, still counts.
  */
 export function machineConnection(
   machine: ConnectionSnapshot | undefined,
@@ -70,6 +75,7 @@ export function machineConnection(
   if (!machine || machine.phase !== "live") return machine;
   for (const { attach, wasLive } of sessions) {
     if (!wasLive && attach && (firstAttachInProgress(attach) || firstAttachRetry(attach, wasLive))) continue;
+    if (wasLive && attach && sessionOnlyReconnect(attach)) continue;
     const effective = sessionConnection(machine, attach, wasLive);
     if (effective && effective.phase !== "live") return effective;
   }
@@ -78,4 +84,9 @@ export function machineConnection(
 
 function firstAttachInProgress(attach: AttachSnapshot): boolean {
   return attach.fatal !== true && !attach.authFailure && attach.phase !== "failed" && attach.phase !== "backoff" && attach.phase !== "live";
+}
+
+/** A session that was live, reconnecting for a reason retrying can fix (cas-d15c). */
+function sessionOnlyReconnect(attach: AttachSnapshot): boolean {
+  return attach.sessionOnly === true && attach.fatal !== true && !attach.authFailure && attach.phase !== "live" && attach.phase !== "idle";
 }

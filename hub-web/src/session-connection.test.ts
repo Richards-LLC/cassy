@@ -34,7 +34,12 @@ describe("machineConnection (the footer)", () => {
     const live = machine("live");
     expect(machineConnection(live, [])).toBe(live);
     expect(machineConnection(live, [{ attach: attach("live"), wasLive: true }])).toBe(live);
+    // cas-d15c: a live session reconnecting on a connected machine is that
+    // session's state; a failure retrying cannot fix still counts.
+    expect(machineConnection(live, [{ attach: attach("live"), wasLive: true }, { attach: attach("backoff", { sessionOnly: true }), wasLive: true }])).toBe(live);
+    // A socket that simply dropped, or a failure retrying cannot fix, still counts.
     expect(machineConnection(live, [{ attach: attach("live"), wasLive: true }, { attach: attach("failed"), wasLive: true }])?.phase).toBe("backoff");
+    expect(machineConnection(live, [{ attach: attach("live"), wasLive: true }, { attach: attach("failed", { fatal: true, sessionOnly: true }), wasLive: true }])?.phase).toBe("failed");
     const down = machine("failed");
     expect(machineConnection(down, [{ attach: attach("live"), wasLive: true }])).toBe(down);
   });
@@ -43,13 +48,15 @@ describe("machineConnection (the footer)", () => {
     for (const phase of ["resolving", "dialing", "auth", "attaching"] as const) {
       expect(machineConnection(live, [{ attach: attach(phase, { stage: phase === "resolving" ? "resolving" : phase }), wasLive: false }])).toBe(live);
     }
-    // A first attach failing a second time, a dropped session retrying, and a pairing loss still count.
+    // A first attach failing a second time and a pairing loss still count.
     expect(machineConnection(live, [{ attach: attach("failed", { attempt: 1 }), wasLive: false }])?.phase).toBe("failed");
     expect(machineConnection(live, [{ attach: attach("backoff", { attempt: 2 }), wasLive: false }])?.phase).toBe("backoff");
-    expect(machineConnection(live, [{ attach: attach("attaching"), wasLive: true }])?.phase).toBe("backoff");
     expect(machineConnection(live, [{ attach: attach("auth", { authFailure: "revoked" }), wasLive: false }])?.authFailure).toBe("revoked");
+    expect(machineConnection(live, [{ attach: attach("attaching"), wasLive: true }])?.phase).toBe("backoff");
     // An opening conversation beside a dropped one: the drop still shows.
     expect(machineConnection(live, [{ attach: attach("attaching"), wasLive: false }, { attach: attach("dialing"), wasLive: true }])?.phase).toBe("backoff");
+    // A stream the hub closed on a connected machine does not (cas-d15c).
+    expect(machineConnection(live, [{ attach: attach("attaching", { sessionOnly: true }), wasLive: true }])).toBe(live);
   });
 });
 

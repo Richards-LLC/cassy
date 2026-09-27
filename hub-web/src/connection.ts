@@ -322,6 +322,9 @@ export class HubConnectionSupervisor {
       attempt: this.socketAttempts.get(session) ?? 0,
       missedHeartbeats: 0,
       degraded: false,
+      // A session-only drop stays one through its retry; another failure, or
+      // being live again, ends it (cas-d15c).
+      sessionOnly: phase === "failed" || phase === "live" || phase === "idle" ? undefined : prior?.sessionOnly,
       ...update,
     };
     this.attachLifecycles.set(session, snapshot);
@@ -1348,7 +1351,7 @@ export class HubConnectionSupervisor {
     }
     if (envelope.closed) {
       this.machineSubscriptions.delete(session);
-      this.transitionAttach(session, "failed", "attaching", { reason: "Session daemon stream closed" });
+      this.transitionAttach(session, "failed", "attaching", { reason: "Session daemon stream closed", sessionOnly: true });
       this.callbacks.onSocketError(session, "Session daemon stream closed. Retrying…");
       this.scheduleAttach(session);
       return;

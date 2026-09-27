@@ -27,6 +27,12 @@ export interface AttachSnapshot extends ConnectionSnapshot {
   session: string;
   /** Start of the uninterrupted not-live lifecycle; stable across retries. */
   attachSince?: number;
+  /**
+   * cas-d15c: the hub closed just this session's stream while the machine
+   * socket stayed up (its daemon link dropped). Kept through the retry, and
+   * cleared by any other failure or once the session is live again.
+   */
+  sessionOnly?: boolean;
 }
 
 export const STAGE_TIMEOUT_MS: Readonly<Record<Exclude<ConnectionStage, "idle" | "live">, number>> = {

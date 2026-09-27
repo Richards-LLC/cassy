@@ -19,7 +19,7 @@ import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionU
 import { cycleAttentionGroup, renderAttentionPanel, renderAttentionSummary } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
 import { attachElapsedSeconds, elapsedSeconds, headerConnectionChip, type AttachSnapshot } from "./connection-state";
-import { CONVERSATION_OPENING, disconnectedView, lostConnectionBanner, outageControlsReason, outageRefusal, renderConnectionSurfaceInto, shouldRetainDisconnectedFrame, transportFailureNeedsAttention } from "./connection-state-view";
+import { CONVERSATION_OPENING, disconnectedView, lostConnectionBanner, outageControlsReason, outageRefusal, pairingLostBanner, renderConnectionSurfaceInto, sessionOutageControlsReason, sessionReconnectingBanner, shouldRetainDisconnectedFrame, transportFailureNeedsAttention } from "./connection-state-view";
 import { ensureMachineConnection, replaceMachineConnection } from "./connection-lifecycle";
 import { createDeviceKey } from "./dpop";
 import { readPairingFragment, watchPairingFragment } from "./fragment";
@@ -1411,6 +1411,19 @@ function openConnectionLog(machineId: string): void {
   });
 }
 
+/**
+ * The hub closed just this session's stream and the machine is still
+ * connected: the drop is the conversation's, not the machine's (cas-d15c).
+ */
+function sessionOnlyDrop(machineId: string, session: string): boolean {
+  return attachStates.get(sessionKey(machineId, session))?.sessionOnly === true && connectionStates.get(machineId)?.phase === "live";
+}
+
+/** A conversation as the operator knows it: its project, else its session name. */
+function conversationLabel(machineId: string, session: string): string {
+  return projectTitle(sessions.get(machineId)?.find((item) => item.name === session)?.project_dir) || session;
+}
+
 function renderConnectionSurface(machineId: string, session: string, snapshot: ConnectionState, now = Date.now()): void {
   if (selectedMachineId !== machineId || selectedSession !== session) return;
   const grid = document.querySelector<HTMLElement>("#pane-grid");
@@ -1428,7 +1441,18 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
     // A fatal failure is not reconnecting, so the banner must not claim it is.
     // Plain words in the body font (cas-a447): who was lost and what happens next.
     const where = machines.get(machineId)?.label ?? "the machine";
-    banner.textContent = lostConnectionBanner(where, snapshot.fatal === true);
+    // cas-d15c: with the machine still connected, only this session's daemon
+    // link dropped; the banner names the conversation, not the machine.
+    const sessionOnly = sessionOnlyDrop(machineId, session);
+    // A refused pairing is not reconnecting: say what the header's "Needs
+    // pairing" means instead (cas-d15c).
+    const pairingLost = Boolean(snapshot.authFailure ?? connectionStates.get(machineId)?.authFailure);
+    banner.textContent = pairingLost
+      ? pairingLostBanner(where)
+      : sessionOnly
+        ? sessionReconnectingBanner(conversationLabel(machineId, session), where, snapshot.fatal === true)
+        : lostConnectionBanner(where, snapshot.fatal === true);
+    banner.dataset.scope = pairingLost ? "pairing" : sessionOnly ? "session" : "machine";
     banner.dataset.attempt = String(view.attempt);
     grid.classList.add("terminal-disconnected");
     // A toast already up when the banner arrives moves clear of it (cas-00cc).
@@ -2790,7 +2814,7 @@ function render(captureDraft = true): void {
   const outageReason = sessionDown && selected && selectedSession
     && (sessionsEverLive.has(sessionKey(selected.id, selectedSession))
       || (machineConnectionSnapshot !== undefined && machineConnectionSnapshot.phase !== "live" && lastLiveAt.has(selected.id)))
-    ? outageControlsReason(selected.label)
+    ? (sessionOnlyDrop(selected.id, selectedSession) ? sessionOutageControlsReason(conversationLabel(selected.id, selectedSession)) : outageControlsReason(selected.label))
     : undefined;
   const controlReason = controlDisabledReason(selected, selectedSession, lease);
   const takeControlReason = outageReason ?? takeControlDisabledReason(selected, selectedSession, lease);

@@ -5,9 +5,9 @@ import { ATLAS, STUDIO, PELICAN } from "./world";
 // machine protocol (one socket, health ping/pong) so a half-open socket, the
 // failure a network switch actually leaves, can be reproduced.
 test("HUB-J12 switch networks without losing the conversation", async ({ page, journey }) => {
-  // Five transitions, one of them a 25 s outage with four missed heartbeats,
+  // Seven transitions, one of them a 25 s outage with four missed heartbeats,
   // plus the held-send backoff wait and the legacy-socket stage.
-  test.setTimeout(270_000);
+  test.setTimeout(330_000);
   // Time flows as usual; the fake clock only lets the daemon-link stage jump
   // past the two-minute hold on a held message (cas-a355).
   await page.clock.install();
@@ -48,6 +48,8 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
     // No browser event says so; the open socket goes quiet (half-open).
     await hub.down("atlas");
     await expect(header).toHaveText(" · Reconnecting", { timeout: 30_000 });
+    // A real machine drop keeps the machine-level wording (cas-d15c).
+    await expect(page.locator(".terminal-disconnected-banner")).toHaveText("Lost connection to Atlas · Linux. Reconnecting…");
     // A message written now waits in the thread instead of vanishing into
     // the dead socket, and says so.
     await sendNow("While Tailscale is off");
@@ -122,11 +124,27 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
     // (upstream_unavailable) and closes the session's stream; the message
     // waits in the thread instead of reading "Not sent", and goes out once
     // when the session is live again.
+    // cas-d15c: the machine never dropped, so the banner names the
+    // conversation, not the machine, and the footer stays Connected; it used
+    // to read "Lost connection to Atlas · Linux".
+    const banner = page.locator(".terminal-disconnected-banner");
+    const footer = page.locator("#hub-footer-badges .machine-badge-state");
+    await expect(footer).toHaveText("Connected");
+    await page.evaluate(() => {
+      const seen: string[] = [];
+      (window as unknown as { __footerSeen: string[] }).__footerSeen = seen;
+      const sample = () => { const text = document.querySelector<HTMLElement>("#hub-footer-badges .machine-badge-state")?.innerText.trim(); if (text && seen.at(-1) !== text) seen.push(text); };
+      new MutationObserver(sample).observe(document.body, { subtree: true, childList: true, characterData: true });
+    });
     hub.upstreamLost(PELICAN);
+    // The resubscribe answers after 2 s, so the reattach is on screen.
+    hub.delayAttach(PELICAN, 2_000);
     const refusalsBefore = hub.upstreamRefusals.length;
     await sendNow("While the daemon link is down");
     expect(await until(() => hub.upstreamRefusals.length, (n) => n > refusalsBefore, 5_000)).toBeGreaterThan(refusalsBefore);
     await expect(held).toHaveText("Waiting for the connection — sends when it's back");
+    await expect(banner).toHaveText("Reconnecting to cas-src… Atlas · Linux is still connected.", { timeout: 10_000 });
+    await expect(banner).toHaveAttribute("data-scope", "session");
     expect(sentTimes("While the daemon link is down")).toBe(0);
     hub.upstreamBack(PELICAN);
     expect(await until(() => sentTimes("While the daemon link is down"), (n) => n >= 1, 15_000)).toBe(1);
@@ -134,6 +152,9 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
     await expect(header).toHaveText(" · Live");
     await page.waitForTimeout(1_000);
     expect(sentTimes("While the daemon link is down"), "sent once").toBe(1);
+    await expect(banner).toBeHidden({ timeout: 15_000 });
+    const footerSeen = await page.evaluate(() => (window as unknown as { __footerSeen: string[] }).__footerSeen);
+    expect(footerSeen.filter((text) => text !== "Connected"), "the footer while the session reconnected").toEqual([]);
 
     // cas-a355: when the link stays down, the page backs off (about 1, 2,
     // then 4 s between attempts) instead of resending once a second.

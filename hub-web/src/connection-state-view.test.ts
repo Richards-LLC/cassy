@@ -10,6 +10,9 @@ import {
   disconnectedView,
   elapsedSeconds,
   lostConnectionBanner,
+  pairingLostBanner,
+  sessionOutageControlsReason,
+  sessionReconnectingBanner,
   outageControlsReason,
   outageRefusal,
   shouldRetainDisconnectedFrame,
@@ -226,6 +229,12 @@ describe("one outage, one vocabulary (journey F9)", () => {
   it("words the refusal and the disabled controls the way the banner does", () => {
     expect(lostConnectionBanner("Atlas · Linux", false)).toBe("Lost connection to Atlas · Linux. Reconnecting…");
     expect(lostConnectionBanner("Atlas · Linux", true)).toBe("Lost connection to Atlas · Linux. Not retrying.");
+    // cas-d15c: one session's link, the machine still connected.
+    expect(sessionReconnectingBanner("cas-src", "Atlas · Linux", false)).toBe("Reconnecting to cas-src… Atlas · Linux is still connected.");
+    expect(sessionReconnectingBanner("cas-src", "Atlas · Linux", true)).toBe("Lost the link to cas-src. Not retrying. Atlas · Linux is still connected.");
+    expect(sessionOutageControlsReason("cas-src")).toBe("Reconnecting to cas-src. Control and interrupts return when it's back.");
+    // A refused pairing does not claim to be reconnecting.
+    expect(pairingLostBanner("Atlas · Linux")).toBe("Atlas · Linux needs pairing again. Re-pair to reconnect.");
     expect(outageRefusal("Atlas · Linux")).toBe("Not sent: lost connection to Atlas · Linux. Your message is kept; send it again when it's back.");
     expect(outageControlsReason("Atlas · Linux")).toBe("Lost connection to Atlas · Linux. Control and interrupts return when it reconnects.");
     for (const line of [outageRefusal("Atlas · Linux"), outageControlsReason("Atlas · Linux")]) {

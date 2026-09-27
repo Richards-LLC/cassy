@@ -557,7 +557,10 @@ export class HubDouble {
         // The session's frames go to this socket from now on, as the hub's
         // per-session viewer does.
         this.sockets.set(session, channel(session));
-        ws.send(JSON.stringify({ channel: `pty:${session}`, message: this.welcomeFor(session) }));
+        const welcome = () => ws.send(JSON.stringify({ channel: `pty:${session}`, message: this.welcomeFor(session) }));
+        const delay = this.attachDelays.get(session);
+        this.attachDelays.delete(session);
+        if (delay === undefined) welcome(); else setTimeout(welcome, delay);
         return;
       }
       if (!frame.message) return;

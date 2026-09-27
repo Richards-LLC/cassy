@@ -50,7 +50,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   exactly once.
 - A send the hub refuses because the session's daemon link is missing is an
   audited, retryable `upstream_unavailable` rather than `forbidden`. It is
-  held and resent once the session is live again.
+  held and resent once the session is live again. While the link stays
+  down, the page backs off its retries (about 1, 2, 4, then 8 s), and a
+  message written to the legacy socket after the refused one is held too.
+- A held message that waits past two minutes says Not sent because the
+  session didn't come back, with Retry, instead of advising to re-pair the
+  device. The composer no longer promises it will go out by itself.
 - The factory daemon answers a resent `SendMessage` with its first receipt
   and queues it once.
 - A refused DPoP proof is retried instead of being read as a revoked

@@ -111,6 +111,10 @@ struct ManifestFiles {
     visual_qa: Option<String>,
     visual_qa_json: Option<String>,
     visual_qa_stdout: Option<String>,
+    /// cas-e371: with `visual_qa_status: "scoped"`, the strict run of the
+    /// base build over the same pages, so findings already there are told
+    /// apart from findings the delivery introduced.
+    visual_qa_baseline_json: Option<String>,
     critique: Option<String>,
 }
 
@@ -248,7 +252,9 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
     // journey evaluation scores it. Supervisor decision (cas-0cd5): that
     // exception does not reach a delivery close; a delivery still needs its
     // own polish proof.
-    if manifest.producer == "journey" && manifest.visual_qa_status != "pass" {
+    if manifest.producer == "journey"
+        && !matches!(manifest.visual_qa_status.as_str(), "pass" | "scoped")
+    {
         return Err(EvidenceRefusal::new(
             format!(
                 "a journey bundle without polish proof (visual_qa_status {:?}); the journey polish exception covers the release evaluation, not a delivery close",
@@ -471,33 +477,51 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
         ));
     }
 
-    // 5. Polish run passed.
-    if manifest.visual_qa_status != "pass" {
-        return Err(EvidenceRefusal::new(
-            format!(
-                "missing polish proof: visual_qa_status is {:?} (only \"pass\" closes without a supervisor override)",
-                manifest.visual_qa_status
-            ),
-            producing_command("visual_qa_stdout", &bundle_dir),
-        ));
-    }
-    // Markdown and stdout are retained as evidence, but their presentation
-    // varies by script and source count. The JSON run report is the verdict
-    // authority (GH #1017/#1025); no hand-written PASS markers are needed.
-    check_visual_qa_run(
-        &path_of("visual_qa_json").unwrap_or_default(),
-        delivered_time,
-        &format!("the delivered commit {}", short(ctx.delivered_head)),
-    )
-    .map_err(|problem| {
-        EvidenceRefusal::new(
-            problem,
-            producing_command("visual_qa_json", &bundle_dir).replace(
-                "<url>",
-                "<a local URL serving a build of the delivered commit>",
-            ),
+    // 5. Polish run passed, or (cas-e371, GH #1023 finding 1) introduced no
+    // finding the base build did not already have. A narrow delivery on a
+    // page with an older visual backlog is judged on what it changed; the
+    // backlog is the base run's, and the page's follow-up work.
+    let visual_qa_json = path_of("visual_qa_json").unwrap_or_default();
+    let delivered_label = format!("the delivered commit {}", short(ctx.delivered_head));
+    let run_command = || {
+        producing_command("visual_qa_json", &bundle_dir).replace(
+            "<url>",
+            "<a local URL serving a build of the delivered commit>",
         )
-    })?;
+    };
+    match manifest.visual_qa_status.as_str() {
+        // Markdown and stdout are retained as evidence, but their presentation
+        // varies by script and source count. The JSON run report is the verdict
+        // authority (GH #1017/#1025); no hand-written PASS markers are needed.
+        "pass" => check_visual_qa_run(&visual_qa_json, delivered_time, &delivered_label)
+            .map_err(|problem| EvidenceRefusal::new(problem, run_command()))?,
+        "scoped" => {
+            let Some(relative) = files
+                .visual_qa_baseline_json
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            else {
+                return Err(missing_key("visual_qa_baseline_json"));
+            };
+            let baseline =
+                resolve_bundle_file(&bundle_dir, "visual_qa_baseline_json", relative)?;
+            check_visual_qa_scoped(&visual_qa_json, &baseline, delivered_time, &delivered_label)
+                .map_err(|problem| {
+                    EvidenceRefusal::new(
+                        problem,
+                        producing_command("visual_qa_baseline_json", &bundle_dir),
+                    )
+                })?;
+        }
+        other => {
+            return Err(EvidenceRefusal::new(
+                format!(
+                    "missing polish proof: visual_qa_status is {other:?} (\"pass\", or \"scoped\" with a base-build run, closes without a supervisor override)"
+                ),
+                producing_command("visual_qa_stdout", &bundle_dir),
+            ));
+        }
+    }
 
     // 6. Critique floor.
     for dimension in RUBRIC {
@@ -541,6 +565,11 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
 /// `visual_qa_status` is only a claim; this is the run's own record.
 #[derive(Debug, Deserialize)]
 struct VisualQaRun {
+    /// Every unsuppressed finding, as visual-qa.mjs records it (type,
+    /// selector or elementPath, url, scheme, viewport). A scoped comparison
+    /// needs it; the pass check does not.
+    #[serde(default)]
+    findings: Option<Vec<serde_json::Value>>,
     #[serde(default)]
     status: String,
     #[serde(default, rename = "generatedAt")]
@@ -607,18 +636,7 @@ pub fn check_visual_qa_run(
     not_before_label: &str,
 ) -> Result<(), String> {
     let claim = "claims a visual-QA pass, but";
-    let raw = std::fs::read_to_string(report).map_err(|_| {
-        format!(
-            "{claim} the strict run's own report {} is missing or unreadable",
-            report.display()
-        )
-    })?;
-    let run: VisualQaRun = serde_json::from_str(&raw).map_err(|error| {
-        format!(
-            "{claim} {} is not the JSON report visual-qa.mjs writes ({error})",
-            report.display()
-        )
-    })?;
+    let run = read_visual_qa_run(report, claim)?;
     let legacy_single_source = run.status.is_empty() && run.total_issues.is_some();
     if legacy_single_source {
         if run.total_issues != Some(0)
@@ -640,32 +658,61 @@ pub fn check_visual_qa_run(
             run.total_issues
         ));
     }
+    check_run_provenance(&run, report, claim, Some((not_before, not_before_label)))?;
+    Ok(())
+}
+
+fn read_visual_qa_run(report: &Path, claim: &str) -> Result<VisualQaRun, String> {
+    let raw = std::fs::read_to_string(report).map_err(|_| {
+        format!(
+            "{claim} the strict run's own report {} is missing or unreadable",
+            report.display()
+        )
+    })?;
+    serde_json::from_str(&raw).map_err(|error| {
+        format!(
+            "{claim} {} is not the JSON report visual-qa.mjs writes ({error})",
+            report.display()
+        )
+    })
+}
+
+/// The run was strict, (when `fresh` is given) generated no earlier than
+/// that time, and checked local builds only. Returns the targets it checked.
+fn check_run_provenance(
+    run: &VisualQaRun,
+    report: &Path,
+    claim: &str,
+    fresh: Option<(i64, &str)>,
+) -> Result<Vec<String>, String> {
     if run.strict == Some(false) {
         return Err(format!(
             "{claim} {} records a run without --strict",
             report.display()
         ));
     }
-    let generated = chrono::DateTime::parse_from_rfc3339(run.generated_at.trim())
-        .map(|time| time.timestamp())
-        .map_err(|_| {
-            format!(
-                "{claim} {} records no valid generatedAt ({:?}), so nothing shows when the run happened",
+    if let Some((not_before, not_before_label)) = fresh {
+        let generated = chrono::DateTime::parse_from_rfc3339(run.generated_at.trim())
+            .map(|time| time.timestamp())
+            .map_err(|_| {
+                format!(
+                    "{claim} {} records no valid generatedAt ({:?}), so nothing shows when the run happened",
+                    report.display(),
+                    run.generated_at
+                )
+            })?;
+        if generated < not_before {
+            return Err(format!(
+                "{claim} {} was generated at {}, before {not_before_label}: that run did not check this build",
                 report.display(),
-                run.generated_at
-            )
-        })?;
-    if generated < not_before {
-        return Err(format!(
-            "{claim} {} was generated at {}, before {not_before_label}: that run did not check this build",
-            report.display(),
-            run.generated_at.trim()
-        ));
+                run.generated_at.trim()
+            ));
+        }
     }
-    let targets: Vec<&str> = if !run.urls.is_empty() {
-        run.urls.iter().map(String::as_str).collect()
+    let targets: Vec<String> = if !run.urls.is_empty() {
+        run.urls.clone()
     } else if !run.input.trim().is_empty() {
-        vec![run.input.trim()]
+        vec![run.input.trim().to_string()]
     } else {
         Vec::new()
     };
@@ -681,7 +728,125 @@ pub fn check_visual_qa_run(
             report.display()
         ));
     }
-    Ok(())
+    Ok(targets)
+}
+
+/// The page a visual-QA target names, without the origin: the delivered and
+/// the base build are served on different local ports.
+fn visual_qa_page(target: &str) -> String {
+    match url::Url::parse(target.trim()) {
+        Ok(parsed) if parsed.scheme() != "file" => {
+            let mut page = parsed.path().to_string();
+            if let Some(query) = parsed.query() {
+                page.push('?');
+                page.push_str(query);
+            }
+            page
+        }
+        _ => target.trim().to_string(),
+    }
+}
+
+/// What a finding is compared by across two runs: its type, element, the
+/// element it collides with, page, scheme and viewport.
+fn visual_qa_finding_key(finding: &serde_json::Value) -> String {
+    let text = |pointer: &str| {
+        finding
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let element = Some(text("/selector"))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| text("/elementPath"));
+    let viewport = Some(text("/viewport/name"))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| text("/viewport"));
+    [
+        text("/type"),
+        element,
+        text("/otherElementPath"),
+        visual_qa_page(&text("/url")),
+        text("/scheme"),
+        viewport,
+    ]
+    .join(" | ")
+}
+
+/// A scoped visual-QA check that passed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedVisualQa {
+    /// Findings of the delivered build, all of which the base build has.
+    pub pre_existing: usize,
+}
+
+/// cas-e371 (GH #1023 finding 1): the close gate measures what a delivery
+/// changed, not the page's whole visual backlog. `tip` is the strict run of
+/// the delivered build (fresh, local), `baseline` the strict run of the base
+/// build over the same pages (local). The check passes when every finding of
+/// the delivered build also appears in the base run, so the delivery
+/// introduced none; it fails naming the findings the base build does not
+/// have. The pre-existing ones are the page's follow-up work.
+pub fn check_visual_qa_scoped(
+    tip: &Path,
+    baseline: &Path,
+    not_before: i64,
+    not_before_label: &str,
+) -> Result<ScopedVisualQa, String> {
+    let claim = "claims a scoped visual-QA result, but";
+    let tip_run = read_visual_qa_run(tip, claim)?;
+    let tip_targets =
+        check_run_provenance(&tip_run, tip, claim, Some((not_before, not_before_label)))?;
+    let base_run = read_visual_qa_run(baseline, claim)?;
+    let base_targets = check_run_provenance(&base_run, baseline, claim, None)?;
+    let (Some(tip_findings), Some(base_findings)) = (&tip_run.findings, &base_run.findings) else {
+        return Err(format!(
+            "{claim} {} and {} must both carry the `findings` list visual-qa.mjs writes, so the two runs can be compared",
+            tip.display(),
+            baseline.display()
+        ));
+    };
+    let base_pages: std::collections::BTreeSet<String> =
+        base_targets.iter().map(|target| visual_qa_page(target)).collect();
+    let missing: Vec<String> = tip_targets
+        .iter()
+        .map(|target| visual_qa_page(target))
+        .filter(|page| !base_pages.contains(page))
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "{claim} the base run {} did not check {}; run it over the same pages as the delivered build",
+            baseline.display(),
+            missing.join(", ")
+        ));
+    }
+    let mut available: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    for finding in base_findings {
+        *available.entry(visual_qa_finding_key(finding)).or_default() += 1;
+    }
+    let mut introduced = Vec::new();
+    for finding in tip_findings {
+        let key = visual_qa_finding_key(finding);
+        match available.get_mut(&key) {
+            Some(count) if *count > 0 => *count -= 1,
+            _ => introduced.push(key),
+        }
+    }
+    if !introduced.is_empty() {
+        let shown: Vec<&str> = introduced.iter().take(5).map(String::as_str).collect();
+        return Err(format!(
+            "the delivery introduced {} visual-QA finding(s) the base build does not have ({}): {}{}",
+            introduced.len(),
+            tip.display(),
+            shown.join("; "),
+            if introduced.len() > shown.len() { "; …" } else { "" }
+        ));
+    }
+    Ok(ScopedVisualQa {
+        pre_existing: tip_findings.len(),
+    })
 }
 
 fn missing_key(key: &str) -> EvidenceRefusal {
@@ -708,8 +873,11 @@ pub fn producing_command(key: &str, bundle_dir: &Path) -> String {
         "polish_screenshots" | "visual_qa" | "visual_qa_json" | "visual_qa_stdout" => format!(
             "node <skills-dir>/cas-ui-craft/scripts/visual-qa.mjs --strict --artifact-dir {dir}/visual-qa <url> > {dir}/visual-qa.stdout 2>&1"
         ),
+        "visual_qa_baseline_json" => format!(
+            "serve a build of the base commit (git merge-base <target> <head>) and run node <skills-dir>/cas-ui-craft/scripts/visual-qa.mjs --strict --artifact-dir {dir}/visual-qa-baseline <the same local pages>, then list visual-qa-baseline/visual-qa.json as files.visual_qa_baseline_json"
+        ),
         "critique" => format!(
-            "score the surface with the cas-ui-craft rubric into {dir}/critique.md and bundle.json critique_score"
+            "score what the delivery changed with the cas-ui-craft rubric into {dir}/critique.md and bundle.json critique_score"
         ),
         _ => format!("produce `{key}` per {CONTRACT_REFERENCE}"),
     }

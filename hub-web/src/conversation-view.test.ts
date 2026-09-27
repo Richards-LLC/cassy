@@ -409,7 +409,7 @@ describe("ConversationView (Pebble thread)", () => {
     // The visible time is not read twice: the group label carries it.
     for (const time of view.element.querySelectorAll(".msgs time")) expect(time.getAttribute("aria-hidden")).toBe("true");
   });
-  it("says Delivered on the latest delivered send until the reply lands (F5)", () => {
+  it("says Delivered on each delivered send until a reply linked to it lands (F5, journey F4)", () => {
     const history = new ConversationHistory();
     const view = new ConversationView(document, history, { supervisor: "sup" }); document.body.replaceChildren(view.element);
     history.submit("a", "sup", "First", at(9, 0)); view.update();
@@ -419,17 +419,22 @@ describe("ConversationView (Pebble thread)", () => {
     expect(delivered.textContent).toBe("Delivered");
     expect(delivered.getAttribute("role")).toBe("status");
     expect(delivered.querySelector("svg.tick")?.getAttribute("aria-hidden")).toBe("true");
-    // A second send still in flight leaves the first as the latest delivered one.
+    // A second send still in flight: the first keeps its tick.
     history.submit("b", "sup", "Second", at(9, 1)); view.update();
     expect(view.element.querySelectorAll(".conversation-delivered")).toHaveLength(1);
     expect(view.element.querySelector('.bub[data-state="sending"] .conversation-delivery')?.textContent).toBe("Sending…");
-    // Once it is delivered too, only the latest says so.
+    // An unrelated supervisor turn crosses the second send (journey F4): the first keeps Delivered…
+    history.reply({ notification_id: 12, reply_to: null, message: "Gate run 2 of 3 is going.", summary: "", device_id: "d" }, at(9, 2)); view.update();
+    expect([...view.element.querySelectorAll(".conversation-delivered")].map((node) => node.closest(".bub")?.textContent)).toEqual(["FirstDelivered"]);
+    // …and the second, acknowledged after that turn, ends Delivered too.
     history.acknowledge({ client_ref: "b", notification_id: 11, target: "sup", stamped: true }); view.update();
+    expect([...view.element.querySelectorAll(".conversation-delivered")].map((node) => node.closest(".bub")?.textContent)).toEqual(["FirstDelivered", "SecondDelivered"]);
+    // A reply linked to a send is its evidence: that send's tick steps aside.
+    history.reply({ notification_id: 13, reply_to: 10, message: "Done.", summary: "", device_id: "d" }, at(9, 3)); view.update();
     expect([...view.element.querySelectorAll(".conversation-delivered")].map((node) => node.closest(".bub")?.textContent)).toEqual(["SecondDelivered"]);
-    // Any supervisor turn after it is the evidence now; Delivered steps aside.
-    history.reply({ notification_id: 12, reply_to: null, message: "On it.", summary: "", device_id: "d" }, at(9, 2)); view.update();
-    expect(view.element.querySelector(".conversation-delivered")).toBeNull();
-    expect(history.delivered()).toBeUndefined();
+    // Hydrated history carries no tick.
+    const hydrated = history.events.find((event) => event.kind === "send" && event.value.id === "a")!.value as never as { sentAt?: number; state: string };
+    expect(history.showsDelivered({ ...hydrated, sentAt: undefined, state: "acknowledged" } as never)).toBe(false);
   });
   it("retires a refused send once its edited version is sent: collapsed, no Retry (F6)", () => {
     const history = new ConversationHistory();

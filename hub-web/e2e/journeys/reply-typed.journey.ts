@@ -189,6 +189,11 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
     expect(flashed, "frames that showed Not confirmed before the late receipt").toBe(0);
     await expect(page.getByRole("button", { name: "Retry sending" })).toHaveCount(0);
     await expect(page.getByRole("log").getByText("Run the gate once more.")).toHaveCount(1);
+    // Journey F4: the late-receipt message ends visibly delivered, and the
+    // unrelated "Gate run 2 of 3" turn did not take the tick off the earlier
+    // "Ship it after the gate passes." either.
+    await expect(crossed.locator(".conversation-delivered")).toHaveText("Delivered");
+    await expect(page.locator('.conversation-turn[data-state="acknowledged"]').filter({ hasText: "Ship it after the gate passes." }).locator(".conversation-delivered")).toHaveText("Delivered");
   });
 
   await journey.stage("A message Cassy can't confirm offers Retry", async () => {
@@ -207,7 +212,7 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
     await bubble.getByRole("button", { name: "Retry sending" }).click();
     expect((await retried).text).toBe("Is the gate green yet?");
     hub.deliverLatest(PELICAN);
-    await expect(page.locator(".conversation-delivered")).toHaveText("Delivered");
+    await expect(page.locator(".conversation-turn").filter({ hasText: "Is the gate green yet?" }).locator(".conversation-delivered")).toHaveText("Delivered");
     await expect(page.locator('.conversation-turn[data-state="unconfirmed"]')).toHaveCount(0);
     await expect(page.getByRole("log").getByText("Is the gate green yet?")).toHaveCount(1);
   });

@@ -291,14 +291,16 @@ export class ConversationHistory {
     const since = send.unconfirmedAt;
     return this.events.slice(index + 1).some((event) => event.kind === "reply" && (since === undefined || (event.arrivedAt ?? event.at ?? 0) > since));
   }
-  delivered(): ConversationSend | undefined {
-    for (let index = this.events.length - 1; index >= 0; index -= 1) {
-      const event = this.events[index]!;
-      if (event.kind === "reply") return undefined;
-      if (event.value.state === "replied") return undefined;
-      if (event.value.state === "acknowledged") return event.value;
-    }
-    return undefined;
+  /**
+   * Whether `send` says "Delivered" (journey F4): a send this visit put on the
+   * wire whose receipt came, until a reply linked to it (reply_to) makes it
+   * "replied". An unrelated supervisor turn crossing it no longer hides the
+   * tick, and a receipt that lands after such a turn still shows one.
+   * Hydrated history (no sentAt) stays unmarked, so an old thread is not a
+   * column of ticks.
+   */
+  showsDelivered(send: ConversationSend): boolean {
+    return send.state === "acknowledged" && send.sentAt !== undefined;
   }
   /**
    * The conversation list's one-line preview of the last turn. A refused send

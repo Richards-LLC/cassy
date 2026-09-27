@@ -782,9 +782,10 @@ pub struct ExpectSummary {
     pub failed: usize,
 }
 
-/// Read `test.trace` from a Playwright trace zip and count Expect steps.
-/// A step fails when its `after` event carries an `error`; a top-level
-/// `error` event also counts as a failure.
+/// Read `test.trace` from a Playwright trace zip and count final Expect steps.
+/// Inner assertions retried by `expect.poll` or `toPass` are children of an
+/// outer Expect step; only that outer step's outcome describes the test.
+/// A top-level `error` event still counts as a failure.
 pub fn trace_expect_summary(trace_zip: &Path) -> Result<ExpectSummary, String> {
     let file =
         std::fs::File::open(trace_zip).map_err(|error| format!("cannot be opened ({error})"))?;
@@ -800,12 +801,38 @@ pub fn trace_expect_summary(trace_zip: &Path) -> Result<ExpectSummary, String> {
 }
 
 fn expect_summary_from_events(body: &str) -> ExpectSummary {
-    let mut expects = std::collections::HashSet::new();
-    let mut summary = ExpectSummary::default();
-    for line in body.lines().filter(|line| !line.trim().is_empty()) {
-        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+    // Playwright writes callId=stepId and parentId=the enclosing test step.
+    // Collect the full graph before outcomes because a trace can interleave
+    // child and parent `after` events, and a custom poll message can hide the
+    // word "poll" in the outer title. An Expect ancestor identifies retries.
+    let mut steps = std::collections::HashMap::new();
+    for event in body
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+    {
+        if event.get("type").and_then(|value| value.as_str()) != Some("before") {
+            continue;
+        }
+        let Some(call) = event.get("callId").and_then(|value| value.as_str()) else {
             continue;
         };
+        let title = event
+            .get("title")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        let expect = event.get("method").and_then(|value| value.as_str()) == Some("expect")
+            || title.starts_with("Expect \"");
+        let parent = event
+            .get("parentId")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        steps.insert(call.to_string(), (parent, expect));
+    }
+    let mut summary = ExpectSummary::default();
+    for event in body
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+    {
         let kind = event
             .get("type")
             .and_then(|value| value.as_str())
@@ -815,20 +842,8 @@ fn expect_summary_from_events(body: &str) -> ExpectSummary {
             .and_then(|value| value.as_str())
             .unwrap_or_default();
         match kind {
-            "before" => {
-                let title = event
-                    .get("title")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or_default();
-                let method = event
-                    .get("method")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or_default();
-                if method == "expect" || title.starts_with("Expect \"") {
-                    expects.insert(call.to_string());
-                }
-            }
-            "after" if expects.contains(call) => {
+            "after" if steps.get(call).is_some_and(|(_, expect)| *expect)
+                && !expect_has_expect_ancestor(call, &steps) => {
                 if event.get("error").is_some_and(|error| !error.is_null()) {
                     summary.failed += 1;
                 } else {
@@ -840,6 +855,27 @@ fn expect_summary_from_events(body: &str) -> ExpectSummary {
         }
     }
     summary
+}
+
+fn expect_has_expect_ancestor(
+    call: &str,
+    steps: &std::collections::HashMap<String, (Option<String>, bool)>,
+) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    let mut parent = steps.get(call).and_then(|(parent, _)| parent.as_deref());
+    while let Some(id) = parent {
+        if !seen.insert(id) {
+            break;
+        }
+        let Some((next, is_expect)) = steps.get(id) else {
+            break;
+        };
+        if *is_expect {
+            return true;
+        }
+        parent = next.as_deref();
+    }
+    false
 }
 
 /// Validate `<task>/LEDGER.md` for a demo-only (non-web) delivery: present,

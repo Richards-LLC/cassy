@@ -347,6 +347,35 @@ fn failing_or_assertion_free_trace_is_rejected() {
 }
 
 #[test]
+fn passing_poll_and_to_pass_ignore_caught_inner_expect_retries_gh1013() {
+    let fx = Fixture::new();
+    fx.write_bundle(|_| {});
+    let events = [
+        r#"{"type":"before","callId":"poll@1","method":"expect","title":"Expect \"poll toBe\""}"#,
+        r#"{"type":"before","callId":"retry@1","parentId":"poll@1","method":"expect","title":"Expect \"toBe\""}"#,
+        r#"{"type":"after","callId":"retry@1","error":{"message":"not ready"}}"#,
+        r#"{"type":"before","callId":"retry@2","parentId":"poll@1","method":"expect","title":"Expect \"toBe\""}"#,
+        r#"{"type":"after","callId":"retry@2"}"#,
+        r#"{"type":"after","callId":"poll@1"}"#,
+        r#"{"type":"before","callId":"toPass@1","method":"expect","title":"wait for audit"}"#,
+        r#"{"type":"before","callId":"callback@1","parentId":"toPass@1","method":"test.step","title":"poll callback"}"#,
+        r#"{"type":"before","callId":"retry@3","parentId":"callback@1","method":"expect","title":"Expect \"toContain\""}"#,
+        r#"{"type":"after","callId":"retry@3","error":{"message":"waiting"}}"#,
+        r#"{"type":"after","callId":"callback@1"}"#,
+        r#"{"type":"after","callId":"toPass@1"}"#,
+    ];
+    trace_zip(&fx.bundle_dir().join("trace.zip"), &events);
+    assert_eq!(trace_expect_summary(&fx.bundle_dir().join("trace.zip")).unwrap(), ExpectSummary { passed: 2, failed: 0 });
+    fx.validate(&fx.notes()).expect("the final poll outcomes passed");
+
+    let mut terminal_failure = events.to_vec();
+    terminal_failure[5] = r#"{"type":"after","callId":"poll@1","error":{"message":"poll timed out"}}"#;
+    trace_zip(&fx.bundle_dir().join("trace.zip"), &terminal_failure);
+    let refusal = fx.validate(&fx.notes()).unwrap_err();
+    assert!(refusal.problem.contains("failing run"), "{refusal:?}");
+}
+
+#[test]
 fn polish_proof_and_critique_floor_are_enforced() {
     let fx = Fixture::new();
     fx.write_bundle(|manifest| manifest["visual_qa_status"] = serde_json::json!("unavailable"));

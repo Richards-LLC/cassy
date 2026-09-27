@@ -61,6 +61,12 @@ impl Config {
             "tasks.block_exit_on_open" => Some(tasks.block_exit_on_open.to_string()),
             "qa.user_facing_labels" => Some(qa.user_facing_labels.join(",")),
             "qa.telemetry_sweep" => Some(qa.telemetry_sweep.unwrap_or_default()),
+            "factory.epic_base_branch" => Some(
+                self.factory
+                    .as_ref()
+                    .and_then(|factory| factory.epic_base_branch.clone())
+                    .unwrap_or_default(),
+            ),
             "qa.independent_pass" => Some(qa.independent_pass.to_string()),
             "qa.evidence_gate" => Some(qa.evidence_gate.to_string()),
             "qa.terminal_render_paths" => Some(qa.terminal_render_paths.join(",")),

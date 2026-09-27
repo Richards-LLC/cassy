@@ -1464,7 +1464,7 @@ describe("3.30.0 journey polish (cas-b128)", () => {
     expect(conversations.slice(0, firstGroupEnd)).not.toContain("data-palette-action");
     expect(conversations.slice(0, firstGroupEnd)).not.toContain("palette-paired-machines");
     expect(conversations).toContain('${showSessionControls ? `<section class="palette-group" data-palette-group="session"');
-    expect(conversations).toContain('<h3 id="palette-group-session" class="palette-group-heading">This session</h3>');
+    expect(conversations).toContain('<h3 id="palette-group-session" class="palette-group-heading">This conversation</h3>');
     expect(conversations).toContain('<h3 id="palette-group-machines" class="palette-group-heading">Machines</h3>');
     expect(conversations).toContain('${infoItems.length > 0 ? `<button type="button" class="palette-command" data-palette-action="dismiss-info">');
     // A new info item brings the command back: the shell rebuilds on that change.

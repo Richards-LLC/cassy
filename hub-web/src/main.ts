@@ -3,7 +3,7 @@ import { CANT_REACH_RETRYING, machineFooterMarkup, pairedMachinesDialogMarkup, r
 import { retainPendingSessions, visibleCatalog } from "./worker-visibility";
 import "./styles.css";
 import { ConversationList, filterConversationRows, type ConversationRow } from "./conversation-list";
-import { sessionJumpCommandMarkup } from "./palette-commands";
+import { controlCommandCopy, sessionJumpCommandMarkup } from "./palette-commands";
 import { ConversationHistory } from "./conversation-history";
 import { ConversationView } from "./conversation-view";
 import { REFUSED_SEE_ABOVE, refusalSentence, refusal } from "./refusal";
@@ -2560,6 +2560,12 @@ function render(captureDraft = true): void {
   const machineLabel = selected?.label ?? "No machine";
   const compactMachineLabel = machineInitials(machineLabel);
   const controlActionDisabled = takeControlReason !== undefined;
+  const controlCommand = controlCommandCopy({
+    heldByMe: Boolean(lease?.held_by_me),
+    forceTakeover: controlActionLabel === "Force takeover",
+    controller: lease?.controller_label ?? undefined,
+    disabledReason: controlActionDisabled ? takeControlReason ?? "Control unavailable" : undefined,
+  });
   const sessionCommands = [...machines.values()].flatMap((machine) => visibleSessions(machine.id).map((session) =>
     sessionJumpCommandMarkup(machine, session, sessionSummaries.get(sessionKey(machine.id, session.name))))).join("");
   const backTarget = previousSelection(selection);
@@ -2714,15 +2720,15 @@ function render(captureDraft = true): void {
     <dialog id="command-palette" class="command-palette">
       <section>
         <header><strong>Commands</strong><button id="command-palette-close" type="button" aria-label="Close command palette">×</button></header>
-        <input id="command-palette-query" type="search" aria-label="Filter commands" placeholder="Type a command or session">
+        <input id="command-palette-query" type="search" aria-label="Filter commands" placeholder="Type a command or conversation">
         <div class="palette-commands">
           <section class="palette-group" data-palette-group="conversations" aria-labelledby="palette-group-conversations">
             <h3 id="palette-group-conversations" class="palette-group-heading">Conversations</h3>
-            ${sessionCommands || '<p class="palette-empty">No live sessions available.</p>'}
+            ${sessionCommands || '<p class="palette-empty">No live conversations yet.</p>'}
           </section>
           ${showSessionControls ? `<section class="palette-group" data-palette-group="session" aria-labelledby="palette-group-session">
-            <h3 id="palette-group-session" class="palette-group-heading">This session</h3>
-            <button type="button" class="palette-command" data-palette-action="control" ${controlActionDisabled ? "disabled" : ""}><span>${controlActionLabel}</span><small>${controlActionDisabled ? escapeHtml(takeControlReason ?? "Control unavailable") : escapeHtml(selectedSession ?? "")}</small></button>
+            <h3 id="palette-group-session" class="palette-group-heading">This conversation</h3>
+            <button type="button" class="palette-command" data-palette-action="control" ${controlActionDisabled ? "disabled" : ""}><span>${escapeHtml(controlCommand.title)}</span><small>${escapeHtml(controlCommand.hint)}</small></button>
           </section>` : ""}
           <section class="palette-group" data-palette-group="machines" aria-labelledby="palette-group-machines">
             <h3 id="palette-group-machines" class="palette-group-heading">Machines</h3>
@@ -3505,7 +3511,7 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   palette.onclose = () => { if (palette.isConnected && !palette.open) commandPaletteOpen = false; };
   const paletteQuery = document.querySelector<HTMLInputElement>("#command-palette-query")!;
   const paletteAdvanced = palette.querySelector<HTMLDetailsElement>(".palette-advanced");
-  // Commands in order, grouped Conversations / This session / Machines /
+  // Commands in order, grouped Conversations / This conversation / Machines /
   // Appearance / Advanced (3.30.0 journey F4: lease and machine commands are
   // not conversations, and an empty "Dismiss all info" is not offered). A row
   // inside the collapsed Advanced group is not on screen, so Enter and
@@ -3535,7 +3541,7 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
     if (noMatch) {
       const anyVisible = [...palette.querySelectorAll<HTMLElement>(".palette-command")].some((command) => !command.hidden);
       noMatch.hidden = query.length === 0 || anyVisible;
-      noMatch.textContent = noMatch.hidden ? "" : `No commands or sessions match “${paletteQuery.value.trim()}”.`;
+      noMatch.textContent = noMatch.hidden ? "" : `No commands or conversations match “${paletteQuery.value.trim()}”.`;
     }
   };
   if (paletteAdvanced) paletteAdvanced.ontoggle = () => { if (!paletteAdvanced.open) delete paletteAdvanced.dataset.autoOpened; };

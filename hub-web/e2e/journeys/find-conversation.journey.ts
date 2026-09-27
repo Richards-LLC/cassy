@@ -182,11 +182,16 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(page.locator(".conversation-identity h1")).toHaveText("gabber-studio");
     // A mouse jump lands in the opened conversation's composer too, and
     // landing there must not freeze the shell at its pre-load state: once
-    // this first visit's lease loads, the palette offers "Release control".
+    // this first visit's lease loads, the palette offers to let other devices
+    // type here, "Release control" kept as its hint (journey F16).
     await expect(page.getByRole("textbox", { name: "Your message" })).toBeFocused();
-    await expect(page.locator('#command-palette [data-palette-action="control"]')).toContainText("Release control");
-    // The lease command sits in its own group once a session is open.
-    await expect(page.locator('#command-palette [data-palette-group="session"]')).toContainText("This session");
+    const control = page.locator('#command-palette [data-palette-action="control"]');
+    await expect(control.locator("span")).toHaveText("Let other devices type here");
+    await expect(control.locator("small")).toHaveText("Release control of this conversation");
+    // The lease command sits in its own group once a conversation is open,
+    // and the palette speaks of conversations, not sessions.
+    await expect(page.locator("#palette-group-session")).toHaveText("This conversation");
+    await expect(page.locator("#command-palette-query")).toHaveAttribute("placeholder", "Type a command or conversation");
     await expect(page.locator('#command-palette [data-palette-group="session"] [data-palette-action="control"]')).toHaveCount(1);
     await expect(page.getByRole("textbox", { name: "Your message" })).toBeFocused();
   });
@@ -274,7 +279,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     all = await commands.visible().count();
     expect(all).toBeGreaterThan(0);
     await filter.fill("zzzz");
-    await expect(noMatch).toHaveText("No commands or sessions match “zzzz”.");
+    await expect(noMatch).toHaveText("No commands or conversations match “zzzz”.");
     await page.getByRole("button", { name: "Close command palette" }).click();
     await expect(palette).toBeHidden();
     await reopen();

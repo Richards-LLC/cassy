@@ -120,6 +120,24 @@ that produces it:
    against a production or other remote origin does not count.
    `qa_record` applies the same check to an independent round that claims
    `visual_qa_status: "pass"`, counting from when the round opened.
+5a. **Deployed origin (cas-a6ab, GH #1023 finding 4).** A bundle may
+   declare `deployed` when local auth is impossible. gabber-studio's
+   staging backend rejects a localhost origin on `/auth/session`, so an
+   authenticated page had no local real-build run. The declaration needs
+   all of the following:
+   - a `reason` of at least 20 characters;
+   - an http(s) `origin` that is not local and is listed in
+     `qa.deployed_origins`, otherwise "wrong origin";
+   - a `deployed_sha` that is the delivered head or a descendant of it,
+     otherwise "stale";
+   - a `deployment_proof` file in the bundle, fresh like every listed
+     file, that names that commit, otherwise "unproven".
+
+   The visual-QA URLs may then be on the declared origin, and nowhere else
+   remote. Every listed text file and every text entry of `trace.zip` is
+   scanned for credentials (session JWTs, bearer tokens, API tokens,
+   cookie/authorization header values, a saved storage state). A hit is
+   refused, naming the file and the kind of secret but never the value.
 6. **Critique.** `critique_score` has the five dimensions, each 0–5. It must
    meet the floor: distinctiveness, fit and hierarchy each ≥ 4, and no
    dimension at 0.

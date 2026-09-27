@@ -168,6 +168,7 @@ impl Fixture {
             repo: &self.repo,
             delivered_head: &self.head,
             notes,
+            deployed_origins: &[],
         })
     }
 }
@@ -495,6 +496,7 @@ fn ledger_tier_requires_a_fresh_pass_row() {
         repo: &fx.repo,
         delivered_head: &fx.head,
         notes: "",
+        deployed_origins: &[],
     };
     assert!(
         validate_ledger(&ctx)
@@ -662,6 +664,7 @@ fn close_gate_rejects_unexplained_markers_before_evidence() {
         repo: &fx.repo,
         delivered_head: &fx.head,
         notes: &notes,
+        deployed_origins: &[],
     };
     let markers = added_skip_markers(HEALER_DIFF);
     let error = run_close_gate(&ctx, EvidenceTier::None, &[], &markers).unwrap_err();
@@ -717,6 +720,7 @@ fn close_gate_message_names_reasons_problem_and_next_command() {
         repo: &fx.repo,
         delivered_head: &fx.head,
         notes: "",
+        deployed_origins: &[],
     };
     let error = run_close_gate(
         &ctx,
@@ -846,6 +850,7 @@ fn ledger_pass_row_must_be_real_build() {
         repo: &fx.repo,
         delivered_head: &fx.head,
         notes: "",
+        deployed_origins: &[],
     };
     let ledger = fx.task_dir.join("LEDGER.md");
     std::fs::write(
@@ -866,6 +871,7 @@ fn terminal_qa_receipt_must_pass_and_be_fresh() {
         repo: &fx.repo,
         delivered_head: &fx.head,
         notes: "",
+        deployed_origins: &[],
     };
     let refusal = validate_terminal_qa(&ctx).unwrap_err();
     assert!(refusal.problem.starts_with("missing"), "{refusal:?}");
@@ -1265,4 +1271,243 @@ fn scoped_visual_qa_needs_a_comparable_local_base_run() {
     .unwrap();
     let refusal = fx.validate(&fx.notes()).unwrap_err();
     assert!(refusal.problem.contains("`findings` list"), "{refusal:?}");
+}
+
+// ---------------------------------------------------------------------------
+// cas-a6ab (GH #1023 finding 4): a deployed authenticated staging run stands
+// in for a local build when local auth is impossible.
+// ---------------------------------------------------------------------------
+
+const STAGING: &str = "https://staging.gabber.studio";
+const CORS_REASON: &str = "staging backend CORS rejects the localhost origin on /auth/session, so /creator-profile has no local authenticated build";
+/// Clerk-shaped session JWT; never allowed into a bundle.
+const SESSION_JWT: &str =
+    "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyXzEyMzQ1Njc4OSJ9.c2lnbmF0dXJlLXNpZ25hdHVyZS1zaWc";
+
+impl Fixture {
+    /// A complete deployed-origin bundle for the delivered head.
+    fn write_deployed_bundle(&self, edit: impl FnOnce(&mut serde_json::Value)) -> PathBuf {
+        let head = self.head.clone();
+        let path = self.write_bundle(|manifest| {
+            manifest["build_url"] = serde_json::json!(format!("{STAGING}/creator-profile"));
+            manifest["deployed"] = serde_json::json!({
+                "origin": STAGING,
+                "reason": CORS_REASON,
+                "deployed_sha": head,
+                "deployment_proof": "deployment.json",
+            });
+            edit(manifest);
+        });
+        let dir = self.bundle_dir();
+        std::fs::write(
+            dir.join("deployment.json"),
+            serde_json::json!({ "environment": "staging", "commit": self.head }).to_string(),
+        )
+        .unwrap();
+        write_visual_qa_report(
+            &dir,
+            "PASS",
+            chrono::Utc::now(),
+            &format!("{STAGING}/creator-profile"),
+        );
+        path
+    }
+
+    fn validate_with_origins(&self, origins: &[String]) -> Result<BundleReceipt, EvidenceRefusal> {
+        let notes = self.notes();
+        validate_bundle(&EvidenceContext {
+            task_id: TASK,
+            task_artifacts_dir: &self.task_dir,
+            repo: &self.repo,
+            delivered_head: &self.head,
+            notes: &notes,
+            deployed_origins: origins,
+        })
+    }
+}
+
+fn staging() -> Vec<String> {
+    vec![STAGING.to_string()]
+}
+
+#[test]
+fn deployed_staging_bundle_with_reason_and_proof_satisfies_the_gate() {
+    let fx = Fixture::new();
+    fx.write_deployed_bundle(|_| {});
+    let receipt = fx
+        .validate_with_origins(&staging())
+        .unwrap_or_else(|refusal| panic!("{refusal:?}"));
+    assert_eq!(receipt.head_sha, fx.head);
+    // The same run is not local, so without the declaration it is refused.
+    let local_only = fx.validate_with_origins(&[]).unwrap_err();
+    assert!(
+        local_only.problem.contains("wrong origin"),
+        "{local_only:?}"
+    );
+}
+
+#[test]
+fn deployed_bundle_without_a_reason_is_refused() {
+    let fx = Fixture::new();
+    fx.write_deployed_bundle(|manifest| manifest["deployed"]["reason"] = serde_json::json!(" "));
+    let refusal = fx.validate_with_origins(&staging()).unwrap_err();
+    assert!(
+        refusal.problem.contains("without its reason"),
+        "{refusal:?}"
+    );
+}
+
+#[test]
+fn deployed_bundle_from_an_unconfigured_or_local_origin_is_refused() {
+    let fx = Fixture::new();
+    fx.write_deployed_bundle(|manifest| {
+        manifest["deployed"]["origin"] = serde_json::json!("https://gabber.studio")
+    });
+    let wrong = fx.validate_with_origins(&staging()).unwrap_err();
+    assert!(
+        wrong.problem.contains("wrong origin") && wrong.problem.contains("https://gabber.studio"),
+        "{wrong:?}"
+    );
+    assert!(wrong.command.contains("qa.deployed_origins"), "{wrong:?}");
+
+    let fx = Fixture::new();
+    fx.write_deployed_bundle(|manifest| {
+        manifest["deployed"]["origin"] = serde_json::json!("http://localhost:3000")
+    });
+    let local = fx.validate_with_origins(&staging()).unwrap_err();
+    assert!(local.problem.contains("names a local origin"), "{local:?}");
+
+    // The visual-QA run itself must be on the declared origin.
+    let fx = Fixture::new();
+    fx.write_deployed_bundle(|_| {});
+    write_visual_qa_report(
+        &fx.bundle_dir(),
+        "PASS",
+        chrono::Utc::now(),
+        "https://gabber.studio/",
+    );
+    let elsewhere = fx.validate_with_origins(&staging()).unwrap_err();
+    assert!(
+        elsewhere.problem.contains("https://gabber.studio/"),
+        "{elsewhere:?}"
+    );
+}
+
+#[test]
+fn deployed_bundle_for_another_commit_or_without_proof_is_refused() {
+    let fx = Fixture::new();
+    fx.write_deployed_bundle(|manifest| {
+        manifest["deployed"]["deployed_sha"] = serde_json::json!("a".repeat(40))
+    });
+    let stale = fx.validate_with_origins(&staging()).unwrap_err();
+    assert!(
+        stale.problem.starts_with("stale: the deployment served"),
+        "{stale:?}"
+    );
+
+    let fx = Fixture::new();
+    fx.write_deployed_bundle(|_| {});
+    std::fs::write(
+        fx.bundle_dir().join("deployment.json"),
+        "{\"commit\":\"main\"}",
+    )
+    .unwrap();
+    let unproven = fx.validate_with_origins(&staging()).unwrap_err();
+    assert!(unproven.problem.starts_with("unproven"), "{unproven:?}");
+
+    let fx = Fixture::new();
+    fx.write_deployed_bundle(|_| {});
+    std::fs::remove_file(fx.bundle_dir().join("deployment.json")).unwrap();
+    let missing = fx.validate_with_origins(&staging()).unwrap_err();
+    assert!(
+        missing.problem.contains("deployed.deployment_proof")
+            && missing.problem.contains("does not exist"),
+        "{missing:?}"
+    );
+}
+
+#[test]
+fn deployed_bundle_carrying_credentials_is_refused_without_echoing_them() {
+    // A session cookie copied into a text artifact.
+    let fx = Fixture::new();
+    fx.write_deployed_bundle(|_| {});
+    std::fs::write(
+        fx.bundle_dir().join("trace-actions.txt"),
+        format!("   1. 0:00.1  Expect \"toHaveText\"   2ms\nCookie: __session={SESSION_JWT}\n"),
+    )
+    .unwrap();
+    let leaked = fx.validate_with_origins(&staging()).unwrap_err();
+    assert!(
+        leaked.problem.contains("carrying credentials"),
+        "{leaked:?}"
+    );
+    assert!(leaked.problem.contains("trace_actions"), "{leaked:?}");
+    assert!(
+        !format!("{leaked:?}").contains(SESSION_JWT),
+        "the secret must not be echoed"
+    );
+
+    // An auth header Playwright recorded in the trace's network log.
+    let fx = Fixture::new();
+    fx.write_deployed_bundle(|_| {});
+    let trace = fx.bundle_dir().join("trace.zip");
+    let file = std::fs::File::create(&trace).unwrap();
+    let mut writer = zip::ZipWriter::new(file);
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    writer.start_file("test.trace", options).unwrap();
+    writer.write_all(PASSING.join("\n").as_bytes()).unwrap();
+    writer.start_file("0-trace.network", options).unwrap();
+    writer
+        .write_all(
+            format!(
+                r#"{{"type":"resource-snapshot","snapshot":{{"request":{{"headers":[{{"name":"Authorization","value":"Bearer {SESSION_JWT}"}}]}}}}}}"#
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    writer.finish().unwrap();
+    let network = fx.validate_with_origins(&staging()).unwrap_err();
+    assert!(
+        network.problem.contains("carrying credentials")
+            && network.problem.contains("0-trace.network"),
+        "{network:?}"
+    );
+    assert!(!format!("{network:?}").contains(SESSION_JWT));
+
+    // A saved storage state anywhere in the bundle.
+    let fx = Fixture::new();
+    fx.write_deployed_bundle(|_| {});
+    std::fs::write(fx.bundle_dir().join("staging-storage-state.json"), "{}").unwrap();
+    let state = fx.validate_with_origins(&staging()).unwrap_err();
+    assert!(state.problem.contains("storage state"), "{state:?}");
+}
+
+#[test]
+fn deployed_origins_config_accepts_remote_origins_only() {
+    assert_eq!(
+        url_origin("https://Staging.Gabber.Studio/creator-profile?x=1").as_deref(),
+        Some("https://staging.gabber.studio")
+    );
+    assert_eq!(url_origin("file:///tmp/x.html"), None);
+    let mut config = crate::config::Config::default();
+    config
+        .set(
+            "qa.deployed_origins",
+            "https://staging.gabber.studio/path, https://preview.example.com",
+        )
+        .unwrap();
+    assert_eq!(
+        config.qa().deployed_origins,
+        vec![
+            "https://staging.gabber.studio",
+            "https://preview.example.com"
+        ]
+    );
+    assert!(
+        config
+            .set("qa.deployed_origins", "http://localhost:3000")
+            .is_err()
+    );
+    assert!(config.set("qa.deployed_origins", "not a url").is_err());
 }

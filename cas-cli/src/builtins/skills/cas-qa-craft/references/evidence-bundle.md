@@ -61,6 +61,25 @@ journey evaluation scores polish for it.
   follow-ups in the ledger; they are not this delivery's defects.
 - `files`: the keys above, with paths relative to the bundle
 - `critique_score`: `distinctiveness`, `fit`, `hierarchy`, `craft`, and `accessibility`, each 0–5, matching `critique.md`
+- `deployed` (optional, cas-a6ab): use it only when a local build cannot
+  authenticate, for example when the staging backend's CORS rejects
+  localhost on its session endpoint. The run then goes against the deployed
+  origin, with these fields:
+  - `origin`: the deployment, which must be listed in the project's
+    `qa.deployed_origins`;
+  - `reason`: why local auth is impossible, in a full sentence;
+  - `deployed_sha`: the full commit the deployment serves. It must be the
+    delivered head or a descendant of it;
+  - `deployment_proof`: a bundle file recording what the deployment reports
+    about itself (its version endpoint or deployment metadata). It must name
+    `deployed_sha`.
+
+  The visual-QA report's URLs may then be on that origin. The bundle must
+  carry no credential: no storage state, cookie, session JWT, bearer token
+  or auth header, including the headers Playwright records in `trace.zip`'s
+  network log. Close refuses such a bundle and names the file, never the
+  value. Log in through a setup project that is not traced, and redact
+  header values before listing the trace.
 
 ## Config
 

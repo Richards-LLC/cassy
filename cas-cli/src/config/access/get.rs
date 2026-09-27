@@ -69,6 +69,7 @@ impl Config {
             "qa.max_rounds" => Some(qa.max_rounds.to_string()),
             "qa.github_status" => Some(qa.github_status.to_string()),
             "qa.preflight_gh_token" => Some(qa.preflight_gh_token.to_string()),
+            "qa.deployed_origins" => Some(qa.deployed_origins.join(",")),
             "qa.preflight_env_files" => Some(qa.preflight_env_files.join(",")),
             "qa.preflight_hook" => Some(qa.preflight_hook.clone().unwrap_or_default()),
             "qa.preflight_hook_timeout_secs" => Some(qa.preflight_hook_timeout_secs.to_string()),

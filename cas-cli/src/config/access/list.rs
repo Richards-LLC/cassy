@@ -160,6 +160,10 @@ impl Config {
             ("qa.max_rounds".to_string(), qa.max_rounds.to_string()),
             ("qa.github_status".to_string(), qa.github_status.to_string()),
             (
+                "qa.deployed_origins".to_string(),
+                qa.deployed_origins.join(","),
+            ),
+            (
                 "qa.preflight_gh_token".to_string(),
                 qa.preflight_gh_token.to_string(),
             ),

@@ -340,6 +340,13 @@ pub struct QaConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preflight_hook: Option<String>,
 
+    /// cas-a6ab: remote deployments (`https://staging.example.com`) whose
+    /// authenticated runs may stand in for a local build in a QA evidence
+    /// bundle when local auth is impossible. The bundle must still record
+    /// the reason and prove the deployment served the delivered commit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deployed_origins: Vec<String>,
+
     /// cas-d5c1: seconds the preflight hook may run.
     #[serde(default = "default_preflight_hook_timeout_secs")]
     pub preflight_hook_timeout_secs: u32,
@@ -418,6 +425,7 @@ impl Default for QaConfig {
             preflight_gh_token: false,
             preflight_env_files: Vec::new(),
             preflight_hook: None,
+            deployed_origins: Vec::new(),
             preflight_hook_timeout_secs: default_preflight_hook_timeout_secs(),
         }
     }

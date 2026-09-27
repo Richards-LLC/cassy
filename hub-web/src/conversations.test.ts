@@ -400,6 +400,9 @@ describe('conversation evidence', () => {
     expect(header.querySelector('.conversation-host')?.textContent).toBe('Atlas · Linux · patient-pelican-9');
     // The OS word is its own span, so a phone can drop it before the codename (journey F14).
     expect(header.querySelector('.host-where .host-os')?.textContent).toBe(' · Linux');
+    // Machine, separator and codename are separate flex items so the machine name yields first (cas-e918 QA F01).
+    expect([...header.querySelector('.host-where')!.children].map((node) => node.className)).toEqual(['host-machine', 'host-sep', 'codename']);
+    expect(header.querySelector('.host-machine')?.textContent).toBe('Atlas · Linux');
     expect(header.querySelector('.host-where')?.getAttribute('title')).toBe('Atlas · Linux · patient-pelican-9');
     expect(header.querySelector('.conversation-host > .host-where > .codename')?.textContent).toBe('patient-pelican-9');
     expect(header.querySelector('.conversation-host > .host-where + #conversation-connection')).not.toBeNull();
@@ -510,6 +513,11 @@ describe("hostMarkup (journey F14)", () => {
     expect(hostMarkup("hub · staging")).toBe("hub · staging");
     expect(hostMarkup("pippenz-desktop")).toBe("pippenz-desktop");
     expect(hostMarkup("<b> · Windows")).toBe('&lt;b&gt;<span class="host-os"> · Windows</span>');
+  });
+  it("lets the machine name ellipsise before the codename at every width", () => {
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
+    expect(css).toContain(".conversation-identity .host-machine { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }");
+    expect(css).toContain(".conversation-identity .host-machine ~ .codename { flex: none; max-width: calc(100% - 6ch); overflow: hidden; text-overflow: ellipsis; }");
   });
   it("hides the OS word below 500px, after the phone block in the cascade", () => {
     const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");

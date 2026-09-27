@@ -3156,6 +3156,13 @@ dialog form > *,
    state after it stays visible, instead of the line wrapping to three. */
 .conversation-identity .conversation-host { display: flex; margin-top: 1px; font: var(--weight-regular) 13px/1.25 var(--font-mono); color: var(--ink-mid); white-space: nowrap; }
 .conversation-identity .host-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* The codename is who the operator is talking to, so the machine name yields
+   first (journey F14, QA round 1 F01). The machine ellipsises, and the codename
+   keeps its full width up to all but 6ch of the line, then ellipsises itself. */
+.conversation-identity .host-where:has(> .host-machine) { display: flex; }
+.conversation-identity .host-machine { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.conversation-identity .host-sep { flex: none; white-space: pre; }
+.conversation-identity .host-machine ~ .codename { flex: none; max-width: calc(100% - 6ch); overflow: hidden; text-overflow: ellipsis; }
 #conversation-connection { flex: none; white-space: pre; }
 .conversation-pane-slot { flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
 .conversation-pane-slot .pane-grid { display: block; padding: 0; height: 100%; min-height: 0; background: var(--bg-root); color: var(--text-hi); }

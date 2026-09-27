@@ -480,7 +480,8 @@ pre { font-family: var(--font-mono); }
 .fleet-plot-name { display: block; padding: 0 var(--space-1); line-height: var(--button-compact-height); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* cas-598e QA F01: rows sharing a project carry a codename tag that never truncates; the project gives way first. */
 .fleet-plot-name.tagged { display: flex; align-items: baseline; gap: var(--space-1); }
-.fleet-plot-project { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* The project keeps at least a letter and its ellipsis beside any tag (cas-ae5e). */
+.fleet-plot-project { min-width: 2ch; overflow: hidden; text-overflow: ellipsis; }
 .fleet-plot-tag { flex: none; }
 .fleet-plot-tag::before { content: "· "; }
 .fleet-track-cell { position: relative; text-align: center; }

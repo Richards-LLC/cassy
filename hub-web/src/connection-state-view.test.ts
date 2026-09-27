@@ -210,6 +210,11 @@ describe("the attach surface opens calmly (journey F3)", () => {
     expect(details.querySelector(".connection-timeline")?.textContent).toContain("Retry scheduled");
     expect(details.querySelector(".connection-timeline")?.textContent).toContain("no session state within 3s");
     expect(target.textContent).not.toMatch(/interrupted|retrying/i);
+    // The 1 Hz repaint keeps keyboard focus on Details instead of dropping it to the page.
+    details.querySelector<HTMLElement>("summary")!.focus();
+    renderConnectionSurfaceInto(target, "patient-pelican-9", { ...retry, retryInMs: 0 }, {}, startedAt + 4_200, { openingTitle: CONVERSATION_OPENING, quietRetry: true });
+    expect(document.activeElement?.tagName).toBe("SUMMARY");
+    expect(target.contains(document.activeElement)).toBe(true);
     // A fatal failure is never quieted.
     const fatal = card();
     renderConnectionSurfaceInto(fatal, "patient-pelican-9", snapshot({ phase: "failed", fatal: true }), {}, startedAt + 3_200, { openingTitle: CONVERSATION_OPENING, quietRetry: true });

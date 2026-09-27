@@ -177,6 +177,10 @@ export function renderConnectionSurfaceInto(
   const opening = attachInProgress(snapshot) || (options.quietRetry === true && !fatal);
   // A repaint (the 1 Hz ticker, a hub push) keeps "Details" as the operator left it.
   const detailsOpen = target.querySelector<HTMLDetailsElement>(":scope > .connection-details")?.open === true;
+  // cas-28df: the 1 Hz repaint rebuilds this card, so keyboard focus on
+  // "Details" or an action was dropped to the page body every second. Note
+  // which control held it and hand it to that control's replacement.
+  const focused = document.activeElement instanceof HTMLElement && target.contains(document.activeElement) ? focusKey(document.activeElement) : undefined;
   target.className = `empty terminal-state terminal-connecting${fatal ? " terminal-connect-failed" : ""}`;
 
   const title = document.createElement("p");
@@ -249,6 +253,13 @@ export function renderConnectionSurfaceInto(
     }
     if (actionRow.childElementCount > 0) target.append(actionRow);
   }
+  if (focused) [...target.querySelectorAll<HTMLElement>("summary, button")].find((element) => focusKey(element) === focused)?.focus();
+}
+
+function focusKey(element: HTMLElement): string | undefined {
+  if (element.tagName === "SUMMARY") return "summary";
+  if (element.tagName === "BUTTON") return `button:${element.textContent ?? ""}`;
+  return undefined;
 }
 
 export function shouldRetainDisconnectedFrame(snapshot: ConnectionSnapshotView): boolean {

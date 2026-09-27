@@ -2506,6 +2506,26 @@ impl CasService {
             "\nWARNING — NON-ISOLATED SHARED-CHECKOUT RISK: every spawned worker uses the same working directory and mutable HEAD. Another worker can switch HEAD between tool calls, causing commits to land on a foreign factory branch; an explicit HEAD:<mine> push can graft that worker's commits onto the caller's remote branch; and SKILL.md guidance can change on disk mid-session. Prefer isolate=true. Commit/merge/push guards will refuse unless the checkout is still on the calling worker's exact factory/<name> branch.".to_string()
         };
 
+        // cas-bebc (GH #1023 finding 9): registering a worker under a name
+        // another live session's worker holds supersedes, and so reaps, that
+        // worker. Refuse the name instead of warning after the fact.
+        if let Some(refusal) = worker_names.iter().find_map(|name| {
+            crate::factory_session_scope::foreign_owner_in_store(
+                &self.inner.cas_root,
+                |agents, caller, now| {
+                    crate::factory_session_scope::foreign_owner_of_worker(agents, caller, name, now)
+                },
+            )
+            .map(|(owner, caller)| {
+                owner.refusal(&format!("spawn_workers worker_names={name}"), &caller)
+            })
+        }) {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                format!("{refusal} Pick a different worker name."),
+            ));
+        }
+
         // GH #699: spawning while a second supervisor session is live on this
         // clone puts two fleets on one `.cas/` state, where either supervisor's
         // reset/merge/shutdown can reap the other's workers. Say so in the
@@ -2870,6 +2890,23 @@ impl CasService {
                 .cloned()
                 .collect();
             if !refused.is_empty() {
+                // cas-bebc: name the session (and its supervisor) that owns
+                // each refused worker, so the operator knows which pane can
+                // act on it.
+                let owners: Vec<String> = refused
+                    .iter()
+                    .map(|target| {
+                        let owner = all_registry_workers
+                            .iter()
+                            .filter(|worker| worker_answers_to(worker, target))
+                            .max_by_key(|worker| worker.registered_at)
+                            .and_then(|worker| worker.factory_session.clone());
+                        match owner {
+                            Some(session) => format!("{target} (factory session {session})"),
+                            None => format!("{target} (no factory session)"),
+                        }
+                    })
+                    .collect();
                 return Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
@@ -2877,7 +2914,7 @@ impl CasService {
                          outside this session's shutdown scope (a different factory session \
                          owns them, or they are not workers of yours). Nothing was queued. \
                          Known workers in scope: {}.",
-                        refused.join(", "),
+                        owners.join(", "),
                         if known.is_empty() {
                             "(none)".to_string()
                         } else {

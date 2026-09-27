@@ -2560,6 +2560,28 @@ impl CasCore {
             None
         };
         let task_id = task_id.or(inferred_task_id.as_deref());
+        // cas-bebc (GH #1023 finding 9): never integrate another live factory
+        // session's worker branch or task from this session.
+        let scoped_task =
+            task_id.and_then(|task_id| self.open_task_store().ok()?.get(task_id).ok());
+        if let Some((owner, caller)) = crate::factory_session_scope::foreign_owner_in_store(
+            &cas_root,
+            |agents, caller, now| {
+                crate::factory_session_scope::foreign_owner_of_merge(
+                    agents,
+                    caller,
+                    id,
+                    scoped_task.as_ref(),
+                    now,
+                )
+            },
+        ) {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(owner.refusal(&format!("worktree_merge of {id}"), &caller)),
+                data: None,
+            });
+        }
         let config = Config::load(&cas_root).map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Failed to load config: {e}")),

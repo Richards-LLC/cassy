@@ -487,8 +487,59 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     expect(back!.x + back!.width <= paletteKey!.x || paletteKey!.x + paletteKey!.width <= back!.x, "Back and ⌘K do not overlap at 900 with the drawer open").toBe(true);
     await page.setViewportSize(viewport);
     await expect(page.locator("#session-back .session-back-label")).toBeVisible();
+    // Journey F1: every Fleet overview row leads with its project; the
+    // codename is named once, in the line beneath.
+    const row = (session: string) => board.locator(`button.fleet-session[data-fleet-session="${session}"]`);
+    await expect(row("keen-lynx-1").locator(".session-name")).toHaveText("orion");
+    await expect(row("keen-lynx-1").locator(".session-meta")).toHaveText("supervisor keen-lynx-1 · 1 worker · live");
+    await expect(row(PELICAN).locator(".session-name")).toHaveText("cas-src");
+    await expect(board.locator('.fleet-plot-row[data-fleet-session="keen-lynx-1"] .fleet-plot-name')).toHaveText("orion");
+    for (const session of ["keen-lynx-1", "lone-heron-2", PELICAN, OTTER]) {
+      expect((await row(session).innerText()).split(session).length - 1, `${session} named once in its Fleet overview row`).toBe(1);
+    }
+    // The machine drawer, opened by the rail click above, reads the same way.
+    const drawer = page.locator("#machine-tree");
+    await expect(drawer.locator(".nav-item .session-name").first()).toBeVisible();
+    const drawerRows = await drawer.locator(".nav-item").evaluateAll((items) => items.map((item) => [item.querySelector(".session-name")?.textContent ?? "", item.querySelector(".session-meta, .session-summary-title")?.textContent ?? ""]));
+    for (const [headline, meta] of drawerRows) {
+      expect(["cas-src", "gabber-studio", "orion", "lighthouse"], `drawer row headline ${headline}`).toContain(headline);
+      expect(meta, `drawer row ${headline} names its codename once, beneath`).not.toContain(headline);
+    }
     // With nothing open, the title says so: the fleet, then the switch.
     await expect(page.getByRole("heading", { level: 1, name: `Fleet overview — switch session (${pickerRows} available)`, exact: true })).toBeVisible();
+    // cas-598e QA F01: when several sessions share a project, each plot row
+    // also carries the shortest tail of its codename that tells it apart, so
+    // three cas-src rows never read "cas-src / cas-src / cas-src". Alpha
+    // starts two more cas-src supervisors for a moment (the catalog refreshes
+    // every 5 s), then stops them so the stages after this one see the fleet
+    // they expect.
+    const alpha = hub.machine("alpha").sessions;
+    const extra = [
+      { name: "brisk-otter-5", supervisor: "brisk-otter-5", project_dir: "/projects/cas-src", workers: ["w5"], liveness: "live" },
+      { name: "quiet-heron-8", supervisor: "quiet-heron-8", project_dir: "/projects/cas-src", workers: [], liveness: "live" },
+    ] as Machine["sessions"];
+    alpha.push(...extra);
+    const plotName = (session: string) => board.locator(`.fleet-plot-row[data-fleet-session="${session}"] .fleet-plot-name`);
+    await expect(plotName("quiet-heron-8")).toBeVisible({ timeout: 15_000 });
+    const plotLabels = async () => board.locator(".fleet-plot-row").evaluateAll((rows) => rows.map((row) => {
+      const name = row.querySelector<HTMLElement>(".fleet-plot-name")!;
+      const tag = name.querySelector<HTMLElement>(".fleet-plot-tag");
+      return { session: (row as HTMLElement).dataset.fleetSession!, project: name.querySelector(".fleet-plot-project")?.textContent ?? name.textContent ?? "", tag: tag?.textContent ?? "", tagWhole: !tag || tag.scrollWidth <= tag.clientWidth + 1 && tag.getBoundingClientRect().right <= name.getBoundingClientRect().right + 1 };
+    }));
+    for (const width of [viewport.width, 390]) {
+      await page.setViewportSize({ width, height: viewport.height });
+      const labels = await plotLabels();
+      const casSrc = labels.filter((label) => label.project === "cas-src");
+      expect(casSrc.map((label) => label.tag).sort(), `cas-src plot rows at ${width}px`).toEqual(["heron-8", "otter-5", "pelican-9"]);
+      expect(new Set(labels.map((label) => `${label.project} ${label.tag}`)).size, `every plot row reads differently at ${width}px`).toBe(labels.length);
+      expect(casSrc.every((label) => label.tagWhole), `the tag is never cut at ${width}px`).toBe(true);
+      // A project that appears once carries no tag.
+      expect(labels.find((label) => label.session === "keen-lynx-1")?.tag).toBe("");
+    }
+    await page.setViewportSize(viewport);
+    alpha.splice(alpha.length - extra.length, extra.length);
+    await expect(plotName("quiet-heron-8")).toHaveCount(0, { timeout: 15_000 });
+    await expect(board.locator(".fleet-plot-tag")).toHaveCount(0);
   });
 
   await journey.stage("Hear the open conversation as the Terminal view title", async () => {

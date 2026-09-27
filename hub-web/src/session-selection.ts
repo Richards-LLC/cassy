@@ -166,14 +166,6 @@ export function workerCountLabel(count: number): string {
   return `${count} ${count === 1 ? "worker" : "workers"}`;
 }
 
-/** The one-line summary under a session name: who runs it, how many, how it is. */
-export function sessionPickerMeta(entry: SessionPickerEntry): string {
-  const role = entry.supervisor ? `${entry.role} ${entry.supervisor}` : entry.role;
-  // Project first, as the conversation list reads (cas-7260); the machine is
-  // the group heading above the row.
-  return [entry.project, role, workerCountLabel(entry.workerCount), entry.status].filter(Boolean).join(" · ");
-}
-
 /**
  * What a session picker row leads with: the project, as the conversation list
  * and the palette do, or the session name when the hub names no project

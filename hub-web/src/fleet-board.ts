@@ -1,4 +1,4 @@
-import { sessionPickerMeta, type SessionPickerEntry } from "./session-selection";
+import { sessionPickerHeadline, sessionPickerRowMeta, type SessionPickerEntry } from "./session-selection";
 
 /**
  * The fleet board: the canvas with machines paired and no session open. It is
@@ -39,7 +39,7 @@ export interface FleetBoardCallbacks {
 export function fleetBoardSignature(model: FleetBoardModel): string {
   return [
     ...model.machines.map((machine) => `${machine.id}|${machine.label}|${machine.state}|${machine.phase}|${machine.selected ? 1 : 0}|${machine.hubVersion ?? ""}`),
-    ...model.sessions.map((entry) => `${entry.machineId}/${entry.session}|${entry.supervisor ?? ""}|${entry.workerCount}|${entry.status}|${entry.title ?? ""}|${entry.phase ?? ""}|${entry.attentionSeverity ?? ""}|${entry.lastActivity ?? ""}`),
+    ...model.sessions.map((entry) => `${entry.machineId}/${entry.session}|${entry.project ?? ""}|${entry.supervisor ?? ""}|${entry.workerCount}|${entry.status}|${entry.title ?? ""}|${entry.phase ?? ""}|${entry.attentionSeverity ?? ""}|${entry.lastActivity ?? ""}`),
   ].join("~");
 }
 
@@ -60,10 +60,14 @@ function sessionCard(entry: FleetSessionView, callbacks: FleetBoardCallbacks): H
   button.className = `fleet-session${fleetSessionState(entry) === "needs-you" ? " needs-you" : ""}`;
   button.dataset.fleetMachine = entry.machineId;
   button.dataset.fleetSession = entry.session;
-  button.setAttribute("aria-label", `Open ${entry.session} on ${entry.machineLabel}`);
+  // Project first, codename once in the line beneath (journey F1), as the
+  // session picker, the list and the palette read.
+  const headline = sessionPickerHeadline(entry);
+  const codename = entry.project ? entry.supervisor ?? entry.session : undefined;
+  button.setAttribute("aria-label", `Open ${headline}${codename ? `, ${codename}` : ""} on ${entry.machineLabel}`);
   const name = document.createElement("span");
   name.className = "session-name";
-  name.textContent = entry.session;
+  name.textContent = headline;
   button.append(name);
   if (entry.phase) {
     const chip = document.createElement("span");
@@ -79,7 +83,7 @@ function sessionCard(entry: FleetSessionView, callbacks: FleetBoardCallbacks): H
   }
   const meta = document.createElement("small");
   meta.className = "session-meta";
-  meta.textContent = sessionPickerMeta(entry);
+  meta.textContent = sessionPickerRowMeta(entry);
   button.append(meta);
   // A region re-creates this node, so it carries its own handler.
   button.onclick = () => callbacks.open(entry.machineId, entry.session);
@@ -188,6 +192,39 @@ function writeProvenance(line: HTMLElement, model: FleetBoardModel): void {
   line.title = details;
 }
 
+/** A plot row's label: the project (or trimmed session), and a tag when that label repeats. */
+export interface FleetPlotLabel { name: string; tag?: string }
+
+/**
+ * Plot row labels lead with the project (journey F1). When several rows share
+ * a project, each also carries the shortest tail of its codename that tells
+ * them apart ("pelican-9", "otter-5"): at least its last two words, the whole
+ * codename if needed, and the machine when two machines run the same
+ * codename (cas-598e QA F01). Keyed by machine/session.
+ */
+export function fleetPlotLabels(sessions: readonly FleetSessionView[]): Map<string, FleetPlotLabel> {
+  const key = (entry: FleetSessionView) => `${entry.machineId}/${entry.session}`;
+  const name = (entry: FleetSessionView) => entry.project ?? entry.session.split("-").slice(-3).join("-");
+  const labels = new Map<string, FleetPlotLabel>();
+  const groups = new Map<string, FleetSessionView[]>();
+  for (const entry of sessions) groups.set(name(entry), [...(groups.get(name(entry)) ?? []), entry]);
+  for (const [label, group] of groups) {
+    if (group.length === 1) { labels.set(key(group[0]!), { name: label }); continue; }
+    const codenames = group.map((entry) => (entry.supervisor ?? entry.session).split("-"));
+    const longest = Math.max(...codenames.map((words) => words.length));
+    let tags = codenames.map((words) => words.join("-"));
+    for (let length = 2; length <= longest; length += 1) {
+      const tails = codenames.map((words) => words.slice(-length).join("-"));
+      if (new Set(tails).size === tails.length) { tags = tails; break; }
+    }
+    group.forEach((entry, index) => {
+      const repeated = tags.filter((tag) => tag === tags[index]).length > 1;
+      labels.set(key(entry), { name: label, tag: repeated ? `${tags[index]} · ${entry.machineLabel}` : tags[index] });
+    });
+  }
+  return labels;
+}
+
 function fleetFigure(model: FleetBoardModel): HTMLElement {
   const figure = document.createElement("figure");
   figure.className = "fleet-figure";
@@ -210,6 +247,7 @@ function fleetFigure(model: FleetBoardModel): HTMLElement {
     head.append(cell);
   }
   const body = table.createTBody();
+  const labels = fleetPlotLabels(model.sessions);
   for (const entry of orderedSessions(model)) {
     const state = fleetSessionState(entry);
     const row = body.insertRow();
@@ -218,9 +256,21 @@ function fleetFigure(model: FleetBoardModel): HTMLElement {
     row.dataset.state = state;
     const name = document.createElement("th");
     name.scope = "row";
-    name.title = entry.session;
-    name.setAttribute("aria-label", `${entry.session} on ${entry.machineLabel}`);
-    name.append(textNode("span", "fleet-plot-name", entry.session.split("-").slice(-3).join("-")));
+    // The plot's row labels lead with the project too (journey F1); without
+    // one, the session name, trimmed to its last three words as before.
+    const codename = entry.project ? entry.supervisor ?? entry.session : undefined;
+    name.title = codename ? `${entry.project} · ${codename}` : entry.session;
+    name.setAttribute("aria-label", `${sessionPickerHeadline(entry)}${codename ? `, ${codename}` : ""} on ${entry.machineLabel}`);
+    const label = labels.get(`${entry.machineId}/${entry.session}`)!;
+    const plotName = textNode("span", "fleet-plot-name", "");
+    if (label.tag) {
+      // The project gives way before the tag does, so repeated rows stay apart at any width.
+      plotName.classList.add("tagged");
+      plotName.append(textNode("span", "fleet-plot-project", label.name), textNode("span", "fleet-plot-tag", label.tag));
+    } else {
+      plotName.textContent = label.name;
+    }
+    name.append(plotName);
     row.append(name);
     for (const position of TRACK) {
       const cell = row.insertCell();

@@ -3727,9 +3727,6 @@ mod spawn_base_tests {
         assert!(receipt.contains("staging"), "{receipt}");
     }
 
-    /// cas-d897 (GH #146) part (b): the chosen base's local ref was stale while
-    /// `origin/`'s copy of the same branch was ahead. The spawn must cut from
-    /// the fresher commit and name both SHAs.
     #[test]
     fn origin_only_spawn_base_is_fetched_and_materialized_gh_1034() {
         let tmp = TempDir::new().unwrap();
@@ -3778,6 +3775,9 @@ mod spawn_base_tests {
         assert!(full_sha(&repo, "epic/missing").is_none());
     }
 
+    /// cas-d897 (GH #146) part (b): the chosen base's local ref was stale while
+    /// `origin/`'s copy of the same branch was ahead. The spawn must cut from
+    /// the fresher commit and name both SHAs.
     #[test]
     fn stale_local_base_ref_loses_to_a_fresher_origin_ref_cas_d897() {
         let tmp = TempDir::new().unwrap();

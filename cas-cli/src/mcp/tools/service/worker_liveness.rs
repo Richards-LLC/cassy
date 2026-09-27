@@ -346,6 +346,20 @@ fn process_selection_for_agent(
     scanned: Option<ProcessCandidate>,
     probes: &ProcessProbes<'_>,
 ) -> ProcessSelection {
+    // A live MCP child with the registered start-time fingerprint proves this
+    // worker registration is still running, even if its recorded parent PID
+    // has exited or the child has been reparented. It does not identify the
+    // interactive harness, so keep execution evidence available rather than
+    // claiming that the worker is dead.
+    let registered_child_alive = agent.ppid.is_some()
+        && agent.pid.is_some_and(|child| {
+            (probes.pid_alive)(child)
+                && super::agent_liveness::agent_process_is_alive_with(
+                    agent,
+                    probes.pid_alive,
+                    probes.pid_matches_fingerprint,
+                )
+        });
     let registered = if agent.ppid.is_none() {
         agent.pid.map(|pid| {
             let fingerprint_matches = super::agent_liveness::agent_process_is_alive_with(
@@ -385,7 +399,12 @@ fn process_selection_for_agent(
             pid,
         }
     });
-    select_harness_process(registered, parent, scanned)
+    let selection = select_harness_process(registered, parent, scanned);
+    if registered_child_alive && matches!(selection, ProcessSelection::Exited(_)) {
+        ProcessSelection::Unavailable("registered MCP child alive; harness parent identity changed")
+    } else {
+        selection
+    }
 }
 
 fn process_parent_pid(pid: u32) -> Option<u32> {

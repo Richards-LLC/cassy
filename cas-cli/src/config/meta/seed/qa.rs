@@ -54,6 +54,23 @@ pub(super) fn register_qa(registry: &mut ConfigRegistry) {
     });
 
     registry.register(ConfigMeta {
+        key: "qa.github_status",
+        section: "qa",
+        name: "GitHub QA Status",
+        description: "Publish the cassy/independent-qa commit status on each delivered head: pending while an independent QA round is open, success once it passes or is waived, failure on rejection. Require that context in branch protection so a merge on GitHub waits for the verdict too.",
+        value_type: ConfigType::Bool,
+        default: "false",
+        constraint: Constraint::None,
+        advanced: true,
+        requires_feature: None,
+        keywords: &["qa", "github", "status", "required", "check", "branch", "protection", "merge"],
+        use_cases: &[
+            "Enable for a project that merges factory deliveries as GitHub pull requests",
+            "Leave disabled when every merge goes through worktree_merge",
+        ],
+    });
+
+    registry.register(ConfigMeta {
         key: "qa.evidence_gate",
         section: "qa",
         name: "QA Evidence Close Gate",

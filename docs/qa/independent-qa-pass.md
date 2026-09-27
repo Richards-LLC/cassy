@@ -37,7 +37,7 @@ merge. The pass has to live there.
 | Trigger | A Cassy **QA dispatch** created when a user-facing task parks for merge. It is not a supervisor habit and not a task-verifier step. |
 | Who runs it | A separate factory worker on the **taste** lane (`claude-opus-5-5`/high). It is never the implementer, and the rule is enforced in the store. |
 | What it produces | A typed QA verdict (`qa_passes` row: passed/failed/waived) bound to the reviewed branch tip, plus a ledger with evidence. |
-| What it blocks | `worktree_merge`, a supervisor's raw `git merge factory/<w>` (pre-tool guard), and the re-close (backstop). |
+| What it blocks | `worktree_merge`, a supervisor's raw `git merge factory/<w>` (pre-tool guard), a raw GitHub merge by any agent (`gh pr merge`, the merge API; pre-tool guard), a GitHub merge from any client once the `cassy/independent-qa` check is required, and the re-close (backstop). |
 | Failure | A rejected QA verdict fires `request_changes` automatically, citing the ledger. The implementer keeps the task. |
 | Cost cap | 45 min per round, 1 active pass per task, 3 rounds before escalation. Journeys are limited to those the diff touches. |
 
@@ -262,6 +262,85 @@ dispatches use for repository proof drift.
    `waived` pass whose `bound_head` is an ancestor of the target branch. This catches merges made outside a Claude Code hook, such as
    another harness or a shell. The rejection message carries the exact
    command to dispatch a pass.
+4. **Raw GitHub merge guard (cas-2ee2, every role).** The same pre-tool
+   hook denies `gh pr merge` (by number, URL, branch, or the checked-out
+   branch, including `--auto`), a `PUT …/pulls/<n>/merge` through `gh api`
+   or `curl`, and the GraphQL `mergePullRequest` /
+   `enablePullRequestAutoMerge` mutations. The PR maps to its delivery
+   through the PR number the worker reported (`delivery_pr_number`) or a
+   bounded `gh pr view --json headRefName,headRefOid`. The gate is then
+   checked at the PR's head commit, so a push after the verdict is not
+   covered. GitHub is only asked while some unclosed delivery has a
+   recorded round. A PR Cassy cannot map while a round is open is refused
+   rather than let through.
+5. **GitHub required check (repository side, opt-in).** This covers
+   merges no Cassy hook sees: the web UI, another machine, or a person.
+   See "GitHub required check" below.
+
+The merge request a worker sends (`merge_request=true`) leads with a
+`⏸ QA HOLD` block while its tip has no passed or waived round, so the
+supervisor reads the QA state before any merge guidance in the same batch
+(GH #1023: PR #2546 merged before its `cas-qa-dispatch` was read).
+
+### GitHub required check
+
+With `qa.github_status = true`, Cassy publishes the commit status
+`cassy/independent-qa` on each delivered head through `gh api` from the
+delivery's checkout. The status is:
+
+| Round | Status |
+| --- | --- |
+| open (pending or claimed) | `pending` |
+| passed | `success` |
+| waived by the supervisor | `success`, with the waiver reason as the description |
+| rejected, or timed out | `failure` |
+| delivery needs no independent QA | `success` ("not required") |
+
+Publishing runs in the background with a time limit, so it never delays a
+park, verdict or waiver. A publication that fails leaves the check missing
+or pending, which GitHub treats as not mergeable, so a failure errs toward
+blocking.
+
+To enforce it:
+
+1. Enable publishing: `cas config set qa.github_status true`. The
+   supervisor's `gh` needs commit-status write access (`repo:status`, or
+   the fine-grained "Commit statuses: write").
+2. Require the context on the integration branch, for example staging:
+
+   ```sh
+   gh api -X PUT repos/OWNER/REPO/branches/staging/protection \
+     -F required_status_checks[strict]=false \
+     -f 'required_status_checks[contexts][]=cassy/independent-qa' \
+     -F enforce_admins=true -F required_pull_request_reviews=null \
+     -F restrictions=null
+   ```
+
+   This call replaces the branch's existing protection. Merge the new
+   context into any existing rules, or add it in the repository settings
+   under Branches or Rules.
+3. Pull requests that do not come from factory deliveries also need the
+   context, or they can never merge. Either set it on those PRs by hand, or
+   add a workflow that marks non-factory heads as not requiring the check:
+
+   ```yaml
+   # .github/workflows/cassy-qa-gate.yml
+   on: pull_request
+   permissions: { statuses: write }
+   jobs:
+     non-factory:
+       runs-on: ubuntu-latest
+       steps:
+         - if: ${{ !startsWith(github.head_ref, 'factory/') }}
+           run: >
+             gh api -X POST repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha }}
+             -f state=success -f context=cassy/independent-qa
+             -f description="Not a factory delivery"
+           env: { GH_TOKEN: "${{ github.token }}" }
+   ```
+
+   Use a step-level condition, as above, not a job-level `if:`. A skipped
+   job produces no status, and the factory PRs must carry only Cassy's.
 
 The task-verifier's Step 0A ledger check stays as it is. It governs the
 implementer's own evidence, which cas-0cd5 enforces. The independent pass is

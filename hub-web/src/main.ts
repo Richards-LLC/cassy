@@ -35,7 +35,7 @@ import { DEFAULT_PAIRING_SCOPES, PairingRelayError, acknowledgePairing, createPa
 import { browserSupport, unsupportedBrowserNotice } from "./browser-support";
 import { attentionStore, catalog } from "./storage";
 import { createTerminalSurface, type TerminalSurface } from "./terminal";
-import { machineConnection, sessionConnection } from "./session-connection";
+import { firstAttachRetry, machineConnection, sessionConnection } from "./session-connection";
 import { toastPlacementInThread, toastTopClearOfBanner } from "./toast-placement";
 import { absoluteTimestamp, relativeTimestamp } from "./time";
 import { loadPaneLayout, movePane, normalizePaneLayout, orderedPaneIds, promotePane, savePaneLayout, type PaneLayout, type PaneLayoutStorage } from "./pane-layout";
@@ -156,7 +156,16 @@ let contextProgress = false;
 let contextAttention = 0;
 function syncConversationContext(): void {
   if (hubPresentation !== "conversation") return;
-  const history = selectedMachineId && selectedSession ? conversationHistories.get(sessionKey(selectedMachineId, selectedSession)) : undefined;
+  // With no thread open there is nothing for the rail to hold: the last
+  // thread's progress and attention must not keep it open as an empty column
+  // (journey F15, cas-9225).
+  if (!selectedMachineId || !selectedSession) {
+    contextProgress = false;
+    contextAttention = 0;
+    syncContextRail(document, { history: undefined, progress: false, attention: 0 });
+    return;
+  }
+  const history = conversationHistories.get(sessionKey(selectedMachineId, selectedSession));
   syncContextRail(document, { history, progress: contextProgress, attention: contextAttention });
 }
 let workingRefresh: ReturnType<typeof setTimeout> | undefined;
@@ -1411,7 +1420,10 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
     retry: () => { void connections.get(machineId)?.attach(session); },
     diagnose: () => openConnectionLog(machineId),
     repair: () => openRepairDialog(machineId),
-  }, now, hubPresentation === "conversation" ? { openingTitle: CONVERSATION_OPENING } : {});
+  }, now, {
+    ...(hubPresentation === "conversation" ? { openingTitle: CONVERSATION_OPENING } : {}),
+    quietRetry: "session" in snapshot && firstAttachRetry(snapshot as AttachSnapshot, sessionsEverLive.has(sessionKey(machineId, session))),
+  });
 }
 
 function syncConnectionViewTicker(): void {
@@ -1437,6 +1449,10 @@ function renderTerminalFailure(machineId: string, session: string, detail: strin
   if (grid?.dataset.sessionKey !== sessionKey(machineId, session)) return;
   const placeholder = grid.querySelector<HTMLElement>(":scope > .empty");
   if (!placeholder) return;
+  // cas-28df: a never-live conversation's first retry is still opening; the
+  // connection surface shows it calmly, with this detail behind "Details".
+  const key = sessionKey(machineId, session);
+  if (firstAttachRetry(attachStates.get(key), sessionsEverLive.has(key))) return;
   const message = document.createElement("p");
   message.textContent = `Terminal unavailable: ${detail}`;
   const retry = document.createElement("button");
@@ -2777,13 +2793,13 @@ function render(captureDraft = true): void {
           <header class="drawer-header">${cloudBrand()}<button id="machine-drawer-close" type="button" aria-label="Close machines and sessions">×</button></header>
           ${compatibility ? `<div class="compatibility-warning" role="alert">${escapeHtml(compatibility)}</div>` : ""}
           <nav id="machine-tree" aria-label="Machine sessions"></nav>
-          ${selected ? '<button id="remove-machine" class="remove-machine">Remove selected machine</button>' : ""}
+          ${selected ? `<button id="remove-machine" class="remove-machine">Remove ${escapeHtml(selected.label)} from this browser</button>` : ""}
         </div>
       </aside>
       <main>
         <header class="session-header">
           <div class="session-identity">
-            ${backTarget ? `<button id="session-back" class="session-back" type="button" aria-label="${escapeAttr(backText)}" title="${escapeAttr(backText)}"><span aria-hidden="true">‹</span></button>` : ""}
+            ${backTarget ? `<button id="session-back" class="session-back" type="button" aria-label="${escapeAttr(backText)}" title="${escapeAttr(backText)}"><span aria-hidden="true">‹</span><span class="session-back-label" aria-hidden="true">Back</span></button>` : ""}
             <h1 class="${selectedSession ? "toolbar-session-title" : ""}"><button id="session-picker-toggle" class="session-picker-toggle" type="button" aria-haspopup="dialog" aria-expanded="${sessionPickerOpen}" aria-label="${escapeAttr(sessionPickerLabel)}" title="${escapeAttr(sessionPickerTooltip)}"><span class="session-picker-name">${escapeHtml(sessionTitleLead)}</span>${sessionTitleCodename ? `<span class="session-picker-codename codename">${escapeHtml(sessionTitleCodename)}</span>` : ""}<span class="session-picker-caret" aria-hidden="true">▾</span></button></h1>
           </div>
           ${selected ? `<span class="machine-chip" data-compact-label="${escapeAttr(compactMachineLabel)}" title="${escapeAttr(machineLabel)}">${escapeHtml(machineLabel)}</span><span class="mode-badge ${mode.toLowerCase()}" data-compact-label="${lease?.held_by_me ? "CTL" : "OBS"}"${sessionDown ? " hidden" : ""}>${mode}</span><span class="connection-summary ${connectionState}" title="${escapeAttr(compatibility ?? connectionText)}"><span class="connection-dot"></span><span data-machine-latency="${escapeAttr(selected.id)}">${latencyText}</span></span>` : ""}

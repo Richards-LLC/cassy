@@ -158,6 +158,7 @@ impl Config {
                 qa.pass_timeout_mins.to_string(),
             ),
             ("qa.max_rounds".to_string(), qa.max_rounds.to_string()),
+            ("qa.github_status".to_string(), qa.github_status.to_string()),
             // Dev section
             ("dev.dev_mode".to_string(), dev.dev_mode.to_string()),
             (

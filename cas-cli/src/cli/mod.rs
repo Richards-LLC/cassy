@@ -745,6 +745,11 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
 }
 
 fn serve_execute() -> anyhow::Result<()> {
+    // Long-lived: a proxy client that vanishes mid-write on the MCP socket
+    // must not kill the server every harness session depends on (cas-5918).
+    // Without the harness, stdout writes now fail with EPIPE and the service
+    // ends through its normal shutdown path.
+    crate::server_signals::ignore_sigpipe_for_server();
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?

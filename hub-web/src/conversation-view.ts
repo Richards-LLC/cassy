@@ -738,17 +738,27 @@ export class ConversationView {
       bubble.append(state);
     } else if (send.state === "unconfirmed" && this.history.repliedSince(send)) {
       // Journey F10: the supervisor has spoken since, so this send most
-      // likely arrived. The card settles to a quiet record: no warning, no
-      // Retry inviting a duplicate, and a note to resend only if it was missed.
+      // likely arrived. The card settles to a quiet record: no warning and no
+      // primary Retry inviting a duplicate. cas-470e: the copy says to send
+      // it again only if it was missed, so a quiet text-weight "Send again"
+      // is right there; the operator never has to retype the message.
       bubble.dataset.settled = "true";
       const state = document.createElement("span");
       state.className = "conversation-delivery conversation-refused conversation-unconfirmed conversation-settled"; state.setAttribute("role", "status");
       const label = document.createElement("b"); label.textContent = "Not confirmed";
       const separator = document.createElement("span"); separator.className = "sr-only"; separator.textContent = " · ";
       const reason = document.createElement("span"); reason.className = "conversation-refused-reason";
-      reason.textContent = "The supervisor has replied since; resend only if it missed this.";
+      reason.textContent = "The supervisor has replied since; send it again only if it missed this.";
       state.append(label, separator, reason);
       bubble.append(state);
+      if (this.options.retryMessage) {
+        const actions = document.createElement("div"); actions.className = "conversation-actions conversation-actions-quiet";
+        const again = document.createElement("button"); again.type = "button"; again.className = "conversation-send-again"; again.textContent = "Send again";
+        again.setAttribute("aria-label", "Send this message again");
+        again.onclick = () => this.options.retryMessage?.(send);
+        actions.append(again);
+        bubble.append(actions);
+      }
     } else if (send.state === "unconfirmed") {
       // cas-1622: the receipt for this send never came. It is not refused —
       // it may well have arrived — so it does not claim "Not sent". It stops

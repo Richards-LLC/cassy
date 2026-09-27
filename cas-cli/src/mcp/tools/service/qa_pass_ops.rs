@@ -7,7 +7,8 @@
 //! closes the QA work item either way.
 
 use crate::mcp::tools::service::imports::*;
-use cas_types::{QaPass, QaVerdict, TaskStatus};
+use crate::qa_pass::PreExistingIssue;
+use cas_types::{Dependency, DependencyType, QaPass, QaVerdict, Task, TaskRisk, TaskStatus, TaskType};
 
 impl CasService {
     pub(super) async fn verification_qa_record(
@@ -25,6 +26,16 @@ impl CasService {
                 ErrorCode::INVALID_PARAMS,
                 format!("qa_record: ledger_path {ledger_path} is not a file; write the ledger first"),
             ));
+        }
+        // cas-e371 (GH #1023 finding 1): issues marked pre-existing are the
+        // page's backlog, not the delivery's defects. They never carry a
+        // rejection on their own, and each one becomes a linked follow-up.
+        let (pre_existing, delivery_issues) = crate::qa_pass::split_qa_issues(req.issues.as_deref())
+            .map_err(|problem| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_record rejected: {problem}")))?;
+        if let Some(refusal) =
+            crate::qa_pass::rejection_scope_refusal(verdict, pre_existing.len(), delivery_issues)
+        {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, format!("qa_record rejected: {refusal}")));
         }
         let (reviewer, reviewer_id) = self.inner.qa_caller_identity()?;
         let cas_root = self.inner.cas_root.clone();
@@ -60,6 +71,8 @@ impl CasService {
             now,
         )
         .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_record rejected: {error}")))?;
+        // cas-2ee2: the verdict turns the GitHub required check green or red.
+        crate::qa_pass::github_gate::publish_pass_status(&cas_root, &pass);
 
         // Cite the round's bundle on the delivery the same way an
         // implementer cites its own (`note_type=platform_proof`).
@@ -75,13 +88,14 @@ impl CasService {
                 tracing::warn!(task_id = %task_id, error = %error, "cas-619f: bundle citation not recorded");
             }
         }
+        let follow_ups = self.file_pre_existing_follow_ups(task_id, &pass, &pre_existing, ledger_path);
         let qa_task_note = self.close_qa_task(&pass, verdict, summary);
         let routing = match verdict {
             QaVerdict::Approved => self.announce_qa_pass(&pass),
             QaVerdict::Rejected => self.route_qa_rejection(&pass, &reviewer, summary),
         };
         Ok(Self::success(format!(
-            "Independent QA {} recorded for {task_id} @{} (pass {}, round {}).\n{routing}{qa_task_note}",
+            "Independent QA {} recorded for {task_id} @{} (pass {}, round {}).\n{routing}{qa_task_note}{follow_ups}",
             match verdict {
                 QaVerdict::Approved => "APPROVAL",
                 QaVerdict::Rejected => "REJECTION",
@@ -171,6 +185,9 @@ impl CasService {
             chrono::Utc::now(),
         )
         .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_waive rejected: {error}")))?;
+        // cas-2ee2: a waiver satisfies the GitHub required check too, and its
+        // status description carries the logged reason.
+        crate::qa_pass::github_gate::publish_pass_status(&self.inner.cas_root, &pass);
         // Same shape as `task action=notes note_type=decision`, so the waiver
         // reads as a decision in every note view.
         let note = format!(
@@ -272,6 +289,86 @@ impl CasService {
             ));
         }
         Ok(Self::success(out))
+    }
+
+    /// cas-e371: file one follow-up task per pre-existing issue, linked to
+    /// the delivery (`related`), and note the ids on the delivery so the
+    /// finding stays discoverable after the verdict closes the round.
+    fn file_pre_existing_follow_ups(
+        &self,
+        delivery_id: &str,
+        pass: &QaPass,
+        issues: &[PreExistingIssue],
+        ledger_path: &str,
+    ) -> String {
+        if issues.is_empty() {
+            return String::new();
+        }
+        let Ok(store) = self.inner.open_task_store() else {
+            return format!(
+                "\n{} pre-existing issue(s) were not filed as follow-ups (task store unavailable); they are in {ledger_path}.",
+                issues.len()
+            );
+        };
+        let Ok(delivery) = store.get(delivery_id) else {
+            return format!(
+                "\n{} pre-existing issue(s) were not filed as follow-ups ({delivery_id} not found); they are in {ledger_path}.",
+                issues.len()
+            );
+        };
+        let mut filed = Vec::new();
+        let mut failed = Vec::new();
+        for issue in issues {
+            let id = match store.generate_id() {
+                Ok(id) => id,
+                Err(error) => {
+                    failed.push(format!("{} ({error})", issue.problem));
+                    continue;
+                }
+            };
+            let mut task = Task::new(id.clone(), crate::qa_pass::follow_up_title(&delivery, issue));
+            task.task_type = TaskType::Bug;
+            task.scope = crate::types::Scope::Project;
+            task.origin_project = delivery.origin_project.clone();
+            task.description = crate::qa_pass::follow_up_description(&delivery, pass, issue, ledger_path);
+            task.priority = crate::qa_pass::follow_up_priority(&issue.severity);
+            task.risk = vec![TaskRisk::None];
+            task.labels = vec!["qa-follow-up".to_string(), "pre-existing".to_string()];
+            task.external_ref = Some(ledger_path.to_string());
+            if let Err(error) = store.create_atomic(&task, &[], None, Some("cas-qa-record")) {
+                failed.push(format!("{} ({error})", issue.problem));
+                continue;
+            }
+            let related = Dependency::new(id.clone(), delivery.id.clone(), DependencyType::Related);
+            if let Err(error) = store.add_dependency(&related) {
+                tracing::warn!(follow_up = %id, delivery = %delivery.id, error = %error, "cas-e371: related link not recorded");
+            }
+            filed.push(id);
+        }
+        let mut out = String::new();
+        if !filed.is_empty() {
+            let note = format!(
+                "[{}] Independent QA round {} recorded {} pre-existing issue(s) as follow-ups: {} (not counted against this delivery; ledger {ledger_path})",
+                chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+                pass.round,
+                filed.len(),
+                filed.join(", "),
+            );
+            if let Err(error) = store.append_note(delivery_id, &note) {
+                tracing::warn!(task_id = %delivery_id, error = %error, "cas-e371: follow-up note not recorded");
+            }
+            out.push_str(&format!(
+                "\nPre-existing follow-ups filed (related to {delivery_id}): {}.",
+                filed.join(", ")
+            ));
+        }
+        if !failed.is_empty() {
+            out.push_str(&format!(
+                "\nNot filed, still in the ledger: {}.",
+                failed.join("; ")
+            ));
+        }
+        out
     }
 
     fn close_qa_task(&self, pass: &QaPass, verdict: QaVerdict, summary: &str) -> String {

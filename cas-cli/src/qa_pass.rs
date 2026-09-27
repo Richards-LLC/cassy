@@ -12,6 +12,9 @@ use cas_types::{QaPass, Task, TaskType};
 
 use crate::config::QaConfig;
 
+pub mod github_gate;
+pub use github_gate::{github_merge_refusal, merge_request_qa_hold};
+
 /// Label carried by every Cassy-created QA work item.
 pub const QA_PASS_LABEL: &str = "qa-pass";
 
@@ -292,11 +295,15 @@ pub fn factory_branches_merged_by(command: &str) -> Vec<String> {
 /// a user-facing delivery with a recorded round whose current tip has no passed or waived
 /// independent QA round. Fails open (None) when Cassy state is unreadable —
 /// the close backstop still refuses such a task later.
+///
+/// cas-2ee2: raw GitHub merges (`gh pr merge`, the merge API) are checked
+/// too; [`github_merge_refusal`] also runs for non-supervisor roles.
 pub fn supervisor_merge_refusal(cas_root: &Path, cwd: &Path, command: &str) -> Option<String> {
     let branches = factory_branches_merged_by(command);
     branches
         .into_iter()
         .find_map(|branch| branch_merge_refusal(cas_root, cwd, &branch))
+        .or_else(|| github_merge_refusal(cas_root, cwd, command))
 }
 
 /// Check the branch selected by `worktree_merge`, including calls without a
@@ -556,35 +563,178 @@ pub fn validate_round_bundle(ledger_path: &Path, pass: &QaPass) -> Result<std::p
     }
     // cas-a6a3 (GH #1007): a round that claims a visual-QA pass backs it with
     // the strict run's own report, generated after the round opened, against
-    // a local build of the reviewed tip, never the production URL.
-    if field("visual_qa_status") == "pass" {
-        let relative = value
-            .pointer("/files/visual_qa_json")
-            .and_then(|v| v.as_str())
-            .unwrap_or("visual-qa/visual-qa.json");
-        if std::path::Path::new(relative).components().any(|part| {
-            !matches!(
-                part,
-                std::path::Component::Normal(_) | std::path::Component::CurDir
+    // a local build of the reviewed tip, never the production URL. cas-e371
+    // (GH #1023 finding 1): a "scoped" round backs it with that run plus the
+    // base build's run over the same pages, and passes when the tip added no
+    // finding the base does not have.
+    let status = field("visual_qa_status");
+    if matches!(status, "pass" | "scoped") {
+        let inside = |key: &str, default: &str| -> Result<std::path::PathBuf, String> {
+            let relative = value
+                .pointer(&format!("/files/{key}"))
+                .and_then(|v| v.as_str())
+                .unwrap_or(default);
+            if relative.trim().is_empty()
+                || std::path::Path::new(relative).components().any(|part| {
+                    !matches!(
+                        part,
+                        std::path::Component::Normal(_) | std::path::Component::CurDir
+                    )
+                })
+            {
+                return Err(format!(
+                    "{}: files.{key} {relative:?} must name a file inside the round directory",
+                    bundle.display()
+                ));
+            }
+            Ok(dir.join(relative))
+        };
+        let tip = inside("visual_qa_json", "visual-qa/visual-qa.json")?;
+        let opened = format!(
+            "round {} opened at {}",
+            pass.round,
+            pass.requested_at.to_rfc3339()
+        );
+        if status == "pass" {
+            crate::qa_evidence::check_visual_qa_run(&tip, pass.requested_at.timestamp(), &opened)
+                .map_err(|problem| format!("{}: {problem}", bundle.display()))?;
+        } else {
+            let baseline = inside("visual_qa_baseline_json", "")?;
+            crate::qa_evidence::check_visual_qa_scoped(
+                &tip,
+                &baseline,
+                pass.requested_at.timestamp(),
+                &opened,
             )
-        }) {
-            return Err(format!(
-                "{}: files.visual_qa_json {relative:?} must stay inside the round directory",
-                bundle.display()
-            ));
+            .map_err(|problem| format!("{}: {problem}", bundle.display()))?;
         }
-        crate::qa_evidence::check_visual_qa_run(
-            &dir.join(relative),
-            pass.requested_at.timestamp(),
-            &format!(
-                "round {} opened at {}",
-                pass.round,
-                pass.requested_at.to_rfc3339()
-            ),
-        )
-        .map_err(|problem| format!("{}: {problem}", bundle.display()))?;
     }
     Ok(bundle)
+}
+
+/// A `qa_record` issue the reviewer marked `"scope": "pre-existing"`: the base
+/// build has it too, so it is not the delivery's defect (cas-e371, GH #1023
+/// finding 1). Cassy files each one as a follow-up task linked to the
+/// delivery instead of letting it reject a correct, narrow change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreExistingIssue {
+    pub severity: String,
+    pub problem: String,
+    pub suggestion: String,
+    /// The screenshot or file the reviewer cited, if any.
+    pub evidence: String,
+}
+
+/// Split `qa_record`'s `issues` JSON array into the pre-existing issues and
+/// the number of issues the delivery owns. An issue without a `scope`, or
+/// with any scope other than pre-existing, belongs to the delivery.
+pub fn split_qa_issues(issues_json: Option<&str>) -> Result<(Vec<PreExistingIssue>, usize), String> {
+    let Some(raw) = issues_json.filter(|raw| !raw.trim().is_empty()) else {
+        return Ok((Vec::new(), 0));
+    };
+    let parsed: serde_json::Value =
+        serde_json::from_str(raw).map_err(|error| format!("issues is not valid JSON ({error})"))?;
+    let items = parsed
+        .as_array()
+        .ok_or_else(|| "issues must be a JSON array".to_string())?;
+    let mut pre_existing = Vec::new();
+    let mut delivery = 0;
+    for item in items {
+        let text = |key: &str| {
+            item.get(key)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        };
+        let scope = text("scope").to_ascii_lowercase().replace(['_', ' '], "-");
+        if matches!(scope.as_str(), "pre-existing" | "preexisting") {
+            pre_existing.push(PreExistingIssue {
+                severity: text("severity"),
+                problem: text("problem"),
+                suggestion: text("suggestion"),
+                evidence: text("file"),
+            });
+        } else {
+            delivery += 1;
+        }
+    }
+    Ok((pre_existing, delivery))
+}
+
+/// Why a rejection is refused: every issue it names is pre-existing, so it
+/// rejects the delivery for defects it did not cause.
+pub fn rejection_scope_refusal(
+    verdict: cas_types::QaVerdict,
+    pre_existing: usize,
+    delivery: usize,
+) -> Option<String> {
+    (verdict == cas_types::QaVerdict::Rejected && pre_existing > 0 && delivery == 0).then(|| {
+        format!(
+            "every issue ({pre_existing}) is marked \"scope\": \"pre-existing\", and a pre-existing \
+             defect never rejects a delivery. Reject only for a regression the delivery introduced \
+             or an unmet acceptance criterion, and name that issue without the pre-existing scope; \
+             otherwise record status=approved and Cassy files the pre-existing issues as follow-ups."
+        )
+    })
+}
+
+/// Priority of a follow-up for a pre-existing issue, from its severity.
+pub fn follow_up_priority(severity: &str) -> cas_types::Priority {
+    match severity.trim().to_ascii_lowercase().as_str() {
+        "blocking" | "critical" => cas_types::Priority::HIGH,
+        "high" | "normal" => cas_types::Priority::MEDIUM,
+        _ => cas_types::Priority::LOW,
+    }
+}
+
+/// Title of the follow-up task for one pre-existing issue.
+pub fn follow_up_title(delivery: &Task, issue: &PreExistingIssue) -> String {
+    // The first sentence of the first line: "Footer contrast 3.1:1. Base too."
+    // titles as "Footer contrast 3.1:1".
+    let first_line = issue.problem.lines().next().unwrap_or_default();
+    let mut problem = first_line
+        .split(". ")
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .trim_end_matches('.')
+        .to_string();
+    if problem.is_empty() {
+        problem = "defect recorded by independent QA".to_string();
+    }
+    if problem.chars().count() > 80 {
+        problem = problem.chars().take(77).collect::<String>() + "...";
+    }
+    format!("Pre-existing: {problem} (found in QA of {})", delivery.id)
+}
+
+/// Body of the follow-up task for one pre-existing issue.
+pub fn follow_up_description(
+    delivery: &Task,
+    pass: &QaPass,
+    issue: &PreExistingIssue,
+    ledger_path: &str,
+) -> String {
+    let mut body = format!(
+        "Independent QA round {round} of {task} ({title}) @{head} found this defect on the base \
+         build as well, so it was recorded as pre-existing and did not count against the delivery \
+         (cas-e371).\n\n- Severity: {severity}\n- Problem: {problem}\n",
+        round = pass.round,
+        task = delivery.id,
+        title = delivery.title.trim(),
+        head = pass.head8(),
+        severity = if issue.severity.is_empty() { "unrated" } else { issue.severity.as_str() },
+        problem = if issue.problem.is_empty() { "(not described)" } else { issue.problem.as_str() },
+    );
+    if !issue.suggestion.is_empty() {
+        body.push_str(&format!("- Suggested fix: {}\n", issue.suggestion));
+    }
+    if !issue.evidence.is_empty() {
+        body.push_str(&format!("- Evidence: {}\n", issue.evidence));
+    }
+    body.push_str(&format!("- Ledger: {ledger_path}\n"));
+    body
 }
 
 /// Title of the QA work item for one round.
@@ -617,16 +767,22 @@ pub fn round_dir(artifacts_root: &Path, pass: &QaPass) -> std::path::PathBuf {
 /// task text, not only in the skill reference, because a reviewer recorded
 /// "approved" twice before a supervisor's stricter brief arrived, and an
 /// installed skill may predate `references/independent-pass.md`.
-pub const QA_REJECTION_BAR: &str = "Rejection bar. Decide by this, not by impression:\n\
-- Reject on any Blocking or High journey finding, or when visual-qa.mjs --strict fails.\n\
-- Reject when any cas-ui-craft critique dimension scores below 3, or distinctiveness, fit or \
-hierarchy scores below 4 on a public surface.\n\
-- Reject any easy-to-spot bug on the touched path. That includes a pre-existing one on the path \
-this delivery claims to fix.\n\
+pub const QA_REJECTION_BAR: &str = "Rejection bar. Decide by this, not by impression. Judge what the \
+delivery changed (the pages, controls and journeys its diff touches) and its acceptance criteria, not the \
+page's older backlog.\n\
+- Reject on a regression the delivery introduced: a Blocking or High journey finding it causes, or a \
+visual-qa.mjs --strict finding the base build does not have.\n\
+- Reject when a cas-ui-craft critique dimension for what the delivery changed scores below 3, or \
+distinctiveness, fit or hierarchy scores below 4 on a public surface.\n\
+- Reject when an acceptance criterion or the demo statement is not met on the running build. A defect the \
+delivery claims to fix that still reproduces is an unmet criterion.\n\
 - Forced colors, reduced motion and more contrast count only when the capture proves the mode \
 with matchMedia (for example matchMedia('(forced-colors: active)').matches is true).\n\
 - Keyboard-only must reach and complete the demo's primary action.\n\
 - A required mode you did not run is NOT EXERCISED, never PASS, and rejects.\n\
+- A defect the base build already has never rejects, even on a touched page, unless the delivery claims \
+to fix it. Record it under Pre-existing in LEDGER.md and pass it to qa_record with \"scope\": \
+\"pre-existing\"; Cassy files it as a follow-up task linked to the delivery.\n\
 Otherwise approve, and list Normal and Note findings in the summary.";
 
 /// Brief the reviewer reads when it starts the QA work item.
@@ -657,7 +813,12 @@ pub fn qa_task_description(
          (scripts/journeys-for-diff.py {parent} {head}) plus the demo statement; \
          walk the adjacent paths (empty, loading, error, long content, phone 390px, dark, \
          keyboard-only, reduced motion); run visual-qa.mjs --strict and score the \
-         cas-ui-craft rubric with desktop+phone, light+dark screenshots. Every finding \
+         cas-ui-craft rubric for what the delivery changed, with desktop+phone, light+dark \
+         screenshots. When a check fails, repeat it on the base build \
+         (git merge-base {parent} {head}) before you count it: a failure the base shares is \
+         pre-existing. For visual QA, run the base build over the same pages into \
+         visual-qa-baseline/ and set visual_qa_status \"scoped\" with \
+         files.visual_qa_baseline_json; only findings the base lacks count. Every finding \
          cites a trace action and a screenshot.\n\n\
          {bar}\n\n\
          Evidence: {ledger}/bundle.json with producer \"independent-qa\", task_id {task} and \
@@ -1021,8 +1182,14 @@ mod tests {
             "Rejection bar. Decide by this, not by impression",
             "scores below 3",
             "below 4 on a public surface",
-            "easy-to-spot bug on the touched path",
-            "pre-existing one on the path this delivery claims to fix",
+            "page's older backlog",
+            "a regression the delivery introduced",
+            "finding the base build does not have",
+            "A defect the delivery claims to fix that still reproduces is an unmet criterion",
+            "never rejects, even on a touched page",
+            "\"scope\": \"pre-existing\"",
+            "visual_qa_status \"scoped\"",
+            "files.visual_qa_baseline_json",
             "matchMedia('(forced-colors: active)').matches",
             "Keyboard-only must reach and complete the demo's primary action",
             "NOT EXERCISED, never PASS, and rejects",
@@ -1087,6 +1254,151 @@ mod tests {
         // A passing local run after the round opened backs the claim.
         report("PASS", later, "http://127.0.0.1:28511/commander/");
         assert!(validate_round_bundle(&ledger, &round).is_ok());
+    }
+
+    /// cas-e371 (GH #1023 finding 1): the rejection bar no longer turns a
+    /// pre-existing defect on a touched page into a rejection.
+    #[test]
+    fn rejection_bar_scopes_rejection_to_what_the_delivery_changed() {
+        assert!(!QA_REJECTION_BAR.contains("easy-to-spot bug on the touched path"));
+        assert!(!QA_REJECTION_BAR.contains("including a pre-existing one"));
+        assert!(!QA_REJECTION_BAR.contains("when visual-qa.mjs --strict fails"));
+    }
+
+    #[test]
+    fn qa_issues_split_into_pre_existing_follow_ups_and_delivery_issues() {
+        let (pre, delivery) = split_qa_issues(Some(
+            r#"[
+                {"severity":"high","problem":"no focus ring on Send"},
+                {"severity":"normal","scope":"pre-existing","problem":"Footer contrast 3.1:1. Base too.","suggestion":"darken","file":"F02.png"},
+                {"severity":"note","scope":"Pre_Existing","problem":"old overflow"},
+                {"severity":"note","scope":"delivery","problem":"new clip"}
+            ]"#,
+        ))
+        .unwrap();
+        assert_eq!(delivery, 2);
+        assert_eq!(pre.len(), 2);
+        assert_eq!(pre[0].problem, "Footer contrast 3.1:1. Base too.");
+        assert_eq!(pre[0].suggestion, "darken");
+        assert_eq!(pre[0].evidence, "F02.png");
+        assert_eq!(split_qa_issues(None).unwrap(), (Vec::new(), 0));
+        assert_eq!(split_qa_issues(Some("  ")).unwrap(), (Vec::new(), 0));
+        assert!(split_qa_issues(Some("{}")).unwrap_err().contains("JSON array"));
+        assert!(split_qa_issues(Some("[")).unwrap_err().contains("not valid JSON"));
+    }
+
+    #[test]
+    fn a_rejection_needs_an_issue_the_delivery_owns() {
+        use cas_types::QaVerdict::*;
+        let refusal = rejection_scope_refusal(Rejected, 2, 0).expect("only pre-existing issues");
+        assert!(refusal.contains("never rejects a delivery"), "{refusal}");
+        assert!(rejection_scope_refusal(Rejected, 2, 1).is_none());
+        assert!(rejection_scope_refusal(Rejected, 0, 0).is_none());
+        assert!(rejection_scope_refusal(Approved, 3, 0).is_none());
+    }
+
+    #[test]
+    fn follow_up_task_names_the_defect_the_delivery_and_the_evidence() {
+        let delivery = task();
+        let round = pass("aaaa1111", cas_types::QaPassState::Passed);
+        let issue = PreExistingIssue {
+            severity: "normal".to_string(),
+            problem: "Footer links fail contrast at 3.1:1. The base build too.".to_string(),
+            suggestion: "use --ink-mid".to_string(),
+            evidence: "F02.png".to_string(),
+        };
+        assert_eq!(
+            follow_up_title(&delivery, &issue),
+            "Pre-existing: Footer links fail contrast at 3.1:1 (found in QA of cas-ui1)"
+        );
+        let body = follow_up_description(&delivery, &round, &issue, "/a/LEDGER.md");
+        for pinned in [
+            "Independent QA round 1 of cas-ui1 (Reply composer) @aaaa1111",
+            "base build as well",
+            "- Severity: normal",
+            "- Suggested fix: use --ink-mid",
+            "- Evidence: F02.png",
+            "- Ledger: /a/LEDGER.md",
+        ] {
+            assert!(body.contains(pinned), "missing {pinned:?} in:\n{body}");
+        }
+        let long = PreExistingIssue {
+            problem: "x".repeat(200),
+            ..issue.clone()
+        };
+        assert!(follow_up_title(&delivery, &long).contains(&format!("{}...", "x".repeat(77))));
+        let blank = PreExistingIssue {
+            problem: String::new(),
+            ..issue
+        };
+        assert!(follow_up_title(&delivery, &blank).contains("defect recorded by independent QA"));
+        assert_eq!(follow_up_priority("Blocking"), cas_types::Priority::HIGH);
+        assert_eq!(follow_up_priority("high"), cas_types::Priority::MEDIUM);
+        assert_eq!(follow_up_priority("note"), cas_types::Priority::LOW);
+    }
+
+    /// cas-e371: a round whose tip shares every visual-QA finding with the
+    /// base build backs its verdict with the scoped pair.
+    #[test]
+    fn round_bundle_accepts_a_scoped_visual_qa_pair() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let ledger = dir.path().join("LEDGER.md");
+        std::fs::write(&ledger, "# ledger").unwrap();
+        let round = pass("aaaa1111", cas_types::QaPassState::Claimed);
+        let later = round.requested_at + chrono::Duration::seconds(60);
+        std::fs::create_dir_all(dir.path().join("visual-qa")).unwrap();
+        std::fs::create_dir_all(dir.path().join("visual-qa-baseline")).unwrap();
+        let finding = |port: u16| {
+            serde_json::json!({
+                "type": "insufficient-contrast", "selector": "footer a",
+                "url": format!("http://127.0.0.1:{port}/?fixture=home"),
+                "scheme": "light", "viewport": {"name": "phone", "width": 390, "height": 844}
+            })
+        };
+        let report = |name: &str, port: u16, findings: serde_json::Value| {
+            std::fs::write(
+                dir.path().join(name),
+                serde_json::json!({
+                    "status": "FAIL", "strict": true, "generatedAt": later.to_rfc3339(),
+                    "urls": [format!("http://127.0.0.1:{port}/?fixture=home")],
+                    "findings": findings
+                })
+                .to_string(),
+            )
+            .unwrap();
+        };
+        report("visual-qa/visual-qa.json", 28511, serde_json::json!([finding(28511)]));
+        report("visual-qa-baseline/visual-qa.json", 28512, serde_json::json!([finding(28512)]));
+        let bundle = |files: serde_json::Value| {
+            std::fs::write(
+                dir.path().join("bundle.json"),
+                serde_json::json!({
+                    "schema": 1, "task_id": "cas-ui1", "producer": "independent-qa",
+                    "head_sha": "aaaa1111", "visual_qa_status": "scoped", "files": files
+                })
+                .to_string(),
+            )
+            .unwrap();
+        };
+        bundle(serde_json::json!({"visual_qa_json": "visual-qa/visual-qa.json"}));
+        let refused = validate_round_bundle(&ledger, &round).unwrap_err();
+        assert!(refused.contains("visual_qa_baseline_json"), "{refused}");
+        bundle(serde_json::json!({
+            "visual_qa_json": "visual-qa/visual-qa.json",
+            "visual_qa_baseline_json": "visual-qa-baseline/visual-qa.json"
+        }));
+        validate_round_bundle(&ledger, &round).expect("every tip finding is on the base build");
+        // A finding the base build does not have is the delivery's.
+        let mut introduced = finding(28511);
+        introduced["selector"] = serde_json::json!("#send");
+        report(
+            "visual-qa/visual-qa.json",
+            28511,
+            serde_json::json!([finding(28511), introduced]),
+        );
+        let refused = validate_round_bundle(&ledger, &round).unwrap_err();
+        assert!(refused.contains("introduced 1 visual-QA finding"), "{refused}");
+        assert!(refused.contains("#send"), "{refused}");
     }
 
     #[test]

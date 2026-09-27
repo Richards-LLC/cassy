@@ -28,9 +28,28 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(filter).toBeFocused();
   };
 
+  // The no-selection canvas: no context column (not even the folded strip),
+  // the welcome centred in the canvas (journey F15, cas-9225).
+  const welcomeLayout = () => page.evaluate(() => {
+    const shell = document.querySelector<HTMLElement>(".conversation-shell")!;
+    const main = document.querySelector<HTMLElement>(".conversation-main")!.getBoundingClientRect();
+    const welcome = document.querySelector<HTMLElement>(".conversation-welcome h2")!.getBoundingClientRect();
+    const rail = document.querySelector<HTMLElement>(".conversation-context");
+    return {
+      contextOpen: shell.classList.contains("context-open"),
+      railWidth: rail ? Math.round(rail.getBoundingClientRect().width) : 0,
+      mainRight: Math.round(main.right),
+      welcomeLeft: Math.round(welcome.left),
+      centred: Math.abs((welcome.left + welcome.right) / 2 - (main.left + main.right) / 2) <= 1,
+    };
+  });
+  let firstWelcome: Awaited<ReturnType<typeof welcomeLayout>> | undefined;
+
   await journey.stage("See every machine's supervisors in one list", async () => {
     await journey.open();
     await expect(list.getByRole("button")).toHaveCount(3);
+    firstWelcome = await welcomeLayout();
+    expect(firstWelcome).toMatchObject({ contextOpen: false, railWidth: 0, mainRight: 1280, centred: true });
     // Machines list in id order (atlas, forge, studio). Rows are titled by project, then machine; the codename is tertiary.
     await expect(list.locator(".conversation-project")).toHaveText(["cas-src", "lighthouse", "gabber-studio"]);
     await expect(list.locator(".conversation-machine")).toHaveText(["Atlas", "Forge build box with an unusual hostname", "Studio Mac"]);
@@ -142,6 +161,11 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     // Receipt beside the stage screenshots: the 390 px list with the long name.
     await page.screenshot({ path: join(RECEIPTS, journey.id, "long-machine-phone.png") });
     await page.setViewportSize({ width: 1280, height: 720 });
+    // Back at desktop width with nothing open, after a thread had filled the
+    // context rail: the canvas is the first load's, not an empty 240px column
+    // beside a shifted welcome (journey F15).
+    await expect(page.locator(".conversation-welcome")).toBeVisible();
+    expect(await welcomeLayout()).toEqual(firstWelcome);
   });
 
   await journey.stage("Jump to a supervisor by name", async () => {
@@ -363,5 +387,37 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     const jargon = seen.pane.filter((text) => /relay|attempt|authori[sz]ation|handshake|heartbeat|resolving|dialing/i.test(text));
     expect(jargon, "relay-stage words on the default attach surface").toEqual([]);
     await expect(footerState).toHaveText("Connected");
+  });
+
+  await journey.stage("A first open that misses the 3-second mark retries calmly, and the footer stays Connected", async () => {
+    // cas-28df: a conversation whose first attach sends no session state
+    // within 3 s retries. On a live machine that used to drop the footer to
+    // "1 connected" and flash "Terminal unavailable" and the full retry
+    // timeline. A fresh visit reopens lighthouse; the double answers its first
+    // attach only after 3.5 s, so the first try times out and the retry opens it.
+    await page.addInitScript(() => {
+      const seen = { footer: [] as string[], pane: [] as string[], connected: false };
+      (window as unknown as { __retrySeen: typeof seen }).__retrySeen = seen;
+      const sample = () => {
+        const footer = document.querySelector<HTMLElement>("#hub-footer-badges .machine-badge-state")?.innerText.trim();
+        // Machines come up one by one on load; watch the footer once all are.
+        if (footer === "Connected") seen.connected = true;
+        if (seen.connected && footer && seen.footer.at(-1) !== footer) seen.footer.push(footer);
+        const pane = document.querySelector<HTMLElement>(".conversation-pane-slot")?.innerText.trim();
+        if (pane && seen.pane.at(-1) !== pane) seen.pane.push(pane);
+      };
+      document.addEventListener("DOMContentLoaded", () => new MutationObserver(sample).observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true }));
+    });
+    hub.delayAttach("quiet-heron-7", 3_500);
+    await page.reload();
+    const opening = page.locator(".conversation-pane-slot .terminal-connecting-title");
+    await expect(opening).toHaveText("Opening the conversation…");
+    await expect(page.locator(".thread .empty b")).toHaveText("lighthouse", { timeout: 15_000 });
+    const seen = await page.evaluate(() => (window as unknown as { __retrySeen: { footer: string[]; pane: string[] } }).__retrySeen);
+    expect(seen.pane.some((text) => text.startsWith("Opening the conversation…")), "the pane said it was opening").toBe(true);
+    expect(seen.footer, "the footer once every machine was up").toEqual(["Connected"]);
+    const alarm = seen.pane.filter((text) => /Terminal unavailable|interrupted|retrying|Try again|relay|attempt|diagnostic|handshake/i.test(text));
+    expect(alarm, "retry wording on the default surface while it opened").toEqual([]);
+    await expect(page.locator("#hub-footer-badges .machine-badge-state")).toHaveText("Connected");
   });
 });

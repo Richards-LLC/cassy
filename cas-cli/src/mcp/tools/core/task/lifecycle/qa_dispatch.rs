@@ -191,6 +191,11 @@ impl CasCore {
             // left the merge refused with no round a reviewer could record.
             let prior = cas_store::list_qa_passes(&self.cas_root, &task.id).unwrap_or_default();
             if !crate::qa_pass::gate_applies(task, &qa, &prior) {
+                // cas-2ee2: a required GitHub check must still turn green for
+                // a delivery that needs no independent QA.
+                if let Some(head) = head {
+                    crate::qa_pass::github_gate::publish_not_required(&self.cas_root, repo, head);
+                }
                 return None;
             }
             let latest = prior.iter().find(|pass| !pass.is_withdrawn())?;
@@ -291,6 +296,14 @@ impl CasCore {
                     .find(|pass| pass.id == id)
             });
             status.push_str(&self.retire_superseded_qa_round(&retired, next.as_ref()));
+        }
+        // cas-2ee2: mirror the round covering this head onto GitHub.
+        if let Some(current) = cas_store::list_qa_passes(&self.cas_root, &task.id)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|pass| pass.bound_head == head && !pass.is_withdrawn())
+        {
+            crate::qa_pass::github_gate::publish_pass_status(&self.cas_root, &current);
         }
         Some(status)
     }

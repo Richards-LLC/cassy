@@ -289,10 +289,24 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
     const bubble = page.locator('.conversation-turn[data-state="unconfirmed"]').filter({ hasText: "Did the Mac tests start?" });
     await expect(bubble.getByRole("button", { name: "Retry sending" })).toBeVisible({ timeout: 10_000 });
     hub.supervisorSays(PELICAN, "Tests are running on the Mac.");
-    await expect(bubble.getByRole("status")).toHaveText("Not confirmed · The supervisor has replied since; resend only if it missed this.");
+    await expect(bubble.getByRole("status")).toHaveText("Not confirmed · The supervisor has replied since; send it again only if it missed this.");
     await expect(bubble).toHaveAttribute("data-settled", "true");
     await expect(bubble.getByRole("button", { name: "Retry sending" })).toHaveCount(0);
     await expect(page.getByRole("log").locator(".conversation-unconfirmed")).not.toContainText(/\bhub\b/i);
+    // cas-470e: the copy says "send it again", so the card carries a quiet
+    // text-weight Send again (no pill, no fill), and it resends the message
+    // without the operator retyping it.
+    const again = bubble.getByRole("button", { name: "Send this message again" });
+    await expect(again).toHaveText("Send again");
+    const look = await again.evaluate((button) => { const style = getComputedStyle(button); return { border: style.borderTopWidth, background: style.backgroundColor, line: style.textDecorationLine }; });
+    expect(look).toEqual({ border: "0px", background: "rgba(0, 0, 0, 0)", line: "underline" });
+    const resent = hub.nextSend();
+    await again.click();
+    expect((await resent).text).toBe("Did the Mac tests start?");
+    hub.deliverLatest(PELICAN);
+    await expect(page.locator(".conversation-turn").filter({ hasText: "Did the Mac tests start?" }).locator(".conversation-delivered")).toHaveText("Delivered");
+    await expect(page.locator('.conversation-turn[data-state="unconfirmed"]')).toHaveCount(0);
+    await expect(page.getByRole("log").getByText("Did the Mac tests start?")).toHaveCount(1);
   });
 
   await journey.stage("A long supervisor name leaves the message box usable", async () => {

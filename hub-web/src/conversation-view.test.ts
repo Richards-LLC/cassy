@@ -372,7 +372,7 @@ describe("ConversationView (Pebble thread)", () => {
     expect(view.element.querySelector(".conversation-unconfirmed")).toBeNull();
     expect(view.element.querySelector(".conversation-delivered")?.textContent).toBe("Delivered");
   });
-  it("settles a Not confirmed send once the supervisor replies after it: no warning, no Retry (journey F10)", () => {
+  it("settles a Not confirmed send once the supervisor replies after it: no warning, no Retry, a quiet Send again (journey F10, cas-470e)", () => {
     const history = new ConversationHistory();
     const retry = vi.fn();
     const view = new ConversationView(document, history, { supervisor: "calm-otter-4", retryMessage: retry }); document.body.replaceChildren(view.element);
@@ -391,9 +391,18 @@ describe("ConversationView (Pebble thread)", () => {
     expect(settled.dataset.settled).toBe("true");
     const label = settled.querySelector<HTMLElement>(".conversation-unconfirmed.conversation-settled")!;
     expect(label.getAttribute("role")).toBe("status");
-    expect(label.textContent).toBe("Not confirmed · The supervisor has replied since; resend only if it missed this.");
+    expect(label.textContent).toBe("Not confirmed · The supervisor has replied since; send it again only if it missed this.");
     expect(label.querySelector("svg.warn")).toBeNull();
     expect(settled.querySelector(".conversation-retry")).toBeNull();
+    // cas-470e: the copy's "send it again" has its control on the card, a
+    // quiet secondary one, and it resends the same message.
+    const again = settled.querySelectorAll<HTMLButtonElement>(".conversation-send-again");
+    expect(again).toHaveLength(1);
+    expect(again[0].textContent).toBe("Send again");
+    expect(again[0].getAttribute("aria-label")).toBe("Send this message again");
+    again[0].click();
+    expect(retry).toHaveBeenCalledTimes(1);
+    expect(retry.mock.calls[0][0]).toMatchObject({ text: "Kick off the Mac tests.", state: "unconfirmed" });
     expect(label.textContent).not.toMatch(/\bhub\b/i);
     expect(history.repliedSince(history.events.find((event) => event.kind === "send")!.value as never)).toBe(true);
   });

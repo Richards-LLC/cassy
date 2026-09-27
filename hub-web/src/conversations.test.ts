@@ -422,7 +422,7 @@ describe('conversation evidence', () => {
   it('dresses the composer as Pebble: pill field, no dead attach clip, send in the accent naming the supervisor', () => {
     const app = document.createElement('div');
     app.innerHTML = '<div class="shell"><div id="pane-grid"></div><div class="message"><h2><label for="message-text">Talk to x</label></h2><div class="operator-thread"></div><textarea id="message-text" placeholder="old"></textarea><div class="composer-actions"><button id="message-mic" type="button" aria-label="Start listening" aria-pressed="false"><svg class="mic-glyph" aria-hidden="true"></svg></button><button id="message-keyboard" type="button">Keyboard</button><button id="message-send" class="primary">Send message</button></div><p id="message-status" class="message-status" role="status" hidden></p></div><div id="status-view"></div><section id="attention-panel" hidden></section></div>';
-    arrangeConversationShell(app, { selected: true, supervisor: 'patient-pelican-9', machineId: 'atlas-linux', loaded: true, paired: true });
+    arrangeConversationShell(app, { selected: true, supervisor: 'patient-pelican-9', projectDir: '/projects/cas-src', machineId: 'atlas-linux', loaded: true, paired: true });
     const composer = app.querySelector<HTMLElement>('#conversation-composer-slot > .message.conversation-composer')!;
     expect(composer).not.toBeNull();
     expect(composer.querySelector('.operator-thread')).toBeNull();
@@ -434,10 +434,11 @@ describe('conversation evidence', () => {
     expect(mic.getAttribute('aria-label')).toBe('Start listening');
     expect(mic.querySelector('.mic-glyph')).not.toBeNull();
     expect(mic.textContent).toBe('');
-    expect(composer.querySelector<HTMLTextAreaElement>('#message-text')?.placeholder).toBe('Message patient-pelican-9');
+    expect(composer.querySelector<HTMLTextAreaElement>('#message-text')?.placeholder).toBe('Message the cas-src supervisor');
     const send = composer.querySelector<HTMLButtonElement>('#message-send')!;
     expect(send.classList.contains('send')).toBe(true);
-    expect(send.textContent).toBe('Send to patient-pelican-9');
+    expect(send.textContent).toBe('Send');
+    expect(send.getAttribute('aria-label')).toBe('Send to patient-pelican-9');
     expect(send.querySelector('.send-glyph')).not.toBeNull();
     expect(app.querySelector('.conversation-shell')?.classList.contains('machine-accent-0')).toBe(true);
     // Dressing twice (every re-render) never stacks a second clip or label.

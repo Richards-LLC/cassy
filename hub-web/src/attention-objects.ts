@@ -1,4 +1,4 @@
-import { entryText } from "./context-rail";
+import { BLOCKER_HINT, entryText } from "./context-rail";
 import { registerTurnRenderer, renderBody, type TurnRenderContext } from "./conversation-view";
 import { blockerEvidence } from "./thread-model";
 import type { OperatorReply } from "./types";
@@ -25,6 +25,11 @@ export function askOptions(reply: OperatorReply): string[] {
 
 /** The collapsed in-flow copy's pointer to the pinned tray. */
 export const WAITING_LINE = "Waiting on you — answer below";
+
+/** True while `reply` still waits on the operator (an unanswered ask, an unacknowledged blocker). */
+export function isWaiting(reply: OperatorReply, context: Pick<TurnRenderContext, "history">): boolean {
+  return context.history?.waiting().some((item) => item.notification_id === reply.notification_id) === true;
+}
 
 /** True when `reply` is the ask the view pins above the composer (the most recent unanswered one). */
 export function isPinnedAsk(reply: OperatorReply, context: Pick<TurnRenderContext, "history">): boolean {
@@ -64,6 +69,8 @@ export function renderAskObject(reply: OperatorReply, context: TurnRenderContext
   }
   if (answer) {
     // The chosen reply stays in the tray as sent; the other choices leave.
+    // Handled, it quiets to the supervisor's colour (journey F12): only what
+    // still waits keeps the attention treatment.
     object.dataset.answered = "true";
     const sent = document.createElement("span"); sent.className = "chip sent"; sent.dataset.state = answer.state;
     sent.append(tick(document), document.createTextNode(answer.text));
@@ -92,6 +99,12 @@ export function renderBlockerObject(reply: OperatorReply, context: TurnRenderCon
   const { text, evidence } = blockerEvidence(reply.message);
   const body = document.createElement("div"); body.className = "obj-body";
   body.append(...renderBody(document, { ...reply, message: text }, context));
+  const waiting = isWaiting(reply, context);
+  object.dataset.waiting = String(waiting);
+  if (waiting) {
+    const hint = document.createElement("p"); hint.className = "blk-hint"; hint.textContent = BLOCKER_HINT;
+    body.append(hint);
+  }
   object.append(body);
   if (evidence) {
     const foot = document.createElement("div"); foot.className = "obj-foot";

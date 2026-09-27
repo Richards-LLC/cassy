@@ -96,23 +96,33 @@ const SEND_GLYPH = '<svg class="send-glyph" viewBox="0 0 20 20" fill="currentCol
 
 /**
  * Pebble composer (cas-3800): the field is a pill on --panel with --lift, the
- * send button takes the machine accent from the shell root and names the
- * supervisor, and the attach clip sits beside the field, present but
- * disabled. Dresses the existing `.message` region in place so the ids the
- * live-region updater and the send handler bind to are untouched.
+ * send button takes the machine accent from the shell root, and the attach
+ * clip sits beside the field, present but disabled. Dresses the existing
+ * `.message` region in place so the ids the live-region updater and the send
+ * handler bind to are untouched.
+ *
+ * The field and the button lead with the project, never the generated
+ * codename (journey F13): "Message the cas-src supervisor" and "Send". The
+ * codename is an identifier, not a name to read in prose; the header shows it,
+ * and the button's accessible name, "Send to <codename>", keeps it whole.
  */
-export function dressComposer(composer: HTMLElement, supervisor?: string): void {
-  const name = supervisor || "the supervisor";
+export function dressComposer(composer: HTMLElement, supervisor?: string, project?: string): void {
   composer.classList.add("conversation-composer");
   composer.querySelector(".operator-thread")?.remove();
   const label = composer.querySelector("label"); if (label) label.textContent = "Your message";
   composer.querySelector("h2")?.classList.add("sr-only");
   const input = composer.querySelector("textarea");
   if (input) {
-    // A placeholder that cannot fit is ellipsised here as well as by the
-    // stylesheet, so no engine wraps it into a taller field (journey F9); the
-    // header and the Send button's accessible name carry the name whole.
-    input.placeholder = `Message ${composerNameHint(name)}`;
+    // The longest wording that fits the field is chosen when the field is
+    // laid out and again whenever it resizes, so a phone never shows a cut
+    // "Message the gabber-studio supervi…" (cas-1e0f QA F01). The stylesheet
+    // still ellipsises on one line as the last guard (journey F9).
+    input.dataset.placeholders = JSON.stringify(composerPlaceholders(project));
+    fitComposerPlaceholder(input);
+    // dressComposer runs before a rebuild re-attaches the composer: fit again
+    // once it is back in the document.
+    queueMicrotask(() => fitComposerPlaceholder(input));
+    watchComposerPlaceholder(input);
     input.rows = 1;
     // Hidden until attaching works (cas-17e3): a control that can never be
     // used is noise for every reader, and a dead stop for keyboard users.
@@ -125,18 +135,74 @@ export function dressComposer(composer: HTMLElement, supervisor?: string): void 
     button.setAttribute("aria-label", `Send to ${supervisor || "supervisor"}`);
     button.replaceChildren();
     button.insertAdjacentHTML("afterbegin", SEND_GLYPH);
-    const text = composer.ownerDocument.createElement("span"); text.className = "send-label"; text.textContent = `Send to ${supervisor || "supervisor"}`;
+    const text = composer.ownerDocument.createElement("span"); text.className = "send-label"; text.textContent = "Send";
     button.append(text);
   }
 }
 
-/** Longest supervisor name the composer placeholder spells out in full. */
-export const COMPOSER_NAME_MAX_CHARS = 20;
+/**
+ * The composer's placeholder wordings, longest first: the project's
+ * supervisor, then the project alone, then the role. Never the codename, and
+ * never a name cut inside the text (cas-1e0f QA F02).
+ */
+export function composerPlaceholders(project?: string): string[] {
+  const name = project?.trim();
+  return name ? [`Message the ${name} supervisor`, `Message ${name}`, COMPOSER_ROLE_PLACEHOLDER] : [COMPOSER_ROLE_PLACEHOLDER];
+}
 
-/** The name as the placeholder shows it: whole, or cut with an ellipsis. */
-export function composerNameHint(name: string): string {
-  const characters = Array.from(name);
-  return characters.length <= COMPOSER_NAME_MAX_CHARS ? name : `${characters.slice(0, COMPOSER_NAME_MAX_CHARS - 1).join("")}…`;
+export const COMPOSER_ROLE_PLACEHOLDER = "Message the supervisor";
+
+/** The composer's resting placeholder before it is measured: the fullest wording. */
+export function composerPlaceholder(project?: string): string {
+  return composerPlaceholders(project)[0];
+}
+
+/** The first wording whose width fits `available` px; the last (shortest) when none does. */
+export function fittingPlaceholder(candidates: readonly string[], available: number, measure: (text: string) => number): string {
+  return candidates.find((text) => measure(text) <= available) ?? candidates[candidates.length - 1];
+}
+
+/**
+ * Measure the field's placeholder wordings in its own font and keep the
+ * longest that fits its text box. Not laid out yet (no width): keep the
+ * fullest; the resize watch fits it once there is a box. While dictation
+ * holds the placeholder, the fitted wording becomes the one it restores.
+ */
+export function fitComposerPlaceholder(field: HTMLTextAreaElement): void {
+  let candidates: string[];
+  try { candidates = JSON.parse(field.dataset.placeholders ?? "[]") as string[]; } catch { return; }
+  if (!candidates.length) return;
+  const document = field.ownerDocument;
+  const view = document.defaultView;
+  const current = field.dataset.restingPlaceholder ?? field.placeholder;
+  // Unmeasurable (detached mid-rebuild, not laid out): keep a wording already
+  // fitted for these candidates; the microtask and resize watch refit it.
+  let chosen = candidates.includes(current) ? current : candidates[0];
+  if (view && field.isConnected && field.clientWidth > 0) {
+    const style = view.getComputedStyle(field);
+    const available = field.clientWidth - parseFloat(style.paddingLeft || "0") - parseFloat(style.paddingRight || "0");
+    const probe = document.createElement("span");
+    probe.setAttribute("aria-hidden", "true");
+    probe.style.cssText = "position:absolute;left:-10000px;top:0;visibility:hidden;white-space:pre;";
+    probe.style.font = style.font;
+    probe.style.letterSpacing = style.letterSpacing;
+    document.body.append(probe);
+    chosen = fittingPlaceholder(candidates, available, (text) => { probe.textContent = text; return probe.getBoundingClientRect().width; });
+    probe.remove();
+  }
+  if (field.dataset.restingPlaceholder !== undefined) field.dataset.restingPlaceholder = chosen;
+  else if (field.placeholder !== chosen) field.placeholder = chosen;
+}
+
+const watchedComposerFields = new WeakSet<HTMLTextAreaElement>();
+
+/** Refit on every size change of the field (a rotation, a breakpoint, the rail opening) and once web fonts land. */
+function watchComposerPlaceholder(field: HTMLTextAreaElement): void {
+  if (watchedComposerFields.has(field)) return;
+  watchedComposerFields.add(field);
+  const view = field.ownerDocument.defaultView as (Window & typeof globalThis) | null;
+  if (view && typeof view.ResizeObserver === "function") new view.ResizeObserver(() => fitComposerPlaceholder(field)).observe(field);
+  void field.ownerDocument.fonts?.ready.then(() => fitComposerPlaceholder(field));
 }
 
 /** The list's empty line: loading, unpaired, or paired with nothing live. */
@@ -231,7 +297,7 @@ export function arrangeConversationShell(app: HTMLElement, model: ConversationSh
   if (model.selected) {
     if (grid) shell.querySelector("#conversation-pane-slot")!.append(grid);
     if (composer) {
-      dressComposer(composer, model.supervisor);
+      dressComposer(composer, model.supervisor, projectTitle(model.projectDir));
       shell.querySelector("#conversation-composer-slot")!.append(composer);
     }
     if (status) shell.querySelector("#conversation-status-slot")!.append(status);

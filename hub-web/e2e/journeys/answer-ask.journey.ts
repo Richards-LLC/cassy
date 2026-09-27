@@ -63,6 +63,9 @@ test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
     await expect(waiting.locator("li")).toHaveCount(1);
     await expect(waiting.locator('.context-jump[data-kind="blocker"]')).toHaveCount(1);
     await expect(waiting.locator('.context-jump[data-kind="ask"]')).toHaveCount(0);
+    // The waiting blocker says how it clears, in the thread and in the rail (journey F12).
+    await expect(page.getByRole("log").locator('.obj.blk[data-waiting="true"] .blk-hint')).toHaveText("Reply to unblock");
+    await expect(waiting.locator('.context-jump[data-kind="blocker"] .context-hint')).toHaveText("Reply to unblock");
     // cas-1f13: the blocker the machine stamped five minutes ahead sorts at its
     // arrival, above the session line and the question that came after it, and
     // says its machine's clock is ahead instead of showing a time from the future.
@@ -90,6 +93,20 @@ test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
         - text: Fix in-train
     `);
     await expect(page.getByRole("button", { name: "Ship with allowlist" })).toHaveCount(0);
+    // Handled, the question quiets to the supervisor's colour and keeps the
+    // tick on the chosen answer (journey F12); the answer also acknowledged
+    // the earlier blocker, which drops its hint.
+    const answered = page.getByRole("log").locator('.obj.t-a[data-answered="true"]');
+    const quiet = await answered.evaluate((object) => {
+      const probe = document.createElement("span"); probe.style.background = "var(--sup-bg)"; object.append(probe);
+      const supervisor = getComputedStyle(probe).backgroundColor; probe.remove();
+      const body = getComputedStyle(object.querySelector(".obj-body")!);
+      return { body: body.backgroundColor, edge: body.borderLeftColor, supervisor };
+    });
+    expect(quiet.body, "answered question background").toBe(quiet.supervisor);
+    expect(quiet.edge, "no attention edge").toBe("rgba(0, 0, 0, 0)");
+    await expect(answered.locator(".chip.sent .tick")).toBeVisible();
+    await expect(page.getByRole("log").locator(".blk-hint")).toHaveCount(0);
     // The answer comes after everything shown, so nothing is left waiting in the rail (cas-ce17).
     await expect(waiting).toBeHidden();
     // It sorts after the machine's future-stamped blocker, but shows the time it was sent, under today (cas-ac1f).
@@ -105,6 +122,9 @@ test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
     hub.supervisorSays(PELICAN, "A second gate went red; the train is still held.", { kind: "blocker" });
     await expect(waiting.locator("li")).toHaveCount(1);
     await expect(waiting).toContainText("A second gate went red");
+    await expect(waiting.locator(".context-hint")).toHaveText("Reply to unblock");
+    await expect(page.getByRole("log").locator('.obj.blk[data-waiting="true"]')).toContainText("A second gate went red");
+    await expect(page.getByRole("log").locator(".blk-hint")).toHaveText(["Reply to unblock"]);
   });
 
   await journey.stage("Reply to a machine a day ahead", async () => {

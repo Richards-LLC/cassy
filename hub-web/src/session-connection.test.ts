@@ -38,4 +38,17 @@ describe("machineConnection (the footer)", () => {
     const down = machine("failed");
     expect(machineConnection(down, [{ attach: attach("live"), wasLive: true }])).toBe(down);
   });
+  it("does not count a conversation opening for the first time against its machine (journey F3)", () => {
+    const live = machine("live");
+    for (const phase of ["resolving", "dialing", "auth", "attaching"] as const) {
+      expect(machineConnection(live, [{ attach: attach(phase, { stage: phase === "resolving" ? "resolving" : phase }), wasLive: false }])).toBe(live);
+    }
+    // A first attach that failed, a dropped session retrying, and a pairing loss still count.
+    expect(machineConnection(live, [{ attach: attach("failed"), wasLive: false }])?.phase).toBe("failed");
+    expect(machineConnection(live, [{ attach: attach("backoff"), wasLive: false }])?.phase).toBe("backoff");
+    expect(machineConnection(live, [{ attach: attach("attaching"), wasLive: true }])?.phase).toBe("backoff");
+    expect(machineConnection(live, [{ attach: attach("auth", { authFailure: "revoked" }), wasLive: false }])?.authFailure).toBe("revoked");
+    // An opening conversation beside a dropped one: the drop still shows.
+    expect(machineConnection(live, [{ attach: attach("attaching"), wasLive: false }, { attach: attach("dialing"), wasLive: true }])?.phase).toBe("backoff");
+  });
 });

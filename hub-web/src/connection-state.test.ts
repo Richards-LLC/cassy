@@ -6,6 +6,7 @@ import {
   connectingAnchor,
   DEGRADED_AFTER_MISSED_HEARTBEATS,
   elapsedSeconds,
+  headerConnectionChip,
   RECONNECT_AFTER_MISSED_HEARTBEATS,
   stageFailureDetail,
   STAGE_TIMEOUT_MS,
@@ -71,5 +72,38 @@ describe("Commander connection lifecycle contract", () => {
       session: "factory-a", phase: "backoff", stage: "attaching", since: 18_000,
       attachSince: 1_000, attempt: 3, missedHeartbeats: 0, degraded: false,
     }, 21_500)).toBe(20);
+  });
+});
+
+describe("Terminal view header connection chip (journey F17, cas-bf07 QA)", () => {
+  const live = (update: Partial<ConnectionSnapshot> = {}): ConnectionSnapshot => ({
+    phase: "live", stage: "live", since: 0, attempt: 0, missedHeartbeats: 0, degraded: false, ...update,
+  });
+
+  it("is neutral and says Checking… before the first latency sample, never a green dot", () => {
+    expect(headerConnectionChip(live(), "live", "Live")).toEqual({ state: "checking", text: "Checking…" });
+    expect(headerConnectionChip(undefined, "idle", "Idle")).toEqual({ state: "checking", text: "Checking…" });
+    // One missed heartbeat clears the sample; not degraded yet.
+    expect(headerConnectionChip(live({ missedHeartbeats: 1 }), "live", "Live")).toEqual({ state: "checking", text: "Checking…" });
+  });
+
+  it("shows the latency beside the attach state once a sample lands", () => {
+    expect(headerConnectionChip(live({ latencyMs: 41 }), "live", "Live")).toEqual({ state: "live", text: "41ms" });
+  });
+
+  it("names a degraded machine with the amber dot even while the terminal is still attached (QA F01)", () => {
+    const degraded = live({ missedHeartbeats: DEGRADED_AFTER_MISSED_HEARTBEATS, degraded: true });
+    expect(headerConnectionChip(degraded, "live", "Degraded")).toEqual({ state: "degraded", text: "Degraded" });
+    expect(headerConnectionChip({ ...degraded, latencyMs: 12 }, "live", "Degraded")).toEqual({ state: "degraded", text: "Degraded" });
+  });
+
+  it("names a machine that is not live by its own phase and label", () => {
+    expect(headerConnectionChip(live({ phase: "backoff", stage: "dialing" }), "live", "Reconnecting")).toEqual({ state: "backoff", text: "Reconnecting" });
+  });
+
+  it("never says Status unavailable", () => {
+    for (const machine of [undefined, live(), live({ degraded: true, missedHeartbeats: 3 }), live({ phase: "failed" })]) {
+      expect(headerConnectionChip(machine, "live", "Unreachable").text).not.toMatch(/unavailable/i);
+    }
   });
 });

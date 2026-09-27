@@ -188,7 +188,7 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
   if (state === 'conversation-mic-listening') draft = 'Cut 3.26.0 once the gate is';
   // The production composer markup (main.ts renders the same builder), mic included.
   slot.innerHTML = composerMarkup(supervisor);
-  dressComposer(slot.querySelector<HTMLElement>('.message')!, supervisor);
+  dressComposer(slot.querySelector<HTMLElement>('.message')!, supervisor, machine.project);
   applyMicState(slot.querySelector<HTMLButtonElement>('#message-mic')!, fixtureMicState(state));
   slot.querySelector<HTMLTextAreaElement>('#message-text')!.value = draft;
   if (state === 'conversation-keyboard') {

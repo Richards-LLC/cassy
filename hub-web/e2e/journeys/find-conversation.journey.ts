@@ -182,11 +182,16 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(page.locator(".conversation-identity h1")).toHaveText("gabber-studio");
     // A mouse jump lands in the opened conversation's composer too, and
     // landing there must not freeze the shell at its pre-load state: once
-    // this first visit's lease loads, the palette offers "Release control".
+    // this first visit's lease loads, the palette offers to let other devices
+    // type here, "Release control" kept as its hint (journey F16).
     await expect(page.getByRole("textbox", { name: "Your message" })).toBeFocused();
-    await expect(page.locator('#command-palette [data-palette-action="control"]')).toContainText("Release control");
-    // The lease command sits in its own group once a session is open.
-    await expect(page.locator('#command-palette [data-palette-group="session"]')).toContainText("This session");
+    const control = page.locator('#command-palette [data-palette-action="control"]');
+    await expect(control.locator("span")).toHaveText("Let other devices type here");
+    await expect(control.locator("small")).toHaveText("Release control of this conversation");
+    // The lease command sits in its own group once a conversation is open,
+    // and the palette speaks of conversations, not sessions.
+    await expect(page.locator("#palette-group-session")).toHaveText("This conversation");
+    await expect(page.locator("#command-palette-query")).toHaveAttribute("placeholder", "Type a command or conversation");
     await expect(page.locator('#command-palette [data-palette-group="session"] [data-palette-action="control"]')).toHaveCount(1);
     await expect(page.getByRole("textbox", { name: "Your message" })).toBeFocused();
   });
@@ -274,7 +279,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     all = await commands.visible().count();
     expect(all).toBeGreaterThan(0);
     await filter.fill("zzzz");
-    await expect(noMatch).toHaveText("No commands or sessions match “zzzz”.");
+    await expect(noMatch).toHaveText("No commands or conversations match “zzzz”.");
     await page.getByRole("button", { name: "Close command palette" }).click();
     await expect(palette).toBeHidden();
     await reopen();
@@ -318,5 +323,45 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await list.getByRole("button", { name: /cas-src/ }).click();
     await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
     await expect(palette).toBeHidden();
+  });
+
+  await journey.stage("Open a conversation over a slow relay: one calm line, and the footer stays Connected", async () => {
+    // Journey F3: opening a conversation used to flash "ATTEMPT 1 · dialing
+    // the relay" and drop the footer to Reconnecting / "2 connected" while the
+    // machine itself stayed connected. The double holds the attach for 2 s,
+    // as a real relay does, and every frame of the footer and the pane is
+    // recorded while it opens.
+    const footerState = page.locator("#hub-footer-badges .machine-badge-state");
+    await expect(footerState).toHaveText("Connected");
+    await page.evaluate(() => {
+      const seen = { footer: new Set<string>(), pane: new Set<string>() };
+      (window as unknown as { __attachSeen: typeof seen }).__attachSeen = seen;
+      const sample = () => {
+        const footer = document.querySelector<HTMLElement>("#hub-footer-badges .machine-badge-state");
+        if (footer) seen.footer.add(footer.innerText.trim());
+        const pane = document.querySelector<HTMLElement>(".conversation-pane-slot");
+        if (pane) seen.pane.add(pane.innerText.trim());
+      };
+      new MutationObserver(sample).observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true });
+    });
+    hub.delayAttach("quiet-heron-7", 2_000);
+    await list.getByRole("button", { name: /lighthouse/ }).click();
+    const opening = page.locator(".conversation-pane-slot .terminal-connecting-title");
+    await expect(opening).toHaveText("Opening the conversation…");
+    // Past the quiet window the attempt and stage are offered behind Details, closed.
+    const details = page.locator(".conversation-pane-slot .connection-details");
+    await expect(details.getByText("Details", { exact: true })).toBeVisible();
+    await expect(details).not.toHaveAttribute("open", "");
+    await expect(details.locator(".connection-timeline")).toBeHidden();
+    await expect(page.getByRole("button", { name: "Send to quiet-heron-7", exact: true })).toBeVisible();
+    await expect(page.locator(".thread .empty b")).toHaveText("lighthouse", { timeout: 10_000 });
+    const seen = await page.evaluate(() => {
+      const { footer, pane } = (window as unknown as { __attachSeen: { footer: Set<string>; pane: Set<string> } }).__attachSeen;
+      return { footer: [...footer], pane: [...pane] };
+    });
+    expect(seen.footer, "the footer while the conversation opened").toEqual(["Connected"]);
+    const jargon = seen.pane.filter((text) => /relay|attempt|authori[sz]ation|handshake|heartbeat|resolving|dialing/i.test(text));
+    expect(jargon, "relay-stage words on the default attach surface").toEqual([]);
+    await expect(footerState).toHaveText("Connected");
   });
 });

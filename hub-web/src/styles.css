@@ -633,6 +633,11 @@ main {
   font: inherit;
 }
 
+/* The h1 clips at the toggle's own edges (overflow: hidden keeps the long-title
+   ellipsis), so an outset ring was cut off on every side. Draw it inside the
+   toggle's box instead, where the clip cannot reach it (cas-cf10 QA F01). */
+.session-picker-toggle:focus-visible { outline-offset: calc(-1 * var(--focus-ring-width)); }
+
 /* The caret is the only sign that the session name is a control, so the name
    yields width to it rather than pushing it out of the clipped header. */
 .session-picker-name {
@@ -1216,6 +1221,13 @@ main {
 }
 
 .connection-timeline-detail { color: var(--text-mid); }
+
+/* An attach in progress keeps its attempt and relay stage behind "Details"
+   (journey F3): the default surface is the calm title alone. */
+.connection-details { width: 100%; text-align: left; }
+.connection-details > summary { width: fit-content; min-height: var(--space-6); margin-inline: auto; padding: var(--space-1) var(--space-3); border-radius: var(--radius-pill); color: var(--text-mid); font-size: var(--fs-meta); cursor: pointer; text-align: center; }
+.connection-details > summary:hover { color: var(--text-hi); }
+.connection-details[open] > summary { margin-bottom: var(--space-2); }
 
 .terminal-connecting-actions {
   display: flex;
@@ -2113,6 +2125,8 @@ dialog::backdrop { background: var(--overlay-backdrop); }
 .palette-command:disabled { opacity: 1; color: var(--text-mid); background: transparent; }
 .palette-command span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .palette-command small, .palette-empty { color: var(--text-mid); }
+/* A long unbroken filter query wraps inside the dialog instead of running out of it (cas-a8db QA F01). */
+#session-picker-no-match { overflow-wrap: anywhere; }
 /* Journey F20: the Appearance row in effect carries a check and "Current". */
 .palette-check { margin-inline-end: var(--space-2); color: var(--accent, var(--you-bg)); font-weight: var(--weight-semibold); }
 .palette-command small { justify-self: end; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -3281,6 +3295,9 @@ dialog form > *,
 .thread .conversation-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 10px; }
 .thread .conversation-edit, .thread .conversation-retry, .thread .conversation-take-control { min-height: 32px; padding: 0 14px; border-radius: 999px; border: 1.5px solid var(--line-strong); background: transparent; color: var(--ink); font: var(--weight-medium) 13px/1.2 var(--font-ui); cursor: pointer; }
 .thread .conversation-edit:hover, .thread .conversation-retry:hover, .thread .conversation-take-control:hover { border-color: var(--ink); }
+/* cas-88d86 QA F02: "Waiting for <device>" is not pressable, so it does not look pressable. */
+.thread .conversation-take-control[aria-disabled="true"] { cursor: default; }
+.thread .conversation-take-control[aria-disabled="true"]:hover { border-color: var(--line-strong); }
 .thread .conversation-edit:focus-visible, .thread .conversation-retry:focus-visible, .thread .conversation-take-control:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 /* cas-8e0a: on a phone or any touch screen the message's actions are 44px
  * targets (WCAG 2.5.5); 32px stays for a mouse on a wide screen. */
@@ -3294,6 +3311,13 @@ dialog form > *,
  * fourth line never peeks through. */
 .thread .coalesce { align-self: flex-start; max-width: 100%; background: var(--sup-bg); color: var(--ink-mid); border-radius: 16px; padding: 10px 16px 0; border-bottom: 10px solid transparent; font-size: 13px; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
 .thread .coalesce[data-expanded="true"] { display: block; -webkit-line-clamp: none; line-clamp: none; overflow: visible; }
+/* Forced colours repaint a transparent border in the text colour, which drew
+   a 10px bar under every coalesced line (journey F11). A system colour is kept
+   as written: Canvas, the fill forced colours give the box, keeps the spacer
+   invisible in light and dark. */
+@media (forced-colors: active) {
+  .thread .coalesce { border-bottom-color: Canvas; }
+}
 .thread .coalesce p { margin: 0; white-space: pre-wrap; }
 .thread .coalesce p + p { margin-top: 6px; }
 .thread .coalesce-expand { min-height: 32px; padding: 0 14px; border: var(--line-width) solid var(--line-strong); border-radius: 999px; background: transparent; color: var(--ink); font: var(--weight-medium) 13px/1.2 var(--font-ui); }
@@ -3339,6 +3363,15 @@ dialog form > *,
 .obj.t-a .obj-foot button.chip:focus-visible { outline-color: var(--tray-focus); }
 .obj.t-a.blk .obj-body { border-left-color: var(--crit-edge); background: var(--crit-tint); color: var(--crit-tint-fg); }
 .obj.t-a.blk .obj-foot { display: block; padding: 0 9px 9px 5px; border-left-color: var(--crit-edge); background: var(--crit-tint); }
+/* A waiting blocker says how it clears (journey F12). */
+.obj.t-a.blk .blk-hint { margin-top: 10px; font: var(--weight-semibold) 12.5px/1.3 var(--font-ui); letter-spacing: 0.01em; }
+/* An answered question is handled: it quiets to the supervisor's colour and
+   keeps only the tick on the chosen answer (journey F12). Only what still
+   waits keeps the attention treatment. */
+.obj.t-a[data-answered="true"] { box-shadow: var(--lift-sup); }
+.obj.t-a[data-answered="true"] .obj-body, .obj.t-a[data-answered="true"] .obj-foot { border-left-color: var(--color-transparent); background: var(--sup-bg); color: var(--sup-fg); }
+.obj.t-a[data-answered="true"] .obj-foot { padding-top: 0; }
+.obj.t-a[data-answered="true"] .obj-foot .chip.sent { flex: 0 1 auto; border-color: var(--line-subtle); background: var(--panel); color: var(--ink); }
 .pinned-ask .obj.t-a .obj-body { border-left-color: var(--color-transparent); background: var(--ask-bg); color: var(--ask-fg); }
 .pinned-ask .obj.t-a .obj-foot { border-left-color: var(--color-transparent); background: var(--ask-deep); }
 .pinned-ask .obj.t-a .obj-foot .chip { border-color: var(--color-transparent); background: var(--pin-chip-bg); color: var(--pin-chip-fg); }
@@ -3397,18 +3430,27 @@ button.chip:disabled { cursor: default; }
 .thread .bub.bub-empty { display: none; }
 
 /* Nothing waiting: the machine's monogram in its accent, the supervisor's
-   name, one quiet centred line, and the last message as a faint echo. */
-.thread .empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; min-width: 0; padding: 60px 40px; text-align: center; color: var(--ink); }
+   name, one quiet centred line, and the last message as a faint echo. The
+   card spans the thread (align-self: stretch overrides the global .empty
+   place-self), so a one-line ellipsised meta line is bounded by the thread,
+   not widened to its own unbroken length. */
+.thread .empty { flex: 1; align-self: stretch; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; min-width: 0; padding: 60px 40px; text-align: center; color: var(--ink); }
 .thread .empty[hidden], .thread .msgs[hidden] { display: none; }
 .thread .empty .mono { display: flex; align-items: center; justify-content: center; flex: none; width: 76px; height: 76px; border-radius: var(--radius-pill); background: var(--accent, var(--you-bg)); color: var(--accent-fg); font: var(--weight-semibold) 30px/1 var(--font-ui); box-shadow: var(--lift-strong); }
-.thread .empty b { max-width: 100%; font: var(--weight-semibold) 21px/1.2 var(--font-ui); letter-spacing: -0.015em; white-space: normal; overflow-wrap: anywhere; } /* b.codename: wrap, not the codename's nowrap (cas-1334 QA F2) */
-.thread .empty .proj2 { font: var(--weight-regular) 13px/1.3 var(--font-mono); color: var(--ink-mid); overflow-wrap: anywhere; }
-/* The project-led card puts the codename in .proj2; it wraps like the rest of
-   the line, not with the codename's nowrap (cas-1334 QA round 2). */
-.thread .empty .proj2 .codename { white-space: normal; overflow-wrap: anywhere; }
+.thread .empty b { max-width: 100%; font: var(--weight-semibold) 21px/1.2 var(--font-ui); letter-spacing: -0.015em; white-space: normal; overflow-wrap: anywhere; }
+/* A generated codename is never broken at its hyphens (journey F13): as the
+   title (no project) or in the meta line it stays on one line and ellipsises,
+   with the whole name in its title. No sideways scroll (cas-1334 QA F2). */
+.thread .empty b.codename { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.35; }
+.thread .empty .proj2 { max-width: 100%; font: var(--weight-regular) 13px/1.4 var(--font-mono); color: var(--ink-mid); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .thread .empty .proj2:empty { display: none; }
 .thread .empty .said { margin: 0; max-width: 34ch; color: var(--ink-mid); font-size: 15px; overflow-wrap: anywhere; }
-.thread .empty .said .codename { font: var(--weight-medium) 0.93em/1 var(--font-mono); color: var(--ink); white-space: normal; overflow-wrap: anywhere; }
+/* In the sentence the codename is one unbroken token, capped at 20
+   characters and ellipsised beyond (the 2px keeps a rounded-down 20ch from
+   dropping the 19th character); overflow: clip keeps its text baseline on the
+   sentence's, and .said-who keeps the brackets on its line. */
+.thread .empty .said .said-who { white-space: nowrap; }
+.thread .empty .said .codename { display: inline-block; max-width: min(100%, calc(20ch + 2px)); overflow: clip; text-overflow: ellipsis; white-space: nowrap; vertical-align: baseline; font: var(--weight-medium) 0.93em/1.4 var(--font-mono); color: var(--ink); }
 .thread .empty .quiet { max-width: min(100%, 56ch); background: var(--sup-bg); color: var(--sup-fg); border-radius: 22px; padding: 12px 22px; box-shadow: var(--lift); overflow-wrap: anywhere; }
 .thread .empty .conversation-loading { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px; }
 
@@ -3418,10 +3460,8 @@ button.chip:disabled { cursor: default; }
    attachment transport yet and its title says so. The ids inside are the
    send handler's and the live-region updater's; only the dress changes. */
 /* The field has a floor, min(16rem, 45%), and the send column is `auto` over
-   shrinkable content (cas-1334): a normal "Send to <name>" takes its full
-   width, and only a name too long for the row ellipsises in the button
-   instead of crushing the message field to a sliver. The aria-label keeps
-   the whole name. */
+   shrinkable content (cas-1334). The button reads "Send" (journey F13); its
+   aria-label, "Send to <codename>", keeps the whole name. */
 .conversation-composer { position: relative; display: grid; grid-template-columns: auto minmax(min(16rem, 45%), 1fr) auto; grid-template-areas: "clip field send" "status status status"; align-items: center; column-gap: 11px; row-gap: var(--space-2); padding: 14px 30px 22px; padding-bottom: max(22px, env(safe-area-inset-bottom)); margin: 0; border-top: 0; background: var(--canvas); color: var(--ink); }
 .conversation-composer h2 { margin: 0; } /* .sr-only from dressComposer: the label is for the reader */
 /* Without the attach clip (cas-17e3) the field takes the first column. */
@@ -3493,6 +3533,7 @@ button.chip:disabled { cursor: default; }
 .conversation-context .context-kind { font-weight: var(--weight-semibold); color: var(--ink); }
 .conversation-context .context-jump[data-kind="blocker"] .context-kind { color: var(--warn-text); }
 .conversation-context .context-jump .context-text { color: var(--ink-mid); overflow-wrap: anywhere; }
+.conversation-context .context-jump .context-hint { color: var(--warn-text); font-size: 12px; font-weight: var(--weight-medium); }
 .conversation-context .context-attachment { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "plate name" "plate meta"; column-gap: var(--space-2); align-items: center; }
 .conversation-context .context-plate { grid-area: plate; display: flex; align-items: center; justify-content: center; min-width: 34px; height: 34px; padding: 0 4px; border-radius: 7px; background: var(--crit-bg); color: var(--crit-fg); font: var(--weight-semibold) 9px/1 var(--font-ui); letter-spacing: 0.06em; }
 .conversation-context .context-attachment .context-text { grid-area: name; min-width: 0; overflow-wrap: anywhere; }

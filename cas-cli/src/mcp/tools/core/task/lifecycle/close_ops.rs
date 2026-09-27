@@ -23762,6 +23762,57 @@ mod merge_state_gate_tests {
             }
             other => panic!("an empty target-sync delivery must reject, got {other:?}"),
         }
+        let window = window_at(0, "task work cycle");
+        assert!(matches!(
+            run_factory_branch_merge_gate_with_attribution(
+                &task,
+                &req,
+                "main",
+                p,
+                TaskCommitAttribution {
+                    receipt: None,
+                    window: Some(&window),
+                },
+            ),
+            MergeStateGateOutcome::Reject(_)
+        ));
+    }
+
+    /// GH #1018: the task's unnamed content commit becomes target-reachable
+    /// after the worker's target-sync merge ships. The recorded merge tip and
+    /// current work window must still prove its non-merge content.
+    #[test]
+    fn shipped_unnamed_content_under_merge_tip_closes_gh_1018() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        commit_file_at(p, "delivered.rs", "// shipped\n", "2026-08-04T12:00:00Z");
+        git(p, &["checkout", "-q", "main"]);
+        commit_file_at(p, "target.rs", "// target\n", "2026-08-04T12:01:00Z");
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git(p, &["merge", "-q", "--no-ff", "main", "-m", "sync target"]);
+        let merge_tip = rev_parse_local(p, "HEAD");
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/worker", "-m", "ship delivery"]);
+
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(merge_tip);
+        let mut window = window_at(1_700_000_000, "task work cycle");
+        window.not_before = chrono::DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        let req = base_req(&task.id);
+        assert!(matches!(
+            run_factory_branch_merge_gate_with_attribution(
+                &task,
+                &req,
+                "main",
+                p,
+                TaskCommitAttribution {
+                    receipt: None,
+                    window: Some(&window),
+                },
+            ),
+            MergeStateGateOutcome::Proceed
+        ));
     }
 
     /// cas-2598: review can require deleting content that was present when a

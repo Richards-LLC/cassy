@@ -175,6 +175,37 @@ describe("ConversationView (Pebble thread)", () => {
     expect(view.element.hasAttribute("aria-busy")).toBe(false);
     expect(button.disabled).toBe(false); expect(button.textContent).toBe("Load earlier"); expect(button.querySelector(".dots")).toBeNull();
   });
+  it("keeps the turn on screen in place when Load earlier adds turns above it (journey F7)", () => {
+    const history = new ConversationHistory();
+    const view = new ConversationView(document, history, { supervisor: "sup", hasEarlier: () => true, loadEarlier: () => {} });
+    document.body.replaceChildren(view.element);
+    history.reply(reply(30, "answer", "Is the gate green?"), at(10, 0));
+    history.reply(reply(31, "answer", "Yes, all fourteen targets."), at(10, 1));
+    view.update();
+    // A stand-in layout: every element in the thread, in document order, is 50px tall, stacked from the thread's top edge and moved by scrollTop.
+    const msgs = view.element.querySelector<HTMLElement>(".msgs")!;
+    const rect = (top: number, height: number) => ({ top, bottom: top + height, height, left: 0, right: 100, width: 100, x: 0, y: top, toJSON: () => ({}) }) as DOMRect;
+    const original = Element.prototype.getBoundingClientRect;
+    Element.prototype.getBoundingClientRect = function (this: Element) {
+      if (this === view.element) return rect(0, 200);
+      const index = [...msgs.querySelectorAll("*")].indexOf(this);
+      return index >= 0 ? rect(40 + index * 50 - view.element.scrollTop, 50) : original.call(this);
+    };
+    const bubble = (key: string) => [...msgs.querySelectorAll<HTMLElement>("[data-key]")].find((node) => node.dataset.key === key);
+    try {
+      const key = "reply:30";
+      const before = bubble(key)!.getBoundingClientRect().top;
+      view.element.querySelector<HTMLButtonElement>(".conversation-load-earlier")!.click();
+      // An older page from the same day lands above, from the same sender: its turns join the reader's group.
+      history.reply(reply(10, "answer", "Scheduled for 09:00."), at(9, 0));
+      history.reply(reply(11, "answer", "Three workers."), at(9, 1));
+      view.update();
+      expect(view.element.scrollTop).toBeGreaterThan(0);
+      expect(bubble(key)!.getBoundingClientRect().top).toBe(before);
+    } finally {
+      Element.prototype.getBoundingClientRect = original;
+    }
+  });
   it("falls back to data-kind bubbles for ask and blocker when nothing is registered", () => {
     const history = new ConversationHistory();
     const view = new ConversationView(document, history, "sup"); document.body.replaceChildren(view.element);

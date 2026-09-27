@@ -208,7 +208,9 @@ export class ConversationView {
     this.loadEarlier.className = "conversation-load-earlier";
     this.loadEarlier.textContent = "Load earlier";
     this.loadEarlier.hidden = true;
-    this.loadEarlier.onclick = () => this.options.loadEarlier?.();
+    // Asking for older turns is reading, not following the tail: the page
+    // lands above and the turn on screen stays put (journey F7).
+    this.loadEarlier.onclick = () => { this.following = false; this.options.loadEarlier?.(); };
     this.msgs = document.createElement("div"); this.msgs.className = "msgs";
     this.msgs.setAttribute("role", "log");
     this.empty = document.createElement("div"); this.empty.className = "empty"; this.empty.hidden = true;
@@ -236,6 +238,9 @@ export class ConversationView {
   /** Re-derive the thread from the history; nodes are keyed so grouping survives. */
   update(): void {
     if (this.disposed) return;
+    // Turns added above the reader (Load earlier) must not move what they are
+    // reading (journey F7): remember the first turn on screen and where it sat.
+    const anchor = this.following ? undefined : this.readingAnchor();
     const hasEarlier = this.options.hasEarlier?.() === true;
     const loadingEarlier = this.options.loadingEarlier?.() === true;
     this.loadEarlier.hidden = !hasEarlier;
@@ -260,7 +265,42 @@ export class ConversationView {
     if (!same) this.msgs.replaceChildren(...children);
     this.renderPinned(document);
     this.renderEmpty(model.length === 0, this.options.loadingHistory?.() === true);
+    const held = anchor && this.anchorNode(anchor);
+    if (anchor && held) {
+      // The button sits above every turn, so the browser's own scroll
+      // anchoring has nothing to hold on to; hold the turn ourselves.
+      const drift = held.getBoundingClientRect().top - anchor.top;
+      if (Math.abs(drift) >= 1) this.element.scrollTop += drift;
+    }
     if (this.following && document.getSelection()?.isCollapsed !== false) this.pin();
+  }
+
+  /**
+   * The first turn still on screen (by its key), and its top edge, before a
+   * repaint. Keyed bubbles, not top-level items: an older page's turns from
+   * the same sender join the reader's group, which is rebuilt, and an older
+   * page from the same day slots in under the day line, which stays put.
+   */
+  private readingAnchor(): { key?: string; node: HTMLElement; top: number } | undefined {
+    if (this.msgs.hidden) return undefined;
+    const top = this.element.getBoundingClientRect().top;
+    const visible = (node: HTMLElement) => { const box = node.getBoundingClientRect(); return box.height > 0 && box.bottom > top ? box.top : undefined; };
+    for (const node of this.msgs.querySelectorAll<HTMLElement>("[data-key]")) {
+      const at = visible(node);
+      if (at !== undefined) return { key: node.dataset.key, node, top: at };
+    }
+    for (const child of this.msgs.children) {
+      const at = visible(child as HTMLElement);
+      if (at !== undefined) return { node: child as HTMLElement, top: at };
+    }
+    return undefined;
+  }
+
+  private anchorNode(anchor: { key?: string; node: HTMLElement }): HTMLElement | undefined {
+    if (anchor.key !== undefined) {
+      for (const node of this.msgs.querySelectorAll<HTMLElement>("[data-key]")) if (node.dataset.key === anchor.key) return node;
+    }
+    return anchor.node.isConnected ? anchor.node : undefined;
   }
 
   /**

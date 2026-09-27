@@ -60,15 +60,29 @@ export const composeFabMarkup = '<button id="compose-fab" class="compose-fab" ty
  * keeps its accessible name ("‹ Conversations", "Terminal view") the same at
  * every width. The project ellipsises (its title carries it whole) and the
  * host line ellipsises its machine · codename part while the connection state
- * after it stays visible.
+ * after it stays visible. The codename has priority over the machine name
+ * (journey F14, QA round 1 F01): the machine name ellipsises first, and
+ * below 500px its OS word is dropped before that.
  */
+/** A machine label's trailing operating-system word, as in "Studio Mac · macOS". */
+const HOST_OS = /^(.*\S)(\s·\s(?:macOS|Linux|Windows|FreeBSD|OpenBSD|NetBSD|ChromeOS|iPadOS|iOS|Android|Ubuntu|Debian|Fedora|WSL))$/i;
+
+/**
+ * The machine label with its OS word in its own span (journey F14): on a
+ * phone the header drops " · macOS" before it truncates the codename.
+ */
+export function hostMarkup(host: string): string {
+  const match = HOST_OS.exec(host);
+  return match ? `${escapeHtml(match[1])}<span class="host-os">${escapeHtml(match[2])}</span>` : escapeHtml(host);
+}
+
 export function conversationHeaderMarkup(model: ConversationShellModel): string {
   const host = model.host || "";
   // No project named: the codename is the title and the host line names only the machine (cas-1ca1 F03).
   const project = projectTitle(model.projectDir);
   const supervisor = model.supervisor || "Supervisor unavailable";
   const title = project ?? supervisor;
-  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button" aria-label="‹ Conversations"><span class="back-glyph">‹</span><span class="back-label"> Conversations</span></button>${cloudBrand()}<button id="conversation-terminal" type="button" aria-label="Terminal view">Terminal<span class="terminal-suffix"> view</span></button></div><div class="conversation-identity"><span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(host || model.supervisor || "?"))}</span><div class="id"><h1><b title="${escapeHtml(title)}"${project ? "" : ' class="codename"'}>${escapeHtml(title)}</b></h1><span class="conversation-host"><span class="host-where" title="${escapeHtml(project ? [host, supervisor].filter(Boolean).join(" · ") : host)}">${project ? `${host ? `${escapeHtml(host)} · ` : ""}<span class="codename">${escapeHtml(supervisor)}</span>` : escapeHtml(host)}</span><span id="conversation-connection" role="status"></span></span></div></div></header>`;
+  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button" aria-label="‹ Conversations"><span class="back-glyph">‹</span><span class="back-label"> Conversations</span></button>${cloudBrand()}<button id="conversation-terminal" type="button" aria-label="Terminal view">Terminal<span class="terminal-suffix"> view</span></button></div><div class="conversation-identity"><span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(host || model.supervisor || "?"))}</span><div class="id"><h1><b title="${escapeHtml(title)}"${project ? "" : ' class="codename"'}>${escapeHtml(title)}</b></h1><span class="conversation-host"><span class="host-where" title="${escapeHtml(project ? [host, supervisor].filter(Boolean).join(" · ") : host)}">${project ? `${host ? `<span class="host-machine">${hostMarkup(host)}</span><span class="host-sep"> · </span>` : ""}<span class="codename">${escapeHtml(supervisor)}</span>` : `<span class="host-machine">${hostMarkup(host)}</span>`}</span><span id="conversation-connection" role="status"></span></span></div></div></header>`;
 }
 
 /** Attaching files from this browser has no transport yet; the clip stays out of the composer until it does. */

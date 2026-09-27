@@ -2351,7 +2351,7 @@ impl FactoryApp {
         // work. Dirty trees are preserved for the daemon reaper (Unit 3) to
         // salvage later, and we flag the agent record + warn the supervisor so
         // nothing is silently abandoned.
-        if !preserve_worktree && !has_open_tasks {
+        if crate::worktree::should_finalize_worker_worktree(preserve_worktree, has_open_tasks) {
             self.finalize_worker_worktree(&agent_store, &agent_id, name);
         }
 

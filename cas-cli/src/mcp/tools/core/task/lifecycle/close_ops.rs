@@ -8673,16 +8673,10 @@ impl CasCore {
                 .assignee
                 .as_deref()
                 .expect("System B requires assignee");
-            // cas-73b8: a worktree on the worker's per-task branch for this
-            // task is the task's worktree too.
-            let task_branch = crate::factory_isolation::worker_task_branch(assignee, &task.id);
-            let expected_branch = if crate::factory_isolation::branch_at(path).as_deref()
-                == Some(task_branch.as_str())
-            {
-                task_branch
-            } else {
-                format!("factory/{assignee}")
-            };
+            let expected_branch = system_b_expected_branch(
+                assignee,
+                crate::factory_isolation::branch_at(path).as_deref(),
+            );
             validate_pre_close_worktree(path, expected, Some(&expected_branch))
                 .map_err(|error| error.to_string())?;
         }
@@ -12250,7 +12244,22 @@ pub(crate) fn check_factory_branch_merge_reality_with_delivery_mode(
     delivery_mode: cas_types::DeliveryMode,
     task_id: Option<&str>,
 ) -> MergeRealityOutcome {
-    let factory_branch = format!("factory/{assignee}");
+    // cas-8606: a per-task delivery lives on `factory/<assignee>-<task>`, not
+    // on the worker's base branch. Measuring `factory/<assignee>` refused
+    // every merged, verified per-task delivery whose worker never pushed its
+    // base branch (it sits at the epic tip with no commits of its own).
+    // `worker_task_branch_ref` answers `origin/<branch>` when only the pushed
+    // copy remains; that is a published delivery, so the local-ref check
+    // below lets it through.
+    let factory_branch = task_id
+        .and_then(|task_id| worker_task_branch_ref(repo_path, assignee, task_id))
+        .map(|branch| {
+            branch
+                .strip_prefix("origin/")
+                .map(str::to_string)
+                .unwrap_or(branch)
+        })
+        .unwrap_or_else(|| format!("factory/{assignee}"));
 
     // Branch absent locally → push+merge+prune path; treat as merged.
     if !git_ref_exists(repo_path, &factory_branch) {
@@ -13063,6 +13072,26 @@ fn resolve_system_b_worktree_path_for_repo(
     }
     let path = system_b_worktree_base_for_repo(cas_root, repo_root).join(assignee);
     path.join(".git").exists().then_some(path)
+}
+
+/// The branch a System-B worker worktree must be on for a close to run its
+/// gates there. cas-73b8 accepted the worker's per-task branch for *this*
+/// task; cas-8606 accepts any of the worker's own branches. A worker whose
+/// `factory/<name>` is frozen commits each task on `factory/<name>-<task>`,
+/// so re-closing a merged, verified task A while checked out on task B's
+/// branch is ordinary, and was refused for cas-ac390, cas-bf07 and five
+/// cas-459b deliveries. A sibling worker's branch, trunk, or a detached HEAD
+/// is still refused.
+fn system_b_expected_branch(assignee: &str, current: Option<&str>) -> String {
+    match current {
+        Some(branch)
+            if crate::factory_isolation::classify_worker_binding(assignee, Some(branch))
+                == crate::factory_isolation::WorkerBinding::Own =>
+        {
+            branch.to_string()
+        }
+        _ => format!("factory/{}", assignee.trim()),
+    }
 }
 
 fn supervisor_merged_anchor_close(
@@ -31062,6 +31091,116 @@ mod merge_reality_tests {
         assert!(msg.contains("task action=close id=<task-id>`"), "{msg}");
     }
 
+    /// cas-8606: the cas-459b shape. The worker's base `factory/test-worker`
+    /// sits at the target with no commits and was never pushed. Task
+    /// cas-8606 was delivered on `factory/test-worker-cas-8606`, pushed, and
+    /// merged. Re-closing it measures its own branch and proceeds.
+    #[test]
+    fn merged_per_task_delivery_closes_while_the_base_branch_is_unpushed_cas_8606() {
+        let dir = init_repo_worker_branch_empty();
+        let p = dir.path();
+        git(
+            p,
+            &[
+                "checkout",
+                "-q",
+                "-b",
+                "factory/test-worker-cas-8606",
+                "main",
+            ],
+        );
+        std::fs::write(p.join("delivery.rs"), "fn delivered() {}\n").unwrap();
+        git(p, &["add", "delivery.rs"]);
+        git(p, &["commit", "-q", "-m", "cas-8606 delivery"]);
+        let tip = git_output(p, &["rev-parse", "HEAD"]);
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "-m",
+                "merge cas-8606",
+                "factory/test-worker-cas-8606",
+            ],
+        );
+        git(
+            p,
+            &[
+                "update-ref",
+                "refs/remotes/origin/factory/test-worker-cas-8606",
+                &tip,
+            ],
+        );
+
+        let own = check_factory_branch_merge_reality_with_delivery_mode(
+            p,
+            "test-worker",
+            "main",
+            cas_types::DeliveryMode::PushBranch,
+            Some("cas-8606"),
+        );
+        assert!(
+            matches!(own, MergeRealityOutcome::Proceed),
+            "a merged, pushed per-task delivery must not be judged by the unpushed base branch"
+        );
+
+        // Only the pushed copy remains (local per-task branch pruned).
+        git(p, &["branch", "-D", "factory/test-worker-cas-8606"]);
+        let pruned = check_factory_branch_merge_reality_with_delivery_mode(
+            p,
+            "test-worker",
+            "main",
+            cas_types::DeliveryMode::PushBranch,
+            Some("cas-8606"),
+        );
+        assert!(matches!(pruned, MergeRealityOutcome::Proceed));
+
+        // A task with no per-task branch is still measured on the base
+        // branch, so the cas-762e wrong-branch guard keeps its bite.
+        let base = check_factory_branch_merge_reality_with_delivery_mode(
+            p,
+            "test-worker",
+            "main",
+            cas_types::DeliveryMode::PushBranch,
+            Some("cas-other"),
+        );
+        let MergeRealityOutcome::Refuse(message) = base else {
+            panic!("the unpushed empty base branch must still be refused for a base-branch task");
+        };
+        assert!(
+            message.contains("factory/test-worker has no commits"),
+            "{message}"
+        );
+    }
+
+    /// cas-8606: the pre-close worktree check accepts any of the worker's own
+    /// branches, including another task's per-task branch, and still refuses
+    /// a sibling worker's branch, trunk or a detached HEAD.
+    #[test]
+    fn pre_close_worktree_accepts_any_own_worker_branch_cas_8606() {
+        for own in [
+            "factory/happy-octopus-83",
+            "factory/happy-octopus-83-cas-2ee2",
+            "factory/happy-octopus-83-cas-8606",
+        ] {
+            assert_eq!(system_b_expected_branch("happy-octopus-83", Some(own)), own);
+        }
+        for foreign in [
+            Some("factory/wild-heron-20"),
+            Some("factory/wild-heron-20-cas-470e"),
+            Some("main"),
+            Some("epic/consolidated-burn-down-v34"),
+            None,
+        ] {
+            assert_eq!(
+                system_b_expected_branch("happy-octopus-83", foreign),
+                "factory/happy-octopus-83",
+                "{foreign:?}"
+            );
+        }
+    }
     // -------------------------------------------------------------------------
     // AC3a: branch has ≥1 unmerged commit → PROCEED
     // (cas-95ce already guards this; B2 must not double-reject)

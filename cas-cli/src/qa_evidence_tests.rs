@@ -1096,3 +1096,173 @@ fn local_origin_predicate() {
         assert!(!is_local_origin(remote), "{remote}");
     }
 }
+
+/// cas-e371 (GH #1023 finding 1): a visual-QA report with its findings list.
+fn scoped_report(
+    path: &Path,
+    status: &str,
+    generated: chrono::DateTime<chrono::Utc>,
+    urls: &[&str],
+    findings: serde_json::Value,
+) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        path,
+        serde_json::json!({
+            "status": status,
+            "strict": true,
+            "generatedAt": generated.to_rfc3339(),
+            "urls": urls,
+            "findings": findings
+        })
+        .to_string(),
+    )
+    .unwrap();
+}
+
+fn backlog_finding(origin: &str, selector: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "insufficient-contrast",
+        "selector": selector,
+        "elementPath": selector,
+        "url": format!("{origin}/?fixture=home"),
+        "scheme": "dark",
+        "viewport": {"name": "desktop", "width": 1280, "height": 800}
+    })
+}
+
+const TIP: &str = "http://127.0.0.1:4173";
+const BASE: &str = "http://127.0.0.1:4174";
+
+/// A bundle claiming `scoped`, with a delivered-build run (one backlog finding)
+/// and a base-build run over the same page on another port.
+fn scoped_fixture() -> Fixture {
+    let fx = Fixture::new();
+    fx.write_bundle(|manifest| {
+        manifest["visual_qa_status"] = serde_json::json!("scoped");
+        manifest["files"]["visual_qa_baseline_json"] =
+            serde_json::json!("visual-qa-baseline/visual-qa.json");
+    });
+    let dir = fx.bundle_dir();
+    scoped_report(
+        &dir.join("visual-qa/visual-qa.json"),
+        "FAIL",
+        chrono::Utc::now(),
+        &[&format!("{TIP}/?fixture=home")],
+        serde_json::json!([backlog_finding(TIP, "footer a")]),
+    );
+    scoped_report(
+        &dir.join("visual-qa-baseline/visual-qa.json"),
+        "FAIL",
+        chrono::Utc::now() - chrono::Duration::days(3),
+        &[&format!("{BASE}/?fixture=home")],
+        serde_json::json!([
+            backlog_finding(BASE, "footer a"),
+            backlog_finding(BASE, "header nav a")
+        ]),
+    );
+    fx
+}
+
+#[test]
+fn scoped_visual_qa_accepts_a_page_backlog_the_delivery_did_not_add() {
+    let fx = scoped_fixture();
+    fx.validate(&fx.notes())
+        .expect("a finding the base build already has does not block a narrow delivery");
+}
+
+#[test]
+fn scoped_visual_qa_refuses_a_finding_the_delivery_introduced() {
+    let fx = scoped_fixture();
+    scoped_report(
+        &fx.bundle_dir().join("visual-qa/visual-qa.json"),
+        "FAIL",
+        chrono::Utc::now(),
+        &[&format!("{TIP}/?fixture=home")],
+        serde_json::json!([
+            backlog_finding(TIP, "footer a"),
+            backlog_finding(TIP, "#send")
+        ]),
+    );
+    let refusal = fx.validate(&fx.notes()).unwrap_err();
+    assert!(
+        refusal.problem.contains("introduced 1 visual-QA finding") && refusal.problem.contains("#send"),
+        "{refusal:?}"
+    );
+    assert!(refusal.command.contains("merge-base"), "{refusal:?}");
+
+    // The same finding twice on the tip, once on the base: one is new.
+    scoped_report(
+        &fx.bundle_dir().join("visual-qa/visual-qa.json"),
+        "FAIL",
+        chrono::Utc::now(),
+        &[&format!("{TIP}/?fixture=home")],
+        serde_json::json!([
+            backlog_finding(TIP, "footer a"),
+            backlog_finding(TIP, "footer a")
+        ]),
+    );
+    let refusal = fx.validate(&fx.notes()).unwrap_err();
+    assert!(refusal.problem.contains("introduced 1"), "{refusal:?}");
+}
+
+#[test]
+fn scoped_visual_qa_needs_a_comparable_local_base_run() {
+    // No baseline key.
+    let fx = scoped_fixture();
+    fx.write_bundle(|manifest| manifest["visual_qa_status"] = serde_json::json!("scoped"));
+    let refusal = fx.validate(&fx.notes()).unwrap_err();
+    assert!(refusal.problem.contains("visual_qa_baseline_json"), "{refusal:?}");
+
+    // A base run that did not check the delivered page.
+    let fx = scoped_fixture();
+    scoped_report(
+        &fx.bundle_dir().join("visual-qa-baseline/visual-qa.json"),
+        "FAIL",
+        chrono::Utc::now(),
+        &[&format!("{BASE}/?fixture=other")],
+        serde_json::json!([backlog_finding(BASE, "footer a")]),
+    );
+    let refusal = fx.validate(&fx.notes()).unwrap_err();
+    assert!(refusal.problem.contains("did not check /?fixture=home"), "{refusal:?}");
+
+    // A base run against a deployed site.
+    let fx = scoped_fixture();
+    scoped_report(
+        &fx.bundle_dir().join("visual-qa-baseline/visual-qa.json"),
+        "FAIL",
+        chrono::Utc::now(),
+        &["https://staging.example.com/?fixture=home"],
+        serde_json::json!([backlog_finding("https://staging.example.com", "footer a")]),
+    );
+    let refusal = fx.validate(&fx.notes()).unwrap_err();
+    assert!(refusal.problem.contains("not a local build"), "{refusal:?}");
+
+    // A delivered-build run from before the delivered commit.
+    let fx = scoped_fixture();
+    scoped_report(
+        &fx.bundle_dir().join("visual-qa/visual-qa.json"),
+        "FAIL",
+        chrono::Utc::now() - chrono::Duration::hours(1),
+        &[&format!("{TIP}/?fixture=home")],
+        serde_json::json!([backlog_finding(TIP, "footer a")]),
+    );
+    let refusal = fx.validate(&fx.notes()).unwrap_err();
+    assert!(refusal.problem.contains("before the delivered commit"), "{refusal:?}");
+
+    // Reports without a findings list cannot be compared.
+    let fx = scoped_fixture();
+    write_visual_qa_report(&fx.bundle_dir(), "FAIL", chrono::Utc::now(), "http://127.0.0.1:4173/");
+    std::fs::write(
+        fx.bundle_dir().join("visual-qa/visual-qa.json"),
+        serde_json::json!({
+            "status": "FAIL", "strict": true,
+            "generatedAt": chrono::Utc::now().to_rfc3339(),
+            "urls": [format!("{TIP}/?fixture=home")]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let refusal = fx.validate(&fx.notes()).unwrap_err();
+    assert!(refusal.problem.contains("`findings` list"), "{refusal:?}");
+}

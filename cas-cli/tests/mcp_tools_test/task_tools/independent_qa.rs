@@ -409,6 +409,95 @@ async fn rejection_returns_the_delivery_and_approval_unlocks_merge_and_close() {
     assert!(status.contains("round 1") && status.contains("failed"), "{status}");
 }
 
+/// cas-e371 (GH #1023 finding 1): a narrow, correct delivery on a page with
+/// an unrelated older defect passes independent QA. The defect is recorded
+/// and filed as a follow-up linked to the delivery; it cannot carry a
+/// rejection on its own.
+#[tokio::test]
+async fn pre_existing_defects_become_linked_follow_ups_and_never_reject_alone() {
+    let (temp, core, repo, task_id) = fixture();
+    let _env = env_test_lock();
+    let cas_dir = repo.join(".cas");
+    let _keep = &temp;
+    let tasks = open_task_store(&cas_dir).unwrap();
+
+    close_text(&core, &task_id).await;
+    let round_task = qa_task_id(&cas_dir, &task_id);
+    let reviewer = reviewer_core(&cas_dir, "qa-reviewer");
+    let reviewer_service = CasService::new(reviewer.clone(), None);
+    reviewer
+        .cas_task_start(Parameters(IdRequest { id: round_task.clone() }))
+        .await
+        .unwrap();
+    let head = git(&repo, &["rev-parse", "factory/test-agent"]);
+    let ledger = round_evidence(&repo.join("round-1"), &task_id, &head);
+    let pre_existing = "[{\"severity\":\"normal\",\"scope\":\"pre-existing\",\"problem\":\"Footer links fail contrast at 3.1:1. The base build too.\",\"suggestion\":\"use --ink-mid\",\"file\":\"F01.png\"}]";
+
+    // Rejecting for the page's older defect alone is refused, and changes nothing.
+    let refused = reviewer_service
+        .verification(Parameters(verification(serde_json::json!({
+            "action": "qa_record",
+            "task_id": task_id,
+            "status": "rejected",
+            "summary": "footer contrast fails",
+            "issues": pre_existing,
+            "ledger_path": ledger.display().to_string(),
+        }))))
+        .await
+        .expect_err("a pre-existing defect never rejects a delivery on its own");
+    assert!(refused.message.contains("never rejects a delivery"), "{}", refused.message);
+    assert_eq!(tasks.get(&task_id).unwrap().status, TaskStatus::AwaitingMerge);
+    assert_ne!(tasks.get(&round_task).unwrap().status, TaskStatus::Closed);
+
+    // Approving records it and files a linked follow-up.
+    let approved = extract_text(
+        reviewer_service
+            .verification(Parameters(verification(serde_json::json!({
+                "action": "qa_record",
+                "task_id": task_id,
+                "status": "approved",
+                "summary": "spacing change is correct; footer contrast is pre-existing",
+                "issues": pre_existing,
+                "ledger_path": ledger.display().to_string(),
+            }))))
+            .await
+            .unwrap(),
+    );
+    assert!(approved.contains("APPROVAL"), "{approved}");
+    assert!(approved.contains("Pre-existing follow-ups filed"), "{approved}");
+    let follow_ups: Vec<_> = tasks
+        .list(None)
+        .unwrap()
+        .into_iter()
+        .filter(|task| task.labels.iter().any(|label| label == "qa-follow-up"))
+        .collect();
+    assert_eq!(follow_ups.len(), 1, "one follow-up per pre-existing issue");
+    let follow_up = &follow_ups[0];
+    assert_eq!(
+        follow_up.title,
+        format!("Pre-existing: Footer links fail contrast at 3.1:1 (found in QA of {task_id})")
+    );
+    assert!(follow_up.description.contains("use --ink-mid"), "{}", follow_up.description);
+    assert!(follow_up.description.contains(&ledger.display().to_string()));
+    assert_eq!(follow_up.status, TaskStatus::Open);
+    assert!(approved.contains(&follow_up.id), "{approved}");
+    assert!(
+        tasks
+            .get_dependencies(&follow_up.id)
+            .unwrap()
+            .iter()
+            .any(|dep| dep.to_id == task_id && dep.dep_type == DependencyType::Related),
+        "the follow-up is linked to the delivery"
+    );
+    assert!(
+        tasks.get(&task_id).unwrap().notes.contains(&follow_up.id),
+        "the delivery names its follow-up"
+    );
+    // The approval stands: the tip may merge.
+    let merge_cmd = "git merge --no-ff factory/test-agent";
+    assert!(cas::qa_pass::supervisor_merge_refusal(&cas_dir, &repo, merge_cmd).is_none());
+}
+
 #[tokio::test]
 async fn pending_round_refuses_both_merge_paths_in_progress_and_awaiting_merge() {
     let (temp, core, repo, task_id) = fixture();

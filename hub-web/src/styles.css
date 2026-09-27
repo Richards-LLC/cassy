@@ -605,6 +605,16 @@ main {
 
 .session-back-label { font-size: var(--fs-meta); }
 
+/* cas-ac390 QA F01/F02: "Back" yields when the Terminal-view column has no
+   room for it (a 900px window with the drawer open, a phone): the glyph stays
+   and the accessible name is still "Back to …". Scoped to the back control;
+   the column is only the measuring container. */
+.shell > main { container: shell-main / inline-size; }
+@container shell-main (max-width: 36rem) {
+  .session-back-label { display: none; }
+  .session-back { padding: 0; }
+}
+
 .session-back {
   flex: 0 0 auto;
   display: inline-flex;

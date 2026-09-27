@@ -433,5 +433,16 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await expect(page.locator("#session-back")).toBeVisible();
     await expect(page.locator("#session-back .session-back-label")).toHaveText("Back");
     await expect(page.locator("#session-back")).toHaveAccessibleName(/^Back to /);
+    // cas-ac390 QA F01: in a narrow column (900px with the drawer open) Back
+    // yields to its glyph instead of running under ⌘K; its name is unchanged.
+    const viewport = page.viewportSize()!;
+    await page.setViewportSize({ width: 900, height: 720 });
+    await expect(page.locator(".shell.drawer-open")).toHaveCount(1);
+    await expect(page.locator("#session-back .session-back-label")).toBeHidden();
+    await expect(page.locator("#session-back")).toHaveAccessibleName(/^Back to /);
+    const [back, paletteKey] = await Promise.all([page.locator("#session-back").boundingBox(), page.locator("#command-palette-toggle").boundingBox()]);
+    expect(back!.x + back!.width <= paletteKey!.x || paletteKey!.x + paletteKey!.width <= back!.x, "Back and ⌘K do not overlap at 900 with the drawer open").toBe(true);
+    await page.setViewportSize(viewport);
+    await expect(page.locator("#session-back .session-back-label")).toBeVisible();
   });
 });

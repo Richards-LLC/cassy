@@ -341,6 +341,9 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await page.getByRole("button", { name: "Terminal view" }).click();
     await expect(page.locator(".session-picker-name")).toHaveText("cas-src");
     await expect(page.locator(".session-picker-codename")).toHaveText(PELICAN);
+    // The title is announced as the open conversation and its machine, the
+    // switch after it (journey F19): not "Switch session — 4 available".
+    await expect(page.getByRole("heading", { level: 1, name: `cas-src ${PELICAN} on Atlas · Linux — switch session (4 available)`, exact: true })).toBeVisible();
     const initials = page.locator("#machine-rail-list .machine-initials");
     await expect(initials).toHaveCount(3);
     expect((await initials.allTextContents()).sort()).toEqual(["AL", "AT", "SM"]);
@@ -393,7 +396,7 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     const pickerRows = await picker.locator(".session-picker-entry").count();
     expect(pickerRows).toBe(4);
     expect(jumpCount, "palette Jump rows").toBe(pickerRows);
-    await expect(toggle).toHaveAttribute("aria-label", `Switch session — ${pickerRows} available`);
+    await expect(toggle).toHaveAttribute("aria-label", `cas-src ${PELICAN} on Atlas · Linux — switch session (${pickerRows} available)`);
     expect(listRows, "conversation list rows").toBe(pickerRows);
     const pickerSessions = (await picker.locator(".session-picker-entry").evaluateAll((rows) => rows.map((row) => (row as HTMLElement).dataset.pickerSession))).sort();
     await page.keyboard.press("Escape");
@@ -411,5 +414,16 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     for (const selector of [".fleet-board-summary", ".fleet-catalog-time"]) {
       expect(await board.locator(selector).evaluate((element) => getComputedStyle(element, "::before").content), selector).toBe("none");
     }
+    // With nothing open, the title says so: the fleet, then the switch.
+    await expect(page.getByRole("heading", { level: 1, name: `Fleet overview — switch session (${pickerRows} available)`, exact: true })).toBeVisible();
+  });
+
+  await journey.stage("Hear the open conversation as the Terminal view title", async () => {
+    // Journey F19: the goal state (final.aria.yml) names the open conversation
+    // and its machine in the page heading, the switch after it.
+    await page.locator('#fleet-board button.fleet-session[data-fleet-session="patient-pelican-9"]').click();
+    await expect(page.locator(".session-picker-name")).toHaveText("cas-src");
+    await expect(page.locator("body")).toMatchAriaSnapshot(`- heading "cas-src ${PELICAN} on Atlas · Linux — switch session (4 available)" [level=1]`);
+    expect(await page.locator("body").ariaSnapshot()).not.toContain('heading "Switch session');
   });
 });

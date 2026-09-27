@@ -169,8 +169,9 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     await expect(dialog).toBeHidden();
     const toast = page.locator("#toast");
     await expect(toast).toHaveText("Forge · Linux connected", { timeout: 15_000 });
-    await list.getByRole("button", { name: /forge-tools/ }).tap();
-    await expect(page.locator(".conversation-identity h1")).toHaveText("forge-tools");
+    // Pairing from the phone opens the new machine's conversation; no list
+    // tap in between (journey F8).
+    await expect(page.locator(".conversation-identity h1")).toHaveText("forge-tools", { timeout: 15_000 });
     // The "connected" toast sits below the thread header, never over the
     // back link, project and host (cas-002e).
     const [notice, heading] = await Promise.all([toast.boundingBox(), page.locator(".conversation-heading").boundingBox()]);

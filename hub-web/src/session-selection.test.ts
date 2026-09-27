@@ -6,6 +6,7 @@ import {
   forgetMachine,
   goBackSelection,
   loadStoredSelection,
+  pairedSessionToOpen,
   previousSelection,
   restorableSession,
   saveStoredSelection,
@@ -141,6 +142,19 @@ describe("last session restore", () => {
     expect(restorableSession(stored, "m2", [hubSession("cas-src-young-raven-93")])).toBeUndefined();
     expect(restorableSession({ machineId: "m1" }, "m1", [hubSession("alpha")])).toBeUndefined();
     expect(restorableSession(undefined, "m1", [hubSession("alpha")])).toBeUndefined();
+  });
+
+  it("opens the paired machine's first live session, never a dormant or unreachable one (journey F8)", () => {
+    expect(pairedSessionToOpen([hubSession("steady-wren-3")])).toBe("steady-wren-3");
+    expect(pairedSessionToOpen([
+      hubSession("old", { liveness: "stale_metadata" }),
+      hubSession("asleep", { dormant: true }),
+      hubSession("gone", { unreachable: true }),
+      hubSession("first-live"),
+      hubSession("second-live"),
+    ])).toBe("first-live");
+    expect(pairedSessionToOpen([hubSession("old", { liveness: "missing_endpoint" })])).toBeUndefined();
+    expect(pairedSessionToOpen([])).toBeUndefined();
   });
 });
 

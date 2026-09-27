@@ -474,7 +474,7 @@ async fn pending_round_refuses_both_merge_paths_in_progress_and_awaiting_merge()
 
 /// A delivery merged into a non-trunk lane (an epic) outside the guarded
 /// paths is still sent for review before it closes. The supervisor's handoff
-/// says it was merged, never that it "parked for merge" (cas-5c38).
+/// reports target ancestry, without assuming it never parked (GH #1026).
 #[tokio::test]
 async fn merged_into_an_epic_without_a_verdict_is_refused_at_close_and_dispatched() {
     let (temp, core, repo, task_id) = fixture();
@@ -521,10 +521,12 @@ async fn merged_into_an_epic_without_a_verdict_is_refused_at_close_and_dispatche
     assert!(
         handoff
             .prompt
-            .contains("was merged into epic/ui before any QA round (it never parked)"),
+            .contains("delivered tip @"),
         "{}",
         handoff.prompt
     );
+    assert!(handoff.prompt.contains("contained in epic/ui"), "{}", handoff.prompt);
+    assert!(!handoff.prompt.contains("never parked"), "{}", handoff.prompt);
     assert!(!handoff.prompt.contains("parked for merge"), "{}", handoff.prompt);
     let guard = cas::qa_pass::supervisor_merge_refusal(
         &cas_dir,

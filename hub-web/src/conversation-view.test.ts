@@ -358,7 +358,9 @@ describe("ConversationView (Pebble thread)", () => {
     const label = bubble.querySelector<HTMLElement>(".conversation-unconfirmed")!;
     expect(label.getAttribute("role")).toBe("status");
     expect(label.querySelector("svg.warn")?.getAttribute("aria-hidden")).toBe("true");
-    expect(label.textContent).toBe("Not confirmed · The hub never confirmed this reached sup. Retry sends it again.");
+    expect(label.textContent).toBe("Not confirmed · Cassy couldn't confirm delivery to sup. Retry sends it again.");
+    // Journey F10: the operator's words, not "the hub".
+    expect(label.textContent).not.toMatch(/\bhub\b/i);
     // It may have arrived: no "Not sent", and only Retry (an edit could reach the supervisor twice as easily).
     expect(label.textContent).not.toContain("Not sent");
     const buttons = [...bubble.querySelectorAll<HTMLButtonElement>(".conversation-actions button")];
@@ -369,6 +371,31 @@ describe("ConversationView (Pebble thread)", () => {
     view.update();
     expect(view.element.querySelector(".conversation-unconfirmed")).toBeNull();
     expect(view.element.querySelector(".conversation-delivered")?.textContent).toBe("Delivered");
+  });
+  it("settles a Not confirmed send once the supervisor replies after it: no warning, no Retry (journey F10)", () => {
+    const history = new ConversationHistory();
+    const retry = vi.fn();
+    const view = new ConversationView(document, history, { supervisor: "calm-otter-4", retryMessage: retry }); document.body.replaceChildren(view.element);
+    history.submit("x", "calm-otter-4", "Kick off the Mac tests.", at(9, 0));
+    // The turn that crossed the send and made its receipt overdue (cas-1185) does not settle it.
+    history.reply(reply(60, "answer", "Still building."), at(9, 0) + 1_000, undefined, undefined, at(9, 0) + 1_000);
+    history.unconfirmSilent(at(9, 0) + RECEIPT_TIMEOUT_MS);
+    view.update();
+    const bubble = () => view.element.querySelector<HTMLElement>('.turn.you .bub[data-state="unconfirmed"]')!;
+    expect(bubble().dataset.settled).toBeUndefined();
+    expect(bubble().querySelectorAll(".conversation-retry")).toHaveLength(1);
+    // A turn arriving after the give-up does.
+    history.reply(reply(61, "answer", "Tests are running on the Mac."), at(9, 2), undefined, undefined, at(9, 2));
+    view.update();
+    const settled = bubble();
+    expect(settled.dataset.settled).toBe("true");
+    const label = settled.querySelector<HTMLElement>(".conversation-unconfirmed.conversation-settled")!;
+    expect(label.getAttribute("role")).toBe("status");
+    expect(label.textContent).toBe("Not confirmed · The supervisor has replied since; resend only if it missed this.");
+    expect(label.querySelector("svg.warn")).toBeNull();
+    expect(settled.querySelector(".conversation-retry")).toBeNull();
+    expect(label.textContent).not.toMatch(/\bhub\b/i);
+    expect(history.repliedSince(history.events.find((event) => event.kind === "send")!.value as never)).toBe(true);
   });
   it("names each message group's speaker and time for assistive tech (cas-17e3)", () => {
     const history = new ConversationHistory();

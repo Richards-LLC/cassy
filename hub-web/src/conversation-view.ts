@@ -363,7 +363,9 @@ export class ConversationView {
     // A refused send repaints when control changes hands (cas-8e0a).
     const held = turn.event.kind === "send" && turn.event.value.state === "error" ? this.options.controlHeld?.() === true : undefined;
     const holder = turn.event.kind === "send" && turn.event.value.state === "error" ? this.options.controlHolder?.() : undefined;
-    return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting, pinned, delivered, held, holder]);
+    // An unconfirmed send settles once the supervisor speaks after it (journey F10).
+    const settled = turn.event.kind === "send" && turn.event.value.state === "unconfirmed" ? this.history.repliedSince(turn.event.value) : undefined;
+    return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting, pinned, delivered, held, holder, settled]);
   }
 
   /**
@@ -556,18 +558,32 @@ export class ConversationView {
       const label = document.createElement("span"); label.textContent = "Delivered";
       state.append(tick.content.firstElementChild!, label);
       bubble.append(state);
+    } else if (send.state === "unconfirmed" && this.history.repliedSince(send)) {
+      // Journey F10: the supervisor has spoken since, so this send most
+      // likely arrived. The card settles to a quiet record: no warning, no
+      // Retry inviting a duplicate, and a note to resend only if it was missed.
+      bubble.dataset.settled = "true";
+      const state = document.createElement("span");
+      state.className = "conversation-delivery conversation-refused conversation-unconfirmed conversation-settled"; state.setAttribute("role", "status");
+      const label = document.createElement("b"); label.textContent = "Not confirmed";
+      const separator = document.createElement("span"); separator.className = "sr-only"; separator.textContent = " · ";
+      const reason = document.createElement("span"); reason.className = "conversation-refused-reason";
+      reason.textContent = "The supervisor has replied since; resend only if it missed this.";
+      state.append(label, separator, reason);
+      bubble.append(state);
     } else if (send.state === "unconfirmed") {
-      // cas-1622: the hub never sent this send's receipt. It is not refused —
+      // cas-1622: the receipt for this send never came. It is not refused —
       // it may well have arrived — so it does not claim "Not sent". It stops
-      // saying "Sending…" forever, says what is unknown, and offers Retry,
-      // warning that a retry may reach the supervisor twice.
+      // saying "Sending…" forever, says what is unknown in the operator's
+      // words (Cassy, not "the hub": journey F10), and offers Retry, warning
+      // that a retry may reach the supervisor twice.
       const state = document.createElement("span");
       state.className = "conversation-delivery conversation-refused conversation-unconfirmed"; state.setAttribute("role", "status");
       const glyph = document.createElement("template"); glyph.innerHTML = WARN;
       const label = document.createElement("b"); label.textContent = "Not confirmed";
       const separator = document.createElement("span"); separator.className = "sr-only"; separator.textContent = " · ";
       const reason = document.createElement("span"); reason.className = "conversation-refused-reason";
-      reason.textContent = `The hub never confirmed this reached ${this.options.supervisor}.`;
+      reason.textContent = `Cassy couldn't confirm delivery to ${this.options.supervisor}.`;
       const next = document.createElement("span"); next.className = "conversation-refused-next"; next.textContent = " Retry sends it again.";
       reason.append(next);
       state.append(glyph.content.firstElementChild!, label, separator, reason);

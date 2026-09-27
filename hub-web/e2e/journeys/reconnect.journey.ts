@@ -54,10 +54,12 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
       return product;
     });
     expect(readingOpacity, "the conversation reading view is not faded during an outage").toBe(1);
-    // A send during the outage is refused for the connection, and says so.
+    // A send during the outage is refused in the banner's own words, and the
+    // draft is kept (journey F9).
     await composer.fill("Are you there?");
     await page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true }).click();
-    await expect(page.locator("#message-status")).toHaveText("The hub connection is reconnecting, so this message was not delivered. Try again once the session is live.");
+    await expect(page.locator("#message-status")).toHaveText("Not sent: lost connection to Atlas · Linux. Your message is kept; send it again when it's back.");
+    await expect(composer).toHaveValue("Are you there?");
     // The rail defers to the banner: no second, technical alarm about the same
     // drop, and whatever it does show counts the same in every place (cas-90d4).
     const rail = page.locator("#attention-panel");
@@ -181,15 +183,29 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     expect(during.latency).toBe("Reconnecting");
     // cas-1730: controls that need the machine say why instead of acting, and
     // the drawer's session row does not call the session live.
-    const outage = "Atlas · Linux is reconnecting. Control and interrupts come back when it is live.";
+    // Journey F9: in the banner's words, and on screen rather than only in a
+    // tooltip a touch screen cannot show.
+    const outage = "Lost connection to Atlas · Linux. Control and interrupts return when it reconnects.";
     await expect(page.locator("#lease")).toHaveAttribute("aria-disabled", "true");
     await expect(page.locator("#lease")).toHaveAttribute("data-disabled-reason", outage);
     await expect(page.locator("#interrupt")).toHaveAttribute("data-disabled-reason", outage);
-    await page.getByRole("button", { name: "Open machines and sessions" }).click();
-    const drawerSession = page.locator("#machine-tree .session-meta").first();
-    await expect(drawerSession).toContainText("Reconnecting");
-    await expect(drawerSession).not.toContainText("live");
-    await page.getByRole("button", { name: "Close machines and sessions" }).click();
+    const reason = page.locator("#session-controls-reason");
+    await expect(reason).toBeVisible();
+    await expect(reason).toHaveText(outage);
+    // The drawer's machine status reads whole, at a desktop and a phone width.
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 720 });
+      await expect(reason, `the reason is on screen at ${width}`).toBeVisible();
+      await page.getByRole("button", { name: "Open machines and sessions" }).click();
+      const drawerSession = page.locator("#machine-tree .session-meta").first();
+      await expect(drawerSession).toContainText("Reconnecting");
+      await expect(drawerSession).not.toContainText("live");
+      const status = page.locator("#machine-tree .machine-row small").first();
+      await expect(status).toHaveText("Reconnecting");
+      expect(await status.evaluate((element) => element.scrollWidth <= element.clientWidth), `drawer status not clipped at ${width}`).toBe(true);
+      await page.getByRole("button", { name: "Close machines and sessions" }).click();
+    }
+    await page.setViewportSize({ width: 1280, height: 720 });
     hub.release(PELICAN);
     await expect(banner).toBeHidden({ timeout: 15_000 });
     await expect.poll(async () => (await read()).rail, { timeout: 15_000 }).toBe("All clear");
@@ -199,5 +215,6 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     expect(after.latency).toMatch(/^\d+ms$/);
     await expect(page.locator("#lease")).not.toHaveAttribute("aria-disabled", "true");
     await expect(page.locator("#interrupt")).not.toHaveAttribute("aria-disabled", "true");
+    await expect(page.locator("#session-controls-reason")).toBeHidden();
   });
 });

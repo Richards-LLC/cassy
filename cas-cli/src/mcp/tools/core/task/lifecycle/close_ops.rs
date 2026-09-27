@@ -14561,6 +14561,13 @@ impl EpicGitSnapshot {
             patterns.push(format!("refs/heads/{parent_branch}"));
             patterns.push(format!("refs/remotes/origin/{parent_branch}"));
         }
+        for child in subtasks {
+            let target = child_delivery_target(child, parent_branch);
+            if target != parent_branch && is_safe_git_refname(target) {
+                patterns.push(format!("refs/heads/{target}"));
+                patterns.push(format!("refs/remotes/origin/{target}"));
+            }
+        }
         let mut args = vec![
             "for-each-ref".to_string(),
             "--format=%(refname) %(objectname) %(committerdate:unix)".to_string(),
@@ -14968,6 +14975,16 @@ pub(crate) fn collect_epic_branch_statuses(
     .statuses
 }
 
+fn child_delivery_target<'a>(child: &'a Task, epic_target: &'a str) -> &'a str {
+    child
+        .deliverables
+        .work_target
+        .as_ref()
+        .map(|target| target.target_branch.trim())
+        .filter(|branch| !branch.is_empty() && is_safe_git_refname(branch))
+        .unwrap_or(epic_target)
+}
+
 /// Collect an epic-status view with an explicit page and deadline. The close
 /// gate uses the full-fidelity mode with its own bounded deadline, while the
 /// public status action selects its page and summary mode independently.
@@ -14994,6 +15011,9 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
             budget_exhausted = true;
             break;
         }
+        // GH #1038: retargeting the epic for a follow-up does not retarget
+        // children already delivered to their own recorded WorkTarget.
+        let parent_branch = child_delivery_target(t, parent_branch);
         // cas-6c50: a measured negative result deliberately has no
         // delivery to integrate. Its structured supervisor receipt is
         // durable close evidence, so neither the historical parked branch
@@ -16210,6 +16230,11 @@ fn run_epic_close_merge_gate_with_budget(
     let mut cleaned_worktree_guidance = String::new();
     let mut any_merge_withheld = false;
     for s in &stranded {
+        let child_target = subtasks
+            .iter()
+            .find(|child| child.id == s.task_id)
+            .map(|child| child_delivery_target(child, parent_branch))
+            .unwrap_or(parent_branch);
         // Round-1 cas-code-review autofix: use idiomatic `writeln!`
         // rather than the explicit `Write::write_fmt(format_args!(...))`
         // desugaring. `writeln!` returns Result; the surrounding
@@ -16226,7 +16251,7 @@ fn run_epic_close_merge_gate_with_budget(
                 "  - {task} ({branch}): anchor is reachable from {parent}, but delivery content is absent from path(s): {paths}{recorded_anchor}",
                 task = s.task_id,
                 branch = s.factory_branches_label(),
-                parent = parent_branch,
+                parent = child_target,
                 paths = s.dropped_paths.join(", "),
                 recorded_anchor = recorded_anchor,
             );
@@ -16236,7 +16261,7 @@ fn run_epic_close_merge_gate_with_budget(
                 "  - {task} ({branch}): delivery content could not be proven on {parent}: {reason}{recorded_anchor}",
                 task = s.task_id,
                 branch = s.factory_branches_label(),
-                parent = parent_branch,
+                parent = child_target,
                 recorded_anchor = recorded_anchor,
             );
         } else {
@@ -16246,7 +16271,7 @@ fn run_epic_close_merge_gate_with_budget(
                 task = s.task_id,
                 branch = s.factory_branches_label(),
                 n = s.unmerged_count,
-                parent = parent_branch,
+                parent = child_target,
                 recorded_anchor = recorded_anchor,
             );
         }
@@ -16265,7 +16290,7 @@ fn run_epic_close_merge_gate_with_budget(
                 .iter()
                 .find(|(measured_branch, _)| measured_branch == branch)
                 .map(|(_, direction)| direction.clone())
-                .unwrap_or_else(|| branch_content_direction(repo_path, branch, parent_branch));
+                .unwrap_or_else(|| branch_content_direction(repo_path, branch, child_target));
             match &direction {
                 BranchContentDirection::ContentAbsent { .. } => {
                     let _ = writeln!(
@@ -16275,7 +16300,7 @@ fn run_epic_close_merge_gate_with_budget(
                          remote-tracking ref remains) — content measured as absent from \
                          {parent}, so this merge delivers work rather than reverting it",
                         task = s.task_id,
-                        parent = parent_branch,
+                        parent = child_target,
                     );
                 }
                 BranchContentDirection::ContentPresent { .. } => {
@@ -16286,7 +16311,7 @@ fn run_epic_close_merge_gate_with_budget(
                          cherry-pick loses ancestry, not content); merging would only pollute \
                          history. Nothing to do for this child.",
                         task = s.task_id,
-                        parent = parent_branch,
+                        parent = child_target,
                     );
                 }
                 BranchContentDirection::BehindTarget {
@@ -16300,7 +16325,7 @@ fn run_epic_close_merge_gate_with_budget(
                             "Inspect these path(s) by hand before discarding the branch — they \
                              differ and {parent} has NOT touched them, so they may hold real \
                              unlanded work: {paths}.",
-                            parent = parent_branch,
+                            parent = child_target,
                             paths = candidate_paths.join(", "),
                         )
                     };
@@ -16310,7 +16335,7 @@ fn run_epic_close_merge_gate_with_budget(
                          delivered path(s) differ because {parent} moved them after this lane \
                          branched ({sample}), so merging re-opens superseded content. {rescue}",
                         task = s.task_id,
-                        parent = parent_branch,
+                        parent = child_target,
                         n = stale_paths.len(),
                         sample = stale_paths
                             .iter()
@@ -16328,7 +16353,7 @@ fn run_epic_close_merge_gate_with_budget(
                          {parent}: {reason}. No merge instruction is offered, because a merge \
                          that cannot be measured may revert shipped work. Resolve by hand.",
                         task = s.task_id,
-                        parent = parent_branch,
+                        parent = child_target,
                     );
                 }
             }
@@ -16402,7 +16427,7 @@ fn run_epic_close_merge_gate_with_budget(
         detail = detail,
         closing_instruction = closing_instruction.replace("{parent}", parent_branch),
         cleaned_worktree_guidance = cleaned_worktree_guidance,
-        parent = parent_branch,
+                        parent = child_target,
         tool_prefix = crate::mcp::tools::core::guidance::caller_prefix()
     ))
 }
@@ -17916,7 +17941,9 @@ pub(crate) fn run_declared_pre_close_hook(
                 .ok_or_else(|| {
                     "PRE-CLOSE HOOK CONTEXT REJECTED: declared task repository resolved, but no \
                      task-owned worktree, commit receipt, or factory anchor identifies the code \
-                     to check. No close-time executable gate was run."
+                     to check. Retry with commit_receipt=<merged-commit-sha> for the delivered \
+                     epic tip (or a target commit carrying its content). No close-time \
+                     executable gate was run."
                         .to_string()
                 })?;
             if !git_ref_exists(&repo_context.repo_root, tip) {
@@ -27299,6 +27326,40 @@ mod epic_status_gate_tests {
     }
 
     #[test]
+    fn epic_retarget_checks_child_squash_against_its_delivered_target_gh1038() {
+        let dir = init_squash_landed_repo(None);
+        let p = dir.path();
+        let anchor = epic_git_stdout(p, &["rev-parse", "factory/lane"]);
+        // A later child deliberately removes the shipped route on main.
+        git(p, &["rm", "feature.rs"]);
+        git(p, &["commit", "-q", "-m", "remove superseded feature route"]);
+        // The epic is then retargeted to a follow-up branch from before the
+        // squash. That branch cannot be evidence for this already-shipped child.
+        git(p, &["checkout", "-q", "-b", "epic/follow-up", "main~2"]);
+
+        let mut landed = child("cas-shipped", TaskStatus::Closed, Some("lane"));
+        landed.deliverables.factory_branch_anchor = Some(anchor);
+        landed.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:fixture".into(),
+            target_branch: "main".into(),
+        });
+        let task = epic("cas-epic-retargeted");
+        let req = base_req(&task.id);
+        let statuses = collect_epic_branch_statuses(std::slice::from_ref(&landed), "epic/follow-up", p);
+        assert!(!statuses[0].blocks_epic_close(), "{statuses:?}");
+        assert!(matches!(
+            run_epic_close_merge_gate(&task, &req, "epic/follow-up", p, &[landed.clone()]),
+            EpicCloseGateOutcome::ProceedWithNote(_)
+        ));
+
+        landed.deliverables.work_target = None;
+        assert!(matches!(
+            run_epic_close_merge_gate(&task, &req, "epic/follow-up", p, &[landed]),
+            EpicCloseGateOutcome::Reject(_)
+        ));
+    }
+
+    #[test]
     fn content_reconciliation_does_not_clear_a_branch_that_delivers_nothing() {
         // Caught by an existing test while building cas-b192, and worth pinning
         // directly: a recycled / reset-to-parent branch trivially has "nothing
@@ -28590,6 +28651,22 @@ mod zero_change_close_tests {
         )
         .expect("local target merge must satisfy the local_merge pre-close hook");
         assert_eq!(evidence.task_tip.as_deref(), Some(anchor.as_str()));
+    }
+
+    #[test]
+    fn epic_pre_close_missing_anchor_names_commit_receipt_remedy_gh1038() {
+        let dir = init_worker_repo();
+        let mut task = Task::new("cas-epic-receipt".into(), "retargeted epic".into());
+        task.task_type = TaskType::Epic;
+        let error = run_declared_pre_close_hook(
+            &task,
+            &declared_main_context(dir.path()),
+            None,
+            None,
+            false,
+        )
+        .expect_err("an epic without an anchor needs an explicit receipt");
+        assert!(error.contains("commit_receipt=<merged-commit-sha>"), "{error}");
     }
 
     #[test]

@@ -91,12 +91,17 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
     await page.waitForTimeout(6_000);
     const woke = Date.now();
     await setVisibility("visible");
+    // A message written the moment the page wakes, while the socket is
+    // still in doubt, is held rather than sent into it.
+    await sendNow("Right after waking");
     // Waking checks the socket (a health ping, 3 s to answer) and replaces
     // it, well before four missed heartbeats (about 20 s) would.
     await expect.poll(() => hub.machineSocketOpens.get("atlas") ?? 0, { timeout: 8_000 }).toBeGreaterThan(opens);
     expect(Date.now() - woke, "socket replaced within 8 s of waking").toBeLessThan(8_000);
     await expect(header).toHaveText(" · Live");
+    await expect.poll(() => sentTimes("Right after waking"), { timeout: 8_000 }).toBe(1);
     await sendNow("After waking");
     await expect.poll(() => sentTimes("After waking"), { timeout: 5_000 }).toBe(1);
+    expect(sentTimes("Right after waking"), "sent once").toBe(1);
   });
 });

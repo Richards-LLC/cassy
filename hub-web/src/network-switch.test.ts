@@ -101,6 +101,19 @@ describe("network hints (cas-0978)", () => {
     expect(internals.machineMultiplex, "a network failure is not a protocol verdict").toBe(true);
   });
 
+  it("refuses a supervisor message while the machine socket is in doubt, so it is held, not lost", () => {
+    vi.stubGlobal("window", globalThis);
+    const { sup, internals } = supervisor();
+    const machine = fakeSocket();
+    internals.machineSocket = machine;
+    internals.machineSocketReady = true;
+    (internals as unknown as { probePingId?: number }).probePingId = 17;
+    expect(sup.send("patient-pelican-9", { SendMessage: { target: "t", text: "x" } }, "ref-1")).toBe(false);
+    expect(machine.send).not.toHaveBeenCalled();
+    // Reads and keystrokes are not held.
+    expect(sup.send("patient-pelican-9", "GetState")).toBe(true);
+  });
+
   it("waits at most 10 s between reconnects and gives a doubted socket 3 s to answer", () => {
     expect(MACHINE_RETRY_CEILING_MS).toBe(10_000);
     expect(SOCKET_PROBE_TIMEOUT_MS).toBe(3_000);

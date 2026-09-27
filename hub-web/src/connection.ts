@@ -1061,6 +1061,10 @@ export class HubConnectionSupervisor {
   }
 
   send(session: string, message: unknown, clientRef?: string): boolean {
+    // While a probe waits on the machine socket it may be half-open: a
+    // message sent into it could vanish, so it is refused here and the
+    // caller holds it until the socket answers or is replaced (cas-0978).
+    if (this.probePingId !== undefined && isSupervisorMessage(message)) return false;
     const outbound = withClientRef(message, clientRef);
     if (this.machineSocketReady && this.machineSocket?.readyState === WebSocket.OPEN) {
       const resize = typeof outbound === "object" && outbound !== null && "ResizePane" in outbound;
@@ -1133,7 +1137,13 @@ export class HubConnectionSupervisor {
     try { envelope = JSON.parse(input) as Record<string, any>; }
     catch { return; }
     if (envelope.channel === "health" && typeof envelope.pong === "number") {
-      if (envelope.pong === this.probePingId) this.probePingId = undefined;
+      if (envelope.pong === this.probePingId) {
+        // The doubted socket answered: messages held meanwhile can go now.
+        this.probePingId = undefined;
+        for (const [session, snapshot] of this.attachLifecycles) {
+          if (snapshot.phase === "live") this.callbacks.onAttachState?.(session, snapshot);
+        }
+      }
       if (this.healthPing?.id !== envelope.pong) return;
       const latencyMs = Math.max(0, Math.round(performance.now() - this.healthPing.startedAt));
       this.healthPing = undefined;
@@ -1278,6 +1288,10 @@ export function messageQueuedFromDaemon(message: Record<string, any>): MessageQu
     target: value.target,
     stamped: value.stamped === true,
   };
+}
+
+function isSupervisorMessage(message: unknown): boolean {
+  return typeof message === "object" && message !== null && "SendMessage" in message;
 }
 
 function withClientRef(message: unknown, clientRef: string | undefined): unknown {

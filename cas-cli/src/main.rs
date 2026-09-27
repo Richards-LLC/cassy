@@ -258,6 +258,27 @@ fn contains_factory_launch_flag(tokens: &[String]) -> bool {
 
 /// Initialize the logging system
 fn init_logging(cli: &cli::Cli) {
+    // cas-093a: the machine hub logs to its host-level directory
+    // (~/.cas/hub/logs), never the project it happened to be started from.
+    // Its logging settings come from the host config in ~/.cas.
+    if let Some(hub_root) = cli::host_tracing_root(cli) {
+        let logging_config = hub_root
+            .parent()
+            .and_then(|cas_home| config::Config::load(cas_home).ok())
+            .and_then(|c| c.logging)
+            .unwrap_or_default();
+        if let Err(e) = logging::init(Some(&hub_root), cli.verbose, &logging_config) {
+            if cli.verbose {
+                eprintln!("Warning: Failed to initialize logging: {e}");
+            }
+        }
+        let log_dir = hub_root.join(&logging_config.log_dir);
+        if log_dir.exists() {
+            let _ = logging::cleanup_old_logs(&log_dir, logging_config.retention_days);
+        }
+        return;
+    }
+
     // Try to find Cassy root and load config
     let cas_root = store::find_cas_root().ok();
     let logging_config = cas_root

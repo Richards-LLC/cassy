@@ -111,4 +111,24 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
     expect(await until(() => sentTimes("After waking"), (n) => n >= 1, 5_000)).toBe(1);
     expect(sentTimes("Right after waking"), "sent once").toBe(1);
   });
+
+  await journey.stage("The session's daemon link drops for a moment", async () => {
+    // cas-0653: the hub and the machine stay reachable, but the session's
+    // daemon link is gone. The hub refuses the send as retryable
+    // (upstream_unavailable) and closes the session's stream; the message
+    // waits in the thread instead of reading "Not sent", and goes out once
+    // when the session is live again.
+    hub.upstreamLost(PELICAN);
+    const refusalsBefore = hub.upstreamRefusals.length;
+    await sendNow("While the daemon link is down");
+    expect(await until(() => hub.upstreamRefusals.length, (n) => n > refusalsBefore, 5_000)).toBeGreaterThan(refusalsBefore);
+    await expect(held).toHaveText("Waiting for the connection — sends when it's back");
+    expect(sentTimes("While the daemon link is down")).toBe(0);
+    hub.upstreamBack(PELICAN);
+    expect(await until(() => sentTimes("While the daemon link is down"), (n) => n >= 1, 15_000)).toBe(1);
+    await expect(held).toHaveCount(0);
+    await expect(header).toHaveText(" · Live");
+    await page.waitForTimeout(1_000);
+    expect(sentTimes("While the daemon link is down"), "sent once").toBe(1);
+  });
 });

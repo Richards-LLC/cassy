@@ -62,6 +62,8 @@ export type Outage = {
 };
 
 const PANE_TEXT = "The supervisor is ready.\r\n";
+/** The real hub's operator text for `upstream_unavailable` (hub/server.rs). */
+const UPSTREAM_UNAVAILABLE_MESSAGE = "The session's daemon connection is reconnecting, so the message was not sent. Retry once the session is live again.";
 
 export class HubDouble {
   readonly sends: SentMessage[] = [];
@@ -90,6 +92,10 @@ export class HubDouble {
   private readonly stalledSockets = new WeakSet<WebSocketRoute>();
   /** Machine sockets opened, per machine (multiplex). */
   readonly machineSocketOpens = new Map<string, number>();
+  /** Sessions whose daemon upstream is gone while the hub stays up (cas-0653). */
+  private readonly upstreamDown = new Set<string>();
+  /** client_refs the double refused with `upstream_unavailable`, in order. */
+  readonly upstreamRefusals: string[] = [];
   /** Turns pushed live, replayed in history like a real hub after a reload. */
   private readonly live = new Map<string, { messages: Array<Record<string, unknown>>; replies: Array<Record<string, unknown>> }>();
 
@@ -243,6 +249,25 @@ export class HubDouble {
     this.remember(session).messages.push({ notification_id: queued, target: sent.target, text: sent.text, state: "acknowledged", stamped: true, device_id: "journey-device", session, ...(sent.in_reply_to === undefined || sent.in_reply_to === null ? {} : { reply_to: sent.in_reply_to }), at: now });
     this.remember(session).replies.push({ notification_id: reply, reply_to: queued, message, summary: "", device_id: "journey-device", attachments: [], session, at: now, ...extra });
     return { queued, reply };
+  }
+
+  /**
+   * The session's daemon link drops while the hub and the machine stay
+   * reachable (cas-0653). A SendMessage is then refused the way the real hub
+   * refuses it (hub/server.rs): `upstream_unavailable`, retryable, with its
+   * client_ref, and the session's stream is closed so the page attaches again.
+   */
+  upstreamLost(session: string): void { this.upstreamDown.add(session); }
+
+  /** The daemon link is back: the next attach carries sends again. */
+  upstreamBack(session: string): void { this.upstreamDown.delete(session); }
+
+  /** Refuse a send while the session's upstream is down; its client_ref when refused. */
+  private refuseWithoutUpstream(session: string, message: Record<string, Record<string, unknown>>): string | undefined {
+    if (!message.SendMessage || !this.upstreamDown.has(session)) return undefined;
+    const clientRef = String(message.SendMessage.client_ref);
+    this.upstreamRefusals.push(clientRef);
+    return clientRef;
   }
 
   /** Acknowledge the latest send (MessageQueued) without answering it yet. */
@@ -416,7 +441,15 @@ export class HubDouble {
     const pages = [...(this.options.history?.[session] ?? [])];
     ws.onMessage((data) => {
       if (this.stalledSockets.has(ws) || !this.reachable(machineId)) { this.stalledSockets.add(ws); return; }
-      this.handleSessionFrame(machineId, session, ws, JSON.parse(String(data)) as Record<string, Record<string, unknown>>, pages);
+      const message = JSON.parse(String(data)) as Record<string, Record<string, unknown>>;
+      const refused = this.refuseWithoutUpstream(session, message);
+      if (refused !== undefined) {
+        // The real hub's legacy socket: the refusal, then a close (cas-0653).
+        ws.send(JSON.stringify({ error: "upstream_unavailable", retryable: true, message: UPSTREAM_UNAVAILABLE_MESSAGE, client_ref: refused }));
+        void ws.close({ code: 1011, reason: "journey: session daemon link is reconnecting" });
+        return;
+      }
+      this.handleSessionFrame(machineId, session, ws, message, pages);
     });
     const welcome = () => ws.send(JSON.stringify(this.welcomeFor(session)));
     const delay = this.attachDelays.get(session);
@@ -473,7 +506,17 @@ export class HubDouble {
         ws.send(JSON.stringify({ channel: `pty:${session}`, message: this.welcomeFor(session) }));
         return;
       }
-      if (frame.message) this.handleSessionFrame(machineId, session, channel(session), frame.message as Record<string, Record<string, unknown>>, [...(this.options.history?.[session] ?? [])]);
+      if (!frame.message) return;
+      const refused = this.refuseWithoutUpstream(session, frame.message as Record<string, Record<string, unknown>>);
+      if (refused !== undefined) {
+        // The real hub's machine channel: the refusal, then the session's
+        // stream closes so a new subscribe restarts the upstream (cas-0653).
+        ws.send(JSON.stringify({ channel: `pty:${session}`, error: { code: "upstream_unavailable", retryable: true, message: UPSTREAM_UNAVAILABLE_MESSAGE, client_ref: refused } }));
+        subscribed.delete(session);
+        ws.send(JSON.stringify({ channel: `pty:${session}`, closed: true }));
+        return;
+      }
+      this.handleSessionFrame(machineId, session, channel(session), frame.message as Record<string, Record<string, unknown>>, [...(this.options.history?.[session] ?? [])]);
     });
   }
 

@@ -1,10 +1,24 @@
 import { test, expect } from "./journey";
 import type { Machine } from "./hub-double";
-import { ATLAS, STUDIO, PELICAN } from "./world";
+import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
 
 // A machine whose supervisor has a 64-character codename (cas-1334).
 const LONG_NAME = "an-extraordinarily-long-supervisor-name-for-truncation-checks-77";
 const FORGE: Machine = { id: "forge", label: "Forge · Linux", sessions: [{ name: LONG_NAME, supervisor: LONG_NAME, project_dir: "/projects/forge-tools", workers: ["steady-wren-3"], liveness: "live" }] };
+
+/** A finger swiping the first match sideways by `dx`; returns whether it was gone right after the finger lifted. */
+async function swipeAway(locator: import("@playwright/test").Locator, dx: number): Promise<boolean> {
+  return locator.first().evaluate((element, dx) => {
+    const box = element.getBoundingClientRect();
+    const y = box.top + Math.min(24, box.height / 2);
+    const x0 = box.left + box.width / 2;
+    const fire = (type: string, x: number) => element.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, pointerType: "touch", pointerId: 7, isPrimary: true, clientX: x, clientY: y }));
+    fire("pointerdown", x0);
+    for (let step = 1; step <= 6; step += 1) fire("pointermove", x0 + (dx * step) / 6);
+    fire("pointerup", x0 + dx);
+    return !element.isConnected;
+  }, dx);
+}
 
 test("HUB-J5 reply by typing", async ({ page, journey }) => {
   // Eleven stages plus the phone placeholder sweep: past the 60 s budget on a
@@ -139,6 +153,53 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
     // The hub refuses it again, so the next stage has a refused message to edit.
     hub.send(PELICAN, { Error: { client_ref: (await retried).client_ref, message: "forbidden" } });
     await expect(page.locator('.conversation-turn[data-state="error"]')).toHaveCount(1);
+  });
+
+  await journey.stage("Dismiss a refused message and bring it back", async () => {
+    // cas-16eed: a refused message can leave the thread so it does not take
+    // the screen; a small chip keeps the way back, and Edit and Retry come
+    // back with it.
+    const bubble = page.locator('.conversation-turn[data-state="error"]:not([data-replaced="true"])');
+    const unsent = page.getByRole("button", { name: "Show 1 unsent message", exact: true });
+    const dismiss = bubble.getByRole("button", { name: "Dismiss unsent message", exact: true });
+    // Desktop, light: Dismiss by keyboard. The card leaves, the composer stops
+    // pointing at it, the list stops previewing it, and focus lands on the chip.
+    await dismiss.focus();
+    await page.keyboard.press("Enter");
+    await expect(bubble).toHaveCount(0);
+    await expect(unsent).toBeVisible();
+    await expect(unsent).toContainText("1 unsent message");
+    await expect(unsent).toBeFocused();
+    await expect(page.locator("#message-status")).toBeHidden();
+    await expect(list.getByText(/Not sent: /)).toHaveCount(0);
+    await page.keyboard.press("Enter");
+    await expect(bubble).toHaveCount(1);
+    await expect(unsent).toBeHidden();
+    await expect(bubble.getByRole("button", { name: "Retry sending", exact: true })).toBeFocused();
+    await expect(bubble.getByRole("button", { name: "Edit message", exact: true })).toBeVisible();
+    // Phone, dark: a swipe takes it off; the chip is a 44px target and brings it back.
+    const desktop = page.viewportSize()!;
+    await page.emulateMedia({ colorScheme: "dark" });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect.poll(async () => (await dismiss.boundingBox())?.height ?? 0, { message: "Dismiss target height at 390px" }).toBeGreaterThanOrEqual(44);
+    await swipeAway(bubble, -300);
+    await expect(bubble).toHaveCount(0);
+    await expect(unsent).toBeVisible();
+    expect((await unsent.boundingBox())!.height, "unsent chip height at 390px").toBeGreaterThanOrEqual(44);
+    await unsent.click();
+    await expect(bubble).toHaveCount(1);
+    // A swipe short of the threshold settles the card back.
+    await swipeAway(bubble, -40);
+    await expect(bubble).toHaveCount(1);
+    await expect.poll(() => bubble.evaluate((element) => element.style.transform)).toBe("");
+    // Reduced motion: the swipe is an instant dismiss, with no slide.
+    await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
+    expect(await swipeAway(bubble, 300), "gone the moment the finger lifts").toBe(true);
+    await expect(unsent).toBeVisible();
+    await unsent.click();
+    await expect(bubble).toHaveCount(1);
+    await page.emulateMedia({ colorScheme: "light", reducedMotion: "no-preference" });
+    await page.setViewportSize(desktop);
   });
 
   await journey.stage("Edit and resend retires the refused message", async () => {
@@ -342,5 +403,32 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
     // Back on a desktop field the full phrase returns.
     await page.setViewportSize(desktop);
     await expect(composer).toHaveAttribute("placeholder", "Message the forge-tools supervisor");
+  });
+
+  await journey.stage("Focus on the opening card moves into the conversation", async () => {
+    // cas-9a96: keyboard focus on the connection card's Details fell to the
+    // page body when the opened conversation replaced the card. It lands in
+    // the composer now; focus elsewhere is left where it is.
+    const details = page.locator(".conversation-pane-slot .connection-details summary");
+    await page.reload();
+    await expect(list.getByRole("button", { name: /gabber-studio/ })).toBeVisible();
+    hub.delayAttach(OTTER, 3_000);
+    await list.getByRole("button", { name: /gabber-studio/ }).click();
+    await expect(details).toBeVisible();
+    await details.focus();
+    await expect(details).toBeFocused();
+    await expect(page.locator(".conversation-pane-slot .terminal-connecting")).toHaveCount(0, { timeout: 10_000 });
+    await expect(composer).toBeFocused();
+    // Focus outside the card (the list search) stays there when it is replaced.
+    await page.reload();
+    await expect(list.getByRole("button", { name: /cas-src/ })).toBeVisible();
+    hub.delayAttach(PELICAN, 3_000);
+    await list.getByRole("button", { name: /cas-src/ }).click();
+    await expect(details).toBeVisible();
+    const search = page.getByRole("searchbox", { name: "Search conversations" });
+    await search.focus();
+    await expect(page.locator(".conversation-pane-slot .terminal-connecting")).toHaveCount(0, { timeout: 10_000 });
+    await page.waitForTimeout(500);
+    await expect(search).toBeFocused();
   });
 });

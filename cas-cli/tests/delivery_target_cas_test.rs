@@ -422,6 +422,9 @@ fn assert_no_delivery_projection(fixture: &DeliveryFixture, state: WorkerDeliver
 
 #[tokio::test]
 async fn cas8d38_worktree_merge_records_observed_work_target_delivery() {
+    // cas-bebc scopes worktree_merge to the caller's CAS_FACTORY_SESSION; the
+    // test must not inherit the session of the shell that runs it (cas-31a3).
+    let _env = TestEnvGuard::temp_home();
     let repo = GitRepo::new();
     run_git(&["branch", "integration"], &repo.root);
     run_git(

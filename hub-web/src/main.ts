@@ -5,12 +5,13 @@ import "./styles.css";
 import { ConversationList, filterConversationRows, type ConversationRow } from "./conversation-list";
 import { controlCommandCopy, sessionJumpCommandMarkup } from "./palette-commands";
 import { ConversationHistory } from "./conversation-history";
+import { loadDismissedAsks, saveDismissedAsks, type DismissedAsksStorage } from "./dismissed-asks";
 import { ConversationView } from "./conversation-view";
 import { REFUSED_SEE_ABOVE, refusalSentence, refusal } from "./refusal";
 import { installAttentionObjects } from "./attention-objects";
 import { clearTransientAttachmentNotes, installAttachmentSheet, setAttachmentNote } from "./attachment-sheet";
 import { artifactFailureIsAboutTheFile, artifactIdFromHref, artifactIsLocalOnly, artifactLinkFor, openArtifact } from "./artifact-open";
-import { arrangeConversationShell, bindKeyboardViewport, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY, paletteShortcutLabel, fitConversationHost } from "./conversation-shell";
+import { arrangeConversationShell, bindKeyboardViewport, keyboardViewportHeight, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY, paletteShortcutLabel, fitConversationHost } from "./conversation-shell";
 import { clockLabel } from "./thread-model";
 import { syncContextRail } from "./context-rail";
 import { applyScheme, markAppearanceCommands, setScheme, type SchemePreference } from "./scheme";
@@ -82,6 +83,9 @@ const pairingOperations = new PairingOperationCoordinator();
 const pairingCancellations = new PairingCancellationTracker();
 const app = document.querySelector<HTMLDivElement>("#app")!;
 bindKeyboardViewport(window);
+// The keyboard coming up or going away resizes the window: the pinned question folds or opens with it (cas-16eed).
+window.addEventListener("resize", () => syncComposing());
+window.visualViewport?.addEventListener("resize", () => syncComposing());
 const machines = new Map<string, StoredMachine>();
 let machineCatalogLoaded = false;
 const sessions = new Map<string, HubSession[]>();
@@ -116,10 +120,24 @@ let conversationSearchQuery = "";
 const conversationList = new ConversationList();
 let hubPresentation: "conversation" | "terminal" = "conversation";
 const pendingSubmissions = new Set<string>();
-function conversationHistory(key: string): ConversationHistory {
+/**
+ * The thread for machine:session. With `session`, the thread learns which
+ * supervisor session it is attached to, so questions a session that has since
+ * ended asked stop waiting (cas-16eed).
+ */
+function conversationHistory(key: string, session?: string): ConversationHistory {
   let history = conversationHistories.get(key);
-  if (!history) { history = new ConversationHistory(); conversationHistories.set(key, history); }
+  if (!history) {
+    history = new ConversationHistory();
+    // Questions dismissed on an earlier visit stay dismissed when history replays them.
+    for (const id of loadDismissedAsks(dismissedAskStorage(), key)) history.dismissAsk(id);
+    conversationHistories.set(key, history);
+  }
+  if (session !== undefined) history.currentSession = session;
   return history;
+}
+function dismissedAskStorage(): DismissedAsksStorage | undefined {
+  try { return window.localStorage; } catch { return undefined; }
 }
 const conversationHistoryPages = new Map<string, { hasEarlier: boolean; nextBefore?: number; loading: boolean; loaded: boolean; requested?: boolean }>();
 function conversationHistoryPage(key: string): { hasEarlier: boolean; nextBefore?: number; loading: boolean; loaded: boolean; requested?: boolean } {
@@ -331,7 +349,7 @@ function mountConversation(key: string, mount: HTMLElement): void {
     const threadMachineId = selectedMachineId!, threadSession = selectedSession!;
     const hubSession = sessions.get(selectedMachineId!)?.find((item) => item.name === selectedSession);
     const target = supervisorTarget(hubSession) || "Supervisor";
-    const history = conversationHistory(threadKey);
+    const history = conversationHistory(threadKey, threadSession);
     conversation = new ConversationView(document, history, {
       supervisor: target,
       machine: machines.get(selectedMachineId!)?.label,
@@ -368,6 +386,15 @@ function mountConversation(key: string, mount: HTMLElement): void {
           ? lease.controller_label
           : undefined;
       },
+      // cas-16eed: a failed send swiped away takes the composer's pointer at
+      // it along, the list preview stops saying "Not sent", and a dismissed
+      // question stays dismissed across a reload.
+      dismissalsChanged: () => {
+        saveDismissedAsks(dismissedAskStorage(), threadKey, history.dismissedAskIds());
+        if (messageStatus?.session === threadKey && messageStatus.text === REFUSED_SEE_ABOVE && !history.visibleEvents().some((event) => event.kind === "send" && history.isFailedSend(event.value))) clearComposerStatus();
+        renderConversationList();
+        syncConversationContext();
+      },
       hasEarlier: () => conversationHistoryPage(threadKey).hasEarlier,
       loadingEarlier: () => conversationHistoryPage(threadKey).loading,
       loadingHistory: () => {
@@ -396,6 +423,8 @@ function mountConversation(key: string, mount: HTMLElement): void {
   // The unanswered ask is pinned directly above the composer as well as in the flow.
   const composerSlot = document.querySelector<HTMLElement>("#conversation-composer-slot");
   if (composerSlot && conversation.pinned.parentElement !== composerSlot) composerSlot.prepend(conversation.pinned);
+  // "1 unsent message" sits above the pinned question: the way back to a dismissed failed send (cas-16eed).
+  if (composerSlot && conversation.unsent.parentElement !== composerSlot) composerSlot.prepend(conversation.unsent);
   // "Jump to latest" gets its own row above the pinned card and composer, so
   // it never floats over a turn in the thread (cas-97ea).
   if (composerSlot && conversation.jump.parentElement !== composerSlot) composerSlot.prepend(conversation.jump);
@@ -760,8 +789,23 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       if (messageDelivery?.session === sessionKey(machine.id, session) && messageDelivery.clientRef === receipt.client_ref) { messageDelivery = undefined; document.querySelector<HTMLElement>("#message-delivery")?.setAttribute("hidden", ""); }
       updateConversationViews(); renderConversationList();
     },
-    onMessageRejected: (session, clientRef, detail) => {
+    onMessageRejected: (session, clientRef, detail, rejection) => {
       const key = sessionKey(machine.id, session);
+      // cas-0653: the hub could not reach the session's daemon, so the
+      // message never arrived there. It waits in the thread and goes out once
+      // on the next live attach (the connection reattaches for it), instead
+      // of reading "Not sent".
+      if (rejection?.retryable && reholdRefusedSend(machine, session, clientRef)) {
+        if (messageDelivery?.session === key && messageDelivery.clientRef === clientRef) {
+          messageDelivery = undefined;
+          document.querySelector<HTMLElement>("#message-delivery")?.setAttribute("hidden", "");
+        }
+        if (selectedMachineId === machine.id && selectedSession === session && heldSends.get(key)?.some((held) => held.clientRef === clientRef)) {
+          showComposerStatus(`${session} on ${machine.label} is reconnecting. Your message will go out by itself when it's back.`, "info", true);
+        }
+        updateConversationViews(); renderConversationList();
+        return;
+      }
       // A control refusal proves the cached lease is stale: control counts as
       // held again only after a take succeeds (cas-8e0a). Other refusals say
       // nothing about the lease and leave it alone.
@@ -780,7 +824,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       updateConversationViews(); renderConversationList();
     },
     onOperatorReply: (session, reply) => {
-      conversationHistory(sessionKey(machine.id, session)).receive(reply, Date.now(), session);
+      conversationHistory(sessionKey(machine.id, session), session).receive(reply, Date.now(), session);
       // A later supervisor turn shortens an unreceipted send's wait (cas-1622).
       scheduleReceiptCheck(sessionKey(machine.id, session));
       updateConversationViews(); renderConversationList();
@@ -807,7 +851,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       cursor.loaded = true;
       cursor.hasEarlier = page.has_earlier;
       cursor.nextBefore = page.next_before;
-      const history = conversationHistory(key);
+      const history = conversationHistory(key, session);
       for (const message of page.messages) history.hydrateSend(message);
       const replies = operatorReplies.get(key) ?? [];
       for (const reply of page.replies) {
@@ -1574,6 +1618,7 @@ async function renderSessionState(machineId: string, session: string, state: Ses
   if (selectedMachineId !== machineId || selectedSession !== session) return;
   const grid = document.querySelector<HTMLElement>("#pane-grid");
   if (!grid) return;
+  handFocusFromConnectionCard(grid);
   const { visible: visiblePanes, hiddenWorkers } = splitVisiblePanes(state.panes, hubPresentation === "terminal" && revealWorkers, visibleSessions(machineId).find(item => item.name === session)?.workers ?? []);
   // The hub strips hidden workers from the stream, so the roster count comes
   // from the catalog; local filtering covers hubs that predate the gate.
@@ -2076,6 +2121,25 @@ function landFocus(targets: readonly FocusTarget[], options: { keep?: boolean; n
 }
 
 /**
+ * The opened session replaces the connection card. Focus inside the card
+ * (its Details, Retry or another action) would fall to the page body with it,
+ * so it lands where the next keystroke belongs: the composer, else the
+ * thread; in the terminal workspace, the attached terminal, else the way
+ * back. Focus anywhere else is left alone (cas-9a96).
+ */
+function handFocusFromConnectionCard(grid: HTMLElement): void {
+  const card = grid.querySelector<HTMLElement>(":scope > .empty.terminal-state");
+  const active = document.activeElement;
+  if (!card || !(active instanceof HTMLElement) || !card.contains(active)) return;
+  const targets = hubPresentation === "terminal"
+    ? [focusTargets.terminal, focusTargets.conversationReturn]
+    : [focusTargets.composer, focusTargets.thread];
+  // After this render replaces the card; `since` is the card's control, so a
+  // control the operator moves to meanwhile is theirs and is not taken back.
+  landFocus(targets, { keep: true, nextTask: true, waitMs: 2_000, since: active });
+}
+
+/**
  * Entering the terminal workspace: the keyboard and the mouse land in the
  * attached terminal, so keystrokes go to the pane; before a pane is attached,
  * and for a touch (no soft keyboard over the pane), on the way back to the
@@ -2203,7 +2267,12 @@ function bindSpeechComposer(): void {
   keyboard.onclick = () => composer.focus();
   // The keyboard is about to cover the bottom of the thread: pin the tail so
   // the last turn and any pinned ask sit directly above the field (cas-edc9).
-  composer.onfocus = () => { if (selectedMachineId && selectedSession) conversationViews.get(sessionKey(selectedMachineId, selectedSession))?.followTail(); };
+  composer.onfocus = () => {
+    for (const view of selectedConversationViews()) view.followTail();
+    syncComposing();
+  };
+  // Deferred: focus passing to Send or the mic and straight back must not flicker the question open.
+  composer.onblur = () => { window.setTimeout(syncComposing, COMPOSING_BLUR_MS); };
   mic.onclick = () => speechController?.toggle();
   syncSpeechComposer();
   if (speechDetectionStarted) return;
@@ -2213,6 +2282,29 @@ function bindSpeechComposer(): void {
     speechController = capability.mode === "typing" ? undefined : createSpeechController(capability);
     syncSpeechComposer();
   });
+}
+
+/**
+ * cas-16eed: while the operator writes on a phone or touch screen (or with a
+ * soft keyboard up), the pinned question folds to a one-line bar so at least
+ * a few lines of the latest conversation stay readable above the field. On a
+ * desktop there is room for both, so a question being answered in the
+ * composer stays open.
+ */
+const COMPOSE_COLLAPSE_MEDIA_QUERY = `${PHONE_MEDIA_QUERY}, (pointer: coarse)`;
+const COMPOSING_BLUR_MS = 150;
+function syncComposing(): void {
+  const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
+  const focused = composer !== null && composer.isConnected && document.activeElement === composer;
+  const small = window.matchMedia(COMPOSE_COLLAPSE_MEDIA_QUERY).matches || keyboardViewportHeight(window.innerHeight, window.visualViewport) !== undefined;
+  const selected = new Set(selectedConversationViews());
+  for (const view of conversationViews.values()) view.setComposing(focused && small && selected.has(view));
+}
+/** The open thread's views. Views are keyed by pane (machine:session:pane), so match the session prefix. */
+function selectedConversationViews(): ConversationView[] {
+  if (!selectedMachineId || !selectedSession) return [];
+  const thread = sessionKey(selectedMachineId, selectedSession);
+  return [...conversationViews].filter(([key]) => key === thread || key.startsWith(`${thread}:`)).map(([, view]) => view);
 }
 
 function openSupervisorComposer(): void {
@@ -2432,6 +2524,39 @@ function sessionIsUp(machineId: string, session: string): boolean {
 function holdSupervisorMessage(machine: StoredMachine, session: string, clientRef: string, supervisor: string, text: string, replyTo?: number): void {
   const key = sessionKey(machine.id, session);
   conversationHistory(key).hold(clientRef, supervisor, text, Date.now(), replyTo, session);
+  queueHeldSend(machine, key, clientRef, supervisor, text, replyTo, HELD_SEND_MS);
+}
+
+/** When each send was first held, so a send held again keeps its original expiry (cas-0653). */
+const heldSince = new Map<string, number>();
+
+/**
+ * The hub refused a send as retryable (cas-0653, `upstream_unavailable`): the
+ * machine's daemon never received it. Hold it again, as a send made while the
+ * machine was away, to go out once on the next live attach, or turn "Not
+ * sent" when HELD_SEND_MS has passed since it was first held. Returns false
+ * when there is no such send to hold (already receipted, or unknown).
+ */
+function reholdRefusedSend(machine: StoredMachine, session: string, clientRef: string): boolean {
+  const key = sessionKey(machine.id, session);
+  const history = conversationHistory(key);
+  const send = history.rehold(clientRef);
+  if (!send) return false;
+  const now = Date.now();
+  const first = heldSince.get(clientRef) ?? now;
+  heldSince.set(clientRef, first);
+  const remaining = HELD_SEND_MS - (now - first);
+  if (remaining <= 0) {
+    heldSince.delete(clientRef);
+    history.reject(clientRef, outageRefusal(machine.label));
+    return true;
+  }
+  queueHeldSend(machine, key, clientRef, send.target, send.text, send.replyTo, remaining);
+  return true;
+}
+
+function queueHeldSend(machine: StoredMachine, key: string, clientRef: string, supervisor: string, text: string, replyTo: number | undefined, expiresInMs: number): void {
+  heldSince.set(clientRef, heldSince.get(clientRef) ?? Date.now());
   const expiry = setTimeout(() => {
     const queue = heldSends.get(key) ?? [];
     const index = queue.findIndex((held) => held.clientRef === clientRef);
@@ -2439,9 +2564,10 @@ function holdSupervisorMessage(machine: StoredMachine, session: string, clientRe
     queue.splice(index, 1);
     if (queue.length === 0) heldSends.delete(key);
     // Still unreachable: say so on the message, with Retry and Edit.
+    heldSince.delete(clientRef);
     conversationHistory(key).reject(clientRef, outageRefusal(machine.label));
     updateConversationViews(); renderConversationList();
-  }, HELD_SEND_MS);
+  }, expiresInMs);
   const queue = heldSends.get(key) ?? [];
   queue.push({ clientRef, supervisor, text, replyTo, expiry });
   heldSends.set(key, queue);
@@ -2492,7 +2618,7 @@ function deliverSupervisorMessage(machine: StoredMachine, session: string, super
     showComposerStatus(outageRefusal(machine.label), "error", true);
     return;
   }
-  const history = conversationHistory(sessionKey(machine.id, session));
+  const history = conversationHistory(sessionKey(machine.id, session), session);
   if (retryOf) history.discardRefused(retryOf);
   // The edited version is on the wire: the refused original stays as a record
   // but can no longer be retried.

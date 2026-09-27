@@ -903,11 +903,11 @@ async fn proxy_socket(
                     if let Some(client_ref) = client_ref.as_deref() {
                         pending_message_refs.insert((session.clone(), client_ref.to_owned()));
                     }
-                    if handle_client_message(&connector, &session, &auth, text.as_bytes()).await.is_err() {
+                    if let Err(failure) = handle_client_message(&connector, &session, &auth, text.as_bytes()).await {
                         if let Some(client_ref) = client_ref.as_deref() {
                             pending_message_refs.remove(&(session.clone(), client_ref.to_owned()));
                         }
-                        let error = legacy_forbidden_error(client_ref.as_deref());
+                        let error = legacy_send_error(&failure, client_ref.as_deref());
                         let _ = sink.send(Message::Text(error.to_string().into())).await;
                     }
                 }
@@ -916,11 +916,11 @@ async fn proxy_socket(
                     if let Some(client_ref) = client_ref.as_deref() {
                         pending_message_refs.insert((session.clone(), client_ref.to_owned()));
                     }
-                    if handle_client_message(&connector, &session, &auth, &bytes).await.is_err() {
+                    if let Err(failure) = handle_client_message(&connector, &session, &auth, &bytes).await {
                         if let Some(client_ref) = client_ref.as_deref() {
                             pending_message_refs.remove(&(session.clone(), client_ref.to_owned()));
                         }
-                        let error = legacy_forbidden_error(client_ref.as_deref());
+                        let error = legacy_send_error(&failure, client_ref.as_deref());
                         let _ = sink.send(Message::Text(error.to_string().into())).await;
                     }
                 }
@@ -1022,7 +1022,27 @@ async fn handle_client_message(
             "forwarding Commander conversation history request"
         );
     }
-    connector.send(session, message).await?;
+    if let Err(error) = connector.send(session, message).await {
+        // cas-a0e2: the hub accepted the device and the message, but the
+        // session's daemon upstream is not there to take it. Record that,
+        // so a "Not sent" has an audit row, and hand the error back
+        // unchanged for the caller to answer `upstream_unavailable`.
+        if let Err(audit_error) = store.audit(
+            Some(context),
+            "unavailable",
+            if read_message {
+                "websocket_read"
+            } else {
+                "websocket_mutation"
+            },
+            Some(scope),
+            Some(session),
+            now,
+        ) {
+            tracing::warn!(session, error = %audit_error, "cas-a0e2: upstream-unavailable audit not written");
+        }
+        return Err(error);
+    }
     store.audit(
         Some(context),
         "allowed",
@@ -1324,6 +1344,61 @@ fn client_history_request_ref(bytes: &[u8]) -> Option<String> {
 
 fn client_correlation_ref(bytes: &[u8]) -> Option<String> {
     client_message_ref(bytes).or_else(|| client_history_request_ref(bytes))
+}
+
+/// What the browser is told when the session's daemon upstream could not take
+/// a message. The wording avoids every word hub-web's refusal rules read as a
+/// control or pairing problem, and says what happens next.
+const UPSTREAM_UNAVAILABLE_MESSAGE: &str = "The session's daemon connection is reconnecting, so the message was not sent. Retry once the session is live again.";
+
+/// Whether a `handle_client_message` failure is the retryable
+/// upstream-unavailable case (cas-a0e2). Everything else stays a refusal.
+fn is_upstream_unavailable(failure: &anyhow::Error) -> bool {
+    failure
+        .downcast_ref::<crate::hub::connector::UpstreamUnavailable>()
+        .is_some()
+}
+
+/// The legacy per-session socket's answer to a failed client message:
+/// `upstream_unavailable` (retryable, cas-a0e2) when the daemon upstream was
+/// missing, otherwise the unchanged `forbidden` refusal.
+fn legacy_send_error(failure: &anyhow::Error, client_ref: Option<&str>) -> serde_json::Value {
+    if !is_upstream_unavailable(failure) {
+        return legacy_forbidden_error(client_ref);
+    }
+    let mut error = serde_json::json!({
+        "error": crate::hub::connector::UPSTREAM_UNAVAILABLE,
+        "retryable": true,
+        "message": UPSTREAM_UNAVAILABLE_MESSAGE,
+    });
+    if let Some(client_ref) = client_ref {
+        error["client_ref"] = serde_json::Value::String(client_ref.to_owned());
+    }
+    error
+}
+
+/// The machine multiplex channel's answer to a failed client message; see
+/// [`legacy_send_error`].
+fn multiplex_send_error(
+    failure: &anyhow::Error,
+    session: &str,
+    client_ref: Option<&str>,
+) -> serde_json::Value {
+    if !is_upstream_unavailable(failure) {
+        return multiplex_forbidden_error(session, client_ref);
+    }
+    let mut error = serde_json::json!({
+        "channel": format!("pty:{session}"),
+        "error": {
+            "code": crate::hub::connector::UPSTREAM_UNAVAILABLE,
+            "retryable": true,
+            "message": UPSTREAM_UNAVAILABLE_MESSAGE,
+        },
+    });
+    if let Some(client_ref) = client_ref {
+        error["error"]["client_ref"] = serde_json::Value::String(client_ref.to_owned());
+    }
+    error
 }
 
 /// Preserve the submitted reference on a legacy attach refusal without
@@ -1654,11 +1729,11 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                     if let Some(client_ref) = client_ref.as_deref() {
                         pending_message_refs.insert((session.clone(), client_ref.to_owned()));
                     }
-                    if handle_client_message(&state.connector, &session, &auth, &bytes).await.is_err() {
+                    if let Err(failure) = handle_client_message(&state.connector, &session, &auth, &bytes).await {
                         if let Some(client_ref) = client_ref.as_deref() {
                             pending_message_refs.remove(&(session.clone(), client_ref.to_owned()));
                         }
-                        let error = multiplex_forbidden_error(&session, client_ref.as_deref());
+                        let error = multiplex_send_error(&failure, &session, client_ref.as_deref());
                         if sink.send(Message::Text(error.to_string().into())).await.is_err() { break; }
                     }
                 }
@@ -2086,6 +2161,63 @@ mod machine_protocol_tests {
         );
     }
 
+    /// cas-a0e2: a missing daemon upstream is answered with the retryable
+    /// `upstream_unavailable` code on both channels, carrying the client_ref;
+    /// any other failure keeps the `forbidden` refusal byte for byte.
+    #[test]
+    fn upstream_unavailable_is_a_distinct_retryable_code_cas_a0e2() {
+        let unavailable = anyhow::Error::new(crate::hub::connector::UpstreamUnavailable {
+            reason: "session upstream closed",
+        });
+        assert_eq!(
+            legacy_send_error(&unavailable, Some("send-42")),
+            serde_json::json!({
+                "error": "upstream_unavailable",
+                "retryable": true,
+                "message": UPSTREAM_UNAVAILABLE_MESSAGE,
+                "client_ref": "send-42",
+            })
+        );
+        assert_eq!(
+            multiplex_send_error(&unavailable, "factory-a", Some("send-42")),
+            serde_json::json!({
+                "channel": "pty:factory-a",
+                "error": {
+                    "code": "upstream_unavailable",
+                    "retryable": true,
+                    "message": UPSTREAM_UNAVAILABLE_MESSAGE,
+                    "client_ref": "send-42",
+                },
+            })
+        );
+        // The browser's refusal rules must not read it as a control problem.
+        for word in [
+            "forbidden",
+            "control",
+            "lease",
+            "denied",
+            "permission",
+            "observ",
+        ] {
+            assert!(
+                !UPSTREAM_UNAVAILABLE_MESSAGE
+                    .to_ascii_lowercase()
+                    .contains(word),
+                "{word}"
+            );
+        }
+
+        let refused = anyhow::anyhow!("authorization refused");
+        assert_eq!(
+            legacy_send_error(&refused, Some("send-42")),
+            legacy_forbidden_error(Some("send-42"))
+        );
+        assert_eq!(
+            multiplex_send_error(&refused, "factory-a", None),
+            multiplex_forbidden_error("factory-a", None)
+        );
+    }
+
     #[test]
     fn message_queued_reaches_only_the_socket_that_submitted_its_ref() {
         let mut pending = HashSet::from([("factory-a".to_owned(), "send-42".to_owned())]);
@@ -2148,5 +2280,102 @@ mod catalog_visibility_tests {
             vec!["live", "empty"]
         );
         assert_eq!(supervisor_sessions(all, false, true).len(), 4);
+    }
+}
+
+/// cas-a0e2: the send path when the session's daemon upstream is missing.
+#[cfg(test)]
+mod upstream_unavailable_tests {
+    use super::*;
+    use crate::hub::SessionMultiplexer;
+
+    /// The 2026-09-26 22:52Z field shape: a controlling device's send
+    /// reached the hub while no daemon upstream could take it. It came back
+    /// `forbidden` with no audit row. It now fails with the retryable
+    /// upstream error and leaves an `unavailable` audit row.
+    #[tokio::test]
+    async fn a_send_with_no_daemon_upstream_is_audited_and_retryable_cas_a0e2() {
+        let temp = crate::test_support::private_hub_tempdir();
+        let root = temp.path().join("hub");
+        let auth = AuthStore::open(&root, "machine-test").unwrap();
+        let now = chrono::Utc::now();
+        let scopes: std::collections::BTreeSet<Scope> =
+            [Scope::MessageSend, Scope::PaneRead].into_iter().collect();
+        let invitation = auth
+            .mint_pairing("https://controller.example", scopes.clone(), now)
+            .unwrap();
+        let exchange = PairingExchange::test_fixture(
+            invitation.token,
+            "machine-test",
+            "https://controller.example",
+            scopes.clone(),
+        );
+        let credential = auth.exchange_pairing(exchange, now).unwrap();
+        let phone = AuthContext {
+            device_id: credential.device_id,
+            credential_id: credential.credential_id,
+            device_label: "phone".into(),
+            operator_label: "Daniel".into(),
+            controller_origin: "https://controller.example".into(),
+            scopes,
+            request_id: "request-a0e2".into(),
+        };
+        auth.acquire_lease(&phone, "factory-a", now).unwrap();
+        let connector = DaemonConnector::new(SessionMultiplexer::new(8), MachineEventBus::new(8));
+        let frame = serde_json::json!({
+            "SendMessage": {
+                "client_ref": "send-a0e2",
+                "target": "patient-pelican-9",
+                "text": "Do the burn down",
+                "summary": "Cassy Cloud message",
+                "urgent": false,
+                "attribution": {
+                    "device_id": null, "credential_id": null, "device_label": null,
+                    "operator_label": null, "controller_origin": null, "request_id": null
+                }
+            }
+        });
+        let bytes = serde_json::to_vec(&frame).unwrap();
+
+        let failure = handle_client_message(
+            &connector,
+            "factory-a",
+            &Some((auth.clone(), phone.clone())),
+            &bytes,
+        )
+        .await
+        .expect_err("no daemon upstream can take the message");
+        assert!(is_upstream_unavailable(&failure), "{failure:#}");
+        assert_eq!(
+            multiplex_send_error(&failure, "factory-a", Some("send-a0e2"))["error"]["code"],
+            "upstream_unavailable"
+        );
+
+        let audit = std::fs::read_to_string(root.join("audit.jsonl")).unwrap();
+        let row = audit
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|row| row["outcome"] == "unavailable")
+            .unwrap_or_else(|| panic!("no unavailable audit row in:\n{audit}"));
+        assert_eq!(row["action"], "websocket_mutation");
+        assert_eq!(row["target_session"], "factory-a");
+        assert_eq!(row["request_id"], "request-a0e2");
+
+        // A device without the lease is still refused as before, and that
+        // refusal stays `forbidden`.
+        auth.release_lease(&phone, "factory-a", now).unwrap();
+        let refused = handle_client_message(
+            &connector,
+            "factory-a",
+            &Some((auth.clone(), phone)),
+            &bytes,
+        )
+        .await
+        .expect_err("no lease");
+        assert!(!is_upstream_unavailable(&refused));
+        assert_eq!(
+            legacy_send_error(&refused, Some("send-a0e2"))["error"],
+            "forbidden"
+        );
     }
 }

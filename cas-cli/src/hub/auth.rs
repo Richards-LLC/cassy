@@ -494,6 +494,111 @@ struct LeaseRecord {
     expires_at: DateTime<Utc>,
 }
 
+/// File beside `audit.jsonl` that names a failing audit writer (cas-0140).
+pub const AUDIT_HEALTH_FILE: &str = "audit-health.json";
+/// The hub's append-only audit log.
+pub const AUDIT_LOG_FILE: &str = "audit.jsonl";
+
+/// A hub audit writer that is failing (cas-0140). An audit row that cannot be
+/// written refuses the request it was guarding, and nothing said so: the
+/// operator only saw requests fail and the log fall silent. The hub records
+/// the failure here (and in its log) on the first failed write and removes
+/// the file on the next successful one, so `cas hub status` and `cas doctor`
+/// can tell a broken writer from a hub that simply had no audited traffic.
+/// The file outlives a restart until a row is written again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditHealth {
+    pub failing_since: DateTime<Utc>,
+    pub last_failure_at: DateTime<Utc>,
+    pub failures: u64,
+    pub last_action: String,
+    pub last_error: String,
+}
+
+/// The persisted audit-writer failure under a hub state root, if any.
+pub fn read_audit_health(root: &Path) -> Result<Option<AuditHealth>> {
+    let path = root.join(AUDIT_HEALTH_FILE);
+    match fs::read(&path) {
+        Ok(bytes) => Ok(Some(
+            serde_json::from_slice(&bytes)
+                .with_context(|| format!("invalid {}", path.display()))?,
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("cannot read {}", path.display())),
+    }
+}
+
+/// What `cas hub status` and `cas doctor` say about the audit writer
+/// (cas-0140). A quiet log is not a failure: a hub with no authenticated
+/// traffic writes no rows. Only a recorded write failure is.
+#[derive(Debug, Clone, Serialize)]
+pub struct AuditWriterReport {
+    /// "ok", "failing" or "unknown" (the failure record could not be read).
+    pub status: &'static str,
+    pub path: String,
+    pub last_row_at: Option<DateTime<Utc>>,
+    pub failure: Option<AuditHealth>,
+    pub message: String,
+}
+
+impl AuditWriterReport {
+    pub fn is_failure(&self) -> bool {
+        self.status == "failing"
+    }
+}
+
+/// Build the audit-writer report for a hub state root.
+pub fn audit_writer_report(root: &Path, now: DateTime<Utc>) -> AuditWriterReport {
+    let log = root.join(AUDIT_LOG_FILE);
+    let last_row_at = fs::metadata(&log)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .map(DateTime::<Utc>::from);
+    let path = log.display().to_string();
+    let quiet = match last_row_at {
+        Some(at) => format!(
+            "last row {} ago; a hub writes rows only for authenticated requests",
+            age_label(now.signed_duration_since(at))
+        ),
+        None => "no audit rows yet".to_owned(),
+    };
+    match read_audit_health(root) {
+        Ok(None) => AuditWriterReport { status: "ok", path, last_row_at, failure: None, message: quiet },
+        Ok(Some(failure)) => AuditWriterReport {
+            status: "failing",
+            message: format!(
+                "writes failing since {} ({} failure{}, last on {}): {}. Audited requests are refused until a row can be written; check that {} is a regular 0600 file you own on a writable disk",
+                failure.failing_since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                failure.failures,
+                if failure.failures == 1 { "" } else { "s" },
+                failure.last_action,
+                failure.last_error,
+                path,
+            ),
+            path,
+            last_row_at,
+            failure: Some(failure),
+        },
+        Err(error) => AuditWriterReport {
+            status: "unknown",
+            message: format!("cannot read the audit failure record: {error:#}; {quiet}"),
+            path,
+            last_row_at,
+            failure: None,
+        },
+    }
+}
+
+fn age_label(age: Duration) -> String {
+    let seconds = age.num_seconds().max(0);
+    match seconds {
+        0..=59 => format!("{seconds}s"),
+        60..=3_599 => format!("{}m", seconds / 60),
+        3_600..=172_799 => format!("{}h", seconds / 3_600),
+        _ => format!("{}d", seconds / 86_400),
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct AuditRecord<'a> {
     timestamp: DateTime<Utc>,
@@ -516,6 +621,9 @@ struct AuthInner {
     gate: Mutex<()>,
     lock_file: File,
     revocations: broadcast::Sender<String>,
+    /// The writer's failure as last recorded, loaded from AUDIT_HEALTH_FILE at
+    /// open so a success after a restart still clears it (cas-0140).
+    audit_health: Mutex<Option<AuditHealth>>,
 }
 
 struct AuthFileLock<'a>(&'a File);
@@ -573,7 +681,24 @@ impl AuthStore {
             gate: Mutex::new(()),
             lock_file,
             revocations,
+            audit_health: Mutex::new(None),
         }));
+        // A failure recorded by a previous hub process stays visible until
+        // this one writes a row. An unreadable record says nothing true, so
+        // it is dropped rather than left to fail every status check.
+        match read_audit_health(&store.0.root) {
+            Ok(previous) => {
+                *store
+                    .0
+                    .audit_health
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("hub audit health poisoned"))? = previous;
+            }
+            Err(error) => {
+                tracing::warn!(error = %format!("{error:#}"), "dropping an unreadable hub audit failure record");
+                let _ = fs::remove_file(store.0.root.join(AUDIT_HEALTH_FILE));
+            }
+        }
         let state_path = store.0.root.join("auth.json");
         let state = store.lock()?;
         if !state_path.exists() {
@@ -1124,8 +1249,80 @@ impl AuthStore {
             controller_origin: context.map(|value| value.controller_origin.as_str()),
             target_session,
         };
-        let _state_lock = self.lock()?;
-        append_private_json_line(&self.0.root.join("audit.jsonl"), &record)
+        let written = self
+            .lock()
+            .and_then(|_state_lock| append_private_json_line(&self.0.root.join(AUDIT_LOG_FILE), &record));
+        self.record_audit_outcome(action, now, written.as_ref().err());
+        written
+    }
+
+    /// The audit writer's health as this process knows it (cas-0140).
+    pub fn audit_health(&self) -> Option<AuditHealth> {
+        self.0
+            .audit_health
+            .lock()
+            .ok()
+            .and_then(|health| health.clone())
+    }
+
+    /// Record whether an audit row was written. A failure is logged at error
+    /// level and persisted to AUDIT_HEALTH_FILE; the first success afterwards
+    /// clears both. Only transitions touch the disk, so a healthy writer adds
+    /// no I/O per row. The health record never refuses the request itself:
+    /// the audit error already does that.
+    fn record_audit_outcome(&self, action: &str, now: DateTime<Utc>, error: Option<&anyhow::Error>) {
+        let Ok(mut health) = self.0.audit_health.lock() else {
+            return;
+        };
+        let path = self.0.root.join(AUDIT_HEALTH_FILE);
+        match error {
+            None => {
+                if health.take().is_some() {
+                    if let Err(remove) = fs::remove_file(&path)
+                        && remove.kind() != std::io::ErrorKind::NotFound
+                    {
+                        tracing::warn!(error = %remove, path = %path.display(), "hub audit writer recovered but its failure record could not be removed");
+                    }
+                    tracing::info!(action, "hub audit writer recovered; rows are being written again");
+                }
+            }
+            Some(error) => {
+                let message = format!("{error:#}");
+                let next = match health.take() {
+                    Some(previous) => AuditHealth {
+                        failing_since: previous.failing_since,
+                        last_failure_at: now,
+                        failures: previous.failures.saturating_add(1),
+                        last_action: action.to_owned(),
+                        last_error: message.clone(),
+                    },
+                    None => AuditHealth {
+                        failing_since: now,
+                        last_failure_at: now,
+                        failures: 1,
+                        last_action: action.to_owned(),
+                        last_error: message.clone(),
+                    },
+                };
+                tracing::error!(action, failures = next.failures, error = %message, "hub audit row could not be written; the audited request is refused");
+                let persisted = serde_json::to_vec_pretty(&next)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|bytes| {
+                        let temporary = self.0.root.join(format!(
+                            ".audit-health.{}.{}.tmp",
+                            std::process::id(),
+                            uuid::Uuid::new_v4()
+                        ));
+                        write_private_file(&temporary, &bytes, true)?;
+                        fs::rename(&temporary, &path)?;
+                        Ok(())
+                    });
+                if let Err(persist) = persisted {
+                    tracing::error!(error = %persist, path = %path.display(), "hub audit failure record could not be written");
+                }
+                *health = Some(next);
+            }
+        }
     }
 
     pub fn ensure_active_context(&self, context: &AuthContext, now: DateTime<Utc>) -> Result<()> {

@@ -2033,6 +2033,9 @@ fn status(cli: &Cli) -> Result<()> {
     let live = state == HubDisplayState::Running;
     let service_warning = super::hub_service::inactive_detached_warning(&paths, Some(&record))?;
     let transport = hub_transport_report(&paths, Some(&record));
+    // cas-0140: a failing audit writer refuses every audited request and
+    // used to be visible only as a log that fell silent.
+    let audit = crate::hub::audit_writer_report(paths.root(), chrono::Utc::now());
     if cli.json {
         println!(
             "{}",
@@ -2044,6 +2047,7 @@ fn status(cli: &Cli) -> Result<()> {
                 "tailscale_serve": transport,
                 "service_warning": service_warning,
                 "service_status": service_status(service_warning),
+                "audit": audit,
             })
         );
     } else {
@@ -2055,6 +2059,7 @@ fn status(cli: &Cli) -> Result<()> {
             println!("ERROR: {warning}");
         }
         println!("{}", render_transport_status(&transport));
+        println!("{}", render_audit_status(&audit));
     }
     anyhow::ensure!(live, "cas hub is not ready; see status above");
     // cas-621ec: a hub serving outside its installed service has no restart
@@ -2067,7 +2072,19 @@ fn status(cli: &Cli) -> Result<()> {
         "Tailscale Serve check failed: {}",
         transport.message_with_remedy()
     );
+    anyhow::ensure!(!audit.is_failure(), "hub audit writer is failing: {}", audit.message);
     Ok(())
+}
+
+/// The status screen's audit line (cas-0140): OK with the last row's age, or
+/// FAIL with when the writer started failing and why.
+fn render_audit_status(report: &crate::hub::AuditWriterReport) -> String {
+    let verdict = match report.status {
+        "failing" => "FAIL",
+        "unknown" => "WARN",
+        _ => "OK",
+    };
+    format!("Audit log: {verdict} - {}", report.message)
 }
 
 /// `--json` severity of the installed-service finding (cas-621ec).
@@ -3174,6 +3191,36 @@ mod tests {
             rendered.contains("started by update at 2026-09-01T12:34:56Z"),
             "{rendered}"
         );
+    }
+
+    /// cas-0140: the status screen tells a quiet audit log (OK, with the last
+    /// row's age) from a failing writer (FAIL, with since-when and why).
+    #[test]
+    fn status_audit_line_tells_a_quiet_log_from_a_failing_writer() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now();
+        let empty = crate::hub::audit_writer_report(temp.path(), now);
+        assert_eq!(render_audit_status(&empty), "Audit log: OK - no audit rows yet");
+        std::fs::write(temp.path().join(crate::hub::AUDIT_LOG_FILE), b"{}\n").unwrap();
+        let quiet = crate::hub::audit_writer_report(temp.path(), now + chrono::Duration::hours(18));
+        assert!(!quiet.is_failure());
+        assert!(render_audit_status(&quiet).starts_with("Audit log: OK - last row 1"), "{}", render_audit_status(&quiet));
+        let failure = crate::hub::AuditHealth {
+            failing_since: now,
+            last_failure_at: now,
+            failures: 3,
+            last_action: "dpop_auth".into(),
+            last_error: "hub auth state must have mode 0600".into(),
+        };
+        std::fs::write(temp.path().join(crate::hub::AUDIT_HEALTH_FILE), serde_json::to_vec(&failure).unwrap()).unwrap();
+        let failing = crate::hub::audit_writer_report(temp.path(), now);
+        assert!(failing.is_failure());
+        let line = render_audit_status(&failing);
+        assert!(line.starts_with("Audit log: FAIL - writes failing since "), "{line}");
+        assert!(line.contains("3 failures, last on dpop_auth") && line.contains("mode 0600"), "{line}");
+        let json = serde_json::to_value(&failing).unwrap();
+        assert_eq!(json["status"], "failing");
+        assert_eq!(json["failure"]["failures"], 3);
     }
 
     #[test]

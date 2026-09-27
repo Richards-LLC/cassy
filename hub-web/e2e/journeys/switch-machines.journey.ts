@@ -71,7 +71,13 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await expect(page.getByRole("searchbox", { name: "Search conversations" })).toHaveAttribute("placeholder", "Search conversations (Ctrl K)");
     await page.getByRole("button", { name: "Terminal view" }).click();
     await expect(toggle).toBeVisible();
-    await expect(page.getByRole("button", { name: "Open command palette" })).toHaveText("Ctrl K");
+    // Its accessible name carries the visible chord, so "click Ctrl K" works
+    // for a voice user (label in name, cas-3400 QA F02).
+    const paletteButton = page.getByRole("button", { name: "Open command palette (Ctrl K)", exact: true });
+    await expect(paletteButton).toHaveText("Ctrl K");
+    await expect(paletteButton).toHaveAttribute("aria-keyshortcuts", "Control+K Meta+K");
+    // The tab names the open conversation too.
+    await expect(page).toHaveTitle("cas-src patient-pelican-9 — Cassy Cloud");
     // Closing the picker does not rebuild the shell, and the next periodic
     // render papers over a stale "open" state within a few seconds. So each
     // check is short: the picker must open, and say so, at once — not when a
@@ -348,6 +354,27 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await page.getByRole("button", { name: "Terminal view" }).click();
     await expect(page.locator(".session-picker-name")).toHaveText("cas-src");
     await expect(page.locator(".session-picker-codename")).toHaveText(PELICAN);
+    // The header's actions stay whole at every width, the title and chips
+    // yielding instead, even beside a long machine name (cas-3400 QA F01: at
+    // 900–1024px they were clipped out of the header).
+    const header = page.locator(".session-header");
+    for (const width of [390, 600, 849, 900, 1024, 1280]) {
+      await page.setViewportSize({ width, height: 720 });
+      for (const label of ["Atlas · Linux", "Build Server With A Very Long Hostname · Linux"]) {
+        const fit = await header.evaluate((element, text) => {
+          const chip = element.querySelector<HTMLElement>(".machine-chip");
+          if (chip) chip.textContent = text;
+          const box = element.getBoundingClientRect();
+          const right = box.right - parseFloat(getComputedStyle(element).paddingRight) + 0.5;
+          const clipped = [...element.querySelectorAll<HTMLElement>(".actions button")]
+            .filter((button) => button.getBoundingClientRect().width > 0 && button.getBoundingClientRect().right > right)
+            .map((button) => button.textContent);
+          return { overflow: element.scrollWidth > element.clientWidth + 1, clipped };
+        }, label);
+        expect(fit, `header at ${width}px with "${label}"`).toEqual({ overflow: false, clipped: [] });
+      }
+    }
+    await page.setViewportSize({ width: 1280, height: 720 });
     const initials = page.locator("#machine-rail-list .machine-initials");
     await expect(initials).toHaveCount(3);
     expect((await initials.allTextContents()).sort()).toEqual(["AL", "AT", "SM"]);
@@ -412,6 +439,8 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await expect(board.locator("button.fleet-session")).toHaveCount(pickerRows);
     expect((await board.locator("button.fleet-session").evaluateAll((cards) => cards.map((card) => (card as HTMLElement).dataset.fleetSession))).sort(), "fleet board sessions").toEqual(pickerSessions);
     await expect(board.locator(".fleet-board-summary")).toHaveText(new RegExp(`^3 machines · ${pickerRows} sessions`));
+    // Nothing open: the tab is the app's name alone.
+    await expect(page).toHaveTitle("Cassy Cloud");
     // The summary and the refresh time start with their own words, not a
     // separator drawn before them (cas-e503): "2 machines · 2 sessions",
     // "16:56". The " · " stays only between the summary's items.

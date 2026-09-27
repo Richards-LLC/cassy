@@ -556,9 +556,15 @@ main {
 }
 
 /* == Unit 3: header == */
+/* The actions (palette, control, Interrupt) never clip: their track's minimum
+   is their own width. The title, the machine chip and the connection chip
+   yield width instead, each ellipsised, and a header too narrow for them drops
+   the chips (the container rule below). At 900–1024px the header used to run
+   871px of content in 640 and cut the actions off (cas-3400 QA F01). */
 .session-header {
   display: grid;
-  grid-template-columns: minmax(var(--mobile-header-chip-width), auto) auto auto auto minmax(0, 1fr);
+  container: session-header / inline-size;
+  grid-template-columns: minmax(var(--mobile-header-chip-width), max-content) minmax(0, max-content) max-content minmax(0, max-content) minmax(max-content, 1fr);
   flex: 0 0 var(--session-header-height);
   height: var(--session-header-height);
   align-items: center;
@@ -713,6 +719,22 @@ main {
   white-space: nowrap;
 }
 
+/* A long hostname yields to the title and the actions; the full name is in
+   the chip's title attribute. */
+.machine-chip { max-width: min(100%, 20ch); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.connection-summary { max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.connection-summary .connection-dot { flex: 0 0 auto; }
+.connection-summary [data-machine-latency] { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+
+/* Desktop layout in a narrow column (Terminal view beside the rails at
+   849–1000px): the chips go, as they do on a phone, so the title keeps room and
+   the actions stay whole. */
+@media (min-width: 53.0625rem) {
+  @container session-header (max-width: 560px) {
+    .machine-chip, .mode-badge, .connection-summary { display: none; }
+  }
+}
+
 .mode-badge {
   color: var(--text-mid);
   background: var(--color-transparent);
@@ -731,6 +753,9 @@ main {
 .mode-badge[hidden] { display: none; }
 
 .session-header .actions {
+  /* The last track, whichever chips are shown: an auto-placed row put the
+     actions in the machine chip's shrinkable track when the chips were hidden. */
+  grid-column: -2;
   display: flex;
   min-width: 0;
   justify-content: flex-end;

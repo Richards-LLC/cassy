@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="color-scheme" content="light dark">
+    <title>Start</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body { margin: 0; font: 16px/1.4 Arial, sans-serif; color: #172033; background: #fff; }
+      form { box-sizing: border-box; width: min(100% - 32px, 480px); margin: 16px; padding: 16px; background: #f4f7fb; border: 1px solid #172033; }
+      label, input, button { display: block; font: inherit; }
+      input { box-sizing: border-box; width: 100%; margin: 4px 0 12px; padding: 8px; color: #172033; background: #fff; border: 1px solid #172033; }
+      button { padding: 8px 16px; color: #fff; background: #172033; border: 0; }
+      .message { margin: 12px 0 0; }
+      .message[hidden] { display: none; }
+      /* The defect a resting render never shows: once a submit fails, the
+         error is pale and cut off at a fixed width (a post-interaction bug of
+         the GH #1023 finding 7 kind). ?fixed=1 renders it correctly. */
+      .planted { width: 150px; white-space: nowrap; overflow: hidden; color: #c9ccd3; }
+      @media (prefers-color-scheme: dark) {
+        body { color: #f4f7fb; background: #172033; }
+        form { background: #253452; border-color: #8aa4d6; }
+        input { color: #f4f7fb; background: #172033; border-color: #8aa4d6; }
+        button { color: #172033; background: #f4f7fb; }
+        .planted { color: #3a4866; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <form id="start" novalidate>
+        <h1>Start a session</h1>
+        <label for="email">Email</label>
+        <input id="email" name="email" type="email" autocomplete="email">
+        <button id="submit" type="submit">Start</button>
+        <p id="status" class="message" role="status"></p>
+        <p id="error" class="message" role="alert" hidden></p>
+      </form>
+    </main>
+    <script>
+      const fixed = new URLSearchParams(location.search).has('fixed');
+      const form = document.getElementById('start');
+      const email = document.getElementById('email');
+      const status = document.getElementById('status');
+      const error = document.getElementById('error');
+      function fail(text) {
+        status.textContent = '';
+        error.textContent = text;
+        error.hidden = false;
+        error.className = fixed ? 'message' : 'message planted';
+        // Fixed: focus goes back to the field to correct; planted: it is dropped on the body.
+        if (fixed) email.focus(); else document.activeElement?.blur();
+      }
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        error.hidden = true;
+        status.textContent = 'Starting your session…';
+        if (!navigator.onLine) { fail('You are offline. Check your connection, then try again.'); return; }
+        try {
+          const response = await fetch('https://visual-qa.invalid/api/start', { method: 'POST', body: email.value });
+          if (!response.ok) throw new Error(String(response.status));
+          status.textContent = 'Your session has started.';
+        } catch {
+          fail(navigator.onLine ? 'The server could not start your session. Please try again in a minute.' : 'You are offline. Check your connection, then try again.');
+        }
+      });
+    </script>
+  </body>
+</html>

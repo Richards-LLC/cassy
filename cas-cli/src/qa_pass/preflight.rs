@@ -355,7 +355,7 @@ mod tests {
         }
     }
 
-    fn lookup(vars: &HashMap<&str, String>) -> impl Fn(&str) -> Option<String> + '_ {
+    fn lookup<'a>(vars: &'a HashMap<&'a str, String>) -> impl Fn(&str) -> Option<String> + 'a {
         move |name| vars.get(name).cloned()
     }
 

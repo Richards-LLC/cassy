@@ -349,3 +349,28 @@ describe("in the thread", () => {
     expect(blocker.querySelector(".blk-retired")?.textContent).toBe(RETIRED_LINES["session-ended"]);
   });
 });
+
+describe("keyboard up while following the tail", () => {
+  const frames = () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+  it("keeps following when the thread shrinks and the browser adjusts its scroll, but not when the reader scrolls away", async () => {
+    const history = new ConversationHistory();
+    history.reply(reply(1, "answer", "Latest."), at(9, 0));
+    const view = new ConversationView(document, history, "sup");
+    document.body.replaceChildren(view.element, view.jump);
+    const thread = view.element;
+    let height = 600;
+    Object.defineProperty(thread, "clientHeight", { configurable: true, get: () => height });
+    Object.defineProperty(thread, "scrollHeight", { configurable: true, get: () => 1000 });
+    view.update();
+    await frames(); // the initial pin settles
+    thread.scrollTop = 400; thread.dispatchEvent(new Event("scroll")); // at the tail, 600 tall
+    // The keyboard comes up: the thread is 200 tall and the browser keeps the old scrollTop.
+    height = 200; thread.scrollTop = 400; thread.dispatchEvent(new Event("scroll"));
+    expect(view.jump.hidden).toBe(true);
+    expect(thread.scrollTop).toBe(1000);
+    await frames();
+    // A scroll at an unchanged height is the reader's: it stops following.
+    thread.scrollTop = 100; thread.dispatchEvent(new Event("scroll"));
+    expect(view.jump.hidden).toBe(false);
+  });
+});

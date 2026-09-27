@@ -225,6 +225,8 @@ export class ConversationView {
   private expanded = new Set<string>();
   private following = true;
   private pinPending = false;
+  /** The thread's height at the last scroll or resize it saw (cas-16eed). */
+  private lastHeight?: number;
   private disposed = false;
   private resize?: ResizeObserver;
 
@@ -269,12 +271,23 @@ export class ConversationView {
     this.pinned.setAttribute("role", "region"); this.pinned.setAttribute("aria-label", `Waiting on you: question from ${supervisor}`);
     this.element.addEventListener("scroll", () => {
       if (this.pinPending) return;
+      // cas-16eed: the phone keyboard shrinks the thread, and the browser's
+      // own scroll adjustment for that lands here before the resize observer
+      // does. A scroll that comes with a height change is layout, not the
+      // reader scrolling away: a thread following its tail keeps following.
+      const height = this.element.clientHeight;
+      if (this.lastHeight !== undefined && height !== this.lastHeight) {
+        this.lastHeight = height;
+        if (this.following) { this.pin(); return; }
+      }
+      this.lastHeight = height;
       this.following = shouldFollowTail(this.element);
       this.jump.hidden = this.following;
     }, { passive: true });
     if (typeof ResizeObserver !== "undefined") {
       this.resize = new ResizeObserver(() => {
         for (const node of this.msgs.querySelectorAll<HTMLElement>(".coalesce-turn")) syncClampPill(node);
+        this.lastHeight = this.element.clientHeight;
         if (this.following) this.pin();
       });
       this.resize.observe(this.element);

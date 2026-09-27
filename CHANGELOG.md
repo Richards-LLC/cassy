@@ -56,6 +56,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   held and resent once the session is live again. While the link stays
   down, the page backs off its retries (about 1, 2, 4, then 8 s), and a
   message written to the legacy socket after the refused one is held too.
+  The backoff starts afresh once the session has stayed live for 10 s, so the
+  next brief drop retries within about a second.
 - A held message that waits past two minutes says Not sent because the
   session didn't come back, with Retry, instead of advising to re-pair the
   device. The composer no longer promises it will go out by itself.

@@ -31,6 +31,8 @@ Was: the hub could die and a network switch could strand Commander. → Now: bot
 
 • *Messages that wait too long* — Was: after two minutes a waiting message told you to re-pair this device, while the line below still promised it would go out. → Now: it says the session didn't come back, with a Retry.
 
+• *Quick recovery after a blip* — Was: after a session came back, the next brief drop could wait up to 8 seconds before trying again. → Now: it retries within about a second.
+
 • *No double messages* — Was: a message sent again after a reconnect could arrive twice. → Now: it arrives once.
 
 *Conversations*
@@ -97,6 +99,8 @@ Was: SIGPIPE killed long-lived servers and GitHub merges could skip independent 
 • *Held-send retries* — Was: while the daemon link stayed down the page resent about once a second, and a legacy-socket send after a refusal ended Not confirmed. → Now: retries back off 1, 2, 4, then 8 s, and later legacy sends are re-held.
 
 • *Held-send expiry* — Was: the expired bubble fell through to "re-pair this device" and the composer still said "will go out by itself". → Now: "The session didn't come back while it waited", Retry, and the composer points at the message.
+
+• *Backoff reset* — Was: the held-send backoff kept its last step after the session recovered, so the next blip waited up to 8 s. → Now: it resets after 10 s of live settle, and the hub double stops reading the legacy socket after a refusal, as the hub does (HUB-J12 step 8).
 
 • *SendMessage dedupe* — Was: a resent SendMessage could queue twice. → Now: the daemon answers a repeated `client_ref` with its first receipt and queues it once.
 

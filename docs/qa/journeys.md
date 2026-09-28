@@ -405,11 +405,12 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 1. Without launch permission, the button is the way to allow it — the list offers "Allow new sessions", not "New session"; it opens the exact `cas hub pair … --scopes …,session:launch` command to run on the machine
 2. Pair again with launch allowed — "New session" replaces the grant path
 3. Open New session and find the project — the most recently used project leads, a running project offers Attach, Browse is offered because the machine has launch folders, filtering narrows the list, and Claude is marked as the machine's default
-4. Start it and land on its supervisor — Start shows progress ("Starting <project> with <supervisor> on <machine>…") and lands in the new session's conversation once the machine lists it
-5. The session outlives the tab — after a reload the new session is still running and its conversation reopens
-6. A running project attaches instead of starting again — Attach opens the existing session's conversation
-7. A launch refused by the machine says why — the machine's refusal (here, the CLI isn't logged in) is a plain heading and the next step, with the machine's own message behind a disclosure; Back keeps the choices
-8. Browse a launch folder and start a repository in it — folders open, only repository roots are selectable, and Start lands in the new session
+4. Choose the account — every Claude account on the machine is listed with the default preselected; a logged-out one can't be picked and shows its `cas claude login <name>` command with Copy; a long address wraps; Grok has no account step; the summary names the chosen account
+5. Start it and land on its supervisor — Start shows progress ("Starting <project> with <supervisor> (<account>) on <machine>…"), sends the account, and lands in the new session's conversation once the machine lists it
+6. The session outlives the tab — after a reload the new session is still running and its conversation reopens
+7. A running project attaches instead of starting again — Attach opens the existing session's conversation
+8. A launch refused by the machine says why — the machine's refusal (here, the CLI isn't logged in) is a plain heading and the next step, with the machine's own message behind a disclosure; Back keeps the choices
+9. Browse a launch folder and start a repository in it — folders open, only repository roots are selectable, and Start lands in the new session
 
 **Expected experience**
 
@@ -422,3 +423,5 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - The hub refuses the scope at start (403): the sheet switches to the grant path.
 - The session does not come up within 90 s: the sheet says it was started and may still be starting.
 - A machine without launch folders hides Browse.
+- The machine can't list a CLI's accounts: the step says so with Try again, and the launch uses the machine's default account.
+- The chosen account was removed or logged out before Start (400 invalid_profile / 422 not_logged_in): plain advice, and the list refreshes.

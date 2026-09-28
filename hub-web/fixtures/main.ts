@@ -47,6 +47,8 @@ export const FIXTURE_NAMES = [
   "launch-error",
   "launch-starting",
   "launch-grant",
+  "launch-account",
+  "launch-account-unavailable",
 ] as const;
 
 export type FixtureName = (typeof FIXTURE_NAMES)[number];
@@ -366,7 +368,7 @@ function appendOpenPairingDialog(view: PairingFixture): void {
   }
 }
 
-type LaunchFixture = "launch-form" | "launch-browse" | "launch-error" | "launch-starting" | "launch-grant";
+type LaunchFixture = "launch-form" | "launch-browse" | "launch-error" | "launch-starting" | "launch-grant" | "launch-account" | "launch-account-unavailable";
 
 /**
  * The production New session sheet (LaunchSheet, cas-0f51) driven through its
@@ -391,6 +393,16 @@ async function openLaunchSheet(view: LaunchFixture): Promise<void> {
       ],
       browse_roots: [root],
     }),
+    profiles: async () => ({
+      claude: { installed: true, profiles: [
+        { name: "main", logged_in: true, is_default: true },
+        { name: "support@petrastella.io", logged_in: true, is_default: false },
+        { name: "customer-success-escalations@petrastella-international.example", logged_in: true, is_default: false },
+        { name: "old@petrastella.io", logged_in: false, is_default: false },
+      ] },
+      codex: { installed: true, profiles: [], error: "cli_probe_failed" },
+      grok: { installed: true, profiles: [] },
+    }),
     browse: async () => ({ root, path: "clients", truncated: true, entries: [
       { name: "archive", path: "clients/archive", launchable: false, project_id: null, target: null },
       { name: "acme-portal", path: "clients/acme-portal", launchable: true, project_id: null, target: { kind: "browse", root_id: root.id, path: "clients/acme-portal" } },
@@ -412,6 +424,12 @@ async function openLaunchSheet(view: LaunchFixture): Promise<void> {
     dialog.querySelector<HTMLButtonElement>("#launch-tab-browse")!.click();
     await settle();
     dialog.querySelector<HTMLInputElement>('[data-launch-list="browse"] input[type=radio]')?.click();
+    return;
+  }
+  if (view === "launch-account" || view === "launch-account-unavailable") {
+    dialog.querySelector<HTMLInputElement>('[data-launch-list="known"] input[type=radio]')!.click();
+    if (view === "launch-account-unavailable") dialog.querySelector<HTMLInputElement>('input[name="launch-cli"][value="codex"]')!.click();
+    else dialog.querySelector<HTMLInputElement>('input[name="launch-account"][value^="customer-success"]')!.click();
     return;
   }
   if (view === "launch-form" || view === "launch-error" || view === "launch-starting") {

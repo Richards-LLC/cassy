@@ -74,6 +74,8 @@ export type LaunchWorld = {
   defaultCli?: string;
   /** Session names the machine gives new sessions, in order. */
   names: string[];
+  /** GET /v1/launch/profiles per CLI (cas-7b52); absent lists nothing. */
+  profiles?: Record<string, { installed: boolean; profiles: Array<{ name: string; logged_in: boolean; is_default: boolean }>; error?: string }>;
   /** Session-list fetches after a start before the new session is listed (it is booting). */
   bootPolls?: number;
 };
@@ -445,6 +447,7 @@ export class HubDouble {
       this.tickBooting(machineId);
       return route.fulfill({ json: { freshness_threshold_secs: 30, sessions: this.sessionsFor(machineId) } });
     }
+    if (path === "/v1/launch/profiles") return route.fulfill({ json: this.options.launch?.[machineId]?.profiles ?? {} });
     if (path === "/v1/projects") {
       const world = this.options.launch?.[machineId];
       return route.fulfill({ json: { projects: world?.projects ?? [], browse_roots: world?.browse_roots ?? [] } });
@@ -507,13 +510,22 @@ export class HubDouble {
     if (refusal) return route.fulfill({ status: refusal.status, json: { error: refusal.error, detail: refusal.detail } });
     const known = world.projects.find((project) => target.kind === "project" && project.id === target.id);
     if (known?.running_session) return route.fulfill({ status: 200, json: { session: known.running_session, attached: true } });
+    // hub/server.rs selected_profile: unknown → 400 invalid_profile, logged out → 422 not_logged_in.
+    const cliProfiles = world.profiles?.[String(body.supervisor_cli)]?.profiles ?? [];
+    let profile: string | undefined;
+    if (typeof body.profile === "string") {
+      const row = cliProfiles.find((candidate) => candidate.name === body.profile);
+      if (!row) return route.fulfill({ status: 400, json: { error: "invalid_profile", detail: "selected profile is unavailable for this CLI" } });
+      if (!row.logged_in) return route.fulfill({ status: 422, json: { error: "not_logged_in", detail: "selected profile is unavailable for this CLI" } });
+      profile = row.name;
+    } else profile = cliProfiles.find((candidate) => candidate.is_default)?.name ?? "main";
     const name = world.names.shift();
     if (!name) return route.fulfill({ status: 500, json: { error: "launch_failed", detail: "journey: no session names left" } });
     const projectDir = known?.path ?? `${world.browse_roots?.find((root) => root.id === target.root_id)?.path ?? "/projects"}/${String(target.path)}`;
     const session: Session = { name, supervisor: name, project_dir: projectDir, workers: [], liveness: "live" };
     if (known) known.running_session = name;
     this.booting.set(name, { machine: machineId, session, polls: world.bootPolls ?? 2 });
-    return route.fulfill({ status: 202, json: { session: name, attached: false, placement: "systemd_user_scope" } });
+    return route.fulfill({ status: 202, json: { session: name, attached: false, placement: "systemd_user_scope", profile } });
   }
 
   /** A booting session is listed after its polls run out, as its daemon comes up. */

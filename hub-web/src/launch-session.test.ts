@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
-  LaunchSheet, canLaunch, defaultSupervisorCli, launchSheetMarkup, filterProjects, launchErrorCopy, parseWorkers, sortProjects,
+  LaunchSheet, accountLoginCommand, accountStep, canLaunch, defaultAccount, defaultSupervisorCli, launchSheetMarkup, launchSummary,
+  type LaunchProfiles, filterProjects, launchErrorCopy, parseWorkers, sortProjects,
   type BrowseListing, type LaunchHost, type LaunchMachine, type LaunchProject, type LaunchRequest, type LaunchResult, type ProjectCatalog,
 } from "./launch-session";
 import { launchGrantCommand, parseGrantedScopes, scopeChoices, scopeSummary } from "./pairing-scopes";
@@ -105,6 +106,7 @@ function sheet(options: {
   listing?: (root: string, path: string) => BrowseListing;
   result?: LaunchResult;
   listedAfter?: number;
+  profiles?: LaunchProfiles;
 }): { sheet: LaunchSheet; calls: Calls; dialog: () => HTMLDialogElement } {
   const calls: Calls = { launches: [], opened: [], browsed: [] };
   let polls = 0;
@@ -113,6 +115,7 @@ function sheet(options: {
     currentMachineId: () => options.machines[0]?.id,
     origin: "https://hub.example",
     projects: async () => options.catalog ?? { projects: [], browse_roots: [] },
+    profiles: async () => options.profiles ?? {},
     browse: async (_machine, root, path) => { calls.browsed.push([root, path]); return options.listing!(root, path); },
     launch: async (machineId, request) => { calls.launches.push({ machineId, request }); return options.result ?? { ok: true, session: "new-otter-1", attached: false }; },
     sessionListed: async () => ++polls >= (options.listedAfter ?? 1),
@@ -264,5 +267,106 @@ describe("LaunchSheet", () => {
     repo.dispatchEvent(new Event("change", { bubbles: true }));
     dialog().querySelector<HTMLButtonElement>('[data-launch-action="start"]')!.click();
     await vi.waitFor(() => expect(calls.launches[0]?.request.target).toEqual({ kind: "browse", root_id: "root-1", path: "clients/acme" }));
+  });
+});
+
+const ACCOUNTS: LaunchProfiles = {
+  claude: { installed: true, profiles: [
+    { name: "main", logged_in: true, is_default: true },
+    { name: "support@petrastella.io", logged_in: true, is_default: false },
+    { name: "old@petrastella.io", logged_in: false, is_default: false },
+  ] },
+  codex: { installed: true, profiles: [], error: "cli_probe_failed" },
+  grok: { installed: true, profiles: [] },
+};
+
+describe("accounts (cas-9666)", () => {
+  it("preselects the logged-in default, else the first logged-in account", () => {
+    expect(defaultAccount(ACCOUNTS.claude)).toBe("main");
+    expect(defaultAccount({ installed: true, profiles: [{ name: "a", logged_in: false, is_default: true }, { name: "b", logged_in: true, is_default: false }] })).toBe("b");
+    expect(defaultAccount({ installed: true, profiles: [{ name: "a", logged_in: false, is_default: true }] })).toBeUndefined();
+  });
+
+  it("names the login command, quoting anything unusual", () => {
+    expect(accountLoginCommand("claude", "support@petrastella.io")).toBe("cas claude login support@petrastella.io");
+    expect(accountLoginCommand("codex", "my team")).toBe("cas codex login 'my team'");
+  });
+
+  it("hides the step for Grok and a missing CLI, and falls back to the default when a check fails", () => {
+    const ready = { status: "ready", data: { ...ACCOUNTS, codex: { installed: false, profiles: [] } } };
+    expect(accountStep("grok", ready, "Atlas").kind).toBe("hidden");
+    expect(accountStep("codex", ready, "Atlas").kind).toBe("hidden");
+    expect(accountStep("claude", ready, "Atlas").kind).toBe("list");
+    const failed = accountStep("codex", { status: "ready", data: ACCOUNTS }, "Atlas");
+    expect(failed).toEqual({ kind: "unavailable", message: "Atlas couldn't check Codex's accounts. The session uses the machine's default account." });
+    expect(accountStep("claude", { status: "failed" }, "Atlas").kind).toBe("unavailable");
+    expect(accountStep("claude", { status: "loading" }, "Atlas").kind).toBe("loading");
+  });
+
+  it("says the account and a non-default crew in the summary", () => {
+    expect(launchSummary({ verb: "Start", project: "cas-src", cli: "claude", account: "support@petrastella.io", machine: "soundwave", end: "." })).toBe("Start cas-src with Claude (support@petrastella.io) on soundwave.");
+    expect(launchSummary({ verb: "Start", project: "cas-src", cli: "codex", workers: 2, machine: "Atlas", end: "." })).toBe("Start cas-src with Codex and 2 workers on Atlas.");
+    expect(launchSummary({ verb: "Start", project: "cas-src", cli: "grok", workers: 0, machine: "Atlas", end: "." })).toBe("Start cas-src with Grok on Atlas.");
+  });
+
+  it("maps a vanished or logged-out account to plain advice", () => {
+    expect(launchErrorCopy({ status: 400, code: "invalid_profile" }, "claude", "Atlas").title).toBe("That Claude account isn't on Atlas any more.");
+    const out = launchErrorCopy({ status: 422, code: "not_logged_in" }, "claude", "Atlas", "old@petrastella.io");
+    expect(out.title).toBe("The Claude account old@petrastella.io isn't logged in on Atlas.");
+    expect(out.advice).toContain("cas claude login old@petrastella.io");
+  });
+
+  const pick = (dialog: HTMLDialogElement, selector: string) => {
+    const input = dialog.querySelector<HTMLInputElement>(selector)!;
+    input.checked = true;
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+
+  it("starts on a chosen non-default account and never offers a logged-out one", async () => {
+    const { sheet: s, calls, dialog } = sheet({ machines: [ATLAS], profiles: ACCOUNTS, catalog: { projects: [project("cas-src", "2026-09-27T00:00:00Z")], browse_roots: [] } });
+    s.open();
+    await flush();
+    const step = dialog().querySelector<HTMLElement>(".launch-account")!;
+    expect(step.hidden).toBe(false);
+    expect(dialog().querySelector<HTMLInputElement>('input[name="launch-account"][value="main"]')!.checked).toBe(true);
+    expect(dialog().querySelector<HTMLInputElement>('input[name="launch-account"][value="old@petrastella.io"]')!.disabled).toBe(true);
+    expect(step.querySelector(".launch-account-out code")!.textContent).toBe("cas claude login old@petrastella.io");
+    pick(dialog(), 'input[name="launch-project"]');
+    pick(dialog(), 'input[name="launch-account"][value="support@petrastella.io"]');
+    expect(dialog().querySelector(".launch-summary")!.textContent).toBe("Start cas-src with Claude (support@petrastella.io) on Atlas.");
+    dialog().querySelector<HTMLButtonElement>('[data-launch-action="start"]')!.click();
+    await vi.waitFor(() => expect(calls.launches[0]?.request).toEqual({ target: { kind: "project", id: "p-cas-src" }, supervisor_cli: "claude", profile: "support@petrastella.io" }));
+  });
+
+  it("hides the step for Grok, shows a failed check with a retry for Codex, and sends no account for either", async () => {
+    const { sheet: s, calls, dialog } = sheet({ machines: [ATLAS], profiles: ACCOUNTS, catalog: { projects: [project("cas-src", "2026-09-27T00:00:00Z")], browse_roots: [] } });
+    s.open();
+    await flush();
+    pick(dialog(), 'input[name="launch-project"]');
+    pick(dialog(), 'input[name="launch-cli"][value="codex"]');
+    expect(dialog().querySelector(".launch-account")!.textContent).toContain("couldn't check Codex's accounts");
+    expect(dialog().querySelector('[data-launch-action="retry-accounts"]')).not.toBeNull();
+    pick(dialog(), 'input[name="launch-cli"][value="grok"]');
+    expect(dialog().querySelector<HTMLElement>(".launch-account")!.hidden).toBe(true);
+    dialog().querySelector<HTMLButtonElement>('[data-launch-action="start"]')!.click();
+    await vi.waitFor(() => expect(calls.launches[0]?.request).toEqual({ target: { kind: "project", id: "p-cas-src" }, supervisor_cli: "grok" }));
+  });
+
+  it("reopens on the machine's defaults, not the last launch's choices (QA F01)", async () => {
+    const { sheet: s, dialog } = sheet({ machines: [ATLAS], profiles: ACCOUNTS, catalog: { projects: [project("cas-src", "2026-09-27T00:00:00Z")], browse_roots: [] } });
+    s.open();
+    await flush();
+    pick(dialog(), 'input[name="launch-project"]');
+    pick(dialog(), 'input[name="launch-cli"][value="codex"]');
+    const workers = dialog().querySelector<HTMLInputElement>('input[name="launch-workers"]')!;
+    workers.value = "2";
+    workers.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(dialog().querySelector(".launch-summary")!.textContent).toBe("Start cas-src with Codex and 2 workers on Atlas.");
+    s.close();
+    s.open();
+    await flush();
+    expect(dialog().querySelector<HTMLInputElement>('input[name="launch-cli"][value="claude"]')!.checked).toBe(true);
+    expect(dialog().querySelector<HTMLInputElement>('input[name="launch-workers"]')!.value).toBe("");
+    expect(dialog().querySelector<HTMLInputElement>('input[name="launch-account"][value="main"]')!.checked).toBe(true);
   });
 });

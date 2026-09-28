@@ -39,6 +39,8 @@ export const FIXTURE_NAMES = [
   "launch-error",
   "launch-starting",
   "launch-grant",
+  "launch-account",
+  "launch-account-unavailable",
 ];
 
 export const REQUIRED_SCHEMES = ["light", "dark"];

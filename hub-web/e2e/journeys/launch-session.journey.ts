@@ -24,6 +24,18 @@ function atlasLaunch(): LaunchWorld {
       "root-code:clients": { path: "clients", entries: [{ name: "acme-portal", path: "clients/acme-portal", launchable: true, project_id: null, target: { kind: "browse", root_id: "root-code", path: "clients/acme-portal" } }] },
     },
     refuse: { "p-old": { status: 422, error: "not_logged_in", detail: "claude: not logged in for profile main (run `claude /login`)" } },
+    // cas-9666: every Claude account on the machine, one logged out, one a long address.
+    profiles: {
+      claude: { installed: true, profiles: [
+        { name: "main", logged_in: true, is_default: true },
+        { name: "support@petrastella.io", logged_in: true, is_default: false },
+        { name: "customer-success-escalations@petrastella-international.example", logged_in: true, is_default: false },
+        { name: "old@petrastella.io", logged_in: false, is_default: false },
+      ] },
+      codex: { installed: true, profiles: [{ name: "main", logged_in: true, is_default: true }] },
+      grok: { installed: true, profiles: [] },
+    },
+    defaultCli: "claude",
     names: ["bright-heron-21", "quiet-fox-5"],
     bootPolls: 2,
   };
@@ -74,17 +86,37 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
     await expect(sheet.locator("#launch-panel-known .launch-row-name")).toHaveText(["ledger-api"]);
     await sheet.getByRole("radio", { name: /ledger-api/ }).check();
     await expect(sheet.getByRole("radio", { name: "Claude Default" })).toBeChecked();
-    await expect(sheet.getByText("Start ledger-api with Claude on Atlas · Linux.")).toBeVisible();
+    await expect(sheet.getByText("Start ledger-api with Claude (main) on Atlas · Linux.")).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scrolling").toBe(true);
+  });
+
+  await journey.stage("Choose the account", async () => {
+    const accounts = sheet.getByRole("radiogroup", { name: "Claude accounts" });
+    // The machine default is preselected and says so.
+    await expect(accounts.getByRole("radio", { name: /^main Default/ })).toBeChecked();
+    // A logged-out account is listed but can't be picked, and names its fix.
+    await expect(accounts.getByRole("radio", { name: /old@petrastella\.io/ })).toBeDisabled();
+    await expect(sheet.locator(".launch-account-out code")).toHaveText("cas claude login old@petrastella.io");
+    await expect(sheet.getByRole("button", { name: "Copy login command for old@petrastella.io" })).toBeVisible();
+    // A long address wraps inside its row.
+    const long = sheet.locator(".launch-account-row").filter({ hasText: "customer-success-escalations" });
+    expect(await long.evaluate((row) => row.scrollWidth <= row.clientWidth + 1), "the long account name wraps").toBe(true);
+    // Grok runs without an account: the step goes away.
+    await sheet.getByRole("radio", { name: "Grok" }).check();
+    await expect(sheet.locator(".launch-account")).toBeHidden();
+    await sheet.getByRole("radio", { name: /^Claude/ }).check();
+    await accounts.getByRole("radio", { name: "support@petrastella.io" }).check();
+    await expect(sheet.getByText("Start ledger-api with Claude (support@petrastella.io) on Atlas · Linux.")).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scrolling").toBe(true);
   });
 
   await journey.stage("Start it and land on its supervisor", async () => {
     await sheet.getByRole("button", { name: "Start", exact: true }).tap();
-    await expect(sheet.getByRole("status")).toContainText("Starting ledger-api with Claude on Atlas · Linux…");
+    await expect(sheet.getByRole("status")).toContainText("Starting ledger-api with Claude (support@petrastella.io) on Atlas · Linux…");
     await expect(sheet).toBeHidden({ timeout: 15_000 });
     await expect(page.getByRole("button", { name: "Send to bright-heron-21", exact: true })).toBeVisible();
     await expect(page.locator(".conversation-heading")).toContainText("ledger-api");
-    expect(hub.launches.at(-1)?.body).toEqual({ target: { kind: "project", id: "p-ledger" }, supervisor_cli: "claude" });
+    expect(hub.launches.at(-1)?.body).toEqual({ target: { kind: "project", id: "p-ledger" }, supervisor_cli: "claude", profile: "support@petrastella.io" });
   });
 
   await journey.stage("The session outlives the tab", async () => {
@@ -109,8 +141,8 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
     await sheet.getByRole("radio", { name: /old-notes/ }).check();
     await sheet.getByRole("button", { name: "Start", exact: true }).tap();
     const alert = sheet.getByRole("alert");
-    await expect(alert).toContainText("Claude isn't logged in on Atlas · Linux.");
-    await expect(alert).toContainText("Log in to Claude on Atlas · Linux, then start again.");
+    await expect(alert).toContainText("The Claude account main isn't logged in on Atlas · Linux.");
+    await expect(alert).toContainText("Run cas claude login main on Atlas · Linux, or pick another account, then start again.");
     await sheet.getByText("The machine's message").tap();
     await expect(sheet.getByText("claude: not logged in for profile main")).toBeVisible();
     await sheet.getByRole("button", { name: "Back", exact: true }).tap();
@@ -125,6 +157,6 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
     await sheet.getByRole("button", { name: "Start", exact: true }).tap();
     await expect(sheet).toBeHidden({ timeout: 15_000 });
     await expect(page.getByRole("button", { name: "Send to quiet-fox-5", exact: true })).toBeVisible();
-    expect(hub.launches.at(-1)?.body).toEqual({ target: { kind: "browse", root_id: "root-code", path: "clients/acme-portal" }, supervisor_cli: "claude" });
+    expect(hub.launches.at(-1)?.body).toEqual({ target: { kind: "browse", root_id: "root-code", path: "clients/acme-portal" }, supervisor_cli: "claude", profile: "main" });
   });
 });

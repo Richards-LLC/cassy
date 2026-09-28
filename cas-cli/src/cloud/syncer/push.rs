@@ -128,6 +128,16 @@ impl CloudSyncer {
         let mut result = SyncResult::default();
         let start = Instant::now();
 
+        self.cloud_config
+            .validate_team_only()
+            .map_err(CasError::Other)?;
+        if self.cloud_config.team_only {
+            self.queue.neutralize_team_only_personal()?;
+            // A personal push envelope carries this root's project identity.
+            // Even global rows would re-register the retired personal project.
+            return Ok(result);
+        }
+
         self.requeue_version_gated_items()?;
         result.requeued_after_upgrade = self.requeue_stale_client_failures()?;
 
@@ -802,9 +812,11 @@ impl CloudSyncer {
                         for item in &batch_items {
                             let _ = self.queue.mark_failed(item.id, &e.to_string());
                             if let Some(reason) = reason.as_deref() {
-                                let _ = self
-                                    .queue
-                                    .record_row_outcome(item.id, "rejected", Some(reason));
+                                let _ = self.queue.record_row_outcome(
+                                    item.id,
+                                    "rejected",
+                                    Some(reason),
+                                );
                             }
                         }
                         // If any sub-batch fails, report the error

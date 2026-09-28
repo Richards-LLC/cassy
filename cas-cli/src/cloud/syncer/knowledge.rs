@@ -252,6 +252,7 @@ impl CloudSyncer {
     /// Returns the number of pages sent. Returns `Ok(0)` without any network
     /// activity when the user is not logged in.
     pub fn push_knowledge_pages(&self, store: &dyn KnowledgeStore) -> Result<usize, CasError> {
+        self.cloud_config.validate_team_only().map_err(CasError::Other)?;
         if !self.is_available() {
             return Ok(0);
         }
@@ -414,6 +415,7 @@ impl CloudSyncer {
         &self,
         store: &dyn KnowledgeStore,
     ) -> Result<KnowledgePullReport, CasError> {
+        self.cloud_config.validate_team_only().map_err(CasError::Other)?;
         let mut report = KnowledgePullReport::default();
         if !self.is_available() {
             return Ok(report);

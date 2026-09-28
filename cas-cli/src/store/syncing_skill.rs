@@ -20,6 +20,7 @@ pub struct SyncingSkillStore {
     /// `SyncingEntryStore::team_id` for the protocol. `None` preserves
     /// personal-only behaviour.
     team_id: Option<Arc<str>>,
+    team_only: bool,
 }
 
 impl SyncingSkillStore {
@@ -29,6 +30,7 @@ impl SyncingSkillStore {
             inner,
             queue,
             team_id: None,
+            team_only: false,
         }
     }
 
@@ -36,6 +38,7 @@ impl SyncingSkillStore {
     #[must_use]
     pub fn with_cloud_config(mut self, cloud_config: Arc<CloudConfig>) -> Self {
         self.team_id = resolve_team_id(&cloud_config);
+        self.team_only = cloud_config.team_only;
         self
     }
 
@@ -45,12 +48,18 @@ impl SyncingSkillStore {
             Err(_) => return,
         };
 
-        let _ = self.queue.enqueue(
-            EntityType::Skill,
-            &skill.id,
-            SyncOperation::Upsert,
-            Some(&payload),
-        );
+        if self.team_only && eligible_for_team_skill(skill) {
+            let _ = self
+                .queue
+                .drop_personal_queued_push_for(EntityType::Skill, &skill.id);
+        } else {
+            let _ = self.queue.enqueue(
+                EntityType::Skill,
+                &skill.id,
+                SyncOperation::Upsert,
+                Some(&payload),
+            );
+        }
 
         if let Some(team_id) = self.team_id.as_deref()
             && eligible_for_team_skill(skill)
@@ -65,14 +74,22 @@ impl SyncingSkillStore {
         }
     }
 
-    fn queue_delete(&self, id: &str) {
-        let _ = self
-            .queue
-            .enqueue(EntityType::Skill, id, SyncOperation::Delete, None);
+    fn queue_delete(&self, id: &str, team_eligible: bool) {
+        if self.team_only && team_eligible {
+            let _ = self
+                .queue
+                .drop_personal_queued_push_for(EntityType::Skill, id);
+        } else {
+            let _ = self
+                .queue
+                .enqueue(EntityType::Skill, id, SyncOperation::Delete, None);
+        }
 
         // See `share_policy` module docs: delete fans out unconditionally
         // when a team is configured.
-        if let Some(team_id) = self.team_id.as_deref() {
+        if let Some(team_id) = self.team_id.as_deref()
+            && (!self.team_only || team_eligible)
+        {
             let _ = self.queue.enqueue_for_team(
                 EntityType::Skill,
                 id,
@@ -122,8 +139,12 @@ impl SkillStore for SyncingSkillStore {
     }
 
     fn delete(&self, id: &str) -> Result<()> {
+        let team_eligible = self
+            .inner
+            .get(id)
+            .is_ok_and(|row| eligible_for_team_skill(&row));
         self.inner.delete(id)?;
-        self.queue_delete(id);
+        self.queue_delete(id, team_eligible);
         Ok(())
     }
 
@@ -133,8 +154,13 @@ impl SkillStore for SyncingSkillStore {
         changed_by: Option<&str>,
         change_note: Option<&str>,
     ) -> Result<()> {
-        self.inner.delete_with_metadata(id, changed_by, change_note)?;
-        self.queue_delete(id);
+        let team_eligible = self
+            .inner
+            .get(id)
+            .is_ok_and(|row| eligible_for_team_skill(&row));
+        self.inner
+            .delete_with_metadata(id, changed_by, change_note)?;
+        self.queue_delete(id, team_eligible);
         Ok(())
     }
 
@@ -283,6 +309,21 @@ mod tests {
         let (personal, team) = queue_counts(&queue);
         assert_eq!(personal, 1);
         assert_eq!(team, 1);
+    }
+
+    #[test]
+    fn team_only_skill_routes_project_to_team_and_global_to_personal() {
+        let (temp, mut store) = create_team_store(None);
+        store.team_only = true;
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        let mut project = make_skill("team-only-skill");
+        project.scope = Scope::Project;
+        store.add(&project).unwrap();
+        assert_eq!(queue_counts(&queue), (0, 1));
+
+        let global = make_skill("global-skill");
+        store.add(&global).unwrap();
+        assert_eq!(queue_counts(&queue), (1, 1));
     }
 
     #[test]

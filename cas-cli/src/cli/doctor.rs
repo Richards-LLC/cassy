@@ -2681,6 +2681,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
             );
         }
         checks.push(cloud_queue_check(&cas_root));
+        checks.push(cloud_team_only_check(&cas_root));
         checks.extend(sync_warning_checks(&sync_warnings));
         checks.extend(pull_id_collision_check(&cas_root));
         checks.extend(unauthored_pull_check(&cas_root));
@@ -4059,6 +4060,29 @@ fn canonical_alias_checks(cas_root: &Path) -> Vec<Check> {
             }),
     );
     checks
+}
+
+fn cloud_team_only_check(cas_root: &Path) -> Check {
+    match crate::cloud::CloudConfig::load_from_cas_dir(cas_root) {
+        Ok(config) if config.team_only => match config.validate_team_only() {
+            Ok(()) => Check::new(
+                "cloud team-only",
+                CheckStatus::Ok,
+                "on; project rows sync only to the configured team",
+            ),
+            Err(message) => Check::new("cloud team-only", CheckStatus::Error, message),
+        },
+        Ok(_) => Check::new(
+            "cloud team-only",
+            CheckStatus::Ok,
+            "off; project rows use the default personal and team routing",
+        ),
+        Err(error) => Check::new(
+            "cloud team-only",
+            CheckStatus::Warning,
+            format!("could not read cloud config: {error}"),
+        ),
+    }
 }
 
 /// Report cloud watermarks and registration markers that belong to another

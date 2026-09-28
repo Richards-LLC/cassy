@@ -10,6 +10,63 @@ fn create_test_queue() -> (TempDir, SyncQueue) {
 }
 
 #[test]
+fn team_only_neutralizes_project_copies_without_deleting_personal_rows() {
+    let (_temp, queue) = create_test_queue();
+    for (kind, id, payload) in [
+        (EntityType::Task, "project-task", r#"{"scope":"project"}"#),
+        (EntityType::Task, "global-task", r#"{"scope":"global"}"#),
+        (
+            EntityType::Entry,
+            "project-entry",
+            r#"{"scope":"project","entry_type":"learning"}"#,
+        ),
+        (
+            EntityType::Entry,
+            "private-entry",
+            r#"{"scope":"project","share":"private"}"#,
+        ),
+        (EntityType::Rule, "project-rule", r#"{"scope":"project"}"#),
+    ] {
+        queue
+            .enqueue(kind, id, SyncOperation::Upsert, Some(payload))
+            .unwrap();
+    }
+    queue
+        .enqueue_for_team(
+            EntityType::Task,
+            "project-task",
+            SyncOperation::Upsert,
+            Some(r#"{"scope":"project"}"#),
+            "team-1",
+        )
+        .unwrap();
+    queue
+        .enqueue(
+            EntityType::Rule,
+            "deleted-rule",
+            SyncOperation::Delete,
+            None,
+        )
+        .unwrap();
+    queue
+        .enqueue_for_team(
+            EntityType::Rule,
+            "deleted-rule",
+            SyncOperation::Delete,
+            None,
+            "team-1",
+        )
+        .unwrap();
+
+    assert_eq!(queue.neutralize_team_only_personal().unwrap(), 4);
+    let personal = queue.pending(10, 5).unwrap();
+    assert_eq!(personal.len(), 2);
+    assert!(personal.iter().any(|row| row.entity_id == "global-task"));
+    assert!(personal.iter().any(|row| row.entity_id == "private-entry"));
+    assert_eq!(queue.pending_for_team("team-1", 10, 5).unwrap().len(), 2);
+}
+
+#[test]
 fn test_enqueue_and_pending() {
     let (_temp, queue) = create_test_queue();
 
@@ -272,14 +329,18 @@ fn delete_metadata_with_prefix_removes_only_matching_watermarks() {
             .unwrap(),
         2
     );
-    assert!(queue
-        .get_metadata("last_team_pull_at_team-a_project-a")
-        .unwrap()
-        .is_none());
-    assert!(queue
-        .get_metadata("last_team_pull_at_team-b_project-b")
-        .unwrap()
-        .is_none());
+    assert!(
+        queue
+            .get_metadata("last_team_pull_at_team-a_project-a")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        queue
+            .get_metadata("last_team_pull_at_team-b_project-b")
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(
         queue.get_metadata("last_team_pull_at%team-c").unwrap(),
         Some("should-not-match".to_string())
@@ -866,7 +927,10 @@ fn enqueue_for_team_project_targets_a_foreign_owner() {
 
     let pending = queue.pending_for_team("team-123", 10, 5).unwrap();
     assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].project_id.as_deref(), Some("destination-project"));
+    assert_eq!(
+        pending[0].project_id.as_deref(),
+        Some("destination-project")
+    );
 }
 
 #[test]

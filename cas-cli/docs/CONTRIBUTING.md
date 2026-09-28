@@ -25,6 +25,18 @@ Re-enable only when a Phoenix-capable backend is reachable. The REST-based
 cloud syncer (`cas-cli/src/cloud/syncer/`) is independent of this flag and
 always runs when logged in.
 
+### Team-only project sync
+
+Set `[cloud] team_only = true` in a project's `.cas/config.toml` after linking
+that project to a team with `cas cloud team set`. The default is `false`:
+team-eligible project tasks, dependencies, memories, rules, and skills keep
+their existing personal plus team queue behavior. With the opt-in enabled,
+those project rows use only the team queue. Global rows and private memories
+remain in the personal queue. `cas cloud push` and `cas cloud sync` avoid a
+personal project push, and queued personal copies of project rows are removed
+locally before sync. Cloud rows are never deleted by this cleanup. Without
+an active team, sync refuses and `cas doctor` reports an error.
+
 ## Canonical install path
 
 Cassy must be installed to **one** location: `~/.local/bin/cas`. Any other

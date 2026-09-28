@@ -1,0 +1,179 @@
+[dev]
+dev_mode = true
+trace_claude_api = true
+trace_commands = true
+trace_hooks = true
+trace_retention_days = 7
+trace_store_ops = true
+
+[hooks]
+ai_context = false
+ai_fallback = true
+ai_model = "claude-haiku-4-5"
+capture_enabled = true
+capture_tools = [
+    "Write",
+    "Edit",
+    "Bash",
+]
+context_limit = 5
+generate_summaries = false
+inject_context = true
+message_display_guard = false
+minimal_start = false
+token_budget = 4000
+
+[hooks.notification]
+enabled = true
+matcher = [
+    "permission_prompt",
+    "idle_prompt",
+    "auth_success",
+]
+timeout = 1000
+
+[hooks.permission_request]
+enabled = true
+timeout = 2000
+
+[hooks.plan_mode]
+enabled = true
+include_closed = false
+semantic_search = true
+show_dependencies = true
+task_limit = 15
+token_budget = 8000
+
+[hooks.post_tool_use]
+capture_tools = [
+    "Write",
+    "Edit",
+    "Bash",
+]
+enabled = true
+keep_recent = 5
+matcher = [
+    "Write",
+    "Edit",
+    "Bash",
+]
+max_observations = 50
+timeout = 3000
+
+[hooks.post_tool_use.skip]
+commands = [
+    "ls",
+    "cd",
+    "pwd",
+    "echo",
+    "cat",
+    "head",
+    "tail",
+    "less",
+    "more",
+]
+git_readonly = [
+    "git status",
+    "git log",
+    "git diff",
+    "git show",
+    "git branch",
+]
+prefixes = [
+    "cas ",
+    "cas-",
+]
+read_extensions = [
+    ".md",
+    ".txt",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".toml",
+]
+
+[hooks.pre_compact]
+enabled = true
+timeout = 3000
+
+[hooks.pre_tool_use]
+enabled = true
+matcher = [
+    "Read",
+    "Glob",
+    "Grep",
+    "Write",
+    "Edit",
+    "Bash",
+    "WebFetch",
+    "WebSearch",
+    "Task",
+    "SendMessage",
+]
+timeout = 2000
+
+[hooks.pre_tool_use.protection]
+enabled = true
+files = [".env"]
+patterns = [
+    "credentials.json",
+    "secrets.yaml",
+    "secrets.json",
+    ".pem",
+    ".key",
+    "id_rsa",
+    "id_ed25519",
+]
+
+[hooks.session_start]
+enabled = true
+minimal = false
+timeout = 5000
+token_budget = 4000
+
+[hooks.stop]
+block_on_open_tasks = true
+duplicate_detection_enabled = false
+duplicate_detection_threshold = 20
+enabled = true
+generate_summary = false
+learning_review_enabled = false
+learning_review_threshold = 5
+rule_review_enabled = false
+rule_review_threshold = 5
+signals_analysis_enabled = false
+signals_analysis_threshold = 10
+timeout = 10000
+
+[hooks.user_prompt_submit]
+enabled = true
+timeout = 3000
+
+[issues]
+repo = "Richards-LLC/cassy"
+
+[project]
+aliases = [
+    "github.com/pippenz/cas",
+    "github.com/richards-llc/cassy",
+]
+canonical_id = "cas-src"
+
+[sync]
+demotion_threshold = 2
+enabled = true
+min_helpful = 1
+promotion_evidence = ["helpful"]
+promotion_threshold = 2
+target = ".claude/rules/cas"
+
+[tasks]
+block_exit_on_open = true
+commit_nudge_on_close = false
+
+[theme]
+mode = "dark"
+variant = "tokyo_night"
+
+[cloud]
+team_only = true

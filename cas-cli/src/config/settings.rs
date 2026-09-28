@@ -1158,6 +1158,9 @@ impl Default for NotificationConfig {
 /// Cloud sync configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CloudSyncConfig {
+    /// Project-local opt-in: team-visible project rows have no personal copy.
+    #[serde(default)]
+    pub team_only: bool,
     /// Whether auto-sync is enabled (when logged in)
     #[serde(default = "default_true")]
     pub auto_sync: bool,
@@ -1202,6 +1205,7 @@ fn default_cloud_queue_oldest_warning_secs() -> u64 {
 impl Default for CloudSyncConfig {
     fn default() -> Self {
         Self {
+            team_only: false,
             auto_sync: true,
             interval_secs: default_cloud_sync_interval(),
             pull_on_start: true,

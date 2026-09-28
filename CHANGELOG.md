@@ -7,6 +7,25 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.34.1] - 2026-09-28
+
+### Fixed
+
+- A macOS hub no longer stops answering while its process stays alive
+  (Commander showed Degraded). The hub's session read model runs on the
+  blocking pool with single-flight instead of on the async workers, so a
+  stalled SQLite close or open can no longer starve the reactor, and
+  `/v1/health` keeps answering. Callers wait at most 20 s and join the
+  running read.
+- Listed projects' agent registries stay open across session-list passes
+  instead of being closed and reopened every second, and are released when
+  the project is no longer listed.
+- The shared SQLite pool now owns every close. Connections close only
+  under their database's lock, the same lock opens take, through an idle
+  sweep (60 s TTL, at most 16 idle), so a close can no longer race an open
+  of the same file. The CLI closes idle connections on exit, and
+  `cas update` backup and rollback close them before copying `cas.db`.
+
 ## [3.34.0] - 2026-09-27
 
 ### Added

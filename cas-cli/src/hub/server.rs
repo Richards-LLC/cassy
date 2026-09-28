@@ -445,26 +445,65 @@ async fn launch_profiles<R: SessionReadModel>(
     ) {
         return with_cors(unauthorized_for(&error), &headers);
     }
-    let (claude, codex) = tokio::join!(
+    let (claude, codex, grok) = tokio::join!(
         tokio::task::spawn_blocking(|| super::launch_env::profiles(cas_mux::SupervisorCli::Claude)),
         tokio::task::spawn_blocking(|| super::launch_env::profiles(cas_mux::SupervisorCli::Codex)),
+        tokio::task::spawn_blocking(|| {
+            super::launch_env::resolve(cas_mux::SupervisorCli::Grok, None).map(|_| Vec::new())
+        }),
     );
-    let response = match (claude, codex) {
-        (Ok(Ok(claude)), Ok(Ok(codex))) => {
-            Json(serde_json::json!({"claude":claude, "codex":codex, "grok":[]})).into_response()
-        }
-        (Ok(Err(error)), _) | (_, Ok(Err(error))) => launch_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "cli_probe_failed",
-            &error.to_string(),
-        ),
-        (Err(error), _) | (_, Err(error)) => launch_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "cli_probe_failed",
-            &error.to_string(),
-        ),
-    };
-    with_cors(response, &headers)
+    with_cors(
+        Json(serde_json::json!({
+            "claude": profile_envelope(claude),
+            "codex": profile_envelope(codex),
+            "grok": profile_envelope(grok),
+        }))
+        .into_response(),
+        &headers,
+    )
+}
+
+#[derive(Serialize)]
+struct ProfileEnvelope {
+    installed: bool,
+    profiles: Vec<super::launch_env::LaunchProfile>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<&'static str>,
+}
+
+fn profile_envelope(
+    result: Result<
+        Result<Vec<super::launch_env::LaunchProfile>, super::launch_env::LaunchError>,
+        tokio::task::JoinError,
+    >,
+) -> ProfileEnvelope {
+    match result {
+        Ok(Ok(profiles)) => ProfileEnvelope {
+            installed: true,
+            profiles,
+            error: None,
+        },
+        Ok(Err(super::launch_env::LaunchError::MissingBinary { .. })) => ProfileEnvelope {
+            installed: false,
+            profiles: Vec::new(),
+            error: None,
+        },
+        Ok(Err(error)) => ProfileEnvelope {
+            installed: true,
+            profiles: Vec::new(),
+            error: Some(match error {
+                super::launch_env::LaunchError::ProfileMissing { .. } => "profile_missing",
+                super::launch_env::LaunchError::NotLoggedIn { .. } => "not_logged_in",
+                super::launch_env::LaunchError::ProbeFailed { .. } => "cli_probe_failed",
+                super::launch_env::LaunchError::MissingBinary { .. } => unreachable!(),
+            }),
+        },
+        Err(_) => ProfileEnvelope {
+            installed: true,
+            profiles: Vec::new(),
+            error: Some("cli_probe_failed"),
+        },
+    }
 }
 
 async fn diagnostics<R: SessionReadModel>(
@@ -747,6 +786,39 @@ mod launch_profile_tests {
         assert_eq!(request.profile.as_deref(), Some("support@petrastella.io"));
         let extra = r#"{"target":{"kind":"project","id":"known"},"supervisor_cli":"claude","profile":"main","args":[]}"#;
         assert!(serde_json::from_str::<LaunchSessionRequest>(extra).is_err());
+    }
+
+    #[test]
+    fn missing_cli_keeps_the_other_profiles_available() {
+        let missing = profile_envelope(Ok(Err(
+            super::super::launch_env::LaunchError::MissingBinary { cli: "codex" },
+        )));
+        let available = profile_envelope(Ok(Ok(vec![super::super::launch_env::LaunchProfile {
+            name: "support@petrastella.io".into(),
+            logged_in: true,
+            is_default: true,
+        }])));
+        let body = serde_json::json!({"claude": available, "codex": missing});
+        assert_eq!(
+            body["claude"]["profiles"][0]["name"],
+            "support@petrastella.io"
+        );
+        assert_eq!(
+            body["codex"],
+            serde_json::json!({"installed":false,"profiles":[]})
+        );
+        let failed = profile_envelope(Ok(Err(
+            super::super::launch_env::LaunchError::ProbeFailed {
+                cli: "codex",
+                detail: "status probe timed out".into(),
+            },
+        )));
+        assert_eq!(
+            serde_json::to_value(failed).unwrap(),
+            serde_json::json!({
+                "installed":true,"profiles":[],"error":"cli_probe_failed"
+            })
+        );
     }
 }
 

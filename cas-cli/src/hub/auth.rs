@@ -704,6 +704,8 @@ struct AuditRecord<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     supervisor_cli: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    profile: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     placement: Option<&'a str>,
     /// cas-d636: why an authentication was denied (an AuthRefusal code).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1354,7 +1356,7 @@ impl AuthStore {
     ) -> Result<()> {
         self.write_audit(
             context, outcome, action, required_scope, target_session,
-            None, None, None, None, now,
+            None, None, None, None, None, now,
         )
     }
 
@@ -1365,13 +1367,14 @@ impl AuthStore {
         outcome: &str,
         project: &str,
         supervisor_cli: &str,
+        profile: Option<&str>,
         session: Option<&str>,
         now: DateTime<Utc>,
         placement: Option<&str>,
     ) -> Result<()> {
         self.write_audit(
             Some(context), outcome, "session_launch", Some(Scope::SessionLaunch),
-            session, Some(project), Some(supervisor_cli), placement, None, now,
+            session, Some(project), Some(supervisor_cli), profile, placement, None, now,
         )
     }
 
@@ -1385,7 +1388,7 @@ impl AuthStore {
     ) -> Result<()> {
         self.write_audit(
             Some(context), "denied", action, None, None,
-            None, None, None, Some(refusal), now,
+            None, None, None, None, Some(refusal), now,
         )
     }
 
@@ -1399,6 +1402,7 @@ impl AuthStore {
         target_session: Option<&str>,
         project: Option<&str>,
         supervisor_cli: Option<&str>,
+        profile: Option<&str>,
         placement: Option<&str>,
         refusal: Option<AuthRefusal>,
         now: DateTime<Utc>,
@@ -1418,6 +1422,7 @@ impl AuthStore {
             target_session,
             project,
             supervisor_cli,
+            profile,
             placement,
             reason: refusal.map(AuthRefusal::code),
             detail: refusal.and_then(AuthRefusal::detail),

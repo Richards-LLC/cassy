@@ -153,48 +153,7 @@ pub fn resolve(
         }
     }
     if matches!(cli, SupervisorCli::Claude | SupervisorCli::Codex) {
-        let mut command = Command::new(&executable);
-        command.env(
-            "PATH",
-            std::env::join_paths(&path).map_err(|error| LaunchError::ProbeFailed {
-                cli: name,
-                detail: format!("invalid launch PATH: {error}"),
-            })?,
-        );
-        for key in &remove {
-            command.env_remove(key);
-        }
-        for (key, value) in &set {
-            command.env(key, value);
-        }
-        match cli {
-            SupervisorCli::Claude => {
-                command.args(["auth", "status", "--json"]);
-            }
-            SupervisorCli::Codex => {
-                command.args(["login", "status"]);
-            }
-            _ => unreachable!(),
-        }
-        let output = bounded_output(command, Duration::from_secs(5))
-            .map_err(|detail| LaunchError::ProbeFailed { cli: name, detail })?;
-        let logged_in = match cli {
-            SupervisorCli::Claude => serde_json::from_slice::<serde_json::Value>(&output.stdout)
-                .ok()
-                .and_then(|json| json.get("loggedIn").and_then(serde_json::Value::as_bool))
-                .unwrap_or(false),
-            SupervisorCli::Codex => {
-                output.status.success()
-                    && !String::from_utf8_lossy(&output.stdout)
-                        .to_ascii_lowercase()
-                        .contains("not logged in")
-                    && !String::from_utf8_lossy(&output.stderr)
-                        .to_ascii_lowercase()
-                        .contains("not logged in")
-            }
-            _ => unreachable!(),
-        };
-        if !logged_in {
+        if !probe_login(cli, &executable, &set, &remove)? {
             return Err(LaunchError::NotLoggedIn {
                 cli: name,
                 profile: profile_dir
@@ -207,6 +166,52 @@ pub fn resolve(
         executable,
         set,
         remove,
+    })
+}
+
+fn probe_login(
+    cli: SupervisorCli,
+    executable: &Path,
+    set: &[(OsString, OsString)],
+    remove: &[OsString],
+) -> Result<bool, LaunchError> {
+    let mut command = Command::new(executable);
+    for key in remove {
+        command.env_remove(key);
+    }
+    for (key, value) in set {
+        command.env(key, value);
+    }
+    match cli {
+        SupervisorCli::Claude => {
+            command.args(["auth", "status", "--json"]);
+        }
+        SupervisorCli::Codex => {
+            command.args(["login", "status"]);
+        }
+        _ => return Ok(true),
+    }
+    let output = bounded_output(command, Duration::from_secs(5)).map_err(|detail| {
+        LaunchError::ProbeFailed {
+            cli: cli_name(cli),
+            detail,
+        }
+    })?;
+    Ok(match cli {
+        SupervisorCli::Claude => serde_json::from_slice::<serde_json::Value>(&output.stdout)
+            .ok()
+            .and_then(|json| json.get("loggedIn").and_then(serde_json::Value::as_bool))
+            .unwrap_or(false),
+        SupervisorCli::Codex => {
+            output.status.success()
+                && !String::from_utf8_lossy(&output.stdout)
+                    .to_ascii_lowercase()
+                    .contains("not logged in")
+                && !String::from_utf8_lossy(&output.stderr)
+                    .to_ascii_lowercase()
+                    .contains("not logged in")
+        }
+        _ => true,
     })
 }
 
@@ -322,7 +327,7 @@ pub struct LaunchProfile {
     pub is_default: bool,
 }
 
-/// Profiles for a future Commander account picker; login is checked through
+/// Profiles for Commander account picker; login is checked through
 /// the official CLI rather than by opening any credential file.
 pub fn profiles(cli: SupervisorCli) -> Result<Vec<LaunchProfile>, LaunchError> {
     let (main_dir, prefix) = match cli {
@@ -349,25 +354,81 @@ pub fn profiles(cli: SupervisorCli) -> Result<Vec<LaunchProfile>, LaunchError> {
         named_prefix: prefix,
         main_name: "main",
     };
-    let scanned = crate::cli::account_picker::scan_profiles_with(layout, &home, None, |name, _| {
-        if resolve(cli, Some(name)).is_ok() {
-            crate::cli::account_picker::LoginState::LoggedIn
-        } else {
-            crate::cli::account_picker::LoginState::LoggedOut
-        }
+    let scanned = crate::cli::account_picker::scan_profiles_with(layout, &home, None, |_, _| {
+        crate::cli::account_picker::LoginState::Unknown
     })
     .map_err(|error| LaunchError::ProbeFailed {
         cli: cli_name(cli),
         detail: error.to_string(),
     })?;
-    Ok(scanned
-        .into_iter()
-        .map(|p| LaunchProfile {
-            is_default: p.name == default,
-            logged_in: p.login_state == crate::cli::account_picker::LoginState::LoggedIn,
-            name: p.name,
-        })
-        .collect())
+    // The login-shell PATH and executable are shared by all status checks.
+    let candidates = launch_path(&home);
+    let executable = find_executable(cli_name(cli), &candidates)
+        .ok_or(LaunchError::MissingBinary { cli: cli_name(cli) })?;
+    let path = std::env::join_paths(provider_path(&executable, &candidates)).map_err(|error| {
+        LaunchError::ProbeFailed {
+            cli: cli_name(cli),
+            detail: format!("invalid launch PATH: {error}"),
+        }
+    })?;
+    let remove: Vec<OsString> = match cli {
+        SupervisorCli::Claude => vec![
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+            "CLAUDE_CONFIG_DIR",
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+        ],
+        SupervisorCli::Codex => vec![
+            "OPENAI_API_KEY",
+            "CODEX_API_KEY",
+            "CODEX_ACCESS_TOKEN",
+            "CODEX_HOME",
+        ],
+        _ => unreachable!(),
+    }
+    .into_iter()
+    .map(OsString::from)
+    .collect();
+    let rows = std::thread::scope(|scope| {
+        let handles: Vec<_> = scanned
+            .into_iter()
+            .map(|p| {
+                let executable = &executable;
+                let path = &path;
+                let remove = &remove;
+                let default = &default;
+                scope.spawn(move || {
+                    let mut set = vec![(OsString::from("PATH"), path.clone())];
+                    if p.name != "main" {
+                        let key = match cli {
+                            SupervisorCli::Claude => "CLAUDE_CONFIG_DIR",
+                            _ => "CODEX_HOME",
+                        };
+                        set.push((OsString::from(key), p.directory.as_os_str().to_owned()));
+                        if cli == SupervisorCli::Claude {
+                            set.push((
+                                OsString::from("CLAUDE_SECURESTORAGE_CONFIG_DIR"),
+                                p.directory.as_os_str().to_owned(),
+                            ));
+                        }
+                    }
+                    LaunchProfile {
+                        is_default: p.name == default.as_str(),
+                        logged_in: probe_login(cli, executable, &set, remove).unwrap_or(false),
+                        name: p.name,
+                    }
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("profile status thread panicked"))
+            .collect()
+    });
+    Ok(rows)
 }
 
 fn launch_path(home: &Path) -> Vec<PathBuf> {

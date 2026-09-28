@@ -486,7 +486,7 @@ async fn h1_http_surface_is_real_and_origin_authorized() {
         "denied reads never touch session state"
     );
 
-    for uri in ["/v1/projects", "/v1/projects/browse?root=missing"] {
+    for uri in ["/v1/projects", "/v1/projects/browse?root=missing", "/v1/launch/profiles"] {
         let denied = app
             .clone()
             .oneshot(Request::get(uri).body(Body::empty()).unwrap())
@@ -495,6 +495,14 @@ async fn h1_http_surface_is_real_and_origin_authorized() {
         assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
     }
     assert_eq!(source.read_count(), 0);
+
+    let denied_launch = app.clone().oneshot(
+        Request::post("/v1/sessions")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"target":{"kind":"project","id":"unknown"},"supervisor_cli":"claude","profile":"main"}"#))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(denied_launch.status(), StatusCode::UNAUTHORIZED);
 
     let allowed = app
         .oneshot(
@@ -1184,6 +1192,7 @@ async fn h5_machine_identity_advertises_transport_and_untrusted_cloud_suggestion
         "https://target.tail.ts.net/"
     );
     assert_eq!(body["cloud_devices"][0]["id"], "device-hint");
+    assert!(body["default_supervisor_cli"].as_str().is_some());
     assert!(
         body["capabilities"]
             .as_array()

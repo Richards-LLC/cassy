@@ -39,7 +39,7 @@ pub struct HubState<R: SessionReadModel> {
     metadata: MachineMetadata,
     effective_origins: Vec<String>,
     response_transport: TransportSecurity,
-    launches: Arc<Mutex<HashMap<std::path::PathBuf, (String, Instant)>>>,
+    launches: Arc<Mutex<HashMap<std::path::PathBuf, (String, Instant, String)>>>,
 }
 
 impl<R: SessionReadModel> HubState<R> {
@@ -115,6 +115,7 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
             post(refresh_credential::<R>).options(preflight::<R>),
         )
         .route("/v1/machine", get(machine::<R>).options(preflight::<R>))
+        .route("/v1/launch/profiles", get(launch_profiles::<R>).options(preflight::<R>))
         .route(
             "/v1/diagnostics",
             get(diagnostics::<R>).options(preflight::<R>),
@@ -382,6 +383,7 @@ struct MachineResponse {
     capabilities: &'static [&'static str],
     transport: super::MachineTransport,
     cloud_devices: Vec<super::CloudDeviceSuggestion>,
+    default_supervisor_cli: String,
 }
 
 async fn machine<R: SessionReadModel>(
@@ -413,10 +415,95 @@ async fn machine<R: SessionReadModel>(
             ],
             transport: state.metadata.transport,
             cloud_devices: state.metadata.cloud_devices,
+            default_supervisor_cli: crate::config::Config::load(
+                &crate::store::known_repos::host_cas_dir(),
+            )
+            .ok()
+            .and_then(|config| {
+                config
+                    .llm
+                    .map(|llm| llm.harness_for_role("supervisor").to_owned())
+            })
+            .unwrap_or_else(|| "claude".into()),
         })
         .into_response(),
         &headers,
     )
+}
+
+async fn launch_profiles<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(error) = authorize(
+        &state,
+        HubAction::MachineRead,
+        Scope::MachineRead,
+        &headers,
+        "GET",
+        "/v1/launch/profiles",
+    ) {
+        return with_cors(unauthorized_for(&error), &headers);
+    }
+    let (claude, codex, grok) = tokio::join!(
+        tokio::task::spawn_blocking(|| super::launch_env::profiles(cas_mux::SupervisorCli::Claude)),
+        tokio::task::spawn_blocking(|| super::launch_env::profiles(cas_mux::SupervisorCli::Codex)),
+        tokio::task::spawn_blocking(|| {
+            super::launch_env::resolve(cas_mux::SupervisorCli::Grok, None).map(|_| Vec::new())
+        }),
+    );
+    with_cors(
+        Json(serde_json::json!({
+            "claude": profile_envelope(claude),
+            "codex": profile_envelope(codex),
+            "grok": profile_envelope(grok),
+        }))
+        .into_response(),
+        &headers,
+    )
+}
+
+#[derive(Serialize)]
+struct ProfileEnvelope {
+    installed: bool,
+    profiles: Vec<super::launch_env::LaunchProfile>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<&'static str>,
+}
+
+fn profile_envelope(
+    result: Result<
+        Result<Vec<super::launch_env::LaunchProfile>, super::launch_env::LaunchError>,
+        tokio::task::JoinError,
+    >,
+) -> ProfileEnvelope {
+    match result {
+        Ok(Ok(profiles)) => ProfileEnvelope {
+            installed: true,
+            profiles,
+            error: None,
+        },
+        Ok(Err(super::launch_env::LaunchError::MissingBinary { .. })) => ProfileEnvelope {
+            installed: false,
+            profiles: Vec::new(),
+            error: None,
+        },
+        Ok(Err(error)) => ProfileEnvelope {
+            installed: true,
+            profiles: Vec::new(),
+            error: Some(match error {
+                super::launch_env::LaunchError::ProfileMissing { .. } => "profile_missing",
+                super::launch_env::LaunchError::NotLoggedIn { .. } => "not_logged_in",
+                super::launch_env::LaunchError::ProbeFailed { .. } => "cli_probe_failed",
+                super::launch_env::LaunchError::MissingBinary { .. } => unreachable!(),
+            }),
+        },
+        Err(_) => ProfileEnvelope {
+            installed: true,
+            profiles: Vec::new(),
+            error: Some("cli_probe_failed"),
+        },
+    }
 }
 
 async fn diagnostics<R: SessionReadModel>(
@@ -586,6 +673,7 @@ struct LaunchSessionRequest {
     supervisor_cli: String,
     workers: Option<u8>,
     name: Option<String>,
+    profile: Option<String>,
 }
 
 async fn launch_session<R: SessionReadModel>(
@@ -651,11 +739,94 @@ fn valid_launch_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
+fn selected_profile<'a>(
+    name: &str,
+    profiles: &'a [super::launch_env::LaunchProfile],
+) -> Result<&'a str, (StatusCode, &'static str)> {
+    match profiles.iter().find(|row| row.name == name) {
+        Some(row) if row.logged_in => Ok(&row.name),
+        Some(_) => Err((StatusCode::UNPROCESSABLE_ENTITY, "not_logged_in")),
+        None => Err((StatusCode::BAD_REQUEST, "invalid_profile")),
+    }
+}
+
+#[cfg(test)]
+mod launch_profile_tests {
+    use super::*;
+
+    #[test]
+    fn only_listed_logged_in_profiles_are_selectable() {
+        let rows = vec![
+            super::super::launch_env::LaunchProfile {
+                name: "ready".into(),
+                logged_in: true,
+                is_default: false,
+            },
+            super::super::launch_env::LaunchProfile {
+                name: "signed-out".into(),
+                logged_in: false,
+                is_default: true,
+            },
+        ];
+        assert_eq!(selected_profile("ready", &rows), Ok("ready"));
+        assert_eq!(
+            selected_profile("signed-out", &rows),
+            Err((StatusCode::UNPROCESSABLE_ENTITY, "not_logged_in"))
+        );
+        assert_eq!(
+            selected_profile("unknown", &rows),
+            Err((StatusCode::BAD_REQUEST, "invalid_profile"))
+        );
+    }
+
+    #[test]
+    fn launch_request_accepts_profile_and_rejects_extra_fields() {
+        let body = r#"{"target":{"kind":"project","id":"known"},"supervisor_cli":"claude","profile":"support@petrastella.io"}"#;
+        let request: LaunchSessionRequest = serde_json::from_str(body).unwrap();
+        assert_eq!(request.profile.as_deref(), Some("support@petrastella.io"));
+        let extra = r#"{"target":{"kind":"project","id":"known"},"supervisor_cli":"claude","profile":"main","args":[]}"#;
+        assert!(serde_json::from_str::<LaunchSessionRequest>(extra).is_err());
+    }
+
+    #[test]
+    fn missing_cli_keeps_the_other_profiles_available() {
+        let missing = profile_envelope(Ok(Err(
+            super::super::launch_env::LaunchError::MissingBinary { cli: "codex" },
+        )));
+        let available = profile_envelope(Ok(Ok(vec![super::super::launch_env::LaunchProfile {
+            name: "support@petrastella.io".into(),
+            logged_in: true,
+            is_default: true,
+        }])));
+        let body = serde_json::json!({"claude": available, "codex": missing});
+        assert_eq!(
+            body["claude"]["profiles"][0]["name"],
+            "support@petrastella.io"
+        );
+        assert_eq!(
+            body["codex"],
+            serde_json::json!({"installed":false,"profiles":[]})
+        );
+        let failed = profile_envelope(Ok(Err(
+            super::super::launch_env::LaunchError::ProbeFailed {
+                cli: "codex",
+                detail: "status probe timed out".into(),
+            },
+        )));
+        assert_eq!(
+            serde_json::to_value(failed).unwrap(),
+            serde_json::json!({
+                "installed":true,"profiles":[],"error":"cli_probe_failed"
+            })
+        );
+    }
+}
+
 fn launch_session_blocking(
     request: LaunchSessionRequest,
     auth: &AuthStore,
     context: &AuthContext,
-    launches: &Mutex<HashMap<std::path::PathBuf, (String, Instant)>>,
+    launches: &Mutex<HashMap<std::path::PathBuf, (String, Instant, String)>>,
 ) -> Response {
     let supervisor_cli = match request.supervisor_cli.parse::<cas_mux::SupervisorCli>() {
         Ok(
@@ -690,6 +861,36 @@ fn launch_session_blocking(
             "name must be 3-80 ASCII letters, digits, or hyphens and start and end with a letter or digit",
         );
     }
+
+    let chosen_profile = if let Some(profile) = request.profile.as_deref() {
+        let profiles = match super::launch_env::profiles(supervisor_cli) {
+            Ok(profiles) => profiles,
+            Err(error) => {
+                return launch_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "cli_probe_failed",
+                    &error.to_string(),
+                );
+            }
+        };
+        match selected_profile(profile, &profiles) {
+            Ok(name) => name.to_owned(),
+            Err((status, code)) => {
+                return launch_error(status, code, "selected profile is unavailable for this CLI");
+            }
+        }
+    } else {
+        match super::launch_env::default_profile_name(supervisor_cli) {
+            Ok(profile) => profile,
+            Err(error) => {
+                return launch_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "cli_probe_failed",
+                    &error.to_string(),
+                );
+            }
+        }
+    };
 
     let root = match super::projects::resolve_launch_target(&request.target) {
         Ok(root) => root.path,
@@ -740,18 +941,18 @@ fn launch_session_blocking(
         )
             .into_response();
     }
-    if let Some((name, started)) = pending.get(&root) {
+    if let Some((name, started, profile)) = pending.get(&root) {
         if started.elapsed() < Duration::from_secs(90) {
             return (
                 StatusCode::ACCEPTED,
-                Json(serde_json::json!({"session":name, "attached":false})),
+                Json(serde_json::json!({"session":name, "attached":false, "profile":profile})),
             )
                 .into_response();
         }
     }
     pending.remove(&root);
 
-    let environment = match super::launch_env::resolve(supervisor_cli, None) {
+    let environment = match super::launch_env::resolve(supervisor_cli, request.profile.as_deref()) {
         Ok(environment) => environment,
         Err(error) => {
             let code = match error {
@@ -789,6 +990,7 @@ fn launch_session_blocking(
         "requested",
         &project,
         supervisor_cli.backend().name(),
+        Some(&chosen_profile),
         Some(&name),
         now,
         None,
@@ -819,17 +1021,40 @@ fn launch_session_blocking(
             );
         }
     }
-    let placement = match spawn_factory_daemon(&executable, &root, &name, workers, supervisor_cli, &environment, &log_path) {
+    let placement = match spawn_factory_daemon(
+        &executable,
+        &root,
+        &name,
+        workers,
+        supervisor_cli,
+        &environment,
+        &log_path,
+    ) {
         Ok(placement) => placement,
-        Err(error) => return launch_error(StatusCode::SERVICE_UNAVAILABLE, "containment_unavailable", &error.to_string()),
+        Err(error) => {
+            return launch_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "containment_unavailable",
+                &error.to_string(),
+            );
+        }
     };
-    if let Err(error) = auth.audit_launch(context, "allowed", &project, supervisor_cli.backend().name(), Some(&name), now, Some(&placement)) {
+    if let Err(error) = auth.audit_launch(
+        context,
+        "allowed",
+        &project,
+        supervisor_cli.backend().name(),
+        Some(&chosen_profile),
+        Some(&name),
+        now,
+        Some(&placement),
+    ) {
         tracing::warn!(session = %name, %error, "launched factory but could not write placement audit");
     }
-    pending.insert(root, (name.clone(), Instant::now()));
+    pending.insert(root, (name.clone(), Instant::now(), chosen_profile.clone()));
     (
         StatusCode::ACCEPTED,
-        Json(serde_json::json!({"session":name, "attached":false, "placement":placement})),
+        Json(serde_json::json!({"session":name, "attached":false, "placement":placement, "profile":chosen_profile})),
     )
         .into_response()
 }

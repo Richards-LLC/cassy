@@ -486,6 +486,16 @@ async fn h1_http_surface_is_real_and_origin_authorized() {
         "denied reads never touch session state"
     );
 
+    for uri in ["/v1/projects", "/v1/projects/browse?root=missing"] {
+        let denied = app
+            .clone()
+            .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(source.read_count(), 0);
+
     let allowed = app
         .oneshot(
             Request::get("/v1/sessions")

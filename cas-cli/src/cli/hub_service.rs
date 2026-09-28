@@ -55,8 +55,90 @@ struct ServiceReport {
     unit_path: Option<String>,
     log_path: Option<String>,
     hub_running: bool,
+    launch_readiness: Vec<LaunchReadiness>,
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct LaunchReadiness {
+    cli: &'static str,
+    profile: String,
+    ready: bool,
+    detail: String,
+}
+
+fn launch_readiness() -> Vec<LaunchReadiness> {
+    use cas_mux::SupervisorCli;
+    crate::hub::launch_env::readiness()
+        .into_iter()
+        .map(|(cli, result)| {
+            let provider = match cli {
+                "claude" => SupervisorCli::Claude,
+                "codex" => SupervisorCli::Codex,
+                _ => SupervisorCli::Grok,
+            };
+            let profile = crate::hub::launch_env::default_profile_name(provider)
+                .unwrap_or_else(|_| "unknown".into());
+            match result {
+                Ok(path) => LaunchReadiness {
+                    cli,
+                    profile,
+                    ready: true,
+                    detail: path.display().to_string(),
+                },
+                Err(error) => LaunchReadiness {
+                    cli,
+                    profile,
+                    ready: false,
+                    detail: error.to_string(),
+                },
+            }
+        })
+        .collect()
+}
+
+fn capture_launch_profiles() -> Result<()> {
+    use cas_mux::SupervisorCli;
+    let home = home_dir()?;
+    let root = crate::store::known_repos::host_cas_dir();
+    let mut config = crate::config::Config::load(&root)?;
+    let profiles = config
+        .hub
+        .get_or_insert_with(Default::default)
+        .launch_profiles
+        .get_or_insert_with(Default::default);
+    let mut recorded = Vec::new();
+    for (cli, key, slot) in [
+        (
+            SupervisorCli::Claude,
+            "CLAUDE_CONFIG_DIR",
+            &mut profiles.claude,
+        ),
+        (SupervisorCli::Codex, "CODEX_HOME", &mut profiles.codex),
+    ] {
+        if slot.is_some() {
+            continue;
+        }
+        if let Some(dir) = std::env::var_os(key) {
+            if let Some(name) = crate::hub::launch_env::captured_profile(
+                slot.as_deref(),
+                cli,
+                &home,
+                Path::new(&dir),
+            ) {
+                recorded.push(format!("Hub launch profile recorded: {key} → {name}"));
+                *slot = Some(name);
+            }
+        }
+    }
+    if !recorded.is_empty() {
+        config.save(&root)?;
+        for line in recorded {
+            println!("{line}");
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn manage_service(
@@ -102,6 +184,9 @@ fn install(
     dry_run: bool,
 ) -> Result<()> {
     let paths = HubRuntimePaths::default_for_user()?;
+    if !dry_run {
+        capture_launch_profiles()?;
+    }
     match platform {
         ServicePlatform::Launchd => {
             if tailscale_serve {
@@ -193,6 +278,7 @@ pub(super) fn restart_supervised(
             if !path.is_file() {
                 return Ok(false);
             }
+            capture_launch_profiles()?;
             let domain = launchd_domain()?;
             let active = command_succeeds(
                 "launchctl",
@@ -202,11 +288,7 @@ pub(super) fn restart_supervised(
             let service_tailscale = definition.contains("--tailscale-serve");
             let rewritten = if service_publication_repair_needed(tailscale_serve, service_tailscale)
             {
-                rewrite_launchd_publication_flags(
-                    &definition,
-                    true,
-                    tailscale_port,
-                )?
+                rewrite_launchd_publication_flags(&definition, true, tailscale_port)?
             } else {
                 ensure_launchd_cli_environment(&definition)?
             };
@@ -232,6 +314,7 @@ pub(super) fn restart_supervised(
             if !path.is_file() {
                 return Ok(false);
             }
+            capture_launch_profiles()?;
             let service_tailscale = service_file_requests_tailscale(&path)?;
             if service_publication_repair_needed(tailscale_serve, service_tailscale) {
                 repair_systemd_publication_flags(&path, tailscale_port)?;
@@ -806,6 +889,7 @@ fn report(
         unit_path: path.map(|path| path.display().to_string()),
         log_path: Some(paths.log_path().display().to_string()),
         hub_running,
+        launch_readiness: launch_readiness(),
         instructions,
     })
 }
@@ -849,6 +933,19 @@ fn print_report(cli: &Cli, report: ServiceReport) -> Result<()> {
                     println!("  Logs: {log_path}");
                 }
             }
+        }
+        for readiness in &report.launch_readiness {
+            println!(
+                "  {} launch: {} (profile {}, {})",
+                readiness.cli,
+                if readiness.ready {
+                    "ready"
+                } else {
+                    "unavailable"
+                },
+                readiness.profile,
+                readiness.detail
+            );
         }
     }
     Ok(())
@@ -1495,9 +1592,17 @@ mod tests {
             upgraded,
             systemd_unit(Path::new("/opt/cas/bin/cas"), true, 8443)
         );
-        assert_eq!(upgrade_systemd_restart_policy(&upgraded), None, "upgrade is idempotent");
         assert_eq!(
-            upgrade_systemd_restart_policy(&systemd_unit(Path::new("/opt/cas/bin/cas"), false, 443)),
+            upgrade_systemd_restart_policy(&upgraded),
+            None,
+            "upgrade is idempotent"
+        );
+        assert_eq!(
+            upgrade_systemd_restart_policy(&systemd_unit(
+                Path::new("/opt/cas/bin/cas"),
+                false,
+                443
+            )),
             None,
             "a current unit is left alone"
         );
@@ -1520,7 +1625,11 @@ mod tests {
             "RestartSec=3\nRestartForceExitStatus=SIGHUP\n",
         );
         let upgraded = upgrade_systemd_restart_policy(&stale).unwrap();
-        assert_eq!(upgraded.matches("RestartForceExitStatus=").count(), 1, "{upgraded}");
+        assert_eq!(
+            upgraded.matches("RestartForceExitStatus=").count(),
+            1,
+            "{upgraded}"
+        );
         assert!(upgraded.contains("RestartForceExitStatus=SIGHUP SIGINT SIGPIPE\n"));
 
         let no_restart_line = LEGACY_SYSTEMD_UNIT.replace("Restart=on-failure\n", "");
@@ -1567,12 +1676,18 @@ exit 0
         let unit = fixture.path().join("cas-hub.service");
         write_service_file(&unit, LEGACY_SYSTEMD_UNIT).unwrap();
 
-        assert!(refresh_systemd_unit(&unit).unwrap(), "legacy unit is rewritten");
+        assert!(
+            refresh_systemd_unit(&unit).unwrap(),
+            "legacy unit is rewritten"
+        );
         assert_eq!(
             fs::read_to_string(&unit).unwrap(),
             systemd_unit(Path::new("/opt/cas/bin/cas"), true, 8443)
         );
-        assert!(!refresh_systemd_unit(&unit).unwrap(), "current unit is left alone");
+        assert!(
+            !refresh_systemd_unit(&unit).unwrap(),
+            "current unit is left alone"
+        );
         let reloads = fs::read_to_string(&log)
             .unwrap()
             .lines()

@@ -7,6 +7,21 @@ pub struct HubConfig {
     /// Public origin used when authorizing a Commander page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_url: Option<String>,
+    /// Account names used by Commander launches when the service has no shell selectors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_profiles: Option<HubLaunchProfiles>,
+    /// Host folders Commander may browse for launchable main checkouts.
+    /// An explicit empty list disables browsing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_roots: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HubLaunchProfiles {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex: Option<String>,
 }
 
 /// Project-scoped GitHub issue intake configuration. Lives at `[issues]` in

@@ -120,6 +120,11 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
             get(diagnostics::<R>).options(preflight::<R>),
         )
         .route("/v1/sessions", get(sessions::<R>).post(launch_session::<R>).options(preflight::<R>))
+        .route("/v1/projects", get(projects::<R>).options(preflight::<R>))
+        .route(
+            "/v1/projects/browse",
+            get(projects_browse::<R>).options(preflight::<R>),
+        )
         .route("/v1/events", get(events::<R>).options(preflight::<R>))
         .route("/v1/attach", get(machine_attach::<R>))
         .route(
@@ -473,6 +478,75 @@ struct SessionsResponse {
     /// Browser catalog expiry shares worker_status's fresh-heartbeat band.
     freshness_threshold_secs: i64,
     sessions: Vec<HubSession>,
+}
+
+#[derive(Serialize)]
+struct ProjectsResponse {
+    projects: Vec<super::projects::ProjectEntry>,
+    browse_roots: Vec<super::projects::BrowseRoot>,
+}
+
+async fn projects<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(error) = authorize(
+        &state,
+        HubAction::MachineRead,
+        Scope::MachineRead,
+        &headers,
+        "GET",
+        "/v1/projects",
+    ) {
+        return with_cors(unauthorized_for(&error), &headers);
+    }
+    let sessions = match state.catalog.list().await {
+        Ok(sessions) => sessions,
+        Err(error) => return internal_error(error),
+    };
+    match tokio::task::spawn_blocking(move || {
+        Ok::<_, anyhow::Error>(ProjectsResponse {
+            projects: super::projects::list_projects(&sessions)?,
+            browse_roots: super::projects::configured_launch_roots()?,
+        })
+    })
+    .await
+    {
+        Ok(Ok(result)) => with_cors(Json(result).into_response(), &headers),
+        Ok(Err(error)) => internal_error(error),
+        Err(error) => internal_error(error.into()),
+    }
+}
+
+#[derive(Deserialize)]
+struct ProjectsBrowseQuery {
+    root: String,
+    #[serde(default)]
+    path: String,
+}
+
+async fn projects_browse<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    Query(query): Query<ProjectsBrowseQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(error) = authorize(
+        &state,
+        HubAction::MachineRead,
+        Scope::MachineRead,
+        &headers,
+        "GET",
+        "/v1/projects/browse",
+    ) {
+        return with_cors(unauthorized_for(&error), &headers);
+    }
+    match tokio::task::spawn_blocking(move || super::projects::browse(&query.root, &query.path))
+        .await
+    {
+        Ok(Ok(result)) => with_cors(Json(result).into_response(), &headers),
+        Ok(Err(_)) => with_cors(StatusCode::BAD_REQUEST.into_response(), &headers),
+        Err(error) => internal_error(error.into()),
+    }
 }
 
 async fn sessions<R: SessionReadModel>(
@@ -1923,9 +1997,7 @@ pub(crate) fn correlated_daemon_frame_allowed(
 /// Emit only bounded metadata for the private history response. The request
 /// id and row counts make a missing relay observable without logging prompts,
 /// replies, or credential material.
-pub(crate) fn conversation_history_summary(
-    bytes: &[u8],
-) -> Option<(String, usize, usize, bool)> {
+pub(crate) fn conversation_history_summary(bytes: &[u8]) -> Option<(String, usize, usize, bool)> {
     let DaemonMessage::ConversationHistory {
         request_id,
         messages,

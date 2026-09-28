@@ -1599,7 +1599,7 @@ fn serve_foreground_logged(
         record.transport_warning = transport_warning;
         paths.write_process_record(&record)?;
 
-        let catalog = SessionCatalog::new(LocalSessionReadModel);
+        let catalog = SessionCatalog::new(LocalSessionReadModel::default());
         let events = MachineEventBus::open(1024, paths.events_path())?;
         let attention_task = ai_enrichment.enabled.then(|| {
             let receiver = events.enable_enrichment();

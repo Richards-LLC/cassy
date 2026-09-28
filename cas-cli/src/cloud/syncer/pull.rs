@@ -1887,6 +1887,24 @@ impl CloudSyncer {
         file_change_store: &dyn FileChangeStore,
         commit_link_store: &dyn CommitLinkStore,
     ) -> Result<SyncResult, CasError> {
+        self.cloud_config
+            .validate_team_only()
+            .map_err(CasError::Other)?;
+        if self.cloud_config.team_only {
+            let team_id = self
+                .cloud_config
+                .active_team_id()
+                .ok_or_else(|| CasError::Other("cloud.team_only has no active team".to_string()))?;
+            let project_id = self.personal_push_project_id()?;
+            return self.pull_team(
+                &team_id,
+                &project_id,
+                store,
+                task_store,
+                rule_store,
+                skill_store,
+            );
+        }
         self.clear_conflict_log();
         self.clear_incoming_revisions();
         let mut result = SyncResult::default();

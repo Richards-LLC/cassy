@@ -9,6 +9,18 @@ use crate::cloud::sync_queue::{
 use crate::error::CasError;
 
 impl SyncQueue {
+    /// Personal rows retained while a project routes team-visible rows only
+    /// to its team. Includes retry-exhausted rows so the held count is honest.
+    pub fn personal_row_count(&self) -> Result<usize, CasError> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sync_queue WHERE team_id = ''",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
     /// Get items grouped by entity type for batched sync.
     pub fn pending_by_type(
         &self,

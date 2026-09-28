@@ -733,7 +733,7 @@ async fn h4_health_cors_allows_unpaired_trusted_origins_and_preserves_paired_ori
             .header("authorization", format!("DPoP {}", launch_credential.credential))
             .header("dpop", sign_dpop(&signing, &launch_credential.credential, "POST", "/v1/sessions", Utc::now(), &uuid::Uuid::new_v4().to_string()))
             .header("content-type", "application/json")
-            .body(Body::from(r#"{"target":{"kind":"project","id":"unknown"},"supervisor_cli":"claude"}"#))
+            .body(Body::from(r#"{"target":{"kind":"project","id":"unknown"},"supervisor_cli":"bogus"}"#))
             .unwrap(),
     ).await.unwrap();
     assert_eq!(before_revoke.status(), StatusCode::BAD_REQUEST);

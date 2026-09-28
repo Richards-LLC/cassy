@@ -1352,11 +1352,27 @@ impl AuthStore {
         target_session: Option<&str>,
         now: DateTime<Utc>,
     ) -> Result<()> {
-        self.write_audit(context, outcome, action, required_scope, target_session, None, None, None, None, now)
+        self.write_audit(
+            context, outcome, action, required_scope, target_session,
+            None, None, None, None, now,
+        )
     }
 
-    pub fn audit_launch(&self, context: &AuthContext, outcome: &str, project: &str, supervisor_cli: &str, session: Option<&str>, now: DateTime<Utc>, placement: Option<&str>) -> Result<()> {
-        self.write_audit(Some(context), outcome, "session_launch", Some(Scope::SessionLaunch), session, Some(project), Some(supervisor_cli), placement, None, now)
+    #[allow(clippy::too_many_arguments)]
+    pub fn audit_launch(
+        &self,
+        context: &AuthContext,
+        outcome: &str,
+        project: &str,
+        supervisor_cli: &str,
+        session: Option<&str>,
+        now: DateTime<Utc>,
+        placement: Option<&str>,
+    ) -> Result<()> {
+        self.write_audit(
+            Some(context), outcome, "session_launch", Some(Scope::SessionLaunch),
+            session, Some(project), Some(supervisor_cli), placement, None, now,
+        )
     }
 
     /// A denied authentication, with its reason (cas-d636).
@@ -1367,7 +1383,10 @@ impl AuthStore {
         refusal: AuthRefusal,
         now: DateTime<Utc>,
     ) -> Result<()> {
-        self.write_audit(Some(context), "denied", action, None, None, None, None, None, Some(refusal), now)
+        self.write_audit(
+            Some(context), "denied", action, None, None,
+            None, None, None, Some(refusal), now,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]

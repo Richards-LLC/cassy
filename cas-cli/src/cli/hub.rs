@@ -1079,13 +1079,31 @@ fn reap_factory_daemon(args: &HubReapDaemonArgs) -> Result<()> {
     let executable = std::env::current_exe()?;
     let store = crate::hub::DaemonExitEvidenceStore::default_for_user()
         .ok_or_else(|| anyhow::anyhow!("home directory unavailable for daemon exit receipts"))?;
-    let supervisor_cli = args.supervisor_cli.parse::<cas_mux::SupervisorCli>()
+    let supervisor_cli = args
+        .supervisor_cli
+        .parse::<cas_mux::SupervisorCli>()
         .map_err(|error| anyhow::anyhow!(error))?;
-    anyhow::ensure!(matches!(supervisor_cli, cas_mux::SupervisorCli::Claude | cas_mux::SupervisorCli::Codex | cas_mux::SupervisorCli::Grok), "unsupported supervisor CLI");
+    anyhow::ensure!(
+        matches!(
+            supervisor_cli,
+            cas_mux::SupervisorCli::Claude
+                | cas_mux::SupervisorCli::Codex
+                | cas_mux::SupervisorCli::Grok
+        ),
+        "unsupported supervisor CLI"
+    );
     let child = Command::new(executable)
         .args(["factory", "daemon", "--session", &args.session, "--cwd"])
         .arg(&args.cwd)
-        .args(["--workers", &args.workers.to_string(), "--supervisor-cli", supervisor_cli.backend().name(), "--worker-cli", supervisor_cli.backend().name(), "--foreground"])
+        .args([
+            "--workers",
+            &args.workers.to_string(),
+            "--supervisor-cli",
+            supervisor_cli.backend().name(),
+            "--worker-cli",
+            supervisor_cli.backend().name(),
+            "--foreground",
+        ])
         .stdin(Stdio::null())
         .spawn()?;
     let receipt = crate::hub::reap_spawned_daemon(&args.session, child, store)?;
@@ -1093,7 +1111,9 @@ fn reap_factory_daemon(args: &HubReapDaemonArgs) -> Result<()> {
         crate::hub::ProcessExit::Code(code) => code,
         crate::hub::ProcessExit::Signal(signal) => 128 + signal,
     };
-    if code != 0 { std::process::exit(code); }
+    if code != 0 {
+        std::process::exit(code);
+    }
     Ok(())
 }
 

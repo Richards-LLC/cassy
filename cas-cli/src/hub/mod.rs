@@ -22,6 +22,7 @@ mod death;
 mod discovery;
 mod events;
 mod identity;
+pub mod projects;
 mod runtime;
 mod server;
 mod state;

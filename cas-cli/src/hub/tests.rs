@@ -3308,12 +3308,12 @@ async fn e335_health_answers_while_session_reads_are_stalled() {
     assert_eq!(read_model.entered(), 2);
 }
 
-/// cas-e335 regression: a catalog pass must not close a project's registry
-/// database. The shared pool keeps weak references only, so before the fix
-/// every pass opened `<project>/.cas/cas.db` and closed it again once a second;
-/// a close racing the next pass's open of the same file deadlocked SQLite on
-/// macOS. The read model now holds the registry open while the project is
-/// listed and releases it once the project is gone.
+/// cas-e335 regression: the read model holds each listed project's registry
+/// open across catalog passes and releases it once the project is gone.
+/// Before the fix every pass opened `<project>/.cas/cas.db` and the last store
+/// drop closed it again, once a second; a close racing the next pass's open of
+/// the same file deadlocked SQLite on macOS. (`shared_db` now also owns every
+/// close; this pin keeps the hub's registries out of its idle sweeps.)
 #[test]
 fn e335_catalog_passes_keep_listed_registries_open() {
     use crate::store::init_cas_dir;
@@ -3340,25 +3340,33 @@ fn e335_catalog_passes_keep_listed_registries_open() {
     let db_path = cas_root.join("cas.db");
     let model = LocalSessionReadModel::default();
 
+    let pinned = |model: &LocalSessionReadModel| {
+        model
+            .registries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
+    };
+
     let projected = model.project(std::slice::from_ref(&session));
     assert_eq!(projected.len(), 1);
+    assert_eq!(pinned(&model), 1, "the listed project's registry stays open");
     let probe = cas_store::shared_db::shared_connection(&db_path).unwrap();
-    assert!(
-        Arc::strong_count(&probe) >= 2,
-        "the registry connection must outlive the pass that read it"
-    );
+    let while_pinned = Arc::strong_count(&probe);
 
     // A second pass reuses the pinned handle rather than reopening it.
     model.project(std::slice::from_ref(&session));
     let again = cas_store::shared_db::shared_connection(&db_path).unwrap();
     assert!(Arc::ptr_eq(&probe, &again));
     drop(again);
+    assert_eq!(Arc::strong_count(&probe), while_pinned);
 
     // Once the project has no listed session its registry is released.
     model.project(&[]);
+    assert_eq!(pinned(&model), 0);
     assert_eq!(
         Arc::strong_count(&probe),
-        1,
+        while_pinned - 1,
         "a project that is no longer listed must not stay pinned"
     );
 }

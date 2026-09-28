@@ -98,7 +98,7 @@ fn launch_readiness() -> Vec<LaunchReadiness> {
         .collect()
 }
 
-fn capture_launch_profiles() -> Result<()> {
+fn capture_launch_profiles(cli: &Cli) -> Result<()> {
     use cas_mux::SupervisorCli;
     let home = home_dir()?;
     let root = crate::store::known_repos::host_cas_dir();
@@ -134,11 +134,27 @@ fn capture_launch_profiles() -> Result<()> {
     }
     if !recorded.is_empty() {
         config.save(&root)?;
-        for line in recorded {
-            println!("{line}");
+        if !cli.json {
+            for line in recorded {
+                eprintln!("{line}");
+            }
         }
     }
     Ok(())
+}
+
+fn capture_launch_profiles_warning(result: Result<()>) -> Option<String> {
+    result
+        .err()
+        .map(|error| format!("Hub launch profile not recorded: {error:#}"))
+}
+
+/// Profile capture never writes to stdout: `cas update --json` reserves it for JSON.
+fn capture_launch_profiles_best_effort(cli: &Cli) {
+    if let Some(warning) = capture_launch_profiles_warning(capture_launch_profiles(cli)) {
+        tracing::warn!("{warning}");
+        eprintln!("{warning}");
+    }
 }
 
 pub(super) fn manage_service(
@@ -185,7 +201,7 @@ fn install(
 ) -> Result<()> {
     let paths = HubRuntimePaths::default_for_user()?;
     if !dry_run {
-        capture_launch_profiles()?;
+        capture_launch_profiles_best_effort(cli);
     }
     match platform {
         ServicePlatform::Launchd => {
@@ -278,7 +294,7 @@ pub(super) fn restart_supervised(
             if !path.is_file() {
                 return Ok(false);
             }
-            capture_launch_profiles()?;
+            capture_launch_profiles_best_effort(cli);
             let domain = launchd_domain()?;
             let active = command_succeeds(
                 "launchctl",
@@ -314,7 +330,7 @@ pub(super) fn restart_supervised(
             if !path.is_file() {
                 return Ok(false);
             }
-            capture_launch_profiles()?;
+            capture_launch_profiles_best_effort(cli);
             let service_tailscale = service_file_requests_tailscale(&path)?;
             if service_publication_repair_needed(tailscale_serve, service_tailscale) {
                 repair_systemd_publication_flags(&path, tailscale_port)?;
@@ -1310,6 +1326,17 @@ fn manual_linux_instructions() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profile_capture_failure_is_reported_without_failing_service_lifecycle() {
+        let warning =
+            capture_launch_profiles_warning(Err(anyhow::anyhow!("malformed host config")));
+        assert_eq!(
+            warning.as_deref(),
+            Some("Hub launch profile not recorded: malformed host config")
+        );
+        assert!(capture_launch_profiles_warning(Ok(())).is_none());
+    }
 
     #[test]
     fn launchd_plist_is_a_secret_free_golden_with_tailscale_round_trip() {

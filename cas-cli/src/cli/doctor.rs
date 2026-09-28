@@ -999,17 +999,34 @@ fn host_checks(current: Option<&Path>) -> Vec<Check> {
         Check::new("user-level store", CheckStatus::Ok, format!("host root {}", root.display())),
         host_known_repos_check(),
         host_hub_service_check(),
-        // Commander needs a usable provider under the service's environment.
-        // Keep one result per CLI so a missing provider is easy to identify.
         host_hub_transport_check(),
         host_hub_audit_check(),
     ];
+    // Commander needs a usable provider under the service's environment.
+    // Keep one result per CLI so a missing provider is easy to identify. A CLI
+    // that is not installed at all is informational: most machines run only
+    // some providers. An installed CLI that cannot launch is a warning.
     checks.extend(crate::hub::launch_env::readiness().into_iter().map(|(cli, result)| {
-        let provider = match cli { "claude" => cas_mux::SupervisorCli::Claude, "codex" => cas_mux::SupervisorCli::Codex, _ => cas_mux::SupervisorCli::Grok };
-        let profile = crate::hub::launch_env::default_profile_name(provider).unwrap_or_else(|_| "unknown".into());
+        let provider = match cli {
+            "claude" => cas_mux::SupervisorCli::Claude,
+            "codex" => cas_mux::SupervisorCli::Codex,
+            _ => cas_mux::SupervisorCli::Grok,
+        };
+        let profile = crate::hub::launch_env::default_profile_name(provider)
+            .unwrap_or_else(|_| "unknown".into());
+        let name = format!("hub launch {cli}");
         match result {
-            Ok(path) => Check::new(format!("hub launch {cli}"), CheckStatus::Ok, format!("ready: profile {profile}, {}", path.display())),
-            Err(error) => Check::new(format!("hub launch {cli}"), CheckStatus::Warning, format!("profile {profile}: {error}")),
+            Ok(path) => Check::new(
+                name,
+                CheckStatus::Ok,
+                format!("ready: profile {profile}, {}", path.display()),
+            ),
+            Err(crate::hub::launch_env::LaunchError::MissingBinary { .. }) => {
+                Check::new(name, CheckStatus::Ok, "not installed")
+            }
+            Err(error) => {
+                Check::new(name, CheckStatus::Warning, format!("profile {profile}: {error}"))
+            }
         }
     }));
     #[cfg(feature = "mcp-proxy")]

@@ -488,6 +488,7 @@ fn is_control_scope(scope: Scope) -> bool {
     matches!(
         scope,
         Scope::PaneInput
+            | Scope::SessionLaunch
             | Scope::MessageSend
             | Scope::PaneInterrupt
             | Scope::FactoryManage

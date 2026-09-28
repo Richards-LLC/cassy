@@ -513,6 +513,7 @@ async fn h4_health_cors_allows_unpaired_trusted_origins_and_preserves_paired_ori
     let auth = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
     let now = Utc::now();
     let signing = SigningKey::random(&mut OsRng);
+    assert!(!Scope::default_read_only().contains(&Scope::SessionLaunch));
     let invitation = auth
         .mint_pairing("http://127.0.0.1:4173", Scope::default_read_only(), now)
         .unwrap();
@@ -632,6 +633,23 @@ async fn h4_health_cors_allows_unpaired_trusted_origins_and_preserves_paired_ori
         .unwrap();
     assert_eq!(allowed.status(), StatusCode::OK);
 
+    let launch_denied = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/sessions")
+                .header("origin", "http://127.0.0.1:4173")
+                .header("authorization", &authorization)
+                .header("dpop", proof("POST", "/v1/sessions"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"target":{"kind":"project","id":"unknown"},"supervisor_cli":"claude"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(launch_denied.status(), StatusCode::FORBIDDEN);
+
     for (site, host) in [
         (None, "127.0.0.1:4173"),
         (Some("cross-site"), "127.0.0.1:4173"),
@@ -655,6 +673,7 @@ async fn h4_health_cors_allows_unpaired_trusted_origins_and_preserves_paired_ori
     }
 
     let mutation = app
+        .clone()
         .oneshot(
             Request::post("/v1/auth/websocket-ticket")
                 .header("host", "127.0.0.1:4173")
@@ -674,6 +693,46 @@ async fn h4_health_cors_allows_unpaired_trusted_origins_and_preserves_paired_ori
             .contains("dpop_auth"),
         "the accepted real-browser read reaches DPoP verification and audit"
     );
+
+    let launch_scopes = [Scope::MachineRead, Scope::SessionLaunch].into_iter().collect();
+    let invitation = auth
+        .mint_pairing("http://127.0.0.1:4173", launch_scopes.clone(), Utc::now())
+        .unwrap();
+    let mut launch_exchange = PairingExchange::test_fixture(
+        invitation.token,
+        "machine-test",
+        "http://127.0.0.1:4173",
+        launch_scopes,
+    );
+    launch_exchange.public_key_jwk = public_jwk(&signing);
+    let launch_credential = auth.exchange_pairing(launch_exchange, Utc::now()).unwrap();
+    let before_revoke = app.clone().oneshot(
+        Request::post("/v1/sessions")
+            .header("origin", "http://127.0.0.1:4173")
+            .header("authorization", format!("DPoP {}", launch_credential.credential))
+            .header("dpop", sign_dpop(&signing, &launch_credential.credential, "POST", "/v1/sessions", Utc::now(), &uuid::Uuid::new_v4().to_string()))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"target":{"kind":"project","id":"unknown"},"supervisor_cli":"claude"}"#))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(before_revoke.status(), StatusCode::BAD_REQUEST);
+    auth.revoke_device(&launch_credential.device_id, chrono::Utc::now())
+        .unwrap();
+    let revoked_launch = app
+        .oneshot(
+            Request::post("/v1/sessions")
+                .header("origin", "http://127.0.0.1:4173")
+                .header("authorization", format!("DPoP {}", launch_credential.credential))
+                .header("dpop", sign_dpop(&signing, &launch_credential.credential, "POST", "/v1/sessions", Utc::now(), &uuid::Uuid::new_v4().to_string()))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"target":{"kind":"project","id":"unknown"},"supervisor_cli":"claude"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(revoked_launch.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

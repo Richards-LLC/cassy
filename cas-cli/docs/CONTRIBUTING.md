@@ -36,6 +36,9 @@ remain in the personal queue. `cas cloud push` and `cas cloud sync` avoid a
 personal project push, and queued personal copies of project rows are removed
 locally before sync. Cloud rows are never deleted by this cleanup. Without
 an active team, sync refuses and `cas doctor` reports an error.
+The personal push API requires a project identity, so global and private rows
+from a team-only root remain queued rather than re-registering its retired
+personal project. `cas cloud status` and `cas doctor` show the held count.
 
 ## Canonical install path
 

@@ -38,7 +38,7 @@ impl SyncingSkillStore {
     #[must_use]
     pub fn with_cloud_config(mut self, cloud_config: Arc<CloudConfig>) -> Self {
         self.team_id = resolve_team_id(&cloud_config);
-        self.team_only = cloud_config.team_only;
+        self.team_only = cloud_config.team_only && self.team_id.is_some();
         self
     }
 

@@ -2171,15 +2171,21 @@ fn sync_project_knowledge_with_output(
     })
 }
 
+pub(crate) fn team_only_held_personal_rows(cas_root: &Path) -> Option<usize> {
+    let queue = SyncQueue::open_read_only(cas_root).ok()?;
+    queue.personal_row_count().ok()
+}
+
 fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
     let config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)?;
+    let held = config.team_only.then(|| team_only_held_personal_rows(cas_root)).flatten();
 
     if config.token.is_none() {
         if cli.json {
-            println!(
-                "{}",
-                serde_json::json!({"status": "not_logged_in", "team_only": config.team_only})
-            );
+            println!("{}", serde_json::json!({
+                "status": "not_logged_in", "team_only": config.team_only,
+                "personal_rows_held_team_only": held
+            }));
         } else {
             let theme = ActiveTheme::default();
             let mut out = io::stdout();
@@ -2188,6 +2194,10 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
             fmt.write_colored("  \u{25CF} ", warning_color)?;
             fmt.write_raw("Not logged in to Cassy Cloud")?;
             fmt.newline()?;
+            if let Some(count) = held {
+                fmt.write_raw(&format!("  {count} personal rows held (team_only)"))?;
+                fmt.newline()?;
+            }
             fmt.write_raw("  Run ")?;
             fmt.write_accent("cas login")?;
             fmt.write_raw(" to authenticate")?;
@@ -2215,6 +2225,9 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
                 if cli.json {
                     let mut body = body.clone();
                     body["team_only"] = serde_json::json!(config.team_only);
+                    if let Some(count) = held {
+                        body["personal_rows_held_team_only"] = serde_json::json!(count);
+                    }
                     if let (Some(obj), Some(counts)) =
                         (body.as_object_mut(), local_knowledge_counts(cas_root))
                     {
@@ -2252,6 +2265,10 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
                     fmt.write_muted("  Team-only: ")?;
                     fmt.write_raw(if config.team_only { "on" } else { "off" })?;
                     fmt.newline()?;
+                    if let Some(count) = held {
+                        fmt.write_raw(&format!("  {count} personal rows held (team_only)"))?;
+                        fmt.newline()?;
+                    }
 
                     let active_team = config.active_team_id();
                     fmt.write_muted("  Team:   ")?;

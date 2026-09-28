@@ -59,6 +59,7 @@ fn team_only_neutralizes_project_copies_without_deleting_personal_rows() {
         .unwrap();
 
     assert_eq!(queue.neutralize_team_only_personal().unwrap(), 4);
+    assert_eq!(queue.personal_row_count().unwrap(), 2);
     let personal = queue.pending(10, 5).unwrap();
     assert_eq!(personal.len(), 2);
     assert!(personal.iter().any(|row| row.entity_id == "global-task"));

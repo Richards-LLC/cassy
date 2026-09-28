@@ -4065,12 +4065,18 @@ fn canonical_alias_checks(cas_root: &Path) -> Vec<Check> {
 fn cloud_team_only_check(cas_root: &Path) -> Check {
     match crate::cloud::CloudConfig::load_from_cas_dir(cas_root) {
         Ok(config) if config.team_only => match config.validate_team_only() {
-            Ok(()) => Check::new(
-                "cloud team-only",
-                CheckStatus::Ok,
-                "on; project rows sync only to the configured team",
-            ),
-            Err(message) => Check::new("cloud team-only", CheckStatus::Error, message),
+            Ok(()) => {
+                let held = crate::cli::cloud::team_only_held_personal_rows(cas_root).unwrap_or(0);
+                Check::new(
+                    "cloud team-only",
+                    if held > 0 { CheckStatus::Warning } else { CheckStatus::Ok },
+                    format!("on; project rows sync only to the configured team; {held} personal rows held (team_only)"),
+                )
+            }
+            Err(message) => {
+                let held = crate::cli::cloud::team_only_held_personal_rows(cas_root).unwrap_or(0);
+                Check::new("cloud team-only", CheckStatus::Error, format!("{message}; {held} personal rows held (team_only)"))
+            }
         },
         Ok(_) => Check::new(
             "cloud team-only",

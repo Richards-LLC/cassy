@@ -53,7 +53,7 @@ impl SyncingTaskStore {
     #[must_use]
     pub fn with_cloud_config(mut self, cloud_config: Arc<CloudConfig>) -> Self {
         self.team_id = resolve_team_id(&cloud_config);
-        self.team_only = cloud_config.team_only;
+        self.team_only = cloud_config.team_only && self.team_id.is_some();
         self
     }
 
@@ -1464,6 +1464,19 @@ mod tests {
         task.title = "after".to_string();
         store.update(&task).unwrap();
         assert_eq!(queue_counts(&queue), (0, 1));
+    }
+
+    #[test]
+    fn team_only_without_team_keeps_project_task_personal() {
+        let (temp, store) = create_test_store();
+        let mut config = CloudConfig::default();
+        config.team_only = true;
+        let store = store.with_cloud_config(Arc::new(config));
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        store
+            .add(&Task::new("unlinked-task".to_string(), "local".to_string()))
+            .unwrap();
+        assert_eq!(queue.pending(10, 5).unwrap().len(), 1);
     }
 
     #[test]

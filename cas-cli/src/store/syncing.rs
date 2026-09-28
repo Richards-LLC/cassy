@@ -80,7 +80,7 @@ impl SyncingRuleStore {
             "SyncingRuleStore::with_cloud_config called without with_cloud_queue — team dual-enqueue will silently no-op"
         );
         self.team_id = resolve_team_id(&cloud_config);
-        self.team_only = cloud_config.team_only;
+        self.team_only = cloud_config.team_only && self.team_id.is_some();
         self
     }
 

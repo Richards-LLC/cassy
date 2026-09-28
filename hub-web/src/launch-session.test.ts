@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
-  LaunchSheet, canLaunch, defaultSupervisorCli, filterProjects, launchErrorCopy, parseWorkers, sortProjects,
+  LaunchSheet, canLaunch, defaultSupervisorCli, launchSheetMarkup, filterProjects, launchErrorCopy, parseWorkers, sortProjects,
   type BrowseListing, type LaunchHost, type LaunchMachine, type LaunchProject, type LaunchRequest, type LaunchResult, type ProjectCatalog,
 } from "./launch-session";
 import { launchGrantCommand, parseGrantedScopes, scopeChoices, scopeSummary } from "./pairing-scopes";
@@ -45,9 +45,14 @@ describe("launch model", () => {
     expect(parseWorkers("2.5").ok).toBe(false);
   });
 
+  it("offers only the supervisors the hub launches", () => {
+    document.body.innerHTML = launchSheetMarkup();
+    expect([...document.querySelectorAll<HTMLInputElement>("input[name=launch-cli]")].map((input) => input.value)).toEqual(["claude", "codex", "grok"]);
+  });
+
   it("defaults the supervisor to the machine's own CLI, else Claude", () => {
     expect(defaultSupervisorCli({ defaultCli: "codex" })).toBe("codex");
-    expect(defaultSupervisorCli({ defaultCli: "vim" })).toBe("claude");
+    expect(defaultSupervisorCli({ defaultCli: "opencode" })).toBe("claude");
     expect(defaultSupervisorCli(undefined)).toBe("claude");
   });
 

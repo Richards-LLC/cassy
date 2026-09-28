@@ -13,13 +13,13 @@ import { escapeHtml, projectTitle } from "./cloud-brand";
 import { LAUNCH_SCOPE, launchGrantCommand } from "./pairing-scopes";
 import type { Scope } from "./types";
 
-export type SupervisorCli = "claude" | "codex" | "grok" | "opencode";
+/** The supervisors POST /v1/sessions accepts (hub/server.rs launch_session_blocking). */
+export type SupervisorCli = "claude" | "codex" | "grok";
 
 export const SUPERVISOR_CLIS: ReadonlyArray<{ readonly id: SupervisorCli; readonly label: string }> = [
   { id: "claude", label: "Claude" },
   { id: "codex", label: "Codex" },
   { id: "grok", label: "Grok" },
-  { id: "opencode", label: "OpenCode" },
 ];
 
 export type LaunchTarget = { readonly kind: "project"; readonly id: string } | { readonly kind: "browse"; readonly root_id: string; readonly path: string };
@@ -186,8 +186,10 @@ export function launchSheetMarkup(): string {
         </div>
       </fieldset>
       <!-- Account step slot: a profile picker fed by the machine's profile list goes here once the hub exposes one. -->
+      <div class="launch-options">
       <fieldset class="launch-cli" aria-describedby="launch-cli-hint"><legend>Supervisor</legend><div class="launch-cli-options">${clis}</div><small id="launch-cli-hint" class="field-hint">Runs the session's supervisor.</small></fieldset>
       <label class="launch-workers"><span>Workers <span class="launch-optional">(optional)</span></span><input name="launch-workers" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="0" aria-describedby="launch-workers-hint"><small id="launch-workers-hint" class="field-hint">0 to 16. Leave empty to start the supervisor alone.</small></label>
+      </div>
       <p class="launch-invalid" role="alert" hidden></p>
       <div class="dialog-actions launch-actions"><p class="launch-summary" aria-live="polite"></p><button type="button" data-launch-action="close">Cancel</button><button type="button" class="primary" data-launch-action="start" aria-disabled="true">Start</button></div>
     </section>

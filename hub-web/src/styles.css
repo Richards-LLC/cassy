@@ -3876,7 +3876,7 @@ button.chip:disabled { cursor: default; }
 .conversation-list-actions { display: inline-flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-1); margin-inline-start: auto; }
 .new-session-toggle { white-space: nowrap; }
 .new-session-toggle > span[aria-hidden] { font-weight: var(--weight-semibold); }
-.launch-sheet { width: min(560px, calc(100vw - var(--space-6))); max-height: min(84dvh, 760px); margin-block: min(10dvh, 80px) auto; padding: var(--space-4); background: var(--bg-raised); }
+.launch-sheet { width: min(600px, calc(100vw - var(--space-6))); max-height: min(92dvh, 820px); margin-block: min(4dvh, 32px) auto; padding: var(--space-4); background: var(--bg-raised); }
 .launch-flow { display: grid; gap: var(--space-3); min-height: 0; overflow-y: auto; overscroll-behavior: contain; align-content: start; padding-inline: calc(2 * var(--focus-ring-width)); margin-inline: calc(-2 * var(--focus-ring-width)); scroll-padding-bottom: calc(var(--button-height) + var(--space-6)); }
 .launch-flow > * { min-width: 0; }
 .launch-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
@@ -3897,7 +3897,8 @@ button.chip:disabled { cursor: default; }
 .launch-panel[hidden] { display: none; }
 .launch-panel input[type=search] { min-height: var(--button-height); padding: 0 var(--space-3); color: var(--ink); background: var(--panel); border: var(--line-width) solid var(--ink-mid); border-radius: var(--radius-card); }
 /* The list scrolls on its own so the supervisor choice and Start stay in reach. */
-.launch-list { display: grid; gap: var(--space-1); max-height: min(40dvh, 320px); overflow-y: auto; overscroll-behavior: contain; padding: var(--focus-ring-width); margin: calc(-1 * var(--focus-ring-width)); }
+.launch-list { display: flex; flex-direction: column; gap: var(--space-1); max-height: min(30dvh, 244px); overflow-y: auto; overscroll-behavior: contain; padding: var(--focus-ring-width); margin: calc(-1 * var(--focus-ring-width)); }
+.launch-list > * { flex: none; }
 .launch-row { display: flex; align-items: center; gap: var(--space-3); min-height: 48px; min-width: 0; padding: var(--space-2) var(--space-3); color: var(--text-hi); background: var(--panel); border: var(--line-width) solid var(--color-transparent); border-radius: var(--radius-card); font-size: var(--fs-base); text-align: left; cursor: pointer; }
 .launch-row:hover { background: var(--bg-hover); }
 .launch-row-text { display: grid; min-width: 0; flex: 1; gap: 2px; }
@@ -3922,7 +3923,11 @@ button.chip:disabled { cursor: default; }
 .launch-crumb-current { padding: 0 var(--space-2); color: var(--text-hi); font-weight: var(--weight-semibold); }
 .launch-empty { margin: 0; padding: var(--space-3); color: var(--text-mid); font-size: var(--fs-base); }
 .launch-truncated { font-size: var(--fs-meta); }
-.launch-cli-options { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-1); }
+/* Supervisor and Workers share one row wherever there is room, so the whole
+   form fits a 1280x800 screen above the sticky actions without scrolling. */
+.launch-options { display: grid; grid-template-columns: minmax(0, 1fr) 9.5rem; align-items: start; gap: var(--space-4); }
+@media (max-width: 40rem) { .launch-options { grid-template-columns: minmax(0, 1fr); gap: var(--space-3); } }
+.launch-cli-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-1); }
 .launch-cli-option { display: flex; flex-wrap: wrap; align-items: center; column-gap: var(--space-2); min-height: var(--button-height); padding: var(--space-1) var(--space-3); color: var(--text-hi); background: var(--panel); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); font-size: var(--fs-base); cursor: pointer; }
 .launch-cli-option input { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--color-action); }
 .launch-cli-option.is-checked { background: var(--bg-active); border-color: var(--color-action); font-weight: var(--weight-semibold); }
@@ -3930,7 +3935,7 @@ button.chip:disabled { cursor: default; }
 .launch-cli-option input:focus-visible { outline: none; }
 .launch-cli-default { flex-basis: 100%; padding-inline-start: calc(16px + var(--space-2)); color: var(--text-mid); font-size: var(--fs-xs); font-weight: var(--weight-regular); }
 .launch-cli-default[hidden] { display: none; }
-.launch-workers input { max-width: 12rem; }
+.launch-workers input { width: 100%; max-width: 12rem; box-sizing: border-box; }
 .launch-optional { color: var(--text-mid); }
 .launch-workers input { min-height: var(--button-height); }
 .launch-invalid { color: var(--state-crit); font-size: var(--fs-meta); }
@@ -3957,9 +3962,26 @@ button.chip:disabled { cursor: default; }
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
   .launch-sheet { width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; margin: 0; padding: var(--space-4) var(--space-4) max(var(--space-4), env(safe-area-inset-bottom)); border-radius: 0; }
   .launch-list { max-height: none; }
-  .launch-cli-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .launch-row { min-height: 52px; }
   .launch-actions button { flex: 1 1 0; }
+}
+/* A landscape phone is ~390px tall: the project list takes the left column and
+   the supervisor, workers and Start take the right, so Start and every choice
+   share one screen instead of hiding under the sticky actions. */
+@media (max-height: 30rem) and (min-width: 40rem) {
+  .launch-sheet { padding-block: var(--space-2) max(var(--space-2), env(safe-area-inset-bottom)); }
+  .launch-flow { gap: var(--space-2); }
+  .launch-head h2 { font-size: var(--fs-md); }
+  .launch-machine { grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: var(--space-3); }
+  .launch-view[data-launch-view="form"] { grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); column-gap: var(--space-4); row-gap: var(--space-2); align-items: start; }
+  .launch-view[data-launch-view="form"] > .launch-project { grid-column: 1; grid-row: 1 / span 3; }
+  .launch-view[data-launch-view="form"] > :not(.launch-project) { grid-column: 2; }
+  .launch-options { grid-template-columns: minmax(0, 1fr); gap: var(--space-2); }
+  .launch-list { max-height: calc(100dvh - 15rem); }
+  .launch-row { min-height: 44px; padding-block: var(--space-1); }
+  #launch-cli-hint, #launch-workers-hint { display: none; }
+  .launch-workers { grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: var(--space-2); }
+  .launch-actions { position: static; }
 }
 @media (forced-colors: active) {
   .launch-choice.is-checked, .launch-cli-option.is-checked { border: 2px solid Highlight; }

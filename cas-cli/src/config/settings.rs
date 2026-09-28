@@ -22,6 +22,7 @@ pub struct HubLaunchProfiles {
     pub claude: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex: Option<String>,
+}
 
 /// Project-scoped GitHub issue intake configuration. Lives at `[issues]` in
 /// `.cas/config.toml`.

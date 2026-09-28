@@ -715,7 +715,7 @@ async fn h4_health_cors_allows_unpaired_trusted_origins_and_preserves_paired_ori
         "the accepted real-browser read reaches DPoP verification and audit"
     );
 
-    let launch_scopes = [Scope::MachineRead, Scope::SessionLaunch].into_iter().collect();
+    let launch_scopes: std::collections::BTreeSet<Scope> = [Scope::MachineRead, Scope::SessionLaunch].into_iter().collect();
     let invitation = auth
         .mint_pairing("http://127.0.0.1:4173", launch_scopes.clone(), Utc::now())
         .unwrap();

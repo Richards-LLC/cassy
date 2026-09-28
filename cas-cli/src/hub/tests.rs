@@ -660,6 +660,17 @@ async fn h4_health_cors_allows_unpaired_trusted_origins_and_preserves_paired_ori
         .unwrap();
     assert_eq!(launch_denied.status(), StatusCode::FORBIDDEN);
 
+    let extra_args = app.clone().oneshot(
+        Request::post("/v1/sessions")
+            .header("origin", "http://127.0.0.1:4173")
+            .header("authorization", &authorization)
+            .header("dpop", proof("POST", "/v1/sessions"))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"target":{"kind":"project","id":"unknown"},"supervisor_cli":"claude","args":["--cwd","/tmp/other"]}"#))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(extra_args.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
     for (site, host) in [
         (None, "127.0.0.1:4173"),
         (Some("cross-site"), "127.0.0.1:4173"),
@@ -726,6 +737,21 @@ async fn h4_health_cors_allows_unpaired_trusted_origins_and_preserves_paired_ori
             .unwrap(),
     ).await.unwrap();
     assert_eq!(before_revoke.status(), StatusCode::BAD_REQUEST);
+    for body in [
+        r#"{"target":{"kind":"project","id":"unknown"},"supervisor_cli":"claude; echo unsafe"}"#,
+        r#"{"target":{"kind":"project","id":"unknown"},"supervisor_cli":"claude","name":"../escape"}"#,
+    ] {
+        let refused = app.clone().oneshot(
+            Request::post("/v1/sessions")
+                .header("origin", "http://127.0.0.1:4173")
+                .header("authorization", format!("DPoP {}", launch_credential.credential))
+                .header("dpop", sign_dpop(&signing, &launch_credential.credential, "POST", "/v1/sessions", Utc::now(), &uuid::Uuid::new_v4().to_string()))
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        ).await.unwrap();
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    }
     auth.revoke_device(&launch_credential.device_id, chrono::Utc::now())
         .unwrap();
     let revoked_launch = app

@@ -118,7 +118,7 @@ pub struct HubReapDaemonArgs {
     #[arg(long)]
     pub workers: u8,
     #[arg(long)]
-    pub supervisor_cli: cas_mux::SupervisorCli,
+    pub supervisor_cli: String,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1077,14 +1077,17 @@ pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
 fn reap_factory_daemon(args: &HubReapDaemonArgs) -> Result<()> {
     use std::process::{Command, Stdio};
     let executable = std::env::current_exe()?;
+    let store = crate::hub::DaemonExitEvidenceStore::default_for_user()
+        .ok_or_else(|| anyhow::anyhow!("home directory unavailable for daemon exit receipts"))?;
+    let supervisor_cli = args.supervisor_cli.parse::<cas_mux::SupervisorCli>()
+        .map_err(|error| anyhow::anyhow!(error))?;
+    anyhow::ensure!(matches!(supervisor_cli, cas_mux::SupervisorCli::Claude | cas_mux::SupervisorCli::Codex | cas_mux::SupervisorCli::Grok), "unsupported supervisor CLI");
     let child = Command::new(executable)
         .args(["factory", "daemon", "--session", &args.session, "--cwd"])
         .arg(&args.cwd)
-        .args(["--workers", &args.workers.to_string(), "--supervisor-cli", args.supervisor_cli.backend().name(), "--worker-cli", args.supervisor_cli.backend().name(), "--foreground"])
+        .args(["--workers", &args.workers.to_string(), "--supervisor-cli", supervisor_cli.backend().name(), "--worker-cli", supervisor_cli.backend().name(), "--foreground"])
         .stdin(Stdio::null())
         .spawn()?;
-    let store = crate::hub::DaemonExitEvidenceStore::default_for_user()
-        .ok_or_else(|| anyhow::anyhow!("home directory unavailable for daemon exit receipts"))?;
     let receipt = crate::hub::reap_spawned_daemon(&args.session, child, store)?;
     let code = match receipt.exit {
         crate::hub::ProcessExit::Code(code) => code,

@@ -51,7 +51,34 @@ export type DoubleOptions = {
   /** Advertise machine protocol v2 and serve /v1/attach as the real hub does
    * (one socket per machine, `pty:<session>` channels, health ping/pong). */
   multiplex?: boolean;
+  /** Scopes each seeded machine's credential carries; default SCOPES. */
+  scopes?: Record<string, string[]>;
+  /** New session (cas-0f51): what each machine's /v1/projects, /v1/projects/browse and POST /v1/sessions answer. */
+  launch?: Record<string, LaunchWorld>;
 };
+
+/** GET /v1/projects rows as the real hub serves them (hub/projects.rs). */
+export type LaunchProject = {
+  id: string; name: string; path: string; last_touched_at: string; touch_count: number;
+  running_session: string | null; target: Record<string, unknown>;
+};
+
+export type LaunchWorld = {
+  projects: LaunchProject[];
+  browse_roots?: Array<{ id: string; name: string; path: string }>;
+  /** Folder listings keyed `<root id>:<path>`. */
+  browse?: Record<string, { path: string; entries: Array<Record<string, unknown>>; truncated?: boolean }>;
+  /** Refusals keyed by project id or browse path: the real hub's {error, detail} and status. */
+  refuse?: Record<string, { status: number; error: string; detail: string }>;
+  /** The machine's default supervisor CLI, advertised on /v1/machine. */
+  defaultCli?: string;
+  /** Session names the machine gives new sessions, in order. */
+  names: string[];
+  /** Session-list fetches after a start before the new session is listed (it is booting). */
+  bootPolls?: number;
+};
+
+export type LaunchCall = { machine: string; body: Record<string, unknown>; scopes: string[] };
 
 /** A machine the browser cannot reach: how the outage looks from the page. */
 export type Outage = {
@@ -102,6 +129,10 @@ export class HubDouble {
   private readonly unreadLegacySockets = new WeakSet<WebSocketRoute>();
   /** client_refs the double refused with `upstream_unavailable`, in order. */
   readonly upstreamRefusals: string[] = [];
+  /** POST /v1/sessions bodies, in order (cas-0f51). */
+  readonly launches: LaunchCall[] = [];
+  /** Sessions started but still booting: listed after this many more session fetches. */
+  private readonly booting = new Map<string, { machine: string; session: Session; polls: number }>();
   /** Turns pushed live, replayed in history like a real hub after a reload. */
   private readonly live = new Map<string, { messages: Array<Record<string, unknown>>; replies: Array<Record<string, unknown>> }>();
 
@@ -207,10 +238,16 @@ export class HubDouble {
 
   proofRefusalsLeft(machineId: string): number { return this.proofRefusals.get(machineId)?.count ?? 0; }
 
+  /** The scopes a seeded machine's credential carries. */
+  scopesFor(machineId: string): string[] { return this.options.scopes?.[machineId] ?? SCOPES; }
+
+  /** Pair a machine again with other scopes (a new `cas hub pair --scopes` link); call seedPaired and reload after. */
+  setScopes(machineId: string, scopes: string[]): void { this.options.scopes = { ...this.options.scopes, [machineId]: scopes }; }
+
   /** Seed paired machines in IndexedDB exactly as a completed pairing stores them. */
   async seedPaired(): Promise<void> {
-    const machines = (this.options.paired ?? []).map((id) => ({ id, label: this.machine(id).label }));
-    await this.page.evaluate(async ({ machines, scopes }) => {
+    const machines = (this.options.paired ?? []).map((id) => ({ id, label: this.machine(id).label, scopes: this.scopesFor(id) }));
+    await this.page.evaluate(async ({ machines }) => {
       localStorage.clear();
       const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"]);
       const publicKey = await crypto.subtle.exportKey("jwk", pair.publicKey);
@@ -240,14 +277,14 @@ export class HubDouble {
           tx.objectStore("machines").put({
             id: m.id, label: m.label, baseUrl: `https://${m.id}.test`, deviceId: "journey-device",
             credentialId: "journey-credential", credential: "journey-only", expiresAt: "2099-01-01T00:00:00Z",
-            scopes, privateKey: pair.privateKey, publicKey,
+            scopes: m.scopes, privateKey: pair.privateKey, publicKey,
           });
         }
         tx.oncomplete = () => ok();
         tx.onerror = () => fail(tx.error);
       });
       db.close();
-    }, { machines, scopes: SCOPES });
+    }, { machines });
   }
 
   /** Push a hub message onto a session's open socket. */
@@ -400,9 +437,26 @@ export class HubDouble {
     }
     if (path === "/v1/machine") {
       const capabilities = ["session_index", "daemon_attach", "machine_events", ...(this.options.multiplex ? ["machine_multiplex_v2"] : [])];
-      return route.fulfill({ json: { schema_version: 1, version: "journey-double", capabilities } });
+      const defaultCli = this.options.launch?.[machineId]?.defaultCli;
+      return route.fulfill({ json: { schema_version: 1, version: "journey-double", capabilities, ...(defaultCli ? { default_supervisor_cli: defaultCli } : {}) } });
     }
-    if (path === "/v1/sessions") return route.fulfill({ json: { freshness_threshold_secs: 30, sessions: this.sessionsFor(machineId) } });
+    if (path === "/v1/sessions" && method === "POST") return this.launch(route, machineId);
+    if (path === "/v1/sessions") {
+      this.tickBooting(machineId);
+      return route.fulfill({ json: { freshness_threshold_secs: 30, sessions: this.sessionsFor(machineId) } });
+    }
+    if (path === "/v1/projects") {
+      const world = this.options.launch?.[machineId];
+      return route.fulfill({ json: { projects: world?.projects ?? [], browse_roots: world?.browse_roots ?? [] } });
+    }
+    if (path === "/v1/projects/browse") {
+      const world = this.options.launch?.[machineId];
+      const rootId = url.searchParams.get("root") ?? "";
+      const root = world?.browse_roots?.find((candidate) => candidate.id === rootId);
+      const listing = world?.browse?.[`${rootId}:${url.searchParams.get("path") ?? ""}`];
+      if (!root || !listing) return route.fulfill({ status: 400 });
+      return route.fulfill({ json: { root, path: listing.path, entries: listing.entries, truncated: listing.truncated ?? false } });
+    }
     if (path === "/v1/auth/pairing/exchange" && method === "POST") {
       const body = route.request().postDataJSON() as Record<string, unknown>;
       this.exchanges.push(body);
@@ -432,6 +486,45 @@ export class HubDouble {
       return route.fulfill({ json: { tasks_in_progress: [{ id: "task-journey", title: "Journey suite", status: "in_progress" }], tasks_ready: [], agents: [] } });
     }
     return route.fulfill({ json: {} });
+  }
+
+  /**
+   * POST /v1/sessions as cas-cli hub/server.rs answers it: 403 scope_denied
+   * without session-launch; attached for a project that is already running;
+   * a refusal the world names; else 202 with a fresh name, and the session is
+   * listed once it has booted.
+   */
+  private async launch(route: Route, machineId: string): Promise<void> {
+    const body = (route.request().postDataJSON() ?? {}) as Record<string, unknown>;
+    const scopes = this.scopesFor(machineId);
+    this.launches.push({ machine: machineId, body, scopes });
+    if (!scopes.includes("session-launch")) return route.fulfill({ status: 403, json: { error: "scope_denied", required_scope: "session:launch" } });
+    const world = this.options.launch?.[machineId];
+    if (!world) return route.fulfill({ status: 404 });
+    const target = (body.target ?? {}) as Record<string, unknown>;
+    const key = target.kind === "project" ? String(target.id) : String(target.path);
+    const refusal = world.refuse?.[key];
+    if (refusal) return route.fulfill({ status: refusal.status, json: { error: refusal.error, detail: refusal.detail } });
+    const known = world.projects.find((project) => target.kind === "project" && project.id === target.id);
+    if (known?.running_session) return route.fulfill({ status: 200, json: { session: known.running_session, attached: true } });
+    const name = world.names.shift();
+    if (!name) return route.fulfill({ status: 500, json: { error: "launch_failed", detail: "journey: no session names left" } });
+    const projectDir = known?.path ?? `${world.browse_roots?.find((root) => root.id === target.root_id)?.path ?? "/projects"}/${String(target.path)}`;
+    const session: Session = { name, supervisor: name, project_dir: projectDir, workers: [], liveness: "live" };
+    if (known) known.running_session = name;
+    this.booting.set(name, { machine: machineId, session, polls: world.bootPolls ?? 2 });
+    return route.fulfill({ status: 202, json: { session: name, attached: false, placement: "systemd_user_scope" } });
+  }
+
+  /** A booting session is listed after its polls run out, as its daemon comes up. */
+  private tickBooting(machineId: string): void {
+    for (const [name, entry] of this.booting) {
+      if (entry.machine !== machineId) continue;
+      entry.polls -= 1;
+      if (entry.polls > 0) continue;
+      this.booting.delete(name);
+      this.machine(machineId).sessions.push(entry.session);
+    }
   }
 
   private async relay(route: Route): Promise<void> {

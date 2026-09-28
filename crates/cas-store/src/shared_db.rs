@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use rusqlite::Connection;
@@ -24,31 +24,208 @@ pub(crate) fn lock_connection(conn: &Arc<Mutex<Connection>>) -> Result<MutexGuar
 ///
 /// Each database has its own [`PoolSlot`]. `POOL` itself is held only to find
 /// or insert a slot and never across SQLite I/O: before cas-e335 it was held
-/// while `Connection::open` ran, so one open stalled inside SQLite (a macOS
-/// hub opening a database while another thread closed it) blocked every
-/// opener of every database in the process.
-static POOL: Mutex<Option<HashMap<PathBuf, Arc<PoolSlot>>>> = Mutex::new(None);
+/// while `Connection::open` ran, so one open stalled inside SQLite blocked
+/// every opener of every database in the process.
+static POOL: Mutex<Option<Pool>> = Mutex::new(None);
+
+/// How long a connection no caller holds stays open before the pool closes it.
+pub const IDLE_CONNECTION_TTL: Duration = Duration::from_secs(60);
+
+/// Most connections no caller holds that the pool keeps open at once. Beyond
+/// it the least recently used close first, so a process that touches many
+/// short-lived databases keeps a bounded number of file descriptors.
+pub const MAX_IDLE_CONNECTIONS: usize = 16;
+
+/// Minimum spacing between the idle sweeps `shared_connection` runs.
+const IDLE_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
+
+#[derive(Default)]
+struct Pool {
+    slots: HashMap<PathBuf, Arc<PoolSlot>>,
+    last_sweep: Option<Instant>,
+}
 
 /// One database's entry in [`POOL`].
 ///
-/// Uses a `Weak` reference so the connection is cleaned up when all stores are
-/// dropped. The slot mutex serializes opens of this one database, so callers
-/// racing for it share a single open instead of each opening (and then
-/// closing) its own connection.
+/// The slot owns the connection's lifetime: it keeps a strong reference, so a
+/// caller dropping the last store never closes the database, and it closes a
+/// connection only under this slot's lock. Opens take the same lock, so a
+/// close and an open of one database can never overlap. They did before
+/// cas-e335, when the pool kept only a `Weak` and the close ran wherever the
+/// last `Arc` dropped: `sqlite3WalClose` racing `sqlite3BtreeOpen` on the same
+/// file deadlocked inside SQLite and wedged the macOS hub.
 #[derive(Default)]
 struct PoolSlot {
-    connection: Mutex<Weak<Mutex<Connection>>>,
+    state: Mutex<SlotState>,
 }
 
-impl PoolSlot {
-    /// True while a caller still holds the connection, or an open may be in
-    /// progress (the slot is locked).
-    fn in_use(&self) -> bool {
-        self.connection
-            .try_lock()
-            .map(|connection| connection.strong_count() > 0)
-            .unwrap_or(true)
+#[derive(Default)]
+struct SlotState {
+    connection: Option<PooledConnection>,
+}
+
+struct PooledConnection {
+    shared: Arc<Mutex<Connection>>,
+    /// Identity of the database file when it was opened. An idle connection
+    /// whose file was deleted or replaced is closed and reopened rather than
+    /// handed out still pointing at the old file.
+    identity: Option<FileIdentity>,
+    last_used: Instant,
+}
+
+impl PooledConnection {
+    /// No caller holds the connection; only the pool does.
+    fn idle(&self) -> bool {
+        Arc::strong_count(&self.shared) == 1
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+fn file_identity(path: &Path) -> Option<FileIdentity> {
+    let metadata = std::fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some(FileIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        Some(FileIdentity {
+            device: 0,
+            inode: 0,
+        })
+    }
+}
+
+fn lock_pool() -> MutexGuard<'static, Option<Pool>> {
+    POOL.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn lock_slot(slot: &PoolSlot) -> MutexGuard<'_, SlotState> {
+    slot.state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Close idle pooled connections: every one unused for `ttl`, then the least
+/// recently used beyond `cap`. Only databases for which `include` is true are
+/// considered. Each close runs under that database's slot lock; a slot busy
+/// right now (an open in progress) is skipped until the next sweep.
+fn sweep_idle_connections(
+    now: Instant,
+    ttl: Duration,
+    cap: usize,
+    include: impl Fn(&Path) -> bool,
+) {
+    let slots: Vec<Arc<PoolSlot>> = lock_pool()
+        .as_ref()
+        .map(|pool| {
+            pool.slots
+                .iter()
+                .filter(|(path, _)| include(path))
+                .map(|(_, slot)| Arc::clone(slot))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut idle: Vec<(Instant, Arc<PoolSlot>)> = slots
+        .into_iter()
+        .filter_map(|slot| {
+            let last_used = {
+                let state = slot.state.try_lock().ok()?;
+                let pooled = state.connection.as_ref()?;
+                pooled.idle().then_some(pooled.last_used)?
+            };
+            Some((last_used, slot))
+        })
+        .collect();
+    idle.sort_by_key(|(last_used, _)| *last_used);
+    let over_cap = idle.len().saturating_sub(cap);
+
+    for (index, (seen_last_used, slot)) in idle.into_iter().enumerate() {
+        let expired = now.saturating_duration_since(seen_last_used) >= ttl;
+        if !expired && index >= over_cap {
+            continue;
+        }
+        let Ok(mut state) = slot.state.try_lock() else {
+            continue;
+        };
+        let still_idle = state
+            .connection
+            .as_ref()
+            .is_some_and(|pooled| pooled.idle() && pooled.last_used == seen_last_used);
+        if still_idle {
+            // Close while this database's slot lock is held.
+            drop(state.connection.take());
+        }
+    }
+
+    prune_empty_slots();
+}
+
+/// Forget slots with no connection that no caller is using.
+fn prune_empty_slots() {
+    if let Some(pool) = lock_pool().as_mut() {
+        pool.slots.retain(|_, slot| {
+            Arc::strong_count(slot) > 1
+                || slot
+                    .state
+                    .try_lock()
+                    .map(|state| state.connection.is_some())
+                    .unwrap_or(true)
+        });
+    }
+}
+
+/// Close every pooled connection no caller holds.
+///
+/// A process calls this on its way out: the pool lives in a static that is
+/// never dropped, so without it a CLI run would exit with its idle
+/// connections un-closed and its WAL un-checkpointed, where before the pool
+/// owned closes the last store drop checkpointed it.
+pub fn close_idle_connections() {
+    sweep_idle_connections(Instant::now(), Duration::ZERO, 0, |_| true);
+}
+
+/// Close the pooled connection for `db_path` now, if no caller holds it.
+///
+/// Call this before touching the database file directly (copying a backup
+/// over it, for example): the pool otherwise keeps an idle connection, and
+/// its WAL, open for up to [`IDLE_CONNECTION_TTL`]. Returns true when a
+/// connection was closed.
+pub fn close_idle_connection(db_path: &Path) -> bool {
+    let canonical = canonical_db_path(db_path);
+    let Some(slot) = lock_pool()
+        .as_ref()
+        .and_then(|pool| pool.slots.get(&canonical).cloned())
+    else {
+        return false;
+    };
+    let closed = {
+        let mut state = lock_slot(&slot);
+        if state
+            .connection
+            .as_ref()
+            .is_some_and(PooledConnection::idle)
+        {
+            drop(state.connection.take());
+            true
+        } else {
+            false
+        }
+    };
+    drop(slot);
+    prune_empty_slots();
+    closed
 }
 
 /// Environment variable naming databases a test run must never open.
@@ -140,35 +317,59 @@ pub fn shared_connection(db_path: &Path) -> crate::Result<Arc<Mutex<Connection>>
 
     let canonical = canonical_db_path(db_path);
 
-    let slot = {
-        let mut guard = POOL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let map = guard.get_or_insert_with(HashMap::new);
-        let existing = map.get(&canonical).cloned();
-        match existing {
-            Some(slot) => slot,
+    let (slot, sweep_due) = {
+        let mut guard = lock_pool();
+        let pool = guard.get_or_insert_with(Pool::default);
+        let slot = Arc::clone(pool.slots.entry(canonical.clone()).or_default());
+        let now = Instant::now();
+        let sweep_due = pool
+            .last_sweep
+            .is_none_or(|last| now.saturating_duration_since(last) >= IDLE_SWEEP_INTERVAL);
+        if sweep_due {
+            pool.last_sweep = Some(now);
+        }
+        (slot, sweep_due)
+    };
+
+    let (shared, opened) = {
+        // Only callers of this same database wait here.
+        let mut state = lock_slot(&slot);
+        let stale = state
+            .connection
+            .as_ref()
+            .is_some_and(|pooled| pooled.idle() && pooled.identity != file_identity(&canonical));
+        if stale {
+            // The file was deleted or replaced since this idle connection
+            // opened it: close it (under the slot lock) and open the new file.
+            drop(state.connection.take());
+        }
+        match state.connection.as_mut() {
+            Some(pooled) => {
+                pooled.last_used = Instant::now();
+                (Arc::clone(&pooled.shared), false)
+            }
             None => {
-                // Forget databases nobody holds any more, so a process that
-                // opens many short-lived databases keeps a bounded map. A slot
-                // another caller has cloned is never dropped from under it.
-                map.retain(|_, slot| Arc::strong_count(slot) > 1 || slot.in_use());
-                let slot = Arc::new(PoolSlot::default());
-                map.insert(canonical, Arc::clone(&slot));
-                slot
+                let shared = Arc::new(Mutex::new(open_configured(db_path)?));
+                state.connection = Some(PooledConnection {
+                    shared: Arc::clone(&shared),
+                    identity: file_identity(&canonical),
+                    last_used: Instant::now(),
+                });
+                (shared, true)
             }
         }
     };
+    drop(slot);
 
-    // Only callers of this same database wait here.
-    let mut current = slot
-        .connection
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(strong) = current.upgrade() {
-        return Ok(strong);
+    // A new open is also when the idle cap can be exceeded, so sweep then too.
+    if sweep_due || opened {
+        sweep_idle_connections(
+            Instant::now(),
+            IDLE_CONNECTION_TTL,
+            MAX_IDLE_CONNECTIONS,
+            |_| true,
+        );
     }
-
-    let shared = Arc::new(Mutex::new(open_configured(db_path)?));
-    *current = Arc::downgrade(&shared);
     Ok(shared)
 }
 
@@ -609,18 +810,54 @@ mod tests {
         assert!(!Arc::ptr_eq(&conn1, &conn2));
     }
 
+    /// Tag the connection behind `shared` with a per-connection TEMP table and
+    /// report whether it was untagged, meaning SQLite opened it fresh. TEMP
+    /// objects live and die with one connection, so unlike `Arc` addresses
+    /// (which the allocator may reuse) the tag cannot survive a reopen.
+    fn first_sight_of_connection(shared: &Arc<Mutex<Connection>>) -> bool {
+        let conn = shared.lock().unwrap();
+        let tagged: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM temp.sqlite_master WHERE name = 'e335_connection_tag'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        if tagged == 0 {
+            conn.execute_batch("CREATE TEMP TABLE e335_connection_tag (x INTEGER);")
+                .unwrap();
+        }
+        tagged == 0
+    }
+
+    /// The pool, not the last caller, owns the close (cas-e335): dropping every
+    /// handle leaves the connection pooled, and only the pool closes it.
     #[test]
-    fn shared_connection_recreates_after_drop() {
+    fn shared_connection_is_reused_after_every_caller_drops() {
         let temp = TempDir::new().unwrap();
         let db_path = temp.path().join("test.db");
 
         let conn1 = shared_connection(&db_path).unwrap();
-        let ptr1 = Arc::as_ptr(&conn1);
+        assert!(first_sight_of_connection(&conn1));
         drop(conn1);
 
         let conn2 = shared_connection(&db_path).unwrap();
-        let ptr2 = Arc::as_ptr(&conn2);
-        assert_ne!(ptr1, ptr2);
+        assert!(
+            !first_sight_of_connection(&conn2),
+            "dropping the last caller handle must not close the pooled connection"
+        );
+        assert!(
+            !close_idle_connection(&db_path),
+            "a connection a caller holds is never closed"
+        );
+        drop(conn2);
+
+        assert!(close_idle_connection(&db_path));
+        let conn3 = shared_connection(&db_path).unwrap();
+        assert!(
+            first_sight_of_connection(&conn3),
+            "after the pool closes an idle connection the next caller gets a fresh one"
+        );
     }
 
     #[test]
@@ -636,12 +873,35 @@ mod tests {
         drop(conn1);
         let conn3 = shared_connection(&db_path).unwrap();
         assert_eq!(ptr, Arc::as_ptr(&conn3));
+        assert!(!close_idle_connection(&db_path));
 
-        // Drop all — next call creates a new connection
+        // Drop all — the pool still holds it, so the next call reuses it
         drop(conn2);
         drop(conn3);
         let conn4 = shared_connection(&db_path).unwrap();
-        assert_ne!(ptr, Arc::as_ptr(&conn4));
+        assert_eq!(ptr, Arc::as_ptr(&conn4));
+    }
+
+    /// An idle pooled connection whose database file was deleted must not be
+    /// handed out: writes would land in the unlinked file and vanish.
+    #[test]
+    fn an_idle_connection_to_a_deleted_database_is_reopened() {
+        let temp = TempDir::new().unwrap();
+        let db_path = temp.path().join("replaced.db");
+
+        let conn = shared_connection(&db_path).unwrap();
+        assert!(first_sight_of_connection(&conn));
+        drop(conn);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(temp.path().join(format!("replaced.db{suffix}")));
+        }
+
+        let reopened = shared_connection(&db_path).unwrap();
+        assert!(
+            first_sight_of_connection(&reopened),
+            "a deleted database must be reopened, not served from the stale connection"
+        );
+        assert!(db_path.exists(), "the reopen recreates the database file");
     }
 
     #[test]
@@ -707,7 +967,7 @@ mod tests {
         // Poison the POOL mutex by panicking while holding it
         let _ = panic::catch_unwind(|| {
             let mut guard = POOL.lock().unwrap();
-            let _map = guard.get_or_insert_with(HashMap::new);
+            let _pool = guard.get_or_insert_with(Pool::default);
             panic!("intentional poison");
         });
 
@@ -1760,42 +2020,45 @@ mod tests {
         );
     }
 
-    /// Many threads acquiring and dropping the same database, so its last
-    /// handle is closed and reopened over and over, alongside callers of a
-    /// second database. Every caller must finish (bounded by a watchdog rather
-    /// than hanging the suite) and every handle must work.
+    /// Many threads acquiring and dropping the same database as fast as they
+    /// can, alongside callers of a second database. Before cas-e335 the last
+    /// handle's drop closed the connection outside any pool lock while another
+    /// thread reopened the file, and that close/open race deadlocked inside
+    /// SQLite (a full workspace run caught 3 of 16 threads wedged). Now the pool
+    /// owns every close, so neither database is ever reopened: each is opened
+    /// exactly once, and every caller finishes well inside the watchdog.
     #[test]
     fn concurrent_open_and_drop_of_one_database_never_wedges() {
         let temp = TempDir::new().unwrap();
         let hot = temp.path().join("hot.db");
         let side = temp.path().join("side.db");
-        let threads = 16;
-        let rounds = 200;
+        let threads = 24;
+        let rounds = 2_000;
         let barrier = Arc::new(Barrier::new(threads));
+        let hot_opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let side_opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let (done_tx, done_rx) = std::sync::mpsc::channel();
 
         for index in 0..threads {
             let barrier = Arc::clone(&barrier);
-            let path = if index % 4 == 3 {
-                side.clone()
+            let (path, opens) = if index % 4 == 3 {
+                (side.clone(), Arc::clone(&side_opens))
             } else {
-                hot.clone()
+                (hot.clone(), Arc::clone(&hot_opens))
             };
             let done = done_tx.clone();
             std::thread::spawn(move || {
                 barrier.wait();
-                let mut outcome = Ok(());
-                for _ in 0..rounds {
-                    let step = shared_connection(&path).and_then(|shared| {
-                        let conn = lock_connection(&shared)?;
-                        conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))?;
-                        Ok(())
-                    });
-                    if let Err(error) = step {
-                        outcome = Err(error.to_string());
-                        break;
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    for _ in 0..rounds {
+                        let shared = shared_connection(&path).expect("pooled open");
+                        if first_sight_of_connection(&shared) {
+                            opens.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        // The handle drops here, often as the last caller one.
                     }
-                }
+                }))
+                .map_err(|_| "a pooled handle failed".to_string());
                 let _ = done.send(outcome);
             });
         }
@@ -1812,43 +2075,83 @@ mod tests {
                 ),
             }
         }
+        assert_eq!(
+            hot_opens.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the hot database must be opened once, never closed and reopened by a caller drop"
+        );
+        assert_eq!(side_opens.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
-    /// The pool map forgets databases nobody holds, so a process that opens
-    /// many short-lived databases does not grow it without bound, while a
-    /// database still in use keeps its single shared connection.
+    /// Pooled slots under `parent`, and how many of them hold an open connection.
+    fn pooled_under(parent: &Path) -> (usize, usize) {
+        let guard = lock_pool();
+        let Some(pool) = guard.as_ref() else {
+            return (0, 0);
+        };
+        let ours: Vec<_> = pool
+            .slots
+            .iter()
+            .filter(|(path, _)| path.parent() == Some(parent))
+            .collect();
+        let open = ours
+            .iter()
+            .filter(|(_, slot)| {
+                slot.state
+                    .try_lock()
+                    .map(|state| state.connection.is_some())
+                    .unwrap_or(true)
+            })
+            .count();
+        (ours.len(), open)
+    }
+
+    /// Idle connections stay bounded: the least recently used beyond
+    /// `MAX_IDLE_CONNECTIONS` close, every one idle past `IDLE_CONNECTION_TTL`
+    /// closes and leaves the pool, and a connection a caller holds is never
+    /// touched.
     #[test]
-    fn pool_forgets_released_databases_but_keeps_live_ones() {
+    fn idle_connections_are_capped_and_expire() {
         let temp = TempDir::new().unwrap();
         let live_path = temp.path().join("live.db");
-        let live = shared_connection(&live_path).unwrap();
+        let parent = canonical_db_path(&live_path)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let ours = |path: &Path| path.parent() == Some(parent.as_path());
 
-        for index in 0..32 {
+        let live = shared_connection(&live_path).unwrap();
+        assert!(first_sight_of_connection(&live));
+        for index in 0..MAX_IDLE_CONNECTIONS + 8 {
             drop(shared_connection(&temp.path().join(format!("short-{index}.db"))).unwrap());
         }
 
-        let pooled_short_lived = {
-            let guard = POOL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            let prefix = canonical_db_path(&temp.path().join("short-0.db"));
-            let parent = prefix.parent().unwrap().to_path_buf();
-            guard
-                .as_ref()
-                .map(|map| {
-                    map.keys()
-                        .filter(|key| {
-                            key.parent() == Some(parent.as_path())
-                                && key.file_name().is_some_and(|name| {
-                                    name.to_string_lossy().starts_with("short-")
-                                })
-                        })
-                        .count()
-                })
-                .unwrap_or_default()
-        };
-        assert!(
-            pooled_short_lived <= 1,
-            "released databases must not accumulate in the pool ({pooled_short_lived} kept)"
+        sweep_idle_connections(
+            Instant::now(),
+            IDLE_CONNECTION_TTL,
+            MAX_IDLE_CONNECTIONS,
+            &ours,
         );
-        assert!(Arc::ptr_eq(&live, &shared_connection(&live_path).unwrap()));
+        let (_, open) = pooled_under(&parent);
+        assert!(
+            open <= MAX_IDLE_CONNECTIONS + 1,
+            "idle connections beyond the cap must close ({open} open, cap {MAX_IDLE_CONNECTIONS} + 1 live)"
+        );
+
+        sweep_idle_connections(
+            Instant::now() + IDLE_CONNECTION_TTL + Duration::from_secs(1),
+            IDLE_CONNECTION_TTL,
+            MAX_IDLE_CONNECTIONS,
+            &ours,
+        );
+        assert_eq!(
+            pooled_under(&parent),
+            (1, 1),
+            "expired idle connections close and leave the pool; the live one stays"
+        );
+        assert!(
+            !first_sight_of_connection(&live),
+            "a connection a caller holds is never closed by a sweep"
+        );
     }
 }

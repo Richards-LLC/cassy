@@ -500,14 +500,13 @@ pub trait SessionReadModel: Clone + Send + Sync + 'static {
 /// project's agent registry.
 ///
 /// Every pass reads the agent registry (`<project>/.cas/cas.db`) of every
-/// listed session. `cas_store::shared_db` keeps only weak references, so
-/// before cas-e335 each pass opened that database and closing the last store
-/// closed it again, once a second per project. On macOS a close
-/// (`sqlite3WalClose`) racing a reopen (`sqlite3BtreeOpen`) of the same file
-/// deadlocked inside SQLite's unix VFS and wedged the hub. The model therefore
-/// holds one registry handle per listed project for as long as that project
-/// has a listed session, so a pass never closes a registry another pass is
-/// about to open.
+/// listed session. Before cas-e335 each pass opened that database and the
+/// last store drop closed it again, once a second per project. On macOS a
+/// close (`sqlite3WalClose`) racing a reopen (`sqlite3BtreeOpen`) of the same
+/// file deadlocked inside SQLite's unix VFS and wedged the hub. `shared_db`
+/// now owns every close, and the model also holds one registry handle per
+/// listed project while that project has a listed session, so the hub's
+/// registries never go idle and are never swept.
 #[derive(Clone, Default)]
 pub struct LocalSessionReadModel {
     registries: Arc<std::sync::Mutex<HashMap<std::path::PathBuf, PinnedRegistry>>>,

@@ -420,6 +420,9 @@ impl UpdateTransaction {
         let db_path = self.cas_dir.join("cas.db");
         if db_path.exists() && !self.migrations.is_empty() {
             let backup_db = backup_dir.join("cas.db");
+            // The shared pool keeps an idle connection (and its WAL) open;
+            // close it so the copy is checkpointed and complete.
+            cas_store::shared_db::close_idle_connection(&db_path);
             fs::copy(&db_path, &backup_db)?;
             self.backups.insert(db_path, backup_db);
         }
@@ -517,6 +520,8 @@ impl UpdateTransaction {
         // Restore all backed up files
         for (original, backup) in &self.backups {
             if backup.exists() {
+                // Never copy a database over a pooled connection's open WAL.
+                cas_store::shared_db::close_idle_connection(original);
                 if let Err(e) = fs::copy(backup, original) {
                     errors.push(format!("Failed to restore {}: {}", original.display(), e));
                 }

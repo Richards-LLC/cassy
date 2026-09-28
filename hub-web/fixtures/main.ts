@@ -13,7 +13,8 @@ import { DEFAULT_PAIRING_SCOPES } from "../src/pairing-relay";
 import { renderDecision, shellSignature } from "../src/render-model";
 import { operatorThreadMarkup } from "../src/operator-thread";
 import { TranscriptView, type TranscriptSource } from "../src/transcript-view";
-import type { AttentionItem, HubSession } from "../src/types";
+import type { AttentionItem, HubSession, Scope } from "../src/types";
+import { LaunchSheet, type LaunchHost, type LaunchResult } from "../src/launch-session";
 import type { GhosttyCell, GhosttyColor, GhosttyRow } from "../src/terminal/ghostty/core";
 
 export const FIXTURE_NAMES = [
@@ -41,6 +42,11 @@ export const FIXTURE_NAMES = [
   "conversation-mic-unavailable",
   "conversations-loading",
   "conversations-unpaired",
+  "launch-form",
+  "launch-browse",
+  "launch-error",
+  "launch-starting",
+  "launch-grant",
 ] as const;
 
 export type FixtureName = (typeof FIXTURE_NAMES)[number];
@@ -360,6 +366,63 @@ function appendOpenPairingDialog(view: PairingFixture): void {
   }
 }
 
+type LaunchFixture = "launch-form" | "launch-browse" | "launch-error" | "launch-starting" | "launch-grant";
+
+/**
+ * The production New session sheet (LaunchSheet, cas-0f51) driven through its
+ * own controls to one state, over a host that answers like a hub.
+ */
+async function openLaunchSheet(view: LaunchFixture): Promise<void> {
+  const control: Scope[] = ["machine-read", "session-read", "pane-read", "pane-input", "message-send", "pane-interrupt"];
+  const target = (id: string) => ({ kind: "project" as const, id });
+  const root = { id: "root-code", name: "code", path: "/home/dev/code" };
+  const host: LaunchHost = {
+    machines: () => [
+      { id: "atlas", label: "Atlas · Linux", scopes: [...control, "session-launch"] },
+      { id: "studio", label: "Studio Mac · macOS", scopes: control },
+    ],
+    currentMachineId: () => (view === "launch-grant" ? "studio" : "atlas"),
+    origin: window.location.origin,
+    projects: async () => ({
+      projects: [
+        { id: "p-ledger", name: "ledger-api", path: "/home/dev/ledger-api", last_touched_at: "2026-09-28T08:00:00Z", touch_count: 12, running_session: null, target: target("p-ledger") },
+        { id: "p-cas", name: "cas-src", path: "/home/dev/cas-src", last_touched_at: "2026-09-27T18:00:00Z", touch_count: 90, running_session: "patient-pelican-9", target: target("p-cas") },
+        { id: "p-old", name: "old-notes-with-a-rather-long-project-name", path: "/home/dev/archive/2025/old-notes-with-a-rather-long-project-name", last_touched_at: "2026-03-01T09:00:00Z", touch_count: 2, running_session: null, target: target("p-old") },
+      ],
+      browse_roots: [root],
+    }),
+    browse: async () => ({ root, path: "clients", truncated: true, entries: [
+      { name: "archive", path: "clients/archive", launchable: false, project_id: null, target: null },
+      { name: "acme-portal", path: "clients/acme-portal", launchable: true, project_id: null, target: { kind: "browse", root_id: root.id, path: "clients/acme-portal" } },
+    ] }),
+    launch: (): Promise<LaunchResult> => view === "launch-error"
+      ? Promise.resolve({ ok: false, status: 422, code: "not_logged_in", detail: "claude: not logged in for profile main (run `claude /login`)" })
+      : new Promise(() => {}),
+    sessionListed: async () => false,
+    open: () => {},
+    copy: async () => {},
+  };
+  const sheet = new LaunchSheet(host);
+  sheet.open(view === "launch-grant" ? "studio" : "atlas");
+  const dialog = document.querySelector<HTMLDialogElement>("#launch-dialog");
+  if (!dialog?.open) throw new Error("Launch fixture sheet did not open");
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+  await settle();
+  if (view === "launch-browse") {
+    dialog.querySelector<HTMLButtonElement>("#launch-tab-browse")!.click();
+    await settle();
+    dialog.querySelector<HTMLInputElement>('[data-launch-list="browse"] input[type=radio]')?.click();
+    return;
+  }
+  if (view === "launch-form" || view === "launch-error" || view === "launch-starting") {
+    dialog.querySelector<HTMLInputElement>('[data-launch-list="known"] input[type=radio]')!.click();
+    if (view === "launch-form") return;
+    dialog.querySelector<HTMLButtonElement>('[data-launch-action="start"]')!.click();
+    await settle();
+    if (view === "launch-error") dialog.querySelector<HTMLDetailsElement>(".launch-error-detail")!.open = true;
+  }
+}
+
 function renderShell(): void {
   const machineCount = fixtureName === "fleet-empty" ? 0 : 2;
   const openSession = ["session-canvas", "session-workers", "transcript", "attention-0", "attention-12", "operator-thread", "connection-failed-retry"].includes(fixtureName);
@@ -436,7 +499,8 @@ function renderShell(): void {
   } else {
     const grid = element("section", "pane-grid");
     const empty = element("div", "empty empty-pane-slot");
-    empty.append(element("p", "empty-title", "Pairing workspace"), element("p", "empty-hint", "The pairing dialog is open so the machine can be authorized."));
+    if (fixtureName.startsWith("launch")) empty.append(element("p", "empty-title", "New session"), element("p", "empty-hint", "The New session sheet is open over the workspace."));
+    else empty.append(element("p", "empty-title", "Pairing workspace"), element("p", "empty-hint", "The pairing dialog is open so the machine can be authorized."));
     grid.append(empty);
     main.append(grid);
   }
@@ -445,6 +509,7 @@ function renderShell(): void {
   app.replaceChildren(shell);
   renderRestingToast();
   if (fixtureName.startsWith("pairing")) appendOpenPairingDialog(fixtureName as PairingFixture);
+  if (fixtureName.startsWith("launch")) void openLaunchSheet(fixtureName as LaunchFixture);
   if (fixtureName === "fleet-populated" && new URLSearchParams(window.location.search).has("broken")) {
     const style = document.createElement("style");
     style.textContent = ".fixture-broken-contrast { color: var(--bg-panel); background: var(--bg-panel); }";

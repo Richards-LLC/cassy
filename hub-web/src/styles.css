@@ -3901,8 +3901,9 @@ button.chip:disabled { cursor: default; }
 .launch-row { display: flex; align-items: center; gap: var(--space-3); min-height: 48px; min-width: 0; padding: var(--space-2) var(--space-3); color: var(--text-hi); background: var(--panel); border: var(--line-width) solid var(--color-transparent); border-radius: var(--radius-card); font-size: var(--fs-base); text-align: left; cursor: pointer; }
 .launch-row:hover { background: var(--bg-hover); }
 .launch-row-text { display: grid; min-width: 0; flex: 1; gap: 2px; }
-.launch-row-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: var(--weight-medium); }
-.launch-row-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-mid); font-family: var(--font-mono); font-size: var(--fs-xs); }
+/* Names and paths wrap rather than ellipsise: which folder starts is the whole choice. */
+.launch-row-name { overflow-wrap: anywhere; font-weight: var(--weight-medium); }
+.launch-row-path { overflow-wrap: anywhere; color: var(--text-mid); font-family: var(--font-mono); font-size: var(--fs-xs); }
 .launch-choice input { flex: none; width: 18px; height: 18px; margin: 0; accent-color: var(--color-action); }
 .launch-choice.is-checked { background: var(--bg-active); border-color: var(--color-action); }
 .launch-choice:has(input:focus-visible) { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: calc(-1 * var(--focus-ring-width)); }

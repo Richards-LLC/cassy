@@ -34,6 +34,11 @@ export const FIXTURE_NAMES = [
   "conversation-mic-unavailable",
   "conversations-loading",
   "conversations-unpaired",
+  "launch-form",
+  "launch-browse",
+  "launch-error",
+  "launch-starting",
+  "launch-grant",
 ];
 
 export const REQUIRED_SCHEMES = ["light", "dark"];

@@ -234,12 +234,17 @@ export class LaunchSheet {
 
   get isOpen(): boolean { return this.dialog?.open === true; }
 
-  /** Open on the current machine (or the first that can launch). */
+  /**
+   * Open on `machineId` when given; otherwise on the current machine if it
+   * can launch, else the first machine that can, else the current one (whose
+   * grant path then shows).
+   */
   open(machineId?: string): void {
     const dialog = this.ensureDialog();
     const machines = this.host.machines();
-    const preferred = machineId ?? this.host.currentMachineId();
-    const chosen = machines.find((m) => m.id === preferred && canLaunch(m)) ?? machines.find(canLaunch) ?? machines.find((m) => m.id === preferred) ?? machines[0];
+    const current = this.host.currentMachineId();
+    const chosen = (machineId ? machines.find((m) => m.id === machineId) : undefined)
+      ?? machines.find((m) => m.id === current && canLaunch(m)) ?? machines.find(canLaunch) ?? machines.find((m) => m.id === current) ?? machines[0];
     this.view = "form";
     this.selectMachine(chosen?.id);
     if (!dialog.open) dialog.showModal();

@@ -132,6 +132,20 @@ describe("LaunchSheet", () => {
     expect(dialog().querySelector(".launch-grant-command code")!.textContent).toContain("session:launch");
   });
 
+  it("opens on the machine it is asked for, else a machine that can launch", async () => {
+    const studio: LaunchMachine = { id: "studio", label: "Studio", scopes: CONTROL };
+    const { sheet: s, dialog } = sheet({ machines: [studio, ATLAS] });
+    s.open();
+    await flush();
+    expect((dialog().querySelector("select[name=launch-machine]") as HTMLSelectElement).value).toBe("atlas");
+    expect(visibleView(dialog())).toEqual(["form"]);
+    s.close();
+    s.open("studio");
+    await flush();
+    expect((dialog().querySelector("select[name=launch-machine]") as HTMLSelectElement).value).toBe("studio");
+    expect(visibleView(dialog())).toEqual(["grant"]);
+  });
+
   it("lists projects by recency, offers Attach on a running one, and hides Browse without roots", async () => {
     const { sheet: s, calls, dialog } = sheet({ machines: [ATLAS], catalog: { projects: [project("old", "2026-01-01T00:00:00Z"), project("cas-src", "2026-09-27T00:00:00Z", "patient-pelican-9")], browse_roots: [] } });
     s.open();

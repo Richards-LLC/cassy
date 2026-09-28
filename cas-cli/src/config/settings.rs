@@ -7,10 +7,21 @@ pub struct HubConfig {
     /// Public origin used when authorizing a Commander page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_url: Option<String>,
+    /// Account names used by Commander launches when the service has no shell selectors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_profiles: Option<HubLaunchProfiles>,
     /// Host folders Commander may browse for launchable main checkouts.
     /// An explicit empty list disables browsing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_roots: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HubLaunchProfiles {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex: Option<String>,
 }
 
 /// Project-scoped GitHub issue intake configuration. Lives at `[issues]` in
@@ -1147,6 +1158,9 @@ impl Default for NotificationConfig {
 /// Cloud sync configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CloudSyncConfig {
+    /// Project-local opt-in: team-visible project rows have no personal copy.
+    #[serde(default)]
+    pub team_only: bool,
     /// Whether auto-sync is enabled (when logged in)
     #[serde(default = "default_true")]
     pub auto_sync: bool,
@@ -1191,6 +1205,7 @@ fn default_cloud_queue_oldest_warning_secs() -> u64 {
 impl Default for CloudSyncConfig {
     fn default() -> Self {
         Self {
+            team_only: false,
             auto_sync: true,
             interval_secs: default_cloud_sync_interval(),
             pull_on_start: true,

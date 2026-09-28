@@ -1,7 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use axum::Json;
@@ -39,6 +39,7 @@ pub struct HubState<R: SessionReadModel> {
     metadata: MachineMetadata,
     effective_origins: Vec<String>,
     response_transport: TransportSecurity,
+    launches: Arc<Mutex<HashMap<std::path::PathBuf, (String, Instant)>>>,
 }
 
 impl<R: SessionReadModel> HubState<R> {
@@ -59,6 +60,7 @@ impl<R: SessionReadModel> HubState<R> {
             metadata: MachineMetadata::default(),
             effective_origins: Vec::new(),
             response_transport: TransportSecurity::Plaintext,
+            launches: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -117,7 +119,7 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
             "/v1/diagnostics",
             get(diagnostics::<R>).options(preflight::<R>),
         )
-        .route("/v1/sessions", get(sessions::<R>).options(preflight::<R>))
+        .route("/v1/sessions", get(sessions::<R>).post(launch_session::<R>).options(preflight::<R>))
         .route("/v1/projects", get(projects::<R>).options(preflight::<R>))
         .route(
             "/v1/projects/browse",
@@ -574,6 +576,467 @@ async fn sessions<R: SessionReadModel>(
             &headers,
         ),
         Err(error) => internal_error(error),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LaunchSessionRequest {
+    target: super::projects::LaunchTarget,
+    supervisor_cli: String,
+    workers: Option<u8>,
+    name: Option<String>,
+}
+
+async fn launch_session<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    headers: HeaderMap,
+    Json(request): Json<LaunchSessionRequest>,
+) -> Response {
+    let context = match authorize(
+        &state,
+        HubAction::Mutation,
+        Scope::SessionLaunch,
+        &headers,
+        "POST",
+        "/v1/sessions",
+    ) {
+        Ok(Some(context)) => context,
+        Ok(None) => return with_cors(unauthorized(), &headers),
+        Err(error) if error.to_string() == "scope denied" => {
+            return with_cors((StatusCode::FORBIDDEN, Json(serde_json::json!({"error":"scope_denied", "required_scope":"session:launch"}))).into_response(), &headers);
+        }
+        Err(error) => return with_cors(unauthorized_for(&error), &headers),
+    };
+    let Some(auth) = state.auth.clone() else {
+        return with_cors(unauthorized(), &headers);
+    };
+    let launches = state.launches.clone();
+    let response = match tokio::task::spawn_blocking(move || {
+        launch_session_blocking(request, &auth, &context, &launches)
+    })
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => launch_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "launch_failed",
+            &error.to_string(),
+        ),
+    };
+    with_cors(response, &headers)
+}
+
+fn launch_error(status: StatusCode, code: &str, detail: &str) -> Response {
+    (
+        status,
+        Json(serde_json::json!({"error":code, "detail":detail})),
+    )
+        .into_response()
+}
+
+fn valid_launch_name(name: &str) -> bool {
+    name.len() <= 80
+        && name.len() >= 3
+        && name
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && name
+            .as_bytes()
+            .last()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+fn launch_session_blocking(
+    request: LaunchSessionRequest,
+    auth: &AuthStore,
+    context: &AuthContext,
+    launches: &Mutex<HashMap<std::path::PathBuf, (String, Instant)>>,
+) -> Response {
+    let supervisor_cli = match request.supervisor_cli.parse::<cas_mux::SupervisorCli>() {
+        Ok(
+            cli @ (cas_mux::SupervisorCli::Claude
+            | cas_mux::SupervisorCli::Codex
+            | cas_mux::SupervisorCli::Grok),
+        ) => cli,
+        _ => {
+            return launch_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_supervisor_cli",
+                "use claude, codex, or grok",
+            );
+        }
+    };
+    let workers = request.workers.unwrap_or(0);
+    if workers > 16 {
+        return launch_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_workers",
+            "workers must be between 0 and 16",
+        );
+    }
+    if request
+        .name
+        .as_deref()
+        .is_some_and(|name| !valid_launch_name(name))
+    {
+        return launch_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_name",
+            "name must be 3-80 ASCII letters, digits, or hyphens and start and end with a letter or digit",
+        );
+    }
+
+    let root = match super::projects::resolve_launch_target(&request.target) {
+        Ok(root) => root.path,
+        Err(error) => {
+            return launch_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_target",
+                &error.to_string(),
+            );
+        }
+    };
+    let mut pending = match launches.lock() {
+        Ok(lock) => lock,
+        Err(_) => {
+            return launch_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "launch_failed",
+                "launch lock poisoned",
+            );
+        }
+    };
+    // The lock covers both the live-session check and process spawn. A pending
+    // name bridges the period before the daemon writes its metadata.
+    let sessions = match crate::ui::factory::SessionManager::new().list_sessions() {
+        Ok(sessions) => sessions,
+        Err(error) => {
+            return launch_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "session_registry_unavailable",
+                &error.to_string(),
+            );
+        }
+    };
+    if let Some(existing) = sessions.iter().find(|session| {
+        session.is_running
+            && session
+                .metadata
+                .project_dir
+                .as_deref()
+                .and_then(|path| std::fs::canonicalize(path).ok())
+                .as_deref()
+                == Some(root.as_path())
+    }) {
+        pending.remove(&root);
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({"session":existing.name, "attached":true})),
+        )
+            .into_response();
+    }
+    if let Some((name, started)) = pending.get(&root) {
+        if started.elapsed() < Duration::from_secs(90) {
+            return (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({"session":name, "attached":false})),
+            )
+                .into_response();
+        }
+    }
+    pending.remove(&root);
+
+    let environment = match super::launch_env::resolve(supervisor_cli, None) {
+        Ok(environment) => environment,
+        Err(error) => {
+            let code = match error {
+                super::launch_env::LaunchError::MissingBinary { .. } => "cli_missing",
+                super::launch_env::LaunchError::ProfileMissing { .. } => "profile_missing",
+                super::launch_env::LaunchError::NotLoggedIn { .. } => "not_logged_in",
+                super::launch_env::LaunchError::ProbeFailed { .. } => "cli_probe_failed",
+            };
+            return launch_error(StatusCode::UNPROCESSABLE_ENTITY, code, &error.to_string());
+        }
+    };
+    let name = request
+        .name
+        .unwrap_or_else(|| crate::ui::factory::generate_session_name(None));
+    if sessions.iter().any(|session| session.name == name)
+        || crate::ui::factory::metadata_path(&name).exists()
+    {
+        return launch_error(
+            StatusCode::CONFLICT,
+            "name_in_use",
+            "session name already exists",
+        );
+    }
+    let now = chrono::Utc::now();
+    if auth.ensure_active_context(context, now).is_err() {
+        return launch_error(
+            StatusCode::UNAUTHORIZED,
+            "revoked",
+            "device credential is no longer active",
+        );
+    }
+    let project = root.to_string_lossy();
+    if let Err(error) = auth.audit_launch(
+        context,
+        "requested",
+        &project,
+        supervisor_cli.backend().name(),
+        Some(&name),
+        now,
+        None,
+    ) {
+        return launch_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "audit_unavailable",
+            &error.to_string(),
+        );
+    }
+    let executable = match std::env::current_exe() {
+        Ok(executable) => executable,
+        Err(error) => {
+            return launch_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "launch_failed",
+                &error.to_string(),
+            );
+        }
+    };
+    let log_path = crate::ui::factory::daemon_log_path(&name);
+    if let Some(parent) = log_path.parent() {
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            return launch_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "launch_failed",
+                &error.to_string(),
+            );
+        }
+    }
+    let placement = match spawn_factory_daemon(&executable, &root, &name, workers, supervisor_cli, &environment, &log_path) {
+        Ok(placement) => placement,
+        Err(error) => return launch_error(StatusCode::SERVICE_UNAVAILABLE, "containment_unavailable", &error.to_string()),
+    };
+    if let Err(error) = auth.audit_launch(context, "allowed", &project, supervisor_cli.backend().name(), Some(&name), now, Some(&placement)) {
+        tracing::warn!(session = %name, %error, "launched factory but could not write placement audit");
+    }
+    pending.insert(root, (name.clone(), Instant::now()));
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({"session":name, "attached":false, "placement":placement})),
+    )
+        .into_response()
+}
+
+fn factory_daemon_args(
+    root: &std::path::Path,
+    name: &str,
+    workers: u8,
+    cli: cas_mux::SupervisorCli,
+) -> Vec<std::ffi::OsString> {
+    use std::ffi::OsString;
+    vec![
+        "factory".into(), "daemon".into(), "--session".into(), name.into(),
+        "--cwd".into(), root.as_os_str().to_owned(), "--workers".into(),
+        workers.to_string().into(), "--supervisor-cli".into(),
+        OsString::from(cli.backend().name()), "--worker-cli".into(),
+        OsString::from(cli.backend().name()), "--foreground".into(),
+    ]
+}
+
+fn apply_launch_environment(
+    command: &mut std::process::Command,
+    environment: &super::launch_env::LaunchEnvironment,
+) {
+    for key in &environment.remove { command.env_remove(key); }
+    for (key, value) in &environment.set { command.env(key, value); }
+}
+
+#[cfg(target_os = "linux")]
+fn systemd_unit_command(
+    executable: &std::path::Path,
+    root: &std::path::Path,
+    name: &str,
+    workers: u8,
+    cli: cas_mux::SupervisorCli,
+    environment: &super::launch_env::LaunchEnvironment,
+    log_path: &std::path::Path,
+) -> std::process::Command {
+    use std::ffi::OsString;
+    let mut command = std::process::Command::new("systemd-run");
+    command.arg("--user")
+        .arg(format!("--unit=cas-factory-{name}"))
+        .arg("--collect")
+        .arg("--property=Type=exec")
+        .arg(format!("--property=StandardError=append:{}", log_path.display()))
+        .arg("--property=StandardOutput=null")
+        .arg(format!("--working-directory={}", root.display()));
+    for (key, _) in &environment.set {
+        let mut option = OsString::from("--setenv=");
+        option.push(key);
+        command.arg(option);
+    }
+    for key in &environment.remove {
+        let mut option = OsString::from("--property=UnsetEnvironment=");
+        option.push(key);
+        command.arg(option);
+    }
+    command.arg("--").arg(executable)
+        .args(["hub", "reap-daemon", "--session", name, "--cwd"])
+        .arg(root)
+        .args(["--workers", &workers.to_string(), "--supervisor-cli", cli.backend().name()]);
+    apply_launch_environment(&mut command, environment);
+    command
+}
+
+fn spawn_factory_daemon(
+    executable: &std::path::Path,
+    root: &std::path::Path,
+    name: &str,
+    workers: u8,
+    cli: cas_mux::SupervisorCli,
+    environment: &super::launch_env::LaunchEnvironment,
+    log_path: &std::path::Path,
+) -> anyhow::Result<String> {
+    use std::process::{Command, Stdio};
+    let args = factory_daemon_args(root, name, workers, cli);
+    #[cfg(target_os = "linux")]
+    {
+        let output = systemd_unit_command(executable, root, name, workers, cli, environment, log_path).output();
+        match output {
+            Ok(output) if output.status.success() => {
+                return Ok(format!("systemd:cas-factory-{name}.service"));
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let unavailable = stderr.contains("Failed to connect to bus")
+                    || stderr.contains("No medium found")
+                    || stderr.contains("No such file or directory");
+                if !unavailable {
+                    anyhow::bail!("systemd-run refused factory unit: {stderr}");
+                }
+                tracing::warn!(session = %name, %stderr, "systemd user manager unavailable; attempting separate Cassy scope");
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                tracing::warn!(session = %name, %error, "systemd-run unavailable; attempting separate Cassy scope");
+            }
+            Err(error) => return Err(error.into()),
+        }
+        let scope = crate::ui::factory::cgroup::create_server_scope(name, "daemon")
+            .ok_or_else(|| anyhow::anyhow!("no separate Cassy cgroup available after systemd-run failed"))?;
+        if !crate::ui::factory::cgroup::outside_current_scope(&scope) {
+            crate::ui::factory::cgroup::remove_scope(&scope);
+            anyhow::bail!("separate Cassy cgroup is inside the hub's own scope");
+        }
+        // The fixed shell command stops itself before exec. Its arguments are
+        // positional, so project paths and names never become shell source.
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c").arg("kill -STOP $$; exec \"$@\"").arg("sh")
+            .arg(executable).args(&args)
+            .stdin(Stdio::null()).stdout(Stdio::null());
+        let log = std::fs::OpenOptions::new().create(true).append(true).open(log_path)?;
+        command.stderr(Stdio::from(log));
+        apply_launch_environment(&mut command, environment);
+        use std::os::unix::process::CommandExt;
+        unsafe { command.pre_exec(|| {
+            if libc::setsid() == -1 { return Err(std::io::Error::last_os_error()); }
+            Ok(())
+        }); }
+        let mut child = command.spawn()?;
+        let pid = child.id();
+        let stopped = (0..100).any(|_| {
+            let state = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
+            if state.lines().any(|line| line.starts_with("State:") && line.contains('T')) { return true; }
+            std::thread::sleep(Duration::from_millis(10));
+            false
+        });
+        if !stopped {
+            let _ = child.kill(); let _ = child.wait();
+            crate::ui::factory::cgroup::remove_scope(&scope);
+            anyhow::bail!("factory launch barrier did not stop before exec");
+        }
+        if let Err(error) = crate::ui::factory::cgroup::add_pid(&scope, pid) {
+            let _ = child.kill(); let _ = child.wait();
+            crate::ui::factory::cgroup::remove_scope(&scope);
+            return Err(error.into());
+        }
+        if unsafe { libc::kill(pid as i32, libc::SIGCONT) } != 0 {
+            let error = std::io::Error::last_os_error();
+            let _ = child.kill(); let _ = child.wait();
+            crate::ui::factory::cgroup::remove_scope(&scope);
+            return Err(error.into());
+        }
+        if let Some(store) = super::DaemonExitEvidenceStore::default_for_user() {
+            let _ = super::supervise_spawned_daemon(name, child, store);
+        }
+        return Ok(format!("cassy-scope:{}", scope.display()));
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let mut command = Command::new(executable);
+        command.args(&args).current_dir(root).stdin(Stdio::null()).stdout(Stdio::null());
+        let log = std::fs::OpenOptions::new().create(true).append(true).open(log_path)?;
+        command.stderr(Stdio::from(log));
+        apply_launch_environment(&mut command, environment);
+        #[cfg(unix)] {
+            use std::os::unix::process::CommandExt;
+            unsafe { command.pre_exec(|| {
+                if libc::setsid() == -1 { return Err(std::io::Error::last_os_error()); }
+                Ok(())
+            }); }
+        }
+        let child = command.spawn()?;
+        #[cfg(unix)] if let Some(store) = super::DaemonExitEvidenceStore::default_for_user() {
+            let _ = super::supervise_spawned_daemon(name, child, store);
+        }
+        Ok("process-session".to_string())
+    }
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::*;
+
+    #[test]
+    fn daemon_arguments_keep_project_path_as_one_argument() {
+        let args = factory_daemon_args(
+            std::path::Path::new("/tmp/project; touch /tmp/escape"),
+            "safe-session",
+            2,
+            cas_mux::SupervisorCli::Codex,
+        );
+        assert_eq!(args[5], std::ffi::OsString::from("/tmp/project; touch /tmp/escape"));
+        assert_eq!(args[9], std::ffi::OsString::from("codex"));
+        assert_eq!(args.len(), 13);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn systemd_unit_is_separate_and_keeps_provider_environment() {
+        let environment = super::super::launch_env::LaunchEnvironment {
+            executable: "/usr/bin/codex".into(),
+            set: vec![("PATH".into(), "/usr/bin".into())],
+            remove: vec!["INHERITED_PROFILE".into()],
+        };
+        let command = systemd_unit_command(
+            std::path::Path::new("/usr/bin/cas"),
+            std::path::Path::new("/projects/demo"), "demo-1", 0,
+            cas_mux::SupervisorCli::Codex, &environment,
+            std::path::Path::new("/tmp/demo.log"),
+        );
+        let args = command.get_args().map(|arg| arg.to_string_lossy().to_string()).collect::<Vec<_>>();
+        assert!(args.contains(&"--unit=cas-factory-demo-1".to_string()));
+        assert!(args.contains(&"reap-daemon".to_string()));
+        assert!(!args.iter().any(|arg| arg.starts_with("--property=KillMode=")));
+        assert!(args.contains(&"--setenv=PATH".to_string()));
+        assert!(args.contains(&"--property=UnsetEnvironment=INHERITED_PROFILE".to_string()));
+        assert!(args.contains(&"/usr/bin/cas".to_string()));
     }
 }
 

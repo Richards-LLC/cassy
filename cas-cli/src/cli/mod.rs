@@ -2,13 +2,13 @@
 //!
 //! Essential commands only. Use MCP tools for memory, tasks, rules, etc.
 
-mod account_picker;
+pub(crate) mod account_picker;
 mod auth;
 pub(crate) mod bridge;
 mod changelog;
-mod claude;
+pub(crate) mod claude;
 mod claude_md;
-mod codex;
+pub(crate) mod codex;
 mod codemap_cmd;
 mod history_cmd;
 mod artifact_cmd;

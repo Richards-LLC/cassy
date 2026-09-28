@@ -357,14 +357,15 @@ fn own_cgroup_dir() -> Option<PathBuf> {
 /// An MCP server invoked by a worker already runs *inside* that worker's
 /// `cas-worker-*` scope. Treating its current cgroup as the root nests a
 /// supposedly shared server below the worker, so the next worker teardown
-/// kills it. Ascend exactly one level for a recognized Cassy worker scope; never
-/// ascend arbitrary host cgroups.
+/// kills it. A hub in a Cassy shared-server scope has the same problem when
+/// it starts a factory. Ascend one level for a recognized Cassy worker or
+/// server scope; never ascend arbitrary host cgroups.
 fn containment_root(own: &Path) -> PathBuf {
-    let is_worker_scope = own
+    let is_shared_scope = own
         .file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| name.starts_with("cas-worker-"));
-    if is_worker_scope {
+        .is_some_and(|name| name.starts_with("cas-worker-") || name.starts_with("cas-server-"));
+    if is_shared_scope {
         own.parent().unwrap_or(own).to_path_buf()
     } else {
         own.to_path_buf()
@@ -476,6 +477,11 @@ pub(crate) fn create_server_scope(factory_session: &str, server_name: &str) -> O
         prefixed_scope_name("cas-server", factory_session, server_name),
         server_name,
     )
+}
+
+/// A detached daemon must not remain in a cgroup that a hub restart drains.
+pub(crate) fn outside_current_scope(dir: &Path) -> bool {
+    own_cgroup_dir().is_some_and(|own| !dir.starts_with(own))
 }
 
 /// Place a detached, shared workload in a sibling scope before it forks or
@@ -809,12 +815,15 @@ mod tests {
     }
 
     #[test]
-    fn shared_scope_root_ascends_out_of_a_worker_scope_only() {
+    fn shared_scope_root_ascends_out_of_cassy_worker_and_server_scopes() {
         let worker = Path::new("/delegated/session/cas-worker-factory-worker-a");
         assert_eq!(
             containment_root(worker),
             PathBuf::from("/delegated/session")
         );
+
+        let hub = Path::new("/delegated/session/cas-server-factory-hub");
+        assert_eq!(containment_root(hub), PathBuf::from("/delegated/session"));
 
         let ordinary = Path::new("/delegated/session");
         assert_eq!(containment_root(ordinary), ordinary);

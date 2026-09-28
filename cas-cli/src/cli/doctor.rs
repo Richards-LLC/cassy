@@ -1002,6 +1002,33 @@ fn host_checks(current: Option<&Path>) -> Vec<Check> {
         host_hub_transport_check(),
         host_hub_audit_check(),
     ];
+    // Commander needs a usable provider under the service's environment.
+    // Keep one result per CLI so a missing provider is easy to identify. A CLI
+    // that is not installed at all is informational: most machines run only
+    // some providers. An installed CLI that cannot launch is a warning.
+    checks.extend(crate::hub::launch_env::readiness().into_iter().map(|(cli, result)| {
+        let provider = match cli {
+            "claude" => cas_mux::SupervisorCli::Claude,
+            "codex" => cas_mux::SupervisorCli::Codex,
+            _ => cas_mux::SupervisorCli::Grok,
+        };
+        let profile = crate::hub::launch_env::default_profile_name(provider)
+            .unwrap_or_else(|_| "unknown".into());
+        let name = format!("hub launch {cli}");
+        match result {
+            Ok(path) => Check::new(
+                name,
+                CheckStatus::Ok,
+                format!("ready: profile {profile}, {}", path.display()),
+            ),
+            Err(crate::hub::launch_env::LaunchError::MissingBinary { .. }) => {
+                Check::new(name, CheckStatus::Ok, "not installed")
+            }
+            Err(error) => {
+                Check::new(name, CheckStatus::Warning, format!("profile {profile}: {error}"))
+            }
+        }
+    }));
     #[cfg(feature = "mcp-proxy")]
     checks.push(host_proxy_check());
     #[cfg(not(feature = "mcp-proxy"))]
@@ -2671,6 +2698,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
             );
         }
         checks.push(cloud_queue_check(&cas_root));
+        checks.push(cloud_team_only_check(&cas_root));
         checks.extend(sync_warning_checks(&sync_warnings));
         checks.extend(pull_id_collision_check(&cas_root));
         checks.extend(unauthored_pull_check(&cas_root));
@@ -4049,6 +4077,35 @@ fn canonical_alias_checks(cas_root: &Path) -> Vec<Check> {
             }),
     );
     checks
+}
+
+fn cloud_team_only_check(cas_root: &Path) -> Check {
+    match crate::cloud::CloudConfig::load_from_cas_dir(cas_root) {
+        Ok(config) if config.team_only => match config.validate_team_only() {
+            Ok(()) => {
+                let held = crate::cli::cloud::team_only_held_personal_rows(cas_root).unwrap_or(0);
+                Check::new(
+                    "cloud team-only",
+                    if held > 0 { CheckStatus::Warning } else { CheckStatus::Ok },
+                    format!("on; project rows sync only to the configured team; {held} personal rows held (team_only)"),
+                )
+            }
+            Err(message) => {
+                let held = crate::cli::cloud::team_only_held_personal_rows(cas_root).unwrap_or(0);
+                Check::new("cloud team-only", CheckStatus::Error, format!("{message}; {held} personal rows held (team_only)"))
+            }
+        },
+        Ok(_) => Check::new(
+            "cloud team-only",
+            CheckStatus::Ok,
+            "off; project rows use the default personal and team routing",
+        ),
+        Err(error) => Check::new(
+            "cloud team-only",
+            CheckStatus::Warning,
+            format!("could not read cloud config: {error}"),
+        ),
+    }
 }
 
 /// Report cloud watermarks and registration markers that belong to another

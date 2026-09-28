@@ -39,6 +39,7 @@ pub(crate) struct TaskSyncPayload {
     pub payload: String,
     pub current_project_id: Option<String>,
     pub current_team_id: Option<String>,
+    pub personal: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,15 +249,22 @@ impl SyncQueue {
         let payload = canonical.payload;
         let current_project_id = canonical.current_project_id.as_deref();
         let current_team_id = canonical.current_team_id.as_deref();
-        upsert_queue_row(
-            &tx,
-            EntityType::Task,
-            &intent.entity_id,
-            SyncOperation::Upsert,
-            Some(&payload),
-            "",
-            None,
-        )?;
+        if canonical.personal {
+            upsert_queue_row(
+                &tx,
+                EntityType::Task,
+                &intent.entity_id,
+                SyncOperation::Upsert,
+                Some(&payload),
+                "",
+                None,
+            )?;
+        } else {
+            tx.execute(
+                "DELETE FROM sync_queue WHERE entity_type = 'task' AND entity_id = ?1 AND team_id = ''",
+                params![intent.entity_id],
+            )?;
+        }
 
         let previous_route = intent
             .previous_team_id

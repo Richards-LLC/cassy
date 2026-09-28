@@ -129,6 +129,7 @@ fn refusal_of(error: &anyhow::Error) -> AuthRefusal {
 pub enum Scope {
     MachineRead,
     SessionRead,
+    SessionLaunch,
     PaneRead,
     PaneInput,
     MessageSend,
@@ -148,6 +149,7 @@ impl Scope {
         Ok(match value {
             "machine:read" | "machine-read" => Self::MachineRead,
             "session:read" | "session-read" => Self::SessionRead,
+            "session:launch" | "session-launch" => Self::SessionLaunch,
             "pane:read" | "pane-read" => Self::PaneRead,
             "pane:input" | "pane-input" => Self::PaneInput,
             "message:send" | "message-send" => Self::MessageSend,
@@ -163,6 +165,7 @@ impl Scope {
         match self {
             Self::MachineRead => "machine-read",
             Self::SessionRead => "session-read",
+            Self::SessionLaunch => "session-launch",
             Self::PaneRead => "pane-read",
             Self::PaneInput => "pane-input",
             Self::MessageSend => "message-send",
@@ -176,6 +179,7 @@ impl Scope {
         match self {
             Self::MachineRead => "machine:read",
             Self::SessionRead => "session:read",
+            Self::SessionLaunch => "session:launch",
             Self::PaneRead => "pane:read",
             Self::PaneInput => "pane:input",
             Self::MessageSend => "message:send",
@@ -695,6 +699,12 @@ struct AuditRecord<'a> {
     operator_label: Option<&'a str>,
     controller_origin: Option<&'a str>,
     target_session: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    supervisor_cli: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    placement: Option<&'a str>,
     /// cas-d636: why an authentication was denied (an AuthRefusal code).
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'a str>,
@@ -1342,7 +1352,27 @@ impl AuthStore {
         target_session: Option<&str>,
         now: DateTime<Utc>,
     ) -> Result<()> {
-        self.write_audit(context, outcome, action, required_scope, target_session, None, now)
+        self.write_audit(
+            context, outcome, action, required_scope, target_session,
+            None, None, None, None, now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn audit_launch(
+        &self,
+        context: &AuthContext,
+        outcome: &str,
+        project: &str,
+        supervisor_cli: &str,
+        session: Option<&str>,
+        now: DateTime<Utc>,
+        placement: Option<&str>,
+    ) -> Result<()> {
+        self.write_audit(
+            Some(context), outcome, "session_launch", Some(Scope::SessionLaunch),
+            session, Some(project), Some(supervisor_cli), placement, None, now,
+        )
     }
 
     /// A denied authentication, with its reason (cas-d636).
@@ -1353,7 +1383,10 @@ impl AuthStore {
         refusal: AuthRefusal,
         now: DateTime<Utc>,
     ) -> Result<()> {
-        self.write_audit(Some(context), "denied", action, None, None, Some(refusal), now)
+        self.write_audit(
+            Some(context), "denied", action, None, None,
+            None, None, None, Some(refusal), now,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1364,6 +1397,9 @@ impl AuthStore {
         action: &str,
         required_scope: Option<Scope>,
         target_session: Option<&str>,
+        project: Option<&str>,
+        supervisor_cli: Option<&str>,
+        placement: Option<&str>,
         refusal: Option<AuthRefusal>,
         now: DateTime<Utc>,
     ) -> Result<()> {
@@ -1380,6 +1416,9 @@ impl AuthStore {
             operator_label: context.map(|value| value.operator_label.as_str()),
             controller_origin: context.map(|value| value.controller_origin.as_str()),
             target_session,
+            project,
+            supervisor_cli,
+            placement,
             reason: refusal.map(AuthRefusal::code),
             detail: refusal.and_then(AuthRefusal::detail),
         };

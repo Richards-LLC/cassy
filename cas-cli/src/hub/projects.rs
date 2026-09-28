@@ -85,6 +85,7 @@ pub struct BrowseResult {
     pub root: BrowseRoot,
     pub path: String,
     pub entries: Vec<BrowseEntry>,
+    pub truncated: bool,
 }
 
 fn stable_id(prefix: &str, path: &Path) -> String {
@@ -219,7 +220,13 @@ fn projects_from_rows(
 /// when it exists; an explicit empty list disables browsing.
 pub fn configured_launch_roots() -> Result<Vec<BrowseRoot>> {
     let home = dirs::home_dir().context("home directory unavailable")?;
-    let config = Config::load(&host_cas_dir()).context("host config unavailable")?;
+    let config = match Config::load(&host_cas_dir()) {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::warn!(%error, "host config unavailable; Commander browsing disabled");
+            return Ok(Vec::new());
+        }
+    };
     let configured = config.hub.and_then(|hub| hub.launch_roots);
     let paths = configured.unwrap_or_else(|| {
         let default = home.join("Petrastella");
@@ -229,19 +236,30 @@ pub fn configured_launch_roots() -> Result<Vec<BrowseRoot>> {
             vec![]
         }
     });
+    Ok(launch_roots_from_paths(&home, paths))
+}
+
+fn launch_roots_from_paths(home: &Path, paths: Vec<String>) -> Vec<BrowseRoot> {
     let mut roots = BTreeMap::new();
     for raw in paths {
         let path = if raw == "~" {
-            home.clone()
+            home.to_path_buf()
         } else if let Some(tail) = raw.strip_prefix("~/") {
             home.join(tail)
         } else {
             PathBuf::from(raw)
         };
-        let path = path
-            .canonicalize()
-            .context("configured launch root is unavailable")?;
-        ensure!(path.is_dir(), "configured launch root is not a directory");
+        let path = match path.canonicalize() {
+            Ok(path) if path.is_dir() => path,
+            Ok(path) => {
+                tracing::warn!(path = %path.display(), "configured launch root is not a directory");
+                continue;
+            }
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "configured launch root is unavailable");
+                continue;
+            }
+        };
         roots.entry(path.clone()).or_insert_with(|| BrowseRoot {
             id: stable_id("root", &path),
             name: path
@@ -252,7 +270,7 @@ pub fn configured_launch_roots() -> Result<Vec<BrowseRoot>> {
             path,
         });
     }
-    Ok(roots.into_values().collect())
+    roots.into_values().collect()
 }
 
 fn resolve_browse_path(root: &Path, relative: &str) -> Result<PathBuf> {
@@ -292,9 +310,20 @@ pub fn browse(root_id: &str, path: &str) -> Result<BrowseResult> {
 fn browse_in(root: BrowseRoot, path: &str) -> Result<BrowseResult> {
     let current = resolve_browse_path(&root.path, path)?;
     let mut entries = Vec::new();
-    for item in fs::read_dir(&current)?.take(MAX_BROWSE_ENTRIES + 1) {
-        let item = item?;
-        if item.file_type()?.is_symlink() || !item.file_type()?.is_dir() {
+    const MAX_SCAN_ENTRIES: usize = 5_000;
+    let mut scanned = 0;
+    let mut scan_limited = false;
+    for item in fs::read_dir(&current)? {
+        if scanned == MAX_SCAN_ENTRIES {
+            scan_limited = true;
+            break;
+        }
+        scanned += 1;
+        let Ok(item) = item else { continue };
+        let Ok(file_type) = item.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() || !file_type.is_dir() {
             continue;
         }
         let child = match item.path().canonicalize() {
@@ -324,6 +353,7 @@ fn browse_in(root: BrowseRoot, path: &str) -> Result<BrowseResult> {
         });
     }
     entries.sort_by(|a, b| a.name.cmp(&b.name));
+    let truncated = scan_limited || entries.len() > MAX_BROWSE_ENTRIES;
     entries.truncate(MAX_BROWSE_ENTRIES);
     let relative = current
         .strip_prefix(&root.path)?
@@ -333,6 +363,7 @@ fn browse_in(root: BrowseRoot, path: &str) -> Result<BrowseResult> {
         root,
         path: relative,
         entries,
+        truncated,
     })
 }
 
@@ -498,5 +529,64 @@ mod tests {
         );
         let config: Config = toml::from_str("[hub]\nlaunch_roots = []\n").unwrap();
         assert_eq!(config.hub.unwrap().launch_roots, Some(vec![]));
+    }
+
+    #[test]
+    fn missing_configured_root_is_skipped_and_known_projects_remain() {
+        let (temp, main, _linked) = fixture();
+        let missing = temp.path().join("MISSING");
+        let roots = launch_roots_from_paths(
+            temp.path(),
+            vec![
+                missing.to_string_lossy().into_owned(),
+                temp.path().to_string_lossy().into_owned(),
+            ],
+        );
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].path, temp.path());
+        let now = Utc::now();
+        let projects = projects_from_rows(
+            vec![KnownRepo {
+                path: main.clone(),
+                first_seen_at: now,
+                last_touched_at: now,
+                touch_count: 1,
+            }],
+            &[],
+            false,
+        );
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].path, main);
+    }
+
+    #[test]
+    fn browse_filters_files_before_sorting_and_truncating_directories() {
+        let temp = tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
+        for index in 0..150 {
+            fs::write(temp.path().join(format!("file-{index:03}")), b"fixture").unwrap();
+        }
+        let repo = temp.path().join("repo-after-files");
+        fs::create_dir(&repo).unwrap();
+        git(&repo, &["init"]);
+        let root = BrowseRoot {
+            id: stable_id("root", temp.path()),
+            name: "root".into(),
+            path: temp.path().to_path_buf(),
+        };
+        let result = browse_in(root, "").unwrap();
+        assert_eq!(result.entries.len(), 1);
+        assert_eq!(result.entries[0].name, "repo-after-files");
+        assert!(result.entries[0].launchable);
+        assert!(!result.truncated);
+    }
+
+    #[test]
+    fn unreadable_host_config_disables_browse_without_an_error() {
+        crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
+            let host = home.join(".cas");
+            fs::create_dir_all(&host).unwrap();
+            fs::write(host.join("config.toml"), "[hub\ninvalid toml").unwrap();
+            assert!(configured_launch_roots().unwrap().is_empty());
+        });
     }
 }

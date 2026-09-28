@@ -43,9 +43,14 @@ pub fn resolve(
         cli: name,
         detail: "home directory is unavailable".into(),
     })?;
-    let path = launch_path(&home);
+    let candidates = launch_path(&home);
     let executable =
-        find_executable(name, &path).ok_or(LaunchError::MissingBinary { cli: name })?;
+        find_executable(name, &candidates).ok_or(LaunchError::MissingBinary { cli: name })?;
+    // The factory daemon launches workers and capability probes by bare CLI
+    // name. Keep the checked supervisor binary first, then every other
+    // installed provider, before the service PATH. All consumers inherit this
+    // exact PATH through the PTY command environment.
+    let path = provider_path(&executable, &candidates);
     let mut set = vec![
         (
             OsString::from("PATH"),
@@ -267,6 +272,35 @@ fn launch_path(home: &Path) -> Vec<PathBuf> {
     paths.retain(|p| p.is_absolute());
     paths.dedup();
     paths
+}
+
+fn provider_path(executable: &Path, candidates: &[PathBuf]) -> Vec<PathBuf> {
+    let mut path = Vec::new();
+    if let Some(parent) = executable.parent() {
+        path.push(parent.to_path_buf());
+    }
+    for provider in ["claude", "codex", "grok", "opencode"] {
+        if let Some(binary) = find_executable(provider, candidates) {
+            if let Some(parent) = binary.parent() {
+                if !path.iter().any(|existing| existing == parent) {
+                    path.push(parent.to_path_buf());
+                }
+            }
+        }
+    }
+    if let Some(ambient) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&ambient) {
+            if directory.is_absolute() && !path.contains(&directory) {
+                path.push(directory);
+            }
+        }
+    }
+    for directory in candidates {
+        if !path.contains(directory) {
+            path.push(directory.clone());
+        }
+    }
+    path
 }
 
 fn find_executable(name: &str, paths: &[PathBuf]) -> Option<PathBuf> {

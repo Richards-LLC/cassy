@@ -104,6 +104,21 @@ pub enum HubCommands {
     Authorize(HubAuthorizeArgs),
     /// List or revoke paired Commander devices
     Auth(HubAuthArgs),
+    /// Internal reaper for a factory daemon in a separate service unit.
+    #[command(hide = true)]
+    ReapDaemon(HubReapDaemonArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct HubReapDaemonArgs {
+    #[arg(long)]
+    pub session: String,
+    #[arg(long)]
+    pub cwd: std::path::PathBuf,
+    #[arg(long)]
+    pub workers: u8,
+    #[arg(long)]
+    pub supervisor_cli: String,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -992,6 +1007,7 @@ pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
         HubCommands::Start(serve) => {
             start(&serve, cli, args.tailscale_serve, args.tailscale_serve_port)
         }
+        HubCommands::ReapDaemon(reap) => reap_factory_daemon(&reap),
         HubCommands::Serve(serve) => {
             serve_foreground(&serve, args.tailscale_serve, args.tailscale_serve_port)
         }
@@ -1055,6 +1071,55 @@ pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
         HubCommands::Authorize(authorize) => super::hub_reverse_pairing::authorize(&authorize, cli),
         HubCommands::Auth(auth) => manage_auth(&auth, cli),
     }
+}
+
+#[cfg(unix)]
+fn reap_factory_daemon(args: &HubReapDaemonArgs) -> Result<()> {
+    use std::process::{Command, Stdio};
+    let executable = std::env::current_exe()?;
+    let store = crate::hub::DaemonExitEvidenceStore::default_for_user()
+        .ok_or_else(|| anyhow::anyhow!("home directory unavailable for daemon exit receipts"))?;
+    let supervisor_cli = args
+        .supervisor_cli
+        .parse::<cas_mux::SupervisorCli>()
+        .map_err(|error| anyhow::anyhow!(error))?;
+    anyhow::ensure!(
+        matches!(
+            supervisor_cli,
+            cas_mux::SupervisorCli::Claude
+                | cas_mux::SupervisorCli::Codex
+                | cas_mux::SupervisorCli::Grok
+        ),
+        "unsupported supervisor CLI"
+    );
+    let child = Command::new(executable)
+        .args(["factory", "daemon", "--session", &args.session, "--cwd"])
+        .arg(&args.cwd)
+        .args([
+            "--workers",
+            &args.workers.to_string(),
+            "--supervisor-cli",
+            supervisor_cli.backend().name(),
+            "--worker-cli",
+            supervisor_cli.backend().name(),
+            "--foreground",
+        ])
+        .stdin(Stdio::null())
+        .spawn()?;
+    let receipt = crate::hub::reap_spawned_daemon(&args.session, child, store)?;
+    let code = match receipt.exit {
+        crate::hub::ProcessExit::Code(code) => code,
+        crate::hub::ProcessExit::Signal(signal) => 128 + signal,
+    };
+    if code != 0 {
+        std::process::exit(code);
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn reap_factory_daemon(_args: &HubReapDaemonArgs) -> Result<()> {
+    anyhow::bail!("factory daemon reaper requires Unix")
 }
 
 fn start(args: &HubServeArgs, cli: &Cli, tailscale_serve: bool, tailscale_port: u16) -> Result<()> {

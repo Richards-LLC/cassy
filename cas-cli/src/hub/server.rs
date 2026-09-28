@@ -671,7 +671,7 @@ fn launch_session_blocking(
             );
         }
     };
-    let workers = request.workers.unwrap_or(3);
+    let workers = request.workers.unwrap_or(0);
     if workers > 16 {
         return launch_error(
             StatusCode::BAD_REQUEST,

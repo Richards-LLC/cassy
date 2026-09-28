@@ -999,9 +999,15 @@ fn host_checks(current: Option<&Path>) -> Vec<Check> {
         Check::new("user-level store", CheckStatus::Ok, format!("host root {}", root.display())),
         host_known_repos_check(),
         host_hub_service_check(),
+        // Commander needs a usable provider under the service's environment.
+        // Keep one result per CLI so a missing provider is easy to identify.
         host_hub_transport_check(),
         host_hub_audit_check(),
     ];
+    checks.extend(crate::hub::launch_env::readiness().into_iter().map(|(cli, result)| match result {
+        Ok(path) => Check::new(format!("hub launch {cli}"), CheckStatus::Ok, format!("ready: {}", path.display())),
+        Err(error) => Check::new(format!("hub launch {cli}"), CheckStatus::Warning, error.to_string()),
+    }));
     #[cfg(feature = "mcp-proxy")]
     checks.push(host_proxy_check());
     #[cfg(not(feature = "mcp-proxy"))]

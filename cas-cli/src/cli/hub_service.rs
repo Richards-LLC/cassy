@@ -55,8 +55,34 @@ struct ServiceReport {
     unit_path: Option<String>,
     log_path: Option<String>,
     hub_running: bool,
+    launch_readiness: Vec<LaunchReadiness>,
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct LaunchReadiness {
+    cli: &'static str,
+    ready: bool,
+    detail: String,
+}
+
+fn launch_readiness() -> Vec<LaunchReadiness> {
+    crate::hub::launch_env::readiness()
+        .into_iter()
+        .map(|(cli, result)| match result {
+            Ok(path) => LaunchReadiness {
+                cli,
+                ready: true,
+                detail: path.display().to_string(),
+            },
+            Err(error) => LaunchReadiness {
+                cli,
+                ready: false,
+                detail: error.to_string(),
+            },
+        })
+        .collect()
 }
 
 pub(super) fn manage_service(
@@ -202,11 +228,7 @@ pub(super) fn restart_supervised(
             let service_tailscale = definition.contains("--tailscale-serve");
             let rewritten = if service_publication_repair_needed(tailscale_serve, service_tailscale)
             {
-                rewrite_launchd_publication_flags(
-                    &definition,
-                    true,
-                    tailscale_port,
-                )?
+                rewrite_launchd_publication_flags(&definition, true, tailscale_port)?
             } else {
                 ensure_launchd_cli_environment(&definition)?
             };
@@ -806,6 +828,7 @@ fn report(
         unit_path: path.map(|path| path.display().to_string()),
         log_path: Some(paths.log_path().display().to_string()),
         hub_running,
+        launch_readiness: launch_readiness(),
         instructions,
     })
 }
@@ -849,6 +872,18 @@ fn print_report(cli: &Cli, report: ServiceReport) -> Result<()> {
                     println!("  Logs: {log_path}");
                 }
             }
+        }
+        for readiness in &report.launch_readiness {
+            println!(
+                "  {} launch: {} ({})",
+                readiness.cli,
+                if readiness.ready {
+                    "ready"
+                } else {
+                    "unavailable"
+                },
+                readiness.detail
+            );
         }
     }
     Ok(())
@@ -1495,9 +1530,17 @@ mod tests {
             upgraded,
             systemd_unit(Path::new("/opt/cas/bin/cas"), true, 8443)
         );
-        assert_eq!(upgrade_systemd_restart_policy(&upgraded), None, "upgrade is idempotent");
         assert_eq!(
-            upgrade_systemd_restart_policy(&systemd_unit(Path::new("/opt/cas/bin/cas"), false, 443)),
+            upgrade_systemd_restart_policy(&upgraded),
+            None,
+            "upgrade is idempotent"
+        );
+        assert_eq!(
+            upgrade_systemd_restart_policy(&systemd_unit(
+                Path::new("/opt/cas/bin/cas"),
+                false,
+                443
+            )),
             None,
             "a current unit is left alone"
         );
@@ -1520,7 +1563,11 @@ mod tests {
             "RestartSec=3\nRestartForceExitStatus=SIGHUP\n",
         );
         let upgraded = upgrade_systemd_restart_policy(&stale).unwrap();
-        assert_eq!(upgraded.matches("RestartForceExitStatus=").count(), 1, "{upgraded}");
+        assert_eq!(
+            upgraded.matches("RestartForceExitStatus=").count(),
+            1,
+            "{upgraded}"
+        );
         assert!(upgraded.contains("RestartForceExitStatus=SIGHUP SIGINT SIGPIPE\n"));
 
         let no_restart_line = LEGACY_SYSTEMD_UNIT.replace("Restart=on-failure\n", "");
@@ -1567,12 +1614,18 @@ exit 0
         let unit = fixture.path().join("cas-hub.service");
         write_service_file(&unit, LEGACY_SYSTEMD_UNIT).unwrap();
 
-        assert!(refresh_systemd_unit(&unit).unwrap(), "legacy unit is rewritten");
+        assert!(
+            refresh_systemd_unit(&unit).unwrap(),
+            "legacy unit is rewritten"
+        );
         assert_eq!(
             fs::read_to_string(&unit).unwrap(),
             systemd_unit(Path::new("/opt/cas/bin/cas"), true, 8443)
         );
-        assert!(!refresh_systemd_unit(&unit).unwrap(), "current unit is left alone");
+        assert!(
+            !refresh_systemd_unit(&unit).unwrap(),
+            "current unit is left alone"
+        );
         let reloads = fs::read_to_string(&log)
             .unwrap()
             .lines()

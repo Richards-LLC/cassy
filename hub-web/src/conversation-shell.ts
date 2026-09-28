@@ -14,6 +14,20 @@ export interface ConversationShellModel {
   searchQuery?: string;
   /** Offer the Ctrl K hint in the search placeholder (not on a phone). */
   keyboardHint?: boolean;
+  /**
+   * New session (cas-0f51): "ready" when a paired machine lets this browser
+   * start sessions, "grant" when none does yet (the button becomes the way to
+   * allow it); absent with no machine paired.
+   */
+  launch?: "ready" | "grant";
+}
+
+/** The list header's New session control, or the grant path that replaces it. */
+export function newSessionButtonMarkup(launch: ConversationShellModel["launch"]): string {
+  if (!launch) return "";
+  return launch === "ready"
+    ? '<button id="new-session-toggle" class="new-session-toggle" type="button" aria-haspopup="dialog"><span aria-hidden="true">+</span> New session</button>'
+    : '<button id="new-session-toggle" class="new-session-toggle" type="button" aria-haspopup="dialog" data-launch-grant="true">Allow new sessions</button>';
 }
 
 export const CONVERSATION_SEARCH_LABEL = "Search conversations";
@@ -285,7 +299,7 @@ export function conversationShellMarkup(model: ConversationShellModel): string {
   const welcomePairs = !model.selected && model.loaded && !model.paired;
   return `<div class="conversation-shell${model.selected ? " thread-open" : ""}${welcomePairs ? " welcome-pairs" : ""}${model.machineId ? ` ${machineAccentClass(model.machineId)}` : ""}">
     <aside class="conversation-sidebar" aria-label="Supervisor conversations">
-      <header class="conversation-list-heading"><div class="conversation-list-top">${cloudBrand()}${appearanceButtonMarkup()}</div><div class="conversation-list-title"><h1>Conversations</h1><button id="pair-toggle"${welcomePairs ? ' class="primary"' : ""} type="button">Pair a machine</button></div><p>Your projects. Your supervisors.</p>${model.paired ? conversationSearchMarkup(model.searchQuery, model.keyboardHint ?? true) : ""}</header>
+      <header class="conversation-list-heading"><div class="conversation-list-top">${cloudBrand()}${appearanceButtonMarkup()}</div><div class="conversation-list-title"><h1>Conversations</h1><span class="conversation-list-actions">${newSessionButtonMarkup(model.launch)}<button id="pair-toggle"${welcomePairs ? ' class="primary"' : ""} type="button">Pair a machine</button></span></div><p>Your projects. Your supervisors.</p>${model.paired ? conversationSearchMarkup(model.searchQuery, model.keyboardHint ?? true) : ""}</header>
       <nav id="conversation-list" aria-label="Choose a supervisor"></nav>
       <div id="conversation-empty" class="conversation-empty" hidden></div>
       ${model.paired ? composeFabMarkup : ""}

@@ -3867,3 +3867,97 @@ button.chip:disabled { cursor: default; }
   .paired-machine p { margin: 0; }
   .paired-machine button { min-height: var(--button-height); margin-top: var(--space-1); }
 }
+
+/* == New session (cas-0f51): machine → project → supervisor → start ==
+   A body-level sheet (outside #app, so a shell rebuild never replaces it).
+   Desktop: a 560px dialog anchored near the top like the palette, so the
+   list filtering beneath the search never moves the field. Phone: the whole
+   screen, with Start riding the bottom edge. */
+.conversation-list-actions { display: inline-flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-1); margin-inline-start: auto; }
+.new-session-toggle { white-space: nowrap; }
+.new-session-toggle > span[aria-hidden] { font-weight: var(--weight-semibold); }
+.launch-sheet { width: min(560px, calc(100vw - var(--space-6))); max-height: min(84dvh, 760px); margin-block: min(10dvh, 80px) auto; padding: var(--space-4); background: var(--bg-raised); }
+.launch-flow { display: grid; gap: var(--space-3); min-height: 0; overflow-y: auto; overscroll-behavior: contain; align-content: start; padding-inline: calc(2 * var(--focus-ring-width)); margin-inline: calc(-2 * var(--focus-ring-width)); scroll-padding-bottom: calc(var(--button-height) + var(--space-6)); }
+.launch-flow > * { min-width: 0; }
+.launch-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.launch-head h2 { font: var(--weight-medium) var(--fs-lg)/1.2 var(--font-display); }
+.launch-head h2:focus { outline: none; }
+.launch-close { width: var(--rail-item-min); min-width: var(--rail-item-min); min-height: var(--rail-item-min); padding: 0; font-size: 22px; background: var(--color-transparent); }
+.launch-view { display: grid; gap: var(--space-3); min-width: 0; }
+.launch-view[hidden] { display: none; }
+.launch-machine select { min-height: var(--button-height); padding: 0 var(--space-3); color: var(--ink); background: var(--panel); border: var(--line-width) solid var(--ink-mid); border-radius: var(--radius-card); font: inherit; font-size: var(--fs-base); }
+.launch-machine[hidden] { display: none; }
+.launch-sheet fieldset { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-2); min-width: 0; margin: 0; padding: 0; background: transparent; }
+.launch-sheet legend { padding: 0; margin-bottom: var(--space-2); color: var(--text-hi); font-size: var(--fs-meta); font-weight: var(--weight-semibold); }
+.launch-tabs { display: flex; gap: var(--space-1); border-bottom: var(--line-width) solid var(--line-subtle); }
+.launch-tabs [role=tab] { min-height: var(--button-height); margin-bottom: calc(-1 * var(--line-width)); padding: 0 var(--space-3); color: var(--text-mid); background: var(--color-transparent); border-bottom: 2px solid var(--color-transparent); border-radius: var(--radius-card) var(--radius-card) 0 0; }
+.launch-tabs [role=tab][aria-selected="true"] { color: var(--text-hi); font-weight: var(--weight-semibold); border-bottom-color: var(--color-action); }
+.launch-tabs [role=tab][hidden] { display: none; }
+.launch-panel { display: grid; gap: var(--space-2); min-width: 0; }
+.launch-panel[hidden] { display: none; }
+.launch-panel input[type=search] { min-height: var(--button-height); padding: 0 var(--space-3); color: var(--ink); background: var(--panel); border: var(--line-width) solid var(--ink-mid); border-radius: var(--radius-card); }
+/* The list scrolls on its own so the supervisor choice and Start stay in reach. */
+.launch-list { display: grid; gap: var(--space-1); max-height: min(40dvh, 320px); overflow-y: auto; overscroll-behavior: contain; padding: var(--focus-ring-width); margin: calc(-1 * var(--focus-ring-width)); }
+.launch-row { display: flex; align-items: center; gap: var(--space-3); min-height: 48px; min-width: 0; padding: var(--space-2) var(--space-3); color: var(--text-hi); background: var(--panel); border: var(--line-width) solid var(--color-transparent); border-radius: var(--radius-card); font-size: var(--fs-base); text-align: left; cursor: pointer; }
+.launch-row:hover { background: var(--bg-hover); }
+.launch-row-text { display: grid; min-width: 0; flex: 1; gap: 2px; }
+.launch-row-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: var(--weight-medium); }
+.launch-row-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-mid); font-family: var(--font-mono); font-size: var(--fs-xs); }
+.launch-choice input { flex: none; width: 18px; height: 18px; margin: 0; accent-color: var(--color-action); }
+.launch-choice.is-checked { background: var(--bg-active); border-color: var(--color-action); }
+.launch-choice:has(input:focus-visible) { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: calc(-1 * var(--focus-ring-width)); }
+.launch-choice input:focus-visible { outline: none; }
+.launch-running { cursor: default; }
+.launch-running:hover { background: var(--panel); }
+.launch-row-state { display: inline-flex; align-items: center; gap: var(--space-1); color: var(--text-mid); font-size: var(--fs-xs); }
+.launch-dot { width: 8px; height: 8px; border-radius: var(--radius-pill); background: var(--state-ok); }
+.launch-attach { flex: none; width: auto; min-height: 36px; font-size: var(--fs-meta); font-weight: var(--weight-semibold); }
+.launch-folder { width: 100%; min-height: 48px; background: var(--panel); display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "name chevron" "path chevron"; row-gap: 2px; }
+.launch-folder > .launch-row-name { grid-area: name; }
+.launch-folder > .launch-row-path { grid-area: path; }
+.launch-chevron { grid-area: chevron; color: var(--text-mid); font-size: 20px; }
+.launch-crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1); min-height: 32px; font-size: var(--fs-meta); color: var(--text-mid); }
+.launch-crumb { min-height: 32px; padding: 0 var(--space-2); color: var(--color-action); background: var(--color-transparent); font-size: var(--fs-meta); }
+.launch-crumb-current { padding: 0 var(--space-2); color: var(--text-hi); font-weight: var(--weight-semibold); }
+.launch-empty { margin: 0; padding: var(--space-3); color: var(--text-mid); font-size: var(--fs-base); }
+.launch-truncated { font-size: var(--fs-meta); }
+.launch-cli-options { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-1); }
+.launch-cli-option { display: flex; flex-wrap: wrap; align-items: center; column-gap: var(--space-2); min-height: var(--button-height); padding: var(--space-1) var(--space-3); color: var(--text-hi); background: var(--panel); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); font-size: var(--fs-base); cursor: pointer; }
+.launch-cli-option input { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--color-action); }
+.launch-cli-option.is-checked { background: var(--bg-active); border-color: var(--color-action); font-weight: var(--weight-semibold); }
+.launch-cli-option:has(input:focus-visible) { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: var(--focus-ring-width); }
+.launch-cli-option input:focus-visible { outline: none; }
+.launch-cli-default { flex-basis: 100%; padding-inline-start: calc(16px + var(--space-2)); color: var(--text-mid); font-size: var(--fs-xs); font-weight: var(--weight-regular); }
+.launch-cli-default[hidden] { display: none; }
+.launch-workers { max-width: 16rem; }
+.launch-optional { color: var(--text-mid); }
+.launch-workers input { min-height: var(--button-height); }
+.launch-invalid { color: var(--state-crit); font-size: var(--fs-meta); }
+.launch-invalid[hidden] { display: none; }
+.launch-summary { flex: 1 0 100%; order: -1; margin: 0; color: var(--text-hi); font-size: var(--fs-meta); }
+.launch-actions .primary { min-width: 7rem; }
+.launch-grant-command { flex-wrap: wrap; justify-content: flex-start; align-items: center; gap: var(--space-2); padding: var(--space-3); background: var(--panel); border-radius: var(--radius-card); }
+.launch-grant-command code { min-width: 0; overflow-wrap: anywhere; color: var(--text-hi); font-size: var(--fs-meta); }
+.launch-grant .launch-lead { color: var(--text-hi); font-size: var(--fs-md); }
+.launch-progress { display: grid; gap: var(--space-2); padding: var(--space-4) 0; border-top: var(--rule-hero) solid var(--color-verdict); }
+.launch-progress-title { color: var(--text-hi); font: var(--weight-regular) var(--fs-lg)/1.3 var(--font-display); }
+.launch-elapsed { color: var(--text-mid); font: var(--fs-meta)/1 var(--font-mono); white-space: nowrap; }
+.launch-error [role=alert] { display: grid; gap: var(--space-2); padding: var(--space-3) var(--space-4); border-inline-start: 4px solid var(--state-crit); background: var(--panel); border-radius: var(--radius-card); }
+.launch-error h3 { margin: 0; color: var(--text-hi); font-size: var(--fs-md); font-weight: var(--weight-semibold); }
+.launch-error p { color: var(--text-hi); }
+.launch-error-detail { color: var(--text-mid); font-size: var(--fs-meta); }
+.launch-error-detail[hidden] { display: none; }
+.launch-error-detail summary { cursor: pointer; min-height: 32px; display: flex; align-items: center; }
+.launch-error-detail pre { margin: var(--space-2) 0 0; padding: var(--space-3); overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-hi); background: var(--panel); border-radius: var(--radius-card); font-size: var(--fs-xs); }
+.launch-sheet .dialog-actions { background: var(--bg-raised); }
+@media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
+  .launch-sheet { width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; margin: 0; padding: var(--space-4) var(--space-4) max(var(--space-4), env(safe-area-inset-bottom)); border-radius: 0; }
+  .launch-list { max-height: none; }
+  .launch-cli-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .launch-row { min-height: 52px; }
+  .launch-actions button { flex: 1 1 0; }
+}
+@media (forced-colors: active) {
+  .launch-choice.is-checked, .launch-cli-option.is-checked { border: 2px solid Highlight; }
+}
+/* == End New session == */

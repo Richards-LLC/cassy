@@ -3877,7 +3877,11 @@ button.chip:disabled { cursor: default; }
 .new-session-toggle { white-space: nowrap; }
 .new-session-toggle > span[aria-hidden] { font-weight: var(--weight-semibold); }
 .launch-sheet { width: min(600px, calc(100vw - var(--space-6))); max-height: min(92dvh, 820px); margin-block: min(4dvh, 32px) auto; padding: var(--space-4); background: var(--bg-raised); }
-.launch-flow { display: grid; gap: var(--space-3); min-height: 0; overflow-y: auto; overscroll-behavior: contain; align-content: start; padding-inline: calc(2 * var(--focus-ring-width)); margin-inline: calc(-2 * var(--focus-ring-width)); scroll-padding-bottom: calc(var(--button-height) + var(--space-6)); }
+/* scroll-padding-bottom covers the sticky summary + actions (two summary
+   lines and the 40px buttons), so a focused field scrolls clear of it
+   (cas-0f51 QA F02). */
+.launch-flow { display: grid; gap: var(--space-3); min-height: 0; overflow-y: auto; overscroll-behavior: contain; align-content: start; padding-inline: calc(2 * var(--focus-ring-width)); margin-inline: calc(-2 * var(--focus-ring-width)); scroll-padding-bottom: calc(var(--button-height) + 4.5rem); }
+.launch-flow :is(input, select, button) { scroll-margin-bottom: var(--space-2); }
 .launch-flow > * { min-width: 0; }
 .launch-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
 .launch-head h2 { font: var(--weight-medium) var(--fs-lg)/1.2 var(--font-display); }
@@ -3925,8 +3929,16 @@ button.chip:disabled { cursor: default; }
 .launch-truncated { font-size: var(--fs-meta); }
 /* Supervisor and Workers share one row wherever there is room, so the whole
    form fits a 1280x800 screen above the sticky actions without scrolling. */
-.launch-options { display: grid; grid-template-columns: minmax(0, 1fr) 9.5rem; align-items: start; gap: var(--space-4); }
-@media (max-width: 40rem) { .launch-options { grid-template-columns: minmax(0, 1fr); gap: var(--space-3); } }
+/* Supervisor, then Account, then Workers (cas-9666). One column on a phone and
+   in the wide two-column sheet; in the 600px sheet Workers sits beside
+   Supervisor and Account takes the full width under both. */
+.launch-options { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: var(--space-3); }
+@media (min-width: 40.01rem) and (max-width: 61.99rem) and (min-height: 30.01rem) {
+  .launch-options { grid-template-columns: minmax(0, 1fr) 9.5rem; grid-template-areas: "cli workers" "account account"; column-gap: var(--space-4); }
+  .launch-options > .launch-cli { grid-area: cli; }
+  .launch-options > .launch-workers { grid-area: workers; }
+  .launch-options > .launch-account { grid-area: account; }
+}
 .launch-cli-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-1); }
 .launch-cli-option { display: flex; flex-wrap: wrap; align-items: center; column-gap: var(--space-2); min-height: var(--button-height); padding: var(--space-1) var(--space-3); color: var(--text-hi); background: var(--panel); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); font-size: var(--fs-base); cursor: pointer; }
 .launch-cli-option input { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--color-action); }
@@ -3940,6 +3952,23 @@ button.chip:disabled { cursor: default; }
 .launch-workers input { min-height: var(--button-height); }
 .launch-invalid { color: var(--state-crit); font-size: var(--fs-meta); }
 .launch-invalid[hidden] { display: none; }
+/* Account (cas-9666): every account for the chosen CLI. Names are usually
+   email addresses; they wrap anywhere rather than widen the sheet. */
+.launch-account[hidden] { display: none; }
+/* The account list never scrolls on its own: a logged-out row's command and Copy stay whole. */
+.launch-list.launch-accounts { max-height: none; overflow: visible; }
+.launch-account-tag { justify-self: start; padding: 0 var(--space-2); color: var(--text-hi); background: var(--bg-raised); border-radius: var(--radius-pill); font-size: var(--fs-xs); font-weight: var(--weight-semibold); }
+.launch-account-out { flex-wrap: wrap; row-gap: var(--space-2); cursor: default; color: var(--text-mid); }
+.launch-account-out:hover { background: var(--panel); }
+.launch-account-label { display: flex; align-items: center; gap: var(--space-3); min-width: 0; flex: 1 1 100%; }
+.launch-account-label input { flex: none; width: 18px; height: 18px; margin: 0; }
+.launch-account-state { color: var(--text-mid); font-size: var(--fs-xs); }
+.launch-login { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; padding-inline-start: calc(18px + var(--space-3)); }
+.launch-login code { min-width: 0; overflow-wrap: anywhere; color: var(--text-hi); font-size: var(--fs-xs); }
+.launch-login button { min-height: 36px; font-size: var(--fs-meta); }
+.launch-account-note { padding-inline: 0; }
+.launch-retry { justify-self: start; width: auto; min-height: 36px; font-size: var(--fs-meta); }
+.launch-account-body { display: grid; gap: var(--space-2); }
 .launch-summary { flex: 1 0 100%; order: -1; margin: 0; color: var(--text-hi); font-size: var(--fs-meta); }
 .launch-actions .primary { min-width: 7rem; }
 .launch-grant-command { flex-wrap: wrap; justify-content: flex-start; align-items: center; gap: var(--space-2); padding: var(--space-3); background: var(--panel); border-radius: var(--radius-card); }
@@ -3964,24 +3993,50 @@ button.chip:disabled { cursor: default; }
   .launch-list { max-height: none; }
   .launch-row { min-height: 52px; }
   .launch-actions button { flex: 1 1 0; }
+  /* The sticky bar reads as a bar over the scrolling form, not as the form's last row. */
+  .launch-actions { border-top: var(--line-width) solid var(--line-subtle); }
 }
 /* A landscape phone is ~390px tall: the project list takes the left column and
    the supervisor, workers and Start take the right, so Start and every choice
    share one screen instead of hiding under the sticky actions. */
+/* Wide screens and landscape phones: the project list takes the left column
+   and supervisor, account, workers and Start the right, so every choice and
+   Start share one screen with the account list included (cas-9666). */
+@media (min-width: 62rem) and (min-height: 30.01rem), (max-height: 30rem) and (min-width: 40rem) {
+  /* Workers sits under the project list, beside a long account list, so
+     neither is pushed under the sticky actions (cas-9666). */
+  .launch-view[data-launch-view="form"] {
+    grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+    grid-template-areas: "project cli" "project account" "workers account" "invalid invalid" "actions actions";
+    column-gap: var(--space-6); row-gap: var(--space-3); align-items: start;
+  }
+  .launch-view[data-launch-view="form"] > .launch-project { grid-area: project; }
+  .launch-view[data-launch-view="form"] > .launch-options { display: contents; }
+  .launch-options > .launch-cli { grid-area: cli; }
+  .launch-options > .launch-account { grid-area: account; }
+  .launch-options > .launch-workers { grid-area: workers; }
+  .launch-view[data-launch-view="form"] > .launch-invalid { grid-area: invalid; }
+  .launch-view[data-launch-view="form"] > .launch-actions { grid-area: actions; }
+}
+@media (min-width: 62rem) and (min-height: 30.01rem) {
+  .launch-sheet { width: min(880px, calc(100vw - var(--space-6))); }
+  .launch-list { max-height: min(46dvh, 380px); }
+  .launch-workers input { max-width: 9.5rem; }
+}
 @media (max-height: 30rem) and (min-width: 40rem) {
   .launch-sheet { padding-block: var(--space-2) max(var(--space-2), env(safe-area-inset-bottom)); }
   .launch-flow { gap: var(--space-2); }
   .launch-head h2 { font-size: var(--fs-md); }
   .launch-machine { grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: var(--space-3); }
-  .launch-view[data-launch-view="form"] { grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); column-gap: var(--space-4); row-gap: var(--space-2); align-items: start; }
-  .launch-view[data-launch-view="form"] > .launch-project { grid-column: 1; grid-row: 1 / span 3; }
-  .launch-view[data-launch-view="form"] > :not(.launch-project) { grid-column: 2; }
-  .launch-options { grid-template-columns: minmax(0, 1fr); gap: var(--space-2); }
+  .launch-view[data-launch-view="form"] { column-gap: var(--space-4); row-gap: var(--space-2); }
   .launch-list { max-height: calc(100dvh - 15rem); }
   .launch-row { min-height: 44px; padding-block: var(--space-1); }
   #launch-cli-hint, #launch-workers-hint { display: none; }
   .launch-workers { grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: var(--space-2); }
-  .launch-actions { position: static; }
+  /* Start stays in reach: one sticky row, the summary beside the buttons. */
+  .launch-actions { flex-wrap: nowrap; }
+  .launch-actions .launch-summary { flex: 1 1 auto; order: 0; min-width: 0; }
+  .launch-actions button { flex: none; }
 }
 @media (forced-colors: active) {
   .launch-choice.is-checked, .launch-cli-option.is-checked { border: 2px solid Highlight; }

@@ -48,7 +48,66 @@ export interface BrowseEntry {
 
 export interface BrowseListing { root: BrowseRoot; path: string; entries: BrowseEntry[]; truncated: boolean }
 
-export interface LaunchRequest { target: LaunchTarget; supervisor_cli: SupervisorCli; workers?: number }
+export interface LaunchRequest { target: LaunchTarget; supervisor_cli: SupervisorCli; workers?: number; profile?: string }
+
+/** One account profile a CLI can run as (GET /v1/launch/profiles, cas-7b52). */
+export interface LaunchProfile { name: string; logged_in: boolean; is_default: boolean }
+
+/** One CLI's accounts. A missing CLI is installed=false with no error; a failed check keeps installed=true and names the error. */
+export interface CliProfiles { installed: boolean; profiles: LaunchProfile[]; error?: string }
+
+export type LaunchProfiles = Partial<Record<SupervisorCli, CliProfiles>>;
+
+/** The supervisors that run as a chosen account; Grok has none. */
+const ACCOUNT_CLIS: readonly SupervisorCli[] = ["claude", "codex"];
+
+/** Preselect the machine default when it is logged in, else the first logged-in account. */
+export function defaultAccount(entry: CliProfiles | undefined): string | undefined {
+  const usable = entry?.profiles.filter((profile) => profile.logged_in) ?? [];
+  return (usable.find((profile) => profile.is_default) ?? usable[0])?.name;
+}
+
+/** The command that logs an account in on the machine. */
+export function accountLoginCommand(cli: SupervisorCli, name: string): string {
+  const quoted = /^[\w@.+-]+$/.test(name) ? name : `'${name.replaceAll("'", "'\\''")}'`;
+  return `cas ${cli} login ${quoted}`;
+}
+
+export type AccountStep =
+  | { kind: "hidden" }
+  | { kind: "loading" }
+  | { kind: "unavailable"; message: string }
+  | { kind: "list"; entry: CliProfiles };
+
+/**
+ * What the Account step shows for a CLI. Grok and a CLI that is not
+ * installed have no step; a failed check says so and the launch falls back
+ * to the machine's default account.
+ */
+export function accountStep(cli: SupervisorCli, profiles: { status: string; data?: LaunchProfiles }, machine: string): AccountStep {
+  if (!ACCOUNT_CLIS.includes(cli)) return { kind: "hidden" };
+  const name = supervisorCliLabel(cli);
+  if (profiles.status === "idle" || profiles.status === "loading") return { kind: "loading" };
+  const fallback = "The session uses the machine's default account.";
+  if (profiles.status === "failed") return { kind: "unavailable", message: `Couldn't list ${name} accounts on ${machine}. ${fallback}` };
+  const entry = profiles.data?.[cli];
+  if (!entry || !entry.installed) return { kind: "hidden" };
+  if (entry.error) {
+    const why = entry.error === "not_logged_in" ? `${name}'s default account isn't logged in on ${machine}.`
+      : entry.error === "profile_missing" ? `The ${name} account the hub is set to use doesn't exist on ${machine}.`
+      : `${machine} couldn't check ${name}'s accounts.`;
+    return { kind: "unavailable", message: `${why} ${fallback}` };
+  }
+  if (!entry.profiles.length) return { kind: "unavailable", message: `No ${name} accounts found on ${machine}. ${fallback}` };
+  return { kind: "list", entry };
+}
+
+/** "Start cas-src with Claude (support@…) and 2 workers on soundwave." */
+export function launchSummary(input: { verb: string; project: string; cli: SupervisorCli; account?: string; workers?: number; machine: string; end: string }): string {
+  const who = `${supervisorCliLabel(input.cli)}${input.account ? ` (${input.account})` : ""}`;
+  const crew = input.workers ? ` and ${input.workers} ${input.workers === 1 ? "worker" : "workers"}` : "";
+  return `${input.verb} ${input.project} with ${who}${crew} on ${input.machine}${input.end}`;
+}
 
 export type LaunchResult =
   | { readonly ok: true; readonly session: string; readonly attached: boolean }
@@ -69,6 +128,8 @@ export interface LaunchHost {
   currentMachineId(): string | undefined;
   origin: string;
   projects(machineId: string, signal: AbortSignal): Promise<ProjectCatalog>;
+  /** Each CLI's account profiles on the machine. */
+  profiles(machineId: string, signal: AbortSignal): Promise<LaunchProfiles>;
   browse(machineId: string, rootId: string, path: string, signal: AbortSignal): Promise<BrowseListing>;
   launch(machineId: string, request: LaunchRequest): Promise<LaunchResult>;
   /** Refresh the machine's session list; whether `session` is on it now. */
@@ -122,9 +183,14 @@ export function parseWorkers(value: string): { ok: true; workers?: number } | { 
  * and what to do; the machine's own detail follows verbatim for whoever fixes
  * it.
  */
-export function launchErrorCopy(result: { status: number; code?: string; detail?: string }, cli: string, machine: string): { title: string; advice: string } {
+export function launchErrorCopy(result: { status: number; code?: string; detail?: string }, cli: string, machine: string, profile?: string): { title: string; advice: string } {
   const name = supervisorCliLabel(cli);
+  if (profile && result.code === "not_logged_in") {
+    return { title: `The ${name} account ${profile} isn't logged in on ${machine}.`, advice: `Run ${accountLoginCommand(cli as SupervisorCli, profile)} on ${machine}, or pick another account, then start again.` };
+  }
   switch (result.code) {
+    case "invalid_profile":
+      return { title: `That ${name} account isn't on ${machine} any more.`, advice: "The account list has been refreshed. Pick another account, then start again." };
     case "cli_missing":
       return { title: `${name} isn't installed where ${machine}'s hub can find it.`, advice: `Install ${name} on ${machine}, or add it to the hub service's PATH, then start again.` };
     case "profile_missing":
@@ -185,9 +251,9 @@ export function launchSheetMarkup(): string {
           <div class="launch-list" data-launch-list="browse" role="radiogroup" aria-label="Folders"></div>
         </div>
       </fieldset>
-      <!-- Account step slot: a profile picker fed by the machine's profile list goes here once the hub exposes one. -->
       <div class="launch-options">
       <fieldset class="launch-cli" aria-describedby="launch-cli-hint"><legend>Supervisor</legend><div class="launch-cli-options">${clis}</div><small id="launch-cli-hint" class="field-hint">Runs the session's supervisor.</small></fieldset>
+      <fieldset class="launch-account" hidden><legend>Account</legend><div class="launch-account-body" data-launch-accounts></div></fieldset>
       <label class="launch-workers"><span>Workers <span class="launch-optional">(optional)</span></span><input name="launch-workers" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="0" aria-describedby="launch-workers-hint"><small id="launch-workers-hint" class="field-hint">0 to 16. Leave empty to start the supervisor alone.</small></label>
       </div>
       <p class="launch-invalid" role="alert" hidden></p>
@@ -227,6 +293,8 @@ export class LaunchSheet {
   private selection: Selection | undefined;
   private cli: SupervisorCli = "claude";
   private cliChosen = false;
+  private profiles: Load<LaunchProfiles> = { status: "idle" };
+  private account: string | undefined;
   private loads = new AbortController();
   /** Bumped per launch; a stale wait never lands the operator anywhere. */
   private launchGeneration = 0;
@@ -250,6 +318,13 @@ export class LaunchSheet {
     const chosen = (machineId ? machines.find((m) => m.id === machineId) : undefined)
       ?? machines.find((m) => m.id === current && canLaunch(m)) ?? machines.find(canLaunch) ?? machines.find((m) => m.id === current) ?? machines[0];
     this.view = "form";
+    // Every open starts from the machine's defaults: a supervisor, worker
+    // count or filter left from the last launch must never ride along
+    // unseen (cas-0f51 QA F01).
+    this.cliChosen = false;
+    this.query = "";
+    (this.$("input[name=launch-workers]") as HTMLInputElement).value = "";
+    this.$(".launch-invalid").hidden = true;
     this.selectMachine(chosen?.id);
     if (!dialog.open) dialog.showModal();
     this.focusFirst();
@@ -290,7 +365,8 @@ export class LaunchSheet {
       if (action === "close") { this.close(); return; }
       if (action === "start") { void this.start(); return; }
       if (action === "back") { this.showView("form"); this.focusFirst(); return; }
-      if (action === "copy") { void this.copyGrant(target as HTMLButtonElement); return; }
+      if (action === "copy") { void this.copyCommand(target.closest<HTMLButtonElement>("button")!); return; }
+      if (action === "retry-accounts" && this.machineId) { void this.loadProfiles(this.machineId); return; }
       const mode = target.closest<HTMLElement>("[data-launch-mode]")?.dataset.launchMode as Mode | undefined;
       if (mode) { this.setMode(mode); return; }
       const attach = target.closest<HTMLElement>("[data-launch-attach]")?.dataset.launchAttach;
@@ -301,7 +377,8 @@ export class LaunchSheet {
     dialog.addEventListener("change", (event) => {
       const target = event.target as HTMLInputElement | HTMLSelectElement;
       if (target.name === "launch-machine") { this.selectMachine(target.value); return; }
-      if (target.name === "launch-cli") { this.cli = target.value as SupervisorCli; this.cliChosen = true; this.syncChecked(); this.syncActions(); return; }
+      if (target.name === "launch-cli") { this.cli = target.value as SupervisorCli; this.cliChosen = true; this.account = this.defaultAccountFor(this.cli); this.renderAccounts(); this.syncChecked(); this.syncActions(); return; }
+      if (target.name === "launch-account") { this.account = target.value; this.syncChecked(); this.syncActions(); return; }
       if (target.name === "launch-project") { this.choose(target as HTMLInputElement); return; }
     });
     dialog.addEventListener("input", (event) => {
@@ -328,6 +405,8 @@ export class LaunchSheet {
     this.loads = new AbortController();
     this.machineId = machineId;
     this.catalog = { status: "idle" };
+    this.profiles = { status: "idle" };
+    this.account = undefined;
     this.listing = { status: "idle" };
     this.browseRoot = undefined;
     this.browsePath = "";
@@ -338,7 +417,58 @@ export class LaunchSheet {
     this.renderMachines();
     if (this.view === "form" || this.view === "grant") this.view = canLaunch(machine) ? "form" : "grant";
     this.renderAll();
-    if (machine && canLaunch(machine)) void this.loadCatalog(machine.id);
+    if (machine && canLaunch(machine)) { void this.loadCatalog(machine.id); void this.loadProfiles(machine.id); }
+  }
+
+  private defaultAccountFor(cli: SupervisorCli): string | undefined {
+    return this.profiles.status === "ready" ? defaultAccount(this.profiles.data[cli]) : undefined;
+  }
+
+  private async loadProfiles(machineId: string): Promise<void> {
+    const signal = this.loads.signal;
+    this.profiles = { status: "loading" };
+    this.renderAccounts();
+    try {
+      const data = await this.host.profiles(machineId, signal);
+      if (signal.aborted || this.machineId !== machineId) return;
+      this.profiles = { status: "ready", data };
+    } catch {
+      if (signal.aborted || this.machineId !== machineId) return;
+      this.profiles = { status: "failed", message: "" };
+    }
+    // Keep a choice that is still usable; otherwise the default again.
+    const entry = this.profiles.status === "ready" ? this.profiles.data[this.cli] : undefined;
+    if (!entry?.profiles.some((profile) => profile.name === this.account && profile.logged_in)) this.account = this.defaultAccountFor(this.cli);
+    this.renderAccounts();
+    this.syncChecked();
+    this.syncActions();
+  }
+
+  /** The account step as it stands for the chosen CLI. */
+  private step(): AccountStep {
+    return accountStep(this.cli, this.profiles.status === "ready" ? { status: "ready", data: this.profiles.data } : this.profiles, this.machine()?.label ?? "the machine");
+  }
+
+  /** The account to send: only a listed, logged-in choice. */
+  private chosenAccount(): string | undefined {
+    const step = this.step();
+    if (step.kind !== "list") return undefined;
+    return step.entry.profiles.some((profile) => profile.name === this.account && profile.logged_in) ? this.account : undefined;
+  }
+
+  private renderAccounts(): void {
+    const fieldset = this.dialog?.querySelector<HTMLElement>(".launch-account");
+    if (!fieldset) return;
+    const body = fieldset.querySelector<HTMLElement>("[data-launch-accounts]")!;
+    const step = this.step();
+    fieldset.hidden = step.kind === "hidden";
+    if (step.kind === "hidden") { body.innerHTML = ""; return; }
+    if (step.kind === "loading") { body.innerHTML = `<p class="launch-empty" role="status">Loading accounts…</p>`; return; }
+    if (step.kind === "unavailable") {
+      body.innerHTML = `<p class="launch-empty launch-account-note" role="status">${escapeHtml(step.message)}</p><button type="button" class="launch-retry" data-launch-action="retry-accounts">Try again</button>`;
+      return;
+    }
+    body.innerHTML = `<div class="launch-list launch-accounts" role="radiogroup" aria-label="${escapeHtml(supervisorCliLabel(this.cli))} accounts">${step.entry.profiles.map((profile) => accountRowMarkup(this.cli, profile, profile.name === this.account)).join("")}</div>`;
   }
 
   private async loadCatalog(machineId: string): Promise<void> {
@@ -439,6 +569,7 @@ export class LaunchSheet {
     }
     this.renderKnown();
     this.renderBrowse();
+    this.renderAccounts();
     this.syncChecked();
     this.syncActions();
   }
@@ -526,8 +657,9 @@ export class LaunchSheet {
     const machine = this.machine();
     const ready = Boolean(this.selection && machine && canLaunch(machine));
     start.setAttribute("aria-disabled", String(!ready));
+    const workers = parseWorkers((this.$("input[name=launch-workers]") as HTMLInputElement).value);
     summary.textContent = this.selection && machine
-      ? `Start ${this.selection.name} with ${supervisorCliLabel(this.cli)} on ${machine.label}.`
+      ? launchSummary({ verb: "Start", project: this.selection.name, cli: this.cli, account: this.chosenAccount(), workers: workers.ok ? workers.workers : undefined, machine: machine.label, end: "." })
       : "Choose a project to start.";
   }
 
@@ -550,8 +682,9 @@ export class LaunchSheet {
     const generation = ++this.launchGeneration;
     const selection = this.selection;
     const cli = this.cli;
-    const request: LaunchRequest = { target: selection.target, supervisor_cli: cli, ...(workers.workers === undefined ? {} : { workers: workers.workers }) };
-    this.showStarting(`Starting ${selection.name} with ${supervisorCliLabel(cli)} on ${machine.label}…`, `Asking ${machine.label} to start it.`);
+    const profile = this.chosenAccount();
+    const request: LaunchRequest = { target: selection.target, supervisor_cli: cli, ...(workers.workers === undefined ? {} : { workers: workers.workers }), ...(profile ? { profile } : {}) };
+    this.showStarting(launchSummary({ verb: "Starting", project: selection.name, cli, account: profile, workers: workers.workers, machine: machine.label, end: "…" }), `Asking ${machine.label} to start it.`);
     let result: LaunchResult;
     try {
       result = await this.host.launch(machine.id, request);
@@ -566,7 +699,9 @@ export class LaunchSheet {
         this.renderAll();
         return;
       }
-      this.showError(launchErrorCopy(result, cli, machine.label), result.detail);
+      this.showError(launchErrorCopy(result, cli, machine.label, profile), result.detail);
+      // An account that vanished or logged out: Back shows the list as it is now.
+      if (result.code === "invalid_profile" || result.code === "not_logged_in") void this.loadProfiles(machine.id);
       return;
     }
     if (result.attached) { this.land(machine.id, result.session); return; }
@@ -626,15 +761,16 @@ export class LaunchSheet {
     this.host.open(machineId, session);
   }
 
-  private async copyGrant(button: HTMLButtonElement): Promise<void> {
+  private async copyCommand(button: HTMLButtonElement): Promise<void> {
     const command = button.dataset.command ?? "";
+    const label = button.textContent ?? "Copy command";
     try {
       await this.host.copy(command);
       button.textContent = "Copied";
     } catch {
       button.textContent = "Select and copy the command";
     }
-    window.setTimeout(() => { button.textContent = "Copy command"; }, 2000);
+    window.setTimeout(() => { button.textContent = label; }, 2000);
   }
 
   private focusFirst(): void {
@@ -663,6 +799,18 @@ function projectRowMarkup(project: LaunchProject, checked: boolean): string {
     return `<div class="launch-row launch-running"><span class="launch-row-text"><span class="launch-row-name">${name}</span><small class="launch-row-path">${path}</small><small class="launch-row-state"><span class="launch-dot" aria-hidden="true"></span>Running · <span class="codename">${escapeHtml(project.running_session)}</span></small></span><button type="button" class="launch-attach primary" data-launch-attach="${escapeHtml(project.running_session)}" aria-label="Attach to ${name} (${escapeHtml(project.running_session)})">Attach</button></div>`;
   }
   return `<label class="launch-row launch-choice"><input type="radio" name="launch-project" value="${escapeHtml(project.id)}" data-launch-name="${name}" data-launch-path="${path}" data-launch-target="${escapeHtml(JSON.stringify(project.target))}"${checked ? " checked" : ""}><span class="launch-row-text"><span class="launch-row-name">${name}</span><small class="launch-row-path">${path}</small></span></label>`;
+}
+
+function accountRowMarkup(cli: SupervisorCli, profile: LaunchProfile, checked: boolean): string {
+  const name = escapeHtml(profile.name);
+  const tag = profile.is_default ? '<small class="launch-account-tag">Default</small>' : "";
+  if (profile.logged_in) {
+    return `<label class="launch-row launch-choice launch-account-row"><input type="radio" name="launch-account" value="${name}"${checked ? " checked" : ""}><span class="launch-row-text"><span class="launch-row-name">${name}</span>${tag}</span></label>`;
+  }
+  // Logged out: shown so the operator sees every account, never selectable,
+  // with the one command that fixes it.
+  const command = accountLoginCommand(cli, profile.name);
+  return `<div class="launch-row launch-account-row launch-account-out"><label class="launch-account-label"><input type="radio" name="launch-account" value="${name}" disabled><span class="launch-row-text"><span class="launch-row-name">${name}</span>${tag}<small class="launch-account-state">Logged out. Log in on the machine:</small></span></label><span class="launch-login"><code>${escapeHtml(command)}</code><button type="button" data-launch-action="copy" data-command="${escapeHtml(command)}" aria-label="Copy login command for ${name}">Copy</button></span></div>`;
 }
 
 function browseProjectRowMarkup(entry: BrowseEntry, root: BrowseRoot, checked: boolean): string {

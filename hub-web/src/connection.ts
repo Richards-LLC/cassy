@@ -2,7 +2,7 @@ import { anySignal } from "./abort-signals";
 import { browserSupport, unsupportedBrowserNotice } from "./browser-support";
 import { dpopHeaders } from "./dpop";
 import type { ArtifactView, ArtifactViewResult } from "./artifact-open";
-import type { BrowseListing, LaunchRequest, LaunchResult, ProjectCatalog } from "./launch-session";
+import type { BrowseListing, LaunchProfiles, LaunchRequest, LaunchResult, ProjectCatalog } from "./launch-session";
 import {
   backoffDelay,
   connectingAnchor,
@@ -548,6 +548,11 @@ export class HubConnectionSupervisor {
   /** The machine's main project folders and launch roots (cas-41b9). */
   async projects(signal?: AbortSignal): Promise<ProjectCatalog> {
     return this.request("GET", "/v1/projects", undefined, signal);
+  }
+
+  /** Each launch CLI's account profiles on the machine (cas-7b52). */
+  async launchProfiles(signal?: AbortSignal): Promise<LaunchProfiles> {
+    return this.request("GET", "/v1/launch/profiles", undefined, signal);
   }
 
   /** One folder under a configured launch root. */

@@ -1004,9 +1004,13 @@ fn host_checks(current: Option<&Path>) -> Vec<Check> {
         host_hub_transport_check(),
         host_hub_audit_check(),
     ];
-    checks.extend(crate::hub::launch_env::readiness().into_iter().map(|(cli, result)| match result {
-        Ok(path) => Check::new(format!("hub launch {cli}"), CheckStatus::Ok, format!("ready: {}", path.display())),
-        Err(error) => Check::new(format!("hub launch {cli}"), CheckStatus::Warning, error.to_string()),
+    checks.extend(crate::hub::launch_env::readiness().into_iter().map(|(cli, result)| {
+        let provider = match cli { "claude" => cas_mux::SupervisorCli::Claude, "codex" => cas_mux::SupervisorCli::Codex, _ => cas_mux::SupervisorCli::Grok };
+        let profile = crate::hub::launch_env::default_profile_name(provider).unwrap_or_else(|_| "unknown".into());
+        match result {
+            Ok(path) => Check::new(format!("hub launch {cli}"), CheckStatus::Ok, format!("ready: profile {profile}, {}", path.display())),
+            Err(error) => Check::new(format!("hub launch {cli}"), CheckStatus::Warning, format!("profile {profile}: {error}")),
+        }
     }));
     #[cfg(feature = "mcp-proxy")]
     checks.push(host_proxy_check());

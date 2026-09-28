@@ -77,14 +77,15 @@ pub fn resolve(
         ),
     ];
     let mut remove = Vec::new();
-    let profile_name = profile.unwrap_or("main");
+    let configured = configured_profile(cli)?;
+    let profile_name = choose_profile_name(profile, configured.as_deref(), None);
     if !valid_profile_name(profile_name) {
         return Err(LaunchError::ProbeFailed {
             cli: name,
             detail: "invalid profile name".into(),
         });
     }
-    let ambient_dir = if profile.is_none() {
+    let ambient_dir = if profile.is_none() && configured.is_none() {
         match cli {
             SupervisorCli::Claude => std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from),
             SupervisorCli::Codex => std::env::var_os("CODEX_HOME").map(PathBuf::from),
@@ -209,6 +210,90 @@ pub fn resolve(
     })
 }
 
+fn configured_profile(cli: SupervisorCli) -> Result<Option<String>, LaunchError> {
+    let config = crate::config::Config::load(&crate::store::known_repos::host_cas_dir()).map_err(
+        |error| LaunchError::ProbeFailed {
+            cli: cli_name(cli),
+            detail: format!("host config: {error}"),
+        },
+    )?;
+    let profiles = config.hub.and_then(|hub| hub.launch_profiles);
+    Ok(match cli {
+        SupervisorCli::Claude => profiles.and_then(|profiles| profiles.claude),
+        SupervisorCli::Codex => profiles.and_then(|profiles| profiles.codex),
+        _ => None,
+    })
+}
+
+fn choose_profile_name<'a>(
+    explicit: Option<&'a str>,
+    configured: Option<&'a str>,
+    ambient: Option<&'a str>,
+) -> &'a str {
+    explicit.or(configured).or(ambient).unwrap_or("main")
+}
+
+pub fn default_profile_name(cli: SupervisorCli) -> Result<String, LaunchError> {
+    if let Some(configured) = configured_profile(cli)? {
+        return Ok(configured);
+    }
+    let home = dirs::home_dir().ok_or_else(|| LaunchError::ProbeFailed {
+        cli: cli_name(cli),
+        detail: "home directory is unavailable".into(),
+    })?;
+    let key = match cli {
+        SupervisorCli::Claude => "CLAUDE_CONFIG_DIR",
+        SupervisorCli::Codex => "CODEX_HOME",
+        _ => return Ok("default".into()),
+    };
+    Ok(std::env::var_os(key)
+        .and_then(|dir| profile_name_from_dir(cli, &home, Path::new(&dir)))
+        .unwrap_or_else(|| "main".into()))
+}
+
+fn cli_name(cli: SupervisorCli) -> &'static str {
+    match cli {
+        SupervisorCli::Claude => "claude",
+        SupervisorCli::Codex => "codex",
+        SupervisorCli::Grok => "grok",
+        SupervisorCli::OpenCode => "opencode",
+    }
+}
+
+/// Map a `cas claude` / `cas codex` selector directory to its account name.
+pub fn profile_name_from_dir(cli: SupervisorCli, home: &Path, dir: &Path) -> Option<String> {
+    let (main, prefix) = match cli {
+        SupervisorCli::Claude => (".claude", ".claude-"),
+        SupervisorCli::Codex => (".codex", ".codex-"),
+        _ => return None,
+    };
+    let path = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        home.join(dir)
+    };
+    if path.parent()? != home {
+        return None;
+    }
+    let name = path.file_name()?.to_str()?;
+    if name == main {
+        return Some("main".into());
+    }
+    let suffix = name.strip_prefix(prefix)?;
+    valid_profile_name(suffix).then(|| suffix.to_string())
+}
+
+pub fn captured_profile(
+    existing: Option<&str>,
+    cli: SupervisorCli,
+    home: &Path,
+    dir: &Path,
+) -> Option<String> {
+    existing
+        .map(str::to_owned)
+        .or_else(|| profile_name_from_dir(cli, home, dir))
+}
+
 fn valid_profile_name(name: &str) -> bool {
     !name.is_empty()
         && name != "."
@@ -230,18 +315,76 @@ pub fn readiness() -> Vec<(&'static str, Result<PathBuf, LaunchError>)> {
     .collect()
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LaunchProfile {
+    pub name: String,
+    pub logged_in: bool,
+    pub is_default: bool,
+}
+
+/// Profiles for a future Commander account picker; login is checked through
+/// the official CLI rather than by opening any credential file.
+pub fn profiles(cli: SupervisorCli) -> Result<Vec<LaunchProfile>, LaunchError> {
+    let (main_dir, prefix) = match cli {
+        SupervisorCli::Claude => (".claude", ".claude-"),
+        SupervisorCli::Codex => (".codex", ".codex-"),
+        _ => return Ok(Vec::new()),
+    };
+    let home = dirs::home_dir().ok_or_else(|| LaunchError::ProbeFailed {
+        cli: cli_name(cli),
+        detail: "home directory is unavailable".into(),
+    })?;
+    let default = configured_profile(cli)?
+        .or_else(|| {
+            let key = if cli == SupervisorCli::Claude {
+                "CLAUDE_CONFIG_DIR"
+            } else {
+                "CODEX_HOME"
+            };
+            std::env::var_os(key).and_then(|dir| profile_name_from_dir(cli, &home, Path::new(&dir)))
+        })
+        .unwrap_or_else(|| "main".into());
+    let layout = crate::cli::account_picker::ProfileLayout {
+        main_dir,
+        named_prefix: prefix,
+        main_name: "main",
+    };
+    let scanned = crate::cli::account_picker::scan_profiles_with(layout, &home, None, |name, _| {
+        if resolve(cli, Some(name)).is_ok() {
+            crate::cli::account_picker::LoginState::LoggedIn
+        } else {
+            crate::cli::account_picker::LoginState::LoggedOut
+        }
+    })
+    .map_err(|error| LaunchError::ProbeFailed {
+        cli: cli_name(cli),
+        detail: error.to_string(),
+    })?;
+    Ok(scanned
+        .into_iter()
+        .map(|p| LaunchProfile {
+            is_default: p.name == default,
+            logged_in: p.login_state == crate::cli::account_picker::LoginState::LoggedIn,
+            name: p.name,
+        })
+        .collect())
+}
+
 fn launch_path(home: &Path) -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = Vec::new();
     // A user service does not inherit the terminal's PATH. Probe a login shell
     // only for its PATH; neither its output nor any credential value is retained.
     let shell = std::env::var_os("SHELL").unwrap_or_else(|| "/bin/sh".into());
     let mut command = Command::new(shell);
-    command.args(["-lc", "printf '%s' \"$PATH\""]);
+    command.args([
+        "-lc",
+        "printf '__CAS_PATH_BEGIN__%s__CAS_PATH_END__' \"$PATH\"",
+    ]);
     if let Ok(output) = bounded_output(command, Duration::from_secs(3)) {
         if output.status.success() {
-            paths.extend(std::env::split_paths(&OsString::from(
-                String::from_utf8_lossy(&output.stdout).as_ref(),
-            )));
+            if let Some(probed) = parse_shell_path(&output.stdout) {
+                paths.extend(std::env::split_paths(&OsString::from(probed)));
+            }
         }
     }
     if let Some(ambient) = std::env::var_os("PATH") {
@@ -272,6 +415,14 @@ fn launch_path(home: &Path) -> Vec<PathBuf> {
     paths.retain(|p| p.is_absolute());
     paths.dedup();
     paths
+}
+
+fn parse_shell_path(output: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(output);
+    let start = text.rfind("__CAS_PATH_BEGIN__")? + "__CAS_PATH_BEGIN__".len();
+    let tail = &text[start..];
+    let end = tail.find("__CAS_PATH_END__")?;
+    Some(tail[..end].to_string())
 }
 
 fn provider_path(executable: &Path, candidates: &[PathBuf]) -> Vec<PathBuf> {
@@ -352,5 +503,56 @@ mod tests {
             assert!(!valid_profile_name(value), "{value:?}");
         }
         assert!(valid_profile_name("daniel@petrastella.io"));
+    }
+
+    #[test]
+    fn configured_profile_beats_ambient_and_main() {
+        assert_eq!(
+            choose_profile_name(None, Some("daniel@petrastella.io"), Some("other")),
+            "daniel@petrastella.io"
+        );
+        assert_eq!(choose_profile_name(None, None, Some("other")), "other");
+        assert_eq!(choose_profile_name(None, None, None), "main");
+    }
+
+    #[test]
+    fn install_profile_capture_maps_paths_and_preserves_explicit_value() {
+        let home = Path::new("/home/operator");
+        assert_eq!(
+            captured_profile(
+                None,
+                SupervisorCli::Claude,
+                home,
+                Path::new("/home/operator/.claude-x")
+            ),
+            Some("x".into())
+        );
+        assert_eq!(
+            captured_profile(
+                None,
+                SupervisorCli::Claude,
+                home,
+                Path::new("/home/operator/.claude")
+            ),
+            Some("main".into())
+        );
+        assert_eq!(
+            captured_profile(
+                Some("chosen"),
+                SupervisorCli::Claude,
+                home,
+                Path::new("/home/operator/.claude-x")
+            ),
+            Some("chosen".into())
+        );
+    }
+
+    #[test]
+    fn shell_path_sentinels_ignore_banner_noise() {
+        assert_eq!(
+            parse_shell_path(b"welcome\n__CAS_PATH_BEGIN__/a:/b__CAS_PATH_END__\nbye"),
+            Some("/a:/b".into())
+        );
+        assert_eq!(parse_shell_path(b"welcome\n/a:/b"), None);
     }
 }

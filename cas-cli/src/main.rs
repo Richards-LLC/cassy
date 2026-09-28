@@ -18,11 +18,13 @@ fn main() -> ExitCode {
             eprintln!("light-lane worker requires lock, cwd, and prompt");
             return ExitCode::FAILURE;
         };
-        return match cas::run_detached_worker(
+        let outcome = cas::run_detached_worker(
             std::path::Path::new(&lock),
             std::path::Path::new(&cwd),
             &prompt.to_string_lossy(),
-        ) {
+        );
+        cas_store::shared_db::close_idle_connections();
+        return match outcome {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("light-lane worker failed: {error}");
@@ -77,7 +79,11 @@ fn main() -> ExitCode {
     let args = redact_viktor_key_args(std::env::args().skip(1).collect());
     sentry::add_command_breadcrumb(&args.join(" "));
 
-    match cli::run(cli) {
+    let outcome = cli::run(cli);
+    // The shared SQLite pool owns every close; checkpoint and close its idle
+    // connections before exiting rather than leave the WAL behind.
+    cas_store::shared_db::close_idle_connections();
+    match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             use cas::ui::components::Formatter;

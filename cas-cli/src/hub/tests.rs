@@ -3162,3 +3162,211 @@ async fn cas_d636_the_401_carries_a_machine_readable_reason_and_the_hub_clock() 
     assert_eq!(body["reason"], "revoked");
     assert_eq!(body["retryable"], false);
 }
+
+/// A read model whose reads park until the test opens the gate, standing in for
+/// the SQLite stall (cas-e335) that pinned every Tokio worker of a macOS hub.
+#[derive(Clone)]
+struct StalledReadModel {
+    gate: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    entered: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl StalledReadModel {
+    fn new() -> Self {
+        Self {
+            gate: Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new())),
+            entered: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    fn release(&self) {
+        let (open, wake) = &*self.gate;
+        *open.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+        wake.notify_all();
+    }
+
+    fn entered(&self) -> usize {
+        self.entered.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl SessionReadModel for StalledReadModel {
+    fn list_sessions(&self) -> anyhow::Result<Vec<HubSession>> {
+        self.entered.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let (open, wake) = &*self.gate;
+        let mut guard = open.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        while !*guard {
+            guard = wake
+                .wait(guard)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        Ok(vec![fixture_session("factory-a")])
+    }
+}
+
+/// Plain-socket `/v1/health` probe that needs nothing from the Tokio runtime
+/// under test, so it still reports when every runtime worker is pinned.
+fn probe_health_blocking(address: SocketAddr) -> std::result::Result<std::time::Duration, String> {
+    use std::io::{Read, Write};
+
+    let started = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(3);
+    let mut stream = std::net::TcpStream::connect_timeout(&address, timeout)
+        .map_err(|error| format!("connect: {error}"))?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|error| format!("read timeout: {error}"))?;
+    stream
+        .write_all(b"GET /v1/health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .map_err(|error| format!("write: {error}"))?;
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .map_err(|error| format!("no /v1/health answer within {timeout:?}: {error}"))?;
+    let response = String::from_utf8_lossy(&response);
+    if response.starts_with("HTTP/1.1 200") {
+        Ok(started.elapsed())
+    } else {
+        Err(format!(
+            "unexpected /v1/health answer: {}",
+            response.lines().next().unwrap_or_default()
+        ))
+    }
+}
+
+/// cas-e335 regression: a stalled session read must not take `/v1/health`
+/// down with it. Before the fix `SessionCatalog::list` ran the synchronous read
+/// model inline on the async worker, so as many stalled reads as there are
+/// workers (the once-a-second catalog poller plus `/v1/sessions` reads) left
+/// the hub alive, holding `hub.lock`, and unable to answer health. The body
+/// deliberately blocks its own thread with std primitives: nothing here may
+/// depend on a runtime worker being free.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e335_health_answers_while_session_reads_are_stalled() {
+    let read_model = StalledReadModel::new();
+    let catalog = SessionCatalog::new(read_model.clone());
+    let events = MachineEventBus::new(16);
+    let app = router(HubState::new(
+        catalog.clone(),
+        Arc::new(PreAuthAuthorizer),
+        MachineIdentity {
+            id: "machine-test".into(),
+        },
+        DaemonConnector::new(SessionMultiplexer::new(8), events.clone()),
+        events,
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let hub = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    // More concurrent readers than runtime workers, as on the stalled hub.
+    let readers: Vec<_> = (0..4)
+        .map(|_| {
+            let catalog = catalog.clone();
+            tokio::spawn(async move { catalog.list().await })
+        })
+        .collect();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while read_model.entered() == 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(read_model.entered() > 0, "a session read must be in flight");
+    // Let every reader reach the stalled read before probing.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let health = std::thread::spawn(move || probe_health_blocking(address))
+        .join()
+        .expect("health probe thread");
+    let reads_started = read_model.entered();
+
+    // Always unstall before asserting so a failure cannot hang the test.
+    read_model.release();
+    let outcomes = futures_util::future::join_all(readers).await;
+    hub.abort();
+
+    let elapsed = health.expect("/v1/health must answer while session reads are stalled");
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "/v1/health took {elapsed:?} while session reads were stalled"
+    );
+    assert_eq!(
+        reads_started, 1,
+        "concurrent catalog callers share one in-flight read"
+    );
+    for outcome in outcomes {
+        assert_eq!(
+            outcome.expect("reader task").expect("catalog read").len(),
+            1
+        );
+    }
+
+    // A finished read is never reused: the next call reads again.
+    assert_eq!(catalog.list().await.unwrap().len(), 1);
+    assert_eq!(read_model.entered(), 2);
+}
+
+/// cas-e335 regression: the read model holds each listed project's registry
+/// open across catalog passes and releases it once the project is gone.
+/// Before the fix every pass opened `<project>/.cas/cas.db` and the last store
+/// drop closed it again, once a second; a close racing the next pass's open of
+/// the same file deadlocked SQLite on macOS. (`shared_db` now also owns every
+/// close; this pin keeps the hub's registries out of its idle sweeps.)
+#[test]
+fn e335_catalog_passes_keep_listed_registries_open() {
+    use crate::store::init_cas_dir;
+    use crate::ui::factory::{SessionInfo, create_metadata};
+
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let project = private_tempdir();
+    let cas_root = init_cas_dir(project.path()).unwrap();
+    let session_name = "hub-pinned-registry";
+    let session = SessionInfo {
+        name: session_name.to_string(),
+        metadata: create_metadata(
+            session_name,
+            std::process::id(),
+            "supervisor-agent",
+            &[],
+            None,
+            Some(project.path().to_str().unwrap()),
+            Some(4173),
+        ),
+        is_running: true,
+        socket_exists: true,
+    };
+    let db_path = cas_root.join("cas.db");
+    let model = LocalSessionReadModel::default();
+
+    let pinned = |model: &LocalSessionReadModel| {
+        model
+            .registries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
+    };
+
+    let projected = model.project(std::slice::from_ref(&session));
+    assert_eq!(projected.len(), 1);
+    assert_eq!(pinned(&model), 1, "the listed project's registry stays open");
+    let probe = cas_store::shared_db::shared_connection(&db_path).unwrap();
+    let while_pinned = Arc::strong_count(&probe);
+
+    // A second pass reuses the pinned handle rather than reopening it.
+    model.project(std::slice::from_ref(&session));
+    let again = cas_store::shared_db::shared_connection(&db_path).unwrap();
+    assert!(Arc::ptr_eq(&probe, &again));
+    drop(again);
+    assert_eq!(Arc::strong_count(&probe), while_pinned);
+
+    // Once the project has no listed session its registry is released.
+    model.project(&[]);
+    assert_eq!(pinned(&model), 0);
+    assert_eq!(
+        Arc::strong_count(&probe),
+        while_pinned - 1,
+        "a project that is no longer listed must not stay pinned"
+    );
+}

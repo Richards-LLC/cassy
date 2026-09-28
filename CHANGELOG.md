@@ -20,9 +20,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Listed projects' agent registries stay open across session-list passes
   instead of being closed and reopened every second, and are released when
   the project is no longer listed.
-- `shared_db` opens run under a per-database slot instead of the global
-  `POOL` lock, so one stalled open no longer blocks every other database,
-  and released databases are pruned.
+- The shared SQLite pool now owns every close. Connections close only
+  under their database's lock, the same lock opens take, through an idle
+  sweep (60 s TTL, at most 16 idle), so a close can no longer race an open
+  of the same file. The CLI closes idle connections on exit, and
+  `cas update` backup and rollback close them before copying `cas.db`.
 
 ## [3.34.0] - 2026-09-27
 

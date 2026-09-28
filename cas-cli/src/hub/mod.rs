@@ -496,8 +496,124 @@ pub trait SessionReadModel: Clone + Send + Sync + 'static {
     fn list_sessions(&self) -> Result<Vec<HubSession>>;
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct LocalSessionReadModel;
+/// The machine's real session catalog, read from session files and each
+/// project's agent registry.
+///
+/// Every pass reads the agent registry (`<project>/.cas/cas.db`) of every
+/// listed session. `cas_store::shared_db` keeps only weak references, so
+/// before cas-e335 each pass opened that database and closing the last store
+/// closed it again, once a second per project. On macOS a close
+/// (`sqlite3WalClose`) racing a reopen (`sqlite3BtreeOpen`) of the same file
+/// deadlocked inside SQLite's unix VFS and wedged the hub. The model therefore
+/// holds one registry handle per listed project for as long as that project
+/// has a listed session, so a pass never closes a registry another pass is
+/// about to open.
+#[derive(Clone, Default)]
+pub struct LocalSessionReadModel {
+    registries: Arc<std::sync::Mutex<HashMap<std::path::PathBuf, PinnedRegistry>>>,
+}
+
+impl std::fmt::Debug for LocalSessionReadModel {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let pinned = self
+            .registries
+            .lock()
+            .map(|registries| registries.len())
+            .unwrap_or_default();
+        formatter
+            .debug_struct("LocalSessionReadModel")
+            .field("pinned_registries", &pinned)
+            .finish()
+    }
+}
+
+/// One project's agent registry, held open across catalog passes.
+struct PinnedRegistry {
+    _store: Arc<dyn crate::store::AgentStore>,
+    /// Identity of `cas.db` when the handle was opened. A database replaced or
+    /// deleted underneath the hub is reopened instead of read stale.
+    identity: Option<FileIdentity>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+fn file_identity(path: &std::path::Path) -> Option<FileIdentity> {
+    let metadata = std::fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some(FileIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        Some(FileIdentity {
+            device: 0,
+            inode: 0,
+        })
+    }
+}
+
+fn session_cas_root(session: &SessionInfo) -> Option<std::path::PathBuf> {
+    let project_dir = session.metadata.project_dir.as_deref()?;
+    find_cas_root_ignoring_env(std::path::Path::new(project_dir)).ok()
+}
+
+impl LocalSessionReadModel {
+    /// Project discovered sessions onto the wire shape, holding each listed
+    /// project's registry open for the whole pass and until the project stops
+    /// being listed.
+    fn project(&self, sessions: &[SessionInfo]) -> Vec<HubSession> {
+        self.pin_registries(sessions);
+        sessions.iter().map(hub_session).collect()
+    }
+
+    fn pin_registries(&self, sessions: &[SessionInfo]) {
+        let mut pinned = self
+            .registries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Handles move from `previous` to `pinned` as their projects are seen
+        // again. What is left over belongs to projects no longer listed and is
+        // released at the end of the pass, on this thread. `SessionCatalog`
+        // runs one pass at a time, so a release never races a pass's open.
+        let mut previous = std::mem::take(&mut *pinned);
+        for cas_root in sessions.iter().filter_map(session_cas_root) {
+            if pinned.contains_key(&cas_root) {
+                continue;
+            }
+            let identity = file_identity(&cas_root.join("cas.db"));
+            if let Some(registry) = previous.remove(&cas_root) {
+                if registry.identity.is_some() && registry.identity == identity {
+                    pinned.insert(cas_root, registry);
+                    continue;
+                }
+                // Close the stale handle before reopening, so the pool cannot
+                // hand the replaced database's connection back.
+                drop(registry);
+            }
+            if let Ok(store) = open_agent_store(&cas_root) {
+                let identity = file_identity(&cas_root.join("cas.db"));
+                pinned.insert(
+                    cas_root,
+                    PinnedRegistry {
+                        _store: store,
+                        identity,
+                    },
+                );
+            }
+        }
+        drop(pinned);
+        drop(previous);
+    }
+}
 
 /// Project one discovered session onto the wire shape Commander consumes.
 ///
@@ -568,26 +684,85 @@ fn has_live_supervisor(session: &SessionInfo) -> bool {
 
 impl SessionReadModel for LocalSessionReadModel {
     fn list_sessions(&self) -> Result<Vec<HubSession>> {
-        Ok(SessionManager::new()
-            .list_sessions()?
-            .iter()
-            .map(hub_session)
-            .collect())
+        Ok(self.project(&SessionManager::new().list_sessions()?))
     }
 }
 
+/// Outcome of one catalog read. Both sides are shared among its callers.
+type SessionReadOutcome = std::result::Result<Arc<Vec<HubSession>>, Arc<String>>;
+
+/// One catalog read, shared by every caller that arrives while it runs.
+type SharedSessionRead =
+    futures_util::future::Shared<futures_util::future::BoxFuture<'static, SessionReadOutcome>>;
+
+/// How long one `SessionCatalog::list` caller waits for the shared read.
+/// The read itself keeps running on its blocking thread; a later caller joins
+/// it instead of starting another.
+const SESSION_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The hub's view of the machine's factory sessions.
+///
+/// `SessionReadModel::list_sessions` is synchronous and reaches SQLite (the
+/// agent registry of every project) on each call. Run inline on a Tokio worker,
+/// a stalled read pins that worker; the hub's once-a-second catalog poller plus
+/// a few `/v1/sessions` reads pinned every worker, the IO reactor starved, and
+/// the process stayed alive holding `hub.lock` while `/v1/health` stopped
+/// answering on loopback and Tailscale. Reads therefore run on the blocking
+/// pool, and concurrent callers share one in-flight read (single-flight), so a
+/// stalled read costs one blocking thread instead of one worker per caller.
 #[derive(Clone)]
 pub struct SessionCatalog<R: SessionReadModel> {
     read_model: R,
+    in_flight: Arc<std::sync::Mutex<Option<SharedSessionRead>>>,
 }
 
 impl<R: SessionReadModel> SessionCatalog<R> {
     pub fn new(read_model: R) -> Self {
-        Self { read_model }
+        Self {
+            read_model,
+            in_flight: Arc::new(std::sync::Mutex::new(None)),
+        }
     }
 
     pub async fn list(&self) -> Result<Vec<HubSession>> {
-        self.read_model.list_sessions()
+        let read = self.shared_read();
+        match tokio::time::timeout(SESSION_READ_TIMEOUT, read).await {
+            Ok(Ok(sessions)) => Ok(sessions.as_ref().clone()),
+            Ok(Err(error)) => Err(anyhow::anyhow!("{error}")),
+            Err(_) => Err(anyhow::anyhow!(
+                "session catalog read did not finish within {}s",
+                SESSION_READ_TIMEOUT.as_secs()
+            )),
+        }
+    }
+
+    /// Join the read in flight, or start one when none is running. A finished
+    /// read is never reused: a caller either joins the read already running
+    /// or starts a fresh one.
+    fn shared_read(&self) -> SharedSessionRead {
+        use futures_util::FutureExt;
+
+        let mut slot = self
+            .in_flight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(read) = slot.as_ref()
+            && read.peek().is_none()
+        {
+            return read.clone();
+        }
+        let read_model = self.read_model.clone();
+        let read: SharedSessionRead = async move {
+            match tokio::task::spawn_blocking(move || read_model.list_sessions()).await {
+                Ok(Ok(sessions)) => Ok(Arc::new(sessions)),
+                Ok(Err(error)) => Err(Arc::new(format!("{error:#}"))),
+                Err(join) => Err(Arc::new(format!("session catalog read failed: {join}"))),
+            }
+        }
+        .boxed()
+        .shared();
+        *slot = Some(read.clone());
+        read
     }
 }
 

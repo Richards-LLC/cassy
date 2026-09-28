@@ -22,8 +22,34 @@ pub(crate) fn lock_connection(conn: &Arc<Mutex<Connection>>) -> Result<MutexGuar
 
 /// Process-global pool of shared SQLite connections, keyed by canonical DB path.
 ///
-/// Uses `Weak` references so connections are cleaned up when all stores are dropped.
-static POOL: Mutex<Option<HashMap<PathBuf, Weak<Mutex<Connection>>>>> = Mutex::new(None);
+/// Each database has its own [`PoolSlot`]. `POOL` itself is held only to find
+/// or insert a slot and never across SQLite I/O: before cas-e335 it was held
+/// while `Connection::open` ran, so one open stalled inside SQLite (a macOS
+/// hub opening a database while another thread closed it) blocked every
+/// opener of every database in the process.
+static POOL: Mutex<Option<HashMap<PathBuf, Arc<PoolSlot>>>> = Mutex::new(None);
+
+/// One database's entry in [`POOL`].
+///
+/// Uses a `Weak` reference so the connection is cleaned up when all stores are
+/// dropped. The slot mutex serializes opens of this one database, so callers
+/// racing for it share a single open instead of each opening (and then
+/// closing) its own connection.
+#[derive(Default)]
+struct PoolSlot {
+    connection: Mutex<Weak<Mutex<Connection>>>,
+}
+
+impl PoolSlot {
+    /// True while a caller still holds the connection, or an open may be in
+    /// progress (the slot is locked).
+    fn in_use(&self) -> bool {
+        self.connection
+            .try_lock()
+            .map(|connection| connection.strong_count() > 0)
+            .unwrap_or(true)
+    }
+}
 
 /// Environment variable naming databases a test run must never open.
 ///
@@ -114,17 +140,40 @@ pub fn shared_connection(db_path: &Path) -> crate::Result<Arc<Mutex<Connection>>
 
     let canonical = canonical_db_path(db_path);
 
-    let mut guard = POOL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let map = guard.get_or_insert_with(HashMap::new);
-
-    // Try to upgrade existing weak reference
-    if let Some(weak) = map.get(&canonical) {
-        if let Some(strong) = weak.upgrade() {
-            return Ok(strong);
+    let slot = {
+        let mut guard = POOL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let map = guard.get_or_insert_with(HashMap::new);
+        let existing = map.get(&canonical).cloned();
+        match existing {
+            Some(slot) => slot,
+            None => {
+                // Forget databases nobody holds any more, so a process that
+                // opens many short-lived databases keeps a bounded map. A slot
+                // another caller has cloned is never dropped from under it.
+                map.retain(|_, slot| Arc::strong_count(slot) > 1 || slot.in_use());
+                let slot = Arc::new(PoolSlot::default());
+                map.insert(canonical, Arc::clone(&slot));
+                slot
+            }
         }
+    };
+
+    // Only callers of this same database wait here.
+    let mut current = slot
+        .connection
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(strong) = current.upgrade() {
+        return Ok(strong);
     }
 
-    // Create new connection with all PRAGMAs
+    let shared = Arc::new(Mutex::new(open_configured(db_path)?));
+    *current = Arc::downgrade(&shared);
+    Ok(shared)
+}
+
+/// Open a database and apply the PRAGMAs every shared connection carries.
+fn open_configured(db_path: &Path) -> crate::Result<Connection> {
     let conn = Connection::open(db_path)?;
     conn.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
     conn.execute_batch(
@@ -137,10 +186,7 @@ pub fn shared_connection(db_path: &Path) -> crate::Result<Arc<Mutex<Connection>>
     // Bound the WAL file so a long-lived writer fleet cannot leave a journal
     // orders of magnitude larger than its live frames (cas-759f).
     conn.pragma_update(None, "journal_size_limit", WAL_SIZE_LIMIT_BYTES)?;
-
-    let shared = Arc::new(Mutex::new(conn));
-    map.insert(canonical, Arc::downgrade(&shared));
-    Ok(shared)
+    Ok(conn)
 }
 
 /// RAII guard for an IMMEDIATE transaction.
@@ -1650,5 +1696,159 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM stress", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, num_writers as i64);
+    }
+
+    // ── Open stalls and close/open churn (cas-e335) ─────────────────
+
+    /// An open stalled inside SQLite must hold up only callers of that same
+    /// database. Before cas-e335 the pool lock was held across
+    /// `Connection::open` and its PRAGMAs, so a macOS hub whose open of one
+    /// agent registry deadlocked left every other opener in the process
+    /// queued behind it. The stall here is real SQLite: a foreign connection
+    /// holds an EXCLUSIVE lock on a rollback-journal database, so the pooled
+    /// open waits out its busy timeout in `PRAGMA journal_mode=WAL`.
+    #[test]
+    fn a_stalled_open_does_not_block_other_databases() {
+        let temp = TempDir::new().unwrap();
+        let stalled_path = temp.path().join("stalled.db");
+        let other_path = temp.path().join("other.db");
+
+        let blocker = Connection::open(&stalled_path).unwrap();
+        blocker
+            .execute_batch(
+                "PRAGMA journal_mode=DELETE;\
+                 CREATE TABLE t (id INTEGER PRIMARY KEY);\
+                 BEGIN EXCLUSIVE;\
+                 INSERT INTO t VALUES (1);",
+            )
+            .unwrap();
+
+        let (stalled_done_tx, stalled_done) = std::sync::mpsc::channel();
+        let stalled = {
+            let path = stalled_path.clone();
+            std::thread::spawn(move || {
+                let outcome = shared_connection(&path).map(|_| ());
+                let _ = stalled_done_tx.send(());
+                outcome
+            })
+        };
+        // Give the pooled open time to reach SQLite and start waiting.
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            stalled_done.try_recv().is_err(),
+            "test precondition: the open of the locked database must be waiting"
+        );
+
+        let (other_tx, other_rx) = std::sync::mpsc::channel();
+        let other = std::thread::spawn(move || {
+            let started = Instant::now();
+            let outcome = shared_connection(&other_path).map(|_| started.elapsed());
+            let _ = other_tx.send(outcome.is_ok());
+            outcome
+        });
+        let answered = other_rx.recv_timeout(Duration::from_secs(2));
+
+        // Always release the stall before asserting, so a failure cannot hang.
+        blocker.execute_batch("ROLLBACK").unwrap();
+        let _ = stalled.join().unwrap();
+        let other_outcome = other.join().unwrap();
+
+        assert_eq!(
+            answered,
+            Ok(true),
+            "opening an unrelated database waited on a stalled open: {other_outcome:?}"
+        );
+    }
+
+    /// Many threads acquiring and dropping the same database, so its last
+    /// handle is closed and reopened over and over, alongside callers of a
+    /// second database. Every caller must finish (bounded by a watchdog rather
+    /// than hanging the suite) and every handle must work.
+    #[test]
+    fn concurrent_open_and_drop_of_one_database_never_wedges() {
+        let temp = TempDir::new().unwrap();
+        let hot = temp.path().join("hot.db");
+        let side = temp.path().join("side.db");
+        let threads = 16;
+        let rounds = 200;
+        let barrier = Arc::new(Barrier::new(threads));
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+        for index in 0..threads {
+            let barrier = Arc::clone(&barrier);
+            let path = if index % 4 == 3 {
+                side.clone()
+            } else {
+                hot.clone()
+            };
+            let done = done_tx.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                let mut outcome = Ok(());
+                for _ in 0..rounds {
+                    let step = shared_connection(&path).and_then(|shared| {
+                        let conn = lock_connection(&shared)?;
+                        conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))?;
+                        Ok(())
+                    });
+                    if let Err(error) = step {
+                        outcome = Err(error.to_string());
+                        break;
+                    }
+                }
+                let _ = done.send(outcome);
+            });
+        }
+        drop(done_tx);
+
+        let deadline = Instant::now() + Duration::from_secs(60);
+        for finished in 0..threads {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match done_rx.recv_timeout(remaining) {
+                Ok(outcome) => outcome.expect("every pooled handle must work"),
+                Err(_) => panic!(
+                    "{} of {threads} threads wedged in shared_connection open/close churn",
+                    threads - finished
+                ),
+            }
+        }
+    }
+
+    /// The pool map forgets databases nobody holds, so a process that opens
+    /// many short-lived databases does not grow it without bound, while a
+    /// database still in use keeps its single shared connection.
+    #[test]
+    fn pool_forgets_released_databases_but_keeps_live_ones() {
+        let temp = TempDir::new().unwrap();
+        let live_path = temp.path().join("live.db");
+        let live = shared_connection(&live_path).unwrap();
+
+        for index in 0..32 {
+            drop(shared_connection(&temp.path().join(format!("short-{index}.db"))).unwrap());
+        }
+
+        let pooled_short_lived = {
+            let guard = POOL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let prefix = canonical_db_path(&temp.path().join("short-0.db"));
+            let parent = prefix.parent().unwrap().to_path_buf();
+            guard
+                .as_ref()
+                .map(|map| {
+                    map.keys()
+                        .filter(|key| {
+                            key.parent() == Some(parent.as_path())
+                                && key.file_name().is_some_and(|name| {
+                                    name.to_string_lossy().starts_with("short-")
+                                })
+                        })
+                        .count()
+                })
+                .unwrap_or_default()
+        };
+        assert!(
+            pooled_short_lived <= 1,
+            "released databases must not accumulate in the pool ({pooled_short_lived} kept)"
+        );
+        assert!(Arc::ptr_eq(&live, &shared_connection(&live_path).unwrap()));
     }
 }

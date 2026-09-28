@@ -185,7 +185,7 @@ export function launchSheetMarkup(): string {
       </fieldset>
       <!-- Account step slot: a profile picker fed by the machine's profile list goes here once the hub exposes one. -->
       <fieldset class="launch-cli" aria-describedby="launch-cli-hint"><legend>Supervisor</legend><div class="launch-cli-options">${clis}</div><small id="launch-cli-hint" class="field-hint">Runs the session's supervisor.</small></fieldset>
-      <label class="launch-workers">Workers <span class="launch-optional">(optional)</span><input name="launch-workers" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="Machine default" aria-describedby="launch-workers-hint"><small id="launch-workers-hint" class="field-hint">0 to 16. Leave empty for the machine's default.</small></label>
+      <label class="launch-workers"><span>Workers <span class="launch-optional">(optional)</span></span><input name="launch-workers" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="Machine default" aria-describedby="launch-workers-hint"><small id="launch-workers-hint" class="field-hint">0 to 16. Leave empty for the machine's default.</small></label>
       <p class="launch-invalid" role="alert" hidden></p>
       <div class="dialog-actions launch-actions"><p class="launch-summary" aria-live="polite"></p><button type="button" data-launch-action="close">Cancel</button><button type="button" class="primary" data-launch-action="start" aria-disabled="true">Start</button></div>
     </section>

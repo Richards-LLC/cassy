@@ -200,6 +200,7 @@ inherits the chosen page scheme; code scrolls locally without clipping prose.
 - Pairing dialog: `pairDialogMarkup()` in `hub-web/src/main.ts` and cancel semantics in `hub-web/src/pairing-dialog.ts`; inputs and code wells get dark foregrounds, while the dialog and detail terms follow the page scheme.
 - Buttons and inputs: `hub-web/src/styles.css`; full controls retain 40px height and compact pane controls 28px. Keyboard focus uses the house focus role; disabled copy uses muted text.
 - Toast: body-level `#toast` in `hub-web/src/main.ts`; raised surface and the house overlay shadow, above the phone rail.
+- New session: body-level `#launch-dialog` owned by `LaunchSheet` in `hub-web/src/launch-session.ts`, outside `#app` so a shell rebuild never replaces it mid-choice. A 560px dialog anchored near the top on desktop, the full screen on a phone. Rows are `--panel` on the raised dialog; the chosen project and supervisor carry `--bg-active` with a `--color-action` edge (an `.is-checked` class, not `:has()` alone); Attach and Start are the only `.primary` controls. Progress is a `--rule-hero` verdict rule with a quiet elapsed count, never a spinner; a refusal is a `--state-crit` edge with the machine's own words in a disclosure. The list header shows "New session" beside Pair a machine only when a machine grants `session-launch`; otherwise "Allow new sessions" opens the grant path.
 
 ## Do's & Don'ts
 

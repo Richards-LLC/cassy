@@ -3929,7 +3929,7 @@ button.chip:disabled { cursor: default; }
 .launch-cli-option input:focus-visible { outline: none; }
 .launch-cli-default { flex-basis: 100%; padding-inline-start: calc(16px + var(--space-2)); color: var(--text-mid); font-size: var(--fs-xs); font-weight: var(--weight-regular); }
 .launch-cli-default[hidden] { display: none; }
-.launch-workers { max-width: 16rem; }
+.launch-workers input { max-width: 12rem; }
 .launch-optional { color: var(--text-mid); }
 .launch-workers input { min-height: var(--button-height); }
 .launch-invalid { color: var(--state-crit); font-size: var(--fs-meta); }
@@ -3947,7 +3947,10 @@ button.chip:disabled { cursor: default; }
 .launch-error p { color: var(--text-hi); }
 .launch-error-detail { color: var(--text-mid); font-size: var(--fs-meta); }
 .launch-error-detail[hidden] { display: none; }
-.launch-error-detail summary { cursor: pointer; min-height: 32px; display: flex; align-items: center; }
+.launch-error-detail summary { cursor: pointer; min-height: 32px; display: flex; align-items: center; gap: var(--space-2); list-style: none; }
+.launch-error-detail summary::-webkit-details-marker { display: none; }
+.launch-error-detail summary::before { content: "▸"; font-size: 0.9em; }
+.launch-error-detail[open] summary::before { content: "▾"; }
 .launch-error-detail pre { margin: var(--space-2) 0 0; padding: var(--space-3); overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-hi); background: var(--panel); border-radius: var(--radius-card); font-size: var(--fs-xs); }
 .launch-sheet .dialog-actions { background: var(--bg-raised); }
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {

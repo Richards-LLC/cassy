@@ -109,7 +109,7 @@ export function filterProjects(projects: readonly LaunchProject[], query: string
   });
 }
 
-/** The workers field: empty is the machine's default; otherwise 0–16. */
+/** The workers field: empty leaves it to the hub (none); otherwise 0–16. */
 export function parseWorkers(value: string): { ok: true; workers?: number } | { ok: false; message: string } {
   const trimmed = value.trim();
   if (!trimmed) return { ok: true };
@@ -136,9 +136,11 @@ export function launchErrorCopy(result: { status: number; code?: string; detail?
     case "invalid_target":
       return { title: "That folder can't be started.", advice: "Only a project's main folder can start a session, and it must still be there. Pick it again from the list." };
     case "invalid_workers":
-      return { title: "The machine refused that number of workers.", advice: "Choose from 0 to 16 workers, or leave it empty for the machine's default." };
+      return { title: "The machine refused that number of workers.", advice: "Choose from 0 to 16 workers, or leave it empty for none." };
     case "invalid_supervisor_cli":
       return { title: `${machine} doesn't know the ${name} supervisor.`, advice: "Choose another supervisor, or update Cassy on the machine." };
+    case "containment_unavailable":
+      return { title: `${machine} couldn't start the session somewhere that outlives its hub.`, advice: "Nothing was started. Check the hub service on the machine (cas doctor), then try again." };
     case "name_in_use":
       return { title: "A session with that name already exists.", advice: "Start again; the machine picks a fresh name." };
     case "revoked":
@@ -185,7 +187,7 @@ export function launchSheetMarkup(): string {
       </fieldset>
       <!-- Account step slot: a profile picker fed by the machine's profile list goes here once the hub exposes one. -->
       <fieldset class="launch-cli" aria-describedby="launch-cli-hint"><legend>Supervisor</legend><div class="launch-cli-options">${clis}</div><small id="launch-cli-hint" class="field-hint">Runs the session's supervisor.</small></fieldset>
-      <label class="launch-workers"><span>Workers <span class="launch-optional">(optional)</span></span><input name="launch-workers" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="Machine default" aria-describedby="launch-workers-hint"><small id="launch-workers-hint" class="field-hint">0 to 16. Leave empty for the machine's default.</small></label>
+      <label class="launch-workers"><span>Workers <span class="launch-optional">(optional)</span></span><input name="launch-workers" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="0" aria-describedby="launch-workers-hint"><small id="launch-workers-hint" class="field-hint">0 to 16. Leave empty to start the supervisor alone.</small></label>
       <p class="launch-invalid" role="alert" hidden></p>
       <div class="dialog-actions launch-actions"><p class="launch-summary" aria-live="polite"></p><button type="button" data-launch-action="close">Cancel</button><button type="button" class="primary" data-launch-action="start" aria-disabled="true">Start</button></div>
     </section>

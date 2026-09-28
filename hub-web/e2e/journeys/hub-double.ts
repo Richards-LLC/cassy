@@ -513,7 +513,7 @@ export class HubDouble {
     const session: Session = { name, supervisor: name, project_dir: projectDir, workers: [], liveness: "live" };
     if (known) known.running_session = name;
     this.booting.set(name, { machine: machineId, session, polls: world.bootPolls ?? 2 });
-    return route.fulfill({ status: 202, json: { session: name, attached: false } });
+    return route.fulfill({ status: 202, json: { session: name, attached: false, placement: "systemd_user_scope" } });
   }
 
   /** A booting session is listed after its polls run out, as its daemon comes up. */

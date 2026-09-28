@@ -66,6 +66,7 @@ describe("launch model", () => {
     expect(launchErrorCopy({ status: 0 }, "claude", "Atlas").title).toBe("Couldn't reach Atlas.");
     expect(launchErrorCopy({ status: 405 }, "claude", "Atlas").title).toContain("can't start sessions yet");
     expect(launchErrorCopy({ status: 500, code: "launch_failed" }, "claude", "Atlas").title).toBe("Atlas couldn't start the session.");
+    expect(launchErrorCopy({ status: 503, code: "containment_unavailable" }, "claude", "Atlas").advice).toContain("Nothing was started");
   });
 });
 

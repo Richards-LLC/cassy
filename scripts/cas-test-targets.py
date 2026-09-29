@@ -26,6 +26,13 @@ def targets(package):
 
 def inventory(package):
     test_dir = (package / "tests").resolve()
+    def suite_name(path):
+        if path.parent == test_dir:
+            return path.stem
+        if path.name == "main.rs" and path.parent.parent == test_dir:
+            return path.parent.name
+        return None
+
     mapping = {}
     sources = []
     for target, root in targets(package):
@@ -34,14 +41,14 @@ def inventory(package):
         if not root.is_file():
             raise ValueError(f"missing harness: {root}")
         mapping[target] = target
-        if root.parent == test_dir:
+        if (suite := suite_name(root)) is not None:
             sources.append(root)
-            mapping[root.stem] = target
+            mapping[suite] = target
         for relative, module in re.findall(
             r'#\[path\s*=\s*"([^"]+)"\]\s*mod\s+(\w+)\s*;', root.read_text()
         ):
             source = (root.parent / relative).resolve()
-            if source.parent != test_dir:
+            if suite_name(source) is None:
                 continue  # a standalone root's private fixture/helper modules
             if not source.is_file():
                 raise ValueError(f"missing suite: {source}")
@@ -73,7 +80,7 @@ def main():
         manifest = (package / "Cargo.toml").read_text()
         if not re.search(r"^autotests\s*=\s*false\s*$", manifest, re.M):
             raise ValueError("autotests must be false to prevent per-suite binaries")
-        expected = set((package / "tests").glob("*.rs"))
+        expected = set((package / "tests").glob("*.rs")) | set((package / "tests").glob("*/main.rs"))
         missing = expected - set(sources)
         duplicates = [path for path, count in Counter(sources).items() if count != 1]
         if missing or duplicates:

@@ -21,6 +21,8 @@ mod credential_debug_guard_test;
 mod factory_codex_skill_guardrails;
 #[path = "../hook_schema.rs"]
 mod hook_schema;
+#[path = "../hooks_test/main.rs"]
+mod hooks_test;
 #[path = "../issue_intake_directive_test.rs"]
 mod issue_intake_directive_test;
 #[path = "../mcp_action_surface_test.rs"]

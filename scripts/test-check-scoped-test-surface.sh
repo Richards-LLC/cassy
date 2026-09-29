@@ -145,6 +145,26 @@ if python3 "$script_dir/cas-test-targets.py" "$grouped_repo/cas-cli" --check >/d
 fi
 printf 'ok   grouped harnesses resolve sources, refuse phantom binaries, and detect unwired tests\n'
 
+# Cargo also auto-discovers tests/<suite>/main.rs. Consolidation must account
+# for these entry points, not just tests/*.rs (cas-f40e lost 34 hook tests).
+rm "$grouped_repo/cas-cli/tests/unwired.rs"
+mkdir -p "$grouped_repo/cas-cli/tests/hooks_test"
+printf '%s\n' '#[path = "mod.rs"]' 'mod hooks_test;' >"$grouped_repo/cas-cli/tests/hooks_test/main.rs"
+printf '%s\n' '#[test] fn nested_hook_contract() {}' >"$grouped_repo/cas-cli/tests/hooks_test/mod.rs"
+if python3 "$script_dir/cas-test-targets.py" "$grouped_repo/cas-cli" --check >/dev/null 2>&1; then
+    echo 'FAIL unregistered directory-main suite was not detected' >&2
+    exit 1
+fi
+printf '%s\n' '#[path = "../hooks_test/main.rs"]' 'mod hooks_test;' >>"$grouped_repo/cas-cli/tests/integration/cli.rs"
+python3 "$script_dir/cas-test-targets.py" "$grouped_repo/cas-cli" --check
+directory_mapping="$(python3 "$script_dir/cas-test-targets.py" "$grouped_repo/cas-cli" | grep '^hooks_test|')"
+[[ "$directory_mapping" == 'hooks_test|integration_cli' ]]
+git -C "$grouped_repo" add .
+git -C "$grouped_repo" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid commit -qm 'register directory-main suite'
+directory_output="$(cd "$grouped_repo" && bash ./scripts/check-scoped-test-surface.sh --resolve-targets --base HEAD~1 --)"
+[[ "$directory_output" == 'SCOPED_PROOF_TARGET_ARGS: --test integration_cli' ]]
+printf 'ok   directory-main suites reject missing registration and route to grouped targets\n'
+
 # Two sibling source files can each have an inner `mod tests`. Their proof
 # paths must keep the parent module, and a shared prefix filter must cover
 # both (the same substring matching used by cargo nextest).

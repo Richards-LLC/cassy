@@ -128,11 +128,6 @@ pub fn handle_hook(event_name: &str, mut input: HookInput) -> Result<HookOutput,
     // IMPORTANT: We use find_cas_root() not find_cas_root_from() to preserve
     // CAS_ROOT env var priority for factory mode compatibility.
     let cas_root: Option<PathBuf> = find_cas_root().ok();
-    // Global hooks can run in a repo that has not run `cas init`. Such a
-    // request has no local store and must not create records in an ancestor.
-    if cas_root.is_none() {
-        return Ok(HookOutput::empty());
-    }
 
     // The harness submits a raw prompt string. The delivery authority records
     // a one-shot typed envelope keyed to that exact string before it injects
@@ -189,29 +184,19 @@ mod internal_llm_tests {
     use crate::test_support::TestEnvGuard;
 
     #[test]
-    #[ignore] // Mutates process cwd; run in the supervisor's isolated hook test pass.
-    fn hook_in_storeless_nested_repo_is_a_noop() {
+    fn storeless_session_start_does_not_write_to_parent_store() {
         let temp = tempfile::tempdir().unwrap();
         let parent_store = crate::store::init_cas_dir(temp.path()).unwrap();
         let repo = temp.path().join("child");
         std::fs::create_dir_all(&repo).unwrap();
-        let output = std::process::Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(&repo)
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "git init failed: {output:?}");
-
-        let mut env = TestEnvGuard::with_optional_vars(&[("CAS_ROOT", None)]);
-        env.set_current_dir(&repo);
-        let result = handle_hook(
-            "SessionStart",
-            HookInput {
+        let result = handle_session_start(
+            &HookInput {
                 session_id: "storeless-session".into(),
                 cwd: repo.to_string_lossy().into_owned(),
                 hook_event_name: "SessionStart".into(),
                 ..HookInput::default()
             },
+            None,
         )
         .unwrap();
         assert_eq!(

@@ -34,8 +34,8 @@ strict Codex output schemas, and the account-gate procedure.
 
 Every merge to `main` or `staging` needs the existing
 [cas-release-notes](../cas-release-notes/SKILL.md) flow and the project's content/channel
-rubric. Slack uses only the MechaCassy hub/bot through
-[mecha-cassy](../mecha-cassy/SKILL.md); never use Claude.ai Slack or a personal
+rubric. Slack uses only the Violet hub/bot through
+[violet](../violet/SKILL.md); never use Claude.ai Slack or a personal
 connector. The account gate above authorizes non-Slack CLI work only. If the
 hub is unavailable, save the draft and report the measured failure; a supervisor
 handoff must use the same hub route.

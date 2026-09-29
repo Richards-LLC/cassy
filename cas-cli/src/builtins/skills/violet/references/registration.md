@@ -1,13 +1,16 @@
-# Register the MechaCassy hub
+# Register the Violet hub
 
 Every request carries two headers: `Authorization: Bearer <per-client token>`,
 issued by the hub for a client label and stored hub-side as a hash so labels
 revoke individually, and `x-vercel-protection-bypass: <secret>`, checked at
 the edge.
 Both values live in the machine's credentials file as
-`MECHA_SLACK_TOKEN_<LABEL>` and `MECHA_VERCEL_BYPASS` and are exported into the
+`VIOLET_SLACK_TOKEN_<LABEL>` and `VIOLET_VERCEL_BYPASS` and are exported into the
 environment by the login shell. Configurations below name those variables and
-never hold their values.
+never hold their values. `cas integrate violet` prefers `VIOLET_*` names and
+falls back to the corresponding `MECHA_SLACK_TOKEN_<LABEL>` and
+`MECHA_VERCEL_BYPASS` names on existing machines; retain whichever env names
+the integration receipt selects.
 
 ## One command, once per machine
 
@@ -15,7 +18,7 @@ After `cas login`, `cas integrate violet` writes all three registrations
 below — a machine-scoped proxy registration under the user config directory
 that every project inherits, plus the Codex and Claude Code entries — refusing
 to claim success without an authenticated `tools/list` receipt. Re-running it
-is the refresh path, and `cas doctor`'s `mecha-cassy` row states whether this
+is the refresh path, and `cas doctor`'s `violet` row states whether this
 machine can post and what to do when it cannot. Setting up a new machine or a
 teammate: run `cas integrate violet --help` on that machine.
 
@@ -25,7 +28,7 @@ widening it, so one left naming retired routes keeps them authoritative no
 matter how often the machine file is rewritten. Where such a file already names
 hub routes, the command corrects them in place — comments, key order, and every
 unrelated server and route survive. It removes the file's own
-`[servers.mecha-cassy]` block only when that block is identical to the machine
+`[servers.violet]` block only when that block is identical to the machine
 registration which supplies it; a block that differs is an override, such as a
 project aimed at a staging hub, and is kept and named in the receipt rather
 than silently switched. A project file that names *no* hub route is left alone,
@@ -41,7 +44,7 @@ The optional bypass in the create response is used first; otherwise
 `GET /api/bypass`, a read-only Vercel lookup, and one hidden prompt are tried
 in that order. The Vercel PATCH endpoint is never used because it rotates the
 shared secret. If `POST /api/clients` is absent, setup fails closed naming
-`mecha-cassy#5` and never mints locally.
+`Richards-LLC/violet_ps#5` and never mints locally.
 
 The hand-written shapes below remain the reference for repairing a machine by
 hand or for a project that has never named the hub routes itself.
@@ -52,28 +55,28 @@ hand or for a project that has never named the hub routes itself.
 
 ```toml
 allowlist = [
-  "mecha-cassy.mecha_read",
-  "mecha-cassy.mecha_post",
+  "violet.violet_read",
+  "violet.violet_post",
 ]
 
-[servers.mecha-cassy]
+[servers.violet]
 transport = "http"
 url = "https://mecha-cassy.vercel.app/mcp/slack"
-auth = "env:MECHA_SLACK_TOKEN_<LABEL>"
+auth = "env:VIOLET_SLACK_TOKEN_<LABEL>"
 
-[servers.mecha-cassy.headers]
-x-vercel-protection-bypass = "env:MECHA_VERCEL_BYPASS"
+[servers.violet.headers]
+x-vercel-protection-bypass = "env:VIOLET_VERCEL_BYPASS"
 ```
 
 Dispatch through the proxy. `mcp_execute` takes a single `code` string holding
 the JSON dispatch; it has no `server`, `tool` or `args` parameters:
 
 ```text
-mcp_execute code='{"server":"mecha-cassy","tool":"mecha_read","args":{"channel":"<name>","since":"<RFC3339>","max_messages":50}}'
+mcp_execute code='{"server":"violet","tool":"violet_read","args":{"channel":"<name>","since":"<RFC3339>","max_messages":50}}'
 ```
 
 A project `allowlist` replaces the machine allowlist entirely, so list every
-route the project needs (for example `"neon.*"`) alongside the MechaCassy
+route the project needs (for example `"neon.*"`) alongside the Violet
 routes. Prefix an entry with `supervisor:` (for example
 `"supervisor:neon.*"`) to admit it for supervisors and plain sessions only;
 factory workers are refused with a named reason. `cas serve` logs one
@@ -82,8 +85,9 @@ factory workers are refused with a named reason. `cas serve` logs one
 
 The proxy resolves its bearer when `cas serve` starts, so a variable exported
 after startup stays invisible until the next restart. `system
-action=proxy_health` is credential-free: the healthy record for `mecha-cassy`
-reports `tool_count=2` and no error code. `.cas/proxy_catalog.json` is a
+action=proxy_health` is credential-free: the healthy record for `violet`
+has no error code; discovery must include the two primary tools, even when
+the upstream also advertises deprecated aliases. `.cas/proxy_catalog.json` is a
 generated cache, not source configuration.
 
 ### Downstream projects and workers
@@ -91,10 +95,10 @@ generated cache, not source configuration.
 Run `cas integrate violet` from the downstream checkout as well as on the
 machine. A checkout with no `.cas/proxy.toml` inherits the machine-level hub
 server and allowlist; a checkout with its own file uses that file's allowlist
-as the dispatch policy. If `mcp_search` for `server:mecha-cassy` returns no
+as the dispatch policy. If `mcp_search` for `server:violet` returns no
 tools while the machine registration is healthy, run `cas doctor` in that
-checkout and add the exact `mecha-cassy.mecha_read` and
-`mecha-cassy.mecha_post` entries it prints before restarting `cas serve`.
+checkout and add the exact `violet.violet_read` and
+`violet.violet_post` entries it prints before restarting `cas serve`.
 Do not copy a token into the project file. Verify the fresh worker sees both
 tools before starting a release posting run.
 
@@ -103,13 +107,13 @@ tools before starting a release posting run.
 `config.toml` under the Codex home:
 
 ```toml
-[mcp_servers.mecha-cassy]
+[mcp_servers.violet]
 url = "https://mecha-cassy.vercel.app/mcp/slack"
-bearer_token_env_var = "MECHA_SLACK_TOKEN_<LABEL>"
-env_http_headers = { "x-vercel-protection-bypass" = "MECHA_VERCEL_BYPASS" }
+bearer_token_env_var = "VIOLET_SLACK_TOKEN_<LABEL>"
+env_http_headers = { "x-vercel-protection-bypass" = "VIOLET_VERCEL_BYPASS" }
 ```
 
-`codex mcp list` must show `mecha-cassy` enabled, naming the bearer variable
+`codex mcp list` must show `violet` enabled, naming the bearer variable
 rather than a value.
 
 ## Claude Code
@@ -119,12 +123,12 @@ A user-scope HTTP server in the selected profile's `.claude.json`:
 ```json
 {
   "mcpServers": {
-    "mecha-cassy": {
+    "violet": {
       "type": "http",
       "url": "https://mecha-cassy.vercel.app/mcp/slack",
       "headers": {
-        "Authorization": "Bearer ${MECHA_SLACK_TOKEN_<LABEL>}",
-        "x-vercel-protection-bypass": "${MECHA_VERCEL_BYPASS}"
+        "Authorization": "Bearer ${VIOLET_SLACK_TOKEN_<LABEL>}",
+        "x-vercel-protection-bypass": "${VIOLET_VERCEL_BYPASS}"
       }
     }
   }
@@ -150,8 +154,9 @@ from a connected worker.
 
 ## Verify without leaking
 
-- Count tools, do not trust status. An authenticated `tools/list` showing
-  exactly `mecha_read` and `mecha_post` is the proof; `Connected` is not.
+- Check tool names, not connection status. An authenticated `tools/list` showing
+  `violet_read` and `violet_post` is the proof; deprecated aliases may also
+  appear; `Connected` is not.
 - A missing bearer must return HTTP 401 with no tool names. Separate an empty
   variable from a wrong one by recording header state only, as
   `Authorization: Bearer <set|unset>`.
@@ -164,8 +169,8 @@ from a connected worker.
 ## Rotation
 
 Rotating one client mints a replacement for that label, appends only its
-plaintext `MECHA_SLACK_TOKEN_<LABEL>` to the credentials file, replaces the
+plaintext `VIOLET_SLACK_TOKEN_<LABEL>` to the credentials file, replaces the
 single hub variable holding the `label:sha256` allowlist, and restarts just
-that client. Rotating the bypass secret rewrites `MECHA_VERCEL_BYPASS` in the
+that client. Rotating the bypass secret rewrites `VIOLET_VERCEL_BYPASS` in the
 credentials file and restarts the clients and the proxy. Never print the
 platform API response or the selected value during either operation.

@@ -99,7 +99,8 @@ async fn origin_project_move_updates_local_row_audit_and_team_queue() {
 
     let local_store = cas::store::open_task_store_local(&cas_dir).unwrap();
     let mut task = cas::types::Task::new("cas-move-local".into(), "move local".into());
-    task.origin_project = Some("project-a".into());
+    let local = cas::cloud::resolve_canonical_id(&cas_dir).unwrap();
+    task.origin_project = Some(local.clone());
     local_store.add(&task).unwrap();
 
     let request: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
@@ -116,16 +117,16 @@ async fn origin_project_move_updates_local_row_audit_and_team_queue() {
     assert!(
         updated
             .notes
-            .contains("DECISION: moved from project-a to project-b by test-agent"),
+            .contains(&format!("DECISION: moved from {local} to project-b by test-agent")),
         "audit note missing: {}",
         updated.notes
     );
     let queue = cas::cloud::SyncQueue::open(&cas_dir).unwrap();
     let pending = queue.pending_for_team(MOVE_TEAM, 10, 5).unwrap();
-    assert_eq!(pending.len(), 2);
+    assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].operation, cas::cloud::SyncOperation::Delete);
-    assert_eq!(pending[0].project_id.as_deref(), Some("project-a"));
-    assert_eq!(pending[1].operation, cas::cloud::SyncOperation::Upsert);
+    assert_eq!(pending[0].project_id.as_deref(), Some(local.as_str()));
+    assert!(queue.pending(10, 5).unwrap().is_empty());
 }
 
 /// cas-0447 (GH #187): a context-poor worker needs a bounded start response

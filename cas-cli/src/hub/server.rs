@@ -114,6 +114,10 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
             "/v1/auth/refresh",
             post(refresh_credential::<R>).options(preflight::<R>),
         )
+        .route(
+            "/v1/auth/scopes",
+            post(grant_own_scopes::<R>).options(preflight::<R>),
+        )
         .route("/v1/machine", get(machine::<R>).options(preflight::<R>))
         .route("/v1/launch/profiles", get(launch_profiles::<R>).options(preflight::<R>))
         .route(
@@ -1120,6 +1124,19 @@ fn systemd_unit_command(
     command
 }
 
+#[cfg(target_os = "linux")]
+fn cassy_scope_command(
+    executable: &std::path::Path,
+    root: &std::path::Path,
+    args: &[std::ffi::OsString],
+) -> std::process::Command {
+    // Positional arguments keep project paths and names out of shell source.
+    let mut command = std::process::Command::new("/bin/sh");
+    command.arg("-c").arg("kill -STOP $$; exec \"$@\"").arg("sh")
+        .arg(executable).args(args).current_dir(root);
+    command
+}
+
 fn spawn_factory_daemon(
     executable: &std::path::Path,
     root: &std::path::Path,
@@ -1159,12 +1176,9 @@ fn spawn_factory_daemon(
             crate::ui::factory::cgroup::remove_scope(&scope);
             anyhow::bail!("separate Cassy cgroup is inside the hub's own scope");
         }
-        // The fixed shell command stops itself before exec. Its arguments are
-        // positional, so project paths and names never become shell source.
-        let mut command = Command::new("/bin/sh");
-        command.arg("-c").arg("kill -STOP $$; exec \"$@\"").arg("sh")
-            .arg(executable).args(&args)
-            .stdin(Stdio::null()).stdout(Stdio::null());
+        // The fixed shell command stops itself before exec.
+        let mut command = cassy_scope_command(executable, root, &args);
+        command.stdin(Stdio::null()).stdout(Stdio::null());
         let log = std::fs::OpenOptions::new().create(true).append(true).open(log_path)?;
         command.stderr(Stdio::from(log));
         apply_launch_environment(&mut command, environment);
@@ -1262,6 +1276,16 @@ mod launch_tests {
         assert!(args.contains(&"--setenv=PATH".to_string()));
         assert!(args.contains(&"--property=UnsetEnvironment=INHERITED_PROFILE".to_string()));
         assert!(args.contains(&"/usr/bin/cas".to_string()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cassy_scope_fallback_uses_requested_project_as_working_directory() {
+        let root = std::path::Path::new("/projects/launchproj");
+        let args = factory_daemon_args(root, "demo-1", 0, cas_mux::SupervisorCli::Codex);
+        let command = cassy_scope_command(std::path::Path::new("/usr/bin/cas"), root, &args);
+        assert_eq!(command.get_current_dir(), Some(root));
+        assert!(command.get_args().any(|arg| arg == root.as_os_str()));
     }
 }
 
@@ -1613,6 +1637,9 @@ async fn proxy_socket(
                     if !operator_reply_allowed(&auth, &frame.bytes) {
                         continue;
                     }
+                    if !operator_message_allowed(&auth, &frame.bytes) {
+                        continue;
+                    }
                     if !correlated_daemon_frame_allowed(
                         &mut pending_message_refs,
                         &session,
@@ -1626,7 +1653,9 @@ async fn proxy_socket(
                     if sink.send(Message::Binary(frame.bytes.into())).await.is_err() {
                         break;
                     }
-                    if let Some((notification_id, device_id)) = receipt {
+                    if let Some((notification_id, device_id)) = receipt.filter(|(_, device_id)| {
+                        auth.as_ref().is_some_and(|(_, context)| device_id == "*" || context.device_id == device_id.as_str())
+                    }) {
                         let _ = connector
                             .send(
                                 &session,
@@ -1931,6 +1960,56 @@ async fn refresh_credential<R: SessionReadModel>(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SelfGrantRequest {
+    add: Vec<String>,
+}
+
+async fn grant_own_scopes<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    headers: HeaderMap,
+    Json(request): Json<SelfGrantRequest>,
+) -> Response {
+    let Some(auth) = &state.auth else {
+        return with_cors(unauthorized(), &headers);
+    };
+    let context = (|| -> anyhow::Result<AuthContext> {
+        let origin = request_origin(&state, HubAction::Mutation, &headers, "POST")?;
+        let authorization = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .context("authorization required")?;
+        let proof = headers
+            .get("dpop")
+            .and_then(|value| value.to_str().ok())
+            .context("proof required")?;
+        auth.authenticate_dpop(
+            authorization,
+            proof,
+            &origin,
+            "POST",
+            "/v1/auth/scopes",
+            chrono::Utc::now(),
+        )
+    })();
+    let context = match context {
+        Ok(context) => context,
+        Err(error) => return with_cors(unauthorized_for(&error), &headers),
+    };
+    if request.add.len() != 1 || request.add[0] != "session-launch" {
+        return with_cors((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"invalid_scope", "detail":"Only session-launch may be added"}))).into_response(), &headers);
+    }
+    match auth.grant_own_session_launch(&context, chrono::Utc::now()) {
+        Ok(scopes) => with_cors(Json(serde_json::json!({"scopes":scopes})).into_response(), &headers),
+        Err(error) if error.to_string() == "scope denied" => with_cors((StatusCode::FORBIDDEN, Json(serde_json::json!({"error":"scope_denied", "detail":"Pair with a control invitation to allow starting sessions"}))).into_response(), &headers),
+        Err(error) => {
+            tracing::error!(%error, "session launch self-grant failed");
+            with_cors((StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":"grant_failed"}))).into_response(), &headers)
+        }
+    }
+}
+
+#[derive(Deserialize)]
 struct TicketRequest {
     #[serde(default)]
     session: Option<String>,
@@ -2075,19 +2154,28 @@ fn audit_refused_pane_resize(auth: &Option<(AuthStore, AuthContext)>, session: &
     );
 }
 
-/// Operator replies are durable daemon frames, but their recipient is the
-/// authenticated device that originated the referenced Commander message.
-/// A machine can have several paired browsers attached, so the hub performs
-/// this final recipient check instead of broadcasting the frame to every one.
+/// Every authenticated viewer of the session sees the operator conversation.
+/// The reply's device id still routes delivery receipts to its addressee.
 pub(super) fn operator_reply_allowed(
     auth: &Option<(AuthStore, AuthContext)>,
     bytes: &[u8],
 ) -> bool {
-    operator_reply_receipt(bytes).is_none_or(|(_, device_id)| {
-        (device_id == "*" && auth.is_some())
-            || auth
-                .as_ref()
-                .is_some_and(|(_, context)| context.device_id == device_id)
+    operator_reply_receipt(bytes).is_none_or(|_| auth.is_some())
+}
+
+/// A live send belongs in every other authenticated viewer's thread. The
+/// sender already has its optimistic bubble and receives MessageQueued.
+fn operator_message_allowed(
+    auth: &Option<(AuthStore, AuthContext)>,
+    bytes: &[u8],
+) -> bool {
+    let Ok(DaemonMessage::OperatorMessage(message)) =
+        serde_json::from_slice::<DaemonMessage>(bytes)
+    else {
+        return true;
+    };
+    auth.as_ref().is_some_and(|(_, context)| {
+        context.has(Scope::PaneRead) && context.device_id != message.device_id
     })
 }
 
@@ -2358,6 +2446,9 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                     if !operator_reply_allowed(&auth, &frame.bytes) {
                         continue;
                     }
+                    if !operator_message_allowed(&auth, &frame.bytes) {
+                        continue;
+                    }
                     if !correlated_daemon_frame_allowed(
                         &mut pending_message_refs,
                         &session,
@@ -2378,7 +2469,9 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                         Err(_) => break,
                     };
                     if result.is_err() { break; }
-                    if let Some((notification_id, device_id)) = receipt {
+                    if let Some((notification_id, device_id)) = receipt.filter(|(_, device_id)| {
+                        auth.as_ref().is_some_and(|(_, context)| device_id == "*" || context.device_id == device_id.as_str())
+                    }) {
                         let _ = state
                             .connector
                             .send(
@@ -3039,6 +3132,7 @@ mod machine_protocol_tests {
             notification_id: 812,
             target: "patient-pelican-9".to_owned(),
             stamped: true,
+            device_label: None,
         })
         .unwrap();
         assert!(correlated_daemon_frame_allowed(
@@ -3067,6 +3161,32 @@ mod machine_protocol_tests {
             "factory-a",
             &error
         ));
+    }
+
+    #[test]
+    fn live_operator_send_reaches_only_other_authenticated_viewers() {
+        let temp = crate::test_support::private_hub_tempdir();
+        let store = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
+        let scopes: std::collections::BTreeSet<Scope> = [Scope::PaneRead].into_iter().collect();
+        let sender = AuthContext::test_fixture("phone", "https://controller.example", scopes.clone());
+        let viewer = AuthContext::test_fixture("desktop", "https://controller.example", scopes);
+        let frame = serde_json::to_vec(&DaemonMessage::OperatorMessage(
+            crate::ui::factory::ConversationHistoryMessage {
+                notification_id: 41,
+                target: "supervisor".into(),
+                text: "Question".into(),
+                state: "sending".into(),
+                stamped: true,
+                reply_to: None,
+                device_id: "phone".into(),
+                operator_label: Some("Pixel 10".into()),
+                session: "factory-a".into(),
+                at: "2026-09-29T16:00:00Z".into(),
+            },
+        )).unwrap();
+        assert!(!operator_message_allowed(&None, &frame));
+        assert!(!operator_message_allowed(&Some((store.clone(), sender)), &frame));
+        assert!(operator_message_allowed(&Some((store, viewer)), &frame));
     }
 }
 

@@ -689,6 +689,50 @@ mod supervisor_claude_delivery {
         marked
     }
 
+    #[test]
+    fn deleted_team_tree_does_not_stall_the_next_queued_supervisor_merge_relay() {
+        let qdir = TempDir::new().unwrap();
+        let queue = open_queue(qdir.path());
+        with_team_session("team-tree-repair", true, |teams, inboxes, session| {
+            teams
+                .init_team_config(
+                    &["parked-worker".to_string()],
+                    qdir.path(),
+                    &std::collections::HashMap::new(),
+                    "supervisor-lead-session",
+                )
+                .unwrap();
+            queue
+                .enqueue_with_session(
+                    "lifecycle-wake:5569",
+                    "supervisor",
+                    "merge-ready delivery",
+                    session,
+                )
+                .unwrap();
+            std::fs::remove_dir_all(teams.teams_dir()).unwrap();
+            let started = std::time::Instant::now();
+            assert_eq!(drain_claude(&queue, teams, &["supervisor"], session), 1);
+            assert!(started.elapsed() < std::time::Duration::from_secs(60));
+            assert!(
+                queue
+                    .peek_for_targets(&["supervisor"], Some(session), 10)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(teams.teams_dir().join("config.json").is_file());
+            let rows: Vec<InboxMessage> = serde_json::from_str(
+                &std::fs::read_to_string(inboxes.join("supervisor.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].text, "merge-ready delivery");
+            // This transport still owes the normal idle wake; fallback PTY
+            // delivery instead carries its own turn in delivery.rs.
+            assert!(super::super::delivery::idle_nudge_applies(choose_channel(Claude, true)));
+        });
+    }
+
     /// THE fail-before / pass-now regression (cas-6257 root cause). A normal
     /// supervisor→Claude message enqueued **behind** a burst of legacy
     /// NULL-session rows must still be selected and reach the worker's inbox.

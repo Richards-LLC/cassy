@@ -47,10 +47,8 @@ fn prepare_task_origin_project(value: &mut serde_json::Value, project_id: &str) 
     false
 }
 
-/// cas-3a90 (GH #909): entries, rules and skills carry the project that
-/// authored them, so a pull elsewhere can refuse a row that is not its own
-/// instead of trusting the echoed project scope. An explicit origin is kept.
-/// Global-scope rows are personal and stay unstamped, as global tasks do.
+/// Skills still use push-time attribution until they have a persisted origin.
+/// An explicit origin is kept; global rows remain unstamped.
 pub(super) fn stamp_row_origin_project(value: &mut serde_json::Value, project_id: &str) {
     let Some(row) = value.as_object_mut() else {
         return;
@@ -334,34 +332,44 @@ impl CloudSyncer {
                 Some(payload) => match serde_json::from_str::<serde_json::Value>(payload) {
                     Ok(mut value) => {
                         let target_project = item.project_id.as_deref().unwrap_or(project_id);
+                        if matches!(
+                            entity_type,
+                            EntityType::Task | EntityType::Entry | EntityType::Rule
+                        ) {
+                            match self.restore_queued_origin(
+                                &mut value,
+                                entity_type,
+                                &item.entity_id,
+                            ) {
+                                Ok(true) => {}
+                                Ok(false) => {
+                                    let _ = self.queue.park_failed(
+                                        item.id,
+                                        "row has no attributable origin_project",
+                                        self.config.max_retries,
+                                    );
+                                    continue;
+                                }
+                                Err(error) => {
+                                    let _ = self.queue.mark_failed(item.id, &error.to_string());
+                                    continue;
+                                }
+                            }
+                        }
                         // The outer project_canonical_id is a routing key; it
                         // cannot establish a legacy row's authoring project.
                         if entity_type == EntityType::Task
                             && !prepare_task_origin_project(&mut value, target_project)
                         {
-                            let _ = self
-                                .queue
-                                .mark_failed(item.id, "task has no attributable origin_project");
+                            let _ = self.queue.park_failed(
+                                item.id,
+                                "task has no attributable origin_project",
+                                self.config.max_retries,
+                            );
                             continue;
                         }
                         if entity_type == EntityType::TaskDependency {
                             stamp_task_dependency_origin_project(&mut value, target_project);
-                        }
-                        if matches!(entity_type, EntityType::Entry | EntityType::Rule)
-                            && value.get("scope").and_then(serde_json::Value::as_str)
-                                != Some("global")
-                            && !value
-                                .get("origin_project")
-                                .and_then(serde_json::Value::as_str)
-                                .is_some_and(|origin| {
-                                    !origin.trim().is_empty() && origin != "unknown"
-                                })
-                        {
-                            let _ = self.queue.mark_failed(
-                                item.id,
-                                "entry/rule has no attributable origin_project",
-                            );
-                            continue;
                         }
                         if entity_type == EntityType::Skill {
                             stamp_row_origin_project(&mut value, target_project);

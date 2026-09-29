@@ -6,6 +6,105 @@ use crate::cloud::syncer::*;
 use crate::store::TaskStore;
 use crate::types::{Task, TaskStatus};
 
+#[tokio::test]
+async fn legacy_queued_entry_recovers_stored_origin_and_unknown_row_parks() {
+    use crate::cloud::{CloudConfig, EntityType, SyncOperation};
+    use cas_store::{RuleStore, SqliteRuleStore, SqliteStore, Store};
+    use tempfile::tempdir;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/sync/push"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "entries": {"inserted": 1, "updated": 0, "skipped": 0}
+        })))
+        .mount(&server)
+        .await;
+
+    let temp = tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"p\"\n",
+    )
+    .unwrap();
+    let entries = SqliteStore::open_with_origin_project(temp.path(), Some("p")).unwrap();
+    entries.init().unwrap();
+    entries
+        .add(&crate::types::Entry::new(
+            "legacy-local".into(),
+            "local".into(),
+        ))
+        .unwrap();
+    let mut unknown = crate::types::Entry::new("legacy-unknown".into(), "unknown".into());
+    unknown.origin_project = Some("unknown".into());
+    entries.add(&unknown).unwrap();
+    let rules = SqliteRuleStore::open_with_origin_project(temp.path(), Some("p")).unwrap();
+    rules.init().unwrap();
+    rules
+        .add(&crate::types::Rule::new(
+            "legacy-rule".into(),
+            "rule".into(),
+        ))
+        .unwrap();
+
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    for id in ["legacy-local", "legacy-unknown", "legacy-missing"] {
+        queue
+            .enqueue(
+                EntityType::Entry,
+                id,
+                SyncOperation::Upsert,
+                Some(&format!(r#"{{"id":"{id}","scope":"project"}}"#)),
+            )
+            .unwrap();
+    }
+    let config = CloudSyncerConfig::default();
+    let max_retries = config.max_retries;
+    let syncer = CloudSyncer::new_for_project(
+        queue.clone(),
+        CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".into()),
+            ..Default::default()
+        },
+        config,
+        "p".into(),
+        temp.path(),
+    );
+    let mut old_rule_payload = serde_json::json!({"id": "legacy-rule", "scope": "project"});
+    assert!(
+        syncer
+            .restore_queued_origin(&mut old_rule_payload, EntityType::Rule, "legacy-rule")
+            .unwrap()
+    );
+    assert_eq!(old_rule_payload["origin_project"], "p");
+    let result = syncer.push_scoped(PushScope::EntriesOnly).unwrap();
+    assert_eq!(result.pushed_entries, 1);
+    let remaining = queue.list_all(10).unwrap();
+    assert_eq!(remaining.len(), 2);
+    for row in &remaining {
+        assert!(matches!(
+            row.entity_id.as_str(),
+            "legacy-unknown" | "legacy-missing"
+        ));
+        assert_eq!(row.retry_count, max_retries);
+        assert!(
+            row.last_error
+                .as_deref()
+                .unwrap()
+                .contains("no attributable origin_project")
+        );
+    }
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let payload = decode_push_body(&requests[0]);
+    assert_eq!(payload["entries"][0]["origin_project"], "p");
+}
+
 #[test]
 fn test_sync_result_totals() {
     let result = SyncResult {
@@ -523,7 +622,7 @@ async fn personal_push_keeps_itemized_invalid_revision_visible_in_queue_health()
             EntityType::Entry,
             "cas-valid-entry",
             SyncOperation::Upsert,
-            Some(r#"{"id":"cas-valid-entry"}"#),
+            Some(r#"{"id":"cas-valid-entry","origin_project":"p"}"#),
         )
         .unwrap();
     queue
@@ -531,7 +630,7 @@ async fn personal_push_keeps_itemized_invalid_revision_visible_in_queue_health()
             EntityType::Entry,
             "cas-invalid-entry",
             SyncOperation::Upsert,
-            Some(r#"{"id":"cas-invalid-entry"}"#),
+            Some(r#"{"id":"cas-invalid-entry","origin_project":"p"}"#),
         )
         .unwrap();
 
@@ -854,7 +953,7 @@ async fn push_response_aggregate_skip_acknowledges_the_whole_personal_batch() {
             EntityType::Entry,
             "entry-accepted",
             SyncOperation::Upsert,
-            Some(r#"{"id":"entry-accepted"}"#),
+            Some(r#"{"id":"entry-accepted","origin_project":"p"}"#),
         )
         .unwrap();
     queue
@@ -862,7 +961,7 @@ async fn push_response_aggregate_skip_acknowledges_the_whole_personal_batch() {
             EntityType::Entry,
             "entry-lww-skipped",
             SyncOperation::Upsert,
-            Some(r#"{"id":"entry-lww-skipped"}"#),
+            Some(r#"{"id":"entry-lww-skipped","origin_project":"p"}"#),
         )
         .unwrap();
 
@@ -924,7 +1023,7 @@ async fn push_response_per_row_rejection_is_parked_without_poisoning_neighbors()
                 EntityType::Entry,
                 id,
                 SyncOperation::Upsert,
-                Some(&format!(r#"{{"id":"{id}"}}"#)),
+                Some(&format!(r#"{{"id":"{id}","origin_project":"p"}}"#)),
             )
             .unwrap();
     }
@@ -980,7 +1079,7 @@ fn version_gate_requeues_only_after_minimum_and_is_idempotent() {
                 crate::cloud::EntityType::Task,
                 "task-old-client",
                 crate::cloud::SyncOperation::Upsert,
-                Some(r#"{"id":"task-old-client"}"#),
+                Some(r#"{"id":"task-old-client","origin_project":"test-project"}"#),
             )
             .unwrap();
         queue
@@ -988,7 +1087,7 @@ fn version_gate_requeues_only_after_minimum_and_is_idempotent() {
                 crate::cloud::EntityType::Task,
                 "task-new-enough",
                 crate::cloud::SyncOperation::Upsert,
-                Some(r#"{"id":"task-new-enough"}"#),
+                Some(r#"{"id":"task-new-enough","origin_project":"test-project"}"#),
             )
             .unwrap();
         let ids = queue
@@ -1064,7 +1163,7 @@ async fn version_gate_push_requeues_terminal_items_before_reading_pending_queue(
             EntityType::Entry,
             "entry-version-gated",
             SyncOperation::Upsert,
-            Some(r#"{"id":"entry-version-gated"}"#),
+            Some(r#"{"id":"entry-version-gated","origin_project":"p"}"#),
         )
         .unwrap();
     let id = queue.pending(10, 5).unwrap()[0].id;
@@ -2364,7 +2463,7 @@ async fn top_level_rows_ack_lww_skips_and_park_rejections_by_reason() {
                 EntityType::Entry,
                 id,
                 SyncOperation::Upsert,
-                Some(&format!(r#"{{"id":"{id}"}}"#)),
+                Some(&format!(r#"{{"id":"{id}","origin_project":"p"}}"#)),
             )
             .unwrap();
     }
@@ -2399,10 +2498,7 @@ async fn top_level_rows_ack_lww_skips_and_park_rejections_by_reason() {
         "the cloud's reason is persisted for reporting"
     );
     assert!(
-        result
-            .remaining_backlog
-            .failed_errors[0]
-            .contains("cas cloud projects"),
+        result.remaining_backlog.failed_errors[0].contains("cas cloud projects"),
         "the diagnostic carries the remediation for its reason: {:?}",
         result.remaining_backlog.failed_errors
     );
@@ -2442,7 +2538,7 @@ async fn responses_without_rows_keep_the_legacy_aggregate_behaviour() {
                 EntityType::Entry,
                 id,
                 SyncOperation::Upsert,
-                Some(&format!(r#"{{"id":"{id}"}}"#)),
+                Some(&format!(r#"{{"id":"{id}","origin_project":"p"}}"#)),
             )
             .unwrap();
     }

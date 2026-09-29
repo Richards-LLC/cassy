@@ -448,7 +448,6 @@ impl SyncConflict {
             self.resolution.as_str()
         }
     }
-
 }
 
 /// Configuration for CloudSyncer
@@ -526,6 +525,37 @@ pub struct CloudSyncer {
 }
 
 impl CloudSyncer {
+    /// Fill a legacy queued payload only from its persisted row, never from
+    /// the project performing this push. Returns false for missing or unknown
+    /// provenance so callers can park it permanently.
+    pub(super) fn restore_queued_origin(
+        &self,
+        value: &mut serde_json::Value,
+        entity_type: EntityType,
+        entity_id: &str,
+    ) -> Result<bool, CasError> {
+        if value.get("scope").and_then(serde_json::Value::as_str) == Some("global") {
+            return Ok(true);
+        }
+        let origin = value
+            .get("origin_project")
+            .and_then(serde_json::Value::as_str)
+            .filter(|origin| !origin.trim().is_empty() && *origin != "unknown");
+        if origin.is_some() {
+            return Ok(true);
+        }
+        let stored = self.queue.stored_origin_project(entity_type, entity_id)?;
+        let Some(stored) =
+            stored.filter(|origin| !origin.trim().is_empty() && origin.as_str() != "unknown")
+        else {
+            return Ok(false);
+        };
+        if let Some(object) = value.as_object_mut() {
+            object.insert("origin_project".into(), serde_json::Value::String(stored));
+            return Ok(true);
+        }
+        Ok(false)
+    }
     /// Create a new cloud syncer
     pub fn new(
         queue: Arc<SyncQueue>,
@@ -533,8 +563,7 @@ impl CloudSyncer {
         config: CloudSyncerConfig,
     ) -> Self {
         let cas_root = queue.cas_dir().to_path_buf();
-        let personal_push_git_remote =
-            crate::cloud::normalized_git_remote_for_push(&cas_root);
+        let personal_push_git_remote = crate::cloud::normalized_git_remote_for_push(&cas_root);
         // The queue lives in the project's own .cas, so every identity and
         // guard must judge that root rather than whatever project the process
         // happens to run inside.
@@ -647,15 +676,11 @@ impl CloudSyncer {
     ) -> ConflictAction {
         let local_revision = EntityType::parse(entity_type)
             .and_then(|entity| self.queue.revision(entity, entity_id).ok().flatten());
-        let remote_revision = self
-            .incoming_revisions
-            .lock()
-            .ok()
-            .and_then(|revisions| {
-                revisions
-                    .get(&(entity_type.to_string(), entity_id.to_string()))
-                    .copied()
-            });
+        let remote_revision = self.incoming_revisions.lock().ok().and_then(|revisions| {
+            revisions
+                .get(&(entity_type.to_string(), entity_id.to_string()))
+                .copied()
+        });
         self.resolve_conflict_with_revisions(
             entity_type,
             entity_id,

@@ -11,7 +11,7 @@ use crate::cloud::syncer::{
     CloudSyncer, PushBacklog, PushItemizedFailure, PushPlan, PushResponse, PushRowOutcome,
     PushRowResult, PushScope, SyncResult,
 };
-use crate::cloud::{QueuedSync, SyncOperation};
+use crate::cloud::{EntityType, QueuedSync, SyncOperation};
 use crate::error::CasError;
 use crate::types::Session;
 
@@ -561,7 +561,8 @@ impl CloudSyncer {
         // `pending` entirely, advancing `oldest_item` past them (defect B /
         // cas-8dd8 poison-head fix).
         let mut upsert_entries: Vec<(&QueuedSync, serde_json::Value)> = Vec::new();
-        // cas-3a90: entries, rules and skills carry their authoring project.
+        // Entries and rules carry persisted origins; skills still use the
+        // legacy push-time stamp until they get an origin column.
         let origin_project = if entity_type == "skills" {
             Some(self.personal_push_project_id()?)
         } else {
@@ -571,20 +572,26 @@ impl CloudSyncer {
             match item.payload.as_deref() {
                 Some(payload) => match serde_json::from_str::<serde_json::Value>(payload) {
                     Ok(mut v) => {
-                        if matches!(entity_type, "entries" | "rules")
-                            && v.get("scope").and_then(serde_json::Value::as_str) != Some("global")
-                            && !v
-                                .get("origin_project")
-                                .and_then(serde_json::Value::as_str)
-                                .is_some_and(|origin| {
-                                    !origin.trim().is_empty() && origin != "unknown"
-                                })
-                        {
-                            let _ = self.queue.mark_failed(
-                                item.id,
-                                "entry/rule has no attributable origin_project",
-                            );
-                            continue;
+                        if let Some(kind) = match entity_type {
+                            "entries" => Some(EntityType::Entry),
+                            "rules" => Some(EntityType::Rule),
+                            _ => None,
+                        } {
+                            match self.restore_queued_origin(&mut v, kind, &item.entity_id) {
+                                Ok(true) => {}
+                                Ok(false) => {
+                                    let _ = self.queue.park_failed(
+                                        item.id,
+                                        "entry/rule has no attributable origin_project",
+                                        self.config.max_retries,
+                                    );
+                                    continue;
+                                }
+                                Err(error) => {
+                                    let _ = self.queue.mark_failed(item.id, &error.to_string());
+                                    continue;
+                                }
+                            }
                         }
                         if let Some(origin_project) = origin_project.as_deref() {
                             super::team_push::stamp_row_origin_project(&mut v, origin_project);

@@ -764,22 +764,28 @@ fn backfill_legacy_origin_project(conn: &Connection, cas_dir: &Path) -> Result<(
         .prepare("SELECT session_id, cwd FROM sessions")?
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
         .collect::<std::result::Result<_, _>>()?;
+    // Session volume can be much larger than distinct cwd volume. Resolve
+    // each path only once; the resolver may probe Git and the filesystem.
+    let mut cwd_origins = std::collections::HashMap::new();
     for (session_id, cwd) in sessions {
-        let origin = if let (Some(root), Some(cas_dir), Some(project_id)) =
-            (&root, &canonical_cas_dir, &project_id)
-            && Path::new(&cwd).canonicalize().ok().is_some_and(|cwd| {
-                cwd.starts_with(root)
-                    && crate::store::find_cas_root_ignoring_env(&cwd)
-                        .ok()
-                        .and_then(|found| found.canonicalize().ok())
-                        .as_ref()
-                        == Some(cas_dir)
-            }) {
-            project_id.clone()
-        } else {
-            "unknown".into()
-        };
-        session_origins.insert(session_id, origin);
+        let origin = cwd_origins.entry(cwd.clone()).or_insert_with(|| {
+            if let (Some(root), Some(cas_dir), Some(project_id)) =
+                (&root, &canonical_cas_dir, &project_id)
+                && Path::new(&cwd).canonicalize().ok().is_some_and(|cwd| {
+                    cwd.starts_with(root)
+                        && crate::store::find_cas_root_ignoring_env(&cwd)
+                            .ok()
+                            .and_then(|found| found.canonicalize().ok())
+                            .as_ref()
+                            == Some(cas_dir)
+                })
+            {
+                project_id.clone()
+            } else {
+                "unknown".into()
+            }
+        });
+        session_origins.insert(session_id, origin.clone());
     }
     let session_origin = |session_id: Option<String>| -> String {
         session_id

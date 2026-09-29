@@ -1248,6 +1248,13 @@ impl PtyConfig {
         }
 
         let mut args = vec!["--dangerously-skip-permissions".to_string()];
+        if claude_supports_chrome_flag() {
+            args.push("--chrome".to_string());
+        } else {
+            tracing::warn!(
+                "Skipping --chrome: installed claude CLI does not support Claude in Chrome"
+            );
+        }
         // Claude's native Agent Teams permission router can suspend a worker
         // on a team-lead approval request even when the worker's
         // PreToolUse/PermissionRequest hooks return `allow`. The dangerous
@@ -1990,6 +1997,29 @@ pub(crate) fn claude_supports_effort_flag() -> bool {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         stdout.contains("--effort") || stderr.contains("--effort")
+    })
+}
+
+/// Whether the installed Claude CLI accepts `--chrome`. Shared by factory
+/// panes and the `cas claude --bare` launcher. The cached `claude --help`
+/// result fails closed; `CAS_FACTORY_CHROME_SUPPORTED=1|0` overrides it in tests.
+pub fn claude_supports_chrome_flag() -> bool {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<bool> = OnceLock::new();
+
+    match std::env::var("CAS_FACTORY_CHROME_SUPPORTED").as_deref() {
+        Ok("1") => return true,
+        Ok("0") => return false,
+        _ => {}
+    }
+
+    *CACHE.get_or_init(|| {
+        let Ok(output) = std::process::Command::new("claude").arg("--help").output() else {
+            return false;
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        stdout.contains("--chrome") || stderr.contains("--chrome")
     })
 }
 
@@ -3034,6 +3064,7 @@ mod tests {
                 std::env::remove_var("CAS_FACTORY_NICE_LEVEL");
                 // cas-6ee8: clear effort-support override so tests don't bleed state.
                 std::env::remove_var("CAS_FACTORY_EFFORT_SUPPORTED");
+                std::env::remove_var("CAS_FACTORY_CHROME_SUPPORTED");
             }
             Self { _guard: guard }
         }
@@ -3048,6 +3079,7 @@ mod tests {
                 std::env::remove_var("CAS_FACTORY_NICE_LEVEL");
                 // cas-6ee8: clear effort-support override on exit.
                 std::env::remove_var("CAS_FACTORY_EFFORT_SUPPORTED");
+                std::env::remove_var("CAS_FACTORY_CHROME_SUPPORTED");
             }
         }
     }
@@ -4450,6 +4482,10 @@ mod tests {
             codex_args.contains("-c model_reasoning_effort=max"),
             "Codex worker must emit model_reasoning_effort=max; got: {codex_args}"
         );
+        assert!(
+            !codex.args.iter().any(|arg| arg == "--chrome"),
+            "Chrome is a Claude-only spawn flag"
+        );
         unsafe {
             std::env::set_var("CAS_FACTORY_EFFORT_SUPPORTED", "1");
         }
@@ -4517,6 +4553,52 @@ mod tests {
     }
 
     // ── cas-6ee8: --effort version guard tests ────────────────────────────
+
+    #[tokio::test]
+    async fn test_claude_chrome_flag_for_supervisor_and_worker_when_supported() {
+        let _e = ScopedEnv::new();
+        // SAFETY: ScopedEnv holds ENV_LOCK across the override and constructions.
+        unsafe { std::env::set_var("CAS_FACTORY_CHROME_SUPPORTED", "1") };
+        for role in ["supervisor", "worker"] {
+            let config = PtyConfig::claude(
+                "test-agent",
+                role,
+                PathBuf::from("/tmp"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+            assert_eq!(
+                config.args.iter().filter(|arg| *arg == "--chrome").count(),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_claude_chrome_flag_omitted_when_unsupported() {
+        let _e = ScopedEnv::new();
+        // SAFETY: ScopedEnv holds ENV_LOCK across the override and constructions.
+        unsafe { std::env::set_var("CAS_FACTORY_CHROME_SUPPORTED", "0") };
+        assert!(!claude_supports_chrome_flag());
+        for role in ["supervisor", "worker"] {
+            let config = PtyConfig::claude(
+                "test-agent",
+                role,
+                PathBuf::from("/tmp"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+            assert!(!config.args.iter().any(|arg| arg == "--chrome"));
+        }
+    }
 
     #[tokio::test]
     async fn test_effort_flag_included_when_supported() {

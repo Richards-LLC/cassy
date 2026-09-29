@@ -83,7 +83,9 @@ impl SyncQueue {
     }
 
     /// Recover an origin from the persisted row for a queue payload written
-    /// before `origin_project` was part of entry/rule/task JSON.
+    /// before `origin_project` was part of entry/rule/task JSON. A present row
+    /// with NULL origin is returned as `unknown` so a stale payload cannot
+    /// override its missing provenance.
     pub fn stored_origin_project(
         &self,
         entity_type: EntityType,
@@ -103,7 +105,7 @@ impl SyncQueue {
                 |row| row.get::<_, Option<String>>(0),
             )
             .optional()?
-            .flatten())
+            .map(|origin| origin.unwrap_or_else(|| "unknown".to_string())))
     }
 
     /// Initialize the sync queue tables

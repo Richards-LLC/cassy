@@ -34,7 +34,9 @@ fn prepare_task_origin_project(value: &mut serde_json::Value, project_id: &str) 
             .and_then(serde_json::Value::as_str)
             .map(str::trim)
             .filter(|origin| !origin.is_empty());
-        if let Some(origin) = explicit_origin.filter(|origin| *origin != "unknown") {
+        if let Some(origin) = explicit_origin.filter(|origin| {
+            *origin != "unknown" && crate::cloud::project_ids_match(origin, project_id)
+        }) {
             if let Some(canonical) = canonical_project_id_with_pin(origin, Some(project_id)) {
                 task.insert(
                     "origin_project".to_string(),
@@ -47,55 +49,54 @@ fn prepare_task_origin_project(value: &mut serde_json::Value, project_id: &str) 
     false
 }
 
-/// Skills still use push-time attribution until they have a persisted origin.
-/// An explicit origin is kept; global rows remain unstamped.
-pub(super) fn stamp_row_origin_project(value: &mut serde_json::Value, project_id: &str) {
+/// Skills have no stored origin column yet, so only a missing payload origin
+/// may be stamped with the project selected for this push.
+pub(super) fn stamp_row_origin_project(value: &mut serde_json::Value, project_id: &str) -> bool {
     let Some(row) = value.as_object_mut() else {
-        return;
+        return false;
     };
+    if let Some(origin) = row.get("origin_project") {
+        return origin.as_str().is_some_and(|origin| {
+            let origin = origin.trim();
+            !origin.is_empty()
+                && origin != "unknown"
+                && crate::cloud::project_ids_match(origin, project_id)
+        });
+    }
     if row.get("scope").and_then(serde_json::Value::as_str) == Some("global") {
-        return;
+        return true;
     }
-    let has_origin = row
-        .get("origin_project")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|origin| !origin.trim().is_empty());
-    if !has_origin {
-        row.insert(
-            "origin_project".to_string(),
-            serde_json::Value::String(
-                canonical_project_id_with_pin(project_id, Some(project_id))
-                    .unwrap_or_else(|| project_id.to_string()),
-            ),
-        );
-    }
+    let Some(canonical) = canonical_project_id_with_pin(project_id, Some(project_id)) else {
+        return false;
+    };
+    row.insert(
+        "origin_project".to_string(),
+        serde_json::Value::String(canonical),
+    );
+    true
 }
 
-fn stamp_task_dependency_origin_project(value: &mut serde_json::Value, project_id: &str) {
+fn stamp_task_dependency_origin_project(value: &mut serde_json::Value, project_id: &str) -> bool {
     let Some(object) = value.as_object_mut() else {
-        return;
+        return false;
     };
     let explicit_origin = object
         .get("origin_project")
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|origin| !origin.is_empty());
-    if let Some(origin) = explicit_origin {
+    if let Some(origin) = explicit_origin.filter(|origin| {
+        *origin != "unknown" && crate::cloud::project_ids_match(origin, project_id)
+    }) {
         if let Some(canonical) = canonical_project_id_with_pin(origin, Some(project_id)) {
             object.insert(
                 "origin_project".to_string(),
                 serde_json::Value::String(canonical),
             );
+            return true;
         }
-    } else {
-        object.insert(
-            "origin_project".to_string(),
-            serde_json::Value::String(
-                canonical_project_id_with_pin(project_id, Some(project_id))
-                    .unwrap_or_else(|| project_id.to_string()),
-            ),
-        );
     }
+    false
 }
 
 /// Preserve the response diagnostics that ureq otherwise hides behind its
@@ -342,6 +343,7 @@ impl CloudSyncer {
                                 &mut value,
                                 entity_type,
                                 &item.entity_id,
+                                project_id,
                             ) {
                                 Ok(true) => {}
                                 Ok(false) => {
@@ -370,11 +372,17 @@ impl CloudSyncer {
                             );
                             continue;
                         }
-                        if entity_type == EntityType::TaskDependency {
-                            stamp_task_dependency_origin_project(&mut value, target_project);
-                        }
-                        if entity_type == EntityType::Skill {
-                            stamp_row_origin_project(&mut value, target_project);
+                        if (entity_type == EntityType::TaskDependency
+                            && !stamp_task_dependency_origin_project(&mut value, target_project))
+                            || (entity_type == EntityType::Skill
+                                && !stamp_row_origin_project(&mut value, target_project))
+                        {
+                            let _ = self.queue.park_failed(
+                                item.id,
+                                "row has no local attributable origin_project",
+                                self.config.max_retries,
+                            );
+                            continue;
                         }
                         upserts_by_project
                             .entry(target_project.to_string())
@@ -969,6 +977,27 @@ impl CloudSyncer {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn team_skill_push_stamps_missing_origin_but_rejects_explicit_unauthored_origin() {
+        let mut local = serde_json::json!({"id": "skill-local", "scope": "project"});
+        assert!(super::stamp_row_origin_project(
+            &mut local,
+            "acme/accounting"
+        ));
+        assert_eq!(local["origin_project"], "acme/accounting");
+
+        for origin in ["unknown", "pulse-card"] {
+            let mut unauthored = serde_json::json!({
+                "id": "skill-foreign", "scope": "project", "origin_project": origin,
+            });
+            assert!(!super::stamp_row_origin_project(
+                &mut unauthored,
+                "acme/accounting"
+            ));
+            assert_eq!(unauthored["origin_project"], origin);
+        }
+    }
+
+    #[test]
     fn queued_task_without_origin_is_rejected_without_stamping() {
         let mut value = serde_json::json!({"id": "cas-legacy", "title": "old payload"});
         assert!(!super::prepare_task_origin_project(
@@ -980,13 +1009,13 @@ mod tests {
     }
 
     #[test]
-    fn explicit_task_origin_survives_team_push() {
+    fn foreign_task_origin_is_rejected_before_team_push() {
         let mut value = serde_json::json!({
             "id": "cas-reassigned",
             "scope": "project",
             "origin_project": "pulse-card",
         });
-        assert!(super::prepare_task_origin_project(
+        assert!(!super::prepare_task_origin_project(
             &mut value,
             "acme/accounting"
         ));
@@ -1021,14 +1050,14 @@ mod tests {
     }
 
     #[test]
-    fn explicit_remote_alias_is_canonicalized() {
+    fn explicit_remote_origin_is_canonicalized_for_its_project() {
         let mut value = serde_json::json!({
             "id": "cas-alias", "scope": "project",
             "origin_project": "git@GitHub.com:Richards-LLC/gabber-studio.git",
         });
         assert!(super::prepare_task_origin_project(
             &mut value,
-            "acme/accounting",
+            "github.com/richards-llc/gabber-studio",
         ));
         assert_eq!(
             value["origin_project"],
@@ -1043,11 +1072,14 @@ mod tests {
             "origin_project": "git@GitHub.com:Richards-LLC/gabber-studio.git",
         });
 
-        super::stamp_task_dependency_origin_project(&mut value, "gabber-studio");
+        assert!(super::stamp_task_dependency_origin_project(
+            &mut value,
+            "github.com/richards-llc/gabber-studio"
+        ));
 
         assert_eq!(
             value.get("origin_project").and_then(|value| value.as_str()),
-            Some("gabber-studio")
+            Some("github.com/richards-llc/gabber-studio")
         );
     }
 }

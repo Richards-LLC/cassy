@@ -10,7 +10,9 @@ use std::sync::{Arc, OnceLock};
 
 use crate::cloud::{CloudConfig, EntityType, SyncOperation, SyncQueue};
 use crate::store::foreign_project_guard::ForeignProjectGuard;
-use crate::store::share_policy::{eligible_for_team_rule, resolve_team_id};
+use crate::store::share_policy::{
+    eligible_for_team_rule, origin_is_foreign_or_unknown, resolve_team_id,
+};
 use crate::store::{Result, RuleStore};
 use crate::types::Rule;
 use cas_core::Syncer;
@@ -236,12 +238,24 @@ impl RuleStore for SyncingRuleStore {
     }
 
     fn delete(&self, id: &str) -> Result<()> {
-        let team_eligible = self
-            .inner
-            .get(id)
-            .is_ok_and(|row| eligible_for_team_rule(&row));
+        let before = self.inner.get(id).ok();
+        let team_eligible = before.as_ref().is_some_and(eligible_for_team_rule);
+        let local = self
+            .cloud_queue
+            .as_ref()
+            .and_then(|queue| crate::cloud::resolve_canonical_id(queue.cas_dir()));
+        let foreign = before.as_ref().is_some_and(|rule| {
+            rule.scope == crate::types::Scope::Project
+                && origin_is_foreign_or_unknown(rule.origin_project.as_deref(), local.as_deref())
+        });
         self.inner.delete(id)?;
         self.try_remove(id);
+        if foreign {
+            if let Some(queue) = &self.cloud_queue {
+                let _ = queue.drop_queued_pushes_for(EntityType::Rule.as_str(), id);
+            }
+            return Ok(());
+        }
         self.queue_delete(id, team_eligible);
         Ok(())
     }
@@ -252,13 +266,25 @@ impl RuleStore for SyncingRuleStore {
         changed_by: Option<&str>,
         change_note: Option<&str>,
     ) -> Result<()> {
-        let team_eligible = self
-            .inner
-            .get(id)
-            .is_ok_and(|row| eligible_for_team_rule(&row));
+        let before = self.inner.get(id).ok();
+        let team_eligible = before.as_ref().is_some_and(eligible_for_team_rule);
+        let local = self
+            .cloud_queue
+            .as_ref()
+            .and_then(|queue| crate::cloud::resolve_canonical_id(queue.cas_dir()));
+        let foreign = before.as_ref().is_some_and(|rule| {
+            rule.scope == crate::types::Scope::Project
+                && origin_is_foreign_or_unknown(rule.origin_project.as_deref(), local.as_deref())
+        });
         self.inner
             .delete_with_metadata(id, changed_by, change_note)?;
         self.try_remove(id);
+        if foreign {
+            if let Some(queue) = &self.cloud_queue {
+                let _ = queue.drop_queued_pushes_for(EntityType::Rule.as_str(), id);
+            }
+            return Ok(());
+        }
         self.queue_delete(id, team_eligible);
         Ok(())
     }

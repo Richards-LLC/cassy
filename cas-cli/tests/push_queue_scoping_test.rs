@@ -50,11 +50,12 @@ fn set_origin(root: &TempDir, remote: &str) {
 }
 
 fn enqueue(queue: &SyncQueue, kind: EntityType, id: &str, body_bytes: usize) {
+    let origin_project = cas::cloud::resolve_canonical_id(queue.cas_dir()).unwrap();
     let payload = serde_json::json!({
         "id": id,
         "content": "x".repeat(body_bytes),
         "scope": "project",
-        "origin_project": "p",
+        "origin_project": origin_project,
     })
     .to_string();
     queue

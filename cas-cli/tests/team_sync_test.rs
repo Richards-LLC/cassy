@@ -93,29 +93,9 @@ fn seed_team_task_move(queue: &SyncQueue, task_id: &str) {
 }
 
 #[tokio::test]
-async fn team_task_move_deletes_old_project_before_upserting_new_owner() {
+async fn foreign_team_task_move_rows_are_dropped_before_push() {
     let server = MockServer::start().await;
-    Mock::given(method("DELETE"))
-        .and(path(format!(
-            "/api/teams/{TEST_TEAM}/sync/task/move-order-task"
-        )))
-        .and(query_param("project_id", "project-a"))
-        .respond_with(ResponseTemplate::new(204))
-        .expect(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path(format!("/api/teams/{TEST_TEAM}/sync/push")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "synced": { "tasks": { "inserted": 1, "updated": 0, "skipped": 0 } }
-        })))
-        .expect(1)
-        .mount(&server)
-        .await;
-
     let tmp = TempDir::new().unwrap();
-    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
-    // root under the temp directory, and a TempDir is exactly that.
     std::fs::write(
         tmp.path().join("config.toml"),
         "[project]\ncanonical_id = \"p\"\n",
@@ -123,7 +103,7 @@ async fn team_task_move_deletes_old_project_before_upserting_new_owner() {
     .unwrap();
     let queue = Arc::new(SyncQueue::open(tmp.path()).unwrap());
     queue.init().unwrap();
-    seed_team_task_move(&queue, "move-order-task");
+    seed_team_task_move(&queue, "move-foreign-task");
     let syncer = CloudSyncer::new(
         queue.clone(),
         make_cloud_config(server.uri()),
@@ -133,131 +113,11 @@ async fn team_task_move_deletes_old_project_before_upserting_new_owner() {
     tokio::task::spawn_blocking(move || syncer.push_team(TEST_TEAM))
         .await
         .unwrap()
-        .expect("move push should succeed");
+        .expect("foreign rows are skipped without a push error");
 
-    let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests.len(), 2);
-    assert_eq!(requests[0].method.as_str(), "DELETE");
-    assert_eq!(requests[1].method.as_str(), "POST");
-    let payload = decode_gzip_json(&requests[1].body);
-    assert_eq!(payload["project_canonical_id"], "project-b");
-    assert_eq!(payload["tasks"][0]["origin_project"], "project-b");
+    assert!(server.received_requests().await.unwrap().is_empty());
     assert!(queue.pending_for_team(TEST_TEAM, 10, 5).unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn team_task_move_delete_failure_blocks_upsert_and_retains_both_rows() {
-    let server = MockServer::start().await;
-    Mock::given(method("DELETE"))
-        .and(path(format!(
-            "/api/teams/{TEST_TEAM}/sync/task/move-delete-failure"
-        )))
-        .and(query_param("project_id", "project-a"))
-        .respond_with(ResponseTemplate::new(500).set_body_string("delete failed"))
-        .expect(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path(format!("/api/teams/{TEST_TEAM}/sync/push")))
-        .respond_with(ResponseTemplate::new(500))
-        .expect(0)
-        .mount(&server)
-        .await;
-
-    let tmp = TempDir::new().unwrap();
-    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
-    // root under the temp directory, and a TempDir is exactly that.
-    std::fs::write(
-        tmp.path().join("config.toml"),
-        "[project]\ncanonical_id = \"p\"\n",
-    )
-    .unwrap();
-    let queue = Arc::new(SyncQueue::open(tmp.path()).unwrap());
-    queue.init().unwrap();
-    seed_team_task_move(&queue, "move-delete-failure");
-    let syncer = CloudSyncer::new(
-        queue.clone(),
-        make_cloud_config(server.uri()),
-        CloudSyncerConfig::default(),
-    );
-
-    let result = tokio::task::spawn_blocking(move || syncer.push_team(TEST_TEAM))
-        .await
-        .unwrap()
-        .expect("push returns a result for an HTTP delete failure");
-
-    assert!(!result.errors.is_empty());
-    let pending = queue.pending_for_team(TEST_TEAM, 10, 5).unwrap();
-    assert_eq!(pending.len(), 2, "both move rows must remain retryable");
-    assert!(pending.iter().all(|item| item.retry_count > 0));
-    assert!(pending.iter().all(|item| item.last_error.is_some()));
-    assert!(
-        server
-            .received_requests()
-            .await
-            .unwrap()
-            .iter()
-            .all(|request| { request.method.as_str() == "DELETE" })
-    );
-}
-
-#[tokio::test]
-async fn team_task_move_upsert_failure_retains_only_upsert_for_retry() {
-    let server = MockServer::start().await;
-    Mock::given(method("DELETE"))
-        .and(path(format!(
-            "/api/teams/{TEST_TEAM}/sync/task/move-upsert-failure"
-        )))
-        .and(query_param("project_id", "project-a"))
-        .respond_with(ResponseTemplate::new(204))
-        .expect(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path(format!("/api/teams/{TEST_TEAM}/sync/push")))
-        .respond_with(ResponseTemplate::new(500).set_body_string("upsert failed"))
-        .expect(3)
-        .mount(&server)
-        .await;
-
-    let tmp = TempDir::new().unwrap();
-    // Pin the scratch root: the ephemeral-project guard refuses an unpinned
-    // root under the temp directory, and a TempDir is exactly that.
-    std::fs::write(
-        tmp.path().join("config.toml"),
-        "[project]\ncanonical_id = \"p\"\n",
-    )
-    .unwrap();
-    let queue = Arc::new(SyncQueue::open(tmp.path()).unwrap());
-    queue.init().unwrap();
-    seed_team_task_move(&queue, "move-upsert-failure");
-    let syncer = CloudSyncer::new(
-        queue.clone(),
-        make_cloud_config(server.uri()),
-        CloudSyncerConfig::default(),
-    );
-
-    let result = tokio::task::spawn_blocking(move || syncer.push_team(TEST_TEAM))
-        .await
-        .unwrap()
-        .expect("push returns a result for an HTTP upsert failure");
-
-    assert!(!result.errors.is_empty());
-    let pending = queue.pending_for_team(TEST_TEAM, 10, 5).unwrap();
-    assert_eq!(
-        pending.len(),
-        1,
-        "successful old-key delete must be settled"
-    );
-    assert_eq!(pending[0].operation, SyncOperation::Upsert);
-    assert!(pending[0].retry_count > 0);
-    let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests[0].method.as_str(), "DELETE");
-    assert!(
-        requests[1..]
-            .iter()
-            .all(|request| request.method.as_str() == "POST")
-    );
+    assert_eq!(queue.unauthored_skipped_count().unwrap(), 2);
 }
 
 /// Happy path: team configured + queued items → POST fires against
@@ -720,7 +580,7 @@ async fn team_task_upsert_includes_explicit_project_scope() {
             EntityType::Task,
             "legacy-team-task",
             SyncOperation::Upsert,
-            Some(r#"{"id":"legacy-team-task","title":"legacy payload"}"#),
+            Some(r#"{"id":"legacy-team-task","title":"legacy payload","origin_project":"p"}"#),
             TEST_TEAM,
         )
         .unwrap();

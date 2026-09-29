@@ -533,25 +533,24 @@ impl CloudSyncer {
         value: &mut serde_json::Value,
         entity_type: EntityType,
         entity_id: &str,
+        expected_project: &str,
     ) -> Result<bool, CasError> {
         if value.get("scope").and_then(serde_json::Value::as_str) == Some("global") {
             return Ok(true);
         }
-        let origin = value
+        let payload_origin = value
             .get("origin_project")
             .and_then(serde_json::Value::as_str)
-            .filter(|origin| !origin.trim().is_empty() && *origin != "unknown");
-        if origin.is_some() {
-            return Ok(true);
-        }
+            .map(str::to_owned);
         let stored = self.queue.stored_origin_project(entity_type, entity_id)?;
-        let Some(stored) =
-            stored.filter(|origin| !origin.trim().is_empty() && origin.as_str() != "unknown")
-        else {
+        let Some(origin) = stored.or(payload_origin).filter(|origin| {
+            origin.as_str() != "unknown"
+                && crate::cloud::project_ids_match(origin, expected_project)
+        }) else {
             return Ok(false);
         };
         if let Some(object) = value.as_object_mut() {
-            object.insert("origin_project".into(), serde_json::Value::String(stored));
+            object.insert("origin_project".into(), serde_json::Value::String(origin));
             return Ok(true);
         }
         Ok(false)

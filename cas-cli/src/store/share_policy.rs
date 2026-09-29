@@ -47,6 +47,16 @@ pub(crate) fn resolve_team_id(cloud_config: &CloudConfig) -> Option<Arc<str>> {
     cloud_config.active_team_id().map(Arc::from)
 }
 
+/// An explicit foreign or migration-unknown origin cannot be published by
+/// this project's syncing wrappers. Older unstamped test fixtures keep their
+/// legacy path; the push guard handles them before any HTTP request.
+pub(crate) fn origin_is_foreign_or_unknown(origin: Option<&str>, local: Option<&str>) -> bool {
+    origin.is_some_and(|origin| {
+        origin == "unknown"
+            || local.is_some_and(|local| !crate::cloud::project_ids_match(origin, local))
+    })
+}
+
 /// Filter policy for an `Entry`.
 ///
 /// Per filter-policy Decision 1 + Decision 2 precedence table:

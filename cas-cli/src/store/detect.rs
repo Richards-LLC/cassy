@@ -197,17 +197,18 @@ pub(crate) fn find_cas_root_ignoring_env(start: &Path) -> Result<PathBuf> {
         }
     }
 
-    // Prefer Git's canonical toplevel before the legacy parent walk. This keeps
-    // a nested `.cas/` from shadowing the project store when a factory command
-    // starts in a repository subdirectory.
+    // A Git repository is a hard boundary. In particular, a newly cloned repo
+    // inside another Cassy project must never inherit its parent's store.
+    // This also keeps a nested `.cas/` from shadowing the project store.
     if let Ok(repo_root) = find_git_toplevel(start) {
         let cas_dir = repo_root.join(".cas");
         if cas_dir.exists() && cas_dir.is_dir() {
             return Ok(cas_dir);
         }
+        return Err(CasError::NotInitialized);
     }
 
-    // If Git is unavailable or the toplevel has no store, walk up the directory tree
+    // Outside Git, retain the directory walk for non-Git projects.
     let mut current = start.to_path_buf();
 
     loop {
@@ -237,6 +238,16 @@ fn find_cas_root_from_cas_worktree(start: &Path) -> Option<PathBuf> {
     // Look for .cas/worktrees/ in the path
     if let Some(idx) = path_str.find(".cas/worktrees/") {
         let cas_dir = PathBuf::from(&path_str[..idx + ".cas".len()]);
+        // A Git repo nested inside a factory worktree is its own project.
+        // The path marker alone must not grant it the factory parent's store.
+        let worktree_suffix = &path_str[idx + ".cas/worktrees/".len()..];
+        let worktree_name = worktree_suffix.split('/').next()?;
+        let worktree_root = cas_dir.join("worktrees").join(worktree_name);
+        if let Ok(repo_root) = find_git_toplevel(start) {
+            if canonical_or_owned(&repo_root) != canonical_or_owned(&worktree_root) {
+                return None;
+            }
+        }
         if cas_dir.join("cas.db").exists() || cas_dir.is_dir() {
             return Some(cas_dir);
         }
@@ -280,7 +291,10 @@ fn find_main_repo_from_worktree(start: &Path) -> Option<PathBuf> {
                     // e.g., /path/to/main/.git/worktrees/wt1 -> /path/to/main
                     if let Some(git_dir) = gitdir_path.parent() {
                         // .git/worktrees
-                        if let Some(git_dir) = git_dir.parent() {
+                        if git_dir.file_name().is_some_and(|name| name == "worktrees")
+                            && let Some(git_dir) = git_dir.parent()
+                            && git_dir.file_name().is_some_and(|name| name == ".git")
+                        {
                             // .git
                             if let Some(main_repo) = git_dir.parent() {
                                 // main repo — canonicalize to resolve any ../ components
@@ -896,6 +910,83 @@ mod tests {
 
         let found = find_cas_root_from(&subdir).unwrap();
         assert_eq!(found, temp.path().canonicalize().unwrap().join(".cas"));
+    }
+
+    #[test]
+    fn uninitialized_nested_git_repo_does_not_inherit_parent_store() {
+        let mut env = TestEnvGuard::with_optional_vars(&[("CAS_ROOT", None)]);
+        let temp = TempDir::new().unwrap();
+        let parent_store = init_cas_dir(temp.path()).unwrap();
+        let repo = temp.path().join("child");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        let output = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git init failed: {output:?}");
+
+        assert!(matches!(
+            find_cas_root_ignoring_env(&repo.join("src")),
+            Err(CasError::NotInitialized)
+        ));
+        assert!(matches!(
+            find_cas_root_from(&repo.join("src")),
+            Err(CasError::NotInitialized)
+        ));
+
+        // An explicit override remains authoritative even inside an
+        // uninitialized Git repository.
+        env.set("CAS_ROOT", parent_store.to_str().unwrap());
+        assert_eq!(find_cas_root_from(&repo.join("src")).unwrap(), parent_store);
+        env.remove("CAS_ROOT");
+
+        let child_store = init_cas_dir(&repo).unwrap();
+        assert_eq!(find_cas_root_from(&repo.join("src")).unwrap(), child_store);
+        assert_ne!(child_store, parent_store);
+    }
+
+    #[test]
+    fn nested_git_repo_in_factory_worktree_does_not_inherit_factory_store() {
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_ROOT", None)]);
+        let temp = TempDir::new().unwrap();
+        let cas_dir = init_cas_dir(temp.path()).unwrap();
+        let nested_repo = cas_dir.join("worktrees/worker/nested");
+        std::fs::create_dir_all(&nested_repo).unwrap();
+        let output = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&nested_repo)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git init failed: {output:?}");
+        assert!(matches!(
+            find_cas_root_from(&nested_repo),
+            Err(CasError::NotInitialized)
+        ));
+    }
+
+    #[test]
+    fn submodule_git_file_does_not_inherit_parent_store() {
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_ROOT", None)]);
+        let temp = TempDir::new().unwrap();
+        init_cas_dir(temp.path()).unwrap();
+        let parent = temp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let output = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&parent)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git init failed: {output:?}");
+        let child = parent.join("submodule");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::create_dir_all(parent.join(".git/modules/submodule")).unwrap();
+        std::fs::write(
+            child.join(".git"),
+            "gitdir: ../.git/modules/submodule\n",
+        )
+        .unwrap();
+        assert!(find_main_repo_from_worktree(&child).is_none());
     }
 
     #[test]

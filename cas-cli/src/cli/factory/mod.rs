@@ -1931,9 +1931,9 @@ fn validate_cas_root(
                 return Ok(root);
             }
             bail!(
-                "Cassy is not initialized in this directory.\n\n\
+                "no Cassy store here; run `cas init`.\n\n\
                 Factory mode requires Cassy for task coordination.\n\n\
-                Run 'cas init' first to initialize Cassy."
+                Initialize Cassy in this repository first."
             );
         }
     }

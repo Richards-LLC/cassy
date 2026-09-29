@@ -4340,11 +4340,7 @@ impl FactoryDaemon {
                     );
                     continue;
                 };
-                let recipient = row.recipient_device_id.as_deref().unwrap_or("*");
-                if !matches!(payload.schema_version, 1 | 2)
-                    || payload.device_id != recipient
-                    || (recipient != "*" && payload.device_id != device_id)
-                {
+                if !matches!(payload.schema_version, 1 | 2) {
                     continue;
                 }
                 replies.push(crate::ui::factory::ConversationHistoryReply {
@@ -4365,10 +4361,9 @@ impl FactoryDaemon {
                 continue;
             }
 
-            let Some(operator) = row.operator.as_ref() else {
-                continue;
-            };
-            if !operator.verified || operator.device_id != device_id {
+            let terminal = row.source == "terminal";
+            let operator = row.operator.as_ref();
+            if !terminal && !operator.is_some_and(|stamp| stamp.verified) {
                 continue;
             }
             let (reply_to, text) = commander_history_message_text(&row.prompt);
@@ -4376,15 +4371,19 @@ impl FactoryDaemon {
                 notification_id: row.id,
                 target: row.target,
                 text,
-                state: if row.processed_at.is_some() {
+                state: if terminal || row.processed_at.is_some() {
                     "acknowledged".to_string()
                 } else {
                     "sending".to_string()
                 },
-                stamped: true,
+                stamped: !terminal,
                 reply_to,
-                device_id: operator.device_id.clone(),
-                operator_label: Some(operator.operator.clone()),
+                device_id: operator
+                    .map_or_else(|| "terminal".to_string(), |stamp| stamp.device_id.clone()),
+                operator_label: Some(operator.map_or_else(
+                    || "Terminal".to_string(),
+                    |stamp| stamp.device_label.clone(),
+                )),
                 session: row
                     .factory_session
                     .clone()

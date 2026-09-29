@@ -2027,16 +2027,15 @@ pub trait PromptQueueStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<QueuedPrompt>>;
 
-    /// Read a bounded, project-scoped Commander conversation page without
+    /// Read a bounded, session-scoped Commander conversation page without
     /// consuming delivery state. The result is newest-first and may contain
     /// one extra row so callers can determine whether an earlier page exists.
-    /// Only verified Commander sends for `device_id` and operator-lane replies
-    /// addressed to that device (or broadcast replies) are eligible. The
-    /// factory-session argument remains at the trait boundary for compatibility
-    /// with daemon callers, but the store is already project-scoped.
+    /// Verified Commander sends from every device, terminal input, and all
+    /// operator-lane replies are eligible. `device_id` must be nonempty; the
+    /// hub authenticates it before the daemon requests the page.
     fn conversation_history(
         &self,
-        _factory_session: &str,
+        factory_session: &str,
         device_id: &str,
         before: Option<i64>,
         limit: usize,
@@ -4749,7 +4748,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
     fn conversation_history(
         &self,
-        _factory_session: &str,
+        factory_session: &str,
         device_id: &str,
         before: Option<i64>,
         limit: usize,
@@ -4768,23 +4767,20 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     operator_device_id, operator_device_label, operator_scopes,
                     operator_verified, recipient_device_id, kind, attachments
              FROM prompt_queue
-             WHERE (
+             WHERE factory_session = ?1 AND (
                     (source LIKE 'commander:%'
-                     AND operator_verified = 1
-                     AND operator_device_id = ?1)
+                     AND operator_verified = 1)
+                    OR (source = 'terminal' AND target = 'terminal-history'
+                        AND processed_at IS NOT NULL)
                     OR
-                    (lower(target) = 'operator'
-                     AND (recipient_device_id = ?1
-                          OR recipient_device_id IS NULL
-                          OR recipient_device_id = ''
-                          OR recipient_device_id = '*'))
+                    lower(target) = 'operator'
                )
                {before_clause}
                ORDER BY created_at DESC, id DESC
                LIMIT {limit_parameter}"
         );
         let mut stmt = conn.prepare_cached(&sql)?;
-        let mut values: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(device_id.to_owned())];
+        let mut values: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(factory_session.to_owned())];
         if let Some(before) = before {
             values.push(Box::new(before));
         }
@@ -4854,6 +4850,9 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                    WHERE factory_session = ?3 AND lower(target) = 'operator'
                      AND source = 'supervisor' AND dedupe_key IS NULL
                      AND created_at >= ?8 AND created_at <= ?9
+                     AND CASE WHEN json_valid(prompt)
+                       THEN json_extract(prompt, '$.message') = json_extract(?1, '$.message')
+                       ELSE 0 END
                  )",
                 params![
                     payload,
@@ -6092,7 +6091,7 @@ mod tests {
     }
 
     #[test]
-    fn conversation_history_is_project_and_verified_device_scoped() {
+    fn conversation_history_is_session_scoped_and_shared_across_devices() {
         let (_temp, store) = create_test_store();
         let daniel = OperatorStamp {
             operator: "Daniel".into(),
@@ -6175,21 +6174,20 @@ mod tests {
             .unwrap()
             .id;
         store.stamp_recipient_device(reply_id, "phone-7").unwrap();
+        let terminal_id = store.enqueue_with_session("terminal", "terminal-history", "typed at terminal", "factory-7").unwrap();
+        store.mark_processed(terminal_id).unwrap();
 
         let history = store
             .conversation_history("factory-7", "phone-7", None, 20)
             .unwrap();
         assert_eq!(history.len(), 4);
+        assert!(history.iter().any(|row| row.prompt == "typed at terminal"));
         assert!(history.iter().any(|row| row.prompt == "operator message"));
-        assert!(history
+        assert!(!history
             .iter()
             .any(|row| row.prompt == "older project session message"));
         assert!(history.iter().any(|row| row.target == "operator"));
-        assert!(
-            !history
-                .iter()
-                .any(|row| row.prompt == "other device message")
-        );
+        assert!(history.iter().any(|row| row.prompt == "other device message"));
 
         let newest = history.first().unwrap().id;
         let earlier = store

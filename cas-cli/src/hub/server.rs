@@ -1626,7 +1626,9 @@ async fn proxy_socket(
                     if sink.send(Message::Binary(frame.bytes.into())).await.is_err() {
                         break;
                     }
-                    if let Some((notification_id, device_id)) = receipt {
+                    if let Some((notification_id, device_id)) = receipt.filter(|(_, device_id)| {
+                        auth.as_ref().is_some_and(|(_, context)| device_id == "*" || context.device_id == device_id.as_str())
+                    }) {
                         let _ = connector
                             .send(
                                 &session,
@@ -2075,20 +2077,13 @@ fn audit_refused_pane_resize(auth: &Option<(AuthStore, AuthContext)>, session: &
     );
 }
 
-/// Operator replies are durable daemon frames, but their recipient is the
-/// authenticated device that originated the referenced Commander message.
-/// A machine can have several paired browsers attached, so the hub performs
-/// this final recipient check instead of broadcasting the frame to every one.
+/// Every authenticated viewer of the session sees the operator conversation.
+/// The reply's device id still routes delivery receipts to its addressee.
 pub(super) fn operator_reply_allowed(
     auth: &Option<(AuthStore, AuthContext)>,
     bytes: &[u8],
 ) -> bool {
-    operator_reply_receipt(bytes).is_none_or(|(_, device_id)| {
-        (device_id == "*" && auth.is_some())
-            || auth
-                .as_ref()
-                .is_some_and(|(_, context)| context.device_id == device_id)
-    })
+    operator_reply_receipt(bytes).is_none_or(|_| auth.is_some())
 }
 
 fn client_message_ref(bytes: &[u8]) -> Option<String> {
@@ -2378,7 +2373,9 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                         Err(_) => break,
                     };
                     if result.is_err() { break; }
-                    if let Some((notification_id, device_id)) = receipt {
+                    if let Some((notification_id, device_id)) = receipt.filter(|(_, device_id)| {
+                        auth.as_ref().is_some_and(|(_, context)| device_id == "*" || context.device_id == device_id.as_str())
+                    }) {
                         let _ = state
                             .connector
                             .send(

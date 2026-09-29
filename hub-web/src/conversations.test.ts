@@ -12,6 +12,23 @@ import { projectName, projectBadge } from "./cloud-brand";
 
 const reply = { notification_id: 42, reply_to: 41, message: 'Actual supervisor reply <safe>', summary: '', device_id: 'device', operator_label: 'Daniel' };
 describe('conversation evidence', () => {
+  it('shows both paired devices and terminal input in the same history', () => {
+    const history = new ConversationHistory();
+    const row = (notification_id: number, text: string, device_id: string, operator_label: string, stamped = true) => ({
+      notification_id, target: 'supervisor', text, state: 'acknowledged' as const,
+      stamped, device_id, operator_label, at: `2026-09-29T15:00:0${notification_id}Z`,
+    });
+    history.hydrateSend(row(1, 'Phone message', 'phone', 'Pixel 10'));
+    history.hydrateSend(row(2, 'Computer message', 'computer', 'Desktop'));
+    history.hydrateSend(row(3, 'Terminal message', 'terminal', 'Terminal', false));
+    const view = new ConversationView(document, history, 'supervisor');
+    document.body.replaceChildren(view.element);
+    view.update();
+    expect([...view.element.querySelectorAll('.conversation-send-origin')].map(node => node.textContent))
+      .toEqual(['from Pixel 10', 'from Desktop', 'from Terminal']);
+    expect(history.events.map(event => event.kind === 'send' && event.value.text))
+      .toEqual(['Phone message', 'Computer message', 'Terminal message']);
+  });
   it('does not acknowledge socket submission, foreign references, or foreign targets', () => {
     const history = new ConversationHistory();
     history.submit('own', 'supervisor', 'Instruction');

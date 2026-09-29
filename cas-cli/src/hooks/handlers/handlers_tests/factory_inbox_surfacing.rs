@@ -299,6 +299,25 @@ fn the_supervisor_reminder_is_unchanged_when_there_is_no_mail() {
     );
 }
 
+#[test]
+fn supervisor_terminal_input_enters_history_but_machine_relays_do_not() {
+    let _lock = super::env_lock();
+    let _env = supervisor_env();
+    let temp = TempDir::new().unwrap();
+    let store = store_at(&temp);
+    let mut typed = input("supervisor");
+    typed.user_prompt = Some("Check the desktop reply too".into());
+    handle_user_prompt_submit(&typed, Some(temp.path())).unwrap();
+    typed.user_prompt = Some("[cas #123 operator Daniel@Pixel verified 0s first] relay".into());
+    handle_user_prompt_submit(&typed, Some(temp.path())).unwrap();
+    typed.user_prompt = Some("[supervisor reminder] generated".into());
+    handle_user_prompt_submit(&typed, Some(temp.path())).unwrap();
+    let history = store.conversation_history(SESSION, "paired-device", None, 10).unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].source, "terminal");
+    assert_eq!(history[0].prompt, "Check the desktop reply too");
+}
+
 /// cas-0337: this is the actual factory supervisor turn path, not a direct
 /// retriever unit seam. A long active-task title must not hide a same-day
 /// Learning whose vocabulary is present in the submitted turn.

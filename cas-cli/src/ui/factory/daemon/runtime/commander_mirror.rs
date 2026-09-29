@@ -403,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn mirrored_history_is_idempotent_and_explicit_reply_suppresses_it() {
+    fn mirrored_history_is_idempotent_and_deduplicates_matching_explicit_reply() {
         let temp = tempfile::tempdir().unwrap();
         let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
         queue.init().unwrap();
@@ -499,7 +499,7 @@ mod tests {
         // A later turn already sent an explicit operator row while composing.
         let explicit_at = Utc::now();
         queue
-            .enqueue_with_session("supervisor", "operator", "explicit", "factory-1")
+            .enqueue_with_session("supervisor", "operator", &payload, "factory-1")
             .unwrap();
         let end = explicit_at + chrono::Duration::seconds(2);
         assert!(
@@ -517,6 +517,12 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        let different = payload.replace("**Ready**\\n- Next step is clear.", "A separate final answer");
+        assert!(queue
+            .mirror_supervisor_turn("factory-1", "turn-3", explicit_at - chrono::Duration::seconds(1), end,
+                &different, "separate", "phone", "answer")
+            .unwrap()
+            .is_some());
     }
 
     #[test]

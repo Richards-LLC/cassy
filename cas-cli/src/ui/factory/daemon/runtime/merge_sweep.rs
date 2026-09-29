@@ -1265,17 +1265,33 @@ fn spawn_test_runner(
     log: &File,
     runner: &TestRunner,
 ) -> Option<Child> {
+    // Cassy's full assembly suite proves both checkout contexts once. Other
+    // projects, configured commands and failure-bisection filters keep their
+    // original runner and cannot certify a two-context release proof.
+    let assembly_helper = worktree.join("scripts/assembly-proof.py");
+    let assembly_proof = runner.kind == TestRunnerKind::Cargo
+        && settings.nextest_filter.is_none()
+        && assembly_helper.is_file();
+    let program = if assembly_proof {
+        "python3"
+    } else {
+        &runner.program
+    };
     let mut command = if runner.kind == TestRunnerKind::Cargo && settings.nice_cargo {
         let level = nice_level();
         let mut command = Command::new("nice");
-        command.args(["-n", level.as_str()]).arg(&runner.program);
+        command.args(["-n", level.as_str()]).arg(program);
         command
     } else {
-        Command::new(&runner.program)
+        Command::new(program)
     };
+    if assembly_proof {
+        command.arg(&assembly_helper).arg("prove").arg(worktree);
+    } else {
+        command.args(&runner.args);
+    }
     command
         .current_dir(worktree)
-        .args(&runner.args)
         .env("CARGO_BUILD_JOBS", effective_build_jobs(settings))
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone().ok()?))
@@ -1414,7 +1430,8 @@ fn summarize_log(path: &Path) -> (String, Vec<String>) {
     let mut failures = Vec::new();
     for line in contents.lines() {
         let trimmed = line.trim();
-        if trimmed.contains("Summary")
+        if trimmed.starts_with("PASS assembly receipt=")
+            || trimmed.contains("Summary")
             || trimmed.starts_with("test result:")
             || trimmed.contains("tests failed")
         {
@@ -1730,6 +1747,53 @@ mod tests {
                 "CAS_ROOT",
             ]
         );
+    }
+
+    #[test]
+    fn full_cassy_sweep_uses_assembly_proof_but_filtered_and_configured_runs_do_not() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir(temp.path().join("scripts")).unwrap();
+        fs::write(
+            temp.path().join("scripts/assembly-proof.py"),
+            "import pathlib, sys\nassert sys.argv[1] == 'prove'\nassert pathlib.Path(sys.argv[2]) == pathlib.Path.cwd()\npathlib.Path('assembly-called').write_text('both contexts')\n",
+        )
+        .unwrap();
+        let log = File::create(temp.path().join("runner.log")).unwrap();
+        let mut settings = SweepSettings::from(&FactoryConfig::default());
+        settings.nice_cargo = false;
+        let mut runner = TestRunner {
+            kind: TestRunnerKind::Cargo,
+            program: "sh".to_owned(),
+            args: vec!["-c".to_owned(), "echo native > native-called".to_owned()],
+            package_manager: None,
+            cwd: temp.path().to_path_buf(),
+        };
+        let mut child = spawn_test_runner(temp.path(), &settings, &log, &runner).unwrap();
+        assert!(child.wait().unwrap().success());
+        assert!(temp.path().join("assembly-called").is_file());
+        assert!(!temp.path().join("native-called").exists());
+        fs::remove_file(temp.path().join("assembly-called")).unwrap();
+        settings.nextest_filter = Some("test(broken)".to_owned());
+        let mut child = spawn_test_runner(temp.path(), &settings, &log, &runner).unwrap();
+        assert!(child.wait().unwrap().success());
+        assert!(!temp.path().join("assembly-called").exists());
+        assert!(temp.path().join("native-called").is_file());
+        settings.nextest_filter = None;
+        runner.kind = TestRunnerKind::Configured;
+        let mut child = spawn_test_runner(temp.path(), &settings, &log, &runner).unwrap();
+        assert!(child.wait().unwrap().success());
+        assert!(!temp.path().join("assembly-called").exists());
+    }
+
+    #[test]
+    fn sweep_summary_cites_reused_assembly_receipt() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let receipt =
+            "PASS assembly receipt=/proof.json source_sha=abc tree=def contexts=worktree,clone";
+        fs::write(temp.path(), format!("sweep: native nextest\n{receipt}\n")).unwrap();
+        let (summary, failures) = summarize_log(temp.path());
+        assert_eq!(summary, receipt);
+        assert!(failures.is_empty());
     }
 
     #[test]

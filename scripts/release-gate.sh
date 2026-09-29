@@ -165,6 +165,8 @@ row_log_dir="${CAS_RELEASE_GATE_LOG_DIR:-$tmp_dir/rows}"
 mkdir -p "$row_log_dir"
 printf 'row\tstarted_utc\tended_utc\twall_s\tuser_s\tsystem_s\tstatus\tsource_sha\n' >"$row_log_dir/timing.tsv"
 cache_dir="${CAS_RELEASE_GATE_CACHE_DIR:-}"
+# The train owns durable row evidence; unchanged inputs reuse it automatically.
+[[ -z "$cache_dir" || -n "$only_rows" ]] || reuse_rows=true
 cache_head="$(git rev-parse HEAD)"
 gate_implementation="$(realpath "${BASH_SOURCE[0]}")"
 cache_toolchain=''
@@ -190,7 +192,7 @@ print_result() {
 
 # Explicit dependency boundary. Live checks and any unknown future row never
 # reuse evidence. Web tests are independent of Rust; Cargo tests conservatively
-# depend on the entire commit, including build.rs's embedded revision. The
+# depend on the code-input projection, retaining embedded documentation. The
 # assembly sweep uses the same fields, but stores its receipt in the shared
 # merge-sweep directory because its detached checkout is not the release
 # worktree that consumes the receipt.
@@ -222,7 +224,11 @@ cache_input_hash() {
             git ls-tree -r HEAD -- hub-web scripts .github | sha256sum | cut -d' ' -f1
             ;;
         fixture-paths|workspace-tests|macos-check|nextest|doctests|archive-mode|snapshot-portability)
-            git rev-parse "$cache_head^{tree}"
+            if [[ -f "$repo_root/scripts/assembly-proof.py" ]]; then
+                python3 "$repo_root/scripts/assembly-proof.py" input "$repo_root"
+            else
+                git rev-parse "$cache_head^{tree}"
+            fi
             ;;
         *)
             return 1
@@ -303,6 +309,25 @@ run_check() {
     row_selected "$name" || return 0
     log="$row_log_dir/$name.log"
     started="$(date -u +%FT%TZ)"
+    # Assembly/recovery already proved the native suite and the queue's archive
+    # runner in a plain clone. Consume that proof even on the first full gate;
+    # --only remains a fresh diagnostic and cannot consume authorization.
+    if [[ -z "$only_rows" && "$name" =~ ^(nextest|archive-mode)$ \
+        && -f "$repo_root/scripts/assembly-proof.py" ]]; then
+        local assembly_pass=''
+        if assembly_pass="$(python3 "$repo_root/scripts/assembly-proof.py" check "$repo_root")"; then
+            source_sha="$(sed -n 's/.*source_sha=\([0-9a-f]*\).*/\1/p' <<<"$assembly_pass")"
+            print_result PASS "$name" "$command"
+            printf '  reused %s\n' "$assembly_pass"
+            printf '%s\n' "$assembly_pass" >"$log"
+            printf '%s\t%s\t%s\t0\t0\t0\tREUSED\t%s\n' "$name" "$started" "$started" "$source_sha" >>"$row_log_dir/timing.tsv"
+            if [[ "$name" == archive-mode && -n "$archive_size_file" ]]; then
+                mkdir -p "$(dirname "$archive_size_file")"
+                sed -n 's/.*archive_size_bytes=\([0-9]*\).*/\1/p' <<<"$assembly_pass" >"$archive_size_file"
+            fi
+            return 0
+        fi
+    fi
     key="$(row_cache_key "$name" || true)"
     env_fingerprint="$(cache_environment)"
     input_hash="$(cache_input_hash "$name" || true)"

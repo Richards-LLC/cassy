@@ -159,11 +159,30 @@ Factory workers never run Rust builds. Workers edit and commit code, then park
 it without building or testing Rust; a PreToolUse guard denies them any
 `cargo` build/check/test/nextest/clippy/run, `rustc`,
 `scripts/run-scoped-tests.sh`, and `make test*`. Only the supervisor builds:
-once per epic at assembly it runs one full build + test of the epic tip and
+once per release candidate at assembly it runs
+`python3 scripts/assembly-proof.py prove <epic-worktree>` and
 records `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd>
 log=<path>` on the epic. Child task closes reference that proof instead of
 carrying a scoped `--proof` receipt or `loaded_proof` note. Non-Rust work (for
 example hub-web npm/vitest/playwright) is unaffected.
+
+The assembly command runs native full-workspace nextest in the factory
+worktree, then the gate's archive-mode row in a plain clone outside every
+`.cas` ancestor. The archive consumer uses the queue's remapped environment
+and excludes component-output snapshots, already covered by the native run.
+Both contexts must report nonzero passed tests before an atomic PASS is written
+under the shared `.cas/merge-sweeps/assembly-proofs/` directory. The receipt
+records the tested Git tree, each context's tree and pass count, toolchain,
+environment and archive size. Full Cassy integration sweeps and the train's
+assembly stage use this same command; retries cite the existing receipt.
+
+The first full release gate automatically reuses its nextest and archive-mode
+rows from a matching receipt. `--only` remains a fresh diagnostic. Receipts
+expire after 24 hours; dirty checkouts, changed code/manifests/scripts/workflows,
+toolchain or test environment cause a miss. Only `CHANGELOG.md` and release
+prose under `docs/release-notes/` and `docs/release-reports/` are excluded from
+the code-input hash; embedded Rust documentation fixtures remain inputs.
+Release versions and other documentation changes still require a new proof.
 
 Gate evidence: PR #655/run 33430464567; PR #657/run 33435093275.
 

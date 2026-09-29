@@ -2541,5 +2541,40 @@ else
     bad "cas-fed5: announce token env selection: $portable_announce"
 fi
 
+# Assembly must consume the integration tip before producing/reusing proof.
+assembly_fixture="$tmp/assembly-dispatch"
+mkdir -p "$assembly_fixture/bin"
+: >"$assembly_fixture/Cargo.toml"
+cat >"$assembly_fixture/bin/python3" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$ASSEMBLY_DISPATCH_LOG"
+if [[ "$1" == */release-integrate.py && "${ASSEMBLY_INTEGRATE_FAIL:-}" == 1 ]]; then exit 7; fi
+EOF
+chmod +x "$assembly_fixture/bin/python3"
+assembly_dispatch() (
+    export PATH="$assembly_fixture/bin:$PATH" ASSEMBLY_DISPATCH_LOG="$assembly_fixture/calls"
+    script_dir="$repo_root/scripts"
+    worktree="$assembly_fixture"
+    cut_has_external_stage() { return 1; }
+    source "$script_dir/release-train.d/assemble.sh"
+    cut_stage_assemble
+)
+assembly_dispatch
+if [[ "$(wc -l <"$assembly_fixture/calls")" == 2 ]] \
+    && sed -n '1p' "$assembly_fixture/calls" | grep -qF 'release-integrate.py' \
+    && sed -n '2p' "$assembly_fixture/calls" | grep -qF "assembly-proof.py prove $assembly_fixture"; then
+    ok 'assembly consumes integration before producing the shared two-context proof'
+else
+    bad "assembly dispatch order: $(cat "$assembly_fixture/calls")"
+fi
+: >"$assembly_fixture/calls"
+if ASSEMBLY_INTEGRATE_FAIL=1 assembly_dispatch; then
+    bad 'failed integration still certified assembly'
+elif [[ "$(wc -l <"$assembly_fixture/calls")" == 1 ]]; then
+    ok 'failed integration cannot start or reuse assembly proof'
+else
+    bad 'assembly proof ran after integration failed'
+fi
+
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 test "$fail" -eq 0

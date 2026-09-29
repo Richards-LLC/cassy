@@ -1083,6 +1083,9 @@ case "$action" in
         CAS_RELEASE_RECEIPTS_RUN_DIR="${CAS_RELEASE_RECEIPTS_RUN_DIR:-$run_dir}" \
         CAS_RELEASE_TRAIN_RUN_DIR="${CAS_RELEASE_TRAIN_RUN_DIR:-$run_dir}" \
             python3 "$script_dir/release-integrate.py" "$worktree"
+        if [[ -f "$worktree/Cargo.toml" ]]; then
+            python3 "$script_dir/assembly-proof.py" prove "$worktree"
+        fi
         exit $?
         ;;
     --print-run-dir)

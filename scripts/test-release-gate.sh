@@ -51,6 +51,7 @@ new_fixture() {
         "$repo/.github/workflows" \
         "$repo/.context/zig"
     cp "$gate" "$repo/scripts/release-gate.sh"
+    cp "$script_dir/assembly-proof.py" "$repo/scripts/assembly-proof.py"
     cp "$script_dir/release-portable.sh" "$repo/scripts/release-portable.sh"
     cp "$script_dir/check-workflow-run-interpolation.py" "$repo/scripts/check-workflow-run-interpolation.py"
     cat > "$repo/.github/workflows/release.yml" <<'EOF'
@@ -1073,6 +1074,16 @@ if awk -F '\t' '$1 ~ /scratch-base|epic-worktree|builtin-projections|working-tre
 else
     bad 'a live precondition reused stale evidence'
 fi
+mkdir -p "$repo/docs/release-notes"
+printf 'release prose\n' >"$repo/docs/release-notes/cache.md"
+git -C "$repo" add docs/release-notes/cache.md
+git -C "$repo" commit -qm 'fixture release prose'
+run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 >"$tmp/cache-docs.log" 2>&1
+if [[ "$(awk -F '\t' '$7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 9 ]]; then
+    ok 'train row cache automatically reuses unchanged code proof after a release-prose commit'
+else
+    bad "release prose reran unchanged code rows: $(cat "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")"
+fi
 printf '// Rust-only fix\n' >>"$repo/cas-cli/tests/smoke.rs"
 git -C "$repo" add .
 git -C "$repo" commit -qm 'fixture Rust fix'
@@ -1177,6 +1188,73 @@ else
     bad 'a changed workspace input retained the assembly row receipt'
 fi
 unset CAS_RELEASE_GATE_CACHE_DIR CAS_RELEASE_GATE_LOG_DIR
+
+# Real two-context producer with Cargo stubbed, then the real first full gate.
+repo="$(new_fixture two-context-proof)"
+export CAS_RELEASE_GATE_LOG_DIR="$tmp/proof-gate-logs"
+: >"$tmp/cargo.log"
+run_gate "$repo" '' python3 "$repo/scripts/assembly-proof.py" prove "$repo" >"$tmp/proof.log" 2>&1 || { cat "$tmp/proof.log"; exit 1; }
+if [[ "$(grep -c '^nextest run ' "$tmp/cargo.log")" == 2 ]] \
+    && grep -qF 'contexts=worktree,clone' "$tmp/proof.log"; then
+    ok 'assembly proves native nextest and archive-mode in a plain clone exactly twice'
+else
+    bad "assembly suite count: $(cat "$tmp/cargo.log")"
+fi
+run_gate "$repo" '' python3 "$repo/scripts/assembly-proof.py" prove "$repo" >"$tmp/proof-retry.log" 2>&1
+run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 >"$tmp/proof-gate.log" 2>&1
+if [[ "$(awk -F '\t' '$7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 2 ]] \
+    && grep -qF 'PASS assembly receipt=' "$CAS_RELEASE_GATE_LOG_DIR/archive-mode.log" \
+    && [[ "$(grep -c '^nextest run --archive-file ' "$tmp/cargo.log")" == 1 ]]; then
+    ok 'assembly retry and first full gate cite both proved rows without rerunning the archive suite'
+else
+    bad "first gate missed assembly proof: $(cat "$tmp/proof-gate.log")"
+fi
+mkdir -p "$repo/docs/release-notes"
+printf 'release prose\n' >"$repo/docs/release-notes/new.md"
+git -C "$repo" add docs/release-notes/new.md
+git -C "$repo" commit -qm 'release prose'
+if run_gate "$repo" '' python3 "$repo/scripts/assembly-proof.py" check "$repo" >"$tmp/proof-docs.log" 2>&1; then
+    ok 'release prose commit retains the tested code proof'
+else
+    bad 'release prose invalidated assembly proof'
+fi
+printf '// code change\n' >>"$repo/cas-cli/src/version.rs"
+git -C "$repo" add cas-cli/src/version.rs
+git -C "$repo" commit -qm 'code changed'
+if run_gate "$repo" '' python3 "$repo/scripts/assembly-proof.py" check "$repo" >/dev/null 2>&1; then
+    bad 'changed code reused assembly proof'
+else
+    ok 'changed code misses the assembly proof'
+fi
+run_gate "$repo" '' python3 "$repo/scripts/assembly-proof.py" prove "$repo" >"$tmp/proof-changed.log" 2>&1
+if [[ "$(grep -c '^nextest run --archive-file ' "$tmp/cargo.log")" == 2 ]]; then
+    ok 'changed candidate reruns both contexts'
+else
+    bad 'changed candidate did not rerun clone proof'
+fi
+if run_gate "$repo" GATE_FIXTURE_ARCHIVE_FAIL python3 "$repo/scripts/assembly-proof.py" prove "$repo" >"$tmp/proof-fail.log" 2>&1; then
+    bad 'failed clone run published a PASS'
+else
+    ok 'failed clone run cannot publish a PASS receipt'
+fi
+if run_gate "$repo" GATE_FIXTURE_ARCHIVE_FAIL python3 "$repo/scripts/assembly-proof.py" check "$repo" >/dev/null 2>&1; then
+    bad 'failed clone run was reused'
+else
+    ok 'failed or incomplete two-context proof is a cache miss'
+fi
+if run_gate "$repo" GATE_FIXTURE_EMPTY_SUITE python3 "$repo/scripts/assembly-proof.py" prove "$repo" >"$tmp/proof-empty.log" 2>&1; then
+    bad 'zero-test producer published proof'
+else
+    ok 'zero-test assembly cannot publish a PASS receipt'
+fi
+: >"$tmp/cargo.log"
+run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only nextest >/dev/null
+if [[ "$(grep -c '^nextest run --workspace' "$tmp/cargo.log")" == 1 ]]; then
+    ok 'diagnostic nextest always runs despite matching assembly proof'
+else
+    bad 'diagnostic consumed an assembly proof'
+fi
+unset CAS_RELEASE_GATE_LOG_DIR
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 test "$fail" -eq 0

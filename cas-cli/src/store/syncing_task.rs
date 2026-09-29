@@ -494,9 +494,9 @@ impl TaskStore for SyncingTaskStore {
                         .is_some_and(|local| !crate::cloud::project_ids_match(origin, local))
             })
         {
-            let _ = self
-                .queue
-                .drop_queued_pushes_for(EntityType::Task.as_str(), id);
+            // A move away may have left an old-owner tombstone in the queue.
+            // The sync-intent move path removed stale upserts; deleting this
+            // foreign row must leave that tombstone available for push.
             return Ok(());
         }
         self.queue_delete(id, project_id, task.scope);
@@ -1722,12 +1722,13 @@ mod tests {
     }
 
     #[test]
-    fn task_origin_project_move_queues_old_delete_before_new_upsert() {
+    fn task_origin_project_move_queues_only_old_owner_delete() {
         let (temp, store) = create_team_store(None);
         let queue = SyncQueue::open(temp.path()).unwrap();
 
         let mut task = Task::new("p-task-move-001".to_string(), "move me".to_string());
-        task.origin_project = Some("project-a".to_string());
+        let local = crate::cloud::resolve_canonical_id(temp.path()).unwrap();
+        task.origin_project = Some(local.clone());
         store.add(&task).unwrap();
         queue.clear().unwrap();
 
@@ -1735,19 +1736,11 @@ mod tests {
         store.update(&task).unwrap();
 
         let pending = queue.pending_for_team(TEST_TEAM, 10, 5).unwrap();
-        assert_eq!(pending.len(), 2, "a move must retain both team operations");
+        assert_eq!(pending.len(), 1, "a move must only delete the local copy");
         assert_eq!(pending[0].operation, SyncOperation::Delete);
         assert_eq!(pending[0].entity_id, task.id);
-        assert_eq!(pending[0].project_id.as_deref(), Some("project-a"));
-        assert_eq!(pending[1].operation, SyncOperation::Upsert);
-        assert_eq!(pending[1].entity_id, task.id);
-        assert_eq!(pending[1].project_id.as_deref(), Some("project-b"));
-        assert!(
-            pending[1]
-                .payload
-                .as_deref()
-                .is_some_and(|payload| payload.contains("\"origin_project\":\"project-b\""))
-        );
+        assert_eq!(pending[0].project_id.as_deref(), Some(local.as_str()));
+        assert!(queue.pending(10, 5).unwrap().is_empty());
     }
 
     #[test]
@@ -1756,7 +1749,8 @@ mod tests {
         let queue = SyncQueue::open(temp.path()).unwrap();
 
         let mut task = Task::new("p-task-move-legacy".to_string(), "move me".to_string());
-        task.origin_project = Some("project-a".to_string());
+        let local = crate::cloud::resolve_canonical_id(temp.path()).unwrap();
+        task.origin_project = Some(local.clone());
         store.add(&task).unwrap();
         queue.clear().unwrap();
 
@@ -1779,42 +1773,37 @@ mod tests {
         store.update(&task).unwrap();
 
         let pending = queue.pending_for_team(TEST_TEAM, 10, 5).unwrap();
-        assert_eq!(
-            pending.len(),
-            2,
-            "a move must replace stale generic upserts"
-        );
+        assert_eq!(pending.len(), 1, "a move must remove stale generic upserts");
         assert_eq!(pending[0].operation, SyncOperation::Delete);
-        assert_eq!(pending[0].project_id.as_deref(), Some("project-a"));
-        assert_eq!(pending[1].operation, SyncOperation::Upsert);
-        assert_eq!(pending[1].project_id.as_deref(), Some("project-b"));
+        assert_eq!(pending[0].project_id.as_deref(), Some(local.as_str()));
     }
 
     #[test]
-    fn task_origin_project_move_later_edit_stays_on_new_owner_key() {
+    fn task_origin_project_move_later_edit_queues_no_foreign_upsert() {
         let (temp, store) = create_team_store(None);
         let queue = SyncQueue::open(temp.path()).unwrap();
 
         let mut task = Task::new("p-task-move-002".to_string(), "move me".to_string());
-        task.origin_project = Some("project-a".to_string());
+        let local = crate::cloud::resolve_canonical_id(temp.path()).unwrap();
+        task.origin_project = Some(local.clone());
         store.add(&task).unwrap();
         queue.clear().unwrap();
 
         task.origin_project = Some("project-b".to_string());
         store.update(&task).unwrap();
-        queue.clear().unwrap();
 
         task.title = "edited after move".to_string();
         store.update(&task).unwrap();
 
         let pending = queue.pending_for_team(TEST_TEAM, 10, 5).unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].operation, SyncOperation::Upsert);
-        assert_eq!(pending[0].project_id.as_deref(), Some("project-b"));
+        assert_eq!(pending.len(), 1, "later edits must preserve the old delete");
+        assert_eq!(pending[0].operation, SyncOperation::Delete);
+        assert_eq!(pending[0].project_id.as_deref(), Some(local.as_str()));
+        assert!(queue.pending(10, 5).unwrap().is_empty());
     }
 
     #[test]
-    fn task_delete_after_origin_project_move_targets_current_owner_key() {
+    fn task_delete_after_origin_project_move_queues_no_foreign_delete() {
         let (temp, store) = create_team_store(None);
         let queue = SyncQueue::open(temp.path()).unwrap();
 
@@ -1822,20 +1811,22 @@ mod tests {
             "p-task-move-delete".to_string(),
             "move then delete".to_string(),
         );
-        task.origin_project = Some("project-a".to_string());
+        task.origin_project = crate::cloud::resolve_canonical_id(temp.path());
         store.add(&task).unwrap();
         queue.clear().unwrap();
 
         task.origin_project = Some("project-b".to_string());
         store.update(&task).unwrap();
-        queue.clear().unwrap();
 
         store.delete(&task.id).unwrap();
 
         let pending = queue.pending_for_team(TEST_TEAM, 10, 5).unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].operation, SyncOperation::Delete);
-        assert_eq!(pending[0].project_id.as_deref(), Some("project-b"));
+        assert_eq!(
+            pending[0].project_id,
+            crate::cloud::resolve_canonical_id(temp.path())
+        );
     }
 
     #[test]

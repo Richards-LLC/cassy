@@ -251,28 +251,43 @@ impl SyncQueue {
         let project_task = serde_json::from_str::<serde_json::Value>(&payload)
             .ok()
             .is_some_and(|value| value.get("scope").and_then(|v| v.as_str()) != Some("global"));
+        let mut authored_here = true;
         if project_task {
             let origin =
                 Self::queued_origin(&tx, EntityType::Task, &intent.entity_id, Some(&payload));
-            let authored_here = local_project.as_deref().is_none_or(|local| {
+            authored_here = local_project.as_deref().is_none_or(|local| {
                 origin.as_deref().is_none_or(|origin| {
                     origin != "unknown" && crate::cloud::project_ids_match(origin, local)
                 })
             });
-            if !authored_here {
-                tx.execute(
-                    "DELETE FROM sync_queue WHERE entity_type = 'task' AND entity_id = ?1",
-                    params![intent.entity_id],
-                )?;
-                Self::record_unauthored_skip(&tx)?;
-                retire_task_sync_evidence(&tx, &intent.entity_id)?;
-                tx.commit()?;
-                return Ok(TaskSyncFulfillResult::Fulfilled);
-            }
         }
         let current_project_id = canonical.current_project_id.as_deref();
         let current_team_id = canonical.current_team_id.as_deref();
-        if canonical.personal {
+        if !authored_here {
+            // A move away still owes the old owner a tombstone. Keep that
+            // delete across later edits while removing every stale upsert.
+            tx.execute(
+                "DELETE FROM sync_queue WHERE entity_type = 'task' AND entity_id = ?1 AND operation = 'upsert'",
+                params![intent.entity_id],
+            )?;
+            if let (Some(local), Some(team_id), Some(project_id)) = (
+                local_project.as_deref(),
+                intent.previous_team_id.as_deref(),
+                intent.previous_project_id.as_deref(),
+            ) && crate::cloud::project_ids_match(project_id, local)
+            {
+                upsert_queue_row(
+                    &tx,
+                    EntityType::Task,
+                    &intent.entity_id,
+                    SyncOperation::Delete,
+                    None,
+                    team_id,
+                    Some(project_id),
+                )?;
+            }
+            Self::record_unauthored_skip(&tx)?;
+        } else if canonical.personal {
             upsert_queue_row(
                 &tx,
                 EntityType::Task,
@@ -294,7 +309,8 @@ impl SyncQueue {
             .as_deref()
             .map(|team_id| (team_id, intent.previous_project_id.as_deref()));
         let current_route = current_team_id.map(|team_id| (team_id, current_project_id));
-        if previous_route != current_route
+        if authored_here
+            && previous_route != current_route
             && let Some((team_id, project_id)) = previous_route
         {
             remove_legacy_team_upsert_row(&tx, EntityType::Task, &intent.entity_id, team_id)?;
@@ -308,7 +324,7 @@ impl SyncQueue {
                 project_id,
             )?;
         }
-        if let Some((team_id, project_id)) = current_route {
+        if authored_here && let Some((team_id, project_id)) = current_route {
             upsert_queue_row(
                 &tx,
                 EntityType::Task,

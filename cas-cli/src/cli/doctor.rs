@@ -360,7 +360,7 @@ const EXPECTED_TABLES: &[&str] = &[
 /// it simply persists forever, unreachable by any test in this repo. That is
 /// exactly how `mecha-cassy-post` kept documenting a retired hub tool contract
 /// after every in-repo copy had been corrected.
-const RETIRED_USER_SKILLS: &[(&str, &str)] = &[("mecha-cassy-post", "mecha-cassy")];
+const RETIRED_USER_SKILLS: &[(&str, &str)] = &[("mecha-cassy-post", "violet")];
 
 /// Why a user-level skill directory should not be on this machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2558,7 +2558,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // blocks). Unlike the platform rows this one *can* be an Error: a missing
     // variable, a rejected bearer, or a drifted tool contract each mean the
     // next release post will fail, and each has an exact remedy.
-    recorder.mark("mechacassy hub", &checks);
+    recorder.mark("violet hub", &checks);
 
     // Check 13c: stale user-level skills (cas-332f). `cas update` only prunes
     // `cas-*` directories, so a hand-installed skill without that prefix is
@@ -8375,7 +8375,7 @@ mod tests {
         assert_eq!(strays.len(), 1);
         assert_eq!(strays[0].name, "mecha-cassy-post");
         assert_eq!(strays[0].path, retired);
-        assert_eq!(strays[0].reason, StrayReason::RetiredBy("mecha-cassy"));
+        assert_eq!(strays[0].reason, StrayReason::RetiredBy("violet"));
 
         let check = stray_user_skills_check(&strays);
         assert!(matches!(check.status, CheckStatus::Warning));
@@ -8385,7 +8385,7 @@ mod tests {
             check.message
         );
         assert!(
-            check.message.contains("mecha-cassy owns it now"),
+            check.message.contains("violet owns it now"),
             "{}",
             check.message
         );
@@ -8497,7 +8497,7 @@ mod tests {
             stray.path == managed && stray.reason == StrayReason::OrphanedManagedCopy
         }));
         assert!(strays.iter().any(|stray| {
-            stray.path == user && stray.reason == StrayReason::RetiredBy("mecha-cassy")
+            stray.path == user && stray.reason == StrayReason::RetiredBy("violet")
         }));
         let message = stray_user_skills_check(&strays).message;
         assert!(message.contains("cas doctor --fix --yes"), "{message}");

@@ -1286,7 +1286,8 @@ else
     bad "pattern-based process matching in the release path: $pattern_hits"
 fi
 
-for flavour in skills codex/skills grok/skills; do
+# All harness catalogs embed this shared skill; builtin_flavor_drift_test guards parity.
+for flavour in skills; do
     skill="$repo_root/cas-cli/src/builtins/$flavour/cas-cut-release/SKILL.md"
     if grep -q 'release-train.sh' "$skill" 2>/dev/null; then
         ok "cas-cut-release ($flavour) points at release-train.sh"
@@ -1312,8 +1313,8 @@ for flavour in skills codex/skills grok/skills; do
         'four Slack POSTED' 'refresh_binary_version' 'stranded_branch_override' \
         'release.tag-complete.epoch' 'release-published.receipt' \
         'Pin the cut date' 'Cargo.lock' 'docs-only release commits' \
-        'status-check rollup' 'announcement lint' 'wording must avoid' \
-        'agent`, `worker`, `supervisor`, `daemon`, and `factory'; do
+        'status-check rollup' 'announcement lint' 'is the authority for User-thread' \
+        'wording. Real-project fixtures use'; do
         if grep -qF "$marker" "$skill" 2>/dev/null; then
             ok "cas-cut-release ($flavour) carries marker: $marker"
         else
@@ -2520,7 +2521,8 @@ fi
 portable_proxy="$portable_dir/proxy.toml"
 printf 'auth = "env:CASSY_PROXY_TOKEN_SOUNDWAVE"\n' >"$portable_proxy"
 portable_announce="$(
-    env -u MECHA_SLACK_TOKEN_ENV -u CAS_RELEASE_TRAIN_MECHA_TOKEN_ENV -u CASSY_PROXY_TOKEN_SOUNDWAVE \
+    env -u VIOLET_SLACK_TOKEN_ENV -u CAS_RELEASE_TRAIN_VIOLET_TOKEN_ENV \
+        -u MECHA_SLACK_TOKEN_ENV -u CAS_RELEASE_TRAIN_MECHA_TOKEN_ENV -u CASSY_PROXY_TOKEN_SOUNDWAVE \
         CAS_RELEASE_TRAIN_PROXY_TOML="$portable_proxy" python3 - "$repo_root/scripts/release-train-announce.py" <<'PY'
 import importlib.util, os, sys
 spec = importlib.util.spec_from_file_location("announce", sys.argv[1])
@@ -2530,7 +2532,7 @@ unset = announce.announce_token_env({})
 from_credentials = announce.announce_token_env({"CASSY_PROXY_TOKEN_SOUNDWAVE": "secret"})
 os.environ["CASSY_PROXY_TOKEN_SOUNDWAVE"] = "secret"
 from_env = announce.announce_token_env({})
-os.environ["MECHA_SLACK_TOKEN_ENV"] = "MECHA_SLACK_TOKEN_PROWL"
+os.environ["VIOLET_SLACK_TOKEN_ENV"] = "VIOLET_SLACK_TOKEN_PROWL"
 explicit = announce.announce_token_env({})
 print(unset, from_credentials, from_env, explicit)
 PY

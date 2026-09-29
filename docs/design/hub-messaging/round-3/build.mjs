@@ -47,7 +47,7 @@ const ROWS = [
     prev: 'Pass two is green — every pack in one place.' },
   { m: 'atlas', proj: 'petra-stella-cloud', when: 'Tue', prev: 'Preview is up for the alias merge.' },
   { m: 'studio', proj: 'openclaw', when: 'Tue', prev: 'Rebased and pushed; nothing waiting.' },
-  { m: 'bench', proj: 'mecha-cassy', when: 'Mon', prev: 'Posted both threads to the channel.' },
+  { m: 'bench', proj: 'violet', when: 'Mon', prev: 'Posted both threads to the channel.' },
   { m: 'bench', proj: 'cas-hub-static', when: 'Mon', prev: 'Nothing waiting on you.' },
 ];
 

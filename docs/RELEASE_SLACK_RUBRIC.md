@@ -14,17 +14,17 @@ mandatory #cas-internal publication workflow. They are separate duties.**
 
 ## Transport ownership and worker handoff
 
-**Use only the MechaCassy hub/bot.** Never use Claude.ai Slack or a personal
+**Use only the Violet hub/bot.** Never use Claude.ai Slack or a personal
 connector, including during a hub outage. The builtin
-[mecha-cassy](../cas-cli/src/builtins/skills/mecha-cassy/SKILL.md) owns channel
-resolution, authenticated `tools/list`, bounded `mecha_read` dedupe, ordered
+[violet](../cas-cli/src/builtins/skills/violet/SKILL.md) owns channel
+resolution, authenticated `tools/list`, bounded `violet_read` dedupe, ordered
 thread posting with one-second pacing, `## POSTED` receipts and env-only
 credential rules. Its read-only outage procedure stays on the same hub and
 requires local duplicate proof before any write.
 
 Any connected harness posts as the same bot. A worker without hub access saves
 the exact draft and hands its path, target channel, deploy target and receipt
-request to the supervisor, who must also use MechaCassy. If the hub cannot
+request to the supervisor, who must also use Violet. If the hub cannot
 complete publication, preserve the draft and partial receipts and report the
 measured failure. Never mark `POSTED` without returned message IDs and permalinks.
 
@@ -98,20 +98,20 @@ local audit host cannot build Darwin.
    `docs/release-reports/`. Verify source fidelity and PDF pagination before
    either top-level message is sent. These local artifacts precede the later
    upload/link receipt, which needs existing parent messages.
-2. Post the four messages through MechaCassy in order: User top-level, User
+2. Post the four messages through Violet in order: User top-level, User
    reply, Dev top-level, Dev reply. Save every returned message ID and permalink,
    including the two parent IDs needed for report delivery.
 3. After the four messages, set `CAS_RELEASE_TRAIN_REPORT_USER_THREAD_TS` and
    `CAS_RELEASE_TRAIN_REPORT_DEV_THREAD_TS` to those returned parent IDs and run
    `scripts/release-train.sh <version> <epic-worktree> --report`. Attach the PDF
-   to the existing User thread through MechaCassy `mecha_post` with `kind: file`
+   to the existing User thread through Violet `violet_post` with `kind: file`
    and link the HTML from the existing Dev thread. Require uploaded-PDF
    download, decode, page-count and source-hash checks before accepting delivery.
    Preserve the returned file permalink, User/Dev thread receipts, local PDF
    SHA-256/size, verified remote PDF SHA-256/size/page count, the HTML SHA-256,
    both file IDs and the local page count in `release-report.receipt` in the run
    directory. The adapter must download the returned explicit `download_url`, or
-   re-read the uploaded file by its returned ID through authenticated `mecha_read`
+   re-read the uploaded file by its returned ID through authenticated `violet_read`
    when the current hub receipt omits a download URL, and compare the bytes and
    decoded page count before writing that receipt. Bound that fallback read
    inclusively from the User root Slack timestamp as RFC3339 `since`, preserving

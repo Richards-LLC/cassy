@@ -2,7 +2,7 @@
 """Post a release report without routing report bytes through an agent context.
 
 The release train passes paths and thread identifiers to this adapter.  The
-adapter reads the files locally, speaks the authenticated MechaCassy MCP HTTP
+adapter reads the files locally, speaks the authenticated Violet MCP HTTP
 endpoint, and writes the receipt only after both posts have returned usable
 receipts.  Credentials are resolved from the environment or the standard
 0600 credentials file without sourcing or printing that file.
@@ -36,7 +36,7 @@ DEFAULT_REPO = "Richards-LLC/cassy"
 MCP_PROTOCOL_VERSION = "2025-06-18"
 MAX_REMOTE_PDF_BYTES = 32 * 1024 * 1024
 MAX_HUB_FILE_BYTES = 4 * 1024 * 1024
-# The largest file MechaCassy accepts through `mecha_post kind=file` (GH #908).
+# The largest file Violet accepts through `violet_post kind=file` (GH #908).
 # Larger uploads fail at the hub with HTTP 413 or `file_too_large`, so a
 # report over this is refused before any network call. Raise it with
 # CAS_RELEASE_TRAIN_REPORT_MAX_UPLOAD_BYTES only if the hub's limit changes.
@@ -78,7 +78,7 @@ def hub_upload_limit() -> int:
 def upload_limit_message(label: str, size: int | None, limit: int) -> str:
     size_text = f" is {human_size(size)}," if size is not None else " is"
     return (
-        f"{label}{size_text} over MechaCassy's file upload limit of {human_size(limit)}; "
+        f"{label}{size_text} over Violet's file upload limit of {human_size(limit)}; "
         "nothing was posted. Shrink or split the file and post again."
     )
 
@@ -167,19 +167,28 @@ def parse_credentials(path: Path) -> dict[str, str]:
     return values
 
 
+def credential_names(name: str) -> tuple[str, ...]:
+    """Canonical name first, matching legacy name second; custom names unchanged."""
+    for prefix in ("VIOLET_SLACK_TOKEN", "MECHA_SLACK_TOKEN"):
+        if name == prefix or name.startswith(prefix + "_"):
+            suffix = name[len(prefix):]
+            return ("VIOLET_SLACK_TOKEN" + suffix, "MECHA_SLACK_TOKEN" + suffix)
+    if name in {"VIOLET_VERCEL_BYPASS", "MECHA_VERCEL_BYPASS"}:
+        return ("VIOLET_VERCEL_BYPASS", "MECHA_VERCEL_BYPASS")
+    return (name,)
+
+
 def resolve_secret(name: str, explicit_env: str | None, credentials: dict[str, str]) -> str:
-    if explicit_env:
-        value = os.environ.get(explicit_env) or credentials.get(explicit_env, "")
+    for candidate in credential_names(explicit_env or name):
+        value = os.environ.get(candidate) or credentials.get(candidate, "")
         if value:
             return value
+    if explicit_env:
         fail(f"credential variable {explicit_env} is unset or empty")
-    value = os.environ.get(name, "")
-    if value:
-        return value
-    return credentials.get(name, "")
+    return ""
 
 
-def registered_mecha_token_env() -> str | None:
+def registered_violet_token_env() -> str | None:
     """Return the token variable named by this machine's Claude registration."""
 
     config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
@@ -193,7 +202,7 @@ def registered_mecha_token_env() -> str | None:
     servers = document.get("mcpServers")
     if not isinstance(servers, dict):
         return None
-    server = servers.get("mecha-cassy")
+    server = servers.get("violet") or servers.get("mecha-cassy")
     if not isinstance(server, dict):
         return None
     headers = server.get("headers")
@@ -203,7 +212,7 @@ def registered_mecha_token_env() -> str | None:
     if not isinstance(authorization, str):
         return None
     match = re.fullmatch(
-        r"\s*Bearer\s+\$\{(MECHA_SLACK_TOKEN_[A-Z0-9][A-Z0-9_]*)\}\s*",
+        r"\s*Bearer\s+\$\{((?:VIOLET|MECHA)_SLACK_TOKEN_[A-Z0-9][A-Z0-9_]*)\}\s*",
         authorization,
     )
     return match.group(1) if match else None
@@ -213,17 +222,22 @@ def select_token_env(candidates: set[str], registered_env: str | None) -> str | 
     """Choose a token variable, preferring the machine's registration."""
 
     if registered_env:
-        return registered_env
+        primary = credential_names(registered_env)[0]
+        return primary if primary in candidates else registered_env
+    canonical = {name for name in candidates if name.startswith("VIOLET_SLACK_TOKEN_")}
+    if canonical:
+        candidates = canonical
     if len(candidates) == 1:
         return next(iter(candidates))
     return None
 
 
 def resolve_token(credentials: dict[str, str]) -> str:
-    explicit = os.environ.get("CAS_RELEASE_TRAIN_MECHA_TOKEN_ENV") or os.environ.get(
-        "MECHA_SLACK_TOKEN_ENV"
-    )
-    token = resolve_secret("MECHA_SLACK_TOKEN", explicit, credentials)
+    explicit = (os.environ.get("VIOLET_SLACK_TOKEN_ENV")
+                or os.environ.get("CAS_RELEASE_TRAIN_VIOLET_TOKEN_ENV")
+                or os.environ.get("CAS_RELEASE_TRAIN_MECHA_TOKEN_ENV")
+                or os.environ.get("MECHA_SLACK_TOKEN_ENV"))
+    token = resolve_secret("VIOLET_SLACK_TOKEN", explicit, credentials)
     if token:
         return token
 
@@ -231,23 +245,23 @@ def resolve_token(credentials: dict[str, str]) -> str:
         {
             name
             for name, value in list(os.environ.items()) + list(credentials.items())
-            if name.startswith("MECHA_SLACK_TOKEN_")
+            if name.startswith(("VIOLET_SLACK_TOKEN_", "MECHA_SLACK_TOKEN_"))
             and not name.endswith("_ENV")
             and value
         }
     )
-    registered_env = registered_mecha_token_env()
+    registered_env = registered_violet_token_env()
     selected_env = select_token_env(set(candidates), registered_env)
     if selected_env:
         token = resolve_secret(selected_env, None, credentials)
         if token:
             return token
         if selected_env == registered_env:
-            fail(f"registered MechaCassy token variable {selected_env} is unset or empty")
+            fail(f"registered Violet token variable {selected_env} is unset or empty")
     if len(candidates) > 1:
         names = ", ".join(candidates)
-        fail(f"multiple MechaCassy token variables found ({names}); set MECHA_SLACK_TOKEN_ENV")
-    fail("no MechaCassy token found; set MECHA_SLACK_TOKEN_ENV or configure credentials.env")
+        fail(f"multiple Violet token variables found ({names}); set VIOLET_SLACK_TOKEN_ENV")
+    fail("no Violet token found; set VIOLET_SLACK_TOKEN_ENV or configure credentials.env")
 
 
 def request_json(
@@ -270,12 +284,12 @@ def request_json(
         detail = exc.read(512).decode("utf-8", "replace").replace("\n", " ")
         if exc.code == 413:
             fail(
-                "MechaCassy rejected the request as too large (HTTP 413); its file upload "
+                "Violet rejected the request as too large (HTTP 413); its file upload "
                 f"limit is {human_size(hub_upload_limit())}. Nothing was posted."
             )
-        fail(f"MechaCassy HTTP {exc.code}: {detail[:240]}")
+        fail(f"Violet HTTP {exc.code}: {detail[:240]}")
     except urllib.error.URLError as exc:
-        fail(f"MechaCassy request failed: {exc.reason}")
+        fail(f"Violet request failed: {exc.reason}")
 
     if not raw:
         return {}, response_headers
@@ -292,9 +306,9 @@ def request_json(
     try:
         result = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        fail(f"MechaCassy returned invalid JSON: {exc}")
+        fail(f"Violet returned invalid JSON: {exc}")
     if not isinstance(result, dict):
-        fail("MechaCassy returned a non-object JSON response")
+        fail("Violet returned a non-object JSON response")
     return result, response_headers
 
 
@@ -302,9 +316,9 @@ class McpClient:
     def __init__(self, url: str, token: str, bypass: str, timeout: float) -> None:
         self.url = url
         self.timeout = timeout
-        self.mcp_url = parsed_http_url(url, "MechaCassy MCP URL")
+        self.mcp_url = parsed_http_url(url, "Violet MCP URL")
         if self.mcp_url.scheme.lower() == "http" and not is_loopback(self.mcp_url.hostname or ""):
-            fail("MechaCassy MCP URL must use HTTPS outside a loopback test endpoint")
+            fail("Violet MCP URL must use HTTPS outside a loopback test endpoint")
         self.opener = urllib.request.build_opener(NoRedirectHandler())
         self.headers = {
             "Authorization": f"Bearer {token}",
@@ -331,13 +345,13 @@ class McpClient:
             error = result["error"]
             if isinstance(error, dict):
                 fail(
-                    f"MechaCassy MCP error {error.get('code', 'unknown')}: "
+                    f"Violet MCP error {error.get('code', 'unknown')}: "
                     f"{error.get('message', 'unknown')}"
                 )
-            fail("MechaCassy MCP returned an error")
+            fail("Violet MCP returned an error")
         response = result.get("result")
         if not isinstance(response, dict):
-            fail(f"MechaCassy MCP response for {method} had no result")
+            fail(f"Violet MCP response for {method} had no result")
         return response
 
     def notify_initialized(self) -> None:
@@ -385,11 +399,11 @@ class McpClient:
                         headers.get("Location", ""),
                     )
                     continue
-                fail(f"MechaCassy PDF download returned HTTP {exc.code}")
+                fail(f"Violet PDF download returned HTTP {exc.code}")
             except urllib.error.URLError as exc:
-                fail(f"MechaCassy PDF download failed: {exc.reason}")
+                fail(f"Violet PDF download failed: {exc.reason}")
             except (http.client.HTTPException, OSError) as exc:
-                fail(f"MechaCassy PDF download failed ({type(exc).__name__})")
+                fail(f"Violet PDF download failed ({type(exc).__name__})")
 
             status = getattr(response, "status", None)
             if status is None:
@@ -407,17 +421,17 @@ class McpClient:
                 continue
             if status is not None and not 200 <= status < 300:
                 response.close()
-                fail(f"MechaCassy PDF download returned HTTP {status}")
+                fail(f"Violet PDF download returned HTTP {status}")
             try:
                 raw = response.read(MAX_REMOTE_PDF_BYTES + 1)
             except (http.client.HTTPException, OSError) as exc:
-                fail(f"MechaCassy PDF download failed ({type(exc).__name__})")
+                fail(f"Violet PDF download failed ({type(exc).__name__})")
             finally:
                 response.close()
             if len(raw) > MAX_REMOTE_PDF_BYTES:
-                fail("MechaCassy PDF download exceeded the safety limit")
+                fail("Violet PDF download exceeded the safety limit")
             if not raw:
-                fail("MechaCassy PDF download returned no bytes")
+                fail("Violet PDF download returned no bytes")
             return raw
         fail("PDF download followed too many same-origin redirects")
 
@@ -452,10 +466,10 @@ class McpClient:
             )
             if "file_too_large" in detail or "too large" in detail.lower():
                 fail(
-                    f"MechaCassy tool {name} refused the file as too large (file_too_large); "
+                    f"Violet tool {name} refused the file as too large (file_too_large); "
                     f"its file upload limit is {human_size(hub_upload_limit())}."
                 )
-            fail(f"MechaCassy tool {name} returned an error")
+            fail(f"Violet tool {name} returned an error")
         structured = result.get("structuredContent")
         if isinstance(structured, dict):
             return structured
@@ -467,13 +481,13 @@ class McpClient:
                     continue
                 if isinstance(decoded, dict):
                     return decoded
-        fail(f"MechaCassy tool {name} returned no JSON envelope")
+        fail(f"Violet tool {name} returned no JSON envelope")
 
     def read_file(self, channel: str, file_id: str, since: str) -> bytes:
         """Read an uploaded file through the hub's authenticated file packer."""
 
         result = self.tool(
-            "mecha_read",
+            "violet_read",
             {
                 "channel": channel,
                 "since": since,
@@ -487,22 +501,22 @@ class McpClient:
         )
         files = result.get("files")
         if not isinstance(files, list):
-            fail("MechaCassy file read returned no file receipts")
+            fail("Violet file read returned no file receipts")
         for file in files:
             if not isinstance(file, dict) or file.get("file_id") != file_id:
                 continue
             content = file.get("content_base64")
             if not isinstance(content, str) or not content:
-                fail("MechaCassy file read returned no uploaded PDF bytes")
+                fail("Violet file read returned no uploaded PDF bytes")
             try:
                 raw = base64.b64decode(content, validate=True)
             except (ValueError, binascii.Error):
-                fail("MechaCassy file read returned invalid uploaded PDF bytes")
+                fail("Violet file read returned invalid uploaded PDF bytes")
             size = file.get("size_bytes")
             if not isinstance(size, int) or size != len(raw):
-                fail("MechaCassy file read returned inconsistent uploaded PDF size")
+                fail("Violet file read returned inconsistent uploaded PDF size")
             return raw
-        fail("MechaCassy file read returned no receipt for the uploaded PDF")
+        fail("Violet file read returned no receipt for the uploaded PDF")
 
 
 def message_receipt(envelope: dict[str, Any], label: str) -> tuple[str, str]:
@@ -685,7 +699,7 @@ def main(argv: list[str]) -> int:
         pages = page_count(pdf_path, pdf_bytes)
         credentials = parse_credentials(credential_file())
         token = resolve_token(credentials)
-        bypass = resolve_secret("MECHA_VERCEL_BYPASS", None, credentials)
+        bypass = resolve_secret("VIOLET_VERCEL_BYPASS", None, credentials)
         url = os.environ.get("CAS_RELEASE_TRAIN_REPORT_MCP_URL", DEFAULT_MCP_URL)
         channel = os.environ.get("CAS_RELEASE_TRAIN_REPORT_CHANNEL", DEFAULT_CHANNEL)
         timeout = float(os.environ.get("CAS_RELEASE_TRAIN_REPORT_TIMEOUT_SECS", "30"))
@@ -705,11 +719,11 @@ def main(argv: list[str]) -> int:
             for tool in tools.get("tools", [])
             if isinstance(tool, dict) and isinstance(tool.get("name"), str)
         }
-        if "mecha_post" not in tool_names:
-            fail("authenticated MechaCassy tools/list does not expose mecha_post")
+        if "violet_post" not in tool_names:
+            fail("authenticated Violet tools/list does not expose violet_post")
 
         pdf_envelope = client.tool(
-            "mecha_post",
+            "violet_post",
             {
                 "channel": channel,
                 "kind": "file",
@@ -727,7 +741,7 @@ def main(argv: list[str]) -> int:
             client, channel, pdf_file_id, pdf_download_url, read_since, pdf_bytes, pdf_sha, pages
         )
         html_envelope = client.tool(
-            "mecha_post",
+            "violet_post",
             {
                 "channel": channel,
                 "kind": "message",

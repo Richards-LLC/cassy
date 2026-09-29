@@ -1,6 +1,6 @@
-# MechaCassy onboarding — one command per machine
+# Violet onboarding — one command per machine
 
-MechaCassy is the hosted hub that holds the Slack bot credential. Cassy sends
+Violet is the hosted hub that holds the Slack bot credential. Cassy sends
 your **per-machine bearer** to the hub, and the hub talks to Slack. The bearer
 is kept in the private machine credentials file so every local harness can
 reuse the registration without copying a Slack bot token into a project.
@@ -9,8 +9,14 @@ Two values make a machine work, and they are the only two secrets involved:
 
 | Variable | What it is | Who issues it |
 |---|---|---|
-| `MECHA_SLACK_TOKEN_<LABEL>` | Your machine's bearer. Per-machine so one can be revoked without touching anyone else. | `POST /api/clients`, authorized by your Cassy Cloud login |
-| `MECHA_VERCEL_BYPASS` | The shared edge-protection secret in front of the hub. | The hub's bypass route, Vercel read, or one hidden prompt |
+| `VIOLET_SLACK_TOKEN_<LABEL>` | Your machine's bearer. Per-machine so one can be revoked without touching anyone else. | `POST /api/clients`, authorized by your Cassy Cloud login |
+| `VIOLET_VERCEL_BYPASS` | The shared edge-protection secret in front of the hub. | The hub's bypass route, Vercel read, or one hidden prompt |
+
+Violet variables take precedence; existing `MECHA_SLACK_TOKEN_<LABEL>` and
+`MECHA_VERCEL_BYPASS` values remain supported as fallback names. Empty Violet
+values fall back too. `cas integrate mecha-cassy` remains an accepted alias for
+one release; new setup uses `cas integrate violet`. The deployed MCP endpoint
+is still `https://mecha-cassy.vercel.app/mcp/slack`.
 
 Everything Cassy writes references those by **name**. No file in any repo, and
 no line of terminal output, ever holds a value.
@@ -22,11 +28,11 @@ no line of terminal output, ever holds a value.
 ### 1. Use the existing Cassy Cloud login
 
 The command uses team membership from the current `cas login` session. There
-is no MechaCassy admin token and no `MECHA_ADMIN_TOKEN` setting.
+is no Violet admin token and no `MECHA_ADMIN_TOKEN` setting.
 
 ```bash
 cas login
-cas integrate mecha-cassy
+cas integrate violet
 ```
 
 The default label is the uppercased hostname with non-alphanumeric characters
@@ -34,7 +40,7 @@ folded to `_` (`soundwave` becomes `SOUNDWAVE`). Use `--label` only when that
 hostname-derived label should be overridden:
 
 ```bash
-cas integrate mecha-cassy --label DANIEL_LAPTOP
+cas integrate violet --label DANIEL_LAPTOP
 ```
 
 The command calls `POST /api/clients` with the Cassy Cloud bearer. If the hub
@@ -66,7 +72,7 @@ Confirm:
 cas doctor
 ```
 
-The `mecha-cassy` row under **Integrations** should be green and name the
+The `violet` row under **Integrations** should be green and name the
 tools the hub answered with.
 
 ---
@@ -77,16 +83,16 @@ tools the hub answered with.
 |---|---|---|
 | Credentials | `~/.config/cas/credentials.env` | The two plaintext values, mode `0600`; unrelated exports are preserved |
 | Login profile | `~/.profile`, `~/.bash_profile`, or `~/.zprofile` | A guarded source line for the credentials file |
-| Machine proxy registration | `~/.config/code-mode-mcp/config.toml` | The hub URL, `auth = "env:MECHA_SLACK_TOKEN_<LABEL>"`, the bypass header as `env:MECHA_VERCEL_BYPASS`, and the allowlist of the hub's current tools |
+| Machine proxy registration | `~/.config/code-mode-mcp/config.toml` | The hub URL, `auth = "env:VIOLET_SLACK_TOKEN_<LABEL>"`, the bypass header as `env:VIOLET_VERCEL_BYPASS`, and the allowlist of `violet_read` / `violet_post` plus the compatibility `mecha-cassy` registration |
 | Claude Code | `$CLAUDE_CONFIG_DIR/.claude.json` (else `~/.claude.json`) | A user-scope `http` server whose headers use `${VAR}`, expanded by the client at launch |
-| Codex | `$CODEX_HOME/config.toml` (else `~/.codex/config.toml`) | `[mcp_servers.mecha-cassy]` with `bearer_token_env_var` and `env_http_headers` |
+| Codex | `$CODEX_HOME/config.toml` (else `~/.codex/config.toml`) | `[mcp_servers.violet]` with `bearer_token_env_var` and `env_http_headers` |
 
 Every write is idempotent — re-running the command *is* the refresh path — and
 every unrelated key, comment, and table in those harness files is preserved.
 
 Useful flags:
 
-- `--label LABEL` — overrides the hostname-derived label and derives `MECHA_SLACK_TOKEN_<LABEL>`.
+- `--label LABEL` — overrides the hostname-derived label and derives `VIOLET_SLACK_TOKEN_<LABEL>`.
 - `--token-env NAME --bypass-env NAME` — override the variable names. If the
   hub cannot return a bypass, the command may use the one hidden prompt.
 - `--no-harness` — write only the machine registration, leave Claude Code and
@@ -97,14 +103,14 @@ Useful flags:
 
 ---
 
-## Reading a red `mecha-cassy` row
+## Reading a red `violet` row
 
 | Row says | What happened | Fix |
 |---|---|---|
-| `not registered on this machine` | No hub server in the machine config. | `cas integrate mecha-cassy` |
-| `MECHA_SLACK_TOKEN_… is unset` / `set but empty` | The registration is fine; the credentials file is not. | Add the value, **open a new shell** |
+| `not registered on this machine` | No hub server in the machine config. | `cas integrate violet` |
+| `VIOLET_SLACK_TOKEN_… is unset` / `set but empty` | The registration is fine; the credentials file is not. | Add the value, **open a new shell** |
 | `hub rejected this machine (HTTP 401…)` | The bearer is not registered hub-side, was revoked, or the hub was not redeployed after the token was added. | Confirm `cas login`, then re-run the command; the route names the cloud-login failure |
-| `hub tool contract drifted…` | The hub renamed or added tools; the allowlist names the old ones, so every call would be denied by policy. | `cas integrate mecha-cassy` rewrites the allowlist. The row names the file the stale entries are in — machine or project — and the command rewrites that same file |
+| `hub tool contract drifted…` | The hub renamed or added tools; the allowlist names the old ones, so every call would be denied by policy. | `cas integrate violet` rewrites the allowlist. The row names the file the stale entries are in — machine or project — and the command rewrites that same file |
 | `…is authoritative for dispatch policy and names none` | This project has its own `.cas/proxy.toml`, and a project file **replaces** the machine allowlist rather than widening it. | Add the hub routes to that project's `allowlist`, exactly as the message spells them |
 
 That last one is deliberate, not a bug: a machine-wide policy must never
@@ -117,7 +123,7 @@ widening its policy.
 
 ## Hub deployment contract
 
-The hub lives in `petra_stella_tools/mecha_cassy`. The client contract is:
+The hub repository is [`Richards-LLC/violet_ps`](https://github.com/Richards-LLC/violet_ps). The client contract is:
 
 - `POST /api/clients` accepts `Authorization: Bearer <Cassy Cloud token>` and
   `{"label":"…","connector":"slack"}`; it returns a bearer once, rejects
@@ -138,7 +144,7 @@ hash, so it cannot be recovered later; a lost token is re-minted, not looked
 up. Revoking one machine means removing its single `label:sha256` pair — no
 other machine is disturbed.
 
-Rotating `MECHA_VERCEL_BYPASS` affects every machine at once: rotate it, then
+Rotating `VIOLET_VERCEL_BYPASS` affects every machine at once: rotate it, then
 have everyone update their credentials file and restart their clients and
 `cas serve`.
 
@@ -153,8 +159,8 @@ test posts there rather than in release or internal announcement channels.
 
 ## Related
 
-- `cas-cli/src/builtins/skills/mecha-cassy/SKILL.md` — how to *post* once this
+- `cas-cli/src/builtins/skills/violet/SKILL.md` — how to *post* once this
   is green (channel rules, thread order, receipts).
-- `cas-cli/src/builtins/skills/mecha-cassy/references/registration.md` — the
+- `cas-cli/src/builtins/skills/violet/references/registration.md` — the
   per-file registration shapes, for a machine being repaired by hand.
 - `docs/RELEASE_SLACK_RUBRIC.md` — what to post and where.

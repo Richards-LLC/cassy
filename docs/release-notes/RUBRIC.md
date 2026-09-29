@@ -18,7 +18,7 @@ For **how** to post when the session has no Slack connection of its own, see
 
 ## Transport ownership
 
-Use only the MechaCassy hub/bot via the builtin `mecha-cassy` skill and the
+Use only the Violet hub/bot via the builtin `violet` skill and the
 runbook's authenticated preflight and bounded dedupe read. Never use Claude.ai
 Slack or a personal connector. A worker with no hub connection saves the exact
 draft and hands its path, channel, deploy target and receipt request to the

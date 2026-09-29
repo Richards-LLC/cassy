@@ -392,7 +392,8 @@ jobs:
     name: Scoped Validation (factory/PR)
     if: >-
       needs.ci-diff.outputs.class != 'docs-only'
-      && (github.event_name == 'pull_request'
+      && ((github.event_name == 'pull_request'
+      && github.base_ref != github.event.repository.default_branch)
       || (github.event_name == 'push'
       && startsWith(github.ref, 'refs/heads/factory/')))
     needs: ci-diff
@@ -423,8 +424,9 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
-      # Stand down only when a PR event validates this exact commit with
-      # this same impact-selected lane, including default-branch PRs.
+      # Stand down only when the PR event is already validating this exact
+      # commit: for a default-branch PR that is the strictly stronger required
+      # Fast Validation tier, and for an epic-targeted PR it is this same lane.
       # Anything else — no PR, a PR whose head has moved on, an unparseable
       # answer, or an API failure — runs the lane. The guard absorbs those cases
       # itself and always exits 0, so it deliberately does NOT fail open with

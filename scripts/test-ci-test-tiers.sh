@@ -475,7 +475,7 @@ require_text "$suite_shards" 'runs-on: ubuntu-latest' 'required suite shards ret
 scoped="$(job_block scoped-validation)"
 require_text "$scoped" "refs/heads/factory/" 'scoped tier selects factory branches'
 require_text "$scoped" "github.event_name == 'pull_request'" 'pull requests use scoped tier'
-require_absent "$scoped" 'github.base_ref != github.event.repository.default_branch' 'scoped tier also validates protected-default PR changes'
+require_text "$scoped" 'github.base_ref != github.event.repository.default_branch' 'scoped tier excludes protected-default PR changes'
 require_text "$scoped" 'python3 scripts/ci-test-impact.py run' 'scoped tier executes import/dependency selected tests'
 require_text "$scoped" 'python3 scripts/ci-test-impact.py history' 'scoped tier reads additive recorded failure history'
 require_text "$scoped" 'Test snapshot-pinned CLI output surfaces' 'scoped tier names the snapshot surface target'
@@ -1040,7 +1040,7 @@ done
 
 # Protected PRs emit only the required admission contexts. Compiling heavy
 # lanes stay on integration pushes and supervisor-controlled runs.
-require_absent "$scoped" 'github.base_ref != github.event.repository.default_branch' 'non-required scoped lane validates selected tests for main PRs'
+require_text "$scoped" 'github.base_ref != github.event.repository.default_branch' 'non-required scoped lane skips main PRs'
 for job in clippy test-compile-guard; do
     block="$(job_block "$job")"
     require_text "$block" "refs/heads/main" "$job runs on main"

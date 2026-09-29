@@ -237,9 +237,9 @@ lands; hardlink seeding is the current cross-worktree mechanism.
 
 ### CI-load policy
 
-Standing operator policy: factory/* pushes and every Rust-affecting PR run
-import/dependency-selected tests in Scoped Validation. Protected-default PRs also
-keep the required Fast Validation and macOS Check admission lanes. The release
+Standing operator policy: factory/* pushes and epic-targeted PRs run
+import/dependency-selected tests in Scoped Validation. Protected-default PRs run
+only the required Fast Validation and macOS Check admission lanes. The release
 merge queue runs the complete workspace suite on its synthetic tree once; when its
 successful tree is pushed unchanged to main, the main-push Fast Validation and
 macOS lanes reuse that receipt and name the validating run. Direct pushes,

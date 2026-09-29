@@ -1086,11 +1086,11 @@ fn terminal_row_id(queue: &SyncQueue, entity_id: &str, max_retries: i32) -> i64 
         .id
 }
 
-/// GH #668: rows an older client parked (including rows parked before the
-/// client recorded its build at all) get exactly one fresh attempt after an
-/// upgrade, and a permanent cloud rejection is never resurrected.
+/// Only a satisfied client version gate may requeue a terminal row on upgrade.
+/// Retry exhaustion, manual parks, and cloud rejections require operator retry,
+/// even when the row predates client version stamps.
 #[test]
-fn stale_client_failures_requeue_once_per_upgrade() {
+fn upgrade_requeues_only_version_gated_failures() {
     use rusqlite::Connection;
 
     let temp = TempDir::new().unwrap();
@@ -1098,22 +1098,38 @@ fn stale_client_failures_requeue_once_per_upgrade() {
     queue.init().unwrap();
     const MAX_RETRIES: i32 = 5;
 
-    for id in ["task-429", "task-permanent", "task-retryable-reason"] {
+    for id in ["task-parked", "task-rejected", "task-version-gated", "task-team"] {
+        if id == "task-team" {
+            queue
+                .enqueue_for_team(EntityType::Task, id, SyncOperation::Upsert, Some("{}"), "team-1")
+                .unwrap();
+        } else {
+            queue
+                .enqueue(EntityType::Task, id, SyncOperation::Upsert, Some("{}"))
+                .unwrap();
+        }
+        let row_id = queue
+            .list_all(10)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.entity_id == id)
+            .unwrap()
+            .id;
         queue
-            .enqueue(EntityType::Task, id, SyncOperation::Upsert, Some("{}"))
+            .park_failed(
+                row_id,
+                if id == "task-version-gated" {
+                    "Client version 3.4.2 is below minimum 3.5.0"
+                } else {
+                    "parked by operator or rejected by cloud"
+                },
+                MAX_RETRIES,
+            )
             .unwrap();
-        let row_id = terminal_row_id(&queue, id, MAX_RETRIES);
-        queue
-            .park_failed(row_id, "parked by an older build", MAX_RETRIES)
-            .unwrap();
-        match id {
-            "task-permanent" => queue
-                .record_row_outcome(row_id, "rejected", Some("project_mismatch"))
-                .unwrap(),
-            "task-retryable-reason" => queue
-                .record_row_outcome(row_id, "rejected", Some("revision_conflict"))
-                .unwrap(),
-            _ => {}
+        if id == "task-rejected" {
+            queue
+                .record_row_outcome(row_id, "rejected", Some("team_owned_project"))
+                .unwrap();
         }
     }
 
@@ -1124,22 +1140,19 @@ fn stale_client_failures_requeue_once_per_upgrade() {
             .unwrap();
     }
 
-    // The build that records failures is this crate's own version, so the
-    // test must ask the same question production does.
-    let this_build = env!("CARGO_PKG_VERSION");
     assert_eq!(
         queue
-            .requeue_stale_client_failures(this_build, MAX_RETRIES)
+            .requeue_version_gated_failures("3.5.0", MAX_RETRIES)
             .unwrap(),
-        2,
-        "the 429 row and the retryable rejection get one more attempt"
+        1,
+        "only the satisfied version gate gets an automatic retry"
     );
     assert_eq!(
         queue
-            .requeue_stale_client_failures(this_build, MAX_RETRIES)
+            .requeue_version_gated_failures("99.0.0", MAX_RETRIES)
             .unwrap(),
         0,
-        "the same build must not requeue the same rows twice"
+        "a later upgrade must leave all other terminal rows parked"
     );
 
     let pending = queue
@@ -1148,36 +1161,31 @@ fn stale_client_failures_requeue_once_per_upgrade() {
         .into_iter()
         .map(|row| row.entity_id)
         .collect::<Vec<_>>();
-    assert_eq!(pending, vec!["task-429", "task-retryable-reason"]);
+    assert_eq!(pending, vec!["task-version-gated"]);
+    assert!(queue
+        .pending_for_team("team-1", 10, MAX_RETRIES)
+        .unwrap()
+        .is_empty());
     assert_eq!(
         queue
             .rejected_reason_counts_for_entity_type(None, MAX_RETRIES)
             .unwrap()
-            .get("project_mismatch")
+            .get("team_owned_project")
             .copied(),
         Some(1),
-        "a permanent rejection stays parked with its reason"
+        "a cloud rejection stays parked with its reason"
     );
 
-    // A later build finds the requeued rows terminal again and gives them one
-    // more attempt; the same build does not.
-    for id in ["task-429", "task-retryable-reason"] {
-        let row_id = terminal_row_id(&queue, id, MAX_RETRIES);
-        queue
-            .park_failed(row_id, "still failing", MAX_RETRIES)
-            .unwrap();
-    }
     assert_eq!(
         queue
-            .requeue_stale_client_failures(this_build, MAX_RETRIES)
+            .retry_failed_for_reason("rejected by cloud", MAX_RETRIES)
             .unwrap(),
-        0
+        3
     );
+    assert_eq!(queue.pending(10, MAX_RETRIES).unwrap().len(), 3);
     assert_eq!(
-        queue
-            .requeue_stale_client_failures("99.0.0", MAX_RETRIES)
-            .unwrap(),
-        2
+        queue.pending_for_team("team-1", 10, MAX_RETRIES).unwrap().len(),
+        1
     );
 }
 
@@ -1223,11 +1231,6 @@ fn row_outcome_columns_are_added_to_legacy_databases() {
             .len(),
         0
     );
-    assert_eq!(
-        queue
-            .requeue_stale_client_failures(env!("CARGO_PKG_VERSION"), 5)
-            .unwrap(),
-        1,
-        "a row parked without a build stamp is an older-client failure"
-    );
+    assert_eq!(queue.requeue_version_gated_failures("99.0.0", 5).unwrap(), 0);
+    assert_eq!(queue.retry_failed(5).unwrap(), 1);
 }

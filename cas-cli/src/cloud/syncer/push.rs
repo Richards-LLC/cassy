@@ -138,8 +138,7 @@ impl CloudSyncer {
             return Ok(result);
         }
 
-        self.requeue_version_gated_items()?;
-        result.requeued_after_upgrade = self.requeue_stale_client_failures()?;
+        result.requeued_after_upgrade = self.requeue_version_gated_items()?;
 
         if !self.is_available() {
             return Ok(result);

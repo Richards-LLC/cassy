@@ -2489,10 +2489,6 @@ fn every_push_reason_has_its_own_remediation() {
         );
     }
     assert!(push_reason_hint("brand_new_server_reason").starts_with("unrecognized"));
-    assert!(push_reason_is_permanent("project_mismatch"));
-    assert!(push_reason_is_permanent("project_identity_conflict"));
-    assert!(push_reason_is_permanent("SCOPE_MISMATCH"));
-    assert!(!push_reason_is_permanent("revision_conflict"));
 }
 
 #[test]

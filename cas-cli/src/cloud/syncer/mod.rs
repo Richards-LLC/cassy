@@ -76,8 +76,8 @@ pub struct SyncResult {
     /// them separately is what stops a benign LWW loss reading as "rows
     /// failed".
     pub skipped_lww_acked: usize,
-    /// Terminal rows requeued once because only an older client build had
-    /// parked them.
+    /// Terminal rows requeued because this client meets the cloud's recorded
+    /// minimum version.
     pub requeued_after_upgrade: usize,
     /// Number of entries pulled
     pub pulled_entries: usize,
@@ -613,22 +613,6 @@ impl CloudSyncer {
         Ok(requeued)
     }
 
-    /// Give rows that only an older client build parked one fresh attempt.
-    ///
-    /// This is the general form of the version-gate requeue: a row parked by
-    /// a 429 storm, a transport failure, or a server refusal an older client
-    /// could not classify is not evidence that this build cannot push it.
-    /// Permanent per-row rejections are excluded by the queue itself.
-    pub(crate) fn requeue_stale_client_failures(&self) -> Result<usize, CasError> {
-        let requeued = self
-            .queue
-            .requeue_stale_client_failures(env!("CARGO_PKG_VERSION"), self.config.max_retries)?;
-        if requeued > 0 {
-            tracing::debug!("requeued {requeued} item(s) parked by an older client build");
-        }
-        Ok(requeued)
-    }
-
     /// Get the sync queue
     pub fn queue(&self) -> &SyncQueue {
         &self.queue
@@ -1037,16 +1021,6 @@ impl PushRowResult {
                 | "timeout"
         )
     }
-}
-
-/// Whether a cloud rejection reason describes a condition no client retry can
-/// repair. Permanent reasons must survive a client upgrade: requeueing them
-/// only replays the same refusal and hides the row's real diagnosis.
-pub(crate) fn push_reason_is_permanent(reason: &str) -> bool {
-    matches!(
-        reason.trim().to_ascii_lowercase().as_str(),
-        "project_mismatch" | "project_identity_conflict" | "scope_mismatch"
-    )
 }
 
 /// The operator-facing next step for one cloud rejection reason.

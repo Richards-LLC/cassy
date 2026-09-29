@@ -3147,7 +3147,7 @@ mod machine_protocol_tests {
     fn live_operator_send_reaches_only_other_authenticated_viewers() {
         let temp = crate::test_support::private_hub_tempdir();
         let store = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
-        let scopes = [Scope::PaneRead].into_iter().collect();
+        let scopes: std::collections::BTreeSet<Scope> = [Scope::PaneRead].into_iter().collect();
         let sender = AuthContext::test_fixture("phone", "https://controller.example", scopes.clone());
         let viewer = AuthContext::test_fixture("desktop", "https://controller.example", scopes);
         let frame = serde_json::to_vec(&DaemonMessage::OperatorMessage(

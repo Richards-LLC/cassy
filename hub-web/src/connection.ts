@@ -2,6 +2,7 @@ import { anySignal } from "./abort-signals";
 import { browserSupport, unsupportedBrowserNotice } from "./browser-support";
 import { dpopHeaders } from "./dpop";
 import type { ArtifactView, ArtifactViewResult } from "./artifact-open";
+import { SessionLaunchGrantError } from "./launch-session";
 import type { BrowseListing, LaunchProfiles, LaunchRequest, LaunchResult, ProjectCatalog } from "./launch-session";
 import {
   backoffDelay,
@@ -589,7 +590,9 @@ export class HubConnectionSupervisor {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ add: ["session-launch"] }),
     });
-    if (!response.ok) throw new Error(response.status === 403 ? "Pair with a control invitation to start sessions." : `Could not enable session launch (${response.status}).`);
+    if (!response.ok) throw new SessionLaunchGrantError(response.status, response.status === 403
+      ? "This pairing no longer has control access. Pair with a control invitation, then try again."
+      : `Could not enable session launch (${response.status}). Try again.`);
     const body = await response.json() as { scopes: StoredMachine["scopes"] };
     this.machine.scopes = body.scopes;
     await this.callbacks.onCredentialRefreshed?.(this.machine);

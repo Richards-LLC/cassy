@@ -411,6 +411,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 7. A running project attaches instead of starting again — Attach opens the existing session's conversation
 8. A launch refused by the machine says why — the machine's refusal (here, the CLI isn't logged in) is a plain heading and the next step, with the machine's own message behind a disclosure; Back keeps the choices
 9. Browse a launch folder and start a repository in it — folders open, only repository roots are selectable, and Start lands in the new session
+10. A long machine name fits the phone consent — the full name wraps in the grant button and confirmation; Close stays visible and the page does not scroll sideways
 
 **Expected experience**
 
@@ -422,6 +423,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - The hub refuses the scope at start (403): the sheet switches to the grant path.
 - A read-only pairing cannot self-grant session launch; it needs a control invitation.
+- Keyboard focus moves from Allow to Confirm to the project search after grant, and a very long machine label stays readable on a phone.
 - The session does not come up within 90 s: the sheet says it was started and may still be starting.
 - A machine without launch folders hides Browse.
 - The machine can't list a CLI's accounts: the step says so with Try again, and the launch uses the machine's default account.

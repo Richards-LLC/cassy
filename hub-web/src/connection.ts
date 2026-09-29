@@ -2,6 +2,7 @@ import { anySignal } from "./abort-signals";
 import { browserSupport, unsupportedBrowserNotice } from "./browser-support";
 import { dpopHeaders } from "./dpop";
 import type { ArtifactView, ArtifactViewResult } from "./artifact-open";
+import type { BrowseListing, LaunchProfiles, LaunchRequest, LaunchResult, ProjectCatalog } from "./launch-session";
 import {
   backoffDelay,
   connectingAnchor,
@@ -46,6 +47,8 @@ export interface HubMachineInfo {
   schema_version: number;
   version: string;
   capabilities: string[];
+  /** The supervisor CLI this machine starts sessions with by default, when its hub says. */
+  default_supervisor_cli?: string;
 }
 
 /**
@@ -539,6 +542,44 @@ export class HubConnectionSupervisor {
       status: response.status,
       code: typeof body?.error === "string" ? body.error : undefined,
       detail: typeof body?.status === "string" ? body.status : null,
+    };
+  }
+
+  /** The machine's main project folders and launch roots (cas-41b9). */
+  async projects(signal?: AbortSignal): Promise<ProjectCatalog> {
+    return this.request("GET", "/v1/projects", undefined, signal);
+  }
+
+  /** Each launch CLI's account profiles on the machine (cas-7b52). */
+  async launchProfiles(signal?: AbortSignal): Promise<LaunchProfiles> {
+    return this.request("GET", "/v1/launch/profiles", undefined, signal);
+  }
+
+  /** One folder under a configured launch root. */
+  async browseProjects(root: string, path: string, signal?: AbortSignal): Promise<BrowseListing> {
+    const query = new URLSearchParams({ root, path });
+    return this.request("GET", `/v1/projects/browse?${query}`, undefined, signal);
+  }
+
+  /**
+   * Start (or join) a factory session (cas-4c5a). A refusal is an answer, not
+   * an exception: its code says what the operator has to fix, and a scope
+   * refusal is not a lost pairing.
+   */
+  async launchSession(request: LaunchRequest): Promise<LaunchResult> {
+    const { response } = await this.authorizedFetch("POST", "/v1/sessions", {
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    const body = await response.json().catch(() => undefined) as Record<string, unknown> | undefined;
+    if (response.ok && body && typeof body.session === "string") {
+      return { ok: true, session: body.session, attached: body.attached === true };
+    }
+    return {
+      ok: false,
+      status: response.status,
+      ...(typeof body?.error === "string" ? { code: body.error } : {}),
+      ...(typeof body?.detail === "string" ? { detail: body.detail } : typeof body?.reason === "string" ? { detail: body.reason } : {}),
     };
   }
 

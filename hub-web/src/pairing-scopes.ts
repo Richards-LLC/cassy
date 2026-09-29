@@ -4,6 +4,16 @@ import type { Scope } from "./types";
 /** Every scope a Commander pairing may request, in the order the form lists them. */
 export const PAIRING_SCOPES: Scope[] = ["machine-read", "session-read", "pane-read", "pane-input", "message-send", "pane-interrupt"];
 
+/**
+ * Starting new sessions on a machine. Never part of a default pairing: it is
+ * granted only when the machine's `cas hub pair --scopes` names it, so the
+ * form offers it only when an invitation's ceiling includes it.
+ */
+export const LAUNCH_SCOPE: Scope = "session-launch";
+
+/** Every scope an invitation link may declare that this build understands. */
+const KNOWN_INVITATION_SCOPES: readonly Scope[] = [...PAIRING_SCOPES, LAUNCH_SCOPE];
+
 /** What `cas hub pair` grants when its `--scopes` flag is left at its default. */
 export const READ_ONLY_PAIRING_SCOPES: Scope[] = ["machine-read", "session-read", "pane-read"];
 
@@ -21,7 +31,7 @@ export function parseGrantedScopes(value: string | null | undefined): Scope[] | 
   if (!value) return undefined;
   const parsed = value.split(",").map((part) => part.trim().replaceAll(":", "-") as Scope);
   if (!parsed.length || new Set(parsed).size !== parsed.length) return undefined;
-  if (parsed.some((scope) => !PAIRING_SCOPES.includes(scope))) return undefined;
+  if (parsed.some((scope) => !KNOWN_INVITATION_SCOPES.includes(scope))) return undefined;
   return parsed;
 }
 
@@ -48,6 +58,7 @@ const SCOPE_CAPABILITY: Readonly<Record<Scope, string>> = {
   "pane-input": "Type into terminals",
   "message-send": "Send messages to supervisors",
   "pane-interrupt": "Interrupt panes",
+  "session-launch": "Start new sessions",
   "factory-manage": "Manage the factory",
   "hub-admin": "Administer the hub",
 };
@@ -85,7 +96,10 @@ export interface ScopeChoice {
 }
 
 export function scopeChoices(granted: readonly Scope[] | undefined, selected: readonly Scope[]): ScopeChoice[] {
-  return PAIRING_SCOPES.map((scope) => {
+  // Launch is listed only when the invitation grants it: offering a box the
+  // machine never grants would only ever render disabled.
+  const offered = granted?.includes(LAUNCH_SCOPE) ? KNOWN_INVITATION_SCOPES : PAIRING_SCOPES;
+  return offered.map((scope) => {
     const allowed = !granted || granted.includes(scope);
     return { scope, label: scopeLabel(scope), granted: allowed, checked: allowed && selected.includes(scope) };
   });
@@ -99,4 +113,14 @@ export function ungrantedScopes(granted: readonly Scope[] | undefined): Scope[] 
 /** The exact command that mints an invitation with these scopes. */
 export function pairCommand(controllerOrigin: string, scopes: readonly Scope[]): string {
   return `cas hub pair --origin ${controllerOrigin} --scopes ${scopes.map(scopeLabel).join(",")}`;
+}
+
+/**
+ * The command that re-pairs this browser with its current access plus
+ * session launch. Pairing again replaces the machine's credential here, so the
+ * new link must carry everything the old one granted.
+ */
+export function launchGrantCommand(controllerOrigin: string, current: readonly Scope[]): string {
+  const scopes = [...current.filter((scope) => scope !== LAUNCH_SCOPE), LAUNCH_SCOPE];
+  return pairCommand(controllerOrigin, scopes);
 }

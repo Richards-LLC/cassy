@@ -13,8 +13,8 @@ use crate::store::foreign_project_guard::ForeignProjectGuard;
 use crate::store::share_policy::{eligible_for_team_rule, resolve_team_id};
 use crate::store::{Result, RuleStore};
 use crate::types::Rule;
-use cas_store::RuleVersion;
 use cas_core::Syncer;
+use cas_store::RuleVersion;
 
 /// A rule store wrapper that syncs rules to Claude Code and cloud
 pub struct SyncingRuleStore {
@@ -27,6 +27,7 @@ pub struct SyncingRuleStore {
     /// a config without a queue has nowhere to dual-enqueue, so the
     /// builder silently drops it (see `with_cloud_config` doc).
     team_id: Option<Arc<str>>,
+    team_only: bool,
     /// Project root for the foreign-project sync guard (cas-caae). The guard
     /// reads the host registry, so it is built on the first rule sync rather
     /// than on every store open.
@@ -42,6 +43,7 @@ impl SyncingRuleStore {
             syncer: Syncer::new(target_dir, min_helpful),
             cloud_queue: None,
             team_id: None,
+            team_only: false,
             project_root: None,
             project_guard: OnceLock::new(),
         }
@@ -59,6 +61,7 @@ impl SyncingRuleStore {
             syncer: Syncer::new(target_dir, min_helpful),
             cloud_queue: Some(cloud_queue),
             team_id: None,
+            team_only: false,
             project_root: None,
             project_guard: OnceLock::new(),
         }
@@ -77,6 +80,7 @@ impl SyncingRuleStore {
             "SyncingRuleStore::with_cloud_config called without with_cloud_queue — team dual-enqueue will silently no-op"
         );
         self.team_id = resolve_team_id(&cloud_config);
+        self.team_only = cloud_config.team_only && self.team_id.is_some();
         self
     }
 
@@ -139,12 +143,16 @@ impl SyncingRuleStore {
             Err(_) => return,
         };
 
-        let _ = queue.enqueue(
-            EntityType::Rule,
-            &rule.id,
-            SyncOperation::Upsert,
-            Some(&payload),
-        );
+        if self.team_only && eligible_for_team_rule(rule) {
+            let _ = queue.drop_personal_queued_push_for(EntityType::Rule, &rule.id);
+        } else {
+            let _ = queue.enqueue(
+                EntityType::Rule,
+                &rule.id,
+                SyncOperation::Upsert,
+                Some(&payload),
+            );
+        }
 
         if let Some(team_id) = self.team_id.as_deref()
             && eligible_for_team_rule(rule)
@@ -159,22 +167,23 @@ impl SyncingRuleStore {
         }
     }
 
-    fn queue_delete(&self, id: &str) {
+    fn queue_delete(&self, id: &str, team_eligible: bool) {
         let Some(queue) = &self.cloud_queue else {
             return;
         };
-        let _ = queue.enqueue(EntityType::Rule, id, SyncOperation::Delete, None);
+        if self.team_only && team_eligible {
+            let _ = queue.drop_personal_queued_push_for(EntityType::Rule, id);
+        } else {
+            let _ = queue.enqueue(EntityType::Rule, id, SyncOperation::Delete, None);
+        }
 
         // See `share_policy` module docs: delete fans out unconditionally
         // when a team is configured.
-        if let Some(team_id) = self.team_id.as_deref() {
-            let _ = queue.enqueue_for_team(
-                EntityType::Rule,
-                id,
-                SyncOperation::Delete,
-                None,
-                team_id,
-            );
+        if let Some(team_id) = self.team_id.as_deref()
+            && (!self.team_only || team_eligible)
+        {
+            let _ =
+                queue.enqueue_for_team(EntityType::Rule, id, SyncOperation::Delete, None, team_id);
         }
     }
 }
@@ -224,9 +233,13 @@ impl RuleStore for SyncingRuleStore {
     }
 
     fn delete(&self, id: &str) -> Result<()> {
+        let team_eligible = self
+            .inner
+            .get(id)
+            .is_ok_and(|row| eligible_for_team_rule(&row));
         self.inner.delete(id)?;
         self.try_remove(id);
-        self.queue_delete(id);
+        self.queue_delete(id, team_eligible);
         Ok(())
     }
 
@@ -236,9 +249,14 @@ impl RuleStore for SyncingRuleStore {
         changed_by: Option<&str>,
         change_note: Option<&str>,
     ) -> Result<()> {
-        self.inner.delete_with_metadata(id, changed_by, change_note)?;
+        let team_eligible = self
+            .inner
+            .get(id)
+            .is_ok_and(|row| eligible_for_team_rule(&row));
+        self.inner
+            .delete_with_metadata(id, changed_by, change_note)?;
         self.try_remove(id);
-        self.queue_delete(id);
+        self.queue_delete(id, team_eligible);
         Ok(())
     }
 
@@ -372,7 +390,11 @@ mod tests {
 
         let own = make_rule("rule-001", Scope::Project);
         store.add(&own).unwrap();
-        assert_eq!(queue_counts(&queue), (1, 1), "an own rule is queued as before");
+        assert_eq!(
+            queue_counts(&queue),
+            (1, 1),
+            "an own rule is queued as before"
+        );
         queue.clear().unwrap();
 
         let mut rule = make_rule("rule-002", Scope::Project);
@@ -391,7 +413,11 @@ mod tests {
         let mut foreign = make_rule("rule-004", Scope::Project);
         foreign.content = "Deploy gabber-studio from staging.".into();
         store.add(&foreign).unwrap();
-        assert_eq!(queue_counts(&queue), (1, 0), "only the own global rule is queued");
+        assert_eq!(
+            queue_counts(&queue),
+            (1, 0),
+            "only the own global rule is queued"
+        );
 
         // An explicit `project:<slug>` tag declares the scope, as for rule files.
         foreign.tags = vec!["project:gabber-studio".to_string()];
@@ -416,6 +442,19 @@ mod tests {
         let (personal, team) = queue_counts(&queue);
         assert_eq!(personal, 1);
         assert_eq!(team, 1);
+    }
+
+    #[test]
+    fn team_only_rule_routes_project_to_team_and_global_to_personal() {
+        let (temp, mut store) = create_team_store(None);
+        store.team_only = true;
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        store
+            .add(&make_rule("team-only-rule", Scope::Project))
+            .unwrap();
+        assert_eq!(queue_counts(&queue), (0, 1));
+        store.add(&make_rule("global-rule", Scope::Global)).unwrap();
+        assert_eq!(queue_counts(&queue), (1, 1));
     }
 
     #[test]

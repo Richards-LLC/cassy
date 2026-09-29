@@ -55,8 +55,7 @@ pub fn get_project_canonical_id() -> Option<String> {
 
 /// Retained for API compatibility. Canonical ids are no longer cached, so
 /// there is nothing to invalidate after writing a new project pin.
-pub fn invalidate_cached_project_id() {
-}
+pub fn invalidate_cached_project_id() {}
 
 /// Where a resolved canonical id came from. Reported by
 /// [`resolve_canonical_id_with_source`] so diagnostics (`cas doctor`) can
@@ -238,7 +237,11 @@ pub fn canonical_project_id(value: &str) -> Option<String> {
 
     // `.replace(/^\/+|\/+$/g, "").toLowerCase()`
     let cleaned = without_dot_git.trim_matches('/').to_ascii_lowercase();
-    if cleaned.is_empty() { None } else { Some(cleaned) }
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
 }
 
 /// `str::strip_prefix` that ignores ASCII case, so the server's `/…/i` regex
@@ -401,12 +404,11 @@ where
     let serialized = toml::to_string_pretty(&doc)
         .map_err(|e| CasError::Other(format!("Failed to serialize config.toml: {e}")))?;
     before_commit();
-    crate::config::atomic_replace_project_config(&toml_path, &serialized)
-        .map_err(|error| {
-            CasError::Other(format!(
-                "Failed to atomically write project config: {error}"
-            ))
-        })
+    crate::config::atomic_replace_project_config(&toml_path, &serialized).map_err(|error| {
+        CasError::Other(format!(
+            "Failed to atomically write project config: {error}"
+        ))
+    })
 }
 
 fn update_project_config_toml<F>(cas_root: &Path, update: F) -> Result<(), CasError>
@@ -903,6 +905,10 @@ pub struct CloudConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub team_auto_promote: Option<bool>,
 
+    /// Project-local opt-in: send team-eligible project rows only to the team.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub team_only: bool,
+
     /// Team memberships for the authenticated user, fetched from `/api/me`
     /// and cached here so the resolution chain (T3) can work offline.
     ///
@@ -1199,6 +1205,7 @@ impl Default for CloudConfig {
             last_skill_sync: None,
             factory_cloud_client_enabled: false,
             team_auto_promote: None,
+            team_only: false,
             teams: Vec::new(),
             default_team_id: None,
             teams_fetched_at: None,
@@ -1497,14 +1504,28 @@ impl CloudConfig {
 
     /// Load cloud config from a specific path
     pub fn load_from(path: &Path) -> Result<Self, CasError> {
-        if path.exists() {
+        let mut config = if path.exists() {
             let content = fs::read_to_string(path)?;
-            let config: Self = serde_json::from_str(&content)
-                .map_err(|e| CasError::Other(format!("Failed to parse cloud config: {e}")))?;
-            Ok(config)
+            serde_json::from_str(&content)
+                .map_err(|e| CasError::Other(format!("Failed to parse cloud config: {e}")))?
         } else {
-            Ok(Self::default())
+            Self::default()
+        };
+        if let Some(parent) = path.parent() {
+            let project_config = parent.join("config.toml");
+            if project_config.exists() {
+                let source = fs::read_to_string(&project_config)?;
+                let value: toml::Value = toml::from_str(&source).map_err(|error| {
+                    CasError::Other(format!("Failed to parse {}: {error}", project_config.display()))
+                })?;
+                if let Some(setting) = value.get("cloud").and_then(|cloud| cloud.get("team_only")) {
+                    config.team_only = setting.as_bool().ok_or_else(|| {
+                        CasError::Other(format!("{}: cloud.team_only must be a boolean", project_config.display()))
+                    })?;
+                }
+            }
         }
+        Ok(config)
     }
 
     /// Load cloud config from a specific cas directory
@@ -1688,6 +1709,15 @@ impl CloudConfig {
         self.active_team_id_with_user_config(user_cfg.as_ref())
     }
 
+    /// Refuse a team-only project with no usable team instead of silently
+    /// falling back to a personal project.
+    pub fn validate_team_only(&self) -> Result<(), String> {
+        if self.team_only && self.active_team_id().is_none() {
+            return Err("cloud.team_only is enabled but no active team is configured; run `cas cloud team set <team>`".to_string());
+        }
+        Ok(())
+    }
+
     /// Set the current team context
     pub fn set_team(&mut self, team_id: &str, team_slug: &str) {
         self.team_id = Some(team_id.to_string());
@@ -1773,6 +1803,29 @@ mod tests {
         assert_eq!(config.endpoint, "https://petra-stella-cloud.vercel.app");
         assert!(config.token.is_none());
         assert!(!config.is_logged_in());
+        assert!(!config.team_only);
+    }
+
+    #[test]
+    fn team_only_reads_project_config_and_requires_a_team() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join("config.toml"),
+            "[cloud]\nteam_only = true\n",
+        )
+        .unwrap();
+        let config = CloudConfig::load_from_cas_dir(temp.path()).unwrap();
+        assert!(config.team_only);
+        assert!(
+            config
+                .validate_team_only()
+                .unwrap_err()
+                .contains("no active team")
+        );
+
+        let mut linked = config;
+        linked.set_team("team-1", "team");
+        assert!(linked.validate_team_only().is_ok());
     }
 
     #[test]
@@ -2948,18 +3001,18 @@ mod tests {
     #[test]
     fn sync_identity_refuses_a_pin_for_a_different_git_remote() {
         let temp = TempDir::new().unwrap();
-        let cas_dir = git_project_with_remote(
-            temp.path(),
-            "ledger",
-            "git@github.com:acme/ledger.git",
-        );
+        let cas_dir =
+            git_project_with_remote(temp.path(), "ledger", "git@github.com:acme/ledger.git");
         set_canonical_id_in_config_toml(&cas_dir, "github.com/other/other-repo").unwrap();
 
         let error = resolve_canonical_id_for_sync(&cas_dir)
             .expect_err("a pinned identity for another repository must fail closed")
             .to_string();
         assert!(error.contains("github.com/acme/ledger"), "error: {error}");
-        assert!(error.contains("github.com/other/other-repo"), "error: {error}");
+        assert!(
+            error.contains("github.com/other/other-repo"),
+            "error: {error}"
+        );
         assert!(error.contains("cas cloud project set"), "error: {error}");
     }
 
@@ -3377,10 +3430,7 @@ mod tests {
     fn canonical_identity_matches_bare_alias_to_explicit_remote_pin() {
         for alias in ["gabber-studio", "GABBER-STUDIO"] {
             assert_eq!(
-                project_ids_match(
-                    alias,
-                    "https://GitHub.com/Richards-LLC/gabber-studio.git",
-                ),
+                project_ids_match(alias, "https://GitHub.com/Richards-LLC/gabber-studio.git",),
                 true,
                 "alias {alias} must match the explicit remote pin",
             );

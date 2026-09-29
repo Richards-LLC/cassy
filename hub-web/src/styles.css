@@ -3867,3 +3867,178 @@ button.chip:disabled { cursor: default; }
   .paired-machine p { margin: 0; }
   .paired-machine button { min-height: var(--button-height); margin-top: var(--space-1); }
 }
+
+/* == New session (cas-0f51): machine → project → supervisor → start ==
+   A body-level sheet (outside #app, so a shell rebuild never replaces it).
+   Desktop: a 560px dialog anchored near the top like the palette, so the
+   list filtering beneath the search never moves the field. Phone: the whole
+   screen, with Start riding the bottom edge. */
+.conversation-list-actions { display: inline-flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-1); margin-inline-start: auto; }
+.new-session-toggle { white-space: nowrap; }
+.new-session-toggle > span[aria-hidden] { font-weight: var(--weight-semibold); }
+.launch-sheet { width: min(600px, calc(100vw - var(--space-6))); max-height: min(92dvh, 820px); margin-block: min(4dvh, 32px) auto; padding: var(--space-4); background: var(--bg-raised); }
+/* scroll-padding-bottom covers the sticky summary + actions (two summary
+   lines and the 40px buttons), so a focused field scrolls clear of it
+   (cas-0f51 QA F02). */
+.launch-flow { display: grid; gap: var(--space-3); min-height: 0; overflow-y: auto; overscroll-behavior: contain; align-content: start; padding-inline: calc(2 * var(--focus-ring-width)); margin-inline: calc(-2 * var(--focus-ring-width)); scroll-padding-bottom: calc(var(--button-height) + 4.5rem); }
+.launch-flow :is(input, select, button) { scroll-margin-bottom: var(--space-2); }
+.launch-flow > * { min-width: 0; }
+.launch-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.launch-head h2 { font: var(--weight-medium) var(--fs-lg)/1.2 var(--font-display); }
+.launch-head h2:focus { outline: none; }
+.launch-close { width: var(--rail-item-min); min-width: var(--rail-item-min); min-height: var(--rail-item-min); padding: 0; font-size: 22px; background: var(--color-transparent); }
+.launch-view { display: grid; gap: var(--space-3); min-width: 0; }
+.launch-view[hidden] { display: none; }
+.launch-machine select { min-height: var(--button-height); padding: 0 var(--space-3); color: var(--ink); background: var(--panel); border: var(--line-width) solid var(--ink-mid); border-radius: var(--radius-card); font: inherit; font-size: var(--fs-base); }
+.launch-machine[hidden] { display: none; }
+.launch-sheet fieldset { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-2); min-width: 0; margin: 0; padding: 0; background: transparent; }
+.launch-sheet legend { padding: 0; margin-bottom: var(--space-2); color: var(--text-hi); font-size: var(--fs-meta); font-weight: var(--weight-semibold); }
+.launch-tabs { display: flex; gap: var(--space-1); border-bottom: var(--line-width) solid var(--line-subtle); }
+.launch-tabs [role=tab] { min-height: var(--button-height); margin-bottom: calc(-1 * var(--line-width)); padding: 0 var(--space-3); color: var(--text-mid); background: var(--color-transparent); border-bottom: 2px solid var(--color-transparent); border-radius: var(--radius-card) var(--radius-card) 0 0; }
+.launch-tabs [role=tab][aria-selected="true"] { color: var(--text-hi); font-weight: var(--weight-semibold); border-bottom-color: var(--color-action); }
+.launch-tabs [role=tab][hidden] { display: none; }
+.launch-panel { display: grid; gap: var(--space-2); min-width: 0; }
+.launch-panel[hidden] { display: none; }
+.launch-panel input[type=search] { min-height: var(--button-height); padding: 0 var(--space-3); color: var(--ink); background: var(--panel); border: var(--line-width) solid var(--ink-mid); border-radius: var(--radius-card); }
+/* The list scrolls on its own so the supervisor choice and Start stay in reach. */
+.launch-list { display: flex; flex-direction: column; gap: var(--space-1); max-height: min(30dvh, 244px); overflow-y: auto; overscroll-behavior: contain; padding: var(--focus-ring-width); margin: calc(-1 * var(--focus-ring-width)); }
+.launch-list > * { flex: none; }
+.launch-row { display: flex; align-items: center; gap: var(--space-3); min-height: 48px; min-width: 0; padding: var(--space-2) var(--space-3); color: var(--text-hi); background: var(--panel); border: var(--line-width) solid var(--color-transparent); border-radius: var(--radius-card); font-size: var(--fs-base); text-align: left; cursor: pointer; }
+.launch-row:hover { background: var(--bg-hover); }
+.launch-row-text { display: grid; min-width: 0; flex: 1; gap: 2px; }
+/* Names and paths wrap rather than ellipsise: which folder starts is the whole choice. */
+.launch-row-name { overflow-wrap: anywhere; font-weight: var(--weight-medium); }
+.launch-row-path { overflow-wrap: anywhere; color: var(--text-mid); font-family: var(--font-mono); font-size: var(--fs-xs); }
+.launch-choice input { flex: none; width: 18px; height: 18px; margin: 0; accent-color: var(--color-action); }
+.launch-choice.is-checked { background: var(--bg-active); border-color: var(--color-action); }
+.launch-choice:has(input:focus-visible) { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: calc(-1 * var(--focus-ring-width)); }
+.launch-choice input:focus-visible { outline: none; }
+.launch-running { cursor: default; }
+.launch-running:hover { background: var(--panel); }
+.launch-row-state { display: inline-flex; align-items: center; gap: var(--space-1); color: var(--text-mid); font-size: var(--fs-xs); }
+.launch-dot { width: 8px; height: 8px; border-radius: var(--radius-pill); background: var(--state-ok); }
+.launch-attach { flex: none; width: auto; min-height: 36px; font-size: var(--fs-meta); font-weight: var(--weight-semibold); }
+.launch-folder { width: 100%; min-height: 48px; background: var(--panel); display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "name chevron" "path chevron"; row-gap: 2px; }
+.launch-folder > .launch-row-name { grid-area: name; }
+.launch-folder > .launch-row-path { grid-area: path; }
+.launch-chevron { grid-area: chevron; color: var(--text-mid); font-size: 20px; }
+.launch-crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1); min-height: 32px; font-size: var(--fs-meta); color: var(--text-mid); }
+.launch-crumb { min-height: 32px; padding: 0 var(--space-2); color: var(--color-action); background: var(--color-transparent); font-size: var(--fs-meta); }
+.launch-crumb-current { padding: 0 var(--space-2); color: var(--text-hi); font-weight: var(--weight-semibold); }
+.launch-empty { margin: 0; padding: var(--space-3); color: var(--text-mid); font-size: var(--fs-base); }
+.launch-truncated { font-size: var(--fs-meta); }
+/* Supervisor and Workers share one row wherever there is room, so the whole
+   form fits a 1280x800 screen above the sticky actions without scrolling. */
+/* Supervisor, then Account, then Workers (cas-9666). One column on a phone and
+   in the wide two-column sheet; in the 600px sheet Workers sits beside
+   Supervisor and Account takes the full width under both. */
+.launch-options { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: var(--space-3); }
+@media (min-width: 40.01rem) and (max-width: 61.99rem) and (min-height: 30.01rem) {
+  .launch-options { grid-template-columns: minmax(0, 1fr) 9.5rem; grid-template-areas: "cli workers" "account account"; column-gap: var(--space-4); }
+  .launch-options > .launch-cli { grid-area: cli; }
+  .launch-options > .launch-workers { grid-area: workers; }
+  .launch-options > .launch-account { grid-area: account; }
+}
+.launch-cli-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-1); }
+.launch-cli-option { display: flex; flex-wrap: wrap; align-items: center; column-gap: var(--space-2); min-height: var(--button-height); padding: var(--space-1) var(--space-3); color: var(--text-hi); background: var(--panel); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); font-size: var(--fs-base); cursor: pointer; }
+.launch-cli-option input { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--color-action); }
+.launch-cli-option.is-checked { background: var(--bg-active); border-color: var(--color-action); font-weight: var(--weight-semibold); }
+.launch-cli-option:has(input:focus-visible) { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: var(--focus-ring-width); }
+.launch-cli-option input:focus-visible { outline: none; }
+.launch-cli-default { flex-basis: 100%; padding-inline-start: calc(16px + var(--space-2)); color: var(--text-mid); font-size: var(--fs-xs); font-weight: var(--weight-regular); }
+.launch-cli-default[hidden] { display: none; }
+.launch-workers input { width: 100%; max-width: 12rem; box-sizing: border-box; }
+.launch-optional { color: var(--text-mid); }
+.launch-workers input { min-height: var(--button-height); }
+.launch-invalid { color: var(--state-crit); font-size: var(--fs-meta); }
+.launch-invalid[hidden] { display: none; }
+/* Account (cas-9666): every account for the chosen CLI. Names are usually
+   email addresses; they wrap anywhere rather than widen the sheet. */
+.launch-account[hidden] { display: none; }
+/* The account list never scrolls on its own: a logged-out row's command and Copy stay whole. */
+.launch-list.launch-accounts { max-height: none; overflow: visible; }
+.launch-account-tag { justify-self: start; padding: 0 var(--space-2); color: var(--text-hi); background: var(--bg-raised); border-radius: var(--radius-pill); font-size: var(--fs-xs); font-weight: var(--weight-semibold); }
+.launch-account-out { flex-wrap: wrap; row-gap: var(--space-2); cursor: default; color: var(--text-mid); }
+.launch-account-out:hover { background: var(--panel); }
+.launch-account-label { display: flex; align-items: center; gap: var(--space-3); min-width: 0; flex: 1 1 100%; }
+.launch-account-label input { flex: none; width: 18px; height: 18px; margin: 0; }
+.launch-account-state { color: var(--text-mid); font-size: var(--fs-xs); }
+.launch-login { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; padding-inline-start: calc(18px + var(--space-3)); }
+.launch-login code { min-width: 0; overflow-wrap: anywhere; color: var(--text-hi); font-size: var(--fs-xs); }
+.launch-login button { min-height: 36px; font-size: var(--fs-meta); }
+.launch-account-note { padding-inline: 0; }
+.launch-retry { justify-self: start; width: auto; min-height: 36px; font-size: var(--fs-meta); }
+.launch-account-body { display: grid; gap: var(--space-2); }
+.launch-summary { flex: 1 0 100%; order: -1; margin: 0; color: var(--text-hi); font-size: var(--fs-meta); }
+.launch-actions .primary { min-width: 7rem; }
+.launch-grant-command { flex-wrap: wrap; justify-content: flex-start; align-items: center; gap: var(--space-2); padding: var(--space-3); background: var(--panel); border-radius: var(--radius-card); }
+.launch-grant-command code { min-width: 0; overflow-wrap: anywhere; color: var(--text-hi); font-size: var(--fs-meta); }
+.launch-grant .launch-lead { color: var(--text-hi); font-size: var(--fs-md); }
+.launch-progress { display: grid; gap: var(--space-2); padding: var(--space-4) 0; border-top: var(--rule-hero) solid var(--color-verdict); }
+.launch-progress-title { color: var(--text-hi); font: var(--weight-regular) var(--fs-lg)/1.3 var(--font-display); }
+.launch-elapsed { color: var(--text-mid); font: var(--fs-meta)/1 var(--font-mono); white-space: nowrap; }
+.launch-error [role=alert] { display: grid; gap: var(--space-2); padding: var(--space-3) var(--space-4); border-inline-start: 4px solid var(--state-crit); background: var(--panel); border-radius: var(--radius-card); }
+.launch-error h3 { margin: 0; color: var(--text-hi); font-size: var(--fs-md); font-weight: var(--weight-semibold); }
+.launch-error p { color: var(--text-hi); }
+.launch-error-detail { color: var(--text-mid); font-size: var(--fs-meta); }
+.launch-error-detail[hidden] { display: none; }
+.launch-error-detail summary { cursor: pointer; min-height: 32px; display: flex; align-items: center; gap: var(--space-2); list-style: none; }
+.launch-error-detail summary::-webkit-details-marker { display: none; }
+.launch-error-detail summary::before { content: "▸"; font-size: 0.9em; }
+.launch-error-detail[open] summary::before { content: "▾"; }
+.launch-error-detail pre { margin: var(--space-2) 0 0; padding: var(--space-3); overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-hi); background: var(--panel); border-radius: var(--radius-card); font-size: var(--fs-xs); }
+.launch-sheet .dialog-actions { background: var(--bg-raised); }
+@media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
+  .launch-sheet { width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; margin: 0; padding: var(--space-4) var(--space-4) max(var(--space-4), env(safe-area-inset-bottom)); border-radius: 0; }
+  .launch-list { max-height: none; }
+  .launch-row { min-height: 52px; }
+  .launch-actions button { flex: 1 1 0; }
+  /* The sticky bar reads as a bar over the scrolling form, not as the form's last row. */
+  .launch-actions { border-top: var(--line-width) solid var(--line-subtle); }
+}
+/* A landscape phone is ~390px tall: the project list takes the left column and
+   the supervisor, workers and Start take the right, so Start and every choice
+   share one screen instead of hiding under the sticky actions. */
+/* Wide screens and landscape phones: the project list takes the left column
+   and supervisor, account, workers and Start the right, so every choice and
+   Start share one screen with the account list included (cas-9666). */
+@media (min-width: 62rem) and (min-height: 30.01rem), (max-height: 30rem) and (min-width: 40rem) {
+  /* Workers sits under the project list, beside a long account list, so
+     neither is pushed under the sticky actions (cas-9666). */
+  .launch-view[data-launch-view="form"] {
+    grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+    grid-template-areas: "project cli" "project account" "workers account" "invalid invalid" "actions actions";
+    column-gap: var(--space-6); row-gap: var(--space-3); align-items: start;
+  }
+  .launch-view[data-launch-view="form"] > .launch-project { grid-area: project; }
+  .launch-view[data-launch-view="form"] > .launch-options { display: contents; }
+  .launch-options > .launch-cli { grid-area: cli; }
+  .launch-options > .launch-account { grid-area: account; }
+  .launch-options > .launch-workers { grid-area: workers; }
+  .launch-view[data-launch-view="form"] > .launch-invalid { grid-area: invalid; }
+  .launch-view[data-launch-view="form"] > .launch-actions { grid-area: actions; }
+}
+@media (min-width: 62rem) and (min-height: 30.01rem) {
+  .launch-sheet { width: min(880px, calc(100vw - var(--space-6))); }
+  .launch-list { max-height: min(46dvh, 380px); }
+  .launch-workers input { max-width: 9.5rem; }
+}
+@media (max-height: 30rem) and (min-width: 40rem) {
+  .launch-sheet { padding-block: var(--space-2) max(var(--space-2), env(safe-area-inset-bottom)); }
+  .launch-flow { gap: var(--space-2); }
+  .launch-head h2 { font-size: var(--fs-md); }
+  .launch-machine { grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: var(--space-3); }
+  .launch-view[data-launch-view="form"] { column-gap: var(--space-4); row-gap: var(--space-2); }
+  .launch-list { max-height: calc(100dvh - 15rem); }
+  .launch-row { min-height: 44px; padding-block: var(--space-1); }
+  #launch-cli-hint, #launch-workers-hint { display: none; }
+  .launch-workers { grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: var(--space-2); }
+  /* Start stays in reach: one sticky row, the summary beside the buttons. */
+  .launch-actions { flex-wrap: nowrap; }
+  .launch-actions .launch-summary { flex: 1 1 auto; order: 0; min-width: 0; }
+  .launch-actions button { flex: none; }
+}
+@media (forced-colors: active) {
+  .launch-choice.is-checked, .launch-cli-option.is-checked { border: 2px solid Highlight; }
+}
+/* == End New session == */

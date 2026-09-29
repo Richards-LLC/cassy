@@ -29,6 +29,7 @@ pub struct SyncingEntryStore {
     /// takes effect when this store is reconstructed. Documented in
     /// docs/requests/team-memories-filter-policy.md Decision 1.
     team_id: Option<Arc<str>>,
+    team_only: bool,
 }
 
 impl SyncingEntryStore {
@@ -38,6 +39,7 @@ impl SyncingEntryStore {
             inner,
             queue,
             team_id: None,
+            team_only: false,
         }
     }
 
@@ -48,6 +50,7 @@ impl SyncingEntryStore {
     #[must_use]
     pub fn with_cloud_config(mut self, cloud_config: Arc<CloudConfig>) -> Self {
         self.team_id = resolve_team_id(&cloud_config);
+        self.team_only = cloud_config.team_only && self.team_id.is_some();
         self
     }
 
@@ -59,12 +62,18 @@ impl SyncingEntryStore {
         };
 
         // Personal enqueue is best-effort (historical behaviour).
-        let _ = self.queue.enqueue(
-            EntityType::Entry,
-            &entry.id,
-            SyncOperation::Upsert,
-            Some(&payload),
-        );
+        if self.team_only && eligible_for_team_entry(entry) {
+            let _ = self
+                .queue
+                .drop_personal_queued_push_for(EntityType::Entry, &entry.id);
+        } else {
+            let _ = self.queue.enqueue(
+                EntityType::Entry,
+                &entry.id,
+                SyncOperation::Upsert,
+                Some(&payload),
+            );
+        }
 
         // Team enqueue: opt-in, predicate-gated. Best-effort (let _ = ...)
         // matches the personal path's historical contract — a SQLite
@@ -84,14 +93,22 @@ impl SyncingEntryStore {
         }
     }
 
-    fn queue_delete(&self, id: &str) {
-        let _ = self
-            .queue
-            .enqueue(EntityType::Entry, id, SyncOperation::Delete, None);
+    fn queue_delete(&self, id: &str, team_eligible: bool) {
+        if self.team_only && team_eligible {
+            let _ = self
+                .queue
+                .drop_personal_queued_push_for(EntityType::Entry, id);
+        } else {
+            let _ = self
+                .queue
+                .enqueue(EntityType::Entry, id, SyncOperation::Delete, None);
+        }
 
         // See `share_policy` module docs: delete fans out unconditionally
         // when a team is configured (predicate can't run without entity).
-        if let Some(team_id) = self.team_id.as_deref() {
+        if let Some(team_id) = self.team_id.as_deref()
+            && (!self.team_only || team_eligible)
+        {
             let _ = self.queue.enqueue_for_team(
                 EntityType::Entry,
                 id,
@@ -108,10 +125,9 @@ impl SyncingEntryStore {
 /// make a destructive purge look like it has unsent work). Keep every other
 /// field in the comparison so a real content edit is still queued.
 fn is_access_metadata_only_update(before: &Entry, after: &Entry) -> bool {
-    let (Ok(mut before), Ok(mut after)) = (
-        serde_json::to_value(before),
-        serde_json::to_value(after),
-    ) else {
+    let (Ok(mut before), Ok(mut after)) =
+        (serde_json::to_value(before), serde_json::to_value(after))
+    else {
         return false;
     };
     for key in ["last_accessed", "access_count", "stability"] {
@@ -161,8 +177,12 @@ impl Store for SyncingEntryStore {
     }
 
     fn delete(&self, id: &str) -> Result<()> {
+        let team_eligible = self
+            .inner
+            .get(id)
+            .is_ok_and(|row| eligible_for_team_entry(&row));
         self.inner.delete(id)?;
-        self.queue_delete(id);
+        self.queue_delete(id, team_eligible);
         Ok(())
     }
 
@@ -335,7 +355,10 @@ mod tests {
         let (temp, store) = create_test_store();
         let queue = SyncQueue::open(temp.path()).unwrap();
 
-        let entry = Entry::new("entry-access-refresh".to_string(), "Test content".to_string());
+        let entry = Entry::new(
+            "entry-access-refresh".to_string(),
+            "Test content".to_string(),
+        );
         store.add(&entry).unwrap();
         queue.clear().unwrap();
 
@@ -415,6 +438,51 @@ mod tests {
         let (personal, team) = queue_counts(&queue);
         assert_eq!(personal, 1, "personal queue should have the entry");
         assert_eq!(team, 1, "team queue should have the entry (dual-enqueue)");
+    }
+
+    #[test]
+    fn team_only_entry_routes_project_to_team_and_private_to_personal() {
+        let (temp, mut store) = create_team_store(None);
+        store.team_only = true;
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        let project = Entry::new("team-only-entry".to_string(), "shared".to_string());
+        store.add(&project).unwrap();
+        assert_eq!(queue_counts(&queue), (0, 1));
+
+        let mut private = Entry::new("private-entry".to_string(), "private".to_string());
+        private.share = Some(ShareScope::Private);
+        store.add(&private).unwrap();
+        assert_eq!(queue_counts(&queue), (1, 1));
+    }
+
+    #[test]
+    fn team_only_update_removes_the_older_personal_copy() {
+        let (temp, mut store) = create_team_store(None);
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        let mut entry = Entry::new("switching-entry".to_string(), "before".to_string());
+        store.add(&entry).unwrap();
+        assert_eq!(queue_counts(&queue), (1, 1));
+
+        store.team_only = true;
+        entry.content = "after".to_string();
+        store.update(&entry).unwrap();
+        assert_eq!(queue_counts(&queue), (0, 1));
+    }
+
+    #[test]
+    fn team_only_without_team_keeps_personal_queue() {
+        let (temp, store) = create_test_store();
+        let mut config = CloudConfig::default();
+        config.team_only = true;
+        let store = store.with_cloud_config(Arc::new(config));
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        store
+            .add(&Entry::new(
+                "unlinked-entry".to_string(),
+                "local".to_string(),
+            ))
+            .unwrap();
+        assert_eq!(queue.pending(10, 5).unwrap().len(), 1);
     }
 
     #[test]

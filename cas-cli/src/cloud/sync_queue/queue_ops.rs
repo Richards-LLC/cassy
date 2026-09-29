@@ -94,6 +94,86 @@ pub(super) fn remove_legacy_team_upsert_row(
 }
 
 impl SyncQueue {
+    /// Remove one stale personal outbox row when a project write is now
+    /// routed exclusively to its team. Team rows and cloud data are untouched.
+    pub fn drop_personal_queued_push_for(
+        &self,
+        entity_type: EntityType,
+        entity_id: &str,
+    ) -> Result<usize, CasError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM sync_queue WHERE entity_type = ?1 AND entity_id = ?2 AND team_id = ''",
+            params![entity_type.as_str(), entity_id],
+        )
+        .map_err(CasError::from)
+    }
+
+    /// Drop queued personal copies of team-visible project rows after a
+    /// project opts into team-only sync. This changes only the local outbox;
+    /// no cloud delete is emitted. Personal memories and global rows remain.
+    pub fn neutralize_team_only_personal(&self) -> Result<usize, CasError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let mut ids = Vec::new();
+        {
+            let mut stmt = tx.prepare(
+                "SELECT id, entity_type, entity_id, operation, payload FROM sync_queue WHERE team_id = ''",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })?;
+            for row in rows {
+                let (id, kind, entity_id, operation, payload) = row?;
+                let value = payload
+                    .as_deref()
+                    .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok());
+                let is_project = match kind.as_str() {
+                    "entry" => value.as_ref().is_some_and(|v| {
+                        let share = v.get("share").and_then(|x| x.as_str());
+                        share == Some("team")
+                            || (share != Some("private")
+                                && v.get("scope").and_then(|x| x.as_str()) == Some("project")
+                                && v.get("entry_type").and_then(|x| x.as_str())
+                                    != Some("preference"))
+                    }),
+                    "task" | "rule" | "skill" => value
+                        .as_ref()
+                        .is_some_and(|v| v.get("scope").and_then(|x| x.as_str()) != Some("global")),
+                    "task_dependency" => value.as_ref().is_some_and(|v| {
+                        v.get("origin_project").and_then(|x| x.as_str()).is_some()
+                    }),
+                    _ => false,
+                };
+                let paired_team_delete = operation == "delete"
+                    && matches!(kind.as_str(), "entry" | "task" | "rule" | "skill" | "task_dependency")
+                    && tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM sync_queue WHERE entity_type = ?1 AND entity_id = ?2 AND team_id != '')",
+                        params![kind, entity_id],
+                        |row| row.get::<_, bool>(0),
+                    )?;
+                if is_project || paired_team_delete {
+                    ids.push(id);
+                }
+            }
+        }
+        for id in &ids {
+            tx.execute("DELETE FROM sync_queue WHERE id = ?1", params![id])?;
+        }
+        tx.commit()?;
+        tracing::info!(
+            count = ids.len(),
+            "neutralized queued personal copies of team-only project rows"
+        );
+        Ok(ids.len())
+    }
+
     /// Drop a queued task/entry tombstone when its target still exists locally.
     ///
     /// Pull/apply paths intentionally write through non-syncing stores, so a

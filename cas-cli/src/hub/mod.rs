@@ -22,6 +22,8 @@ mod death;
 mod discovery;
 mod events;
 mod identity;
+pub mod launch_env;
+pub mod projects;
 mod runtime;
 mod server;
 mod state;
@@ -43,6 +45,8 @@ pub use connector::DaemonConnector;
 pub use death::{DaemonExitEvidenceStore, DaemonExitReceipt, DaemonIdentity};
 #[cfg(unix)]
 pub(crate) use death::{supervise_forked_daemon, supervise_spawned_daemon};
+#[cfg(unix)]
+pub(crate) use death::reap_spawned_daemon;
 pub use discovery::{CloudDeviceSuggestion, load_cloud_device_suggestions};
 pub use events::{
     AttentionAction, AttentionEnrichment, AttentionSeverity, MachineEvent, MachineEventBus,

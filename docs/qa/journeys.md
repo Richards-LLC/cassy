@@ -391,3 +391,37 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - A message sent into a socket that later proves dead gets no receipt: it turns "Not confirmed" with Retry. Sending it again automatically would need the hub to recognise a repeat (its client_ref); until it does, the operator decides.
 - The machine is unreachable for more than 2 minutes: a held message turns "Not sent" with Retry and Edit.
+
+### HUB-J13 · Start a new session from Commander
+
+- **Entry:** `/commander/` on a 390 px phone paired with a machine, first without and then with the `session:launch` permission
+- **Goal:** I start a supervisor on a project from my phone, without SSH, and land in its conversation
+- **Touches:** `hub-web/src/launch-session.ts`, `hub-web/src/pairing-scopes.ts`, `hub-web/src/connection.ts`, `hub-web/src/conversation-shell.ts`
+- **Suite:** `hub-web/e2e/journeys/launch-session.journey.ts`
+- **Gaps:** the hub's project catalog, folder browse and session start are doubled; that a hub-started session survives a hub restart and the tab closing is proven at epic assembly on a real machine
+
+**Steps**
+
+1. Without launch permission, the button is the way to allow it — the list offers "Allow new sessions", not "New session"; it opens the exact `cas hub pair … --scopes …,session:launch` command to run on the machine
+2. Pair again with launch allowed — "New session" replaces the grant path
+3. Open New session and find the project — the most recently used project leads, a running project offers Attach, Browse is offered because the machine has launch folders, filtering narrows the list, and Claude is marked as the machine's default
+4. Choose the account — every Claude account on the machine is listed with the default preselected; a logged-out one can't be picked and shows its `cas claude login <name>` command with Copy; a long address wraps; Grok has no account step; the summary names the chosen account
+5. Start it and land on its supervisor — Start shows progress ("Starting <project> with <supervisor> (<account>) on <machine>…"), sends the account, and lands in the new session's conversation once the machine lists it
+6. The session outlives the tab — after a reload the new session is still running and its conversation reopens
+7. A running project attaches instead of starting again — Attach opens the existing session's conversation
+8. A launch refused by the machine says why — the machine's refusal (here, the CLI isn't logged in) is a plain heading and the next step, with the machine's own message behind a disclosure; Back keeps the choices
+9. Browse a launch folder and start a repository in it — folders open, only repository roots are selectable, and Start lands in the new session
+
+**Expected experience**
+
+- One obvious New session action beside Pair a machine, and in the command palette; without the permission the same place explains how to get it.
+- Nothing is started twice: a running project attaches.
+- A refusal names what to fix on which machine; it never reads as a lost pairing.
+
+**Edge paths**
+
+- The hub refuses the scope at start (403): the sheet switches to the grant path.
+- The session does not come up within 90 s: the sheet says it was started and may still be starting.
+- A machine without launch folders hides Browse.
+- The machine can't list a CLI's accounts: the step says so with Try again, and the launch uses the machine's default account.
+- The chosen account was removed or logged out before Start (400 invalid_profile / 422 not_logged_in): plain advice, and the list refreshes.

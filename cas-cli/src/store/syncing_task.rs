@@ -34,6 +34,7 @@ pub struct SyncingTaskStore {
     /// `SyncingEntryStore::team_id` for the protocol. `None` preserves
     /// personal-only behaviour.
     team_id: Option<Arc<str>>,
+    team_only: bool,
 }
 
 impl SyncingTaskStore {
@@ -43,6 +44,7 @@ impl SyncingTaskStore {
             inner,
             queue,
             team_id: None,
+            team_only: false,
         }
     }
 
@@ -51,6 +53,7 @@ impl SyncingTaskStore {
     #[must_use]
     pub fn with_cloud_config(mut self, cloud_config: Arc<CloudConfig>) -> Self {
         self.team_id = resolve_team_id(&cloud_config);
+        self.team_only = cloud_config.team_only && self.team_id.is_some();
         self
     }
 
@@ -113,6 +116,7 @@ impl SyncingTaskStore {
             payload,
             current_project_id,
             current_team_id,
+            personal: !self.team_only || task.scope == Scope::Global,
         })
     }
 
@@ -196,14 +200,22 @@ impl SyncingTaskStore {
         Ok(persisted)
     }
 
-    fn queue_delete(&self, id: &str, project_id: Option<&str>) {
-        let _ = self
-            .queue
-            .enqueue(EntityType::Task, id, SyncOperation::Delete, None);
+    fn queue_delete(&self, id: &str, project_id: Option<&str>, scope: Scope) {
+        if !self.team_only || scope == Scope::Global {
+            let _ = self
+                .queue
+                .enqueue(EntityType::Task, id, SyncOperation::Delete, None);
+        } else {
+            let _ = self
+                .queue
+                .drop_personal_queued_push_for(EntityType::Task, id);
+        }
 
         // See `share_policy` module docs: delete fans out unconditionally
         // when a team is configured.
-        if let Some(team_id) = self.team_id.as_deref() {
+        if let Some(team_id) = self.team_id.as_deref()
+            && (!self.team_only || scope == Scope::Project)
+        {
             let _ = self.queue.enqueue_for_team_project(
                 EntityType::Task,
                 id,
@@ -234,12 +246,18 @@ impl SyncingTaskStore {
             return;
         };
         let entity_id = dependency_entity_id(dep);
-        let _ = self.queue.enqueue(
-            EntityType::TaskDependency,
-            &entity_id,
-            SyncOperation::Upsert,
-            Some(&payload),
-        );
+        if !self.team_only || from_task.scope == Scope::Global {
+            let _ = self.queue.enqueue(
+                EntityType::TaskDependency,
+                &entity_id,
+                SyncOperation::Upsert,
+                Some(&payload),
+            );
+        } else {
+            let _ = self
+                .queue
+                .drop_personal_queued_push_for(EntityType::TaskDependency, &entity_id);
+        }
 
         if let Some(team_id) = self.team_id.as_deref()
             && eligible_for_team_task(from_task)
@@ -254,20 +272,28 @@ impl SyncingTaskStore {
         }
     }
 
-    fn queue_dependency_delete(&self, dep: &Dependency) {
+    fn queue_dependency_delete(&self, dep: &Dependency, scope: Scope) {
         let entity_id = dependency_entity_id(dep);
-        let _ = self.queue.enqueue(
-            EntityType::TaskDependency,
-            &entity_id,
-            SyncOperation::Delete,
-            None,
-        );
+        if !self.team_only || scope == Scope::Global {
+            let _ = self.queue.enqueue(
+                EntityType::TaskDependency,
+                &entity_id,
+                SyncOperation::Delete,
+                None,
+            );
+        } else {
+            let _ = self
+                .queue
+                .drop_personal_queued_push_for(EntityType::TaskDependency, &entity_id);
+        }
 
         // A delete must fan out when a team is configured, even when the
         // source task is no longer available to evaluate the promotion
         // predicate. This prevents stale cloud edges from surviving local
         // task/dependency deletion.
-        if let Some(team_id) = self.team_id.as_deref() {
+        if let Some(team_id) = self.team_id.as_deref()
+            && (!self.team_only || scope == Scope::Project)
+        {
             let _ = self.queue.enqueue_for_team(
                 EntityType::TaskDependency,
                 &entity_id,
@@ -446,9 +472,9 @@ impl TaskStore for SyncingTaskStore {
             .origin_project
             .as_deref()
             .filter(|project_id| !project_id.trim().is_empty());
-        self.queue_delete(id, project_id);
+        self.queue_delete(id, project_id, task.scope);
         for dep in &dependencies {
-            self.queue_dependency_delete(dep);
+            self.queue_dependency_delete(dep, task.scope);
         }
         Ok(())
     }
@@ -481,6 +507,7 @@ impl TaskStore for SyncingTaskStore {
     // dependency table remains authoritative; queue writes mirror successful
     // local mutations without routing pulled rows back through this wrapper.
     fn add_dependency(&self, dep: &Dependency) -> Result<()> {
+        let scope = self.inner.get(&dep.from_id)?.scope;
         let previous = self
             .inner
             .get_dependencies(&dep.from_id)?
@@ -488,7 +515,7 @@ impl TaskStore for SyncingTaskStore {
             .find(|existing| existing.to_id == dep.to_id);
         self.inner.add_dependency(dep)?;
         if let Some(previous) = previous.filter(|previous| previous.dep_type != dep.dep_type) {
-            self.queue_dependency_delete(&previous);
+            self.queue_dependency_delete(&previous, scope);
         }
         let from_task = self.inner.get(&dep.from_id)?;
         self.queue_dependency_upsert(dep, &from_task);
@@ -496,6 +523,11 @@ impl TaskStore for SyncingTaskStore {
     }
 
     fn remove_dependency(&self, from_id: &str, to_id: &str) -> Result<()> {
+        let scope = self
+            .inner
+            .get(from_id)
+            .map(|task| task.scope)
+            .unwrap_or(Scope::Project);
         let dependencies: Vec<Dependency> = self
             .inner
             .get_dependencies(from_id)?
@@ -504,7 +536,7 @@ impl TaskStore for SyncingTaskStore {
             .collect();
         self.inner.remove_dependency(from_id, to_id)?;
         for dep in &dependencies {
-            self.queue_dependency_delete(dep);
+            self.queue_dependency_delete(dep, scope);
         }
         Ok(())
     }
@@ -515,17 +547,25 @@ impl TaskStore for SyncingTaskStore {
         to_id: &str,
         dep_type: DependencyType,
     ) -> Result<bool> {
+        let scope = self
+            .inner
+            .get(from_id)
+            .map(|task| task.scope)
+            .unwrap_or(Scope::Project);
         let removed = self
             .inner
             .remove_dependency_of_type(from_id, to_id, dep_type)?;
         if removed {
-            self.queue_dependency_delete(&Dependency {
-                from_id: from_id.to_string(),
-                to_id: to_id.to_string(),
-                dep_type,
-                created_at: Utc::now(),
-                created_by: None,
-            });
+            self.queue_dependency_delete(
+                &Dependency {
+                    from_id: from_id.to_string(),
+                    to_id: to_id.to_string(),
+                    dep_type,
+                    created_at: Utc::now(),
+                    created_by: None,
+                },
+                scope,
+            );
         }
         Ok(removed)
     }
@@ -569,8 +609,8 @@ impl TaskStore for SyncingTaskStore {
 
 #[cfg(test)]
 mod tests {
-    use crate::store::syncing_task::*;
     use crate::store::mock::MockTaskStore;
+    use crate::store::syncing_task::*;
     use crate::store::{SqliteTaskStore, StoreError};
     use fs2::FileExt;
     use std::fs::OpenOptions;
@@ -867,7 +907,10 @@ mod tests {
     #[test]
     fn store_without_atomic_receipt_support_fails_before_mutation() {
         let inner = MockTaskStore::new();
-        let task = Task::new("task-unsupported-receipt".to_string(), "unchanged".to_string());
+        let task = Task::new(
+            "task-unsupported-receipt".to_string(),
+            "unchanged".to_string(),
+        );
 
         let error = inner
             .add_with_mutation_receipt(&task, "receipt-id")
@@ -1193,7 +1236,15 @@ mod tests {
                 .count(),
             1
         );
-        assert_eq!(store.get(&task.id).unwrap().notes.matches("synced task note").count(), 1);
+        assert_eq!(
+            store
+                .get(&task.id)
+                .unwrap()
+                .notes
+                .matches("synced task note")
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -1375,6 +1426,57 @@ mod tests {
         let (personal, team) = queue_counts(&queue);
         assert_eq!(personal, 1);
         assert_eq!(team, 1, "team queue should have the task");
+    }
+
+    #[test]
+    fn team_only_task_routes_project_to_team_and_global_to_personal() {
+        let (temp, mut store) = create_team_store(None);
+        store.team_only = true;
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        store
+            .add(&Task::new("team-only-task".to_string(), "team".to_string()))
+            .unwrap();
+        assert_eq!(queue_counts(&queue), (0, 1));
+
+        let mut global = Task::new("global-task".to_string(), "global".to_string());
+        global.scope = Scope::Global;
+        store.add(&global).unwrap();
+        assert_eq!(queue_counts(&queue), (1, 1));
+
+        queue.clear().unwrap();
+        let child = Task::new("team-only-child".to_string(), "child".to_string());
+        store
+            .create_atomic(&child, &["team-only-task".to_string()], None, None)
+            .unwrap();
+        assert_eq!(queue.pending(10, 5).unwrap().len(), 0);
+        assert_eq!(queue.pending_for_team(TEST_TEAM, 10, 5).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn team_only_task_update_removes_the_older_personal_copy() {
+        let (temp, mut store) = create_team_store(None);
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        let mut task = Task::new("switching-task".to_string(), "before".to_string());
+        store.add(&task).unwrap();
+        assert_eq!(queue_counts(&queue), (1, 1));
+
+        store.team_only = true;
+        task.title = "after".to_string();
+        store.update(&task).unwrap();
+        assert_eq!(queue_counts(&queue), (0, 1));
+    }
+
+    #[test]
+    fn team_only_without_team_keeps_project_task_personal() {
+        let (temp, store) = create_test_store();
+        let mut config = CloudConfig::default();
+        config.team_only = true;
+        let store = store.with_cloud_config(Arc::new(config));
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        store
+            .add(&Task::new("unlinked-task".to_string(), "local".to_string()))
+            .unwrap();
+        assert_eq!(queue.pending(10, 5).unwrap().len(), 1);
     }
 
     #[test]

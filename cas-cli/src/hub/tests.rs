@@ -486,6 +486,24 @@ async fn h1_http_surface_is_real_and_origin_authorized() {
         "denied reads never touch session state"
     );
 
+    for uri in ["/v1/projects", "/v1/projects/browse?root=missing", "/v1/launch/profiles"] {
+        let denied = app
+            .clone()
+            .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(source.read_count(), 0);
+
+    let denied_launch = app.clone().oneshot(
+        Request::post("/v1/sessions")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"target":{"kind":"project","id":"unknown"},"supervisor_cli":"claude","profile":"main"}"#))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(denied_launch.status(), StatusCode::UNAUTHORIZED);
+
     let allowed = app
         .oneshot(
             Request::get("/v1/sessions")
@@ -513,6 +531,7 @@ async fn h4_health_cors_allows_unpaired_trusted_origins_and_preserves_paired_ori
     let auth = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
     let now = Utc::now();
     let signing = SigningKey::random(&mut OsRng);
+    assert!(!Scope::default_read_only().contains(&Scope::SessionLaunch));
     let invitation = auth
         .mint_pairing("http://127.0.0.1:4173", Scope::default_read_only(), now)
         .unwrap();
@@ -632,6 +651,34 @@ async fn h4_health_cors_allows_unpaired_trusted_origins_and_preserves_paired_ori
         .unwrap();
     assert_eq!(allowed.status(), StatusCode::OK);
 
+    let launch_denied = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/sessions")
+                .header("origin", "http://127.0.0.1:4173")
+                .header("authorization", &authorization)
+                .header("dpop", proof("POST", "/v1/sessions"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"target":{"kind":"project","id":"unknown"},"supervisor_cli":"claude"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(launch_denied.status(), StatusCode::FORBIDDEN);
+
+    let extra_args = app.clone().oneshot(
+        Request::post("/v1/sessions")
+            .header("origin", "http://127.0.0.1:4173")
+            .header("authorization", &authorization)
+            .header("dpop", proof("POST", "/v1/sessions"))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"target":{"kind":"project","id":"unknown"},"supervisor_cli":"claude","args":["--cwd","/tmp/other"]}"#))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(extra_args.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
     for (site, host) in [
         (None, "127.0.0.1:4173"),
         (Some("cross-site"), "127.0.0.1:4173"),
@@ -655,6 +702,7 @@ async fn h4_health_cors_allows_unpaired_trusted_origins_and_preserves_paired_ori
     }
 
     let mutation = app
+        .clone()
         .oneshot(
             Request::post("/v1/auth/websocket-ticket")
                 .header("host", "127.0.0.1:4173")
@@ -674,6 +722,61 @@ async fn h4_health_cors_allows_unpaired_trusted_origins_and_preserves_paired_ori
             .contains("dpop_auth"),
         "the accepted real-browser read reaches DPoP verification and audit"
     );
+
+    let launch_scopes: std::collections::BTreeSet<Scope> = [Scope::MachineRead, Scope::SessionLaunch].into_iter().collect();
+    let invitation = auth
+        .mint_pairing("http://127.0.0.1:4173", launch_scopes.clone(), Utc::now())
+        .unwrap();
+    let mut launch_exchange = PairingExchange::test_fixture(
+        invitation.token,
+        "machine-test",
+        "http://127.0.0.1:4173",
+        launch_scopes,
+    );
+    launch_exchange.public_key_jwk = public_jwk(&signing);
+    let launch_credential = auth.exchange_pairing(launch_exchange, Utc::now()).unwrap();
+    let before_revoke = app.clone().oneshot(
+        Request::post("/v1/sessions")
+            .header("origin", "http://127.0.0.1:4173")
+            .header("authorization", format!("DPoP {}", launch_credential.credential))
+            .header("dpop", sign_dpop(&signing, &launch_credential.credential, "POST", "/v1/sessions", Utc::now(), &uuid::Uuid::new_v4().to_string()))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"target":{"kind":"project","id":"unknown"},"supervisor_cli":"bogus"}"#))
+            .unwrap(),
+    ).await.unwrap();
+    assert_eq!(before_revoke.status(), StatusCode::BAD_REQUEST);
+    for body in [
+        r#"{"target":{"kind":"project","id":"unknown"},"supervisor_cli":"claude; echo unsafe"}"#,
+        r#"{"target":{"kind":"project","id":"unknown"},"supervisor_cli":"claude","name":"../escape"}"#,
+    ] {
+        let refused = app.clone().oneshot(
+            Request::post("/v1/sessions")
+                .header("origin", "http://127.0.0.1:4173")
+                .header("authorization", format!("DPoP {}", launch_credential.credential))
+                .header("dpop", sign_dpop(&signing, &launch_credential.credential, "POST", "/v1/sessions", Utc::now(), &uuid::Uuid::new_v4().to_string()))
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        ).await.unwrap();
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    }
+    auth.revoke_device(&launch_credential.device_id, chrono::Utc::now())
+        .unwrap();
+    let revoked_launch = app
+        .oneshot(
+            Request::post("/v1/sessions")
+                .header("origin", "http://127.0.0.1:4173")
+                .header("authorization", format!("DPoP {}", launch_credential.credential))
+                .header("dpop", sign_dpop(&signing, &launch_credential.credential, "POST", "/v1/sessions", Utc::now(), &uuid::Uuid::new_v4().to_string()))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"target":{"kind":"project","id":"unknown"},"supervisor_cli":"claude"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(revoked_launch.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -1089,6 +1192,7 @@ async fn h5_machine_identity_advertises_transport_and_untrusted_cloud_suggestion
         "https://target.tail.ts.net/"
     );
     assert_eq!(body["cloud_devices"][0]["id"], "device-hint");
+    assert!(body["default_supervisor_cli"].as_str().is_some());
     assert!(
         body["capabilities"]
             .as_array()

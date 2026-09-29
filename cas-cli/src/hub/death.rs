@@ -163,6 +163,39 @@ pub(crate) fn supervise_spawned_daemon(
     Some((identity, handle))
 }
 
+/// Wait for a daemon in a detached service unit and return its exit evidence.
+/// The reaper is the unit's main process, so systemd owns both it and the
+/// daemon while the hub can restart independently.
+#[cfg(unix)]
+pub(crate) fn reap_spawned_daemon(
+    session: &str,
+    child: Child,
+    store: DaemonExitEvidenceStore,
+) -> Result<DaemonExitReceipt> {
+    let (identity, handle) = supervise_spawned_daemon(session, child, store.clone())
+        .context("daemon process identity unavailable")?;
+    handle.join().map_err(|_| anyhow::anyhow!("daemon reaper panicked"))?;
+    store.read_matching(&identity).context("daemon exit receipt missing")
+}
+
+#[cfg(all(test, unix))]
+mod reaper_tests {
+    use super::*;
+
+    #[test]
+    fn unit_reaper_writes_matching_exit_receipt() {
+        let root = tempfile::tempdir().unwrap();
+        let store = DaemonExitEvidenceStore::new(root.path());
+        let child = std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 0.1; exit 7"])
+            .spawn().unwrap();
+        let receipt = reap_spawned_daemon("fixture-session", child, store.clone()).unwrap();
+        assert_eq!(receipt.identity.session, "fixture-session");
+        assert_eq!(receipt.exit, ProcessExit::Code(7));
+        assert_eq!(store.read_matching(&receipt.identity), Some(receipt));
+    }
+}
+
 /// Reap the child created by the fork-first factory path.
 #[cfg(unix)]
 pub(crate) struct ForkedDaemonReaper {

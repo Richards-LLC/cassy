@@ -438,6 +438,13 @@ fn redact_dynamic_values(s: &str) -> String {
     let count_re = regex::Regex::new(r":\s+\d+\b").unwrap();
     result = count_re.replace_all(&result, ": [N]").to_string();
 
+    // The host finding count depends on which provider CLIs the machine has
+    // installed (hub launch readiness), so its plural is machine-specific too.
+    let findings_re = regex::Regex::new(r"\[N\] findings?\b").unwrap();
+    result = findings_re
+        .replace_all(&result, "[N] finding(s)")
+        .to_string();
+
     result
 }
 

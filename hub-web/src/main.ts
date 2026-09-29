@@ -30,6 +30,7 @@ import { exchangePendingPairing, PairingCleanupError, PairingExchangeError, Pair
 import { PairingOperationCoordinator, commitPairingResult } from "./pairing-operation";
 import { LATE_ROLLBACK_FAILURE_MESSAGE, PairingCancellationTracker, cleanupRetryOutcome } from "./pairing-cancellation";
 import { preselectedScopes } from "./pairing-scopes";
+import { LaunchSheet, canLaunch } from "./launch-session";
 import { pendingPairingStoreFor, type PendingPairing, type PendingRelayRequest } from "./pending-pairing";
 import { DEFAULT_PAIRING_SCOPES, PairingRelayError, acknowledgePairing, createPairingRequest, pairingRelayOrigin, pollPairingRequest } from "./pairing-relay";
 import { browserSupport, unsupportedBrowserNotice } from "./browser-support";
@@ -964,6 +965,39 @@ function openPairedSession(machineId: string, items: readonly HubSession[]): boo
   void openSession(machineId, session);
   return true;
 }
+
+/**
+ * New session (cas-0f51): offered once any paired machine grants
+ * session-launch; with machines paired but none granting it, the control
+ * becomes the way to allow it.
+ */
+function launchAvailability(): "ready" | "grant" | undefined {
+  if (!machines.size) return undefined;
+  return [...machines.values()].some(canLaunch) ? "ready" : "grant";
+}
+
+function launchConnection(machineId: string): HubConnectionSupervisor {
+  const machine = machines.get(machineId);
+  if (!machine) throw new Error("That machine is no longer paired with this browser.");
+  return ensureConnection(machine);
+}
+
+const launchSheet = new LaunchSheet({
+  machines: () => [...machines.values()].map((machine) => ({ id: machine.id, label: machine.label, scopes: machine.scopes, defaultCli: machineInfo.get(machine.id)?.default_supervisor_cli })),
+  currentMachineId: () => selectedMachineId,
+  origin: location.origin,
+  projects: (machineId, signal) => launchConnection(machineId).projects(signal),
+  profiles: (machineId, signal) => launchConnection(machineId).launchProfiles(signal),
+  browse: (machineId, root, path, signal) => launchConnection(machineId).browseProjects(root, path, signal),
+  launch: (machineId, request) => launchConnection(machineId).launchSession(request),
+  sessionListed: async (machineId, session) => (await launchConnection(machineId).refreshSessions()).some((item) => item.name === session),
+  open: (machineId, session) => {
+    // Land on the new session's supervisor, as a palette jump does.
+    focusJumpedComposer(openSession(machineId, session));
+  },
+  copy: (text) => navigator.clipboard.writeText(text),
+  returnFocus: () => document.querySelector<HTMLButtonElement>("#new-session-toggle")?.focus(),
+});
 
 function ensureConnection(machine: StoredMachine): HubConnectionSupervisor {
   return ensureMachineConnection(machine, connections, createConnection);
@@ -3004,7 +3038,7 @@ function render(captureDraft = true): void {
     controlDisabled: controlActionDisabled,
     commandPaletteOpen,
     pairingView,
-  }) + JSON.stringify([hubPresentation, selectedHubSession?.project_dir, infoItems.length > 0]);
+  }) + JSON.stringify([hubPresentation, selectedHubSession?.project_dir, infoItems.length > 0, launchAvailability()]);
   const active = document.activeElement;
   // Focus anywhere inside the open palette counts as composing too: a rebuild
   // would replace the dialog under a focused row, wipe its filter and leave
@@ -3104,6 +3138,7 @@ function render(captureDraft = true): void {
           </section>` : ""}
           <section class="palette-group" data-palette-group="machines" aria-labelledby="palette-group-machines">
             <h3 id="palette-group-machines" class="palette-group-heading">Machines</h3>
+            ${launchAvailability() === "ready" ? '<button type="button" class="palette-command" data-palette-action="new-session"><span>New session</span><small>Start a supervisor on a project</small></button>' : launchAvailability() === "grant" ? '<button type="button" class="palette-command" data-palette-action="new-session"><span>Allow new sessions</span><small>Let this browser start sessions</small></button>' : ""}
             <button type="button" class="palette-command" id="palette-paired-machines"><span>Paired machines</span><small>Hosts, connection and last seen</small></button>
             ${infoItems.length > 0 ? `<button type="button" class="palette-command" data-palette-action="dismiss-info"><span>Dismiss all info</span><small>${infoItems.length} outstanding</small></button>` : ""}
           </section>
@@ -3136,7 +3171,7 @@ function render(captureDraft = true): void {
     machineDialog.close(); machineDialog.showModal();
   }
   if (hubPresentation === "conversation") {
-    arrangeConversationShell(app, { selected: Boolean(selectedSession), supervisor, projectDir: selectedHubSession?.project_dir, host: selected?.label, machineId: selectedSession ? selected?.id : undefined, loaded: machineCatalogLoaded, paired: machines.size > 0, searchQuery: conversationSearchQuery, keyboardHint: keyboardHintOffered() });
+    arrangeConversationShell(app, { selected: Boolean(selectedSession), supervisor, projectDir: selectedHubSession?.project_dir, host: selected?.label, machineId: selectedSession ? selected?.id : undefined, loaded: machineCatalogLoaded, paired: machines.size > 0, searchQuery: conversationSearchQuery, keyboardHint: keyboardHintOffered(), launch: launchAvailability() });
   } else {
     // The way back to the conversation is first in the workspace's Tab order:
     // after the header, the pane controls and the terminal (which keeps Tab)
@@ -3990,6 +4025,10 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   if (paletteDormant) paletteDormant.onclick = () => { closePalette(); setDormantRevealed(!revealDormant); };
   const paletteControl = palette.querySelector<HTMLButtonElement>("[data-palette-action='control']");
   if (paletteControl) paletteControl.onclick = () => { closePalette(); void toggleControl(selected, lease); };
+  const paletteLaunch = palette.querySelector<HTMLButtonElement>("[data-palette-action='new-session']");
+  if (paletteLaunch) paletteLaunch.onclick = () => { closePalette(); launchSheet.open(); };
+  const newSession = document.querySelector<HTMLButtonElement>("#new-session-toggle");
+  if (newSession) newSession.onclick = () => launchSheet.open();
   const paletteDismiss = palette.querySelector<HTMLButtonElement>("[data-palette-action='dismiss-info']");
   if (paletteDismiss) paletteDismiss.onclick = () => { closePalette(); void acknowledgeAttentionGroup(dismissableInfoItems(attention)); };
   if (document.querySelector<HTMLButtonElement>("#session-picker-toggle")) document.querySelector<HTMLButtonElement>("#session-picker-toggle")!.onclick = openSessionPicker;

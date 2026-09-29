@@ -311,8 +311,7 @@ fn foreign_identity_metadata_keys(
         .iter()
         .filter(|(key, value)| {
             (key.starts_with("last_team_pull_at_")
-                || (key.starts_with("team_project_registered_")
-                    && !key.ends_with(&current_suffix)))
+                || (key.starts_with("team_project_registered_") && !key.ends_with(&current_suffix)))
                 || (key == LAST_KNOWLEDGE_PUSH_PROJECT_KEY && value != current_project)
         })
         .map(|(key, _)| key.clone())
@@ -323,19 +322,21 @@ fn metadata_cleanup_counts(
     metadata: &[(String, String)],
     current_project: &str,
 ) -> ForeignIdentityMetadataCleanup {
-    foreign_identity_metadata_keys(metadata, current_project).into_iter().fold(
-        ForeignIdentityMetadataCleanup::default(),
-        |mut counts, key| {
-            if key.starts_with("last_team_pull_at_") {
-                counts.team_watermarks += 1;
-            } else if key.starts_with("team_project_registered_") {
-                counts.team_registrations += 1;
-            } else if key == LAST_KNOWLEDGE_PUSH_PROJECT_KEY {
-                counts.knowledge_project += 1;
-            }
-            counts
-        },
-    )
+    foreign_identity_metadata_keys(metadata, current_project)
+        .into_iter()
+        .fold(
+            ForeignIdentityMetadataCleanup::default(),
+            |mut counts, key| {
+                if key.starts_with("last_team_pull_at_") {
+                    counts.team_watermarks += 1;
+                } else if key.starts_with("team_project_registered_") {
+                    counts.team_registrations += 1;
+                } else if key == LAST_KNOWLEDGE_PUSH_PROJECT_KEY {
+                    counts.knowledge_project += 1;
+                }
+                counts
+            },
+        )
 }
 
 /// Clear local identity markers after the foreign content rows have been
@@ -2170,12 +2171,21 @@ fn sync_project_knowledge_with_output(
     })
 }
 
+pub(crate) fn team_only_held_personal_rows(cas_root: &Path) -> Option<usize> {
+    let queue = SyncQueue::open_read_only(cas_root).ok()?;
+    queue.personal_row_count().ok()
+}
+
 fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
     let config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)?;
+    let held = config.team_only.then(|| team_only_held_personal_rows(cas_root)).flatten();
 
     if config.token.is_none() {
         if cli.json {
-            println!(r#"{{"status":"not_logged_in"}}"#);
+            println!("{}", serde_json::json!({
+                "status": "not_logged_in", "team_only": config.team_only,
+                "personal_rows_held_team_only": held
+            }));
         } else {
             let theme = ActiveTheme::default();
             let mut out = io::stdout();
@@ -2184,9 +2194,18 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
             fmt.write_colored("  \u{25CF} ", warning_color)?;
             fmt.write_raw("Not logged in to Cassy Cloud")?;
             fmt.newline()?;
+            if let Some(count) = held {
+                fmt.write_raw(&format!("  {count} personal rows held (team_only)"))?;
+                fmt.newline()?;
+            }
             fmt.write_raw("  Run ")?;
             fmt.write_accent("cas login")?;
             fmt.write_raw(" to authenticate")?;
+            fmt.newline()?;
+            fmt.write_raw(&format!(
+                "  Team-only: {}",
+                if config.team_only { "on" } else { "off" }
+            ))?;
             fmt.newline()?;
         }
         return Ok(());
@@ -2205,6 +2224,10 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
 
                 if cli.json {
                     let mut body = body.clone();
+                    body["team_only"] = serde_json::json!(config.team_only);
+                    if let Some(count) = held {
+                        body["personal_rows_held_team_only"] = serde_json::json!(count);
+                    }
                     if let (Some(obj), Some(counts)) =
                         (body.as_object_mut(), local_knowledge_counts(cas_root))
                     {
@@ -2239,6 +2262,13 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
                     fmt.write_muted("  Server: ")?;
                     fmt.write_raw(&config.endpoint)?;
                     fmt.newline()?;
+                    fmt.write_muted("  Team-only: ")?;
+                    fmt.write_raw(if config.team_only { "on" } else { "off" })?;
+                    fmt.newline()?;
+                    if let Some(count) = held {
+                        fmt.write_raw(&format!("  {count} personal rows held (team_only)"))?;
+                        fmt.newline()?;
+                    }
 
                     let active_team = config.active_team_id();
                     fmt.write_muted("  Team:   ")?;
@@ -3339,6 +3369,7 @@ fn execute_push_with_output(
     use crate::cloud::{CloudSyncer, PushScope, resolve_canonical_id_for_sync};
 
     let config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)?;
+    config.validate_team_only().map_err(anyhow::Error::msg)?;
     if config.token.is_none() {
         anyhow::bail!("Not logged in. Run 'cas login' first");
     }
@@ -3354,6 +3385,37 @@ fn execute_push_with_output(
 
     let queue = Arc::new(SyncQueue::open(cas_root)?);
     queue.init()?;
+    if config.team_only && !args.dry_run {
+        queue.neutralize_team_only_personal()?;
+    }
+    if config.team_only {
+        if args.entries_only || args.tasks_only {
+            anyhow::bail!(
+                "cloud.team_only routes project rows to the team; scoped personal push flags are unavailable. Run `cas cloud sync`."
+            );
+        }
+        let mut summary = team_only_push_summary();
+        if !args.dry_run {
+            ensure_team_project_registration_with_output(
+                &config,
+                cas_root,
+                cli,
+                false,
+                emit_output,
+            )?;
+            if let Some(team_summary) =
+                execute_team_push_with_output(&config, cas_root, cli, emit_output && cli.json)?
+            {
+                summary.merge_team_summary(&team_summary);
+            }
+        }
+        if emit_output && !cli.json {
+            let mut out = io::stdout();
+            let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
+            render_sync_summary(&mut fmt, &summary, cli.verbose)?;
+        }
+        return Ok(summary);
+    }
     let syncer = CloudSyncer::new_for_project(
         queue.clone(),
         config.clone(),
@@ -3539,8 +3601,12 @@ fn execute_pull_with_output(
     use crate::cloud::{CloudSyncer, CloudSyncerConfig, SyncQueue};
 
     let config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)?;
+    config.validate_team_only().map_err(anyhow::Error::msg)?;
     if config.token.is_none() {
         anyhow::bail!("Not logged in. Run 'cas login' first");
+    }
+    if config.team_only {
+        return execute_team_only_pull_with_output(args.full, cli, cas_root, emit_output);
     }
 
     // Stores synced by CloudSyncer::pull. cas-ed15 collapsed the unscoped
@@ -3786,6 +3852,10 @@ fn execute_sync_with_output(
     emit_output: bool,
 ) -> anyhow::Result<Vec<SyncSummary>> {
     let mut summaries = Vec::new();
+    let initial_config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)?;
+    initial_config
+        .validate_team_only()
+        .map_err(anyhow::Error::msg)?;
     // T2 lazy refresh: re-fetch /api/me when teams[] is empty or the last
     // fetch is more than 24 h old.  Best-effort — failure is logged but does
     // not abort sync.
@@ -3900,6 +3970,11 @@ fn execute_sync_with_output(
         .ok()
         .and_then(|config| config.active_team_id())
         .is_some();
+    if initial_config.team_only && !args.dry_run {
+        let queue = SyncQueue::open(cas_root)?;
+        queue.init()?;
+        queue.neutralize_team_only_personal()?;
+    }
     if team_linked {
         summaries.push(team_only_push_summary());
     } else {
@@ -6034,9 +6109,8 @@ fn quarantine_peer_evidence_rows(
         if row.evidence.source != "peer-evidence" {
             continue;
         }
-        let reason = format!(
-            "purge-foreign peer-evidence row from verified delete-set {delete_set_hash}"
-        );
+        let reason =
+            format!("purge-foreign peer-evidence row from verified delete-set {delete_set_hash}");
         if queue.quarantine_row(crate::cloud::QUARANTINE_TASK, &row.id, &reason)? {
             quarantined += 1;
         }
@@ -6647,8 +6721,7 @@ Re-run 'cas cloud pull' first, or pass --force to purge anyway (destructive).",
     // Purge removes the local evidence used by team-pull watermarks. Clear
     // every scoped watermark so the next team pull cannot skip the rows that
     // need to be re-evaluated under the same ownership rule as doctor.
-    let cleared_identity_metadata =
-        clear_foreign_identity_metadata(&queue, &project_id)?;
+    let cleared_identity_metadata = clear_foreign_identity_metadata(&queue, &project_id)?;
     let syncer = CloudSyncer::new_for_project(
         Arc::new(queue),
         config,
@@ -6676,10 +6749,8 @@ Re-run 'cas cloud pull' first, or pass --force to purge anyway (destructive).",
     let skills_after = skill_store.list(None).map(|v| v.len()).unwrap_or(0);
     let total_after = entries_after + tasks_after + rules_after + skills_after;
 
-    let remaining_planned_rows = count_remaining_purge_rows(
-        &rusqlite::Connection::open(&db_path)?,
-        delete_set,
-    )?;
+    let remaining_planned_rows =
+        count_remaining_purge_rows(&rusqlite::Connection::open(&db_path)?, delete_set)?;
     if remaining_planned_rows > 0 {
         anyhow::bail!(
             "refusing purge completion: {remaining_planned_rows} row(s) from verified delete set reappeared during pull; restore the backup or run --dry-run again"
@@ -8173,7 +8244,9 @@ mod purge_foreign_safety_tests {
             "a peer-evidence task must be suppressed before the re-pull"
         );
         assert_eq!(
-            queue.quarantined_ids(crate::cloud::QUARANTINE_TASK).unwrap(),
+            queue
+                .quarantined_ids(crate::cloud::QUARANTINE_TASK)
+                .unwrap(),
             ["own-1".to_string()].into_iter().collect()
         );
     }
@@ -8416,7 +8489,9 @@ mod purge_foreign_safety_tests {
         let error = delete_purge_rows(&mut conn, &set).unwrap_err();
 
         assert!(
-            error.to_string().contains("planned 5 row(s), but only 4 were removed"),
+            error
+                .to_string()
+                .contains("planned 5 row(s), but only 4 were removed"),
             "{error}"
         );
         assert_eq!(

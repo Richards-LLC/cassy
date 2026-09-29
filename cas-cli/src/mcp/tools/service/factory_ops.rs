@@ -1106,8 +1106,6 @@ fn resolve_spawn_specs_with_project_config(
             }
         };
         let mut cli_source = source(cli_explicit, configured_cli, llm.cli.is_some());
-        let mut model_source = source(model_explicit, configured_model, llm.model.is_some());
-        let mut effort_source = source(effort_explicit, configured_effort, llm.effort.is_some());
 
         if !cli_explicit
             && !configured_cli
@@ -1115,19 +1113,6 @@ fn resolve_spawn_specs_with_project_config(
         {
             spec.cli = cli;
         }
-        if !model_explicit
-            && !configured_model
-            && let Some(model) = &llm.model
-        {
-            spec.model = Some(model.clone());
-        }
-        if !effort_explicit
-            && !configured_effort
-            && let Some(effort) = llm.effort
-        {
-            spec.effort = Some(effort);
-        }
-
         if !cli_explicit
             && !configured_cli
             && llm.cli.is_none()
@@ -1158,6 +1143,30 @@ fn resolve_spawn_specs_with_project_config(
                 }
             }
         }
+        // Resolve the final harness before inheriting its role recipe. A
+        // Codex role default must not supply model/effort to OpenCode (or
+        // another harness) selected by explicit input or factory config.
+        let llm_applies = llm.cli.is_none_or(|cli| cli == spec.cli);
+        let mut llm_effort = llm.effort.filter(|_| llm_applies);
+        let mut model_source = source(
+            model_explicit,
+            configured_model,
+            llm_applies && llm.model.is_some(),
+        );
+        let mut effort_source = source(effort_explicit, configured_effort, llm_effort.is_some());
+        if !model_explicit
+            && !configured_model
+            && llm_applies
+            && let Some(model) = &llm.model
+        {
+            spec.model = Some(model.clone());
+        }
+        if !effort_explicit
+            && !configured_effort
+            && let Some(effort) = llm_effort
+        {
+            spec.effort = Some(effort);
+        }
         // A role default belongs to its configured harness. An explicit
         // harness/model switch must not inherit an incompatible role recipe.
         if !model_explicit
@@ -1171,6 +1180,7 @@ fn resolve_spawn_specs_with_project_config(
             spec.model = None;
             model_source = "registry";
             if !effort_explicit && !configured_effort {
+                llm_effort = None;
                 spec.effort = Some(default_worker_effort_for_cli(spec.cli));
                 effort_source = "registry";
             }
@@ -1180,7 +1190,7 @@ fn resolve_spawn_specs_with_project_config(
         }
         if !effort_explicit
             && !configured_effort
-            && llm.effort.is_none()
+            && llm_effort.is_none()
             && spec.cli == cas_mux::SupervisorCli::OpenCode
         {
             // The shared resolver's High placeholder is not an OpenCode
@@ -1190,7 +1200,7 @@ fn resolve_spawn_specs_with_project_config(
             spec.effort = None;
         } else if !effort_explicit
             && !configured_effort
-            && llm.effort.is_none()
+            && llm_effort.is_none()
             && spec.effort == Some(cas_mux::Effort::High)
             && spec.cli != cas_mux::SupervisorCli::OpenCode
         {
@@ -12430,7 +12440,8 @@ mod tests {
 
     #[test]
     fn opencode_spawn_preserves_full_provider_model_selector_and_omits_effort() {
-        let _env = TestEnvGuard::with_optional_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, None)]);
+        let mut env = TestEnvGuard::temp_home();
+        env.remove(OPENCODE_ACCEPTED_EFFORTS_ENV);
         let json = build_spawn_spec_json(Some("opencode"), Some("local/qwen3.8"), None)
             .expect("OpenCode selector should resolve without a hard-coded model default");
         let spec = decoded_spawn_spec(&json);
@@ -12442,7 +12453,8 @@ mod tests {
 
     #[test]
     fn opencode_model_selector_infers_opencode_when_cli_is_omitted() {
-        let _env = TestEnvGuard::with_optional_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, None)]);
+        let mut env = TestEnvGuard::temp_home();
+        env.remove(OPENCODE_ACCEPTED_EFFORTS_ENV);
         let json = build_spawn_spec_json(None, Some("local/qwen3.8"), None)
             .expect("provider/model selector should identify OpenCode");
         let spec = decoded_spawn_spec(&json);
@@ -12454,7 +12466,8 @@ mod tests {
 
     #[test]
     fn opencode_defaults_to_the_operator_token_plan_lane() {
-        let _env = TestEnvGuard::with_optional_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, None)]);
+        let mut env = TestEnvGuard::temp_home();
+        env.remove(OPENCODE_ACCEPTED_EFFORTS_ENV);
         let json = build_spawn_spec_json(Some("opencode"), None, None)
             .expect("OpenCode should use the operator's explicit Token Plan default");
         let spec = decoded_spawn_spec(&json);
@@ -12466,7 +12479,8 @@ mod tests {
 
     #[test]
     fn opencode_rejects_effort_outside_endpoint_accepted_set_without_remapping() {
-        let _env = TestEnvGuard::with_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, "low,medium,xhigh")]);
+        let mut env = TestEnvGuard::temp_home();
+        env.set(OPENCODE_ACCEPTED_EFFORTS_ENV, "low,medium,xhigh");
         let err = build_spawn_spec_json(Some("opencode"), Some("local/qwen3.8"), Some("high"))
             .expect_err("unsupported local endpoint effort must fail before spawn");
 
@@ -12481,7 +12495,8 @@ mod tests {
 
     #[test]
     fn opencode_hosted_route_preserves_selector_and_uses_hosted_efforts() {
-        let _env = TestEnvGuard::with_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, "minimal,high")]);
+        let mut env = TestEnvGuard::temp_home();
+        env.set(OPENCODE_ACCEPTED_EFFORTS_ENV, "minimal,high");
         for effort in [None, Some("low"), Some("medium"), Some("xhigh")] {
             let json = build_spawn_spec_json(Some("opencode"), Some("alibaba/qwen3.8-max"), effort)
                 .unwrap_or_else(|error| panic!("hosted effort {effort:?} should resolve: {error}"));
@@ -12497,7 +12512,8 @@ mod tests {
 
     #[test]
     fn opencode_token_plan_route_is_explicit_and_separate_from_payg() {
-        let _env = TestEnvGuard::with_optional_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, None)]);
+        let mut env = TestEnvGuard::temp_home();
+        env.remove(OPENCODE_ACCEPTED_EFFORTS_ENV);
         for selector in ["qwencloud/qwen3.8-max", "hosted-token-plan/qwen3.8-max"] {
             let json = build_spawn_spec_json(Some("opencode"), Some(selector), Some("medium"))
                 .unwrap_or_else(|error| panic!("Token Plan selector should resolve: {error}"));
@@ -12519,7 +12535,8 @@ mod tests {
 
     #[test]
     fn opencode_registered_recipe_runs_registry_policy_before_route_preflight() {
-        let _env = TestEnvGuard::with_optional_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, None)]);
+        let mut env = TestEnvGuard::temp_home();
+        env.remove(OPENCODE_ACCEPTED_EFFORTS_ENV);
         let error = build_spawn_spec_json(
             Some("opencode"),
             Some("qwencloud/qwen3.8-max"),
@@ -12543,10 +12560,9 @@ mod tests {
 
     #[test]
     fn opencode_support_claim_gate_refuses_unreceipted_routes_before_queueing() {
-        let _env = TestEnvGuard::with_optional_vars(&[
-            (OPENCODE_ACCEPTED_EFFORTS_ENV, None),
-            (crate::opencode_preflight::DASHSCOPE_API_KEY_ENV, None),
-        ]);
+        let mut env = TestEnvGuard::temp_home();
+        env.remove(OPENCODE_ACCEPTED_EFFORTS_ENV);
+        env.remove(crate::opencode_preflight::DASHSCOPE_API_KEY_ENV);
         for selector in ["local/qwen3.8", "alibaba/qwen3.8-max"] {
             let json = build_spawn_spec_json(Some("opencode"), Some(selector), None)
                 .expect("selector remains syntactically valid");
@@ -12560,7 +12576,8 @@ mod tests {
 
     #[test]
     fn opencode_hosted_route_rejects_openai_effort_remaps() {
-        let _env = TestEnvGuard::with_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, "minimal,high")]);
+        let mut env = TestEnvGuard::temp_home();
+        env.set(OPENCODE_ACCEPTED_EFFORTS_ENV, "minimal,high");
         for effort in ["minimal", "high"] {
             let error =
                 build_spawn_spec_json(Some("opencode"), Some("alibaba/qwen3.8-max"), Some(effort))
@@ -12572,7 +12589,8 @@ mod tests {
 
     #[test]
     fn opencode_hosted_route_requires_supported_explicit_provider() {
-        let _env = TestEnvGuard::with_optional_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, None)]);
+        let mut env = TestEnvGuard::temp_home();
+        env.remove(OPENCODE_ACCEPTED_EFFORTS_ENV);
         for selector in ["qwen3.8-max", "cloud/qwen3.8-max", "alibaba/other-model"] {
             let error = build_spawn_spec_json(Some("opencode"), Some(selector), None)
                 .expect_err("unsupported OpenCode route must fail before spawn");
@@ -12587,7 +12605,8 @@ mod tests {
 
     #[test]
     fn opencode_accepts_operator_configured_effort_set() {
-        let _env = TestEnvGuard::with_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, "minimal,high")]);
+        let mut env = TestEnvGuard::temp_home();
+        env.set(OPENCODE_ACCEPTED_EFFORTS_ENV, "minimal,high");
         let json = build_spawn_spec_json(Some("opencode"), Some("local/qwen3.8"), Some("high"))
             .expect("local endpoint effort set should be configurable");
         let spec = decoded_spawn_spec(&json);
@@ -12599,7 +12618,8 @@ mod tests {
 
     #[test]
     fn opencode_accepts_project_configured_effort_set() {
-        let _env = TestEnvGuard::with_optional_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, None)]);
+        let mut env = TestEnvGuard::temp_home();
+        env.remove(OPENCODE_ACCEPTED_EFFORTS_ENV);
         let tmp = tempfile::tempdir().expect("temp project config");
         let config = tmp.path().join("config.toml");
         std::fs::write(
@@ -12627,7 +12647,8 @@ opencode_accepted_efforts = ["minimal", "high"]
 
     #[test]
     fn opencode_factory_default_model_is_config_driven() {
-        let _env = TestEnvGuard::with_optional_vars(&[(OPENCODE_ACCEPTED_EFFORTS_ENV, None)]);
+        let mut env = TestEnvGuard::temp_home();
+        env.remove(OPENCODE_ACCEPTED_EFFORTS_ENV);
         let tmp = tempfile::tempdir().expect("temp project config");
         let config = tmp.path().join("config.toml");
         std::fs::write(
@@ -12647,6 +12668,91 @@ model = "local/qwen3.8"
         assert_eq!(spec.cli, cas_mux::SupervisorCli::OpenCode);
         assert_eq!(spec.model.as_deref(), Some("local/qwen3.8"));
         assert_eq!(spec.effort, None);
+    }
+
+    #[test]
+    fn opencode_spawn_does_not_inherit_codex_worker_role_defaults() {
+        let mut env = TestEnvGuard::temp_home();
+        env.remove(OPENCODE_ACCEPTED_EFFORTS_ENV);
+        std::fs::write(
+            env.home().join(".cas/config.toml"),
+            "[llm.worker]\nharness = \"codex\"\nmodel = \"gpt-6.1-sol\"\nreasoning_effort = \"high\"\n",
+        ).unwrap();
+        // Cover explicit, model-inferred and per-slot harness selection. The
+        // real user config exists here deliberately, inside the isolated HOME.
+        for (cli, model, workers, expected_model) in [
+            (Some("opencode"), None, None, "qwencloud/qwen3.8-max"),
+            (
+                Some("opencode"),
+                Some("local/qwen3.8"),
+                None,
+                "local/qwen3.8",
+            ),
+            (None, Some("local/qwen3.8"), None, "local/qwen3.8"),
+            (
+                None,
+                None,
+                Some(r#"[{"cli":"opencode"}]"#),
+                "qwencloud/qwen3.8-max",
+            ),
+        ] {
+            let (specs, sources) =
+                resolve_spawn_specs_with_project_config(1, cli, model, None, None, workers, None)
+                    .unwrap();
+            assert_eq!(specs[0].cli, cas_mux::SupervisorCli::OpenCode);
+            assert_eq!(specs[0].model.as_deref(), Some(expected_model));
+            assert_eq!(specs[0].effort, None, "{sources}");
+            assert!(sources.contains("effort=registry"), "{sources}");
+            assert!(!sources.contains("llm config"), "{sources}");
+        }
+        let project = tempfile::tempdir().unwrap();
+        let config = project.path().join("config.toml");
+        std::fs::write(
+            &config,
+            "[factory.defaults]\ncli = \"opencode\"\nmodel = \"local/qwen3.8\"\n",
+        )
+        .unwrap();
+        let (specs, sources) =
+            resolve_spawn_specs_with_project_config(1, None, None, None, None, None, Some(config))
+                .unwrap();
+        assert_eq!(specs[0].cli, cas_mux::SupervisorCli::OpenCode);
+        assert_eq!(specs[0].model.as_deref(), Some("local/qwen3.8"));
+        assert_eq!(specs[0].effort, None);
+        assert!(
+            sources.contains("cli=factory config, model=factory config, effort=registry"),
+            "{sources}"
+        );
+    }
+
+    #[test]
+    fn opencode_inherits_worker_role_defaults_for_matching_or_unset_harness() {
+        let mut env = TestEnvGuard::temp_home();
+        env.set(OPENCODE_ACCEPTED_EFFORTS_ENV, "low");
+        for harness in ["harness = \"opencode\"\n", ""] {
+            std::fs::write(
+                env.home().join(".cas/config.toml"),
+                format!(
+                    "[llm.worker]\n{harness}model = \"local/qwen3.8\"\nreasoning_effort = \"low\"\n"
+                ),
+            )
+            .unwrap();
+            let (specs, sources) = resolve_spawn_specs_with_project_config(
+                1,
+                Some("opencode"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            assert_eq!(specs[0].model.as_deref(), Some("local/qwen3.8"));
+            assert_eq!(specs[0].effort, Some(cas_mux::Effort::Low));
+            assert!(
+                sources.contains("cli=explicit, model=llm config, effort=llm config"),
+                "{sources}"
+            );
+        }
     }
 
     /// Matching pairs and unrecognized slugs must stay untouched — validation

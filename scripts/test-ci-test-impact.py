@@ -78,13 +78,27 @@ class ImpactTests(unittest.TestCase):
 
     def test_reverse_crate_dependencies_widen_to_all_consumers(self):
         plan = self.select("crates/shared/src/lib.rs")
-        self.assertEqual({c["package"] for c in plan["commands"]}, {"shared", "consumer", "cas"})
+        self.assertEqual({p for c in plan["commands"] for p in c.get("packages", [c["package"]])}, {"shared", "consumer", "cas"})
+        self.assertEqual(len(plan["commands"]), 1)
         self.assertTrue(all(c["stems"] is None for c in plan["commands"]))
 
     def test_test_only_edit_selects_suite_and_archive_guard(self):
         command = self.select("cas-cli/tests/alpha_test.rs")["commands"][0]
         self.assertEqual(command["stems"], ["alpha_test", "builtin_archive_portability_test"])
         self.assertNotIn("--lib", command["args"])
+
+    def test_shared_test_input_retains_every_integration_suite(self):
+        self.put("cas-cli/tests/common/input.json", '{}\n')
+        self.commit()
+        self.base = self.git("rev-parse", "HEAD")
+        command = self.select("cas-cli/tests/common/input.json")["commands"][0]
+        self.assertEqual(set(command["stems"]), {"alpha_test", "beta_test", "gamma_test", "opaque_test", "builtin_archive_portability_test"})
+
+    def test_root_reexport_import_is_opaque_even_with_qualified_import(self):
+        self.put("cas-cli/tests/gamma_test.rs", 'use cas::gamma::other; use cas::root_function;\n')
+        self.commit()
+        self.base = self.git("rev-parse", "HEAD")
+        self.assertIn("gamma_test", self.select()["commands"][0]["stems"])
 
     def test_missing_diff_base_runs_workspace(self):
         self.assertEqual(impact.plan(self.root, "missing-base", "", None)["mode"], "workspace")
@@ -107,7 +121,7 @@ class ImpactTests(unittest.TestCase):
         self.assertIn("gamma_test", self.select()["commands"][0]["stems"])
 
     def test_grouped_inventory_uses_stem_module_filters(self):
-        helper = '#!/usr/bin/env python3\nimport sys\nif "--check" in sys.argv: sys.exit(0)\nprint("alpha_test|integration_contracts\\nbeta_test|integration_contracts\\ngamma_test|integration_cli\\nopaque_test|integration_factory\\nbuiltin_archive_portability_test|builtin_archive_portability_test")\n'
+        helper = '#!/usr/bin/env python3\nimport sys\nif "--check" in sys.argv: sys.exit(0)\nprint("integration_contracts|integration_contracts\\nalpha_test|integration_contracts\\nbeta_test|integration_contracts\\ngamma_test|integration_cli\\nopaque_test|integration_factory\\nbuiltin_archive_portability_test|builtin_archive_portability_test")\n'
         self.put("scripts/cas-test-targets.py", helper)
         self.commit()
         self.base = self.git("rev-parse", "HEAD")
@@ -115,6 +129,7 @@ class ImpactTests(unittest.TestCase):
         expression = command["args"][command["args"].index("-E") + 1]
         self.assertIn("binary(integration_contracts) and test(alpha_test::)", expression)
         self.assertNotIn("gamma_test::", expression)
+        self.assertNotIn("integration_contracts", command["stems"])
 
     def test_full_failure_outside_plan_is_a_recall_miss(self):
         plan = self.select()
@@ -161,12 +176,28 @@ class ImpactTests(unittest.TestCase):
         self.assertIn("gamma_test", self.select()["commands"][0]["stems"])
 
     def test_opaque_source_import_widens_to_its_consumer_module(self):
-        self.put("cas-cli/src/gamma.rs", "use crate::*;\n")
+        self.put("cas-cli/src/gamma.rs", "use crate::root_function;\n")
         self.commit()
         self.base = self.git("rev-parse", "HEAD")
         command = self.select()["commands"][0]
         self.assertIn("gamma_test", command["stems"])
         self.assertIn("test(gamma::)", command["args"][-1])
+
+    def test_receipt_summary_reports_median_and_observed_recall(self):
+        logs = []
+        for index, (role, elapsed, failures, misses) in enumerate([
+            ("scoped", 2.0, [], []), ("scoped", 4.0, [], []),
+            ("full", 8.0, [{"test": "a"}, {"test": "b"}], [{"test": "b"}]),
+        ]):
+            path = self.root / f"summary-input-{index}.json"
+            path.write_text(json.dumps({"role": role, "elapsed_seconds": elapsed, "failures": failures, "post_merge_missed": misses}))
+            logs.extend(["--log", str(path)])
+        output = self.root / "summary.json"
+        subprocess.check_call([str(HERE / "ci-test-impact.py"), "summarize", *logs, "--out", str(output)])
+        summary = json.loads(output.read_text())
+        self.assertEqual(summary["scoped"]["median_seconds"], 3)
+        self.assertEqual(summary["full"]["recall"], 0.5)
+        self.assertIsNone(summary["scoped"]["recall"])
 
     def test_real_runner_records_count_time_and_failed_no_test_run(self):
         self.select("cas-cli/tests/alpha_test.rs")

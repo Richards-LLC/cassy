@@ -213,9 +213,10 @@ lands; hardlink seeding is the current cross-worktree mechanism.
 
 ### CI-load policy
 
-Standing operator policy: factory/* pushes run only Scoped
-Validation; protected-default PRs run only the required Fast Validation and
-macOS Check lanes. The merge queue validates its synthetic tree once; when its
+Standing operator policy: factory/* pushes and every Rust-affecting PR run
+import/dependency-selected tests in Scoped Validation. Protected-default PRs also
+keep the required Fast Validation and macOS Check admission lanes. The release
+merge queue runs the complete workspace suite on its synthetic tree once; when its
 successful tree is pushed unchanged to main, the main-push Fast Validation and
 macOS lanes reuse that receipt and name the validating run. Direct pushes,
 bypass merges, receipt lookup failures, and changed trees still run those
@@ -223,7 +224,9 @@ lanes. The non-required full/heavy tier (Clippy, Test Compile Guard, Build
 Benchmark, and both Panic Isolation profiles) belongs only to
 supervisor-controlled main pushes, schedules, or manual dispatches—never
 factory/*, epic/*, tags, or pull requests. Keep this policy pinned by
-`scripts/test-ci-test-tiers.sh`, rather than relying on convention. Docs-only
+`scripts/test-ci-test-tiers.sh`, rather than relying on convention.
+[Change-scoped CI](../../docs/ci/test-impact.md) describes selection, additive
+failure history, count/time receipts and full-suite recall measurements. Docs-only
 diffs (paths under `docs/` or Markdown files outside embedded
 `cas-cli/src/` content) on pull-request, push, and merge-group events route
 only to the `Docs Lint` job; it runs Markdown lint, validates any changed

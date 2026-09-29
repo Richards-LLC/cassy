@@ -97,7 +97,7 @@ def modules(root):
         if owner in {"lib", "main"}:
             continue
         text = path.read_text()
-        if re.search(r"\bcrate::(?:[A-Z]|\{|\*)", text):
+        if re.search(r"\bcrate::(?:[A-Z]|\{|\*|[A-Za-z_]\w*\s*(?:;|,|\bas\b))", text):
             for dependency in names:
                 edges.setdefault(dependency, set()).add(owner)
         for dependency in set(re.findall(r"\b([A-Za-z_][A-Za-z_0-9]*)\s*::", text)) & names:
@@ -151,12 +151,14 @@ def plan(root, base, zero, history):
             wide = any(p in {"cas-cli/src/lib.rs", "cas-cli/src/main.rs"} or not (root / p).exists() for p in paths) or any("macro_rules!" in (root / p).read_text() for p in production)
             changed_modules = {p.split("/")[2].removesuffix(".rs") for p in production}
             changed_modules = closure(changed_modules, modules(root))
-            selected = set()
+            test_paths = [p for p in paths if p.startswith("cas-cli/tests/")]
+            shared_test_input = any(not any(p == f"cas-cli/tests/{stem}.rs" or p.startswith(f"cas-cli/tests/{stem}/") for stem in mapping) for p in test_paths)
+            selected = set(mapping) if shared_test_input else set()
             for stem in mapping:
                 files = [root / f"cas-cli/tests/{stem}.rs"] + list((root / f"cas-cli/tests/{stem}").rglob("*.rs"))
                 text = "\n".join(p.read_text() for p in files if p.is_file())
                 imports = set(re.findall(r"\bcas::([A-Za-z_][A-Za-z_0-9]*)::", text))
-                opaque = not imports or re.search(r"\b(?:cargo_bin|Command|assert_cmd)\b|\bcas::(?:\{|\*)", text)
+                opaque = not imports or re.search(r"\b(?:cargo_bin|Command|assert_cmd)\b|\bcas::(?:[A-Z]|\{|\*|[A-Za-z_]\w*\s*(?:;|,|\bas\b))", text)
                 if wide or (production and (opaque or imports & changed_modules)) or any(p.startswith(f"cas-cli/tests/{stem}/") or p == f"cas-cli/tests/{stem}.rs" for p in paths):
                     selected.add(stem)
             # Existing snapshot router remains an independent guarded target.
@@ -191,7 +193,10 @@ def plan(root, base, zero, history):
             result["commands"].append({"package": "cas", "args": args, "stems": sorted(selected), "targets": sorted({mapping[s] for s in selected}), "modules": unit_modules if production or wide else []})
         if not result["commands"]:
             return full(result, "no Rust tests selected; caller requested Rust validation")
-        result["selection_units"] = sum(1 + len(command.get("stems") or []) for command in result["commands"])
+        if len(result["commands"]) > 1 and all(command["stems"] is None for command in result["commands"]):
+            packages = sorted(command["package"] for command in result["commands"])
+            result["commands"] = [{"package": "*", "packages": packages, "args": [arg for package in packages for arg in ["-p", package]], "stems": None}]
+        result["selection_units"] = sum(len(command.get("packages", [command["package"]])) + len(command.get("stems") or []) for command in result["commands"])
         return result
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
         return full(result, "uncertain graph/diff/history: " + str(error))
@@ -240,7 +245,9 @@ def collect_history(destination):
 
 def selected_failure(plan, failure):
     for command in plan["commands"]:
-        if command["package"] in {"*", failure["package"]}:
+        packages = command.get("packages")
+        includes_package = failure["package"] in packages if packages is not None else command["package"] in {"*", failure["package"]}
+        if includes_package:
             if command["stems"] is None:
                 return True
             if failure["binary"] == "cas" and "--lib" in command["args"]:

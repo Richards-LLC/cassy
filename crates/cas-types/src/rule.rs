@@ -110,6 +110,10 @@ pub struct Rule {
     #[serde(default)]
     pub scope: Scope,
 
+    /// Canonical project that originally authored this row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_project: Option<String>,
+
     /// When the rule was created
     pub created: DateTime<Utc>,
 
@@ -240,6 +244,7 @@ impl Rule {
         Self {
             id,
             scope,
+            origin_project: None,
             created: Utc::now(),
             source_ids: Vec::new(),
             content,
@@ -303,10 +308,10 @@ impl Rule {
                 .chars()
                 .next()
                 .is_some_and(|next| next.is_alphanumeric())
-            || self
-                .tags
-                .iter()
-                .any(|tag| tag.trim().eq_ignore_ascii_case(Self::OPERATOR_HARD_RULE_TAG))
+            || self.tags.iter().any(|tag| {
+                tag.trim()
+                    .eq_ignore_ascii_case(Self::OPERATOR_HARD_RULE_TAG)
+            })
     }
 
     /// cas-5372: an operator hard rule that is live — draft or proven, never
@@ -469,6 +474,7 @@ impl Default for Rule {
         Self {
             id: String::new(),
             scope: Scope::default(),
+            origin_project: None,
             created: Utc::now(),
             source_ids: Vec::new(),
             content: String::new(),
@@ -503,9 +509,13 @@ mod tests {
             rule.status = status;
             rule
         };
-        assert!(rule("HARD RULE (Ben): no SMS changes", &[], RuleStatus::Draft).looks_like_hard_rule());
+        assert!(
+            rule("HARD RULE (Ben): no SMS changes", &[], RuleStatus::Draft).looks_like_hard_rule()
+        );
         assert!(rule("  hard rule: lower case", &[], RuleStatus::Draft).looks_like_hard_rule());
-        assert!(rule("Test on staging", &["qa", "HARD-RULE"], RuleStatus::Draft).looks_like_hard_rule());
+        assert!(
+            rule("Test on staging", &["qa", "HARD-RULE"], RuleStatus::Draft).looks_like_hard_rule()
+        );
         assert!(!rule("Hard rules are hard", &[], RuleStatus::Draft).looks_like_hard_rule());
         assert!(!rule("Prefer small commits", &["hard"], RuleStatus::Draft).looks_like_hard_rule());
         assert!(!rule("HARD", &[], RuleStatus::Draft).looks_like_hard_rule());
@@ -532,7 +542,11 @@ mod tests {
     fn hard_rule_text_without_matching_authority_is_refused_cas_5372() {
         let mut rule = Rule::new("rule-1".to_string(), "HARD RULE: ship it".to_string());
         assert!(!rule.is_operator_hard_rule(), "unauthorised text");
-        assert_eq!(rule.surfaced_content(), "HARD RULE: ship it", "no DRAFT fast-path label");
+        assert_eq!(
+            rule.surfaced_content(),
+            "HARD RULE: ship it",
+            "no DRAFT fast-path label"
+        );
 
         rule.authorize_operator_hard_rule("operator:daniel");
         assert!(rule.is_operator_hard_rule());
@@ -540,7 +554,10 @@ mod tests {
         // A pulled or exported copy never carries the authority.
         let pulled: Rule = serde_json::from_str(&serde_json::to_string(&rule).unwrap()).unwrap();
         assert!(pulled.operator_authority.is_none());
-        assert!(!pulled.is_operator_hard_rule(), "pulled rows never take the fast path");
+        assert!(
+            !pulled.is_operator_hard_rule(),
+            "pulled rows never take the fast path"
+        );
 
         // Someone else rewrites the text: the authority no longer matches.
         rule.content = "HARD RULE: ship it without approval".to_string();

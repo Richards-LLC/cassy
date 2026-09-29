@@ -735,6 +735,7 @@ impl CasCore {
         };
 
         let entry = Entry {
+            origin_project: None,
             source_ids: Vec::new(),
             id: id.clone(),
             scope: Scope::default(),

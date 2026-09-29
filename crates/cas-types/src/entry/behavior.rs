@@ -17,6 +17,7 @@ impl Entry {
         Self {
             id,
             scope,
+            origin_project: None,
             entry_type: EntryType::default(),
             observation_type: None,
             source_ids: Vec::new(),
@@ -56,6 +57,7 @@ impl Entry {
         Self {
             id,
             scope: Scope::Project,
+            origin_project: None,
             entry_type: EntryType::Learning,
             observation_type: None,
             source_ids: Vec::new(),
@@ -95,6 +97,7 @@ impl Entry {
         Self {
             id,
             scope: Scope::Project,
+            origin_project: None,
             entry_type: EntryType::Learning,
             observation_type: None,
             source_ids: Vec::new(),
@@ -142,6 +145,7 @@ impl Entry {
         Self {
             id,
             scope: Scope::Project, // Observations are always project-scoped
+            origin_project: None,
             entry_type: EntryType::Observation,
             observation_type: Some(obs_type),
             source_ids: Vec::new(),
@@ -187,6 +191,7 @@ impl Entry {
         Self {
             id,
             scope: Scope::Project, // Observations are always project-scoped
+            origin_project: None,
             entry_type: EntryType::Observation,
             observation_type: Some(observation_type),
             source_ids: Vec::new(),
@@ -504,6 +509,7 @@ impl Default for Entry {
         Self {
             id: String::new(),
             scope: Scope::default(),
+            origin_project: None,
             entry_type: EntryType::default(),
             observation_type: None,
             source_ids: Vec::new(),

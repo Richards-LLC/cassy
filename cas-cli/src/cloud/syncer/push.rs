@@ -562,7 +562,7 @@ impl CloudSyncer {
         // cas-8dd8 poison-head fix).
         let mut upsert_entries: Vec<(&QueuedSync, serde_json::Value)> = Vec::new();
         // cas-3a90: entries, rules and skills carry their authoring project.
-        let origin_project = if matches!(entity_type, "entries" | "rules" | "skills") {
+        let origin_project = if entity_type == "skills" {
             Some(self.personal_push_project_id()?)
         } else {
             None
@@ -571,6 +571,21 @@ impl CloudSyncer {
             match item.payload.as_deref() {
                 Some(payload) => match serde_json::from_str::<serde_json::Value>(payload) {
                     Ok(mut v) => {
+                        if matches!(entity_type, "entries" | "rules")
+                            && v.get("scope").and_then(serde_json::Value::as_str) != Some("global")
+                            && !v
+                                .get("origin_project")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|origin| {
+                                    !origin.trim().is_empty() && origin != "unknown"
+                                })
+                        {
+                            let _ = self.queue.mark_failed(
+                                item.id,
+                                "entry/rule has no attributable origin_project",
+                            );
+                            continue;
+                        }
                         if let Some(origin_project) = origin_project.as_deref() {
                             super::team_push::stamp_row_origin_project(&mut v, origin_project);
                         }

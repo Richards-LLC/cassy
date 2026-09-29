@@ -102,6 +102,7 @@ mod tests {
 
     fn entry_with(scope: Scope, entry_type: EntryType, share: Option<ShareScope>) -> Entry {
         Entry {
+            origin_project: None,
             source_ids: Vec::new(),
             id: "p-test-001".to_string(),
             scope,
@@ -142,10 +143,18 @@ mod tests {
 
     #[test]
     fn entry_share_private_blocks_promotion_regardless_of_scope_or_type() {
-        let e = entry_with(Scope::Project, EntryType::Learning, Some(ShareScope::Private));
+        let e = entry_with(
+            Scope::Project,
+            EntryType::Learning,
+            Some(ShareScope::Private),
+        );
         assert!(!eligible_for_team_entry(&e));
 
-        let e = entry_with(Scope::Global, EntryType::Learning, Some(ShareScope::Private));
+        let e = entry_with(
+            Scope::Global,
+            EntryType::Learning,
+            Some(ShareScope::Private),
+        );
         assert!(!eligible_for_team_entry(&e));
 
         let e = entry_with(

@@ -391,6 +391,7 @@ impl CasCore {
         let branch = self.current_worktree_branch();
 
         let entry = Entry {
+            origin_project: None,
             source_ids: Vec::new(),
             id: id.clone(),
             scope: Scope::default(),
@@ -810,9 +811,9 @@ impl CasCore {
                             tracing::warn!(error = %error, "artifact backfill indexing failed")
                         }
                     }
-                    let _ = std::fs::remove_file(
-                        crate::hybrid_search::tantivy_rebuild_marker(&self.cas_root),
-                    );
+                    let _ = std::fs::remove_file(crate::hybrid_search::tantivy_rebuild_marker(
+                        &self.cas_root,
+                    ));
                     results.push(format!("BM25: Indexed {indexed} documents"));
                 }
                 Err(e) => results.push(format!("BM25: Failed - {e}")),

@@ -152,7 +152,7 @@ impl Store for SyncingEntryStore {
 
     fn add(&self, entry: &Entry) -> Result<()> {
         self.inner.add(entry)?;
-        self.queue_upsert(entry);
+        self.queue_upsert(&self.inner.get(&entry.id)?);
         Ok(())
     }
 
@@ -171,7 +171,7 @@ impl Store for SyncingEntryStore {
             .is_ok_and(|before| is_access_metadata_only_update(&before, entry));
         self.inner.update(entry)?;
         if !access_metadata_only {
-            self.queue_upsert(entry);
+            self.queue_upsert(&self.inner.get(&entry.id)?);
         }
         Ok(())
     }

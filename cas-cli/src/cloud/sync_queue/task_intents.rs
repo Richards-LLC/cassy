@@ -247,6 +247,29 @@ impl SyncQueue {
         after_validation();
         let canonical = load_canonical()?;
         let payload = canonical.payload;
+        let local_project = crate::cloud::resolve_canonical_id(&self.cas_dir);
+        let project_task = serde_json::from_str::<serde_json::Value>(&payload)
+            .ok()
+            .is_some_and(|value| value.get("scope").and_then(|v| v.as_str()) != Some("global"));
+        if project_task {
+            let origin =
+                Self::queued_origin(&tx, EntityType::Task, &intent.entity_id, Some(&payload));
+            let authored_here = local_project.as_deref().is_none_or(|local| {
+                origin.as_deref().is_none_or(|origin| {
+                    origin != "unknown" && crate::cloud::project_ids_match(origin, local)
+                })
+            });
+            if !authored_here {
+                tx.execute(
+                    "DELETE FROM sync_queue WHERE entity_type = 'task' AND entity_id = ?1",
+                    params![intent.entity_id],
+                )?;
+                Self::record_unauthored_skip(&tx)?;
+                retire_task_sync_evidence(&tx, &intent.entity_id)?;
+                tx.commit()?;
+                return Ok(TaskSyncFulfillResult::Fulfilled);
+            }
+        }
         let current_project_id = canonical.current_project_id.as_deref();
         let current_team_id = canonical.current_team_id.as_deref();
         if canonical.personal {

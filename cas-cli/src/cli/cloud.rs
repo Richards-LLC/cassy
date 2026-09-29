@@ -2178,14 +2178,25 @@ pub(crate) fn team_only_held_personal_rows(cas_root: &Path) -> Option<usize> {
 
 fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
     let config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)?;
-    let held = config.team_only.then(|| team_only_held_personal_rows(cas_root)).flatten();
+    let held = config
+        .team_only
+        .then(|| team_only_held_personal_rows(cas_root))
+        .flatten();
+    let unauthored_skipped = crate::cloud::SyncQueue::open(cas_root)
+        .ok()
+        .and_then(|queue| queue.unauthored_skipped_count().ok())
+        .unwrap_or(0);
 
     if config.token.is_none() {
         if cli.json {
-            println!("{}", serde_json::json!({
-                "status": "not_logged_in", "team_only": config.team_only,
-                "personal_rows_held_team_only": held
-            }));
+            println!(
+                "{}",
+                serde_json::json!({
+                    "status": "not_logged_in", "team_only": config.team_only,
+                    "personal_rows_held_team_only": held,
+                    "unauthored_skipped": unauthored_skipped
+                })
+            );
         } else {
             let theme = ActiveTheme::default();
             let mut out = io::stdout();
@@ -2207,6 +2218,10 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
                 if config.team_only { "on" } else { "off" }
             ))?;
             fmt.newline()?;
+            fmt.write_raw(&format!(
+                "  Local rows skipped (not authored here): {unauthored_skipped}"
+            ))?;
+            fmt.newline()?;
         }
         return Ok(());
     }
@@ -2225,6 +2240,7 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
                 if cli.json {
                     let mut body = body.clone();
                     body["team_only"] = serde_json::json!(config.team_only);
+                    body["unauthored_skipped"] = serde_json::json!(unauthored_skipped);
                     if let Some(count) = held {
                         body["personal_rows_held_team_only"] = serde_json::json!(count);
                     }
@@ -2264,6 +2280,10 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
                     fmt.newline()?;
                     fmt.write_muted("  Team-only: ")?;
                     fmt.write_raw(if config.team_only { "on" } else { "off" })?;
+                    fmt.newline()?;
+                    fmt.write_raw(&format!(
+                        "  Local rows skipped (not authored here): {unauthored_skipped}"
+                    ))?;
                     fmt.newline()?;
                     if let Some(count) = held {
                         fmt.write_raw(&format!("  {count} personal rows held (team_only)"))?;

@@ -632,6 +632,22 @@ impl CloudSyncer {
                 continue;
             }
 
+            let endpoints_authored_here =
+                [&dependency.from_id, &dependency.to_id]
+                    .into_iter()
+                    .all(|id| {
+                        task_store
+                            .get(id)
+                            .ok()
+                            .and_then(|task| task.origin_project)
+                            .is_some_and(|origin| {
+                                crate::cloud::project_ids_match(&origin, current_project_id)
+                            })
+                    });
+            if !endpoints_authored_here {
+                continue;
+            }
+
             // Ordering, not arrival, decides: a tombstone suppresses an edge
             // created at or before the delete, while an edge recreated after it
             // is newer state that must reach the cloud (and retires the

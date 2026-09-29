@@ -77,7 +77,7 @@ async fn legacy_queued_entry_recovers_stored_origin_and_unknown_row_parks() {
     let mut old_rule_payload = serde_json::json!({"id": "legacy-rule", "scope": "project"});
     assert!(
         syncer
-            .restore_queued_origin(&mut old_rule_payload, EntityType::Rule, "legacy-rule")
+            .restore_queued_origin(&mut old_rule_payload, EntityType::Rule, "legacy-rule", "p")
             .unwrap()
     );
     assert_eq!(old_rule_payload["origin_project"], "p");
@@ -1323,14 +1323,17 @@ async fn pull_team_task_and_dependency_fixtures_with_pull_count(
     // root under the temp directory, and a TempDir is exactly that.
     std::fs::write(
         temp.path().join("config.toml"),
-        "[project]\ncanonical_id = \"p\"\n",
+        format!("[project]\ncanonical_id = \"{project_id}\"\n"),
     )
     .unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     let store = open_store_local(temp.path()).unwrap();
     let task_store = open_task_store_local(temp.path()).unwrap();
-    for local_task in local_tasks {
+    for mut local_task in local_tasks {
+        if local_task.origin_project.is_none() {
+            local_task.origin_project = Some(project_id.to_string());
+        }
         task_store.add(&local_task).unwrap();
     }
     for dependency in local_dependencies {
@@ -1461,6 +1464,35 @@ async fn heal_local_task_dependency_enqueues_team_upsert() {
         "cas-heal-local-from:cas-heal-local-to:blocks"
     );
     assert_eq!(pending[0].operation, crate::cloud::SyncOperation::Upsert);
+}
+
+#[tokio::test]
+async fn dependency_healer_skips_foreign_endpoint() {
+    use crate::types::{Dependency, DependencyType};
+
+    let project_id = "dependency-heal-project";
+    let mut from = Task::new("cas-heal-owned-from".to_string(), "from".to_string());
+    from.origin_project = Some(project_id.to_string());
+    let mut to = Task::new("cas-heal-foreign-to".to_string(), "to".to_string());
+    to.origin_project = Some("other-project".to_string());
+    let edge = Dependency::new(from.id.clone(), to.id.clone(), DependencyType::Blocks);
+
+    let (_temp, result, _task_store, queue) = pull_team_task_and_dependency_fixtures(
+        project_id,
+        Vec::new(),
+        vec![from, to],
+        vec![edge],
+        Vec::new(),
+    )
+    .await;
+
+    assert_eq!(result.healed_task_dependencies_to_cloud, 0);
+    assert!(
+        queue
+            .pending_for_team("team-cas-2125", 10, 5)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -2085,7 +2117,7 @@ async fn pull_team_dependency_scenario(
     // root under the temp directory, and a TempDir is exactly that.
     std::fs::write(
         temp.path().join("config.toml"),
-        "[project]\ncanonical_id = \"p\"\n",
+        format!("[project]\ncanonical_id = \"{project_id}\"\n"),
     )
     .unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
@@ -2108,7 +2140,10 @@ async fn pull_team_dependency_scenario(
     }
     let store = open_store_local(temp.path()).unwrap();
     let task_store = open_task_store_local(temp.path()).unwrap();
-    for task in local_tasks {
+    for mut task in local_tasks {
+        if task.origin_project.is_none() {
+            task.origin_project = Some(project_id.to_string());
+        }
         task_store.add(&task).unwrap();
     }
     for dependency in &local_dependencies {

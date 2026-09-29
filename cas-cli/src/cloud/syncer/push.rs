@@ -225,14 +225,16 @@ impl CloudSyncer {
         Ok(result)
     }
 
-    /// Drop queued writes for pulled rows this project did not author
-    /// (cas-3a90, GH #909). Fails closed: if the ledger cannot be read, the
-    /// push stops rather than risk publishing another project's rows.
+    /// Drop queued writes for rows this project did not author, whether they
+    /// came from a pull ledger or carry foreign/unknown stored provenance.
     pub(super) fn drop_unauthored_queued_pushes(&self) -> Result<usize, CasError> {
-        let dropped = self.queue.drop_queued_pushes_for_unauthored_pulls()?;
+        let dropped = self.queue.drop_queued_pushes_for_unauthored_pulls()?
+            + self
+                .queue
+                .drop_queued_rows_with_foreign_origin(&self.personal_push_project_id()?)?;
         if dropped > 0 {
             warn!(
-                "[Cassy sync] dropped {dropped} queued write(s) for pulled rows this project did \
+                "[Cassy sync] dropped {dropped} queued write(s) for rows this project did \
                  not author; they are never pushed from here"
             );
         }
@@ -578,7 +580,13 @@ impl CloudSyncer {
                             "rules" => Some(EntityType::Rule),
                             _ => None,
                         } {
-                            match self.restore_queued_origin(&mut v, kind, &item.entity_id) {
+                            let project_id = self.personal_push_project_id()?;
+                            match self.restore_queued_origin(
+                                &mut v,
+                                kind,
+                                &item.entity_id,
+                                &project_id,
+                            ) {
                                 Ok(true) => {}
                                 Ok(false) => {
                                     let _ = self.queue.park_failed(
@@ -594,8 +602,15 @@ impl CloudSyncer {
                                 }
                             }
                         }
-                        if let Some(origin_project) = origin_project.as_deref() {
-                            super::team_push::stamp_row_origin_project(&mut v, origin_project);
+                        if let Some(origin_project) = origin_project.as_deref()
+                            && !super::team_push::stamp_row_origin_project(&mut v, origin_project)
+                        {
+                            let _ = self.queue.park_failed(
+                                item.id,
+                                "row has no local attributable origin_project",
+                                self.config.max_retries,
+                            );
+                            continue;
                         }
                         upsert_entries.push((*item, self.with_base_revision(item, v)))
                     }

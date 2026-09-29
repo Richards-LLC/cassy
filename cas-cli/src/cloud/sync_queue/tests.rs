@@ -10,12 +10,80 @@ fn create_test_queue() -> (TempDir, SyncQueue) {
 }
 
 #[test]
+fn foreign_and_unknown_stored_entries_never_enter_personal_or_team_queue() {
+    use rusqlite::Connection;
+
+    let (temp, queue) = create_test_queue();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"local-project\"\n",
+    )
+    .unwrap();
+    let conn = Connection::open(temp.path().join("cas.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS entries (id TEXT PRIMARY KEY, origin_project TEXT);
+         INSERT INTO entries (id, origin_project) VALUES
+           ('foreign', 'other-project'), ('unknown', 'unknown'),
+           ('authored', 'local-project');",
+    )
+    .unwrap();
+
+    for id in ["foreign", "unknown", "authored"] {
+        let payload = format!(r#"{{"id":"{id}","scope":"project"}}"#);
+        queue
+            .enqueue(EntityType::Entry, id, SyncOperation::Upsert, Some(&payload))
+            .unwrap();
+        queue
+            .enqueue_for_team(
+                EntityType::Entry,
+                id,
+                SyncOperation::Upsert,
+                Some(&payload),
+                "team-1",
+            )
+            .unwrap();
+    }
+    assert_eq!(queue.unauthored_skipped_count().unwrap(), 4);
+    assert_eq!(queue.pending(10, 5).unwrap().len(), 1);
+    assert_eq!(queue.pending_for_team("team-1", 10, 5).unwrap().len(), 1);
+    assert_eq!(queue.pending(10, 5).unwrap()[0].entity_id, "authored");
+
+    // Simulate rows left by an older client that had no enqueue guard.
+    conn.execute(
+        "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, team_id, created_at)
+         VALUES ('entry', 'foreign', 'upsert', '{}', '', '2026-01-01T00:00:00Z')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, team_id, created_at)
+         VALUES ('entry', 'unknown', 'upsert', '{}', 'team-1', '2026-01-01T00:00:00Z')",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        queue
+            .drop_queued_rows_with_foreign_origin("local-project")
+            .unwrap(),
+        2
+    );
+    assert_eq!(queue.unauthored_skipped_count().unwrap(), 6);
+    assert_eq!(queue.pending(10, 5).unwrap().len(), 1);
+    assert_eq!(queue.pending_for_team("team-1", 10, 5).unwrap().len(), 1);
+}
+
+#[test]
 fn queued_user_prompts_are_dropped_across_personal_and_team_scopes() {
     let (_temp, queue) = create_test_queue();
     let prompt = serde_json::json!({"tags": ["user-prompt"], "content": "User request: fix this"});
     let ordinary = serde_json::json!({"tags": ["context"], "content": "Keep this"});
     queue
-        .enqueue(EntityType::Entry, "prompt", SyncOperation::Upsert, Some(&prompt.to_string()))
+        .enqueue(
+            EntityType::Entry,
+            "prompt",
+            SyncOperation::Upsert,
+            Some(&prompt.to_string()),
+        )
         .unwrap();
     queue
         .enqueue_for_team(
@@ -27,7 +95,12 @@ fn queued_user_prompts_are_dropped_across_personal_and_team_scopes() {
         )
         .unwrap();
     queue
-        .enqueue(EntityType::Entry, "ordinary", SyncOperation::Upsert, Some(&ordinary.to_string()))
+        .enqueue(
+            EntityType::Entry,
+            "ordinary",
+            SyncOperation::Upsert,
+            Some(&ordinary.to_string()),
+        )
         .unwrap();
 
     assert_eq!(queue.drop_queued_user_prompts().unwrap(), 2);
@@ -939,8 +1012,13 @@ fn project_id_migration_preserves_legacy_rows_and_allows_move_pair() {
 }
 
 #[test]
-fn enqueue_for_team_project_targets_a_foreign_owner() {
-    let (_temp, queue) = create_test_queue();
+fn enqueue_for_team_project_refuses_a_foreign_owner() {
+    let (temp, queue) = create_test_queue();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"local-project\"\n",
+    )
+    .unwrap();
 
     queue
         .enqueue_for_team_project(
@@ -954,11 +1032,8 @@ fn enqueue_for_team_project_targets_a_foreign_owner() {
         .unwrap();
 
     let pending = queue.pending_for_team("team-123", 10, 5).unwrap();
-    assert_eq!(pending.len(), 1);
-    assert_eq!(
-        pending[0].project_id.as_deref(),
-        Some("destination-project")
-    );
+    assert!(pending.is_empty());
+    assert_eq!(queue.unauthored_skipped_count().unwrap(), 1);
 }
 
 #[test]
@@ -1134,7 +1209,13 @@ fn upgrade_requeues_only_version_gated_failures() {
     ] {
         if id == "task-team" {
             queue
-                .enqueue_for_team(EntityType::Task, id, SyncOperation::Upsert, Some("{}"), "team-1")
+                .enqueue_for_team(
+                    EntityType::Task,
+                    id,
+                    SyncOperation::Upsert,
+                    Some("{}"),
+                    "team-1",
+                )
                 .unwrap();
         } else {
             queue
@@ -1206,10 +1287,12 @@ fn upgrade_requeues_only_version_gated_failures() {
         .map(|row| row.entity_id)
         .collect::<Vec<_>>();
     assert_eq!(pending, vec!["task-version-gated", "task-stale-outcome"]);
-    assert!(queue
-        .pending_for_team("team-1", 10, MAX_RETRIES)
-        .unwrap()
-        .is_empty());
+    assert!(
+        queue
+            .pending_for_team("team-1", 10, MAX_RETRIES)
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         queue
             .rejected_reason_counts_for_entity_type(None, MAX_RETRIES)
@@ -1228,7 +1311,10 @@ fn upgrade_requeues_only_version_gated_failures() {
     );
     assert_eq!(queue.pending(10, MAX_RETRIES).unwrap().len(), 4);
     assert_eq!(
-        queue.pending_for_team("team-1", 10, MAX_RETRIES).unwrap().len(),
+        queue
+            .pending_for_team("team-1", 10, MAX_RETRIES)
+            .unwrap()
+            .len(),
         1
     );
 }
@@ -1275,6 +1361,9 @@ fn row_outcome_columns_are_added_to_legacy_databases() {
             .len(),
         0
     );
-    assert_eq!(queue.requeue_version_gated_failures("99.0.0", 5).unwrap(), 0);
+    assert_eq!(
+        queue.requeue_version_gated_failures("99.0.0", 5).unwrap(),
+        0
+    );
     assert_eq!(queue.retry_failed(5).unwrap(), 1);
 }

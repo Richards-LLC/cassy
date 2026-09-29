@@ -228,12 +228,25 @@ impl SyncingTaskStore {
     }
 
     fn queue_dependency_upsert(&self, dep: &Dependency, from_task: &Task) {
+        if from_task.scope == Scope::Project {
+            let local = self.inner.project_id();
+            let to = self.inner.get(&dep.to_id).ok();
+            let authored_here = local.is_none_or(|local| {
+                [Some(from_task), to.as_ref()].into_iter().all(|task| {
+                    task.is_some_and(|task| {
+                        task.origin_project.as_deref().is_none_or(|origin| {
+                            origin != "unknown" && crate::cloud::project_ids_match(origin, local)
+                        })
+                    })
+                })
+            });
+            if !authored_here {
+                return;
+            }
+        }
         let origin_project = match from_task.scope {
             Scope::Global => None,
-            Scope::Project => from_task
-                .origin_project
-                .as_deref()
-                .or(self.inner.project_id()),
+            Scope::Project => from_task.origin_project.as_deref(),
         };
         let payload = TaskDependencyPayload {
             from_id: &dep.from_id,
@@ -472,6 +485,20 @@ impl TaskStore for SyncingTaskStore {
             .origin_project
             .as_deref()
             .filter(|project_id| !project_id.trim().is_empty());
+        if task.scope == Scope::Project
+            && project_id.is_some_and(|origin| {
+                origin == "unknown"
+                    || self
+                        .inner
+                        .project_id()
+                        .is_some_and(|local| !crate::cloud::project_ids_match(origin, local))
+            })
+        {
+            let _ = self
+                .queue
+                .drop_queued_pushes_for(EntityType::Task.as_str(), id);
+            return Ok(());
+        }
         self.queue_delete(id, project_id, task.scope);
         for dep in &dependencies {
             self.queue_dependency_delete(dep, task.scope);

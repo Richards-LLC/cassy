@@ -10,7 +10,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::cloud::{CloudConfig, EntityType, SyncOperation, SyncQueue};
-use crate::store::share_policy::{eligible_for_team_entry, resolve_team_id};
+use crate::store::share_policy::{
+    eligible_for_team_entry, origin_is_foreign_or_unknown, resolve_team_id,
+};
 use crate::store::{Result, Store};
 use crate::types::{Entry, Scope};
 
@@ -187,10 +189,21 @@ impl Store for SyncingEntryStore {
     }
 
     fn delete(&self, id: &str) -> Result<()> {
-        let before = self.inner.get(id).or_else(|_| self.inner.get_archived(id)).ok();
+        let before = self
+            .inner
+            .get(id)
+            .or_else(|_| self.inner.get_archived(id))
+            .ok();
         let team_eligible = before.as_ref().is_some_and(eligible_for_team_entry);
         self.inner.delete(id)?;
-        if before.as_ref().is_some_and(is_user_prompt) {
+        let foreign = before.as_ref().is_some_and(|entry| {
+            entry.scope == Scope::Project
+                && origin_is_foreign_or_unknown(
+                    entry.origin_project.as_deref(),
+                    crate::cloud::resolve_canonical_id(self.inner.cas_dir()).as_deref(),
+                )
+        });
+        if before.as_ref().is_some_and(is_user_prompt) || foreign {
             let _ = self
                 .queue
                 .drop_queued_pushes_for(EntityType::Entry.as_str(), id);
@@ -343,7 +356,10 @@ mod tests {
     fn user_prompt_stays_local_on_add_update_and_delete() {
         let (temp, store) = create_team_store(None);
         let queue = SyncQueue::open(temp.path()).unwrap();
-        let mut entry = Entry::new("prompt-local".to_string(), "User request: fix this".to_string());
+        let mut entry = Entry::new(
+            "prompt-local".to_string(),
+            "User request: fix this".to_string(),
+        );
         entry.tags.push("user-prompt".to_string());
         store.add(&entry).unwrap();
         assert_eq!(store.get(&entry.id).unwrap().content, entry.content);
@@ -353,7 +369,12 @@ mod tests {
         // both queues from receiving an update and clears legacy queued rows.
         let payload = serde_json::to_string(&entry).unwrap();
         queue
-            .enqueue(EntityType::Entry, &entry.id, SyncOperation::Upsert, Some(&payload))
+            .enqueue(
+                EntityType::Entry,
+                &entry.id,
+                SyncOperation::Upsert,
+                Some(&payload),
+            )
             .unwrap();
         queue
             .enqueue_for_team(

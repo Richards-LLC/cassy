@@ -583,6 +583,18 @@ export class HubConnectionSupervisor {
     };
   }
 
+  /** Add session launch to this paired device; keep the live and stored scope sets in sync. */
+  async enableSessionLaunch(): Promise<void> {
+    const { response } = await this.authorizedFetch("POST", "/v1/auth/scopes", {
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ add: ["session-launch"] }),
+    });
+    if (!response.ok) throw new Error(response.status === 403 ? "Pair with a control invitation to start sessions." : `Could not enable session launch (${response.status}).`);
+    const body = await response.json() as { scopes: StoredMachine["scopes"] };
+    this.machine.scopes = body.scopes;
+    await this.callbacks.onCredentialRefreshed?.(this.machine);
+  }
+
   async status(session: string): Promise<Record<string, unknown>> {
     return this.request("GET", `/v1/sessions/${encodeURIComponent(session)}/status`);
   }

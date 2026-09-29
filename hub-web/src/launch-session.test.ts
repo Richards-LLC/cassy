@@ -5,7 +5,7 @@ import {
   type LaunchProfiles, filterProjects, launchErrorCopy, parseWorkers, sortProjects,
   type BrowseListing, type LaunchHost, type LaunchMachine, type LaunchProject, type LaunchRequest, type LaunchResult, type ProjectCatalog,
 } from "./launch-session";
-import { launchGrantCommand, parseGrantedScopes, scopeChoices, scopeSummary } from "./pairing-scopes";
+import { canEnableSessionLaunch, launchGrantCommand, parseGrantedScopes, scopeChoices, scopeSummary } from "./pairing-scopes";
 import type { Scope } from "./types";
 
 const CONTROL: Scope[] = ["machine-read", "session-read", "pane-read", "pane-input", "message-send", "pane-interrupt"];
@@ -63,6 +63,13 @@ describe("launch model", () => {
     expect(canLaunch(undefined)).toBe(false);
   });
 
+  it("offers self grant only with all three control scopes", () => {
+    expect(canEnableSessionLaunch(CONTROL)).toBe(true);
+    for (const scope of ["pane-input", "message-send", "pane-interrupt"] as Scope[]) {
+      expect(canEnableSessionLaunch(CONTROL.filter((entry) => entry !== scope))).toBe(false);
+    }
+  });
+
   it("says what each environment refusal means and what to do", () => {
     expect(launchErrorCopy({ status: 422, code: "not_logged_in" }, "claude", "Atlas").title).toBe("Claude isn't logged in on Atlas.");
     expect(launchErrorCopy({ status: 422, code: "cli_missing" }, "codex", "Atlas").title).toContain("Codex isn't installed");
@@ -118,6 +125,7 @@ function sheet(options: {
     profiles: async () => options.profiles ?? {},
     browse: async (_machine, root, path) => { calls.browsed.push([root, path]); return options.listing!(root, path); },
     launch: async (machineId, request) => { calls.launches.push({ machineId, request }); return options.result ?? { ok: true, session: "new-otter-1", attached: false }; },
+    grant: async (machineId) => { const machine = options.machines.find((entry) => entry.id === machineId); if (machine) machine.scopes = [...machine.scopes, "session-launch"]; },
     sessionListed: async () => ++polls >= (options.listedAfter ?? 1),
     open: (machineId, session) => { calls.opened.push([machineId, session]); },
     copy: async () => undefined,
@@ -137,7 +145,20 @@ describe("LaunchSheet", () => {
     await flush();
     expect(dialog().open).toBe(true);
     expect(visibleView(dialog())).toEqual(["grant"]);
-    expect(dialog().querySelector(".launch-grant")!.textContent).toContain("can't start sessions on Atlas yet");
+    expect(dialog().querySelector(".launch-grant")!.textContent).toContain("Allow starting sessions on Atlas");
+    expect((dialog().querySelector('[data-launch-action="allow"]') as HTMLButtonElement).hidden).toBe(false);
+    (dialog().querySelector('[data-launch-action="allow"]') as HTMLButtonElement).click();
+    expect(visibleView(dialog())).toEqual(["confirm"]);
+    expect(dialog().querySelector(".launch-confirm-copy")!.textContent).toContain("Start new sessions on Atlas");
+    (dialog().querySelector('[data-launch-action="confirm-grant"]') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(visibleView(dialog())).toEqual(["form"]));
+  });
+
+  it("keeps invitation guidance for a read-only pairing", async () => {
+    const { sheet: s, dialog } = sheet({ machines: [{ id: "atlas", label: "Atlas", scopes: ["machine-read", "session-read", "pane-read"] }] });
+    s.open();
+    await flush();
+    expect((dialog().querySelector('[data-launch-action="allow"]') as HTMLButtonElement).hidden).toBe(true);
     expect(dialog().querySelector(".launch-grant-command code")!.textContent).toContain("session:launch");
   });
 

@@ -442,6 +442,14 @@ export class HubDouble {
       const defaultCli = this.options.launch?.[machineId]?.defaultCli;
       return route.fulfill({ json: { schema_version: 1, version: "journey-double", capabilities, ...(defaultCli ? { default_supervisor_cli: defaultCli } : {}) } });
     }
+    if (path === "/v1/auth/scopes" && method === "POST") {
+      const add = (route.request().postDataJSON() as { add?: string[] }).add;
+      const scopes = this.options.scopes?.[machineId] ?? SCOPES;
+      if (JSON.stringify(add) !== JSON.stringify(["session-launch"])) return route.fulfill({ status: 400, json: { error: "invalid_scope" } });
+      if (!["pane-input", "message-send", "pane-interrupt"].every((scope) => scopes.includes(scope))) return route.fulfill({ status: 403, json: { error: "scope_denied" } });
+      this.setScopes(machineId, [...new Set([...scopes, "session-launch"])]);
+      return route.fulfill({ json: { scopes: this.options.scopes![machineId] } });
+    }
     if (path === "/v1/sessions" && method === "POST") return this.launch(route, machineId);
     if (path === "/v1/sessions") {
       this.tickBooting(machineId);

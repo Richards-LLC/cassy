@@ -10,7 +10,7 @@
 //   POST /v1/sessions {target, supervisor_cli, workers?}
 //        202/200 {session, attached} · error {error, detail} · 403 scope_denied
 import { escapeHtml, projectTitle } from "./cloud-brand";
-import { LAUNCH_SCOPE, launchGrantCommand } from "./pairing-scopes";
+import { LAUNCH_SCOPE, canEnableSessionLaunch, launchGrantCommand } from "./pairing-scopes";
 import type { Scope } from "./types";
 
 /** The supervisors POST /v1/sessions accepts (hub/server.rs launch_session_blocking). */
@@ -132,6 +132,7 @@ export interface LaunchHost {
   profiles(machineId: string, signal: AbortSignal): Promise<LaunchProfiles>;
   browse(machineId: string, rootId: string, path: string, signal: AbortSignal): Promise<BrowseListing>;
   launch(machineId: string, request: LaunchRequest): Promise<LaunchResult>;
+  grant(machineId: string): Promise<void>;
   /** Refresh the machine's session list; whether `session` is on it now. */
   sessionListed(machineId: string, session: string): Promise<boolean>;
   /** Land on the session's supervisor. */
@@ -220,7 +221,7 @@ export function launchErrorCopy(result: { status: number; code?: string; detail?
   }
 }
 
-type View = "form" | "grant" | "starting" | "error";
+type View = "form" | "grant" | "confirm" | "starting" | "error";
 type Mode = "known" | "browse";
 type Selection = { target: LaunchTarget; name: string; path: string };
 type Load<T> = { status: "idle" } | { status: "loading" } | { status: "ready"; data: T } | { status: "failed"; message: string };
@@ -264,7 +265,12 @@ export function launchSheetMarkup(): string {
       <p>Starting sessions is a separate permission this browser asks for once per machine. Run this on the machine, then open the link it prints in this browser. What this browser can do now is kept.</p>
       <div class="pair-code-actions launch-grant-command"><code></code><button type="button" data-launch-action="copy">Copy command</button></div>
       <p class="field-hint launch-grant-note">Opening the new link replaces this browser's pairing with the machine.</p>
-      <div class="dialog-actions"><button type="button" data-launch-action="close">Close</button></div>
+      <p class="launch-grant-error" role="alert" hidden></p>
+      <div class="dialog-actions"><button type="button" data-launch-action="close">Close</button><button type="button" class="primary" data-launch-action="allow">Allow starting sessions</button></div>
+    </section>
+    <section class="launch-view launch-confirm" data-launch-view="confirm" hidden>
+      <p class="launch-confirm-copy"></p>
+      <div class="dialog-actions"><button type="button" data-launch-action="back-grant">Back</button><button type="button" class="primary" data-launch-action="confirm-grant">Allow Start new sessions</button></div>
     </section>
     <section class="launch-view launch-starting" data-launch-view="starting" hidden>
       <div role="status" class="launch-progress"><p class="launch-progress-title"></p><p class="launch-progress-step"></p></div>
@@ -364,6 +370,9 @@ export class LaunchSheet {
       const action = target.closest<HTMLElement>("[data-launch-action]")?.dataset.launchAction;
       if (action === "close") { this.close(); return; }
       if (action === "start") { void this.start(); return; }
+      if (action === "allow") { this.showView("confirm"); this.$(".launch-confirm-copy").textContent = `Allow Start new sessions on ${this.machine()?.label ?? "this machine"}?`; return; }
+      if (action === "back-grant") { this.showView("grant"); return; }
+      if (action === "confirm-grant") { void this.grant(); return; }
       if (action === "back") { this.showView("form"); this.focusFirst(); return; }
       if (action === "copy") { void this.copyCommand(target.closest<HTMLButtonElement>("button")!); return; }
       if (action === "retry-accounts" && this.machineId) { void this.loadProfiles(this.machineId); return; }
@@ -596,6 +605,32 @@ export class LaunchSheet {
     const code = this.$(".launch-grant-command code");
     code.textContent = command;
     this.$(".launch-grant-command button").dataset.command = command;
+    const eligible = canEnableSessionLaunch(machine?.scopes ?? []);
+    this.$('[data-launch-action="allow"]').hidden = !eligible;
+    this.$('[data-launch-action="allow"]').textContent = `Allow starting sessions on ${label}`;
+    this.$(".launch-grant-command").hidden = eligible;
+    this.$(".launch-grant-note").hidden = eligible;
+    this.$(".launch-grant .launch-lead").innerHTML = eligible
+      ? `Allow starting sessions on <strong>${escapeHtml(label)}</strong> from this browser.`
+      : `This browser can't start sessions on <strong>${escapeHtml(label)}</strong> yet. Pair with a control invitation to allow it.`;
+  }
+
+  private async grant(): Promise<void> {
+    const machineId = this.machineId;
+    if (!machineId) return;
+    const button = this.$('[data-launch-action="confirm-grant"]') as HTMLButtonElement;
+    button.disabled = true;
+    try {
+      await this.host.grant(machineId);
+      if (!this.dialog?.open || this.machineId !== machineId) return;
+      this.view = "grant";
+      this.selectMachine(machineId);
+    } catch (error) {
+      this.showView("grant");
+      const alert = this.$(".launch-grant-error");
+      alert.textContent = error instanceof Error ? error.message : "Could not enable session launch.";
+      alert.hidden = false;
+    } finally { button.disabled = false; }
   }
 
   private renderKnown(): void {

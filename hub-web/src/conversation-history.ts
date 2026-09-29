@@ -27,6 +27,8 @@ export interface ConversationSend {
   sentAt?: number;
   notificationId?: number;
   stamped?: boolean;
+  /** Device that originated a durable operator turn, or Terminal. */
+  deviceLabel?: string;
   error?: string;
   /** notification_id of the supervisor ask this send answers (in_reply_to on the wire). */
   replyTo?: number;
@@ -192,6 +194,7 @@ export class ConversationHistory {
       existing.value.text = message.text;
       existing.value.state = message.state;
       existing.value.stamped = message.stamped;
+      existing.value.deviceLabel = message.operator_label;
       // A turn already in the thread keeps what it is known to be. A
       // reconnect's history row that omits in_reply_to or the session must
       // not re-open the ask it answered or move it across the session line
@@ -211,6 +214,7 @@ export class ConversationHistory {
         state: message.state,
         notificationId: message.notification_id,
         stamped: message.stamped,
+        deviceLabel: message.operator_label,
         ...(message.reply_to === undefined ? {} : { replyTo: message.reply_to }),
       },
       at,

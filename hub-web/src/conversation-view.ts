@@ -775,6 +775,12 @@ export class ConversationView {
     const bubble = document.createElement("div");
     bubble.className = "bub";
     bubble.dataset.state = send.state;
+    if (send.deviceLabel) {
+      const origin = document.createElement("span");
+      origin.className = "conversation-send-origin";
+      origin.textContent = `from ${send.deviceLabel}`;
+      bubble.append(origin);
+    }
     bubble.append(...paragraphs(document, send.text));
     if (send.state === "sending") {
       const state = document.createElement("span");

@@ -1,4 +1,5 @@
 use crate::hooks::handlers::*;
+use cas_store::PromptQueueStore;
 
 /// Build the per-turn supervisor reminder (≤512 bytes).
 ///
@@ -97,6 +98,32 @@ pub fn handle_user_prompt_submit(
         }
     }
     if is_supervisor {
+        if let (Some(root), Some(prompt), Ok(session)) = (
+            cas_root,
+            input.submitted_prompt(),
+            std::env::var("CAS_FACTORY_SESSION"),
+        ) {
+            let prompt = prompt.trim();
+            let machine_prompt = prompt
+                .lines()
+                .next()
+                .is_some_and(|line| line.contains("[cas #"))
+                || prompt.starts_with("[supervisor reminder]")
+                || prompt.starts_with("[lifecycle")
+                || prompt.starts_with("[system-reminder]");
+            if !session.is_empty()
+                && !prompt.is_empty()
+                && !machine_prompt
+                && matches!(
+                    input.submitted_prompt_origin(),
+                    cas_core::hooks::types::SubmittedPromptOrigin::Operator
+                )
+            {
+                if let Ok(queue) = crate::store::open_prompt_queue_store(root) {
+                    let _ = queue.record_terminal_operator_turn(&session, prompt);
+                }
+            }
+        }
         // Supervisors still skip attribution capture — they don't write code.
         return Ok(HookOutput::with_user_prompt_context(factory_context));
     }

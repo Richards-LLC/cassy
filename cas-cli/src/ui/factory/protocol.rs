@@ -169,10 +169,10 @@ pub struct ConversationHistoryMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<i64>,
     pub device_id: String,
+    /// Display source for the operator turn (paired device label or Terminal).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operator_label: Option<String>,
-    /// Factory session that produced this turn. History is project-scoped, so
-    /// the Commander can mark boundaries when several sessions are hydrated.
+    /// Factory session that produced this turn.
     #[serde(default)]
     pub session: String,
     pub at: String,

@@ -16,6 +16,33 @@ use crate::ui::factory::{
     SessionState, daemon_capabilities,
 };
 
+#[test]
+fn operator_reply_relay_reaches_another_authenticated_device() {
+    let temp = private_tempdir();
+    let auth = AuthStore::open(&temp.path().join("hub"), "machine-test").unwrap();
+    let viewer = AuthContext {
+        device_id: "computer".into(),
+        credential_id: "computer-credential".into(),
+        device_label: "Desktop".into(),
+        operator_label: "Daniel".into(),
+        controller_origin: "https://controller.example".into(),
+        scopes: [Scope::PaneRead].into_iter().collect(),
+        request_id: "request-shared".into(),
+    };
+    let frame = serde_json::to_vec(&DaemonMessage::OperatorReply {
+        notification_id: 42,
+        reply_to: Some(41),
+        message: "From supervisor".into(),
+        summary: "reply".into(),
+        device_id: "phone".into(),
+        operator_label: None,
+        kind: crate::ui::factory::OperatorTurnKind::Answer,
+        attachments: Vec::new(),
+    }).unwrap();
+    assert!(super::server::operator_reply_allowed(&Some((auth, viewer)), &frame));
+    assert!(!super::server::operator_reply_allowed(&None, &frame));
+}
+
 /// Hub state initialization intentionally refuses to traverse symlinked path
 /// components. macOS exposes its temporary directory through `/var`, which is
 /// a symlink to `/private/var`, so fixtures must start at the canonical root.

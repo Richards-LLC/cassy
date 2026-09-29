@@ -907,6 +907,22 @@ jobs:
           SHARD: ${{ matrix.shard }}
         run: scripts/run-verified-tests.sh nextest run --archive-file fast-validation-suite.tar.zst --workspace-remap "$GITHUB_WORKSPACE" --no-fail-fast --partition "count:$SHARD/3"
 
+      # A protected sentinel stands in for an ambient real store on hosted CI.
+      # Running the protocol binary again through the real-store guard catches
+      # a future test that forgets to replace its inherited CAS_ROOT.
+      - name: Prove MCP protocol tests leave the ambient store untouched
+        if: steps.classify-diff.outputs.rust-unaffected != 'true' && matrix.shard == 1
+        run: |
+          set -euo pipefail
+          guard_dir="$(mktemp -d)"
+          trap 'rm -rf "$guard_dir"' EXIT
+          mkdir -p "$guard_dir/.cas"
+          sqlite3 "$guard_dir/.cas/cas.db" 'CREATE TABLE rules (id TEXT, status TEXT, scope TEXT, tags TEXT, paths TEXT, content TEXT);'
+          export CAS_ROOT="$guard_dir/.cas"
+          export CAS_REAL_DBS="$guard_dir/.cas/cas.db"
+          export CARGO_CMD="nextest run --archive-file $GITHUB_WORKSPACE/fast-validation-suite.tar.zst --workspace-remap $GITHUB_WORKSPACE"
+          make -C cas-cli test-real-store-untouched REAL_STORE_ARGS='-p cas --test mcp_protocol_test'
+
   # Keep the protected ruleset's exact full-suite context while the actual
   # test execution fans out after the shared archive. This job runs even when a shard fails and
   # makes a failed or cancelled shard fail the required check.

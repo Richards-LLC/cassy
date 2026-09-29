@@ -2723,6 +2723,155 @@ fn paired_context(
     (credential, context)
 }
 
+#[test]
+fn h2_self_grant_launch_requires_full_control_is_idempotent_and_audited() {
+    use chrono::Utc;
+    let temp = private_tempdir();
+    let root = temp.path().join("hub");
+    let auth = AuthStore::open(&root, "machine-test").unwrap();
+    let now = Utc::now();
+    let full = [
+        Scope::MachineRead,
+        Scope::SessionRead,
+        Scope::PaneRead,
+        Scope::PaneInput,
+        Scope::MessageSend,
+        Scope::PaneInterrupt,
+    ]
+    .into_iter()
+    .collect();
+    let (credential, context) = paired_context(&auth, now, full);
+    let before = std::fs::read_to_string(root.join(AUDIT_LOG_FILE)).unwrap();
+    let scopes = auth.grant_own_session_launch(&context, now).unwrap();
+    assert!(scopes.contains(&Scope::SessionLaunch));
+    assert!(!scopes.contains(&Scope::FactoryManage));
+    assert!(!scopes.contains(&Scope::HubAdmin));
+    assert_eq!(
+        auth.list_devices()
+            .unwrap()
+            .iter()
+            .find(|device| device.device_id == credential.device_id)
+            .unwrap()
+            .scopes,
+        scopes
+    );
+    assert_eq!(
+        auth.grant_own_session_launch(&context, now).unwrap(),
+        scopes
+    );
+    let audit = std::fs::read_to_string(root.join(AUDIT_LOG_FILE)).unwrap();
+    assert_eq!(audit.matches("self_grant_session_launch").count(), 1);
+    assert_eq!(audit.lines().count(), before.lines().count() + 1);
+    assert!(audit.contains("https://controller.example"));
+    let (_read_credential, read_context) = paired_context(&auth, now, Scope::default_read_only());
+    assert_eq!(
+        auth.grant_own_session_launch(&read_context, now)
+            .unwrap_err()
+            .to_string(),
+        "scope denied"
+    );
+    assert!(
+        !auth
+            .list_devices()
+            .unwrap()
+            .iter()
+            .find(|device| device.device_id == read_context.device_id)
+            .unwrap()
+            .scopes
+            .contains(&Scope::SessionLaunch)
+    );
+}
+
+#[tokio::test]
+async fn h2_self_grant_http_rejects_other_scopes_and_read_only_devices() {
+    use chrono::Utc;
+    use p256::ecdsa::SigningKey;
+    use p256::elliptic_curve::rand_core::OsRng;
+
+    let temp = private_tempdir();
+    let auth = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
+    let now = Utc::now();
+    let events = MachineEventBus::new(16);
+    let app = router(
+        HubState::new(
+            SessionCatalog::new(RecordingReadModel::with_sessions(vec![])),
+            Arc::new(PreAuthAuthorizer),
+            MachineIdentity {
+                id: "machine-test".into(),
+            },
+            DaemonConnector::new(SessionMultiplexer::new(8), events.clone()),
+            events,
+        )
+        .with_auth(auth.clone())
+        .with_effective_origin("https://controller.example"),
+    );
+    for scopes in [
+        Scope::default_read_only(),
+        [
+            Scope::MachineRead,
+            Scope::SessionRead,
+            Scope::PaneRead,
+            Scope::PaneInput,
+            Scope::MessageSend,
+            Scope::PaneInterrupt,
+        ]
+        .into_iter()
+        .collect(),
+    ] {
+        let signing = SigningKey::random(&mut OsRng);
+        let invitation = auth
+            .mint_pairing("https://controller.example", scopes.clone(), now)
+            .unwrap();
+        let mut exchange = PairingExchange::test_fixture(
+            invitation.token,
+            "machine-test",
+            "https://controller.example",
+            scopes.clone(),
+        );
+        exchange.public_key_jwk = public_jwk(&signing);
+        let credential = auth.exchange_pairing(exchange, now).unwrap();
+        let send = |body: &'static str| {
+            let proof = sign_dpop(
+                &signing,
+                &credential.credential,
+                "POST",
+                "/v1/auth/scopes",
+                now,
+                &uuid::Uuid::new_v4().to_string(),
+            );
+            Request::post("/v1/auth/scopes")
+                .header("origin", "https://controller.example")
+                .header("authorization", format!("DPoP {}", credential.credential))
+                .header("dpop", proof)
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap()
+        };
+        for body in [
+            r#"{"add":["factory-manage"]}"#,
+            r#"{"add":["session-launch","hub-admin"]}"#,
+        ] {
+            assert_eq!(
+                app.clone().oneshot(send(body)).await.unwrap().status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+        let response = app
+            .clone()
+            .oneshot(send(r#"{"add":["session-launch"]}"#))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            if scopes.contains(&Scope::PaneInput) {
+                StatusCode::OK
+            } else {
+                StatusCode::FORBIDDEN
+            }
+        );
+    }
+}
+
 fn sign_dpop(
     signing: &p256::ecdsa::SigningKey,
     credential: &str,

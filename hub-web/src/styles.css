@@ -3972,6 +3972,7 @@ button.chip:disabled { cursor: default; }
 .launch-summary { flex: 1 0 100%; order: -1; margin: 0; color: var(--text-hi); font-size: var(--fs-meta); }
 .launch-actions .primary { min-width: 7rem; }
 .launch-grant-command { flex-wrap: wrap; justify-content: flex-start; align-items: center; gap: var(--space-2); padding: var(--space-3); background: var(--panel); border-radius: var(--radius-card); }
+.launch-grant-command[hidden], .launch-grant-note[hidden], .launch-grant-error[hidden], .launch-grant [data-launch-action="allow"][hidden] { display: none; }
 .launch-grant-command code { min-width: 0; overflow-wrap: anywhere; color: var(--text-hi); font-size: var(--fs-meta); }
 .launch-grant .launch-lead { color: var(--text-hi); font-size: var(--fs-md); }
 .launch-progress { display: grid; gap: var(--space-2); padding: var(--space-4) 0; border-top: var(--rule-hero) solid var(--color-verdict); }

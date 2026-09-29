@@ -114,6 +114,10 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
             "/v1/auth/refresh",
             post(refresh_credential::<R>).options(preflight::<R>),
         )
+        .route(
+            "/v1/auth/scopes",
+            post(grant_own_scopes::<R>).options(preflight::<R>),
+        )
         .route("/v1/machine", get(machine::<R>).options(preflight::<R>))
         .route("/v1/launch/profiles", get(launch_profiles::<R>).options(preflight::<R>))
         .route(
@@ -1927,6 +1931,56 @@ async fn refresh_credential<R: SessionReadModel>(
     ) {
         Ok(credential) => with_cors(Json(credential).into_response(), &headers),
         Err(error) => with_cors(unauthorized_for(&error), &headers),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SelfGrantRequest {
+    add: Vec<String>,
+}
+
+async fn grant_own_scopes<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    headers: HeaderMap,
+    Json(request): Json<SelfGrantRequest>,
+) -> Response {
+    let Some(auth) = &state.auth else {
+        return with_cors(unauthorized(), &headers);
+    };
+    let context = (|| -> anyhow::Result<AuthContext> {
+        let origin = request_origin(&state, HubAction::Mutation, &headers, "POST")?;
+        let authorization = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .context("authorization required")?;
+        let proof = headers
+            .get("dpop")
+            .and_then(|value| value.to_str().ok())
+            .context("proof required")?;
+        auth.authenticate_dpop(
+            authorization,
+            proof,
+            &origin,
+            "POST",
+            "/v1/auth/scopes",
+            chrono::Utc::now(),
+        )
+    })();
+    let context = match context {
+        Ok(context) => context,
+        Err(error) => return with_cors(unauthorized_for(&error), &headers),
+    };
+    if request.add.len() != 1 || request.add[0] != "session-launch" {
+        return with_cors((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"invalid_scope", "detail":"Only session-launch may be added"}))).into_response(), &headers);
+    }
+    match auth.grant_own_session_launch(&context, chrono::Utc::now()) {
+        Ok(scopes) => with_cors(Json(serde_json::json!({"scopes":scopes})).into_response(), &headers),
+        Err(error) if error.to_string() == "scope denied" => with_cors((StatusCode::FORBIDDEN, Json(serde_json::json!({"error":"scope_denied", "detail":"Pair with a control invitation to allow starting sessions"}))).into_response(), &headers),
+        Err(error) => {
+            tracing::error!(%error, "session launch self-grant failed");
+            with_cors((StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":"grant_failed"}))).into_response(), &headers)
+        }
     }
 }
 

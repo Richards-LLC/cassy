@@ -990,6 +990,7 @@ const launchSheet = new LaunchSheet({
   profiles: (machineId, signal) => launchConnection(machineId).launchProfiles(signal),
   browse: (machineId, root, path, signal) => launchConnection(machineId).browseProjects(root, path, signal),
   launch: (machineId, request) => launchConnection(machineId).launchSession(request),
+  grant: (machineId) => launchConnection(machineId).enableSessionLaunch(),
   sessionListed: async (machineId, session) => (await launchConnection(machineId).refreshSessions()).some((item) => item.name === session),
   open: (machineId, session) => {
     // Land on the new session's supervisor, as a palette jump does.

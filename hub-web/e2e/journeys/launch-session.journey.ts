@@ -49,24 +49,23 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
   const back = page.getByRole("button", { name: "‹ Conversations", exact: true });
 
-  await journey.stage("Without launch permission, the button is the way to allow it", async () => {
+  await journey.stage("A paired controller enables launch from Commander", async () => {
     await journey.open();
     await expect(list.getByRole("button", { name: /cas-src/ })).toBeVisible();
     await expect(page.getByRole("button", { name: "New session", exact: true })).toHaveCount(0);
     await page.getByRole("button", { name: "Allow new sessions" }).tap();
     await expect(sheet).toBeVisible();
-    await expect(sheet.getByText("This browser can't start sessions on Atlas · Linux yet.")).toBeVisible();
-    const command = sheet.locator(".launch-grant-command code");
-    await expect(command).toContainText("cas hub pair --origin");
-    await expect(command).toContainText("pane:interrupt,session:launch");
-    await expect(sheet.getByRole("button", { name: "Copy command" })).toBeVisible();
+    await expect(sheet.getByRole("button", { name: "Allow starting sessions on Atlas · Linux" })).toBeVisible();
+    await sheet.getByRole("button", { name: "Allow starting sessions on Atlas · Linux" }).tap();
+    await expect(sheet.getByText("Allow “Start new sessions” on Atlas · Linux?")).toBeVisible();
+    await sheet.getByRole("button", { name: "Allow starting sessions", exact: true }).tap();
+    await expect(sheet.getByRole("radio", { name: /ledger-api/ })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scrolling").toBe(true);
-    await sheet.getByRole("button", { name: "Close", exact: true }).tap();
+    await sheet.getByRole("button", { name: "Cancel", exact: true }).tap();
     await expect(sheet).toBeHidden();
   });
 
-  await journey.stage("Pair again with launch allowed", async () => {
-    hub.setScopes("atlas", [...SCOPES, "session-launch"]);
+  await journey.stage("The granted scope stays available", async () => {
     await hub.seedPaired();
     await page.reload();
     await expect(page.getByRole("button", { name: "New session", exact: true })).toBeVisible();

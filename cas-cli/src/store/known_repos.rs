@@ -327,8 +327,11 @@ pub fn registry_skip_for_known_roots(
     repo_path: &Path,
     known_roots: &[PathBuf],
 ) -> Option<RegistrySkip> {
-    if let Some(skip) = registry_skip(repo_path) {
-        return Some(skip);
+    let skip = registry_skip(repo_path);
+    // A copy beneath a registered project's artifacts is more specific than
+    // the generic missing-project-root reason, and names the source project.
+    if skip.is_some() && !matches!(&skip, Some(RegistrySkip::NotProjectRoot(_))) {
+        return skip;
     }
 
     let candidate = path_spellings(repo_path);
@@ -343,7 +346,7 @@ pub fn registry_skip_for_known_roots(
             return Some(RegistrySkip::NestedArtifacts { project, artifacts });
         }
     }
-    None
+    skip
 }
 
 /// Every artifacts root this process could plausibly mean: the default

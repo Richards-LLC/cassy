@@ -49,22 +49,31 @@ fn prepare_task_origin_project(value: &mut serde_json::Value, project_id: &str) 
     false
 }
 
-/// Preserve an explicit authoring project; never invent one at push time.
+/// Skills have no stored origin column yet, so only a missing payload origin
+/// may be stamped with the project selected for this push.
 pub(super) fn stamp_row_origin_project(value: &mut serde_json::Value, project_id: &str) -> bool {
     let Some(row) = value.as_object_mut() else {
         return false;
     };
+    if let Some(origin) = row.get("origin_project") {
+        return origin.as_str().is_some_and(|origin| {
+            let origin = origin.trim();
+            !origin.is_empty()
+                && origin != "unknown"
+                && crate::cloud::project_ids_match(origin, project_id)
+        });
+    }
     if row.get("scope").and_then(serde_json::Value::as_str) == Some("global") {
         return true;
     }
-    let origin = row
-        .get("origin_project")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|origin| {
-            *origin != "unknown" && crate::cloud::project_ids_match(origin, project_id)
-        });
-    origin.is_some()
+    let Some(canonical) = canonical_project_id_with_pin(project_id, Some(project_id)) else {
+        return false;
+    };
+    row.insert(
+        "origin_project".to_string(),
+        serde_json::Value::String(canonical),
+    );
+    true
 }
 
 fn stamp_task_dependency_origin_project(value: &mut serde_json::Value, project_id: &str) -> bool {
@@ -967,6 +976,27 @@ impl CloudSyncer {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn team_skill_push_stamps_missing_origin_but_rejects_explicit_unauthored_origin() {
+        let mut local = serde_json::json!({"id": "skill-local", "scope": "project"});
+        assert!(super::stamp_row_origin_project(
+            &mut local,
+            "acme/accounting"
+        ));
+        assert_eq!(local["origin_project"], "acme/accounting");
+
+        for origin in ["unknown", "pulse-card"] {
+            let mut unauthored = serde_json::json!({
+                "id": "skill-foreign", "scope": "project", "origin_project": origin,
+            });
+            assert!(!super::stamp_row_origin_project(
+                &mut unauthored,
+                "acme/accounting"
+            ));
+            assert_eq!(unauthored["origin_project"], origin);
+        }
+    }
+
     #[test]
     fn queued_task_without_origin_is_rejected_without_stamping() {
         let mut value = serde_json::json!({"id": "cas-legacy", "title": "old payload"});

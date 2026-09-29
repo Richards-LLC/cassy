@@ -565,7 +565,7 @@ impl CloudSyncer {
         // cas-8dd8 poison-head fix).
         let mut upsert_entries: Vec<(&QueuedSync, serde_json::Value)> = Vec::new();
         // Entries and rules carry persisted origins; skills still use the
-        // legacy push-time stamp until they get an origin column.
+        // push-time stamp when their payload has no origin.
         let origin_project = if entity_type == "skills" {
             Some(self.personal_push_project_id()?)
         } else {
@@ -1217,6 +1217,28 @@ impl CloudSyncer {
             "client_build".to_string(),
             serde_json::json!(option_env!("CAS_GIT_HASH").unwrap_or("unknown")),
         );
+    }
+}
+
+#[cfg(test)]
+mod skill_push_origin_tests {
+    #[test]
+    fn personal_skill_push_stamps_missing_origin_and_rejects_foreign_origin() {
+        let mut local = serde_json::json!({"id": "skill-local", "scope": "project"});
+        assert!(super::super::team_push::stamp_row_origin_project(
+            &mut local,
+            "acme/accounting"
+        ));
+        assert_eq!(local["origin_project"], "acme/accounting");
+
+        let mut foreign = serde_json::json!({
+            "id": "skill-foreign", "scope": "project", "origin_project": "pulse-card",
+        });
+        assert!(!super::super::team_push::stamp_row_origin_project(
+            &mut foreign,
+            "acme/accounting"
+        ));
+        assert_eq!(foreign["origin_project"], "pulse-card");
     }
 }
 

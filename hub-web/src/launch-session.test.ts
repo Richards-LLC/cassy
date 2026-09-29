@@ -149,7 +149,7 @@ describe("LaunchSheet", () => {
     expect((dialog().querySelector('[data-launch-action="allow"]') as HTMLButtonElement).hidden).toBe(false);
     (dialog().querySelector('[data-launch-action="allow"]') as HTMLButtonElement).click();
     expect(visibleView(dialog())).toEqual(["confirm"]);
-    expect(dialog().querySelector(".launch-confirm-copy")!.textContent).toContain("Start new sessions on Atlas");
+    expect(dialog().querySelector(".launch-confirm-copy")!.textContent).toContain("“Start new sessions” on Atlas");
     (dialog().querySelector('[data-launch-action="confirm-grant"]') as HTMLButtonElement).click();
     await vi.waitFor(() => expect(visibleView(dialog())).toEqual(["form"]));
   });

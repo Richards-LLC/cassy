@@ -57,8 +57,8 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
     await expect(sheet).toBeVisible();
     await expect(sheet.getByRole("button", { name: "Allow starting sessions on Atlas · Linux" })).toBeVisible();
     await sheet.getByRole("button", { name: "Allow starting sessions on Atlas · Linux" }).tap();
-    await expect(sheet.getByText("Allow Start new sessions on Atlas · Linux?")).toBeVisible();
-    await sheet.getByRole("button", { name: "Allow Start new sessions" }).tap();
+    await expect(sheet.getByText("Allow “Start new sessions” on Atlas · Linux?")).toBeVisible();
+    await sheet.getByRole("button", { name: "Allow starting sessions", exact: true }).tap();
     await expect(sheet.getByRole("radio", { name: /ledger-api/ })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scrolling").toBe(true);
     await sheet.getByRole("button", { name: "Cancel", exact: true }).tap();

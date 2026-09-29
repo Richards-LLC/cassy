@@ -270,7 +270,7 @@ export function launchSheetMarkup(): string {
     </section>
     <section class="launch-view launch-confirm" data-launch-view="confirm" hidden>
       <p class="launch-confirm-copy"></p>
-      <div class="dialog-actions"><button type="button" data-launch-action="back-grant">Back</button><button type="button" class="primary" data-launch-action="confirm-grant">Allow Start new sessions</button></div>
+      <div class="dialog-actions"><button type="button" data-launch-action="back-grant">Back</button><button type="button" class="primary" data-launch-action="confirm-grant">Allow starting sessions</button></div>
     </section>
     <section class="launch-view launch-starting" data-launch-view="starting" hidden>
       <div role="status" class="launch-progress"><p class="launch-progress-title"></p><p class="launch-progress-step"></p></div>
@@ -370,7 +370,7 @@ export class LaunchSheet {
       const action = target.closest<HTMLElement>("[data-launch-action]")?.dataset.launchAction;
       if (action === "close") { this.close(); return; }
       if (action === "start") { void this.start(); return; }
-      if (action === "allow") { this.showView("confirm"); this.$(".launch-confirm-copy").textContent = `Allow Start new sessions on ${this.machine()?.label ?? "this machine"}?`; return; }
+      if (action === "allow") { this.showView("confirm"); this.$(".launch-confirm-copy").textContent = `Allow “Start new sessions” on ${this.machine()?.label ?? "this machine"}?`; return; }
       if (action === "back-grant") { this.showView("grant"); return; }
       if (action === "confirm-grant") { void this.grant(); return; }
       if (action === "back") { this.showView("form"); this.focusFirst(); return; }

@@ -53,6 +53,8 @@ pub enum CloudCommands {
     Unlink(CloudUnlinkArgs),
     /// Remove foreign-project entities from local DB and re-pull
     PurgeForeign(CloudPurgeForeignArgs),
+    /// Claim rows with unknown provenance as authored by this project
+    AdoptUnknown(CloudAdoptUnknownArgs),
 }
 
 /// Subcommands for `cas cloud team`
@@ -248,6 +250,10 @@ pub struct CloudPurgeForeignArgs {
     #[arg(long)]
     pub dry_run: bool,
 
+    /// Also delete rows whose origin and session cwd cannot establish an owner.
+    #[arg(long)]
+    pub include_unknown: bool,
+
     /// Proceed even when the recoverability guard refuses (stale pull state, or
     /// local rows that were never pushed to cloud). Classifier hard stops for a
     /// task majority or proven rule cannot be overridden. Destructive — the
@@ -268,6 +274,13 @@ pub struct CloudPurgeForeignArgs {
     /// stale and the purge is refused without --force.
     #[arg(long, default_value_t = PURGE_STALE_THRESHOLD_DAYS)]
     pub stale_days: i64,
+}
+
+#[derive(Parser)]
+pub struct CloudAdoptUnknownArgs {
+    /// Preview rows that would be claimed without changing the database.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Parser)]
@@ -429,6 +442,7 @@ pub fn execute(cmd: &CloudCommands, cli: &Cli, cas_root: &Path) -> anyhow::Resul
         CloudCommands::TeamMemories(args) => execute_team_memories(args, cli, cas_root),
         CloudCommands::Unlink(args) => execute_unlink(args, cli, cas_root),
         CloudCommands::PurgeForeign(args) => execute_purge_foreign(args, cli, cas_root),
+        CloudCommands::AdoptUnknown(args) => execute_adopt_unknown(args, cli, cas_root),
     }
 }
 
@@ -5370,9 +5384,8 @@ pub struct PurgeEntity {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PurgeEvidence {
-    /// `origin_project` for the persisted project field, or `peer-evidence`
-    /// when the doctor's cross-database activity classifier overrode a
-    /// backfilled current-project value.
+    /// Persisted origin, session cwd, peer evidence, or an explicitly included
+    /// unknown row.
     pub source: &'static str,
     /// Stored origin project, or the peer project whose activity proves the
     /// row's home.
@@ -5399,10 +5412,11 @@ impl PurgeEntity {
     }
 
     fn evidence_label(&self) -> String {
-        if self.evidence.source == "peer-evidence" {
-            format!("peer-evidence + home project: {}", self.evidence.project)
-        } else {
-            format!("origin_project: {}", self.evidence.project)
+        match self.evidence.source {
+            "peer-evidence" => format!("peer-evidence + home project: {}", self.evidence.project),
+            "session_cwd" => format!("session cwd: {}", self.evidence.project),
+            "unknown" => "unknown provenance (explicitly included)".to_string(),
+            _ => format!("origin_project: {}", self.evidence.project),
         }
     }
 }
@@ -5529,9 +5543,8 @@ pub struct PurgeForeignAnalysis {
     pub collision_count: usize,
 }
 
-/// Canonical attribution fields that have existed in cloud payloads. The local
-/// content stores do not currently persist one for entries, rules, or skills,
-/// so an absent field means that kind is not an eligible purge candidate.
+/// Canonical attribution fields accepted by old and new local content stores.
+/// An absent field remains ineligible for default purge classification.
 const PURGE_PROJECT_COLUMNS: &[&str] = &[
     "origin_project",
     "project_canonical_id",
@@ -5603,7 +5616,10 @@ fn attributed_rows(
     let rows = mapped.collect::<Result<Vec<_>, _>>()?;
     Ok(rows
         .into_iter()
-        .filter(|(_, stored_project)| !project_ids_match(stored_project, current_project))
+        .filter(|(_, stored_project)| {
+            !stored_project.trim().eq_ignore_ascii_case("unknown")
+                && !project_ids_match(stored_project, current_project)
+        })
         .map(|((id, label), stored_project)| {
             PurgeEntity::with_evidence(kind, id, label, "origin_project", stored_project)
         })
@@ -5691,25 +5707,18 @@ fn has_external_task_dependency(
 
 fn count_proven_attributed_rules(
     conn: &rusqlite::Connection,
-    current_project: &str,
+    delete_set: &PurgeDeleteSet,
 ) -> anyhow::Result<usize> {
-    let Some(project_column) = first_existing_project_column(conn, "rules", PURGE_PROJECT_COLUMNS)?
-    else {
-        return Ok(0);
-    };
     if first_existing_project_column(conn, "rules", &["status"])?.is_none() {
         return Ok(0);
     }
-    let sql = format!(
-        "SELECT {project_column} FROM rules
-         WHERE lower(status) = 'proven'
-           AND NULLIF(trim({project_column}), '') IS NOT NULL"
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
     let mut count = 0;
-    for row in rows {
-        if !project_ids_match(&row?, current_project) {
+    for row in &delete_set.rules {
+        if conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM rules WHERE id = ?1 AND lower(status) = 'proven')",
+            [&row.id],
+            |result| result.get::<_, bool>(0),
+        )? {
             count += 1;
         }
     }
@@ -5793,6 +5802,15 @@ pub(crate) fn collect_purge_delete_set_with_report(
     current_project: &str,
     report: &crate::cli::foreign_rows::ForeignRowReport,
 ) -> anyhow::Result<PurgeForeignAnalysis> {
+    collect_purge_delete_set_with_report_options(conn, current_project, report, false)
+}
+
+fn collect_purge_delete_set_with_report_options(
+    conn: &rusqlite::Connection,
+    current_project: &str,
+    report: &crate::cli::foreign_rows::ForeignRowReport,
+    include_unknown: bool,
+) -> anyhow::Result<PurgeForeignAnalysis> {
     let mut delete_set = collect_purge_delete_set(conn, current_project)?;
     let collision_ids = report
         .collisions
@@ -5845,9 +5863,37 @@ pub(crate) fn collect_purge_delete_set_with_report(
         ));
         known_task_ids.insert(foreign.id.clone());
     }
+    for row in &report.provenance {
+        let (source, project) = match &row.state {
+            crate::cli::foreign_rows::ProvenanceState::Foreign { project, source } =>
+                (*source, project.as_str()),
+            crate::cli::foreign_rows::ProvenanceState::Unknown if include_unknown =>
+                ("unknown", "unknown"),
+            _ => continue,
+        };
+        let (rows, kind) = match row.kind {
+            "task" => (&mut delete_set.tasks, "task"),
+            "entry" => (&mut delete_set.entries, "entry"),
+            "rule" => (&mut delete_set.rules, "rule"),
+            _ => continue,
+        };
+        if rows.iter().any(|existing| existing.id == row.id) {
+            continue;
+        }
+        if kind == "task"
+            && (collision_ids.contains(row.id.as_str())
+                || is_accepted_proposal_task(conn, &row.id, current_project)?
+                || has_external_task_dependency(conn, &row.id)?)
+        {
+            continue;
+        }
+        rows.push(PurgeEntity::with_evidence(kind, &row.id, &row.label, source, project));
+    }
     delete_set
         .tasks
         .sort_by(|left, right| left.id.cmp(&right.id));
+    delete_set.entries.sort_by(|left, right| left.id.cmp(&right.id));
+    delete_set.rules.sort_by(|left, right| left.id.cmp(&right.id));
     delete_set.dependencies = count_purge_dependencies(conn, &delete_set.tasks)?;
 
     let mut retained_foreign_tasks = Vec::new();
@@ -6360,6 +6406,7 @@ fn inspect_purge_state(
     total_tasks: usize,
     stale_days: i64,
     allow_majority_foreign: bool,
+    include_unknown: bool,
 ) -> anyhow::Result<(PurgeForeignAnalysis, Vec<PurgeRefusal>)> {
     let db_path = cas_root.join("cas.db");
     let conn = rusqlite::Connection::open(&db_path)?;
@@ -6368,8 +6415,10 @@ fn inspect_purge_state(
     // A failed read is fatal to the purge preview: an incomplete peer scan
     // must not be presented as a complete delete set.
     let doctor_report = crate::cli::foreign_rows::scan(cas_root)?;
-    let analysis = collect_purge_delete_set_with_report(&conn, project_id, &doctor_report)?;
-    let proven_rule_count = count_proven_attributed_rules(&conn, project_id)?;
+    let analysis = collect_purge_delete_set_with_report_options(
+        &conn, project_id, &doctor_report, include_unknown,
+    )?;
+    let proven_rule_count = count_proven_attributed_rules(&conn, &analysis.delete_set)?;
     let last_pull_at: Option<String> = conn
         .query_row(
             "SELECT value FROM sync_metadata WHERE key = 'last_pull_at'",
@@ -6399,6 +6448,65 @@ pub(crate) fn execute_purge_foreign(
     cas_root: &Path,
 ) -> anyhow::Result<()> {
     execute_purge_foreign_with_output(args, cli, cas_root, true)
+}
+
+fn execute_adopt_unknown(
+    args: &CloudAdoptUnknownArgs,
+    cli: &Cli,
+    cas_root: &Path,
+) -> anyhow::Result<()> {
+    use crate::cli::foreign_rows::ProvenanceState;
+
+    let project = crate::cloud::resolve_canonical_id(cas_root)
+        .ok_or_else(|| anyhow::anyhow!("cannot resolve this project's canonical id"))?;
+    let db_path = cas_root.join("cas.db");
+    let mut conn = rusqlite::Connection::open(&db_path)?;
+    let unknown = crate::cli::foreign_rows::read_provenance(&conn, cas_root, &project)?
+        .into_iter()
+        .filter(|row| matches!(&row.state, ProvenanceState::Unknown))
+        .collect::<Vec<_>>();
+    if !args.dry_run && !unknown.is_empty() {
+        let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+        let backup = cas_root.join(format!("cas.db.pre-adopt-unknown-{timestamp}"));
+        backup_database_crash_safe(&db_path, &backup)?;
+        let tx = conn.transaction()?;
+        let mut changed = 0;
+        for row in &unknown {
+            let table = match row.kind {
+                "task" => "tasks",
+                "entry" => "entries",
+                "rule" => "rules",
+                _ => continue,
+            };
+            anyhow::ensure!(
+                first_existing_project_column(&tx, table, &["origin_project"])?.is_some(),
+                "{table} has no origin_project column; run `cas update --schema-only` first"
+            );
+            changed += tx.execute(
+                &format!("UPDATE {table} SET origin_project = ?1 WHERE id = ?2 AND (origin_project IS NULL OR trim(origin_project) = '' OR lower(trim(origin_project)) = 'unknown')"),
+                rusqlite::params![project, row.id],
+            )?;
+        }
+        anyhow::ensure!(changed == unknown.len(), "unknown rows changed during adoption; transaction rolled back");
+        tx.commit()?;
+    }
+    let counts = ["task", "entry", "rule"].map(|kind| unknown.iter().filter(|row| row.kind == kind).count());
+    if cli.json {
+        println!("{}", serde_json::json!({
+            "dry_run": args.dry_run,
+            "project": project,
+            "unknown": {"tasks": counts[0], "entries": counts[1], "rules": counts[2]},
+            "claimed": if args.dry_run { 0 } else { unknown.len() },
+        }));
+    } else {
+        println!(
+            "{} {} unknown task(s), {} entry(s), {} rule(s) for project `{project}`.",
+            if args.dry_run { "Would claim" } else { "Claimed" },
+            counts[0], counts[1], counts[2]
+        );
+        if args.dry_run { println!("Run `cas cloud adopt-unknown` to claim these rows."); }
+    }
+    Ok(())
 }
 
 /// Execute a foreign-row purge while optionally leaving rendering to the
@@ -6464,6 +6572,7 @@ fn execute_purge_foreign_with_output(
         tasks_before,
         args.stale_days,
         args.allow_majority_foreign,
+        args.include_unknown,
     )?;
     let mut delete_set_hash = purge_delete_set_hash(&analysis.delete_set);
 
@@ -6479,6 +6588,7 @@ fn execute_purge_foreign_with_output(
             fresh_total_tasks,
             args.stale_days,
             args.allow_majority_foreign,
+            args.include_unknown,
         )?;
         if fresh_total_tasks != tasks_before {
             anyhow::bail!(
@@ -6501,6 +6611,7 @@ fn execute_purge_foreign_with_output(
                 "{}",
                 serde_json::json!({
                     "dry_run": true,
+                    "include_unknown": args.include_unknown,
                     "project_id": project_id,
                     "entities_before": {
                         "entries": entries_before,
@@ -6559,6 +6670,10 @@ fn execute_purge_foreign_with_output(
         fmt.write_muted("  Project: ")?;
         fmt.write_raw(&project_id)?;
         fmt.newline()?;
+        if args.include_unknown {
+            fmt.write_raw("  Unknown provenance: included by --include-unknown")?;
+            fmt.newline()?;
+        }
         fmt.write_muted("  Before:  ")?;
         fmt.write_raw(&format!(
             "{} entries, {} tasks, {} rules, {} skills ({} total)",
@@ -6874,6 +6989,7 @@ pub(crate) fn doctor_purge_foreign(
 ) -> anyhow::Result<bool> {
     let dry_run = CloudPurgeForeignArgs {
         dry_run: true,
+        include_unknown: false,
         force: false,
         allow_majority_foreign: false,
         yes: false,
@@ -6890,6 +7006,7 @@ pub(crate) fn doctor_purge_foreign(
         tasks_before,
         PURGE_STALE_THRESHOLD_DAYS,
         false,
+        false,
     )?;
     if !refusals.is_empty() || !apply {
         return Ok(false);
@@ -6897,6 +7014,7 @@ pub(crate) fn doctor_purge_foreign(
 
     let apply_args = CloudPurgeForeignArgs {
         dry_run: false,
+        include_unknown: false,
         force: false,
         allow_majority_foreign: false,
         yes: true,
@@ -8097,6 +8215,97 @@ mod purge_foreign_safety_tests {
     use crate::types::Task;
     use rusqlite::Connection;
     use tempfile::TempDir;
+
+    #[test]
+    fn purge_provenance_covers_entries_rules_and_opt_in_unknown_rows() {
+        use crate::cli::foreign_rows::{ForeignRowReport, ProvenanceRow, ProvenanceState};
+        let conn = Connection::open_in_memory().unwrap();
+        seed_project_scoped_db(&conn);
+        conn.execute_batch(
+            "INSERT INTO entries VALUES ('cwd-entry','foreign entry','text','cas-src'), ('unknown-entry','unknown entry','text',NULL), ('tagged-unknown','tagged unknown','text','unknown');
+             INSERT INTO rules VALUES ('cwd-rule','foreign rule','draft','cas-src'), ('unknown-rule','unknown rule','draft',NULL);",
+        ).unwrap();
+        let report = ForeignRowReport {
+            provenance: vec![
+                ProvenanceRow { kind: "entry", id: "cwd-entry".into(), label: "foreign entry".into(), state: ProvenanceState::Foreign { project: "other".into(), source: "session_cwd" } },
+                ProvenanceRow { kind: "rule", id: "cwd-rule".into(), label: "foreign rule".into(), state: ProvenanceState::Foreign { project: "other".into(), source: "session_cwd" } },
+                ProvenanceRow { kind: "task", id: "legacy".into(), label: "legacy local task".into(), state: ProvenanceState::Unknown },
+                ProvenanceRow { kind: "entry", id: "unknown-entry".into(), label: "unknown entry".into(), state: ProvenanceState::Unknown },
+                ProvenanceRow { kind: "entry", id: "tagged-unknown".into(), label: "tagged unknown".into(), state: ProvenanceState::Unknown },
+                ProvenanceRow { kind: "rule", id: "unknown-rule".into(), label: "unknown rule".into(), state: ProvenanceState::Unknown },
+            ],
+            ..Default::default()
+        };
+        let default = collect_purge_delete_set_with_report_options(&conn, "cas-src", &report, false).unwrap();
+        assert!(default.delete_set.entries.iter().any(|row| row.id == "cwd-entry"));
+        assert!(default.delete_set.rules.iter().any(|row| row.id == "cwd-rule"));
+        assert!(!default.delete_set.entries.iter().any(|row| row.id == "unknown-entry"));
+        assert!(!default.delete_set.entries.iter().any(|row| row.id == "tagged-unknown"));
+        assert!(!default.delete_set.rules.iter().any(|row| row.id == "unknown-rule"));
+        let included = collect_purge_delete_set_with_report_options(&conn, "cas-src", &report, true).unwrap();
+        assert!(included.delete_set.tasks.iter().any(|row| row.id == "legacy"));
+        assert!(included.delete_set.entries.iter().any(|row| row.id == "unknown-entry"));
+        assert!(included.delete_set.entries.iter().any(|row| row.id == "tagged-unknown"));
+        assert!(included.delete_set.rules.iter().any(|row| row.id == "unknown-rule"));
+    }
+
+    #[test]
+    fn foreign_entry_and_rule_delete_after_crash_safe_backup() {
+        let temp = TempDir::new().unwrap();
+        let db = temp.path().join("cas.db");
+        let backup = temp.path().join("before-purge.db");
+        let mut conn = Connection::open(&db).unwrap();
+        seed_project_scoped_db(&conn);
+        conn.execute_batch(
+            "INSERT INTO entries VALUES ('foreign-entry','foreign entry','text','other');
+             INSERT INTO rules VALUES ('foreign-rule','foreign rule','draft','other');",
+        ).unwrap();
+        let mut set = collect_purge_delete_set(&conn, "cas-src").unwrap();
+        set.tasks.clear();
+        set.dependencies = 0;
+        assert_eq!(set.entries.len(), 1);
+        assert_eq!(set.rules.len(), 1);
+        backup_database_crash_safe(&db, &backup).unwrap();
+        assert_eq!(delete_purge_rows(&mut conn, &set).unwrap(), 2);
+        let count: i64 = conn.query_row("SELECT count(*) FROM entries WHERE id = 'foreign-entry'", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 0);
+        let saved = Connection::open(&backup).unwrap();
+        let count: i64 = saved.query_row("SELECT count(*) FROM entries WHERE id = 'foreign-entry'", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 1);
+        let count: i64 = saved.query_row("SELECT count(*) FROM rules WHERE id = 'foreign-rule'", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn adopt_unknown_stamps_local_origin_only_after_apply() {
+        let temp = TempDir::new().unwrap();
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        std::fs::write(cas_root.join("config.toml"), "[project]\ncanonical_id = \"local\"\n").unwrap();
+        let conn = Connection::open(cas_root.join("cas.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tasks (id TEXT, title TEXT, origin_project TEXT);
+             CREATE TABLE entries (id TEXT, title TEXT, content TEXT, origin_project TEXT);
+             CREATE TABLE rules (id TEXT, content TEXT, origin_project TEXT);
+             INSERT INTO tasks VALUES ('t','task','unknown');
+             INSERT INTO entries VALUES ('e','entry','text',NULL);
+             INSERT INTO rules VALUES ('r','rule','unknown');",
+        ).unwrap();
+        drop(conn);
+        let cli = Cli { json: true, full: false, verbose: false, command: None };
+        execute_adopt_unknown(&CloudAdoptUnknownArgs { dry_run: true }, &cli, &cas_root).unwrap();
+        let conn = Connection::open(cas_root.join("cas.db")).unwrap();
+        let before: Option<String> = conn.query_row("SELECT origin_project FROM entries WHERE id = 'e'", [], |row| row.get(0)).unwrap();
+        assert_eq!(before, None);
+        drop(conn);
+        execute_adopt_unknown(&CloudAdoptUnknownArgs { dry_run: false }, &cli, &cas_root).unwrap();
+        let conn = Connection::open(cas_root.join("cas.db")).unwrap();
+        for table in ["tasks", "entries", "rules"] {
+            let origin: String = conn.query_row(&format!("SELECT origin_project FROM {table}"), [], |row| row.get(0)).unwrap();
+            assert_eq!(origin, "local");
+        }
+        assert!(std::fs::read_dir(&cas_root).unwrap().any(|entry| entry.unwrap().file_name().to_string_lossy().starts_with("cas.db.pre-adopt-unknown-")));
+    }
 
     fn seed_project_scoped_db(conn: &Connection) {
         conn.execute_batch(

@@ -3535,6 +3535,25 @@ fn output_foreign_rows_detail(
     ))?;
     fmt.newline()?;
 
+    for kind in ["task", "entry", "rule"] {
+        let mut authored = 0;
+        let mut foreign = 0;
+        let mut unknown = 0;
+        for row in report.provenance.iter().filter(|row| row.kind == kind) {
+            match &row.state {
+                crate::cli::foreign_rows::ProvenanceState::Authored => authored += 1,
+                crate::cli::foreign_rows::ProvenanceState::Foreign { .. } => foreign += 1,
+                crate::cli::foreign_rows::ProvenanceState::Unknown => unknown += 1,
+            }
+        }
+        fmt.write_raw(&format!(
+            "  {kind}s: {authored} authored, {foreign} foreign, {unknown} unknown"
+        ))?;
+        fmt.newline()?;
+    }
+    fmt.write_muted("  Review: cas cloud purge-foreign --dry-run; unknown: cas cloud adopt-unknown --dry-run")?;
+    fmt.newline()?;
+
     for peer in &report.peers_unreadable {
         fmt.warning(&format!(
             "NOT COMPARED: {} ({}) — {}",
@@ -6789,6 +6808,26 @@ mod tests {
         );
         // AC2: the identity constraint is stated where a human would act on it.
         assert!(check.message.contains("(id, title)"), "{}", check.message);
+    }
+
+    #[test]
+    fn doctor_names_task_entry_rule_provenance_counts_and_commands() {
+        use crate::cli::foreign_rows::{ForeignRowReport, ProvenanceRow, ProvenanceState};
+        let report = ForeignRowReport {
+            provenance: vec![
+                ProvenanceRow { kind: "task", id: "t".into(), label: "task".into(), state: ProvenanceState::Foreign { project: "other".into(), source: "origin_project" } },
+                ProvenanceRow { kind: "entry", id: "e".into(), label: "entry".into(), state: ProvenanceState::Unknown },
+                ProvenanceRow { kind: "rule", id: "r".into(), label: "rule".into(), state: ProvenanceState::Authored },
+            ],
+            ..Default::default()
+        };
+        let check = foreign_rows_check(Ok(&report), None, 0);
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(check.message.contains("tasks: 0 authored, 1 foreign, 0 unknown"));
+        assert!(check.message.contains("entries: 0 authored, 0 foreign, 1 unknown"));
+        assert!(check.message.contains("rules: 1 authored, 0 foreign, 0 unknown"));
+        assert!(check.message.contains("cas cloud purge-foreign --dry-run"));
+        assert!(check.message.contains("cas cloud adopt-unknown --dry-run"));
     }
 
     #[test]

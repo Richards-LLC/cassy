@@ -26,9 +26,9 @@
 //!
 //! # Attribution
 //!
-//! Local task rows carry no project column, so "foreign" cannot be read off a
-//! single database. Instead each project database on the host (from the
-//! `known_repos` registry) is compared, and attribution uses **local-activity
+//! Legacy task origins can be stamped with the wrong local project. Each
+//! project database on the host (from the `known_repos` registry) is therefore
+//! compared, and attribution also uses **local-activity
 //! evidence**: lease history, leases, verifications, worker receipts, spawn
 //! queue entries — tables that are never synced through the cloud and so only
 //! exist in the database where the work actually happened. Evidence is
@@ -40,6 +40,10 @@
 //!
 //! This module never writes: every database (including the local one) is opened
 //! `SQLITE_OPEN_READ_ONLY`.
+//!
+//! Tasks, entries and rules also carry persisted origin since m260. Their
+//! session cwd is checked independently; a foreign cwd overrides a misleading
+//! local origin, while missing evidence stays unknown.
 //!
 //! Knowledge pages do not need the peer/evidence heuristic: m226 gives them a
 //! durable local-vs-cloud-pull origin and the exact project id accepted from the
@@ -192,6 +196,27 @@ pub struct SkippedPeer {
     pub reason: String,
 }
 
+/// Ownership of one content row, based on persisted origin and the session
+/// that created it. A foreign session wins over a local origin because older
+/// migrations stamped some already-contaminated rows with the local project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProvenanceState {
+    Authored,
+    Foreign {
+        project: String,
+        source: &'static str,
+    },
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvenanceRow {
+    pub kind: &'static str,
+    pub id: String,
+    pub label: String,
+    pub state: ProvenanceState,
+}
+
 /// Result of a read-only contamination scan of one project database.
 #[derive(Debug, Clone, Default)]
 pub struct ForeignRowReport {
@@ -211,6 +236,7 @@ pub struct ForeignRowReport {
     pub local_knowledge_page_count: usize,
     pub foreign_knowledge_pages: Vec<ForeignKnowledgePage>,
     pub unattributed_knowledge_pages: Vec<UnattributedKnowledgePage>,
+    pub provenance: Vec<ProvenanceRow>,
 }
 
 impl ForeignRowReport {
@@ -235,6 +261,10 @@ impl ForeignRowReport {
             && self.unattributed.is_empty()
             && self.foreign_knowledge_pages.is_empty()
             && self.unattributed_knowledge_pages.is_empty()
+            && self
+                .provenance
+                .iter()
+                .all(|row| matches!(&row.state, ProvenanceState::Authored))
     }
 
     /// Distinct projects the foreign rows are attributed to, sorted.
@@ -257,6 +287,24 @@ impl ForeignRowReport {
     /// DB(s) compared" with no explanation of what happened to the other row.
     pub fn summary(&self) -> String {
         let mut summary = self.comparison_summary();
+        if !self.provenance.is_empty() {
+            let counts = ["task", "entry", "rule"].map(|kind| {
+                let rows = self.provenance.iter().filter(|row| row.kind == kind);
+                let (mut authored, mut foreign, mut unknown) = (0, 0, 0);
+                for row in rows {
+                    match &row.state {
+                        ProvenanceState::Authored => authored += 1,
+                        ProvenanceState::Foreign { .. } => foreign += 1,
+                        ProvenanceState::Unknown => unknown += 1,
+                    }
+                }
+                format!("{kind}s: {authored} authored, {foreign} foreign, {unknown} unknown")
+            });
+            if !summary.is_empty() {
+                summary.push_str("; ");
+            }
+            summary.push_str(&format!("provenance — {}", counts.join("; ")));
+        }
         if !self.peers_skipped.is_empty() {
             let named = self
                 .peers_skipped
@@ -304,7 +352,11 @@ impl ForeignRowReport {
             }
             return summary;
         }
-        if self.is_clean() {
+        if self.foreign.is_empty()
+            && self.unattributed.is_empty()
+            && self.foreign_knowledge_pages.is_empty()
+            && self.unattributed_knowledge_pages.is_empty()
+        {
             // The honest zero: a bare "clean" is indistinguishable from a scan
             // that compared nothing. Always say what was actually covered —
             // rows scanned, peers compared, peers that could not be read.
@@ -381,6 +433,15 @@ across projects, so deleting by id alone destroys live work.",
             text.push_str(
                 " Knowledge pages are attributed independently: inspect the named rel_path and \
 origin_project_id before removing a page, then re-run a scoped pull and this audit.",
+            );
+        }
+        if self
+            .provenance
+            .iter()
+            .any(|row| matches!(&row.state, ProvenanceState::Unknown))
+        {
+            text.push_str(
+                " Unknown task, entry and rule rows stay out of the default purge. Run `cas cloud adopt-unknown --dry-run` to review local claims, or `cas cloud purge-foreign --dry-run --include-unknown` to review deletion; apply only the chosen plan.",
             );
         }
         text
@@ -490,6 +551,18 @@ origin_project_id before removing a page, then re-run a scoped pull and this aud
                 })).collect::<Vec<_>>(),
                 "identity_predicate": "byte-exact project_canonical_id/project_id match (shared with cloud pull ingest)",
             },
+            "provenance": ["task", "entry", "rule"].iter().map(|kind| {
+                let rows = self.provenance.iter().filter(|row| row.kind == *kind);
+                let (mut authored, mut foreign, mut unknown) = (0, 0, 0);
+                for row in rows {
+                    match &row.state {
+                        ProvenanceState::Authored => authored += 1,
+                        ProvenanceState::Foreign { .. } => foreign += 1,
+                        ProvenanceState::Unknown => unknown += 1,
+                    }
+                }
+                (kind.to_string(), serde_json::json!({"authored": authored, "foreign": foreign, "unknown": unknown}))
+            }).collect::<serde_json::Map<String, serde_json::Value>>(),
             "clean": self.is_clean(),
             "remediation": self.remediation(),
         })
@@ -699,6 +772,212 @@ fn open_read_only(db_path: &Path) -> anyhow::Result<rusqlite::Connection> {
     Ok(conn)
 }
 
+fn has_table(conn: &rusqlite::Connection, table: &str) -> anyhow::Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        [table],
+        |row| row.get(0),
+    )?)
+}
+
+fn has_column(conn: &rusqlite::Connection, table: &str, column: &str) -> anyhow::Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let names = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for name in names {
+        if name? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Read task, entry and rule provenance without opening a writable store.
+/// Older schemas without the new columns remain auditable as unknown rows.
+pub fn read_provenance(
+    conn: &rusqlite::Connection,
+    cas_root: &Path,
+    current_project: &str,
+) -> anyhow::Result<Vec<ProvenanceRow>> {
+    let mut sessions = HashMap::new();
+    if has_table(conn, "sessions")? {
+        let mut stmt = conn.prepare("SELECT session_id, cwd FROM sessions")?;
+        for row in stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })? {
+            let (id, cwd) = row?;
+            sessions.insert(id, cwd);
+        }
+    }
+    let mut cwd_cache = HashMap::new();
+    let mut entry_sessions: HashMap<String, Option<String>> = HashMap::new();
+    let mut rows = Vec::new();
+    for (kind, table, label, link) in [
+        ("task", "tasks", "title", "event"),
+        (
+            "entry",
+            "entries",
+            "COALESCE(NULLIF(title, ''), substr(content, 1, 80))",
+            "session_id",
+        ),
+        ("rule", "rules", "substr(content, 1, 80)", "source_ids"),
+    ] {
+        if !has_table(conn, table)? {
+            continue;
+        }
+        let origin = if has_column(conn, table, "origin_project")? {
+            "origin_project"
+        } else {
+            "NULL"
+        };
+        let link_sql = match link {
+            "event" if has_table(conn, "events")? => {
+                "(SELECT e.session_id FROM events e WHERE e.entity_type = 'task' AND e.entity_id = tasks.id AND e.session_id IS NOT NULL ORDER BY e.id LIMIT 1)"
+            }
+            "event" => "NULL",
+            "session_id" if has_column(conn, table, "session_id")? => "session_id",
+            "source_ids" if has_column(conn, table, "source_ids")? => "source_ids",
+            _ => "NULL",
+        };
+        let sql = format!("SELECT id, {label}, {origin}, {link_sql} FROM {table} ORDER BY id");
+        let mut stmt = conn.prepare(&sql)?;
+        let mapped = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })?;
+        for row in mapped {
+            let (id, label, origin, link_value) = row?;
+            let session_ids = if kind == "rule" {
+                let source_ids: Vec<String> = link_value
+                    .as_deref()
+                    .map(|raw| {
+                        serde_json::from_str(raw).unwrap_or_else(|_| {
+                            raw.split(',').map(|id| id.trim().to_string()).collect()
+                        })
+                    })
+                    .unwrap_or_default();
+                source_ids
+                    .iter()
+                    .filter_map(|source_id| entry_sessions.get(source_id).cloned().flatten())
+                    .collect::<Vec<_>>()
+            } else {
+                if kind == "entry" {
+                    entry_sessions.insert(id.clone(), link_value.clone());
+                }
+                link_value.into_iter().collect()
+            };
+            let session_states = session_ids
+                .iter()
+                .filter_map(|id| sessions.get(id))
+                .map(|cwd| {
+                    cwd_cache
+                        .entry(cwd.clone())
+                        .or_insert_with(|| classify_session_cwd(cwd, cas_root, current_project))
+                        .clone()
+                })
+                .collect::<Vec<_>>();
+            let session_state = session_states
+                .iter()
+                .find(|state| matches!(state, ProvenanceState::Foreign { .. }))
+                .or_else(|| {
+                    session_states
+                        .iter()
+                        .find(|state| matches!(state, ProvenanceState::Authored))
+                })
+                .cloned();
+            let state = classify_origin(origin.as_deref(), session_state, current_project);
+            rows.push(ProvenanceRow {
+                kind,
+                id,
+                label,
+                state,
+            });
+        }
+    }
+    Ok(rows)
+}
+
+fn classify_session_cwd(cwd: &str, cas_root: &Path, current_project: &str) -> ProvenanceState {
+    if !Path::new(cwd).is_absolute() {
+        return ProvenanceState::Unknown;
+    }
+    let Ok(cwd) = Path::new(cwd).canonicalize() else {
+        return ProvenanceState::Unknown;
+    };
+    let Ok(found) = crate::store::find_cas_root_ignoring_env(&cwd) else {
+        let top = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&cwd)
+            .args(["rev-parse", "--show-toplevel"])
+            .output()
+            .ok();
+        return top
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .and_then(|path| Path::new(path.trim()).canonicalize().ok())
+            .filter(|top| {
+                crate::store::known_repos::is_project_root(top)
+                    && cas_root
+                        .parent()
+                        .and_then(|root| root.canonicalize().ok())
+                        .as_ref()
+                        != Some(top)
+            })
+            .map(|top| ProvenanceState::Foreign {
+                project: top.display().to_string(),
+                source: "session_cwd",
+            })
+            .unwrap_or(ProvenanceState::Unknown);
+    };
+    if found.canonicalize().ok() == cas_root.canonicalize().ok()
+        || crate::store::known_repos::project_inode_key(&found).is_some_and(|inode| {
+            crate::store::known_repos::project_inode_key(cas_root) == Some(inode)
+        })
+    {
+        ProvenanceState::Authored
+    } else {
+        let project = crate::cloud::resolve_canonical_id(&found)
+            .unwrap_or_else(|| found.parent().unwrap_or(&found).display().to_string());
+        if crate::cloud::project_ids_match(&project, current_project) {
+            ProvenanceState::Authored
+        } else {
+            ProvenanceState::Foreign {
+                project,
+                source: "session_cwd",
+            }
+        }
+    }
+}
+
+fn classify_origin(
+    origin: Option<&str>,
+    session: Option<ProvenanceState>,
+    current_project: &str,
+) -> ProvenanceState {
+    if let Some(ProvenanceState::Foreign { project, .. }) = session.as_ref() {
+        return ProvenanceState::Foreign {
+            project: project.clone(),
+            source: "session_cwd",
+        };
+    }
+    let origin = origin
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("unknown"));
+    match origin {
+        Some(project) if crate::cloud::project_ids_match(project, current_project) => {
+            ProvenanceState::Authored
+        }
+        Some(project) => ProvenanceState::Foreign {
+            project: project.to_string(),
+            source: "origin_project",
+        },
+        None => session.unwrap_or(ProvenanceState::Unknown),
+    }
+}
+
 fn snapshot_from_conn(
     conn: &rusqlite::Connection,
     db_path: &Path,
@@ -898,6 +1177,9 @@ pub fn scan(cas_root: &Path) -> anyhow::Result<ForeignRowReport> {
     let mut report = classify(&local, &peers);
     let project_id = crate::cloud::resolve_canonical_id(cas_root);
     classify_knowledge_pages(&mut report, &local.knowledge_pages, project_id.as_deref());
+    let conn = open_read_only(&local_db)?;
+    report.provenance =
+        read_provenance(&conn, cas_root, project_id.as_deref().unwrap_or("unknown"))?;
     report.peers_unreadable = unreadable;
     report.peers_skipped = skipped;
     Ok(report)
@@ -906,6 +1188,72 @@ pub fn scan(cas_root: &Path) -> anyhow::Result<ForeignRowReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provenance_classifies_tasks_entries_rules_with_origin_and_session_cwd() {
+        let temp = tempfile::tempdir().unwrap();
+        let local = temp.path().join("local");
+        let foreign = temp.path().join("foreign");
+        std::fs::create_dir_all(local.join(".cas")).unwrap();
+        std::fs::create_dir_all(foreign.join(".cas")).unwrap();
+        let conn = rusqlite::Connection::open(local.join(".cas/cas.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (session_id TEXT, cwd TEXT);
+             CREATE TABLE tasks (id TEXT, title TEXT, origin_project TEXT);
+             CREATE TABLE entries (id TEXT, title TEXT, content TEXT, origin_project TEXT, session_id TEXT);
+             CREATE TABLE rules (id TEXT, content TEXT, origin_project TEXT, source_ids TEXT);
+             CREATE TABLE events (id INTEGER PRIMARY KEY, entity_type TEXT, entity_id TEXT, session_id TEXT);",
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO sessions VALUES ('local', ?1)",
+            [local.to_string_lossy().to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions VALUES ('other', ?1)",
+            [foreign.to_string_lossy().to_string()],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO tasks VALUES ('own-task','own','local'), ('foreign-task','foreign','other-project'), ('unknown-task','unknown','unknown');
+             INSERT INTO entries VALUES ('own-entry','own','', 'local','local'), ('foreign-entry','foreign','', 'local','other'), ('unknown-entry','unknown','', 'unknown',NULL);
+             INSERT INTO rules VALUES ('own-rule','own','local','[\"own-entry\"]'), ('foreign-rule','foreign','local','[\"foreign-entry\"]'), ('unknown-rule','unknown','unknown',NULL);
+             INSERT INTO events (entity_type,entity_id,session_id) VALUES ('task','own-task','local'), ('task','unknown-task','other');",
+        ).unwrap();
+        let rows = read_provenance(&conn, &local.join(".cas"), "local").unwrap();
+        for id in ["own-task", "own-entry", "own-rule"] {
+            assert!(
+                matches!(
+                    &rows.iter().find(|row| row.id == id).unwrap().state,
+                    ProvenanceState::Authored
+                ),
+                "{id}"
+            );
+        }
+        for id in [
+            "foreign-task",
+            "unknown-task",
+            "foreign-entry",
+            "foreign-rule",
+        ] {
+            assert!(
+                matches!(
+                    &rows.iter().find(|row| row.id == id).unwrap().state,
+                    ProvenanceState::Foreign { .. }
+                ),
+                "{id}"
+            );
+        }
+        for id in ["unknown-entry", "unknown-rule"] {
+            assert!(
+                matches!(
+                    &rows.iter().find(|row| row.id == id).unwrap().state,
+                    ProvenanceState::Unknown
+                ),
+                "{id}"
+            );
+        }
+    }
 
     fn attributed_fixture() -> (tempfile::TempDir, PathBuf) {
         let temp = tempfile::tempdir().unwrap();
@@ -1042,9 +1390,9 @@ mod tests {
         assert_eq!(report.collisions[0].id, "cas-1234");
         assert_eq!(report.collisions[0].other_project, "accounting");
         assert!(report.remediation().contains("(id, title)"));
-        assert!(report
-            .remediation()
-            .contains("mcp__cs__task action=update id=<task-id> origin_project=<confirmed canonical id>"));
+        assert!(report.remediation().contains(
+            "mcp__cs__task action=update id=<task-id> origin_project=<confirmed canonical id>"
+        ));
     }
 
     /// A row that is a genuine replica *and* collides with a third project's

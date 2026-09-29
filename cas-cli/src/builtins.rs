@@ -8015,7 +8015,8 @@ This is the body content."#;
             "worktree_merge id=<worker> task_id=<task-id>",
             "Hold the main merge",
             "Run the final assembled-tree gate",
-            "the project's assembly gate command",
+            "one full assembly gate run",
+            "python3 scripts/assembly-proof.py prove <epic-worktree>",
             "bounded epic-child fix-round task",
             "Never pipe the test run to `tail`",
         ] {

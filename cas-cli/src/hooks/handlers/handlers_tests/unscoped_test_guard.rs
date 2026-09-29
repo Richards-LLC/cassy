@@ -85,19 +85,25 @@ fn worker_rust_builds_are_denied_naming_the_assembly_rule() {
 fn literal_worker_check_is_rewritten_to_the_capped_runner_for_both_harnesses() {
     use crate::test_support::TestEnvGuard;
     for harness in ["claude", "codex"] {
-        let _env = TestEnvGuard::with_vars(&[("CAS_HOOK_HARNESS", harness)]);
         let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().to_str().unwrap();
+        let _env = TestEnvGuard::with_vars(&[
+            ("CAS_HOOK_HARNESS", harness),
+            ("CAS_CLONE_PATH", worktree),
+        ]);
         let root = dir.path().join(".cas");
         std::fs::create_dir(&root).unwrap();
         for command in [
             "cargo check -p cas --lib",
             "cargo check -p cas -p cas-pty --lib",
-            "cargo check --lib -p cas > /tmp/worker-check.log 2>&1 &",
+            "cargo check --lib -p cas > worker-check.log 2>&1 &",
             "cargo check -p cas --tests",
             "cargo check -p cas -p cas-pty --tests",
-            "cargo check --tests -p cas > /tmp/worker-check.log 2>&1 &",
+            "cargo check --tests -p cas > worker-check.log 2>&1 &",
         ] {
-            let out = handle_pre_tool_use(&input(command, "worker"), Some(&root)).unwrap();
+            let mut request = input(command, "worker");
+            request.cwd = worktree.into();
+            let out = handle_pre_tool_use(&request, Some(&root)).unwrap();
             assert!(deny_reason(&out).is_none(), "{command}: {out:?}");
             let value = serde_json::to_value(&out).unwrap();
             let rewritten = value
@@ -120,6 +126,19 @@ fn literal_worker_check_is_rewritten_to_the_capped_runner_for_both_harnesses() {
                         .is_none()
                 );
             }
+        }
+        // Rewriting through the capped runner must preserve the workspace
+        // contract, rather than granting the check a bare /tmp escape hatch.
+        for command in [
+            "cargo check --lib -p cas > /tmp/worker-check.log 2>&1 &",
+            "cargo check --tests -p cas > /tmp/worker-check.log 2>&1 &",
+        ] {
+            let mut request = input(command, "worker");
+            request.cwd = worktree.into();
+            let out = handle_pre_tool_use(&request, Some(&root)).unwrap();
+            let reason = deny_reason(&out).expect("bare /tmp must remain denied after rewrite");
+            assert!(reason.contains("FACTORY WORKSPACE CONTRACT"), "{reason}");
+            assert!(reason.contains("/tmp/worker-check.log"), "{reason}");
         }
     }
 }

@@ -19,7 +19,7 @@ import {
   type ConnectionStage,
   type AttachSnapshot,
 } from "./connection-state";
-import type { ConversationHistoryPage, HubSession, LeaseState, MessageQueued, OperatorReply, PaneInfo, SessionCardSummary, SessionState, StoredMachine } from "./types";
+import type { ConversationHistoryMessage, ConversationHistoryPage, HubSession, LeaseState, MessageQueued, OperatorReply, PaneInfo, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
 import { sessionsPath, workersRevealed } from "./worker-visibility";
 import { dormantRevealed } from "./dormant-visibility";
@@ -80,6 +80,7 @@ export interface HubCallbacks {
   onSessionState(session: string, state: SessionState, scrollback?: Record<string, number[][]>, authoritativeKeyframes?: boolean): void;
   onOutput(session: string, paneId: string, data: Uint8Array): void;
   onMessageQueued?(session: string, queued: MessageQueued): void;
+  onOperatorMessage?(session: string, message: ConversationHistoryMessage): void;
   onMessageRejected?(session: string, clientRef: string, detail: string, rejection?: MessageRejection): void;
   onOperatorReply?(session: string, reply: OperatorReply): void;
   onConversationHistory?(session: string, page: ConversationHistoryPage): void;
@@ -1505,6 +1506,8 @@ export class HubConnectionSupervisor {
       if (queued) this.callbacks.onMessageQueued?.(session, queued);
     } else if (message.OperatorReply) {
       this.callbacks.onOperatorReply?.(session, message.OperatorReply as OperatorReply);
+    } else if (message.OperatorMessage) {
+      this.callbacks.onOperatorMessage?.(session, message.OperatorMessage as ConversationHistoryMessage);
     } else if (message.ConversationHistory) {
       this.callbacks.onConversationHistory?.(session, message.ConversationHistory as ConversationHistoryPage);
     } else if (message.SessionSummary) {
@@ -1547,6 +1550,7 @@ export function messageQueuedFromDaemon(message: Record<string, any>): MessageQu
     notification_id: Number(value.notification_id),
     target: value.target,
     stamped: value.stamped === true,
+    ...(typeof value.device_label === "string" ? { device_label: value.device_label } : {}),
   };
 }
 

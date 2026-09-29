@@ -4361,35 +4361,9 @@ impl FactoryDaemon {
                 continue;
             }
 
-            let terminal = row.source == "terminal";
-            let operator = row.operator.as_ref();
-            if !terminal && !operator.is_some_and(|stamp| stamp.verified) {
-                continue;
+            if let Some(message) = commander_history_send(row, &self.session_name) {
+                messages.push(message);
             }
-            let (reply_to, text) = commander_history_message_text(&row.prompt);
-            messages.push(crate::ui::factory::ConversationHistoryMessage {
-                notification_id: row.id,
-                target: row.target,
-                text,
-                state: if terminal || row.processed_at.is_some() {
-                    "acknowledged".to_string()
-                } else {
-                    "sending".to_string()
-                },
-                stamped: !terminal,
-                reply_to,
-                device_id: operator
-                    .map_or_else(|| "terminal".to_string(), |stamp| stamp.device_id.clone()),
-                operator_label: Some(operator.map_or_else(
-                    || "Terminal".to_string(),
-                    |stamp| stamp.device_label.clone(),
-                )),
-                session: row
-                    .factory_session
-                    .clone()
-                    .unwrap_or_else(|| self.session_name.clone()),
-                at: row.created_at.to_rfc3339(),
-            });
         }
         Ok(crate::ui::factory::DaemonMessage::ConversationHistory {
             request_id,
@@ -4398,6 +4372,22 @@ impl FactoryDaemon {
             has_earlier,
             next_before,
         })
+    }
+
+    pub(super) fn live_operator_message(
+        &self,
+        notification_id: i64,
+    ) -> anyhow::Result<Option<crate::ui::factory::ConversationHistoryMessage>> {
+        let queue = crate::store::open_prompt_queue_store(self.app.cas_dir())?;
+        Ok(queue
+            .queued_prompt(notification_id)?
+            .and_then(|row| commander_history_send(row, &self.session_name))
+            .map(|mut message| {
+                // The durable enqueue has completed, so other viewers need
+                // no private receipt to show this send as acknowledged.
+                message.state = "acknowledged".to_string();
+                message
+            }))
     }
 
     fn process_operator_replies(
@@ -8062,6 +8052,38 @@ impl FactoryDaemon {
         }
         Ok(())
     }
+}
+
+/// Project the same durable send shape for history pages and live broadcasts.
+fn commander_history_send(
+    row: cas_store::QueuedPrompt,
+    fallback_session: &str,
+) -> Option<crate::ui::factory::ConversationHistoryMessage> {
+    let terminal = row.source == "terminal";
+    let operator = row.operator.as_ref();
+    if !terminal && !operator.is_some_and(|stamp| stamp.verified) {
+        return None;
+    }
+    let (reply_to, text) = commander_history_message_text(&row.prompt);
+    Some(crate::ui::factory::ConversationHistoryMessage {
+        notification_id: row.id,
+        target: row.target,
+        text,
+        state: if terminal || row.processed_at.is_some() {
+            "acknowledged".to_string()
+        } else {
+            "sending".to_string()
+        },
+        stamped: !terminal,
+        reply_to,
+        device_id: operator.map_or_else(|| "terminal".to_string(), |stamp| stamp.device_id.clone()),
+        operator_label: Some(operator.map_or_else(
+            || "Terminal".to_string(),
+            |stamp| stamp.device_label.clone(),
+        )),
+        session: row.factory_session.unwrap_or_else(|| fallback_session.to_string()),
+        at: row.created_at.to_rfc3339(),
+    })
 }
 
 /// Remove the durable reply marker from the operator's visible message while

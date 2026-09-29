@@ -29,6 +29,18 @@ describe('conversation evidence', () => {
     expect(history.events.map(event => event.kind === 'send' && event.value.text))
       .toEqual(['Phone message', 'Computer message', 'Terminal message']);
   });
+  it('shows the other device send live before its reply and labels the sender receipt', () => {
+    const history = new ConversationHistory();
+    history.submit('own', 'supervisor', 'Mine');
+    history.acknowledge({ client_ref: 'own', notification_id: 40, target: 'supervisor', stamped: true, device_label: 'Desktop' });
+    history.hydrateSend({ notification_id: 41, target: 'supervisor', text: 'Question', state: 'sending', stamped: true, device_id: 'phone', operator_label: 'Pixel 10', session: 'factory-a', at: '2026-09-29T16:00:00Z' });
+    history.receive({ notification_id: 42, reply_to: 41, message: 'Answer', summary: '', device_id: 'phone' });
+    const view = new ConversationView(document, history, 'supervisor');
+    document.body.replaceChildren(view.element);
+    view.update();
+    expect([...view.element.querySelectorAll('.conversation-send-origin')].map(node => node.textContent)).toEqual(['from Desktop', 'from Pixel 10']);
+    expect(history.events.map(event => event.kind === 'send' ? event.value.text : event.value.message)).toEqual(['Mine', 'Question', 'Answer']);
+  });
   it('does not acknowledge socket submission, foreign references, or foreign targets', () => {
     const history = new ConversationHistory();
     history.submit('own', 'supervisor', 'Instruction');

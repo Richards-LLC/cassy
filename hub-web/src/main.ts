@@ -800,6 +800,11 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       if (messageDelivery?.session === sessionKey(machine.id, session) && messageDelivery.clientRef === receipt.client_ref) { messageDelivery = undefined; document.querySelector<HTMLElement>("#message-delivery")?.setAttribute("hidden", ""); }
       updateConversationViews(); renderConversationList();
     },
+    onOperatorMessage: (session, message) => {
+      conversationHistory(sessionKey(machine.id, session), session).hydrateSend(message);
+      updateConversationViews(); renderConversationList();
+      if (selectedMachineId === machine.id && selectedSession === session) render();
+    },
     onMessageRejected: (session, clientRef, detail, rejection) => {
       const key = sessionKey(machine.id, session);
       // cas-0653: the hub could not reach the session's daemon, so the

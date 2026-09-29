@@ -1617,6 +1617,9 @@ async fn proxy_socket(
                     if !operator_reply_allowed(&auth, &frame.bytes) {
                         continue;
                     }
+                    if !operator_message_allowed(&auth, &frame.bytes) {
+                        continue;
+                    }
                     if !correlated_daemon_frame_allowed(
                         &mut pending_message_refs,
                         &session,
@@ -2140,6 +2143,22 @@ pub(super) fn operator_reply_allowed(
     operator_reply_receipt(bytes).is_none_or(|_| auth.is_some())
 }
 
+/// A live send belongs in every other authenticated viewer's thread. The
+/// sender already has its optimistic bubble and receives MessageQueued.
+fn operator_message_allowed(
+    auth: &Option<(AuthStore, AuthContext)>,
+    bytes: &[u8],
+) -> bool {
+    let Ok(DaemonMessage::OperatorMessage(message)) =
+        serde_json::from_slice::<DaemonMessage>(bytes)
+    else {
+        return true;
+    };
+    auth.as_ref().is_some_and(|(_, context)| {
+        context.has(Scope::PaneRead) && context.device_id != message.device_id
+    })
+}
+
 fn client_message_ref(bytes: &[u8]) -> Option<String> {
     let ClientMessage::SendMessage { client_ref, .. } =
         serde_json::from_slice::<ClientMessage>(bytes).ok()?
@@ -2405,6 +2424,9 @@ async fn proxy_machine_socket<R: SessionReadModel>(
             outgoing = outbound_rx.recv() => match outgoing {
                 Some(MachineOutbound::Frame { session, frame }) => {
                     if !operator_reply_allowed(&auth, &frame.bytes) {
+                        continue;
+                    }
+                    if !operator_message_allowed(&auth, &frame.bytes) {
                         continue;
                     }
                     if !correlated_daemon_frame_allowed(
@@ -3090,6 +3112,7 @@ mod machine_protocol_tests {
             notification_id: 812,
             target: "patient-pelican-9".to_owned(),
             stamped: true,
+            device_label: None,
         })
         .unwrap();
         assert!(correlated_daemon_frame_allowed(
@@ -3118,6 +3141,32 @@ mod machine_protocol_tests {
             "factory-a",
             &error
         ));
+    }
+
+    #[test]
+    fn live_operator_send_reaches_only_other_authenticated_viewers() {
+        let temp = crate::test_support::private_hub_tempdir();
+        let store = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
+        let scopes = [Scope::PaneRead].into_iter().collect();
+        let sender = AuthContext::test_fixture("phone", "https://controller.example", scopes.clone());
+        let viewer = AuthContext::test_fixture("desktop", "https://controller.example", scopes);
+        let frame = serde_json::to_vec(&DaemonMessage::OperatorMessage(
+            crate::ui::factory::ConversationHistoryMessage {
+                notification_id: 41,
+                target: "supervisor".into(),
+                text: "Question".into(),
+                state: "sending".into(),
+                stamped: true,
+                reply_to: None,
+                device_id: "phone".into(),
+                operator_label: Some("Pixel 10".into()),
+                session: "factory-a".into(),
+                at: "2026-09-29T16:00:00Z".into(),
+            },
+        )).unwrap();
+        assert!(!operator_message_allowed(&None, &frame));
+        assert!(!operator_message_allowed(&Some((store.clone(), sender)), &frame));
+        assert!(operator_message_allowed(&Some((store, viewer)), &frame));
     }
 }
 

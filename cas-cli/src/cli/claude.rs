@@ -320,7 +320,8 @@ const PRIVATE_PROFILE_ENTRIES: [&str; 12] = [
     "backups",
 ];
 
-/// Build the command used for a `--bare` profile launch without executing it.
+/// Build the command used for a `--bare` profile launch or account login
+/// without executing it. Login is an auth subcommand, not a Claude session.
 pub(crate) fn build_claude_command(
     profile: &str,
     profile_dir: &Path,
@@ -329,6 +330,9 @@ pub(crate) fn build_claude_command(
     let mut command = Command::new("claude");
     configure_profile_command(&mut command, profile, profile_dir);
     command.args(args);
+    if !args.first().is_some_and(|arg| arg == "auth") {
+        enable_chrome_if_supported(&mut command);
+    }
     command
 }
 
@@ -340,7 +344,27 @@ pub(crate) fn build_inherited_claude_command(args: &[OsString]) -> Command {
     let mut command = Command::new("claude");
     scrub_claude_credentials(&mut command);
     command.args(args);
+    enable_chrome_if_supported(&mut command);
     command
+}
+
+fn enable_chrome_if_supported(command: &mut Command) {
+    // An explicit --chrome or --no-chrome from the caller wins.
+    if command
+        .get_args()
+        .any(|arg| arg == "--chrome" || arg == "--no-chrome")
+    {
+        return;
+    }
+    enable_chrome(command, cas_pty::claude_supports_chrome_flag());
+}
+
+fn enable_chrome(command: &mut Command, supported: bool) {
+    if supported {
+        command.arg("--chrome");
+    } else {
+        tracing::warn!("Skipping --chrome: installed claude CLI does not support Claude in Chrome");
+    }
 }
 
 /// Warn about a profile directory that Claude will have to bootstrap or log in.
@@ -585,9 +609,13 @@ mod tests {
         let command = build_claude_command("alt", Path::new("/tmp/.claude-alt"), &args);
 
         assert_eq!(command.get_program(), OsStr::new("claude"));
+        let mut expected = args.clone();
+        if cas_pty::claude_supports_chrome_flag() {
+            expected.push(OsString::from("--chrome"));
+        }
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
-            args.iter().collect::<Vec<_>>()
+            expected.iter().collect::<Vec<_>>()
         );
         let envs = command.get_envs().collect::<Vec<_>>();
         assert!(envs.contains(&(
@@ -603,6 +631,40 @@ mod tests {
         assert!(envs.contains(&(OsStr::new("CLAUDE_CODE_OAUTH_TOKEN"), None)));
         assert!(envs.contains(&(OsStr::new("CLAUDE_CODE_OAUTH_REFRESH_TOKEN"), None)));
         assert!(envs.contains(&(OsStr::new("CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR"), None)));
+    }
+
+    #[test]
+    fn bare_chrome_guard_covers_both_launch_builders_and_skips_auth() {
+        let mut supported = Command::new("claude");
+        enable_chrome(&mut supported, true);
+        assert_eq!(
+            supported.get_args().collect::<Vec<_>>(),
+            vec![OsStr::new("--chrome")]
+        );
+
+        let mut unsupported = Command::new("claude");
+        enable_chrome(&mut unsupported, false);
+        assert!(unsupported.get_args().next().is_none());
+
+        let login = build_claude_command(
+            "alt",
+            Path::new("/tmp/.claude-alt"),
+            &[OsString::from("auth"), OsString::from("login")],
+        );
+        assert_eq!(
+            login.get_args().collect::<Vec<_>>(),
+            vec![OsStr::new("auth"), OsStr::new("login")]
+        );
+        let opted_out = build_inherited_claude_command(&[OsString::from("--no-chrome")]);
+        assert_eq!(
+            opted_out.get_args().collect::<Vec<_>>(),
+            vec![OsStr::new("--no-chrome")]
+        );
+        let inherited = build_inherited_claude_command(&[OsString::from("--continue")]);
+        assert_eq!(
+            inherited.get_args().any(|arg| arg == "--chrome"),
+            cas_pty::claude_supports_chrome_flag()
+        );
     }
 
     #[cfg(unix)]

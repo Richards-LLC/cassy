@@ -11,7 +11,7 @@ use crate::cloud::syncer::{
     CloudSyncer, PushBacklog, PushItemizedFailure, PushPlan, PushResponse, PushRowOutcome,
     PushRowResult, PushScope, SyncResult,
 };
-use crate::cloud::{QueuedSync, SyncOperation};
+use crate::cloud::{EntityType, QueuedSync, SyncOperation};
 use crate::error::CasError;
 use crate::types::Session;
 
@@ -128,6 +128,8 @@ impl CloudSyncer {
         let mut result = SyncResult::default();
         let start = Instant::now();
 
+        self.queue.drop_queued_user_prompts()?;
+
         self.cloud_config
             .validate_team_only()
             .map_err(CasError::Other)?;
@@ -138,8 +140,7 @@ impl CloudSyncer {
             return Ok(result);
         }
 
-        self.requeue_version_gated_items()?;
-        result.requeued_after_upgrade = self.requeue_stale_client_failures()?;
+        result.requeued_after_upgrade = self.requeue_version_gated_items()?;
 
         if !self.is_available() {
             return Ok(result);
@@ -224,14 +225,16 @@ impl CloudSyncer {
         Ok(result)
     }
 
-    /// Drop queued writes for pulled rows this project did not author
-    /// (cas-3a90, GH #909). Fails closed: if the ledger cannot be read, the
-    /// push stops rather than risk publishing another project's rows.
+    /// Drop queued writes for rows this project did not author, whether they
+    /// came from a pull ledger or carry foreign/unknown stored provenance.
     pub(super) fn drop_unauthored_queued_pushes(&self) -> Result<usize, CasError> {
-        let dropped = self.queue.drop_queued_pushes_for_unauthored_pulls()?;
+        let dropped = self.queue.drop_queued_pushes_for_unauthored_pulls()?
+            + self
+                .queue
+                .drop_queued_rows_with_foreign_origin(&self.personal_push_project_id()?)?;
         if dropped > 0 {
             warn!(
-                "[Cassy sync] dropped {dropped} queued write(s) for pulled rows this project did \
+                "[Cassy sync] dropped {dropped} queued write(s) for rows this project did \
                  not author; they are never pushed from here"
             );
         }
@@ -561,8 +564,9 @@ impl CloudSyncer {
         // `pending` entirely, advancing `oldest_item` past them (defect B /
         // cas-8dd8 poison-head fix).
         let mut upsert_entries: Vec<(&QueuedSync, serde_json::Value)> = Vec::new();
-        // cas-3a90: entries, rules and skills carry their authoring project.
-        let origin_project = if matches!(entity_type, "entries" | "rules" | "skills") {
+        // Entries and rules carry persisted origins; skills still use the
+        // push-time stamp when their payload has no origin.
+        let origin_project = if entity_type == "skills" {
             Some(self.personal_push_project_id()?)
         } else {
             None
@@ -571,8 +575,42 @@ impl CloudSyncer {
             match item.payload.as_deref() {
                 Some(payload) => match serde_json::from_str::<serde_json::Value>(payload) {
                     Ok(mut v) => {
-                        if let Some(origin_project) = origin_project.as_deref() {
-                            super::team_push::stamp_row_origin_project(&mut v, origin_project);
+                        if let Some(kind) = match entity_type {
+                            "entries" => Some(EntityType::Entry),
+                            "rules" => Some(EntityType::Rule),
+                            _ => None,
+                        } {
+                            let project_id = self.personal_push_project_id()?;
+                            match self.restore_queued_origin(
+                                &mut v,
+                                kind,
+                                &item.entity_id,
+                                &project_id,
+                            ) {
+                                Ok(true) => {}
+                                Ok(false) => {
+                                    let _ = self.queue.park_failed(
+                                        item.id,
+                                        "entry/rule has no attributable origin_project",
+                                        self.config.max_retries,
+                                    );
+                                    continue;
+                                }
+                                Err(error) => {
+                                    let _ = self.queue.mark_failed(item.id, &error.to_string());
+                                    continue;
+                                }
+                            }
+                        }
+                        if let Some(origin_project) = origin_project.as_deref()
+                            && !super::team_push::stamp_row_origin_project(&mut v, origin_project)
+                        {
+                            let _ = self.queue.park_failed(
+                                item.id,
+                                "row has no local attributable origin_project",
+                                self.config.max_retries,
+                            );
+                            continue;
                         }
                         upsert_entries.push((*item, self.with_base_revision(item, v)))
                     }
@@ -1179,6 +1217,28 @@ impl CloudSyncer {
             "client_build".to_string(),
             serde_json::json!(option_env!("CAS_GIT_HASH").unwrap_or("unknown")),
         );
+    }
+}
+
+#[cfg(test)]
+mod skill_push_origin_tests {
+    #[test]
+    fn personal_skill_push_stamps_missing_origin_and_rejects_foreign_origin() {
+        let mut local = serde_json::json!({"id": "skill-local", "scope": "project"});
+        assert!(super::super::team_push::stamp_row_origin_project(
+            &mut local,
+            "acme/accounting"
+        ));
+        assert_eq!(local["origin_project"], "acme/accounting");
+
+        let mut foreign = serde_json::json!({
+            "id": "skill-foreign", "scope": "project", "origin_project": "pulse-card",
+        });
+        assert!(!super::super::team_push::stamp_row_origin_project(
+            &mut foreign,
+            "acme/accounting"
+        ));
+        assert_eq!(foreign["origin_project"], "pulse-card");
     }
 }
 

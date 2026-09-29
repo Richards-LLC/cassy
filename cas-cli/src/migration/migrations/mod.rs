@@ -235,6 +235,7 @@ mod m256_artifacts_create_table;
 mod m257_qa_passes;
 mod m258_unauthored_pulled_rows;
 mod m259_rules_add_operator_authority;
+mod m260_entries_rules_add_origin_project;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -506,6 +507,7 @@ pub const MIGRATIONS: &[Migration] = &[
     m257_qa_passes::MIGRATION,
     m258_unauthored_pulled_rows::MIGRATION,
     m259_rules_add_operator_authority::MIGRATION,
+    m260_entries_rules_add_origin_project::MIGRATION,
 ];
 
 #[cfg(test)]

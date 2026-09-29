@@ -757,12 +757,15 @@ mod tests {
     use cas_store::SqliteKnowledgeStore;
     use std::sync::Arc;
 
+    /// Project identity shared by every knowledge-sync fixture in this module.
+    const FIXTURE_PROJECT: &str = "knowledge-sync-fixture";
+
     fn syncer(endpoint: Option<&str>, root: &std::path::Path) -> CloudSyncer {
-        // These fixtures are constructed through the legacy `from_page` helper,
-        // whose records intentionally carry the current checkout's identity.
-        // Pin the synthetic queue root to that same identity so the tests model
-        // an explicitly configured project rather than an unrelated temp path.
-        let fixture_project_id = get_project_canonical_id().expect("tests run in a Cassy project");
+        // Pin the synthetic queue root to the fixture identity so the tests
+        // model an explicitly configured project. The identity is fixed rather
+        // than read from the process's ambient store: a CI checkout has no
+        // `.cas`, and store lookup stops at the Git repository boundary.
+        let fixture_project_id = FIXTURE_PROJECT.to_string();
         crate::cloud::set_canonical_id_in_config_toml(root, &fixture_project_id).unwrap();
         let queue = Arc::new(SyncQueue::open(root).unwrap());
         queue.init().unwrap();
@@ -914,10 +917,11 @@ mod tests {
         let mut page = KnowledgePage::new("cas-kn900", "architecture", title);
         page.snippet = "remote snippet".to_string();
         page.locked = locked;
-        serde_json::to_value(KnowledgePageRecord::from_page(
+        serde_json::to_value(KnowledgePageRecord::from_page_for_project(
             &page,
             body.to_string(),
             ShareScope::Team,
+            Some(FIXTURE_PROJECT.to_string()),
         ))
         .unwrap()
     }
@@ -926,8 +930,7 @@ mod tests {
         serde_json::json!({
             "id": id,
             "deleted_at": "2026-08-08T12:00:00Z",
-            "project_canonical_id": get_project_canonical_id()
-                .expect("knowledge pull tests run from a Cassy project"),
+            "project_canonical_id": FIXTURE_PROJECT,
         })
     }
 
@@ -1016,7 +1019,7 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let own_project = get_project_canonical_id().expect("tests run in a Cassy project");
+        let own_project = FIXTURE_PROJECT.to_string();
         let legacy = remote_record("Legacy Page", "# Legacy", false);
         assert!(legacy.get("origin_project").is_none(), "fixture is a legacy record");
         let mut stamped = remote_record("Stamped Page", "# Stamped", false);
@@ -1115,7 +1118,7 @@ mod tests {
         let pushed = tokio::task::spawn_blocking(move || {
             let store = seeded_store(&root);
             let syncer = syncer(Some(&endpoint), &root);
-            let own_project = get_project_canonical_id().expect("tests run in a Cassy project");
+            let own_project = FIXTURE_PROJECT.to_string();
             for (id, title, origin) in [
                 ("cas-kn909a", "Foreign Page", "someone-elses-project"),
                 ("cas-kn909b", "Own Pulled Page", own_project.as_str()),

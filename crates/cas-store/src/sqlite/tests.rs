@@ -10,6 +10,59 @@ use crate::{SqliteRuleStore, SqliteSkillStore, SqliteTaskStore};
 use cas_types::{Rule, Skill, Task};
 
 #[test]
+fn entry_and_rule_origins_are_stamped_on_add_and_preserved_on_update() {
+    let temp = TempDir::new().unwrap();
+    let entries =
+        SqliteStore::open_with_origin_project(temp.path(), Some("local/project")).unwrap();
+    entries.init().unwrap();
+    let rules =
+        SqliteRuleStore::open_with_origin_project(temp.path(), Some("local/project")).unwrap();
+    rules.init().unwrap();
+
+    let local_entry = Entry::new("local-entry".into(), "local".into());
+    entries.add(&local_entry).unwrap();
+    assert_eq!(
+        entries
+            .get("local-entry")
+            .unwrap()
+            .origin_project
+            .as_deref(),
+        Some("local/project")
+    );
+
+    let mut pulled_entry = Entry::new("pulled-entry".into(), "pulled".into());
+    pulled_entry.origin_project = Some("foreign/project".into());
+    entries.add(&pulled_entry).unwrap();
+    pulled_entry.origin_project = None;
+    entries.update(&pulled_entry).unwrap();
+    assert_eq!(
+        entries
+            .get("pulled-entry")
+            .unwrap()
+            .origin_project
+            .as_deref(),
+        Some("foreign/project")
+    );
+
+    let local_rule = Rule::new("local-rule".into(), "local".into());
+    rules.add(&local_rule).unwrap();
+    assert_eq!(
+        rules.get("local-rule").unwrap().origin_project.as_deref(),
+        Some("local/project")
+    );
+
+    let mut pulled_rule = Rule::new("pulled-rule".into(), "pulled".into());
+    pulled_rule.origin_project = Some("foreign/project".into());
+    rules.add(&pulled_rule).unwrap();
+    pulled_rule.origin_project = None;
+    rules.update(&pulled_rule).unwrap();
+    assert_eq!(
+        rules.get("pulled-rule").unwrap().origin_project.as_deref(),
+        Some("foreign/project")
+    );
+}
+
+#[test]
 fn test_sqlite_store_crud() {
     let temp = TempDir::new().unwrap();
     let store = SqliteStore::open(temp.path()).unwrap();

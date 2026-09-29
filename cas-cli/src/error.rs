@@ -8,7 +8,7 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum CasError {
-    #[error("Cassy not initialized")]
+    #[error("no Cassy store here; run `cas init`")]
     NotInitialized,
 
     #[error("not found: {0}")]

@@ -47,6 +47,7 @@ fn test_version() {
 #[test]
 fn test_init_yes_flag() {
     let temp = TempDir::new().unwrap();
+    assert!(!temp.path().join(".git").exists());
 
     cas_cmd(temp.path())
         .current_dir(&temp)
@@ -60,6 +61,11 @@ fn test_init_yes_flag() {
     assert!(temp.path().join(".cas/cas.db").exists());
     // Config is now saved as TOML (preferred format)
     assert!(temp.path().join(".cas/config.toml").exists());
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .arg("status")
+        .assert()
+        .success();
 }
 
 #[test]
@@ -354,7 +360,7 @@ fn test_not_initialized_error() {
         .arg("status")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("not initialized"));
+        .stderr(predicate::str::contains("no Cassy store here; run `cas init`"));
 }
 
 #[test]

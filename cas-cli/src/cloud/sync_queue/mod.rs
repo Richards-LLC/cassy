@@ -6,7 +6,7 @@
 //! # Integration Status
 //! Queue infrastructure ready for cloud sync feature.
 
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -34,12 +34,12 @@ pub use dependency_tombstones::{
 pub use quarantine::{
     PULL_ID_COLLISION, QUARANTINE_TASK, QUARANTINED_ROW_STATEMENTS, QuarantinedRow,
 };
-pub use unauthored::UNAUTHORED_PULL_STATEMENTS;
 pub use revisions::{SYNC_REVISION_STATEMENTS, parse_wire_revision, wire_revision};
 pub use types::{
     EntityType, PendingByType, QueueHealth, QueueStats, QueuedSync, SyncConflictRecord,
     SyncOperation,
 };
+pub use unauthored::UNAUTHORED_PULL_STATEMENTS;
 
 /// Persistent sync queue backed by SQLite
 pub struct SyncQueue {
@@ -80,6 +80,32 @@ impl SyncQueue {
     /// The `.cas` directory this queue was opened in.
     pub fn cas_dir(&self) -> &Path {
         &self.cas_dir
+    }
+
+    /// Recover an origin from the persisted row for a queue payload written
+    /// before `origin_project` was part of entry/rule/task JSON. A present row
+    /// with NULL origin is returned as `unknown` so a stale payload cannot
+    /// override its missing provenance.
+    pub fn stored_origin_project(
+        &self,
+        entity_type: EntityType,
+        entity_id: &str,
+    ) -> Result<Option<String>, CasError> {
+        let table = match entity_type {
+            EntityType::Entry => "entries",
+            EntityType::Rule => "rules",
+            EntityType::Task => "tasks",
+            _ => return Ok(None),
+        };
+        let conn = self.conn.lock().unwrap();
+        Ok(conn
+            .query_row(
+                &format!("SELECT origin_project FROM {table} WHERE id = ?1"),
+                params![entity_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .map(|origin| origin.unwrap_or_else(|| "unknown".to_string())))
     }
 
     /// Initialize the sync queue tables

@@ -1,5 +1,5 @@
-//! `cas purge-test-fixtures` — remove the integration-suite fixture memories
-//! that leaked into real Cassy stores (cas-78c8 / GH #156).
+//! `cas purge-test-fixtures` — remove exact integration-suite fixture entries,
+//! tasks and rules that leaked into real Cassy stores (cas-78c8 / GH #156).
 //!
 //! For months the integration suite wrote its five literal fixture strings into
 //! the developer's `~/.cas/cas.db` and the cas-src project database instead of
@@ -8,7 +8,7 @@
 //! `cas_store::shared_db`; this command cleans up what already landed.
 //!
 //! Two rules govern the deletion, and both exist because the alternative
-//! destroys real memories:
+//! destroys real records:
 //!
 //! * **Exact equality, never `LIKE`.** A `LIKE '%Context test memory entry%'`
 //!   would also match a genuine memory that quotes a fixture string while
@@ -26,6 +26,14 @@ use clap::Args;
 use rusqlite::{Connection, OpenFlags, params_from_iter};
 
 use crate::memory_migration::routing::FIXTURE_CONTENTS;
+
+const FIXTURE_TASK_TITLES: [&str; 4] = [
+    "MCP Protocol Test Task",
+    "Test task for notification test",
+    "Context test task",
+    "Consolidated task test",
+];
+const FIXTURE_RULE_CONTENTS: [&str; 1] = ["Always use descriptive variable names in tests"];
 
 #[derive(Debug, Clone, Args)]
 pub struct PurgeFixturesArgs {
@@ -50,7 +58,7 @@ pub struct PurgeFixturesArgs {
     #[arg(long)]
     pub backup_dir: Option<PathBuf>,
 
-    /// Print every row that would be deleted as `db<TAB>id<TAB>content`.
+    /// Print every row that would be deleted as `db<TAB>entity_type<TAB>id<TAB>content`.
     ///
     /// The per-string counts say how many rows go; this says exactly which.
     /// `--apply` writes the same list to a manifest beside the backup whether
@@ -67,17 +75,24 @@ pub struct DbPlan {
     /// `(fixture string, rows matching it exactly)`, in the order of
     /// [`FIXTURE_CONTENTS`].
     pub per_string: Vec<(&'static str, i64)>,
-    /// Every row in `entries`, so the report can state what fraction of the
-    /// corpus is junk and the apply step can prove it deleted nothing else.
+    pub per_task_title: Vec<(&'static str, i64)>,
+    pub per_rule_content: Vec<(&'static str, i64)>,
+    /// Table sizes for the report denominator and the post-delete checks.
     pub entries_total: i64,
-    /// Pending cloud-sync rows pointing at the doomed entries. Left behind,
-    /// these are orphans that would push a deleted fixture to the cloud.
+    pub tasks_total: i64,
+    pub rules_total: i64,
+    /// Pending cloud-sync rows pointing at doomed entries, tasks or rules.
     pub sync_queue_rows: i64,
 }
 
 impl DbPlan {
     pub fn fixture_total(&self) -> i64 {
-        self.per_string.iter().map(|(_, count)| count).sum()
+        self.per_string
+            .iter()
+            .chain(&self.per_task_title)
+            .chain(&self.per_rule_content)
+            .map(|(_, count)| count)
+            .sum()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -104,7 +119,12 @@ pub fn plan_db(label: &'static str, db_path: &Path) -> anyhow::Result<DbPlan> {
         per_string.push((content, count));
     }
 
-    let entries_total: i64 = conn.query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))?;
+    let entries_total: i64 =
+        conn.query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))?;
+    let per_task_title = count_exact_matches(&conn, "tasks", "title", &FIXTURE_TASK_TITLES)?;
+    let per_rule_content = count_exact_matches(&conn, "rules", "content", &FIXTURE_RULE_CONTENTS)?;
+    let tasks_total = count_table_rows(&conn, "tasks")?;
+    let rules_total = count_table_rows(&conn, "rules")?;
 
     let sync_queue_rows = count_sync_queue(&conn)?;
 
@@ -112,12 +132,43 @@ pub fn plan_db(label: &'static str, db_path: &Path) -> anyhow::Result<DbPlan> {
         label,
         db_path: db_path.to_path_buf(),
         per_string,
+        per_task_title,
+        per_rule_content,
         entries_total,
+        tasks_total,
+        rules_total,
         sync_queue_rows,
     })
 }
 
-/// Count `sync_queue` rows whose entity is one of the fixture entries.
+fn count_exact_matches(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    values: &[&'static str],
+) -> anyhow::Result<Vec<(&'static str, i64)>> {
+    if !table_exists(conn, table)? {
+        return Ok(values.iter().map(|value| (*value, 0)).collect());
+    }
+    let sql = format!("SELECT COUNT(*) FROM {table} WHERE {column} = ?1");
+    values
+        .iter()
+        .map(|value| Ok((*value, conn.query_row(&sql, [*value], |row| row.get(0))?)))
+        .collect()
+}
+
+fn count_table_rows(conn: &Connection, table: &str) -> anyhow::Result<i64> {
+    if !table_exists(conn, table)? {
+        return Ok(0);
+    }
+    Ok(
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })?,
+    )
+}
+
+/// Count `sync_queue` rows whose entity is one of the fixture records.
 ///
 /// Returns 0 when the table does not exist: `sync_queue` arrived in a later
 /// migration and an older database is a legitimate target for this purge.
@@ -125,42 +176,79 @@ fn count_sync_queue(conn: &Connection) -> anyhow::Result<i64> {
     if !table_exists(conn, "sync_queue")? {
         return Ok(0);
     }
-    let placeholders = placeholders(FIXTURE_CONTENTS.len());
-    let sql = format!(
-        "SELECT COUNT(*) FROM sync_queue WHERE entity_id IN \
-         (SELECT id FROM entries WHERE content IN ({placeholders}))"
-    );
-    Ok(conn.query_row(&sql, params_from_iter(FIXTURE_CONTENTS.iter()), |row| {
-        row.get(0)
-    })?)
+    let mut count = 0;
+    for (entity_type, table, column, values) in fixture_tables() {
+        if !table_exists(conn, table)? {
+            continue;
+        }
+        let sql = format!(
+            "SELECT COUNT(*) FROM sync_queue WHERE entity_type = ?1 AND entity_id IN \
+             (SELECT id FROM {table} WHERE {column} IN ({}))",
+            shifted_placeholders(values.len(), 2)
+        );
+        count += conn.query_row(
+            &sql,
+            params_from_iter(std::iter::once(entity_type).chain(values.iter().copied())),
+            |row| row.get::<_, i64>(0),
+        )?;
+    }
+    Ok(count)
+}
+
+fn fixture_tables() -> [(
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static [&'static str],
+); 3] {
+    [
+        ("entry", "entries", "content", &FIXTURE_CONTENTS),
+        ("task", "tasks", "title", &FIXTURE_TASK_TITLES),
+        ("rule", "rules", "content", &FIXTURE_RULE_CONTENTS),
+    ]
+}
+
+fn shifted_placeholders(n: usize, start: usize) -> String {
+    (start..start + n)
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The exact rows a purge of `db_path` would delete, as
-/// `(id, content)` ordered by id.
+/// `(entity type, id, content)` ordered by entity type and id.
 ///
 /// Read-only, and computed from the same exact-equality predicate the delete
 /// uses, so the manifest cannot describe a different set than the one removed.
-pub fn delete_set(db_path: &Path) -> anyhow::Result<Vec<(String, String)>> {
+pub fn delete_set(db_path: &Path) -> anyhow::Result<Vec<(String, String, String)>> {
     let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let placeholders = placeholders(FIXTURE_CONTENTS.len());
-    let sql = format!(
-        "SELECT id, content FROM entries WHERE content IN ({placeholders}) ORDER BY id"
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt
-        .query_map(params_from_iter(FIXTURE_CONTENTS.iter()), |row| {
+    let mut rows = Vec::new();
+    for (entity_type, table, column, values) in fixture_tables() {
+        if !table_exists(&conn, table)? {
+            continue;
+        }
+        let sql = format!(
+            "SELECT id, {column} FROM {table} WHERE {column} IN ({}) ORDER BY id",
+            placeholders(values.len())
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let found = stmt.query_map(params_from_iter(values.iter()), |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
+        })?;
+        for row in found {
+            let (id, content) = row?;
+            rows.push((entity_type.to_owned(), id, content));
+        }
+    }
     Ok(rows)
 }
 
 /// Render the delete set as TSV, one row per line, with a header.
-fn render_delete_set(plan: &DbPlan, rows: &[(String, String)]) -> String {
-    let mut out = String::from("db\tid\tcontent\n");
+fn render_delete_set(plan: &DbPlan, rows: &[(String, String, String)]) -> String {
+    let mut out = String::from("db\tentity_type\tid\tcontent\n");
     let db = plan.db_path.display().to_string();
-    for (id, content) in rows {
-        out.push_str(&format!("{db}\t{id}\t{content}\n"));
+    for (entity_type, id, content) in rows {
+        out.push_str(&format!("{db}\t{entity_type}\t{id}\t{content}\n"));
     }
     out
 }
@@ -186,6 +274,8 @@ fn placeholders(n: usize) -> String {
 pub struct PurgeOutcome {
     pub backup_path: PathBuf,
     pub entries_deleted: i64,
+    pub tasks_deleted: i64,
+    pub rules_deleted: i64,
     pub sync_queue_deleted: i64,
     pub entries_before: i64,
     pub entries_after: i64,
@@ -228,31 +318,59 @@ pub fn purge_db(plan: &DbPlan, backup_path: &Path) -> anyhow::Result<PurgeOutcom
 
     let entries_before: i64 =
         conn.query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))?;
+    let tasks_before = count_table_rows(&conn, "tasks")?;
+    let rules_before = count_table_rows(&conn, "rules")?;
 
-    let placeholders = placeholders(FIXTURE_CONTENTS.len());
     let tx = conn.unchecked_transaction()?;
 
-    // Order matters: the sync_queue rows are located through `entries`, so they
-    // must be deleted while their entries still exist.
-    let sync_queue_deleted = if table_exists(&tx, "sync_queue")? {
+    // Order matters: locate queue rows through their source records before
+    // deleting each record.
+    let mut sync_queue_deleted = 0;
+    let mut deleted = [0_i64; 3];
+    for (index, (entity_type, table, column, values)) in fixture_tables().into_iter().enumerate() {
+        if !table_exists(&tx, table)? {
+            continue;
+        }
+        if table_exists(&tx, "sync_queue")? {
+            let sql = format!(
+                "DELETE FROM sync_queue WHERE entity_type = ?1 AND entity_id IN \
+                 (SELECT id FROM {table} WHERE {column} IN ({}))",
+                shifted_placeholders(values.len(), 2)
+            );
+            sync_queue_deleted += tx.execute(
+                &sql,
+                params_from_iter(std::iter::once(entity_type).chain(values.iter().copied())),
+            )? as i64;
+        }
         let sql = format!(
-            "DELETE FROM sync_queue WHERE entity_id IN \
-             (SELECT id FROM entries WHERE content IN ({placeholders}))"
+            "DELETE FROM {table} WHERE {column} IN ({})",
+            placeholders(values.len())
         );
-        tx.execute(&sql, params_from_iter(FIXTURE_CONTENTS.iter()))? as i64
-    } else {
-        0
-    };
+        deleted[index] = tx.execute(&sql, params_from_iter(values.iter()))? as i64;
+    }
 
-    let sql = format!("DELETE FROM entries WHERE content IN ({placeholders})");
-    let entries_deleted = tx.execute(&sql, params_from_iter(FIXTURE_CONTENTS.iter()))? as i64;
-
-    let remaining: i64 = tx.query_row(
-        &format!("SELECT COUNT(*) FROM entries WHERE content IN ({placeholders})"),
-        params_from_iter(FIXTURE_CONTENTS.iter()),
-        |row| row.get(0),
-    )?;
+    let entries_deleted = deleted[0];
+    let tasks_deleted = deleted[1];
+    let rules_deleted = deleted[2];
+    let remaining: i64 = count_exact_matches(&tx, "entries", "content", &FIXTURE_CONTENTS)?
+        .iter()
+        .chain(&count_exact_matches(
+            &tx,
+            "tasks",
+            "title",
+            &FIXTURE_TASK_TITLES,
+        )?)
+        .chain(&count_exact_matches(
+            &tx,
+            "rules",
+            "content",
+            &FIXTURE_RULE_CONTENTS,
+        )?)
+        .map(|(_, count)| count)
+        .sum();
     let entries_after: i64 = tx.query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))?;
+    let tasks_after = count_table_rows(&tx, "tasks")?;
+    let rules_after = count_table_rows(&tx, "rules")?;
 
     if remaining != 0 {
         anyhow::bail!(
@@ -261,10 +379,12 @@ pub fn purge_db(plan: &DbPlan, backup_path: &Path) -> anyhow::Result<PurgeOutcom
             plan.db_path.display()
         );
     }
-    if entries_after != entries_before - entries_deleted {
+    if entries_after != entries_before - entries_deleted
+        || tasks_after != tasks_before - tasks_deleted
+        || rules_after != rules_before - rules_deleted
+    {
         anyhow::bail!(
-            "{} lost rows the purge did not delete: {entries_before} -> {entries_after} while \
-             deleting {entries_deleted} — rolled back",
+            "{} lost rows outside the planned fixture set — rolled back",
             plan.db_path.display()
         );
     }
@@ -274,6 +394,8 @@ pub fn purge_db(plan: &DbPlan, backup_path: &Path) -> anyhow::Result<PurgeOutcom
     Ok(PurgeOutcome {
         backup_path: backup_path.to_path_buf(),
         entries_deleted,
+        tasks_deleted,
+        rules_deleted,
         sync_queue_deleted,
         entries_before,
         entries_after,
@@ -291,16 +413,23 @@ pub fn render_plan(plan: &DbPlan) -> String {
         if plan.entries_total == 1 { "y" } else { "ies" }
     );
     for (content, count) in &plan.per_string {
-        out.push_str(&format!("  {count:>6}  {content}\n"));
+        out.push_str(&format!("  {count:>6}  entry: {content}\n"));
+    }
+    for (title, count) in &plan.per_task_title {
+        out.push_str(&format!("  {count:>6}  task: {title}\n"));
+    }
+    for (content, count) in &plan.per_rule_content {
+        out.push_str(&format!("  {count:>6}  rule: {content}\n"));
     }
     let total = plan.fixture_total();
-    let percent = if plan.entries_total > 0 {
-        (total as f64 / plan.entries_total as f64) * 100.0
+    let all_rows = plan.entries_total + plan.tasks_total + plan.rules_total;
+    let percent = if all_rows > 0 {
+        (total as f64 / all_rows as f64) * 100.0
     } else {
         0.0
     };
     out.push_str(&format!(
-        "  {total:>6}  TOTAL fixture rows ({percent:.1}% of this database)\n"
+        "  {total:>6}  TOTAL fixture rows ({percent:.1}% of entries, tasks and rules)\n"
     ));
     if plan.sync_queue_rows > 0 {
         out.push_str(&format!(
@@ -354,7 +483,10 @@ fn resolve_targets(
         if db.is_file() {
             targets.push(("project", db));
         } else {
-            notes.push(format!("(no project database at {} — skipping)", db.display()));
+            notes.push(format!(
+                "(no project database at {} — skipping)",
+                db.display()
+            ));
         }
     }
 
@@ -402,7 +534,7 @@ pub fn execute(args: &PurgeFixturesArgs, cas_root: &Path) -> anyhow::Result<()> 
     println!(
         "{} — matching {} fixture string(s) by EXACT equality (never LIKE)\n",
         if args.apply { "APPLY" } else { "DRY RUN" },
-        FIXTURE_CONTENTS.len()
+        FIXTURE_CONTENTS.len() + FIXTURE_TASK_TITLES.len() + FIXTURE_RULE_CONTENTS.len()
     );
 
     let mut plans = Vec::new();
@@ -423,7 +555,10 @@ pub fn execute(args: &PurgeFixturesArgs, cas_root: &Path) -> anyhow::Result<()> 
     }
 
     let grand_total: i64 = plans.iter().map(DbPlan::fixture_total).sum();
-    println!("{grand_total} fixture row(s) across {} database(s)", plans.len());
+    println!(
+        "{grand_total} fixture row(s) across {} database(s)",
+        plans.len()
+    );
 
     if !args.apply {
         println!();
@@ -460,7 +595,7 @@ pub fn execute(args: &PurgeFixturesArgs, cas_root: &Path) -> anyhow::Result<()> 
 
         let outcome = purge_db(plan, &backup)?;
         println!(
-            "{}: deleted {} entr{} ({} -> {}) and {} sync_queue row(s)\n  backup: {}",
+            "{}: deleted {} entr{}, {} task(s), {} rule(s) and {} sync_queue row(s)\n  entries: {} -> {}\n  backup: {}",
             plan.db_path.display(),
             outcome.entries_deleted,
             if outcome.entries_deleted == 1 {
@@ -468,9 +603,11 @@ pub fn execute(args: &PurgeFixturesArgs, cas_root: &Path) -> anyhow::Result<()> 
             } else {
                 "ies"
             },
+            outcome.tasks_deleted,
+            outcome.rules_deleted,
+            outcome.sync_queue_deleted,
             outcome.entries_before,
             outcome.entries_after,
-            outcome.sync_queue_deleted,
             outcome.backup_path.display()
         );
         println!("  manifest: {}", manifest_path.display());
@@ -496,6 +633,8 @@ mod tests {
         let conn = Connection::open(db_path).unwrap();
         conn.execute_batch(
             "CREATE TABLE entries (id TEXT PRIMARY KEY, content TEXT NOT NULL, created TEXT NOT NULL);
+             CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT NOT NULL);
+             CREATE TABLE rules (id TEXT PRIMARY KEY, content TEXT NOT NULL);
              CREATE TABLE sync_queue (id INTEGER PRIMARY KEY, entity_type TEXT, entity_id TEXT);",
         )
         .unwrap();
@@ -518,6 +657,55 @@ mod tests {
             )
             .unwrap();
         }
+        for (i, title) in FIXTURE_TASK_TITLES.iter().enumerate() {
+            let id = format!("fixture-task-{i}");
+            conn.execute(
+                "INSERT INTO tasks (id, title) VALUES (?1, ?2)",
+                (&id, *title),
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sync_queue (entity_type, entity_id) VALUES ('task', ?1)",
+                [&id],
+            )
+            .unwrap();
+        }
+        for (i, content) in FIXTURE_RULE_CONTENTS.iter().enumerate() {
+            let id = format!("fixture-rule-{i}");
+            conn.execute(
+                "INSERT INTO rules (id, content) VALUES (?1, ?2)",
+                (&id, *content),
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sync_queue (entity_type, entity_id) VALUES ('rule', ?1)",
+                [&id],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO tasks (id, title) VALUES ('near-task', ?1)",
+            [format!("{} — real follow-up", FIXTURE_TASK_TITLES[0])],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (entity_type, entity_id) VALUES ('task', 'near-task')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO rules (id, content) VALUES ('near-rule', ?1)",
+            [format!(
+                "{} for production code too",
+                FIXTURE_RULE_CONTENTS[0]
+            )],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (entity_type, entity_id) VALUES ('rule', 'near-rule')",
+            [],
+        )
+        .unwrap();
         // The row that a LIKE-based purge would destroy: a real memory that
         // quotes a fixture string while documenting this very bug.
         conn.execute(
@@ -542,10 +730,18 @@ mod tests {
         for (content, count) in &plan.per_string {
             assert_eq!(*count, 1, "unexpected count for {content}");
         }
-        assert_eq!(plan.fixture_total(), FIXTURE_CONTENTS.len() as i64);
+        for (title, count) in &plan.per_task_title {
+            assert_eq!(*count, 1, "unexpected count for task {title}");
+        }
+        for (content, count) in &plan.per_rule_content {
+            assert_eq!(*count, 1, "unexpected count for rule {content}");
+        }
+        assert_eq!(plan.fixture_total(), 10);
         // 3 genuine + 5 fixture + 1 quoting decoy
         assert_eq!(plan.entries_total, 9);
-        assert_eq!(plan.sync_queue_rows, FIXTURE_CONTENTS.len() as i64);
+        assert_eq!(plan.tasks_total, 5);
+        assert_eq!(plan.rules_total, 2);
+        assert_eq!(plan.sync_queue_rows, 10);
     }
 
     #[test]
@@ -572,13 +768,17 @@ mod tests {
         let outcome = purge_db(&plan, &backup).unwrap();
 
         assert_eq!(outcome.entries_deleted, FIXTURE_CONTENTS.len() as i64);
-        assert_eq!(outcome.sync_queue_deleted, FIXTURE_CONTENTS.len() as i64);
+        assert_eq!(outcome.tasks_deleted, 4);
+        assert_eq!(outcome.rules_deleted, 1);
+        assert_eq!(outcome.sync_queue_deleted, 10);
 
         let after = plan_db("test", &db).unwrap();
         assert_eq!(after.fixture_total(), 0);
         assert_eq!(after.sync_queue_rows, 0);
         // 3 genuine + the decoy that merely quotes a fixture string.
         assert_eq!(after.entries_total, 4);
+        assert_eq!(after.tasks_total, 1);
+        assert_eq!(after.rules_total, 1);
 
         let conn = Connection::open(&db).unwrap();
         let quoted: i64 = conn
@@ -587,6 +787,29 @@ mod tests {
             })
             .unwrap();
         assert_eq!(quoted, 1, "a LIKE-based purge would have eaten this row");
+        for table in ["tasks", "rules"] {
+            let id = if table == "tasks" {
+                "near-task"
+            } else {
+                "near-rule"
+            };
+            let count: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE id = ?1"),
+                    [id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "near-match in {table} must survive");
+        }
+        let near_queue_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_queue WHERE entity_id IN ('near-task', 'near-rule')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(near_queue_rows, 2, "near-match queue rows must survive");
     }
 
     #[test]
@@ -602,7 +825,7 @@ mod tests {
         // The snapshot still has every row the live database just lost.
         let restored = plan_db("test", &backup).unwrap();
         assert_eq!(restored.entries_total, 9);
-        assert_eq!(restored.fixture_total(), FIXTURE_CONTENTS.len() as i64);
+        assert_eq!(restored.fixture_total(), 10);
     }
 
     #[test]
@@ -618,10 +841,7 @@ mod tests {
         assert!(err.contains("already exists"), "unexpected error: {err}");
 
         // And the refusal was total: nothing was deleted.
-        assert_eq!(
-            plan_db("test", &db).unwrap().fixture_total(),
-            FIXTURE_CONTENTS.len() as i64
-        );
+        assert_eq!(plan_db("test", &db).unwrap().fixture_total(), 10);
     }
 
     #[test]
@@ -631,11 +851,11 @@ mod tests {
         seed(&db, 3);
 
         let rows = delete_set(&db).unwrap();
-        assert_eq!(rows.len(), FIXTURE_CONTENTS.len());
+        assert_eq!(rows.len(), 10);
         // The manifest is the receipt an operator reconciles the backup
         // against, so it must not claim a row the delete leaves behind.
         assert!(
-            rows.iter().all(|(id, _)| id.starts_with("fixture-")),
+            rows.iter().all(|(_, id, _)| id.starts_with("fixture-")),
             "delete set named a non-fixture row: {rows:?}"
         );
 
@@ -654,9 +874,13 @@ mod tests {
         let rendered = render_delete_set(&plan, &delete_set(&db).unwrap());
         let lines: Vec<&str> = rendered.lines().collect();
 
-        assert_eq!(lines[0], "db\tid\tcontent");
-        assert_eq!(lines.len(), FIXTURE_CONTENTS.len() + 1);
-        assert!(lines[1..].iter().all(|line| line.matches('\t').count() == 2));
+        assert_eq!(lines[0], "db\tentity_type\tid\tcontent");
+        assert_eq!(lines.len(), 11);
+        assert!(
+            lines[1..]
+                .iter()
+                .all(|line| line.matches('\t').count() == 3)
+        );
     }
 
     #[test]

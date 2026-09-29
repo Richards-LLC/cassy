@@ -197,17 +197,18 @@ pub(crate) fn find_cas_root_ignoring_env(start: &Path) -> Result<PathBuf> {
         }
     }
 
-    // Prefer Git's canonical toplevel before the legacy parent walk. This keeps
-    // a nested `.cas/` from shadowing the project store when a factory command
-    // starts in a repository subdirectory.
+    // A Git repository is a hard boundary. In particular, a newly cloned repo
+    // inside another Cassy project must never inherit its parent's store.
+    // This also keeps a nested `.cas/` from shadowing the project store.
     if let Ok(repo_root) = find_git_toplevel(start) {
         let cas_dir = repo_root.join(".cas");
         if cas_dir.exists() && cas_dir.is_dir() {
             return Ok(cas_dir);
         }
+        return Err(CasError::NotInitialized);
     }
 
-    // If Git is unavailable or the toplevel has no store, walk up the directory tree
+    // Outside Git, retain the directory walk for non-Git projects.
     let mut current = start.to_path_buf();
 
     loop {
@@ -237,6 +238,16 @@ fn find_cas_root_from_cas_worktree(start: &Path) -> Option<PathBuf> {
     // Look for .cas/worktrees/ in the path
     if let Some(idx) = path_str.find(".cas/worktrees/") {
         let cas_dir = PathBuf::from(&path_str[..idx + ".cas".len()]);
+        // A Git repo nested inside a factory worktree is its own project.
+        // The path marker alone must not grant it the factory parent's store.
+        let worktree_suffix = &path_str[idx + ".cas/worktrees/".len()..];
+        let worktree_name = worktree_suffix.split('/').next()?;
+        let worktree_root = cas_dir.join("worktrees").join(worktree_name);
+        if let Ok(repo_root) = find_git_toplevel(start) {
+            if canonical_or_owned(&repo_root) != canonical_or_owned(&worktree_root) {
+                return None;
+            }
+        }
         if cas_dir.join("cas.db").exists() || cas_dir.is_dir() {
             return Some(cas_dir);
         }
@@ -280,7 +291,10 @@ fn find_main_repo_from_worktree(start: &Path) -> Option<PathBuf> {
                     // e.g., /path/to/main/.git/worktrees/wt1 -> /path/to/main
                     if let Some(git_dir) = gitdir_path.parent() {
                         // .git/worktrees
-                        if let Some(git_dir) = git_dir.parent() {
+                        if git_dir.file_name().is_some_and(|name| name == "worktrees")
+                            && let Some(git_dir) = git_dir.parent()
+                            && git_dir.file_name().is_some_and(|name| name == ".git")
+                        {
                             // .git
                             if let Some(main_repo) = git_dir.parent() {
                                 // main repo — canonicalize to resolve any ../ components
@@ -327,13 +341,16 @@ pub fn detect_store_type(cas_dir: &Path) -> StoreType {
 
 /// Open base entry store (sqlite/markdown + optional notifier).
 /// Never wraps with [`SyncingEntryStore`] — safe for pull/apply-remote.
-fn open_store_base(cas_dir: &Path) -> Result<Arc<dyn Store>> {
+fn open_store_base(cas_dir: &Path, stamp_origin: bool) -> Result<Arc<dyn Store>> {
     let store_type = detect_store_type(cas_dir);
     let config = Config::load(cas_dir).unwrap_or_default();
 
     let base_store: Arc<dyn Store> = match store_type {
         StoreType::Sqlite => {
-            let store = SqliteStore::open(cas_dir)?;
+            let origin = stamp_origin
+                .then(|| crate::cloud::resolve_canonical_id(cas_dir))
+                .flatten();
+            let store = SqliteStore::open_with_origin_project(cas_dir, origin.as_deref())?;
             store.init()?;
             Arc::new(store)
         }
@@ -362,7 +379,7 @@ fn open_store_base(cas_dir: &Path) -> Result<Arc<dyn Store>> {
 /// [`open_store_local`] instead — otherwise every pulled row re-enters the
 /// queue and push↔pull never settles (cas-7fbb).
 pub fn open_store(cas_dir: &Path) -> Result<Arc<dyn Store>> {
-    let base_store = open_store_base(cas_dir)?;
+    let base_store = open_store_base(cas_dir, true)?;
 
     // Wrap with cloud sync if logged in
     if let Ok(cloud_config) = CloudConfig::load_from_cas_dir(cas_dir) {
@@ -385,7 +402,7 @@ pub fn open_store(cas_dir: &Path) -> Result<Arc<dyn Store>> {
 /// Use on pull / team-pull / daemon cloud-sync apply paths so remote rows
 /// are written locally without re-enqueueing (cas-7fbb).
 pub fn open_store_local(cas_dir: &Path) -> Result<Arc<dyn Store>> {
-    open_store_base(cas_dir)
+    open_store_base(cas_dir, false)
 }
 
 /// Open base task store (+ optional notifier). No SyncingTaskStore.
@@ -405,7 +422,10 @@ fn open_task_store_base(cas_dir: &Path) -> Result<Arc<dyn TaskStore>> {
     // the whole task store down with it.
     if let Ok(queue) = crate::cloud::SyncQueue::open(cas_dir) {
         let queue = Arc::new(queue);
-        if queue.quarantined_count(crate::cloud::QUARANTINE_TASK).is_ok() {
+        if queue
+            .quarantined_count(crate::cloud::QUARANTINE_TASK)
+            .is_ok()
+        {
             base_store = Arc::new(crate::store::QuarantineFilteringTaskStore::new(
                 base_store, queue,
             ));
@@ -608,13 +628,16 @@ pub fn open_spec_store(cas_dir: &Path) -> Result<Arc<dyn SpecStore>> {
 }
 
 /// Open base rule store (+ optional notifier). No SyncingRuleStore / SyncQueue.
-fn open_rule_store_base(cas_dir: &Path) -> Result<Arc<dyn RuleStore>> {
+fn open_rule_store_base(cas_dir: &Path, stamp_origin: bool) -> Result<Arc<dyn RuleStore>> {
     let store_type = detect_store_type(cas_dir);
     let config = Config::load(cas_dir).unwrap_or_default();
 
     let base_store: Arc<dyn RuleStore> = match store_type {
         StoreType::Sqlite => {
-            let store = SqliteRuleStore::open(cas_dir)?;
+            let origin = stamp_origin
+                .then(|| crate::cloud::resolve_canonical_id(cas_dir))
+                .flatten();
+            let store = SqliteRuleStore::open_with_origin_project(cas_dir, origin.as_deref())?;
             store.init()?;
             Arc::new(store)
         }
@@ -639,7 +662,7 @@ fn open_rule_store_base(cas_dir: &Path) -> Result<Arc<dyn RuleStore>> {
 /// Prefer [`open_rule_store_local`] for pull/apply-remote paths.
 pub fn open_rule_store(cas_dir: &Path) -> Result<Arc<dyn RuleStore>> {
     let config = Config::load(cas_dir).unwrap_or_default();
-    let base_store = open_rule_store_base(cas_dir)?;
+    let base_store = open_rule_store_base(cas_dir, true)?;
 
     // Wrap with syncing store if sync is enabled
     if config.sync.enabled && !Config::is_sync_disabled() {
@@ -690,7 +713,7 @@ pub fn open_rule_store(cas_dir: &Path) -> Result<Arc<dyn RuleStore>> {
 /// apply does not re-feed the queue. Local rule-file sync still runs on
 /// normal edit paths via [`open_rule_store`].
 pub fn open_rule_store_local(cas_dir: &Path) -> Result<Arc<dyn RuleStore>> {
-    open_rule_store_base(cas_dir)
+    open_rule_store_base(cas_dir, false)
 }
 
 /// Initialize a new .cas directory
@@ -899,6 +922,83 @@ mod tests {
     }
 
     #[test]
+    fn uninitialized_nested_git_repo_does_not_inherit_parent_store() {
+        let mut env = TestEnvGuard::with_optional_vars(&[("CAS_ROOT", None)]);
+        let temp = TempDir::new().unwrap();
+        let parent_store = init_cas_dir(temp.path()).unwrap();
+        let repo = temp.path().join("child");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        let output = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git init failed: {output:?}");
+
+        assert!(matches!(
+            find_cas_root_ignoring_env(&repo.join("src")),
+            Err(CasError::NotInitialized)
+        ));
+        assert!(matches!(
+            find_cas_root_from(&repo.join("src")),
+            Err(CasError::NotInitialized)
+        ));
+
+        // An explicit override remains authoritative even inside an
+        // uninitialized Git repository.
+        env.set("CAS_ROOT", parent_store.to_str().unwrap());
+        assert_eq!(find_cas_root_from(&repo.join("src")).unwrap(), parent_store);
+        env.remove("CAS_ROOT");
+
+        let child_store = init_cas_dir(&repo).unwrap();
+        assert_eq!(find_cas_root_from(&repo.join("src")).unwrap(), child_store);
+        assert_ne!(child_store, parent_store);
+    }
+
+    #[test]
+    fn nested_git_repo_in_factory_worktree_does_not_inherit_factory_store() {
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_ROOT", None)]);
+        let temp = TempDir::new().unwrap();
+        let cas_dir = init_cas_dir(temp.path()).unwrap();
+        let nested_repo = cas_dir.join("worktrees/worker/nested");
+        std::fs::create_dir_all(&nested_repo).unwrap();
+        let output = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&nested_repo)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git init failed: {output:?}");
+        assert!(matches!(
+            find_cas_root_from(&nested_repo),
+            Err(CasError::NotInitialized)
+        ));
+    }
+
+    #[test]
+    fn submodule_git_file_does_not_inherit_parent_store() {
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_ROOT", None)]);
+        let temp = TempDir::new().unwrap();
+        init_cas_dir(temp.path()).unwrap();
+        let parent = temp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let output = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&parent)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git init failed: {output:?}");
+        let child = parent.join("submodule");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::create_dir_all(parent.join(".git/modules/submodule")).unwrap();
+        std::fs::write(
+            child.join(".git"),
+            "gitdir: ../.git/modules/submodule\n",
+        )
+        .unwrap();
+        assert!(find_main_repo_from_worktree(&child).is_none());
+    }
+
+    #[test]
     fn test_detect_store_type() {
         let temp = TempDir::new().unwrap();
         let cas_dir = temp.path().join(".cas");
@@ -936,7 +1036,6 @@ mod tests {
         // After init, should return true
         init_cas_dir(&temp_path).unwrap();
         assert!(has_project_cas(), "Expected .cas to be found after init");
-
     }
 
     #[test]
@@ -1136,8 +1235,10 @@ mod tests {
         init_cas_dir(&copy).unwrap();
         init_cas_dir(&live).unwrap();
 
-        let _env =
-            TestEnvGuard::with_optional_vars(&[("CAS_ROOT", Some(live.join(".cas").to_str().unwrap()))]);
+        let _env = TestEnvGuard::with_optional_vars(&[(
+            "CAS_ROOT",
+            Some(live.join(".cas").to_str().unwrap()),
+        )]);
 
         // Precedence is unchanged: CAS_ROOT still wins the actual resolution...
         assert_eq!(
@@ -1146,7 +1247,10 @@ mod tests {
             "CAS_ROOT precedence must NOT change — factory workers depend on it"
         );
         // ...but the losing root is knowable, which is what the notice reports.
-        assert_eq!(find_cas_root_ignoring_env(&copy).unwrap(), copy.join(".cas"));
+        assert_eq!(
+            find_cas_root_ignoring_env(&copy).unwrap(),
+            copy.join(".cas")
+        );
         assert!(
             root_override_notice(&live.join(".cas"), &copy.join(".cas")).is_some(),
             "a cwd store different from CAS_ROOT must be reported"
@@ -1165,7 +1269,6 @@ mod tests {
         // find_cas_root should use CAS_ROOT
         let found = find_cas_root().unwrap();
         assert_eq!(found, cas_dir);
-
     }
 
     #[test]
@@ -1190,6 +1293,5 @@ mod tests {
         // Should fall back to directory walk and find the real .cas
         let found = find_cas_root().unwrap();
         assert_eq!(found, temp_path.join(".cas"));
-
     }
 }

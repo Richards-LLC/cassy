@@ -1720,6 +1720,23 @@ fn discover_local_projects(current_cas_root: Option<&Path>) -> ProjectDiscovery 
         unregistered.remove(&home);
     }
 
+    // A bind mount can expose the same project at two real paths. Refresh
+    // once per filesystem directory, preferring an already registered path.
+    let mut seen_inodes = std::collections::HashSet::new();
+    let mut preferred = projects.iter().cloned().collect::<Vec<_>>();
+    preferred.sort_by_key(|path| (!registered.contains(path), path.clone()));
+    let mut keep = BTreeSet::new();
+    for project in preferred {
+        if crate::store::known_repos::project_inode_key(&project)
+            .is_some_and(|inode| !seen_inodes.insert(inode)) {
+            unregistered.remove(&project);
+            skipped_by_path.insert(project, "duplicate project directory".to_string());
+        } else {
+            keep.insert(project);
+        }
+    }
+    projects = keep;
+
     ProjectDiscovery {
         projects: projects.into_iter().collect(),
         unregistered,
@@ -1743,7 +1760,7 @@ fn canonical_path(path: &Path) -> PathBuf {
 /// `~/.rustup`, and `~/.claude` are large and hold no projects, and anything
 /// genuinely living under one is reachable through the host registry.
 fn scan_for_projects(root: &Path, depth: usize, projects: &mut BTreeSet<PathBuf>) {
-    if root.join(".cas").is_dir() {
+    if root.join(".cas").is_dir() && crate::store::known_repos::is_project_root(root) {
         projects.insert(canonical_path(root));
     }
     if depth == 0 {
@@ -1777,6 +1794,11 @@ fn scan_for_projects(root: &Path, depth: usize, projects: &mut BTreeSet<PathBuf>
                     | "snap"
             )
         ) {
+            continue;
+        }
+        if dirs::home_dir()
+            .is_some_and(|home| canonical_path(&path) == canonical_path(&home.join("Archive")))
+        {
             continue;
         }
         scan_for_projects(&path, depth - 1, projects);

@@ -123,8 +123,12 @@ fn test_env() -> TestEnvGuard {
 
 fn init_cas_dir(path: &Path, _env: &mut TestEnvGuard) -> anyhow::Result<PathBuf> {
     let cas_root = cas::store::init_cas_dir(path)?;
-    cas::store::known_repos::ensure_host_schema()?;
-    cas::store::known_repos::register_repo_strict(path)?;
+    // Non-git stores are valid local stores, but cannot enter the host's
+    // project registry without an exact Git root or canonical_id pin.
+    if cas::store::known_repos::is_project_root(path) {
+        cas::store::known_repos::ensure_host_schema()?;
+        cas::store::known_repos::register_repo_strict(path)?;
+    }
     Ok(cas_root)
 }
 

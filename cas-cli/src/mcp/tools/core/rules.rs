@@ -471,6 +471,7 @@ impl CasCore {
         }
 
         let mut rule = Rule {
+            origin_project: None,
             id: id.clone(),
             scope: Scope::default(),
             content: req.content,

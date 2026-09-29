@@ -184,6 +184,30 @@ mod internal_llm_tests {
     use crate::test_support::TestEnvGuard;
 
     #[test]
+    fn storeless_session_start_does_not_write_to_parent_store() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent_store = crate::store::init_cas_dir(temp.path()).unwrap();
+        let repo = temp.path().join("child");
+        std::fs::create_dir_all(&repo).unwrap();
+        let result = handle_session_start(
+            &HookInput {
+                session_id: "storeless-session".into(),
+                cwd: repo.to_string_lossy().into_owned(),
+                hook_event_name: "SessionStart".into(),
+                ..HookInput::default()
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(result).unwrap(),
+            serde_json::to_value(HookOutput::empty()).unwrap()
+        );
+        let agents = crate::store::open_agent_store(&parent_store).unwrap();
+        assert!(agents.list(None).unwrap().is_empty());
+    }
+
+    #[test]
     fn internal_model_hooks_create_neither_agents_nor_prompt_memories() {
         let project = tempfile::tempdir().expect("project");
         let cas_root = crate::store::init_cas_dir(project.path()).expect("cas root");

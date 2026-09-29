@@ -7,6 +7,46 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.36.0] - 2026-09-29
+
+### Changed
+
+- Every task, memory and rule now records the project that wrote it. A
+  one-time upgrade step labels older rows from the folder of the session that
+  wrote them; a row it cannot place is marked unknown, stays local and is
+  never pushed to a team.
+- Cloud sync pushes only rows this project wrote. Queued rows from other
+  projects, or with an unknown owner, are dropped before every push and
+  counted in `cas cloud status`. Rows queued before the upgrade take their
+  owner from the stored row.
+- Moving a task to another project deletes this project's cloud copy and no
+  longer pushes a copy under the new owner.
+- Only real projects are registered and refreshed: a Git top-level folder, or
+  a folder whose `.cas/config.toml` pins a `canonical_id`. Container folders
+  and anything under `~/Archive` are skipped, and one folder reached by two
+  paths is registered once. `cas update` no longer links an unlinked project
+  to a team.
+- A Git repository without its own `.cas` no longer uses a parent folder's
+  store; run `cas init` there. The error now reads "no Cassy store here; run
+  `cas init`".
+- Rows a push marked unrecoverable stay parked across upgrades until
+  `cas cloud queue --retry`. Only rows refused for an old client version are
+  retried automatically after an upgrade.
+- Captured user prompts ("User request: …") are local only and never sync.
+- Cassy starts every Claude session with Claude in Chrome enabled
+  (`--chrome`), when the installed Claude supports it.
+
+### Added
+
+- `cas doctor` reports authored, foreign and unknown counts for tasks,
+  memories and rules, with the command that fixes each.
+- `cas cloud purge-foreign --include-unknown` also removes rows with an
+  unknown owner (backup first, as for foreign rows).
+- `cas cloud adopt-unknown` claims unknown rows for this project after a
+  backup (`--dry-run` previews).
+- `cas purge-test-fixtures` also removes the leaked MCP protocol test tasks
+  and rule.
+
 ## [3.35.0] - 2026-09-29
 
 ### Added

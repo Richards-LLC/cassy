@@ -109,7 +109,9 @@ fn task_note_append_waits_through_a_foreign_write_lock() {
 
     started_rx.recv().unwrap();
     assert!(
-        finished_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+        finished_rx
+            .recv_timeout(Duration::from_millis(100))
+            .is_err(),
         "task note append must wait while a foreign writer holds the lock"
     );
     holder.execute_batch("COMMIT").unwrap();
@@ -184,6 +186,13 @@ fn task_origin_project_round_trips_and_store_identity_stamps_new_rows() {
     assert_eq!(
         store.get(&foreign_id).unwrap().origin_project.as_deref(),
         Some("acme/other")
+    );
+    foreign.origin_project = None;
+    store.update(&foreign).unwrap();
+    assert_eq!(
+        store.get(&foreign_id).unwrap().origin_project.as_deref(),
+        Some("acme/other"),
+        "an edit without provenance must preserve the stored origin"
     );
 }
 

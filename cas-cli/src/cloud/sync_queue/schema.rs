@@ -144,10 +144,9 @@ impl SyncQueue {
     ///
     /// `last_error` alone cannot separate a benign last-writer-wins skip from a
     /// refused write, and it cannot say which client build parked a row. The
-    /// structured columns keep the cloud's own verdict (`last_outcome`,
-    /// `last_reason`) and the build that recorded it so `cas update`/`cas
-    /// doctor` can name rejections by reason and so a client upgrade can
-    /// requeue rows that only an older build treated as terminal.
+    /// structured columns retain the cloud's verdict and the recording build
+    /// for queue diagnostics. An upgrade only requeues client-version gates;
+    /// other terminal rows require an explicit retry.
     pub(super) fn migrate_row_outcomes(&self, conn: &Connection) -> Result<(), CasError> {
         for column in ["last_outcome", "last_reason", "failed_client_version"] {
             let exists: bool = conn

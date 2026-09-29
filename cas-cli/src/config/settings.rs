@@ -31,9 +31,8 @@ pub struct HubLaunchProfiles {
 /// upstream repository, and inferring the current git origin would route Cassy
 /// bugs into a downstream consumer's issue tracker.
 pub const DEFAULT_CASSY_ISSUES_REPO: &str = "Richards-LLC/cassy";
-/// Violet's issue repository (formerly MechaCassy). The GitHub slug keeps the
-/// old name until the repository itself is renamed (GH #963).
-pub const DEFAULT_VIOLET_ISSUES_REPO: &str = "Richards-LLC/mecha-cassy";
+/// Violet's renamed issue repository (GH #1055).
+pub const DEFAULT_VIOLET_ISSUES_REPO: &str = "Richards-LLC/violet_ps";
 /// Deprecated name of [`DEFAULT_VIOLET_ISSUES_REPO`], kept for one release.
 pub const DEFAULT_MECHA_CASSY_ISSUES_REPO: &str = DEFAULT_VIOLET_ISSUES_REPO;
 pub const DEFAULT_CLOUD_ISSUES_REPO: &str = "Richards-LLC/petra-stella-cloud";
@@ -536,9 +535,9 @@ pub struct FactoryConfig {
     pub nice_cargo: bool,
 
     /// Maximum number of workers allowed to build concurrently on this host.
-    /// `spawn_workers` refuses a request that would exceed this cap or when
-    /// the one-minute load is already above CPU capacity; `force=true` is the
-    /// explicit operator override for exceptional runs.
+    /// Compile-only worker checks hold OS slot locks under this hard cap.
+    /// `spawn_workers` additionally applies a soft load/concurrency guard;
+    /// `force=true` overrides only that spawn-time check.
     #[serde(default = "default_max_concurrent_builders")]
     pub max_concurrent_builders: usize,
 

@@ -63,7 +63,7 @@ test-verbose:
 # Scope it, as always. Default is one binary; override for another:
 #   make test-clean-env
 #   make test-clean-env CLEAN_ENV_ARGS='--lib cloud::config'
-CLEAN_ENV_ARGS ?= --test factory_mcp_ops_test
+CLEAN_ENV_ARGS ?= --test integration_factory factory_mcp_ops_test::
 test-clean-env:
 	@stripped=$$(env | sed -n 's/^\(CAS_[A-Za-z0-9_]*\)=.*/\1/p' | sort); \
 	if [ -n "$$stripped" ]; then \
@@ -158,11 +158,11 @@ test-release-panic: test-release-panic-release test-release-panic-release-fast
 
 test-release-panic-release:
 	CARGO="$(CARGO)" ../scripts/run-verified-tests.sh nextest run -p cas --release --lib panic_regression
-	CARGO="$(CARGO)" ../scripts/run-verified-tests.sh nextest run -p cas --release --test search_utf8_regression_test
+	CARGO="$(CARGO)" ../scripts/run-verified-tests.sh nextest run -p cas --release --test integration_cloud search_utf8_regression_test::
 
 test-release-panic-release-fast:
 	CARGO="$(CARGO)" ../scripts/run-verified-tests.sh nextest run -p cas --cargo-profile release-fast --lib panic_regression
-	CARGO="$(CARGO)" ../scripts/run-verified-tests.sh nextest run -p cas --cargo-profile release-fast --test search_utf8_regression_test
+	CARGO="$(CARGO)" ../scripts/run-verified-tests.sh nextest run -p cas --cargo-profile release-fast --test integration_cloud search_utf8_regression_test::
 
 # Prove a test run writes nothing into a real CAS store (cas-78c8 / GH #156).
 #
@@ -171,8 +171,8 @@ test-release-panic-release-fast:
 # any other test command; the default is the suite most likely to leak.
 #
 #   make test-real-store-untouched
-#   make test-real-store-untouched REAL_STORE_ARGS='--test mcp_protocol_test'
-REAL_STORE_ARGS ?= -p cas --test mcp_protocol_test --test mcp_tools_test --test cli_test
+#   make test-real-store-untouched REAL_STORE_ARGS='--test integration_cli mcp_protocol_test::'
+REAL_STORE_ARGS ?= -p cas --test integration_cli --test mcp_tools_test -E 'test(mcp_protocol_test::) or test(cli_test::) or binary(mcp_tools_test)'
 test-real-store-untouched:
 	../scripts/check-real-store-untouched.sh $(REAL_STORE_ARGS)
 
@@ -189,7 +189,7 @@ test-real-store-untouched:
 # run you intend to quote in a close note:
 #
 #   make -C cas-cli test-scoped SCOPED_ARGS='--proof -p cas --lib my_module'
-#   make -C cas-cli test-scoped SCOPED_ARGS='--proof -p cas --test cli_test'
+#   make -C cas-cli test-scoped SCOPED_ARGS='--proof -p cas --test integration_cli'
 #
 # NOTE: like test-clean-env, this MUST stay an explicit rule — the `test-%`
 # pattern rule above would otherwise match it and run `cargo test -p cas scoped`.

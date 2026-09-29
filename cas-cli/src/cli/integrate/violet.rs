@@ -1,4 +1,4 @@
-//! `cas integrate violet` — one command that makes the MechaCassy Slack
+//! `cas integrate violet` — one command that makes the Violet Slack
 //! hub reachable from every project on a machine (task **cas-8fad**).
 //!
 //! ## What this replaces
@@ -14,8 +14,8 @@
 //! ## Credential rule
 //!
 //! Every generated proxy or harness artifact references a credential by
-//! environment variable **name** (`auth = "env:MECHA_SLACK_TOKEN_<LABEL>"`,
-//! `x-vercel-protection-bypass = "env:MECHA_VERCEL_BYPASS"`). Provisioning
+//! environment variable **name** (`auth = "env:VIOLET_SLACK_TOKEN_<LABEL>"`,
+//! `x-vercel-protection-bypass = "env:VIOLET_VERCEL_BYPASS"`). Provisioning
 //! writes the values only to the private machine credentials file; a value is
 //! never read into a report, printed, or embedded in an error. The only fact
 //! this module publishes about a variable is [`EnvState`] — set, empty, or
@@ -38,9 +38,9 @@ use serde::Serialize;
 use url::Url;
 
 use cmcp_core::config::{
-    Config as ProxyConfig, ExternalToolConfig, MECHA_CASSY_BYPASS_HEADER,
-    MECHA_CASSY_DEFAULT_BYPASS_ENV, MECHA_CASSY_MCP_URL,
-    MECHA_CASSY_SERVER, MECHA_CASSY_TOOLS, ServerConfig,
+    Config as ProxyConfig, ExternalToolConfig, ServerConfig, VIOLET_BYPASS_HEADER,
+    VIOLET_DEFAULT_BYPASS_ENV, VIOLET_MCP_URL, VIOLET_SERVER, VIOLET_TOOLS,
+    violet_credential_value,
 };
 
 use crate::cloud::{CloudConfig, DeviceConfig};
@@ -52,31 +52,30 @@ use super::types::{IntegrationAction, IntegrationOutcome, IntegrationStatus, Pla
 /// the message is actionable without opening the onboarding doc.
 pub const HUB_CLIENT_ROUTE: &str = "/api/clients";
 pub const HUB_BYPASS_ROUTE: &str = "/api/bypass";
-pub const HUB_CLIENT_ISSUE: &str = "mecha-cassy#5";
-pub const VERCEL_PROJECT: &str = "mecha-cassy";
-pub const CREDENTIALS_HINT: &str =
-    "run `cas login`, then re-run `cas integrate violet`; credentials are stored in the \
+pub const HUB_CLIENT_ISSUE: &str = "violet_ps#5";
+pub const VERCEL_PROJECT: &str = "violet_ps";
+pub const CREDENTIALS_HINT: &str = "run `cas login`, then re-run `cas integrate violet`; credentials are stored in the \
      machine credentials file sourced by your login shell — see \
-     docs/MECHA_CASSY_ONBOARDING.md";
+     docs/VIOLET_ONBOARDING.md";
 
 // ---------------------------------------------------------------------------
 // CLI surface
 // ---------------------------------------------------------------------------
 
 #[derive(Args, Debug, Clone, Default)]
-pub struct MechaCassyArgs {
+pub struct VioletArgs {
     /// Environment variable holding this machine's hub bearer token.
-    /// Defaults to `MECHA_SLACK_TOKEN_<LABEL>`.
+    /// Defaults to `VIOLET_SLACK_TOKEN_<LABEL>`.
     #[arg(long, value_name = "NAME")]
     pub token_env: Option<String>,
     /// Environment variable holding the Vercel edge-protection bypass secret.
-    #[arg(long, value_name = "NAME", default_value = MECHA_CASSY_DEFAULT_BYPASS_ENV)]
+    #[arg(long, value_name = "NAME", default_value = VIOLET_DEFAULT_BYPASS_ENV)]
     pub bypass_env: String,
     /// Per-machine client label override (e.g. `LAPTOP`).
     #[arg(long, value_name = "LABEL")]
     pub label: Option<String>,
     /// Hub MCP endpoint. Only needed against a staging hub.
-    #[arg(long, value_name = "URL", default_value = MECHA_CASSY_MCP_URL)]
+    #[arg(long, value_name = "URL", default_value = VIOLET_MCP_URL)]
     pub url: String,
     /// Leave the Claude Code and Codex MCP registrations alone.
     #[arg(long)]
@@ -89,7 +88,7 @@ pub struct MechaCassyArgs {
     pub dry_run: bool,
 }
 
-impl MechaCassyArgs {
+impl VioletArgs {
     /// Bearer variable name: `--token-env` wins, then `--label`, then the
     /// hostname-derived label. A label is upper-cased and non-alphanumerics
     /// are folded to `_` so `my laptop` and `my-laptop` name the same variable.
@@ -109,7 +108,7 @@ impl MechaCassyArgs {
         {
             return explicit.to_string();
         }
-        format!("MECHA_SLACK_TOKEN_{}", sanitize_label(label))
+        format!("VIOLET_SLACK_TOKEN_{}", sanitize_label(label))
     }
 }
 
@@ -168,7 +167,7 @@ pub enum EnvState {
 
 impl EnvState {
     pub fn of(env: &dyn EnvLookup, name: &str) -> Self {
-        match env.get(name) {
+        match violet_credential_value(name, |candidate| env.get(candidate)) {
             Some(value) if !value.trim().is_empty() => Self::Set,
             Some(_) => Self::Empty,
             None => Self::Unset,
@@ -219,7 +218,7 @@ impl HubProbe for ProxyHubProbe {
             url: url.to_string(),
             auth: Some(format!("env:{token_env}")),
             headers: HashMap::from([(
-                MECHA_CASSY_BYPASS_HEADER.to_string(),
+                VIOLET_BYPASS_HEADER.to_string(),
                 format!("env:{bypass_env}"),
             )]),
             oauth: false,
@@ -237,7 +236,7 @@ impl HubProbe for ProxyHubProbe {
         };
         runtime.block_on(async move {
             let engine = match cmcp_core::ProxyEngine::from_configs(HashMap::from([(
-                MECHA_CASSY_SERVER.to_string(),
+                VIOLET_SERVER.to_string(),
                 server,
             )]))
             .await
@@ -253,12 +252,12 @@ impl HubProbe for ProxyHubProbe {
             let record = health
                 .servers
                 .iter()
-                .find(|server| server.name == MECHA_CASSY_SERVER);
+                .find(|server| server.name == VIOLET_SERVER);
             let outcome = match record {
                 Some(server) if server.state == cmcp_core::UpstreamState::Healthy => {
                     let catalog = engine.catalog_entries_by_server().await;
                     let tools = catalog
-                        .get(MECHA_CASSY_SERVER)
+                        .get(VIOLET_SERVER)
                         .map(|entries| entries.iter().map(|e| e.name.clone()).collect())
                         .unwrap_or_default();
                     ProbeOutcome::Tools { tools }
@@ -380,7 +379,12 @@ impl HubClient for ProcessHubClient {
                     let body = response.into_string().unwrap_or_default();
                     let is_taken = serde_json::from_str::<serde_json::Value>(&body)
                         .ok()
-                        .and_then(|value| value.get("error").and_then(serde_json::Value::as_str).map(|error| error == "label_taken"))
+                        .and_then(|value| {
+                            value
+                                .get("error")
+                                .and_then(serde_json::Value::as_str)
+                                .map(|error| error == "label_taken")
+                        })
                         .unwrap_or(false);
                     return Err(if is_taken {
                         HubClientError::LabelTaken
@@ -446,8 +450,11 @@ enum BypassReadError {
 }
 
 trait BypassReader {
-    fn read(&self, vercel_token: &str, project: &str)
-        -> std::result::Result<String, BypassReadError>;
+    fn read(
+        &self,
+        vercel_token: &str,
+        project: &str,
+    ) -> std::result::Result<String, BypassReadError>;
 }
 
 struct ProcessBypassReader;
@@ -528,9 +535,9 @@ fn hub_auth_error(error: &HubClientError) -> anyhow::Error {
             "hub route POST {HUB_CLIENT_ROUTE} rejected the Cassy Cloud login ({}); run `cas login` and retry",
             error
         ),
-        HubClientError::RouteUnavailable => anyhow::anyhow!(
-            "hub route POST {HUB_CLIENT_ROUTE} not available ({HUB_CLIENT_ISSUE})"
-        ),
+        HubClientError::RouteUnavailable => {
+            anyhow::anyhow!("hub route POST {HUB_CLIENT_ROUTE} not available ({HUB_CLIENT_ISSUE})")
+        }
         _ => anyhow::anyhow!("hub route POST {HUB_CLIENT_ROUTE} failed: {error}"),
     }
 }
@@ -551,12 +558,15 @@ fn fallback_bypass(
         }
     }
     let bypass = prompt.read()?;
-    anyhow::ensure!(!bypass.trim().is_empty(), "the Vercel bypass secret cannot be empty");
+    anyhow::ensure!(
+        !bypass.trim().is_empty(),
+        "the Vercel bypass secret cannot be empty"
+    );
     Ok(bypass)
 }
 
 fn mint_client(
-    args: &MechaCassyArgs,
+    args: &VioletArgs,
     label: &str,
     cloud_token: &str,
     hub: &dyn HubClient,
@@ -590,7 +600,7 @@ fn mint_client(
 }
 
 fn provision_credentials(
-    args: &MechaCassyArgs,
+    args: &VioletArgs,
     env: &dyn EnvLookup,
     hub: &dyn HubClient,
     vercel: &dyn BypassReader,
@@ -612,7 +622,7 @@ fn provision_credentials(
 }
 
 fn provision_credentials_with_cloud_token(
-    args: &MechaCassyArgs,
+    args: &VioletArgs,
     env: &dyn EnvLookup,
     cloud_token: Option<&str>,
     hub: &dyn HubClient,
@@ -622,15 +632,18 @@ fn provision_credentials_with_cloud_token(
 ) -> Result<(String, CredentialValues)> {
     let label = resolve_label(args.label.as_deref(), device.hostname().as_deref());
     let token_env = args.resolved_token_env_for_label(&label);
-    let existing_token = env.get(&token_env).filter(|value| !value.trim().is_empty());
-    let existing_bypass = env
-        .get(args.bypass_env.trim())
+    let existing_token = violet_credential_value(&token_env, |name| env.get(name))
+        .filter(|value| !value.trim().is_empty());
+    let existing_bypass = violet_credential_value(args.bypass_env.trim(), |name| env.get(name))
         .filter(|value| !value.trim().is_empty());
     if existing_token.is_some() && existing_bypass.is_some() {
-        return Ok((label, CredentialValues {
-            token: existing_token.unwrap_or_default(),
-            bypass: existing_bypass.unwrap_or_default(),
-        }));
+        return Ok((
+            label,
+            CredentialValues {
+                token: existing_token.unwrap_or_default(),
+                bypass: existing_bypass.unwrap_or_default(),
+            },
+        ));
     }
 
     let (token, hub_bypass, cloud_token, actual_label) = if let Some(token) = existing_token {
@@ -638,7 +651,7 @@ fn provision_credentials_with_cloud_token(
     } else {
         let cloud_token = cloud_token.ok_or_else(|| {
             provisioning_error(&format!(
-                "MechaCassy onboarding requires an existing Cassy Cloud login for hub route POST {HUB_CLIENT_ROUTE}; run `cas login` and retry"
+                "Violet onboarding requires an existing Cassy Cloud login for hub route POST {HUB_CLIENT_ROUTE}; run `cas login` and retry"
             ))
         })?;
         let (token, bypass, actual_label) = mint_client(args, &label, cloud_token, hub, device)?;
@@ -659,9 +672,11 @@ fn provision_credentials_with_cloud_token(
                         error
                     ));
                 }
-                Err(error) => return Err(anyhow::anyhow!(
-                    "hub route GET {HUB_BYPASS_ROUTE} failed: {error}"
-                )),
+                Err(error) => {
+                    return Err(anyhow::anyhow!(
+                        "hub route GET {HUB_BYPASS_ROUTE} failed: {error}"
+                    ));
+                }
             },
             None => fallback_bypass(env, vercel, prompt)?,
         }
@@ -699,7 +714,7 @@ impl MachinePaths {
         let home = env.get("HOME").map(PathBuf::from);
         let home_for_credentials = home
             .clone()
-            .context("could not determine HOME for MechaCassy credentials")?;
+            .context("could not determine HOME for Violet credentials")?;
         let claude_dir = env
             .get("CLAUDE_CONFIG_DIR")
             .map(PathBuf::from)
@@ -800,7 +815,10 @@ fn write_private_file(path: &Path, contents: &str) -> Result<()> {
     if let Ok(metadata) = fs::symlink_metadata(path)
         && metadata.file_type().is_symlink()
     {
-        anyhow::bail!("{} is a symlink; refusing to write credentials", path.display());
+        anyhow::bail!(
+            "{} is a symlink; refusing to write credentials",
+            path.display()
+        );
     }
     let file_name = path
         .file_name()
@@ -848,8 +866,14 @@ fn write_credentials(
     bypass_name: &str,
     bypass: &str,
 ) -> Result<bool> {
-    anyhow::ensure!(valid_env_name(token_name), "invalid token environment variable name");
-    anyhow::ensure!(valid_env_name(bypass_name), "invalid bypass environment variable name");
+    anyhow::ensure!(
+        valid_env_name(token_name),
+        "invalid token environment variable name"
+    );
+    anyhow::ensure!(
+        valid_env_name(bypass_name),
+        "invalid bypass environment variable name"
+    );
     anyhow::ensure!(
         !token.contains(['\r', '\n']) && !bypass.contains(['\r', '\n']),
         "credential values cannot contain newlines"
@@ -1067,7 +1091,7 @@ pub struct ProjectProxyEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct MechaCassyReport {
+pub struct VioletReport {
     pub url: String,
     pub token_env: String,
     pub bypass_env: String,
@@ -1093,7 +1117,7 @@ pub struct MechaCassyReport {
     pub remedy: Option<String>,
 }
 
-impl MechaCassyReport {
+impl VioletReport {
     pub fn credentials_ready(&self) -> bool {
         self.token_env_state.is_usable() && self.bypass_env_state.is_usable()
     }
@@ -1189,7 +1213,15 @@ fn sorted_unique(values: &[String]) -> Vec<&str> {
 /// admits. Order-insensitive, so re-ordering a file is never reported as drift.
 pub fn tool_drift(allowlisted: &[String], live: &[String]) -> ToolDrift {
     let expected = sorted_unique(allowlisted);
-    let actual = sorted_unique(live);
+    // Production serves the deprecated mecha aliases alongside Violet. An
+    // alias is harmless when its canonical counterpart is admitted.
+    let actual: Vec<_> = sorted_unique(live)
+        .into_iter()
+        .filter(|tool| {
+            !matches!(*tool, "mecha_read" if expected.contains(&"violet_read"))
+                && !matches!(*tool, "mecha_post" if expected.contains(&"violet_post"))
+        })
+        .collect();
     ToolDrift {
         unallowlisted: actual
             .iter()
@@ -1224,7 +1256,7 @@ pub fn tool_drift(allowlisted: &[String], live: &[String]) -> ToolDrift {
 struct ProjectProxyPlan {
     /// The rewritten document, when something has to change.
     rewritten: Option<String>,
-    /// MechaCassy routes the file admits once the plan is applied. Because a
+    /// Violet routes the file admits once the plan is applied. Because a
     /// project allowlist replaces the machine one, this *is* the effective
     /// dispatch policy for this project.
     effective_tools: Vec<String>,
@@ -1243,9 +1275,9 @@ fn allowlist_source<'a>(project_proxy: Option<&'a Path>, user_proxy: &'a Path) -
 }
 
 fn canonical_entries() -> Vec<String> {
-    MECHA_CASSY_TOOLS
+    VIOLET_TOOLS
         .iter()
-        .map(|tool| format!("{MECHA_CASSY_SERVER}.{tool}"))
+        .map(|tool| format!("{VIOLET_SERVER}.{tool}"))
         .collect()
 }
 
@@ -1272,7 +1304,7 @@ fn server_endpoint(server: &ServerConfig) -> &str {
     }
 }
 
-/// What to do with the project file's own `[servers.mecha-cassy]` block.
+/// What to do with the project file's own `[servers.violet]` block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ServerAction {
     /// The file does not define the hub server at all.
@@ -1294,10 +1326,58 @@ fn plan_project_proxy(
         .parse()
         .with_context(|| format!("parsing {}", path.display()))?;
 
+    let mut migrated_legacy = false;
+    if let Some(servers) = document
+        .get_mut("servers")
+        .and_then(|item| item.as_table_like_mut())
+        && !servers.contains_key(VIOLET_SERVER)
+        && let Some(legacy) = servers.get("mecha-cassy").cloned()
+    {
+        servers.insert(VIOLET_SERVER, legacy);
+        migrated_legacy = true;
+    }
+    if let Some(access) = document
+        .get_mut("worker_access")
+        .and_then(|item| item.as_table_like_mut())
+        && !access.contains_key(VIOLET_SERVER)
+        && let Some(legacy) = access.get("mecha-cassy").cloned()
+    {
+        access.insert(VIOLET_SERVER, legacy);
+        migrated_legacy = true;
+    }
+    for key in ["allowlist", "worker_read_routes"] {
+        if let Some(array) = document.get_mut(key).and_then(|item| item.as_array_mut()) {
+            let legacy_routes: Vec<_> = array
+                .iter()
+                .filter_map(entry_route)
+                .filter(|route| route.server == "mecha-cassy")
+                .map(|mut route| {
+                    route.server = VIOLET_SERVER.to_string();
+                    route.tool = match route.tool.as_str() {
+                        "mecha_read" => "violet_read".to_string(),
+                        "mecha_post" => "violet_post".to_string(),
+                        _ => route.tool,
+                    };
+                    route
+                })
+                .collect();
+            for route in legacy_routes {
+                if !array
+                    .iter()
+                    .filter_map(entry_route)
+                    .any(|current| current.server == route.server && current.tool == route.tool)
+                {
+                    array.push(route.canonical_entry());
+                    migrated_legacy = true;
+                }
+            }
+        }
+    }
+
     let declares_server = document
         .get("servers")
         .and_then(|servers| servers.as_table_like())
-        .is_some_and(|servers| servers.contains_key(MECHA_CASSY_SERVER));
+        .is_some_and(|servers| servers.contains_key(VIOLET_SERVER));
 
     let allowlist_item = document.get("allowlist");
     if let Some(item) = allowlist_item
@@ -1314,7 +1394,7 @@ fn plan_project_proxy(
             array
                 .iter()
                 .filter_map(entry_route)
-                .filter(|route| route.server == MECHA_CASSY_SERVER)
+                .filter(|route| route.server == VIOLET_SERVER)
                 .map(|route| route.tool)
                 .collect()
         })
@@ -1329,7 +1409,7 @@ fn plan_project_proxy(
             effective_tools: Vec::new(),
             shadows_without_routes: true,
             note: format!(
-                "names no {MECHA_CASSY_SERVER} route and is authoritative for dispatch policy \
+                "names no {VIOLET_SERVER} route and is authoritative for dispatch policy \
                  here; left untouched"
             ),
         });
@@ -1341,10 +1421,10 @@ fn plan_project_proxy(
     // dropping a differing one would silently move this project to another
     // endpoint — the same silent policy change refused for the allowlist.
     let project_server = if declares_server {
-        ProxyConfig::load_from(path)
+        toml::from_str::<ProxyConfig>(&document.to_string())
             .with_context(|| format!("reading {}", path.display()))?
             .servers
-            .remove(MECHA_CASSY_SERVER)
+            .remove(VIOLET_SERVER)
     } else {
         None
     };
@@ -1359,13 +1439,13 @@ fn plan_project_proxy(
             .map(server_endpoint)
             .unwrap_or("unparsed endpoint");
         format!(
-            "kept [servers.{MECHA_CASSY_SERVER}]: it overrides the machine registration \
+            "kept [servers.{VIOLET_SERVER}]: it overrides the machine registration \
              (url {endpoint})"
         )
     };
 
     let canonical = canonical_entries();
-    let allowlist_is_canonical = existing_tools == MECHA_CASSY_TOOLS;
+    let allowlist_is_canonical = existing_tools == VIOLET_TOOLS;
     if allowlist_is_canonical && server_action != ServerAction::Drop {
         let mut note = "already names exactly the hub's current routes".to_string();
         if server_action == ServerAction::Keep {
@@ -1373,7 +1453,7 @@ fn plan_project_proxy(
             note.push_str(&kept_override_note());
         }
         return Ok(ProjectProxyPlan {
-            rewritten: None,
+            rewritten: migrated_legacy.then(|| document.to_string()),
             effective_tools: existing_tools,
             shadows_without_routes: false,
             note,
@@ -1388,14 +1468,14 @@ fn plan_project_proxy(
                 .get_mut("servers")
                 .and_then(|item| item.as_table_like_mut())
             {
-                servers.remove(MECHA_CASSY_SERVER);
+                servers.remove(VIOLET_SERVER);
                 emptied = servers.is_empty();
             }
             if emptied {
                 document.remove("servers");
             }
             changes.push(format!(
-                "dropped the [servers.{MECHA_CASSY_SERVER}] block (identical to the machine \
+                "dropped the [servers.{VIOLET_SERVER}] block (identical to the machine \
                  registration, which supplies it)"
             ));
         }
@@ -1421,9 +1501,7 @@ fn plan_project_proxy(
             .unwrap_or_default()
             .to_string();
         let trailing_comma = array.trailing_comma();
-        array.retain(|value| {
-            entry_route(value).is_none_or(|route| route.server != MECHA_CASSY_SERVER)
-        });
+        array.retain(|value| entry_route(value).is_none_or(|route| route.server != VIOLET_SERVER));
         for entry in &canonical {
             let prefix = if array.is_empty() && !sample_prefix.contains('\n') {
                 String::new()
@@ -1439,7 +1517,7 @@ fn plan_project_proxy(
             format!("added the hub routes {}", canonical.join(", "))
         } else {
             format!(
-                "rewrote its {MECHA_CASSY_SERVER} routes to {}",
+                "rewrote its {VIOLET_SERVER} routes to {}",
                 canonical.join(", ")
             )
         });
@@ -1447,7 +1525,7 @@ fn plan_project_proxy(
 
     Ok(ProjectProxyPlan {
         rewritten: Some(document.to_string()),
-        effective_tools: MECHA_CASSY_TOOLS.iter().map(|t| (*t).to_string()).collect(),
+        effective_tools: VIOLET_TOOLS.iter().map(|t| (*t).to_string()).collect(),
         shadows_without_routes: false,
         note: changes.join("; "),
     })
@@ -1463,23 +1541,23 @@ fn plan_project_proxy(
 /// while a project file keeps the retired routes authoritative is what made
 /// this command's own "already configured" receipt a lie (cas-a0ab).
 pub fn run(
-    args: &MechaCassyArgs,
+    args: &VioletArgs,
     project_proxy: Option<&Path>,
     paths: &MachinePaths,
     env: &dyn EnvLookup,
     probe: &dyn HubProbe,
-) -> Result<MechaCassyReport> {
+) -> Result<VioletReport> {
     run_with_credentials(args, project_proxy, paths, env, probe, None)
 }
 
 fn run_with_credentials(
-    args: &MechaCassyArgs,
+    args: &VioletArgs,
     project_proxy: Option<&Path>,
     paths: &MachinePaths,
     env: &dyn EnvLookup,
     probe: &dyn HubProbe,
     credentials: Option<&CredentialValues>,
-) -> Result<MechaCassyReport> {
+) -> Result<VioletReport> {
     let token_env = args.resolved_token_env();
     let bypass_env = args.bypass_env.trim().to_string();
     anyhow::ensure!(
@@ -1534,7 +1612,7 @@ fn run_with_credentials(
     // remedy a one-line credentials-file edit instead of a second setup pass.
     let mut config = ProxyConfig::load_from(&paths.user_proxy)
         .with_context(|| format!("reading {}", paths.user_proxy.display()))?;
-    let changed = config.ensure_mecha_cassy_registration(&args.url, &token_env, &bypass_env);
+    let changed = config.ensure_violet_registration(&args.url, &token_env, &bypass_env);
     let registration = if !changed {
         WriteState::AlreadyCurrent
     } else if args.dry_run {
@@ -1549,7 +1627,7 @@ fn run_with_credentials(
     // The project file is reconciled *after* the machine registration, so a
     // file this command refuses to edit still leaves a correct machine file
     // behind, and the error names the one path an operator must repair.
-    let machine_server = config.servers.get(MECHA_CASSY_SERVER).cloned();
+    let machine_server = config.servers.get(VIOLET_SERVER).cloned();
     let project = match project_proxy.filter(|path| ifs::is_regular_file(path)) {
         Some(path) => {
             let plan = plan_project_proxy(path, machine_server.as_ref())?;
@@ -1581,7 +1659,7 @@ fn run_with_credentials(
     // governs policy here, the machine registration otherwise.
     let allowlist = match &project {
         Some((_, plan)) => plan.effective_tools.clone(),
-        None => config.mecha_cassy_allowlisted_tools(),
+        None => config.violet_allowlisted_tools(),
     };
 
     let harnesses = if args.no_harness {
@@ -1661,11 +1739,12 @@ fn run_with_credentials(
         .as_ref()
         .filter(|(_, plan)| plan.shadows_without_routes)
         .map(|(entry, _)| entry.path.clone());
-    let drift_remedy = drift_message.as_deref().map(|drift| {
-        match &shadowed_without_routes {
+    let drift_remedy = drift_message
+        .as_deref()
+        .map(|drift| match &shadowed_without_routes {
             Some(path) => format!(
                 "{drift}. {} is authoritative for dispatch policy here and names no \
-                 {MECHA_CASSY_SERVER} route: add {} to its allowlist",
+                 {VIOLET_SERVER} route: add {} to its allowlist",
                 path.display(),
                 canonical_entries()
                     .iter()
@@ -1677,8 +1756,7 @@ fn run_with_credentials(
                 "{drift}. Re-run `cas integrate violet` to rewrite the allowlist against \
                  the hub's current contract."
             ),
-        }
-    });
+        });
 
     let remedy = build_remedy(
         &token_env,
@@ -1689,7 +1767,7 @@ fn run_with_credentials(
         drift_remedy,
     );
 
-    Ok(MechaCassyReport {
+    Ok(VioletReport {
         url: args.url.clone(),
         token_env,
         bypass_env,
@@ -1796,8 +1874,7 @@ fn apply_claude(
         if raw.trim().is_empty() {
             serde_json::json!({})
         } else {
-            serde_json::from_str(&raw)
-                .with_context(|| format!("parsing {}", path.display()))?
+            serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?
         }
     } else if path.exists() {
         anyhow::bail!("{} is not a regular file", path.display());
@@ -1813,7 +1890,7 @@ fn apply_claude(
         "url": url,
         "headers": {
             "Authorization": format!("Bearer ${{{token_env}}}"),
-            MECHA_CASSY_BYPASS_HEADER: format!("${{{bypass_env}}}"),
+            VIOLET_BYPASS_HEADER: format!("${{{bypass_env}}}"),
         }
     });
     let servers = document
@@ -1824,7 +1901,7 @@ fn apply_claude(
     if !servers.is_object() {
         anyhow::bail!("{}: mcpServers is not an object", path.display());
     }
-    if servers.get(MECHA_CASSY_SERVER) == Some(&desired) {
+    if servers.get(VIOLET_SERVER) == Some(&desired) {
         return Ok(WriteState::AlreadyCurrent);
     }
     if dry_run {
@@ -1833,13 +1910,13 @@ fn apply_claude(
     servers
         .as_object_mut()
         .expect("checked above")
-        .insert(MECHA_CASSY_SERVER.to_string(), desired);
+        .insert(VIOLET_SERVER.to_string(), desired);
     let serialized = serde_json::to_string_pretty(&document)?;
     ifs::atomic_write_create_dirs(path, &format!("{serialized}\n"))?;
     Ok(WriteState::Written)
 }
 
-/// Codex: an `[mcp_servers.mecha-cassy]` table naming the bearer variable.
+/// Codex: an `[mcp_servers.violet]` table naming the bearer variable.
 /// Edited with `toml_edit` so an operator's 3000-line `config.toml` keeps its
 /// comments, ordering, and every unrelated table.
 fn register_codex(
@@ -1893,16 +1970,13 @@ fn apply_codex(
 
     let existing = document
         .get("mcp_servers")
-        .and_then(|servers| servers.get(MECHA_CASSY_SERVER));
+        .and_then(|servers| servers.get(VIOLET_SERVER));
     let current_matches = existing.is_some_and(|table| {
         table.get("url").and_then(|v| v.as_str()) == Some(url)
-            && table
-                .get("bearer_token_env_var")
-                .and_then(|v| v.as_str())
-                == Some(token_env)
+            && table.get("bearer_token_env_var").and_then(|v| v.as_str()) == Some(token_env)
             && table
                 .get("env_http_headers")
-                .and_then(|headers| headers.get(MECHA_CASSY_BYPASS_HEADER))
+                .and_then(|headers| headers.get(VIOLET_BYPASS_HEADER))
                 .and_then(|v| v.as_str())
                 == Some(bypass_env)
     });
@@ -1918,8 +1992,8 @@ fn apply_codex(
         table.set_implicit(true);
     }
     let mut headers = toml_edit::InlineTable::new();
-    headers.insert(MECHA_CASSY_BYPASS_HEADER, bypass_env.into());
-    let entry = servers[MECHA_CASSY_SERVER].or_insert(toml_edit::table());
+    headers.insert(VIOLET_BYPASS_HEADER, bypass_env.into());
+    let entry = servers[VIOLET_SERVER].or_insert(toml_edit::table());
     entry["url"] = toml_edit::value(url);
     entry["bearer_token_env_var"] = toml_edit::value(token_env);
     entry["env_http_headers"] = toml_edit::value(headers);
@@ -1957,27 +2031,25 @@ pub fn doctor_row(
     env: &dyn EnvLookup,
     probe: &dyn HubProbe,
 ) -> DoctorRow {
-    let merged = match ProxyConfig::load_merged_with_sources_from(
-        Some(&paths.user_proxy),
-        project_proxy,
-    ) {
-        Ok((config, _)) => config,
-        Err(error) => {
-            return DoctorRow {
-                severity: DoctorSeverity::Error,
-                message: format!(
-                    "proxy configuration could not be read ({error:#}). Repair it, then run \
+    let merged =
+        match ProxyConfig::load_merged_with_sources_from(Some(&paths.user_proxy), project_proxy) {
+            Ok((config, _)) => config,
+            Err(error) => {
+                return DoctorRow {
+                    severity: DoctorSeverity::Error,
+                    message: format!(
+                        "proxy configuration could not be read ({error:#}). Repair it, then run \
                      `cas integrate violet`"
-                ),
-            };
-        }
-    };
+                    ),
+                };
+            }
+        };
 
-    let Some((token_env, bypass_env)) = merged.mecha_cassy_env_names() else {
+    let Some((token_env, bypass_env)) = merged.violet_env_names() else {
         return DoctorRow {
             severity: DoctorSeverity::Warning,
             message: format!(
-                "not registered on this machine ({} has no {MECHA_CASSY_SERVER} server). Run \
+                "not registered on this machine ({} has no {VIOLET_SERVER} server). Run \
                  `cas integrate violet`",
                 paths.user_proxy.display()
             ),
@@ -1987,17 +2059,17 @@ pub fn doctor_row(
         return DoctorRow {
             severity: DoctorSeverity::Error,
             message: format!(
-                "the {MECHA_CASSY_SERVER} registration does not reference its bearer by \
+                "the {VIOLET_SERVER} registration does not reference its bearer by \
                  environment-variable name. Run `cas integrate violet` to rewrite it as an \
                  env: reference"
             ),
         };
     };
-    let bypass_env = bypass_env.unwrap_or_else(|| MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string());
+    let bypass_env = bypass_env.unwrap_or_else(|| VIOLET_DEFAULT_BYPASS_ENV.to_string());
 
     let token_state = EnvState::of(env, &token_env);
     let bypass_state = EnvState::of(env, &bypass_env);
-    let allowlist = merged.mecha_cassy_allowlisted_tools();
+    let allowlist = merged.violet_allowlisted_tools();
 
     if allowlist.is_empty() {
         let where_from = project_proxy
@@ -2006,14 +2078,14 @@ pub fn doctor_row(
         return DoctorRow {
             severity: DoctorSeverity::Error,
             message: format!(
-                "{token_env} is {}, but no {MECHA_CASSY_SERVER} route is allowlisted: {where_from} \
+                "{token_env} is {}, but no {VIOLET_SERVER} route is allowlisted: {where_from} \
                  is authoritative for dispatch policy and names none. Run `cas integrate \
-                 mecha-cassy` for a machine without a project proxy file, or add {} to that \
+                 violet` for a machine without a project proxy file, or add {} to that \
                  file's allowlist",
                 token_state.as_str(),
-                MECHA_CASSY_TOOLS
+                VIOLET_TOOLS
                     .iter()
-                    .map(|tool| format!("\"{MECHA_CASSY_SERVER}.{tool}\""))
+                    .map(|tool| format!("\"{VIOLET_SERVER}.{tool}\""))
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
@@ -2034,7 +2106,7 @@ pub fn doctor_row(
         };
     }
 
-    match probe.list_tools(MECHA_CASSY_MCP_URL, &token_env, &bypass_env) {
+    match probe.list_tools(VIOLET_MCP_URL, &token_env, &bypass_env) {
         ProbeOutcome::Tools { tools } => {
             let drift = tool_drift(&allowlist, &tools);
             if drift.is_empty() {
@@ -2114,11 +2186,13 @@ fn probe_failure_detail(code: &str) -> String {
 /// invoked, resolved by the same ancestor walk the proxy loader uses so the
 /// command repairs the very file `cas doctor` reads.
 fn project_proxy_path() -> Option<PathBuf> {
-    let path = crate::store::detect::find_cas_root().ok()?.join("proxy.toml");
+    let path = crate::store::detect::find_cas_root()
+        .ok()?
+        .join("proxy.toml");
     ifs::is_regular_file(&path).then_some(path)
 }
 
-pub fn execute(args: &MechaCassyArgs, json: bool) -> Result<IntegrationOutcome> {
+pub fn execute(args: &VioletArgs, json: bool) -> Result<IntegrationOutcome> {
     let env = ProcessEnv;
     let paths = MachinePaths::from_env(&env)?;
     let project_proxy = project_proxy_path();
@@ -2141,22 +2215,16 @@ pub fn execute(args: &MechaCassyArgs, json: bool) -> Result<IntegrationOutcome> 
         let hub = ProcessHubClient;
         let vercel = ProcessBypassReader;
         let prompt = ProcessSecretPrompt;
-        let provisioned = provision_credentials(
-            &effective_args,
-            &env,
-            &hub,
-            &vercel,
-            &prompt,
-            &device,
-        )?;
+        let provisioned =
+            provision_credentials(&effective_args, &env, &hub, &vercel, &prompt, &device)?;
         effective_args.label = Some(provisioned.0.clone());
         Some(provisioned)
     };
     let credential_values = credentials.as_ref().map(|(_, values)| values);
     if !args.dry_run {
         if let Some(values) = credential_values {
-        // The probe and generated harnesses use env-name references, while
-        // this process must verify the freshly provisioned values immediately.
+            // The probe and generated harnesses use env-name references, while
+            // this process must verify the freshly provisioned values immediately.
             unsafe {
                 std::env::set_var(&effective_args.resolved_token_env(), &values.token);
                 std::env::set_var(&effective_args.bypass_env, &values.bypass);
@@ -2179,9 +2247,8 @@ pub fn execute(args: &MechaCassyArgs, json: bool) -> Result<IntegrationOutcome> 
     // "Already configured" is a claim about dispatch, not about one file: a
     // project proxy this run had to repair means the machine was *not*
     // already configured, however untouched the machine file was.
-    let changed_anything = |state: WriteState| {
-        matches!(state, WriteState::Written | WriteState::Planned)
-    };
+    let changed_anything =
+        |state: WriteState| matches!(state, WriteState::Written | WriteState::Planned);
     let wrote_anything = changed_anything(report.registration)
         || changed_anything(report.credentials)
         || changed_anything(report.login_profile)
@@ -2205,11 +2272,7 @@ pub fn execute(args: &MechaCassyArgs, json: bool) -> Result<IntegrationOutcome> 
         }
     };
 
-    let mut outcome = IntegrationOutcome::new(
-        Platform::MechaCassy,
-        IntegrationAction::Init,
-        status,
-    );
+    let mut outcome = IntegrationOutcome::new(Platform::Violet, IntegrationAction::Init, status);
     outcome.summary.push(format!("hub: {}", report.url));
     outcome.summary.push(format!(
         "credentials: {} {}, {} {}",
@@ -2264,9 +2327,9 @@ pub fn execute(args: &MechaCassyArgs, json: bool) -> Result<IntegrationOutcome> 
             tools.len(),
             tools.join(", ")
         )),
-        ProbeOutcome::Unauthorized => outcome
-            .summary
-            .push("authenticated tools/list: refused (HTTP 401; Authorization: Bearer <set>)".to_string()),
+        ProbeOutcome::Unauthorized => outcome.summary.push(
+            "authenticated tools/list: refused (HTTP 401; Authorization: Bearer <set>)".to_string(),
+        ),
         ProbeOutcome::Unreachable { code } => outcome
             .summary
             .push(format!("authenticated tools/list: unreachable ({code})")),
@@ -2308,7 +2371,7 @@ pub fn execute(args: &MechaCassyArgs, json: bool) -> Result<IntegrationOutcome> 
             println!("  {line}");
         }
         anyhow::bail!(
-            "MechaCassy refused this machine's credential (HTTP 401). Nothing was verified; the \
+            "Violet refused this machine's credential (HTTP 401). Nothing was verified; the \
              registration on disk still names {} and holds no secret.",
             report.token_env
         );
@@ -2342,7 +2405,7 @@ mod tests {
     const FAKE_TOKEN: &str = "xoxb-fake-secret-value-do-not-leak";
     const FAKE_BYPASS: &str = "bypass-secret-do-not-leak";
     const TEST_LABEL: &str = "SOUNDWAVE";
-    const TEST_TOKEN_ENV: &str = "MECHA_SLACK_TOKEN_SOUNDWAVE";
+    const TEST_TOKEN_ENV: &str = "VIOLET_SLACK_TOKEN_SOUNDWAVE";
 
     struct FakeEnv(HashMap<String, String>);
 
@@ -2395,9 +2458,7 @@ mod tests {
             label: &str,
         ) -> std::result::Result<(String, Option<String>), HubClientError> {
             self.labels.borrow_mut().push(label.to_string());
-            self.cloud_tokens
-                .borrow_mut()
-                .push(cloud_token.to_string());
+            self.cloud_tokens.borrow_mut().push(cloud_token.to_string());
             take_hub_response(&self.creates, "create_client")
         }
 
@@ -2406,9 +2467,7 @@ mod tests {
             _hub_url: &str,
             cloud_token: &str,
         ) -> std::result::Result<String, HubClientError> {
-            self.cloud_tokens
-                .borrow_mut()
-                .push(cloud_token.to_string());
+            self.cloud_tokens.borrow_mut().push(cloud_token.to_string());
             take_hub_response(&self.bypasses, "fetch_bypass")
         }
     }
@@ -2458,7 +2517,7 @@ mod tests {
 
     fn live_tools() -> ProbeOutcome {
         ProbeOutcome::Tools {
-            tools: MECHA_CASSY_TOOLS.iter().map(|t| t.to_string()).collect(),
+            tools: VIOLET_TOOLS.iter().map(|t| t.to_string()).collect(),
         }
     }
 
@@ -2467,7 +2526,11 @@ mod tests {
             user_proxy: dir.join("config").join("code-mode-mcp").join("config.toml"),
             claude_json: Some(dir.join("home").join(".claude.json")),
             codex_config: Some(dir.join("home").join(".codex").join("config.toml")),
-            credentials_file: dir.join("home").join(".config").join("cas").join("credentials.env"),
+            credentials_file: dir
+                .join("home")
+                .join(".config")
+                .join("cas")
+                .join("credentials.env"),
             login_profile: Some(dir.join("home").join(".profile")),
         }
     }
@@ -2475,15 +2538,148 @@ mod tests {
     fn ready_env() -> FakeEnv {
         let mut values = HashMap::new();
         values.insert(TEST_TOKEN_ENV.to_string(), FAKE_TOKEN.to_string());
-        values.insert(MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(), FAKE_BYPASS.to_string());
+        values.insert(
+            VIOLET_DEFAULT_BYPASS_ENV.to_string(),
+            FAKE_BYPASS.to_string(),
+        );
         FakeEnv(values)
     }
 
-    fn test_args() -> MechaCassyArgs {
-        MechaCassyArgs {
+    #[test]
+    fn legacy_credentials_provision_without_cloud_and_new_values_win() {
+        let args = test_args();
+        let hub = FakeHub {
+            creates: RefCell::new(Vec::new()),
+            bypasses: RefCell::new(Vec::new()),
+            labels: RefCell::new(Vec::new()),
+            cloud_tokens: RefCell::new(Vec::new()),
+        };
+        let vercel = FakeBypassReader {
+            result: Ok("unused".to_string()),
+            calls: RefCell::new(0),
+        };
+        let prompt = FakePrompt {
+            value: "unused".to_string(),
+            calls: RefCell::new(0),
+        };
+        let device = FakeDevice {
+            hostname: Some("soundwave".to_string()),
+            device_id: None,
+        };
+        let mut env = FakeEnv::with(&[
+            ("MECHA_SLACK_TOKEN_SOUNDWAVE", "legacy-token"),
+            ("MECHA_VERCEL_BYPASS", "legacy-bypass"),
+        ]);
+        for expected in [
+            ("legacy-token", "legacy-bypass"),
+            ("new-token", "new-bypass"),
+        ] {
+            let (_, values) = provision_credentials_with_cloud_token(
+                &args, &env, None, &hub, &vercel, &prompt, &device,
+            )
+            .unwrap();
+            assert_eq!(values.token, expected.0);
+            assert_eq!(values.bypass, expected.1);
+            assert_eq!(EnvState::of(&env, TEST_TOKEN_ENV), EnvState::Set);
+            env.0
+                .insert(TEST_TOKEN_ENV.to_string(), "new-token".to_string());
+            env.0.insert(
+                VIOLET_DEFAULT_BYPASS_ENV.to_string(),
+                "new-bypass".to_string(),
+            );
+        }
+        assert_eq!(*vercel.calls.borrow(), 0);
+        assert_eq!(*prompt.calls.borrow(), 0);
+    }
+
+    #[test]
+    fn production_alias_tools_do_not_report_contract_drift() {
+        let allowlisted = VIOLET_TOOLS.map(str::to_string);
+        let live = ["violet_read", "violet_post", "mecha_read", "mecha_post"].map(str::to_string);
+        assert!(tool_drift(&allowlisted, &live).is_empty());
+        let missing_read = ["violet_post", "mecha_read", "mecha_post"].map(str::to_string);
+        assert_eq!(
+            tool_drift(&allowlisted, &missing_read).retired,
+            ["violet_read"]
+        );
+    }
+
+    #[test]
+    fn legacy_project_registration_migrates_without_losing_endpoint_or_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let project = write_project_proxy(
+            dir.path(),
+            r#"
+# Legacy project endpoint is an intentional override.
+allowlist = ["mecha-cassy.mecha_read", "mecha-cassy.mecha_post", "neon.run_sql"]
+worker_read_routes = ["mecha-cassy.mecha_read"]
+[worker_access]
+mecha-cassy = "read-only"
+[servers.mecha-cassy]
+transport = "http"
+url = "https://staging.example.test/mcp"
+auth = "env:MECHA_SLACK_TOKEN_SOUNDWAVE"
+"#,
+        );
+        let args = VioletArgs {
+            no_harness: true,
+            ..test_args()
+        };
+        let report = run(
+            &args,
+            Some(&project),
+            &paths,
+            &ready_env(),
+            &FakeProbe(live_tools()),
+        )
+        .unwrap();
+        assert!(report.is_green(), "{report:?}");
+        let config = ProxyConfig::load_from(&project).unwrap();
+        assert_eq!(
+            config.servers.get(VIOLET_SERVER),
+            config.servers.get("mecha-cassy")
+        );
+        assert_eq!(
+            server_endpoint(config.servers.get(VIOLET_SERVER).unwrap()),
+            "https://staging.example.test/mcp"
+        );
+        assert_eq!(config.violet_allowlisted_tools(), VIOLET_TOOLS);
+        assert_eq!(
+            config.worker_access.get(VIOLET_SERVER),
+            Some(&cmcp_core::config::WorkerAccess::ReadOnly)
+        );
+        assert!(
+            config
+                .worker_read_routes
+                .iter()
+                .any(|route| route.server == VIOLET_SERVER && route.tool == "violet_read")
+        );
+        assert!(config.allowlist.iter().any(|route| route.server == "neon"));
+        assert!(
+            std::fs::read_to_string(&project)
+                .unwrap()
+                .contains("# Legacy project")
+        );
+        let again = run(
+            &args,
+            Some(&project),
+            &paths,
+            &ready_env(),
+            &FakeProbe(live_tools()),
+        )
+        .unwrap();
+        assert_eq!(
+            again.project_proxy.unwrap().state,
+            WriteState::AlreadyCurrent
+        );
+    }
+
+    fn test_args() -> VioletArgs {
+        VioletArgs {
             label: Some(TEST_LABEL.to_string()),
-            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
-            url: MECHA_CASSY_MCP_URL.to_string(),
+            bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
+            url: VIOLET_MCP_URL.to_string(),
             ..Default::default()
         }
     }
@@ -2491,7 +2687,10 @@ mod tests {
     #[test]
     fn hostname_is_the_default_label_and_label_override_is_folded() {
         assert_eq!(resolve_label(None, Some("soundwave")), "SOUNDWAVE");
-        assert_eq!(resolve_label(Some("Daniel-laptop"), Some("soundwave")), "DANIEL_LAPTOP");
+        assert_eq!(
+            resolve_label(Some("Daniel-laptop"), Some("soundwave")),
+            "DANIEL_LAPTOP"
+        );
     }
 
     #[test]
@@ -2501,16 +2700,34 @@ mod tests {
         std::fs::create_dir_all(credentials.parent().unwrap()).unwrap();
         std::fs::write(
             &credentials,
-            "export KEEP='unrelated'\nexport MECHA_VERCEL_BYPASS='old'\n",
+            "export KEEP='unrelated'\nexport VIOLET_VERCEL_BYPASS='old'\n",
         )
         .unwrap();
 
-        write_credentials(&credentials, "MECHA_SLACK_TOKEN_SOUNDWAVE", FAKE_TOKEN, MECHA_CASSY_DEFAULT_BYPASS_ENV, FAKE_BYPASS).unwrap();
+        write_credentials(
+            &credentials,
+            "VIOLET_SLACK_TOKEN_SOUNDWAVE",
+            FAKE_TOKEN,
+            VIOLET_DEFAULT_BYPASS_ENV,
+            FAKE_BYPASS,
+        )
+        .unwrap();
         let written = std::fs::read_to_string(&credentials).unwrap();
         assert!(written.contains("export KEEP='unrelated'"));
-        assert!(written.contains(&format!("export MECHA_SLACK_TOKEN_SOUNDWAVE='{FAKE_TOKEN}'")));
-        assert!(written.contains(&format!("export {MECHA_CASSY_DEFAULT_BYPASS_ENV}='{FAKE_BYPASS}'")));
-        assert_eq!(std::fs::metadata(&credentials).unwrap().permissions().mode() & 0o777, 0o600);
+        assert!(written.contains(&format!(
+            "export VIOLET_SLACK_TOKEN_SOUNDWAVE='{FAKE_TOKEN}'"
+        )));
+        assert!(written.contains(&format!(
+            "export {VIOLET_DEFAULT_BYPASS_ENV}='{FAKE_BYPASS}'"
+        )));
+        assert_eq!(
+            std::fs::metadata(&credentials)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
 
         let profile = dir.path().join(".profile");
         ensure_profile_line(&profile, &credentials).unwrap();
@@ -2521,13 +2738,16 @@ mod tests {
 
     #[test]
     fn provisioning_mints_with_cloud_login_and_hostname_label() {
-        let args = MechaCassyArgs {
-            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
-            url: MECHA_CASSY_MCP_URL.to_string(),
+        let args = VioletArgs {
+            bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
+            url: VIOLET_MCP_URL.to_string(),
             ..test_args()
         };
         let hub = FakeHub {
-            creates: RefCell::new(vec![Ok((FAKE_TOKEN.to_string(), Some(FAKE_BYPASS.to_string())))]),
+            creates: RefCell::new(vec![Ok((
+                FAKE_TOKEN.to_string(),
+                Some(FAKE_BYPASS.to_string()),
+            ))]),
             bypasses: RefCell::new(Vec::new()),
             labels: RefCell::new(Vec::new()),
             cloud_tokens: RefCell::new(Vec::new()),
@@ -2566,10 +2786,10 @@ mod tests {
 
     #[test]
     fn provisioning_retries_one_taken_label_with_device_suffix() {
-        let args = MechaCassyArgs {
+        let args = VioletArgs {
             label: Some("Daniel-laptop".to_string()),
-            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
-            url: MECHA_CASSY_MCP_URL.to_string(),
+            bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
+            url: VIOLET_MCP_URL.to_string(),
             ..test_args()
         };
         let hub = FakeHub {
@@ -2605,14 +2825,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(label, "DANIEL_LAPTOP_abcdef");
-        assert_eq!(hub.labels.borrow().as_slice(), &["DANIEL_LAPTOP", "DANIEL_LAPTOP_abcdef"]);
+        assert_eq!(
+            hub.labels.borrow().as_slice(),
+            &["DANIEL_LAPTOP", "DANIEL_LAPTOP_abcdef"]
+        );
     }
 
     #[test]
     fn missing_hub_mint_route_fails_closed_without_local_mint() {
-        let args = MechaCassyArgs {
-            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
-            url: MECHA_CASSY_MCP_URL.to_string(),
+        let args = VioletArgs {
+            bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
+            url: VIOLET_MCP_URL.to_string(),
             ..test_args()
         };
         let hub = FakeHub {
@@ -2644,7 +2867,7 @@ mod tests {
         .unwrap_err();
         let rendered = format!("{error:#}");
         assert!(
-            rendered.contains("hub route POST /api/clients not available (mecha-cassy#5)"),
+            rendered.contains("hub route POST /api/clients not available (violet_ps#5)"),
             "{rendered}"
         );
         assert!(!rendered.contains(FAKE_TOKEN));
@@ -2654,9 +2877,9 @@ mod tests {
 
     #[test]
     fn missing_hub_bypass_uses_read_only_vercel_then_hidden_prompt_once() {
-        let args = MechaCassyArgs {
-            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
-            url: MECHA_CASSY_MCP_URL.to_string(),
+        let args = VioletArgs {
+            bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
+            url: VIOLET_MCP_URL.to_string(),
             ..test_args()
         };
         let env = FakeEnv::with(&[
@@ -2699,48 +2922,45 @@ mod tests {
     #[test]
     fn label_selects_the_per_machine_bearer_variable() {
         let mut args = test_args();
-        assert_eq!(
-            args.resolved_token_env(),
-            TEST_TOKEN_ENV
-        );
+        assert_eq!(args.resolved_token_env(), TEST_TOKEN_ENV);
 
         args.label = Some("daniel-laptop".to_string());
         assert_eq!(
             args.resolved_token_env(),
-            "MECHA_SLACK_TOKEN_DANIEL_LAPTOP"
+            "VIOLET_SLACK_TOKEN_DANIEL_LAPTOP"
         );
 
         // An explicit --token-env always wins over a label.
-        args.token_env = Some("MECHA_SLACK_TOKEN_CI".to_string());
-        assert_eq!(args.resolved_token_env(), "MECHA_SLACK_TOKEN_CI");
+        args.token_env = Some("VIOLET_SLACK_TOKEN_CI".to_string());
+        assert_eq!(args.resolved_token_env(), "VIOLET_SLACK_TOKEN_CI");
     }
 
     #[test]
     fn non_interactive_run_writes_env_reference_only_artifacts_and_prints_the_tool_receipt() {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths_in(dir.path());
-        let args = MechaCassyArgs {
+        let args = VioletArgs {
             label: Some("laptop".to_string()),
-            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
-            url: MECHA_CASSY_MCP_URL.to_string(),
+            bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
+            url: VIOLET_MCP_URL.to_string(),
             ..Default::default()
         };
         let env = FakeEnv::with(&[
-            ("MECHA_SLACK_TOKEN_LAPTOP", FAKE_TOKEN),
-            (MECHA_CASSY_DEFAULT_BYPASS_ENV, FAKE_BYPASS),
+            ("VIOLET_SLACK_TOKEN_LAPTOP", FAKE_TOKEN),
+            (VIOLET_DEFAULT_BYPASS_ENV, FAKE_BYPASS),
         ]);
 
         let report = run(&args, None, &paths, &env, &FakeProbe(live_tools())).unwrap();
         assert!(report.is_green(), "{report:?}");
         assert_eq!(report.registration, WriteState::Written);
-        assert_eq!(report.allowlist, MECHA_CASSY_TOOLS);
-        assert_eq!(report.token_env, "MECHA_SLACK_TOKEN_LAPTOP");
+        assert_eq!(report.allowlist, VIOLET_TOOLS);
+        assert_eq!(report.token_env, "VIOLET_SLACK_TOKEN_LAPTOP");
         assert_eq!(report.token_env_state, EnvState::Set);
         assert_eq!(report.remedy, None);
         assert_eq!(
             report.probe,
             ProbeOutcome::Tools {
-                tools: vec!["mecha_read".to_string(), "mecha_post".to_string()]
+                tools: vec!["violet_read".to_string(), "violet_post".to_string()]
             }
         );
         assert!(
@@ -2765,7 +2985,7 @@ mod tests {
                 "{} leaked a credential value",
                 path.display()
             );
-            assert!(written.contains("MECHA_SLACK_TOKEN_LAPTOP"), "{written}");
+            assert!(written.contains("VIOLET_SLACK_TOKEN_LAPTOP"), "{written}");
         }
         // …and neither does the report that becomes terminal/JSON output.
         let rendered = serde_json::to_string(&report).unwrap();
@@ -2788,16 +3008,16 @@ mod tests {
     fn integrated_credentials_are_written_and_profile_sourcing_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths_in(dir.path());
-        let args = MechaCassyArgs {
+        let args = VioletArgs {
             label: Some("laptop".to_string()),
-            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
-            url: MECHA_CASSY_MCP_URL.to_string(),
+            bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
+            url: VIOLET_MCP_URL.to_string(),
             no_harness: true,
             ..Default::default()
         };
         let env = FakeEnv::with(&[
-            ("MECHA_SLACK_TOKEN_LAPTOP", FAKE_TOKEN),
-            (MECHA_CASSY_DEFAULT_BYPASS_ENV, FAKE_BYPASS),
+            ("VIOLET_SLACK_TOKEN_LAPTOP", FAKE_TOKEN),
+            (VIOLET_DEFAULT_BYPASS_ENV, FAKE_BYPASS),
         ]);
         let values = CredentialValues {
             token: FAKE_TOKEN.to_string(),
@@ -2843,10 +3063,10 @@ mod tests {
         std::fs::write(&profile_target, "# operator profile\n").unwrap();
         symlink(&profile_target, &profile_link).unwrap();
         paths.login_profile = Some(profile_link);
-        let args = MechaCassyArgs {
+        let args = VioletArgs {
             label: Some("laptop".to_string()),
-            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
-            url: MECHA_CASSY_MCP_URL.to_string(),
+            bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
+            url: VIOLET_MCP_URL.to_string(),
             no_harness: true,
             ..Default::default()
         };
@@ -2866,7 +3086,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(report.login_profile, WriteState::Written);
-        assert_eq!(report.login_profile_path, Some(profile_target.canonicalize().unwrap()));
+        assert_eq!(
+            report.login_profile_path,
+            Some(profile_target.canonicalize().unwrap())
+        );
         let written = std::fs::read_to_string(profile_target).unwrap();
         assert!(written.contains(&profile_source_line(&paths.credentials_file)));
     }
@@ -2875,9 +3098,9 @@ mod tests {
     fn missing_variable_names_the_variable_and_the_file_without_probing() {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths_in(dir.path());
-        let args = MechaCassyArgs {
-            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
-            url: MECHA_CASSY_MCP_URL.to_string(),
+        let args = VioletArgs {
+            bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
+            url: VIOLET_MCP_URL.to_string(),
             ..test_args()
         };
         let mut values = HashMap::new();
@@ -2893,7 +3116,7 @@ mod tests {
         let remedy = report.remedy.unwrap();
         assert!(remedy.contains(TEST_TOKEN_ENV), "{remedy}");
         assert!(remedy.contains("set but empty"), "{remedy}");
-        assert!(remedy.contains(MECHA_CASSY_DEFAULT_BYPASS_ENV), "{remedy}");
+        assert!(remedy.contains(VIOLET_DEFAULT_BYPASS_ENV), "{remedy}");
         assert!(remedy.contains("credentials file"), "{remedy}");
         // The registration is still written, so the fix is a one-line edit.
         assert_eq!(report.registration, WriteState::Written);
@@ -2903,9 +3126,9 @@ mod tests {
     fn unauthorized_probe_reports_redacted_header_state_and_a_mint_remedy() {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths_in(dir.path());
-        let args = MechaCassyArgs {
-            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
-            url: MECHA_CASSY_MCP_URL.to_string(),
+        let args = VioletArgs {
+            bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
+            url: VIOLET_MCP_URL.to_string(),
             ..test_args()
         };
 
@@ -2928,9 +3151,9 @@ mod tests {
     fn dry_run_writes_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths_in(dir.path());
-        let args = MechaCassyArgs {
-            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
-            url: MECHA_CASSY_MCP_URL.to_string(),
+        let args = VioletArgs {
+            bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
+            url: VIOLET_MCP_URL.to_string(),
             dry_run: true,
             ..test_args()
         };
@@ -2954,29 +3177,27 @@ mod tests {
         )
         .unwrap();
 
-        let args = MechaCassyArgs {
-            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
-            url: MECHA_CASSY_MCP_URL.to_string(),
+        let args = VioletArgs {
+            bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
+            url: VIOLET_MCP_URL.to_string(),
             ..test_args()
         };
         run(&args, None, &paths, &ready_env(), &FakeProbe(live_tools())).unwrap();
 
         let written = std::fs::read_to_string(&codex).unwrap();
-        assert!(written.contains("# operator comment worth keeping"), "{written}");
+        assert!(
+            written.contains("# operator comment worth keeping"),
+            "{written}"
+        );
         assert!(written.contains("[mcp_servers.other]"), "{written}");
         assert!(
-            written.contains(&format!(
-                "bearer_token_env_var = \"{}\"",
-                TEST_TOKEN_ENV
-            )),
+            written.contains(&format!("bearer_token_env_var = \"{}\"", TEST_TOKEN_ENV)),
             "{written}"
         );
         let parsed: toml::Value = toml::from_str(&written).unwrap();
         assert_eq!(
-            parsed["mcp_servers"]["mecha-cassy"]["env_http_headers"]
-                [MECHA_CASSY_BYPASS_HEADER]
-                .as_str(),
-            Some(MECHA_CASSY_DEFAULT_BYPASS_ENV)
+            parsed["mcp_servers"]["violet"]["env_http_headers"][VIOLET_BYPASS_HEADER].as_str(),
+            Some(VIOLET_DEFAULT_BYPASS_ENV)
         );
     }
 
@@ -2993,9 +3214,9 @@ mod tests {
         )
         .unwrap();
 
-        let args = MechaCassyArgs {
-            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
-            url: MECHA_CASSY_MCP_URL.to_string(),
+        let args = VioletArgs {
+            bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
+            url: VIOLET_MCP_URL.to_string(),
             ..test_args()
         };
         run(&args, None, &paths, &ready_env(), &FakeProbe(live_tools())).unwrap();
@@ -3006,7 +3227,7 @@ mod tests {
         assert!(written["projects"]["/tmp/x"].is_object());
         assert_eq!(written["mcpServers"]["playwright"]["command"], "npx");
         assert_eq!(
-            written["mcpServers"]["mecha-cassy"]["headers"]["Authorization"],
+            written["mcpServers"]["violet"]["headers"]["Authorization"],
             format!("Bearer ${{{TEST_TOKEN_ENV}}}")
         );
     }
@@ -3018,9 +3239,9 @@ mod tests {
             "slack_post_message".to_string(),
             "slack_read_channel".to_string(),
         ];
-        let live = vec!["mecha_post".to_string(), "mecha_read".to_string()];
+        let live = vec!["violet_post".to_string(), "violet_read".to_string()];
         let drift = tool_drift(&allowlist, &live);
-        assert_eq!(drift.unallowlisted, vec!["mecha_post", "mecha_read"]);
+        assert_eq!(drift.unallowlisted, vec!["violet_post", "violet_read"]);
         assert_eq!(
             drift.retired,
             vec!["slack_post_message", "slack_read_channel"]
@@ -3033,8 +3254,8 @@ mod tests {
         // A stale leftover next to the live routes is NOT an outage: every hub
         // tool is still admitted, so this must not block dispatch.
         let cluttered = vec![
-            "mecha_read".to_string(),
-            "mecha_post".to_string(),
+            "violet_read".to_string(),
+            "violet_post".to_string(),
             "slack_upload_file".to_string(),
         ];
         let stale = tool_drift(&cluttered, &live);
@@ -3044,7 +3265,7 @@ mod tests {
 
         assert!(
             tool_drift(
-                &["mecha_read".to_string(), "mecha_post".to_string()],
+                &["violet_read".to_string(), "violet_post".to_string()],
                 &live,
             )
             .is_empty(),
@@ -3063,9 +3284,9 @@ mod tests {
         assert_eq!(row.severity, DoctorSeverity::Warning);
         assert!(row.message.contains("cas integrate violet"), "{row:?}");
 
-        let args = MechaCassyArgs {
-            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
-            url: MECHA_CASSY_MCP_URL.to_string(),
+        let args = VioletArgs {
+            bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
+            url: VIOLET_MCP_URL.to_string(),
             no_harness: true,
             ..test_args()
         };
@@ -3073,7 +3294,7 @@ mod tests {
 
         let row = doctor_row(None, &paths, &env, &FakeProbe(live_tools()));
         assert_eq!(row.severity, DoctorSeverity::Ok, "{row:?}");
-        assert!(row.message.contains("mecha_read"), "{row:?}");
+        assert!(row.message.contains("violet_read"), "{row:?}");
         assert!(!row.message.contains(FAKE_TOKEN));
     }
 
@@ -3081,9 +3302,9 @@ mod tests {
     fn doctor_is_red_with_the_exact_remedy_when_a_variable_is_missing() {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths_in(dir.path());
-        let args = MechaCassyArgs {
-            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
-            url: MECHA_CASSY_MCP_URL.to_string(),
+        let args = VioletArgs {
+            bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
+            url: VIOLET_MCP_URL.to_string(),
             no_harness: true,
             ..test_args()
         };
@@ -3092,15 +3313,11 @@ mod tests {
         let row = doctor_row(
             None,
             &paths,
-            &FakeEnv::with(&[(MECHA_CASSY_DEFAULT_BYPASS_ENV, FAKE_BYPASS)]),
+            &FakeEnv::with(&[(VIOLET_DEFAULT_BYPASS_ENV, FAKE_BYPASS)]),
             &FakeProbe(live_tools()),
         );
         assert_eq!(row.severity, DoctorSeverity::Error);
-        assert!(
-            row.message
-                .contains(TEST_TOKEN_ENV),
-            "{row:?}"
-        );
+        assert!(row.message.contains(TEST_TOKEN_ENV), "{row:?}");
         assert!(row.message.contains("unset"), "{row:?}");
         assert!(row.message.contains("credentials file"), "{row:?}");
     }
@@ -3110,9 +3327,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths_in(dir.path());
         let env = ready_env();
-        let args = MechaCassyArgs {
-            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
-            url: MECHA_CASSY_MCP_URL.to_string(),
+        let args = VioletArgs {
+            bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
+            url: VIOLET_MCP_URL.to_string(),
             no_harness: true,
             ..test_args()
         };
@@ -3137,9 +3354,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths_in(dir.path());
         let env = ready_env();
-        let args = MechaCassyArgs {
-            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
-            url: MECHA_CASSY_MCP_URL.to_string(),
+        let args = VioletArgs {
+            bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
+            url: VIOLET_MCP_URL.to_string(),
             no_harness: true,
             ..test_args()
         };
@@ -3150,7 +3367,7 @@ mod tests {
             &paths,
             &env,
             &FakeProbe(ProbeOutcome::Tools {
-                tools: vec!["mecha_read".to_string(), "mecha_broadcast".to_string()],
+                tools: vec!["violet_read".to_string(), "mecha_broadcast".to_string()],
             }),
         );
         assert_eq!(row.severity, DoctorSeverity::Error);
@@ -3167,9 +3384,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths_in(dir.path());
         let env = ready_env();
-        let args = MechaCassyArgs {
-            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
-            url: MECHA_CASSY_MCP_URL.to_string(),
+        let args = VioletArgs {
+            bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
+            url: VIOLET_MCP_URL.to_string(),
             no_harness: true,
             ..test_args()
         };
@@ -3178,8 +3395,8 @@ mod tests {
         let project = dir.path().join("proxy.toml");
         std::fs::write(
             &project,
-            "allowlist = [\"mecha-cassy.mecha_read\", \"mecha-cassy.mecha_post\", \
-             \"mecha-cassy.slack_upload_file\"]\n",
+            "allowlist = [\"violet.violet_read\", \"violet.violet_post\", \
+             \"violet.slack_upload_file\"]\n",
         )
         .unwrap();
 
@@ -3194,7 +3411,8 @@ mod tests {
             "{row:?}"
         );
         assert!(
-            !row.message.contains(&paths.user_proxy.display().to_string()),
+            !row.message
+                .contains(&paths.user_proxy.display().to_string()),
             "the machine file holds no stale entry and must not be blamed: {row:?}"
         );
     }
@@ -3207,44 +3425,44 @@ mod tests {
     fn shadowing_project_proxy() -> String {
         let token_env = TEST_TOKEN_ENV;
         format!(
-        "# project dispatch policy — keep the neon route\n\
+            "# project dispatch policy — keep the neon route\n\
          allowlist = [\n\
          \x20 \"neon.run_sql\",\n\
-         \x20 \"mecha-cassy.mecha_read\",\n\
-         \x20 \"mecha-cassy.mecha_post\",\n\
-         \x20 \"mecha-cassy.slack_list_channels\",\n\
-         \x20 \"mecha-cassy.slack_post_message\",\n\
-         \x20 \"mecha-cassy.slack_read_channel\",\n\
-         \x20 \"mecha-cassy.slack_upload_file\",\n\
+         \x20 \"violet.violet_read\",\n\
+         \x20 \"violet.violet_post\",\n\
+         \x20 \"violet.slack_list_channels\",\n\
+         \x20 \"violet.slack_post_message\",\n\
+         \x20 \"violet.slack_read_channel\",\n\
+         \x20 \"violet.slack_upload_file\",\n\
          ]\n\
          \n\
          [servers.neon]\n\
          transport = \"stdio\"\n\
          command = \"neon-mcp\"\n\
          \n\
-         [servers.mecha-cassy]\n\
+         [servers.violet]\n\
          transport = \"http\"\n\
          url = \"https://mecha-cassy.vercel.app/mcp/slack\"\n\
          auth = \"env:{token_env}\"\n\
          \n\
-         [servers.mecha-cassy.headers]\n\
-         x-vercel-protection-bypass = \"env:MECHA_VERCEL_BYPASS\"\n"
+         [servers.violet.headers]\n\
+         x-vercel-protection-bypass = \"env:VIOLET_VERCEL_BYPASS\"\n"
         )
     }
 
-    /// A `[servers.mecha-cassy]` block byte-equal in effect to the machine
-    /// registration `ensure_mecha_cassy_registration` writes under the default
+    /// A `[servers.violet]` block byte-equal in effect to the machine
+    /// registration `ensure_violet_registration` writes under the default
     /// variable names — the only shape that is a true duplicate and so the
     /// only one safe to drop.
     fn duplicate_server_block() -> String {
         let token_env = TEST_TOKEN_ENV;
         format!(
-            "[servers.mecha-cassy]\ntransport = \"http\"\n\
-             url = \"{MECHA_CASSY_MCP_URL}\"\n\
+            "[servers.violet]\ntransport = \"http\"\n\
+             url = \"{VIOLET_MCP_URL}\"\n\
              auth = \"env:{token_env}\"\n\
              \n\
-             [servers.mecha-cassy.headers]\n\
-             {MECHA_CASSY_BYPASS_HEADER} = \"env:{MECHA_CASSY_DEFAULT_BYPASS_ENV}\"\n"
+             [servers.violet.headers]\n\
+             {VIOLET_BYPASS_HEADER} = \"env:{VIOLET_DEFAULT_BYPASS_ENV}\"\n"
         )
     }
 
@@ -3260,9 +3478,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths_in(dir.path());
         let env = ready_env();
-        let args = MechaCassyArgs {
-            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
-            url: MECHA_CASSY_MCP_URL.to_string(),
+        let args = VioletArgs {
+            bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
+            url: VIOLET_MCP_URL.to_string(),
             no_harness: true,
             ..test_args()
         };
@@ -3274,13 +3492,20 @@ mod tests {
         let before = doctor_row(Some(&project), &paths, &env, &FakeProbe(live_tools()));
         assert_eq!(before.severity, DoctorSeverity::Warning, "{before:?}");
 
-        let report = run(&args, Some(&project), &paths, &env, &FakeProbe(live_tools())).unwrap();
+        let report = run(
+            &args,
+            Some(&project),
+            &paths,
+            &env,
+            &FakeProbe(live_tools()),
+        )
+        .unwrap();
         let entry = report.project_proxy.clone().expect("project file reported");
         assert_eq!(entry.state, WriteState::Written, "{report:?}");
         assert_eq!(entry.path, project);
         assert_eq!(report.registration, WriteState::AlreadyCurrent);
         assert!(report.is_green(), "{report:?}");
-        assert_eq!(report.allowlist, MECHA_CASSY_TOOLS);
+        assert_eq!(report.allowlist, VIOLET_TOOLS);
 
         let rewritten = std::fs::read_to_string(&project).unwrap();
         // Exact bytes: an operator-owned file must come back looking like an
@@ -3291,8 +3516,8 @@ mod tests {
             "# project dispatch policy — keep the neon route\n\
              allowlist = [\n\
              \x20 \"neon.run_sql\",\n\
-             \x20 \"mecha-cassy.mecha_read\",\n\
-             \x20 \"mecha-cassy.mecha_post\",\n\
+             \x20 \"violet.violet_read\",\n\
+             \x20 \"violet.violet_post\",\n\
              ]\n\
              \n\
              [servers.neon]\n\
@@ -3300,7 +3525,7 @@ mod tests {
              command = \"neon-mcp\"\n"
         );
         let parsed = ProxyConfig::load_from(&project).unwrap();
-        assert_eq!(parsed.mecha_cassy_allowlisted_tools(), MECHA_CASSY_TOOLS);
+        assert_eq!(parsed.violet_allowlisted_tools(), VIOLET_TOOLS);
         // Everything unrelated survives, comments included.
         assert!(
             parsed
@@ -3310,19 +3535,26 @@ mod tests {
             "{rewritten}"
         );
         assert!(parsed.servers.contains_key("neon"), "{rewritten}");
-        assert!(rewritten.contains("# project dispatch policy"), "{rewritten}");
-        // The duplicate registration is gone: the machine file supplies it.
         assert!(
-            !parsed.servers.contains_key(MECHA_CASSY_SERVER),
+            rewritten.contains("# project dispatch policy"),
             "{rewritten}"
         );
+        // The duplicate registration is gone: the machine file supplies it.
+        assert!(!parsed.servers.contains_key(VIOLET_SERVER), "{rewritten}");
 
         // Doctor now agrees, which is the whole acceptance criterion.
         let after = doctor_row(Some(&project), &paths, &env, &FakeProbe(live_tools()));
         assert_eq!(after.severity, DoctorSeverity::Ok, "{after:?}");
 
         // Idempotent: a second run is byte-identical and rewrites nothing.
-        let second = run(&args, Some(&project), &paths, &env, &FakeProbe(live_tools())).unwrap();
+        let second = run(
+            &args,
+            Some(&project),
+            &paths,
+            &env,
+            &FakeProbe(live_tools()),
+        )
+        .unwrap();
         assert_eq!(
             second.project_proxy.unwrap().state,
             WriteState::AlreadyCurrent
@@ -3330,7 +3562,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&project).unwrap(), rewritten);
     }
 
-    /// A project file whose only MechaCassy trace is the duplicate server
+    /// A project file whose only Violet trace is the duplicate server
     /// block: dropping the block alone would leave a file that admits nothing,
     /// so the routes it evidently wanted are named explicitly.
     #[test]
@@ -3338,15 +3570,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths_in(dir.path());
         let env = ready_env();
-        let args = MechaCassyArgs {
-            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
-            url: MECHA_CASSY_MCP_URL.to_string(),
+        let args = VioletArgs {
+            bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
+            url: VIOLET_MCP_URL.to_string(),
             no_harness: true,
             ..test_args()
         };
         let project = write_project_proxy(dir.path(), &duplicate_server_block());
 
-        let report = run(&args, Some(&project), &paths, &env, &FakeProbe(live_tools())).unwrap();
+        let report = run(
+            &args,
+            Some(&project),
+            &paths,
+            &env,
+            &FakeProbe(live_tools()),
+        )
+        .unwrap();
         assert_eq!(
             report.project_proxy.as_ref().unwrap().state,
             WriteState::Written,
@@ -3355,8 +3594,8 @@ mod tests {
         assert!(report.is_green(), "{report:?}");
 
         let parsed = ProxyConfig::load_from(&project).unwrap();
-        assert_eq!(parsed.mecha_cassy_allowlisted_tools(), MECHA_CASSY_TOOLS);
-        assert!(!parsed.servers.contains_key(MECHA_CASSY_SERVER));
+        assert_eq!(parsed.violet_allowlisted_tools(), VIOLET_TOOLS);
+        assert!(!parsed.servers.contains_key(VIOLET_SERVER));
         let row = doctor_row(Some(&project), &paths, &env, &FakeProbe(live_tools()));
         assert_eq!(row.severity, DoctorSeverity::Ok, "{row:?}");
     }
@@ -3371,9 +3610,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths_in(dir.path());
         let env = ready_env();
-        let args = MechaCassyArgs {
-            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
-            url: MECHA_CASSY_MCP_URL.to_string(),
+        let args = VioletArgs {
+            bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
+            url: VIOLET_MCP_URL.to_string(),
             no_harness: true,
             ..test_args()
         };
@@ -3382,21 +3621,28 @@ mod tests {
             dir.path(),
             &format!(
                 "allowlist = [\n\
-                 \x20 \"mecha-cassy.mecha_read\",\n\
-                 \x20 \"mecha-cassy.slack_post_message\",\n\
+                 \x20 \"violet.violet_read\",\n\
+                 \x20 \"violet.slack_post_message\",\n\
                  ]\n\
                  \n\
-                 [servers.mecha-cassy]\n\
+                 [servers.violet]\n\
                  transport = \"http\"\n\
                  url = \"{STAGING}\"\n\
-                 auth = \"env:MECHA_SLACK_TOKEN_PROJECT_OVERRIDE\"\n"
+                 auth = \"env:VIOLET_SLACK_TOKEN_PROJECT_OVERRIDE\"\n"
             ),
         );
 
-        let report = run(&args, Some(&project), &paths, &env, &FakeProbe(live_tools())).unwrap();
+        let report = run(
+            &args,
+            Some(&project),
+            &paths,
+            &env,
+            &FakeProbe(live_tools()),
+        )
+        .unwrap();
         let entry = report.project_proxy.clone().unwrap();
         assert_eq!(entry.state, WriteState::Written, "{report:?}");
-        assert!(entry.note.contains("kept [servers.mecha-cassy]"), "{entry:?}");
+        assert!(entry.note.contains("kept [servers.violet]"), "{entry:?}");
         assert!(entry.note.contains(STAGING), "{entry:?}");
 
         let rendered = std::fs::read_to_string(&project).unwrap();
@@ -3404,18 +3650,27 @@ mod tests {
         // The override survives, pointing where the project put it…
         let server = parsed
             .servers
-            .get(MECHA_CASSY_SERVER)
+            .get(VIOLET_SERVER)
             .expect("the override must survive");
         assert_eq!(server_endpoint(server), STAGING, "{rendered}");
         // …while the retired route it carried is corrected.
-        assert_eq!(parsed.mecha_cassy_allowlisted_tools(), MECHA_CASSY_TOOLS);
+        assert_eq!(parsed.violet_allowlisted_tools(), VIOLET_TOOLS);
 
         // Keeping a block is not a change: a second run must not rewrite.
-        let second = run(&args, Some(&project), &paths, &env, &FakeProbe(live_tools())).unwrap();
+        let second = run(
+            &args,
+            Some(&project),
+            &paths,
+            &env,
+            &FakeProbe(live_tools()),
+        )
+        .unwrap();
         let second_entry = second.project_proxy.unwrap();
         assert_eq!(second_entry.state, WriteState::AlreadyCurrent, "{rendered}");
         assert!(
-            second_entry.note.contains("overrides the machine registration"),
+            second_entry
+                .note
+                .contains("overrides the machine registration"),
             "the override must stay visible on every run: {second_entry:?}"
         );
         assert_eq!(std::fs::read_to_string(&project).unwrap(), rendered);
@@ -3431,9 +3686,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths_in(dir.path());
         let env = ready_env();
-        let args = MechaCassyArgs {
-            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
-            url: MECHA_CASSY_MCP_URL.to_string(),
+        let args = VioletArgs {
+            bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
+            url: VIOLET_MCP_URL.to_string(),
             no_harness: true,
             ..test_args()
         };
@@ -3445,13 +3700,20 @@ mod tests {
             ),
         );
 
-        run(&args, Some(&project), &paths, &env, &FakeProbe(live_tools())).unwrap();
+        run(
+            &args,
+            Some(&project),
+            &paths,
+            &env,
+            &FakeProbe(live_tools()),
+        )
+        .unwrap();
 
         let rendered = std::fs::read_to_string(&project).unwrap();
         let parsed = ProxyConfig::load_from(&project).unwrap();
         assert_eq!(
-            parsed.mecha_cassy_allowlisted_tools(),
-            MECHA_CASSY_TOOLS,
+            parsed.violet_allowlisted_tools(),
+            VIOLET_TOOLS,
             "{rendered}"
         );
         assert!(parsed.servers.contains_key("neon"), "{rendered}");
@@ -3470,23 +3732,30 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths_in(dir.path());
         let env = ready_env();
-        let args = MechaCassyArgs {
-            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
-            url: MECHA_CASSY_MCP_URL.to_string(),
+        let args = VioletArgs {
+            bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
+            url: VIOLET_MCP_URL.to_string(),
             no_harness: true,
             ..test_args()
         };
         let original = "allowlist = [\"neon.run_sql\"]\n";
         let project = write_project_proxy(dir.path(), original);
 
-        let report = run(&args, Some(&project), &paths, &env, &FakeProbe(live_tools())).unwrap();
+        let report = run(
+            &args,
+            Some(&project),
+            &paths,
+            &env,
+            &FakeProbe(live_tools()),
+        )
+        .unwrap();
         let entry = report.project_proxy.clone().unwrap();
         assert_eq!(entry.state, WriteState::Skipped, "{report:?}");
         assert_eq!(std::fs::read_to_string(&project).unwrap(), original);
         assert!(!report.is_green(), "{report:?}");
         let remedy = report.remedy.clone().unwrap();
         assert!(remedy.contains(&project.display().to_string()), "{remedy}");
-        assert!(remedy.contains("mecha-cassy.mecha_read"), "{remedy}");
+        assert!(remedy.contains("violet.violet_read"), "{remedy}");
         assert!(
             !remedy.contains("Re-run `cas integrate violet`"),
             "re-running cannot fix this, so it must not be offered: {remedy}"
@@ -3497,9 +3766,9 @@ mod tests {
     fn dry_run_does_not_touch_a_shadowing_project_proxy() {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths_in(dir.path());
-        let args = MechaCassyArgs {
-            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
-            url: MECHA_CASSY_MCP_URL.to_string(),
+        let args = VioletArgs {
+            bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
+            url: VIOLET_MCP_URL.to_string(),
             no_harness: true,
             dry_run: true,
             ..test_args()
@@ -3528,15 +3797,15 @@ mod tests {
     fn a_malformed_project_allowlist_is_refused_by_name_after_the_machine_file_is_written() {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths_in(dir.path());
-        let args = MechaCassyArgs {
-            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
-            url: MECHA_CASSY_MCP_URL.to_string(),
+        let args = VioletArgs {
+            bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
+            url: VIOLET_MCP_URL.to_string(),
             no_harness: true,
             ..test_args()
         };
         let project = write_project_proxy(
             dir.path(),
-            "allowlist = \"mecha-cassy.mecha_read\"\n[servers.mecha-cassy]\n\
+            "allowlist = \"violet.violet_read\"\n[servers.violet]\n\
              transport = \"http\"\nurl = \"https://x\"\n",
         );
 
@@ -3549,7 +3818,10 @@ mod tests {
         )
         .unwrap_err();
         let rendered = format!("{error:#}");
-        assert!(rendered.contains(&project.display().to_string()), "{rendered}");
+        assert!(
+            rendered.contains(&project.display().to_string()),
+            "{rendered}"
+        );
         assert!(paths.user_proxy.is_file(), "machine file must still land");
     }
 
@@ -3558,9 +3830,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths_in(dir.path());
         let env = ready_env();
-        let args = MechaCassyArgs {
-            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
-            url: MECHA_CASSY_MCP_URL.to_string(),
+        let args = VioletArgs {
+            bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
+            url: VIOLET_MCP_URL.to_string(),
             no_harness: true,
             ..test_args()
         };
@@ -3572,7 +3844,7 @@ mod tests {
         let row = doctor_row(Some(&project), &paths, &env, &FakeProbe(live_tools()));
         assert_eq!(row.severity, DoctorSeverity::Error);
         assert!(row.message.contains("authoritative"), "{row:?}");
-        assert!(row.message.contains("mecha-cassy.mecha_read"), "{row:?}");
+        assert!(row.message.contains("violet.violet_read"), "{row:?}");
         assert!(
             row.message.contains(&project.display().to_string()),
             "{row:?}"
@@ -3584,9 +3856,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths_in(dir.path());
         let env = ready_env();
-        let args = MechaCassyArgs {
-            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
-            url: MECHA_CASSY_MCP_URL.to_string(),
+        let args = VioletArgs {
+            bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
+            url: VIOLET_MCP_URL.to_string(),
             no_harness: true,
             ..test_args()
         };

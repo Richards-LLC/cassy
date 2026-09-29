@@ -106,7 +106,7 @@
 //! # Re-baselining
 //!
 //! **One-line procedure:** run
-//! `CAS_RETRIEVAL_EVAL_REBASELINE=1 cargo test -p cas --test retrieval_eval_test`
+//! `CAS_RETRIEVAL_EVAL_REBASELINE=1 cargo test -p cas --test integration_cloud retrieval_eval_test::`
 //! — it rewrites `cas-cli/tests/data/retrieval-eval/baseline.json` in place;
 //! commit that file in the same commit as the change that moved the numbers,
 //! with the reason in the commit message.

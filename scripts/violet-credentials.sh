@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# Store the two Violet secrets in this machine's credentials file.
+#
+# This is the fallback path when the hub cannot return a token or bypass:
+# `cas integrate violet` normally provisions through the authenticated
+# hub route and writes the private file itself. See the onboarding doc.
+#
+# Guarantees:
+#   - values are read with `read -s` and never echoed, logged, or passed as an
+#     argument (so they never appear in `ps` or shell history);
+#   - the credentials file is written 0600 and updated in place, never
+#     truncating a variable this script does not own;
+#   - nothing is sent anywhere. Verification is `cas integrate violet`.
+
+set -euo pipefail
+
+CREDENTIALS_FILE="${CAS_CREDENTIALS_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/cas/credentials.env}"
+BYPASS_VAR="VIOLET_VERCEL_BYPASS"
+
+die() {
+    printf 'error: %s\n' "$1" >&2
+    exit 1
+}
+
+# Replace `export NAME=...` in place, or append it. Reads the value from the
+# named variable rather than an argument so it never reaches the process table.
+upsert_export() {
+    local name="$1" value_var="$2" tmp
+    tmp="$(mktemp "${CREDENTIALS_FILE}.XXXXXX")"
+    chmod 600 "$tmp"
+    if [[ -f "$CREDENTIALS_FILE" ]]; then
+        grep -v -E "^[[:space:]]*export[[:space:]]+${name}=" "$CREDENTIALS_FILE" >"$tmp" || true
+    fi
+    # Single-quote the value and escape any embedded single quote, so a secret
+    # containing shell metacharacters is stored literally.
+    local escaped=${!value_var//\'/\'\\\'\'}
+    printf "export %s='%s'\n" "$name" "$escaped" >>"$tmp"
+    mv "$tmp" "$CREDENTIALS_FILE"
+    chmod 600 "$CREDENTIALS_FILE"
+}
+
+prompt_secret() {
+    local prompt="$1" out_var="$2" value=""
+    while [[ -z "$value" ]]; do
+        printf '%s: ' "$prompt" >&2
+        IFS= read -r -s value || die "no input available; run this in an interactive terminal"
+        printf '\n' >&2
+        [[ -n "$value" ]] || printf 'That was empty. Paste the value issued for this machine.\n' >&2
+    done
+    printf -v "$out_var" '%s' "$value"
+}
+
+[[ -t 0 ]] || die "this wizard needs an interactive terminal (it never takes secrets as arguments)"
+
+printf 'Violet credentials\n'
+printf '  file: %s\n\n' "$CREDENTIALS_FILE"
+
+label="${1:-}"
+while [[ -z "$label" ]]; do
+    printf 'Machine label for the issued token (e.g. DANIEL_LAPTOP): ' >&2
+    IFS= read -r label || die "no input available"
+done
+# Match the folding `cas integrate violet --label` applies, so the wizard
+# and the command always agree on the variable name.
+label="$(printf '%s' "$label" | tr '[:lower:]' '[:upper:]' | tr -c '[:alnum:]\n' '_')"
+token_var="VIOLET_SLACK_TOKEN_${label}"
+
+printf '\nPasting is invisible — nothing is echoed.\n'
+prompt_secret "  ${token_var}" token_value
+prompt_secret "  ${BYPASS_VAR}" bypass_value
+
+mkdir -p "$(dirname "$CREDENTIALS_FILE")"
+chmod 700 "$(dirname "$CREDENTIALS_FILE")" 2>/dev/null || true
+: >>"$CREDENTIALS_FILE"
+chmod 600 "$CREDENTIALS_FILE"
+
+upsert_export "$token_var" token_value
+upsert_export "$BYPASS_VAR" bypass_value
+unset token_value bypass_value
+
+shell_name="${SHELL##*/}"
+profile="$HOME/.profile"
+if [[ "$shell_name" == zsh ]]; then
+    profile="$HOME/.zprofile"
+elif [[ "$shell_name" == bash && -f "$HOME/.bash_profile" ]]; then
+    profile="$HOME/.bash_profile"
+fi
+source_line="[ -f \"$CREDENTIALS_FILE\" ] && . \"$CREDENTIALS_FILE\""
+
+printf '\nStored %s and %s (0600, values not shown).\n' "$token_var" "$BYPASS_VAR"
+if [[ -f "$profile" ]] && grep -qF "$CREDENTIALS_FILE" "$profile"; then
+    printf 'Your %s already sources that file.\n' "$profile"
+else
+    printf '\nAdd this line to %s so every shell exports them:\n\n  %s\n' "$profile" "$source_line"
+fi
+
+printf '\nThen, in a NEW shell:\n\n  cas integrate violet --label %s\n  cas doctor\n' "$label"

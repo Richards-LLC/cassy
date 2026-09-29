@@ -358,7 +358,7 @@ pub struct UndeliveredLifecycleRelay {
     /// Original lifecycle envelope. Consumers use its typed task payload to
     /// distinguish actionable relays from task-free informational events.
     pub prompt: String,
-    /// Terminal stage the row died at (suppressed / dropped / abandoned).
+    /// Terminal incident stage or current stage of a >60s pending relay.
     pub stage: String,
     /// Recorded reason, when one was stamped.
     pub reason: Option<PendingReason>,
@@ -2178,14 +2178,14 @@ pub trait PromptQueueStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<RetriedPrompt>>;
 
-    /// Lifecycle wake relays that reached a terminal stage without ever being
-    /// transported (cas-7787, GH #160).
+    /// Lifecycle wake relays never transported: terminal incidents plus live
+    /// pending relays older than 60 seconds (cas-5569).
     ///
     /// This is the failure-honesty read side: every row here is a moment the
     /// factory told the supervisor a lane was parked behind them and the
     /// supervisor never received it. Derived entirely from columns the queue
-    /// already writes (`transport_delivered_at IS NULL` + a terminal
-    /// `highest_stage` + a `lifecycle-wake:` source), so it reports historical
+    /// already writes (`transport_delivered_at IS NULL` + lifecycle source
+    /// and stage/age), so it reports historical
     /// incidents too, not only ones recorded after this code shipped.
     fn list_undelivered_lifecycle_relays(
         &self,
@@ -2198,9 +2198,8 @@ pub trait PromptQueueStore: Send + Sync {
     /// Returns the number of previously-unacknowledged rows reconciled.
     fn reconcile_terminal_lifecycle_relays(&self) -> Result<usize>;
 
-    /// Count all unresolved terminal lifecycle relay rows without applying a
-    /// display cap.  Status banners use this with a bounded sample so they
-    /// cannot hide backlog depth.
+    /// Count all unresolved terminal or >60s pending lifecycle relays without
+    /// a display cap. Status banners cannot hide backlog depth.
     fn undelivered_lifecycle_relay_count(&self) -> Result<usize>;
 
     /// Get count of pending prompts
@@ -3560,14 +3559,14 @@ impl PromptQueueStore for SqlitePromptQueueStore {
              WHERE q.factory_session = ?
                AND (q.source LIKE 'lifecycle-wake:%' OR q.source LIKE 'lifecycle:%')
                AND lower(q.target) IN ({alias_slots})
-               AND q.created_at <= ?
+               AND (q.created_at <= ? OR q.highest_stage = 'abandoned')
                AND q.created_at >= ?
                AND q.transport_delivered_at IS NULL
                AND q.acked_at IS NULL
                AND (
                     COALESCE(q.highest_stage, 'enqueued') IN ('enqueued', 'selected', 'gated')
                     OR (q.highest_stage = 'abandoned'
-                        AND q.last_pending_reason IN ('undelivered_lifecycle_relay', 'undelivered_after_wake_declines'))
+                        AND q.last_pending_reason IN ('undelivered_lifecycle_relay', 'undelivered_after_wake_declines', 'abandoned_unknown_target'))
                )
                AND NOT EXISTS (
                     SELECT 1 FROM prompt_queue_recipient_seen seen WHERE seen.prompt_id = q.id
@@ -5240,8 +5239,8 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         // `transport_delivered_at IS NULL` is the whole test for "never
         // arrived" — it is stamped only by `mark_transport_delivered` /
-        // a fully successful broadcast. Terminal stage means the row will
-        // never be retried, so the failure is final rather than in progress.
+        // a fully successful broadcast. Pending relays older than 60 seconds
+        // must be visible before their retry budget is exhausted.
         let mut stmt = conn.prepare(
             "SELECT id, source, target, summary, highest_stage, last_pending_reason,
                     last_pending_detail, factory_session, created_at, processed_at, prompt
@@ -5249,11 +5248,15 @@ impl PromptQueueStore for SqlitePromptQueueStore {
              WHERE transport_delivered_at IS NULL
                AND acked_at IS NULL
                AND source LIKE 'lifecycle-wake:%'
-               AND highest_stage IN ('suppressed', 'dropped', 'abandoned')
+               AND (highest_stage IN ('suppressed', 'dropped', 'abandoned')
+                    OR (COALESCE(highest_stage, 'enqueued') IN ('enqueued', 'selected', 'gated')
+                        AND created_at <= ?))
+               AND NOT EXISTS (SELECT 1 FROM prompt_queue_recipient_seen seen WHERE seen.prompt_id = prompt_queue.id)
              ORDER BY id DESC
              LIMIT ?",
         )?;
-        let rows = stmt.query_map(params![limit as i64], |row| {
+        let cutoff = (Utc::now() - chrono::Duration::seconds(60)).to_rfc3339();
+        let rows = stmt.query_map(params![cutoff, limit as i64], |row| {
             let created_at: String = row.get(8)?;
             let processed_at: Option<String> = row.get(9)?;
             let reason: Option<String> = row.get(5)?;
@@ -5265,7 +5268,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 prompt: row.get(10)?,
                 stage: row
                     .get::<_, Option<String>>(4)?
-                    .unwrap_or_else(|| DeliveryStage::Abandoned.as_str().to_string()),
+                    .unwrap_or_else(|| DeliveryStage::Enqueued.as_str().to_string()),
                 reason: reason.as_deref().and_then(PendingReason::parse),
                 detail: row.get(6)?,
                 factory_session: row.get(7)?,
@@ -5319,8 +5322,11 @@ impl PromptQueueStore for SqlitePromptQueueStore {
              WHERE transport_delivered_at IS NULL
                AND acked_at IS NULL
                AND source LIKE 'lifecycle-wake:%'
-               AND highest_stage IN ('suppressed', 'dropped', 'abandoned')",
-            [],
+               AND (highest_stage IN ('suppressed', 'dropped', 'abandoned')
+                    OR (COALESCE(highest_stage, 'enqueued') IN ('enqueued', 'selected', 'gated')
+                        AND created_at <= ?))
+               AND NOT EXISTS (SELECT 1 FROM prompt_queue_recipient_seen seen WHERE seen.prompt_id = prompt_queue.id)",
+            params![(Utc::now() - chrono::Duration::seconds(60)).to_rfc3339()],
             |row| row.get(0),
         )?;
         Ok(count.try_into().unwrap_or(usize::MAX))
@@ -5950,6 +5956,113 @@ mod tests {
             vec![pending_completion, abandoned_undelivered],
             "a relay with an operator alert on record is not selected again"
         );
+    }
+
+    #[test]
+    fn abandoned_unknown_target_relay_escalates_immediately_and_remains_reportable() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue_with_session(
+                "lifecycle-wake:5569",
+                "supervisor",
+                "<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"cas-5569\">",
+                "live-session",
+            )
+            .unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE prompt_queue SET highest_stage = 'abandoned',
+                last_pending_reason = 'abandoned_unknown_target',
+                last_pending_detail = 'No such file or directory (os error 2)',
+                processed_at = ? WHERE id = ?",
+                params![Utc::now().to_rfc3339(), id],
+            )
+            .unwrap();
+        }
+        let rows = store
+            .undelivered_supervisor_lifecycle_relays("live-session", &["supervisor"], 9 * 60, 10)
+            .unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![id],
+            "a terminal missing-path relay must not wait for the pending-row grace period"
+        );
+        let reported = store.list_undelivered_lifecycle_relays(10).unwrap();
+        assert_eq!(reported.len(), 1);
+        assert_eq!(
+            reported[0].reason,
+            Some(PendingReason::AbandonedUnknownTarget)
+        );
+        assert!(
+            reported[0]
+                .detail
+                .as_deref()
+                .unwrap()
+                .contains("os error 2")
+        );
+        // An abandoned relay is forensic evidence, not a pending delivery.
+        // A later handoff cannot rewrite its terminal sibling stage.
+        let error = store.mark_transport_delivered(id).unwrap_err().to_string();
+        assert!(
+            error.contains("illegal stage transition abandoned → delivered"),
+            "{error}"
+        );
+        let report = store.message_delivery_report(id).unwrap().unwrap();
+        assert!(report.delivered_at.is_none());
+        assert_eq!(report.stage, DeliveryStage::Abandoned);
+        let reported = store.list_undelivered_lifecycle_relays(10).unwrap();
+        assert_eq!(reported.len(), 1);
+        assert_eq!(reported[0].prompt_id, id);
+    }
+
+    #[test]
+    fn undelivered_pending_relays_are_visible_after_sixty_seconds() {
+        let (_temp, store) = create_test_store();
+        let pending = store
+            .enqueue_with_session("lifecycle-wake:1", "supervisor", "merge-ready", "live")
+            .unwrap();
+        let delivered = store
+            .enqueue_with_session("lifecycle-wake:2", "supervisor", "delivered", "live")
+            .unwrap();
+        let seen = store
+            .enqueue_with_session("lifecycle-wake:3", "supervisor", "seen", "live")
+            .unwrap();
+        let fresh = store
+            .enqueue_with_session("lifecycle-wake:4", "supervisor", "fresh", "live")
+            .unwrap();
+        let ordinary = store
+            .enqueue_with_session("worker", "supervisor", "ordinary", "live")
+            .unwrap();
+        store.mark_transport_delivered(delivered).unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE prompt_queue SET created_at = ? WHERE id != ?",
+                params![
+                    (Utc::now() - chrono::Duration::seconds(61)).to_rfc3339(),
+                    fresh
+                ],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO prompt_queue_recipient_seen (prompt_id, recipient, seen_at) VALUES (?, 'supervisor', ?)",
+                params![seen, Utc::now().to_rfc3339()]).unwrap();
+        }
+        let rows = store.list_undelivered_lifecycle_relays(10).unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.prompt_id).collect::<Vec<_>>(),
+            vec![pending],
+            "fresh {fresh}, delivered {delivered}, seen {seen}, ordinary {ordinary} are not missing relays"
+        );
+        assert_eq!(store.undelivered_lifecycle_relay_count().unwrap(), 1);
+        store.mark_transport_delivered(pending).unwrap();
+        assert!(
+            store
+                .list_undelivered_lifecycle_relays(10)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(store.undelivered_lifecycle_relay_count().unwrap(), 0);
     }
 
     /// cas-d9a8: the stamped-origin columns exist and default to unattributed.

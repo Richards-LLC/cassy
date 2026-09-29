@@ -97,7 +97,7 @@ def handler_for(state: StubState):
                 body = envelope(
                     {
                         "_id": request_id,
-                        "tools": [{"name": "mecha_read"}, {"name": "mecha_post"}],
+                        "tools": [{"name": name} for name in ("violet_read", "violet_post", "mecha_read", "mecha_post")],
                     }
                 )
                 self.send_response(200)
@@ -108,7 +108,7 @@ def handler_for(state: StubState):
                 return
             if method == "tools/call":
                 tool_name = request["params"]["name"]
-                if tool_name == "mecha_read":
+                if tool_name == "violet_read":
                     arguments = request["params"]["arguments"]
                     assert arguments["channel"] == "cas-internal"
                     assert arguments["since"] == READ_SINCE
@@ -167,7 +167,7 @@ def handler_for(state: StubState):
                     self.wfile.write(body)
                     return
                 arguments = request["params"]["arguments"]
-                assert tool_name == "mecha_post"
+                assert tool_name == "violet_post"
                 if arguments["kind"] == "file" and state.file_mode == "http_413":
                     self.send_error(413, "Request Entity Too Large")
                     return
@@ -395,6 +395,8 @@ def run_token_selection_proof() -> None:
             encoding="utf-8",
         )
         names = {
+            "VIOLET_SLACK_TOKEN_ENV", "CAS_RELEASE_TRAIN_VIOLET_TOKEN_ENV", "VIOLET_SLACK_TOKEN",
+            "VIOLET_SLACK_TOKEN_CASSY_PROXY", "VIOLET_SLACK_TOKEN_SOUNDWAVE", "VIOLET_SLACK_TOKEN_SOUNDWAVE_64AF90",
             "CLAUDE_CONFIG_DIR",
             "CAS_RELEASE_TRAIN_MECHA_TOKEN_ENV",
             "MECHA_SLACK_TOKEN_ENV",
@@ -413,7 +415,7 @@ def run_token_selection_proof() -> None:
                 "MECHA_SLACK_TOKEN_SOUNDWAVE": "soundwave-token",
                 registered: "registered-token",
             }
-            assert module.registered_mecha_token_env() == registered
+            assert module.registered_violet_token_env() == registered
             assert module.resolve_token(credentials) == "registered-token"
 
             os.environ["MECHA_SLACK_TOKEN_ENV"] = "MECHA_SLACK_TOKEN_SOUNDWAVE"
@@ -425,7 +427,7 @@ def run_token_selection_proof() -> None:
                 module.resolve_token(credentials)
             except module.AdapterError as exc:
                 assert str(exc) == (
-                    f"registered MechaCassy token variable {registered} is unset or empty"
+                    f"registered Violet token variable {registered} is unset or empty"
                 )
             else:
                 raise AssertionError("missing registered token must fail")
@@ -441,6 +443,47 @@ def run_token_selection_proof() -> None:
     )
 
 
+def run_violet_credential_proof() -> None:
+    module = adapter_module()
+    names = {name for name in os.environ if name.startswith(("VIOLET_SLACK_TOKEN", "MECHA_SLACK_TOKEN"))}
+    names |= {"VIOLET_VERCEL_BYPASS", "MECHA_VERCEL_BYPASS", "CAS_RELEASE_TRAIN_VIOLET_TOKEN_ENV", "CAS_RELEASE_TRAIN_MECHA_TOKEN_ENV", "CLAUDE_CONFIG_DIR"}
+    previous = {name: os.environ.get(name) for name in names}
+    try:
+        for name in names:
+            os.environ.pop(name, None)
+        with tempfile.TemporaryDirectory(prefix="violet-credentials-") as directory:
+            os.environ["CLAUDE_CONFIG_DIR"] = directory
+            credentials = {"MECHA_SLACK_TOKEN_TEST": "legacy-token", "MECHA_VERCEL_BYPASS": "legacy-bypass"}
+            assert module.resolve_token(credentials) == "legacy-token"
+            assert module.resolve_secret("VIOLET_VERCEL_BYPASS", None, credentials) == "legacy-bypass"
+            credentials.update(VIOLET_SLACK_TOKEN_TEST="new-token", VIOLET_VERCEL_BYPASS="new-bypass")
+            assert module.resolve_token(credentials) == "new-token"
+            assert module.resolve_secret("MECHA_VERCEL_BYPASS", None, credentials) == "new-bypass"
+            credentials["VIOLET_SLACK_TOKEN_TEST"] = ""
+            credentials["VIOLET_VERCEL_BYPASS"] = ""
+            assert module.resolve_token(credentials) == "legacy-token"
+            assert module.resolve_secret("VIOLET_VERCEL_BYPASS", None, credentials) == "legacy-bypass"
+            credentials.update(VIOLET_SLACK_TOKEN_TEST="new-token", VIOLET_SLACK_TOKEN_OTHER="other-token")
+            os.environ["MECHA_SLACK_TOKEN_ENV"] = "MECHA_SLACK_TOKEN_TEST"
+            os.environ["VIOLET_SLACK_TOKEN_ENV"] = "VIOLET_SLACK_TOKEN_OTHER"
+            assert module.resolve_token(credentials) == "other-token"
+            os.environ.pop("MECHA_SLACK_TOKEN_ENV")
+            os.environ.pop("VIOLET_SLACK_TOKEN_ENV")
+            registration = {"mcpServers": {"violet": {"headers": {"Authorization": "Bearer ${VIOLET_SLACK_TOKEN_TEST}"}}, "mecha-cassy": {"headers": {"Authorization": "Bearer ${MECHA_SLACK_TOKEN_OTHER}"}}}}
+            Path(directory, ".claude.json").write_text(json.dumps(registration), encoding="utf-8")
+            assert module.registered_violet_token_env() == "VIOLET_SLACK_TOKEN_TEST"
+            assert module.resolve_token(credentials) == "new-token"
+    finally:
+        for name in set(os.environ) - set(previous):
+            if name.startswith(("VIOLET_SLACK_TOKEN", "MECHA_SLACK_TOKEN")):
+                os.environ.pop(name, None)
+        for name, value in previous.items():
+            os.environ.pop(name, None)
+            if value is not None:
+                os.environ[name] = value
+    print("Violet credentials: legacy fallback, primary precedence, empty fallback, explicit selector, registration precedence passed")
+
+
 def run_adapter(
     server: ThreadingHTTPServer,
     state: StubState,
@@ -448,6 +491,7 @@ def run_adapter(
     user_thread: str = USER_THREAD,
     dev_thread: str = DEV_THREAD,
     pdf_path: Path = PDF,
+    credential_mode: str = "legacy",
 ):
     state.remote_pdf = remote_pdf
     state.requests.clear()
@@ -457,13 +501,19 @@ def run_adapter(
         html = root / "v9.99.0.html"
         html.write_text("<!doctype html><title>stub</title>\n", encoding="utf-8")
         credentials = root / "credentials.env"
-        credentials.write_text(
-            "export MECHA_SLACK_TOKEN_TEST='stub-token'\n"
-            "export MECHA_VERCEL_BYPASS='stub-bypass'\n",
-            encoding="utf-8",
-        )
+        values = {"MECHA_SLACK_TOKEN_TEST": "stub-token", "MECHA_VERCEL_BYPASS": "stub-bypass"}
+        if credential_mode == "violet":
+            values = {"VIOLET_SLACK_TOKEN_TEST": "stub-token", "VIOLET_VERCEL_BYPASS": "stub-bypass"}
+        elif credential_mode == "both":
+            values.update(MECHA_SLACK_TOKEN_TEST="wrong-token", MECHA_VERCEL_BYPASS="wrong-bypass", VIOLET_SLACK_TOKEN_TEST="stub-token", VIOLET_VERCEL_BYPASS="stub-bypass")
+        elif credential_mode == "empty-violet":
+            values.update(VIOLET_SLACK_TOKEN_TEST="", VIOLET_VERCEL_BYPASS="")
+        credentials.write_text("".join(f"export {name}='{value}'\n" for name, value in values.items()), encoding="utf-8")
         receipt = root / "release-report.receipt"
         environment = os.environ.copy()
+        for name in list(environment):
+            if name.startswith(("VIOLET_SLACK_TOKEN", "MECHA_SLACK_TOKEN")) or name in {"VIOLET_VERCEL_BYPASS", "MECHA_VERCEL_BYPASS", "CAS_RELEASE_TRAIN_VIOLET_TOKEN_ENV"}:
+                environment.pop(name, None)
         environment.update(
             {
                 "CAS_RELEASE_TRAIN_REPORT_MCP_URL": f"http://127.0.0.1:{server.server_port}",
@@ -494,12 +544,18 @@ def run_adapter(
 def main() -> int:
     pdf = PDF.read_bytes()
     run_token_selection_proof()
+    run_violet_credential_proof()
     run_download_policy_proof()
     state = StubState(pdf)
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(state))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
+        for mode in ("violet", "both", "empty-violet"):
+            result, fields = run_adapter(server, state, pdf, credential_mode=mode)
+            assert result.returncode == 0, (mode, result.stderr)
+            assert fields is not None, mode
+        print("Violet transport: canonical-only, both names, and empty primary credentials passed against four-tool hub")
         result, fields = run_adapter(server, state, pdf)
         if result.returncode != 0:
             raise AssertionError(f"adapter failed: stdout={result.stdout!r} stderr={result.stderr!r}")

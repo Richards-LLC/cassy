@@ -153,6 +153,11 @@ pub struct TeamConfig {
     pub lead_agent_id: String,
     pub lead_session_id: String,
     pub members: Vec<TeamMember>,
+    /// CAS ownership, independent of the HOME of a later cleanup process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cas_home: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cas_daemon_pid: Option<u32>,
 }
 
 struct InboxFileLock<'a> {
@@ -189,6 +194,8 @@ pub struct TeamsManager {
     team_name: String,
     teams_dir: PathBuf,
     inboxes_dir: PathBuf,
+    // Keep the spawn roster in the daemon, outside the deletable Claude tree.
+    config: std::sync::Mutex<Option<TeamConfig>>,
 }
 
 /// Resolve the Claude config dir that owns the teams tree, from an explicit
@@ -231,6 +238,19 @@ pub(crate) fn teams_root_dir() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let env_config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
     claude_config_dir_from(&home, env_config_dir.as_deref()).join("teams")
+}
+
+fn daemon_pid_alive(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return true;
+    };
+    if pid <= 0 {
+        return true;
+    }
+    // SAFETY: signal 0 probes existence without signalling the process.
+    // EPERM and unexpected failures are not evidence that a daemon is dead.
+    (unsafe { libc::kill(pid, 0) == 0 })
+        || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
 /// cas-7aa2 (GH #176): neutralise Claude Code's NATIVE `SendMessage` copies
@@ -410,6 +430,7 @@ impl TeamsManager {
             team_name: session_name.to_string(),
             teams_dir,
             inboxes_dir,
+            config: std::sync::Mutex::new(None),
         }
     }
 
@@ -448,6 +469,7 @@ impl TeamsManager {
             team_name: self.team_name.clone(),
             inboxes_dir: teams_dir.join("inboxes"),
             teams_dir,
+            config: std::sync::Mutex::new(self.config.lock().unwrap().clone()),
         })
     }
 
@@ -473,6 +495,7 @@ impl TeamsManager {
     /// them, and now that `config.json` exists the cas-7aa2 sweep will skip
     /// them forever.
     pub fn provision_mirror_from(&self, primary: &Self, recipient: &str) -> anyhow::Result<()> {
+        primary.ensure_team_tree()?;
         std::fs::create_dir_all(&self.inboxes_dir)?;
 
         let source_config = primary.teams_dir.join("config.json");
@@ -924,11 +947,14 @@ impl TeamsManager {
             lead_agent_id: self.agent_id_for("supervisor"),
             lead_session_id: lead_session_id.to_string(),
             members,
+            cas_home: dirs::home_dir(),
+            cas_daemon_pid: Some(std::process::id()),
         };
 
         let config_path = self.teams_dir.join("config.json");
         let json = serde_json::to_string_pretty(&config)?;
         std::fs::write(&config_path, json)?;
+        *self.config.lock().unwrap() = Some(config);
 
         // Re-write the supervisor-only settings file. `build_configs_for_mux`
         // already wrote it eagerly (before `FactoryApp::new` spawned the
@@ -969,6 +995,7 @@ impl TeamsManager {
         cwd: &std::path::Path,
         color_index: usize,
     ) -> anyhow::Result<()> {
+        self.ensure_team_tree()?;
         let config_path = self.teams_dir.join("config.json");
         let json = std::fs::read_to_string(&config_path)?;
         let mut config: TeamConfig = serde_json::from_str(&json)?;
@@ -995,6 +1022,7 @@ impl TeamsManager {
 
         let json = serde_json::to_string_pretty(&config)?;
         std::fs::write(&config_path, json)?;
+        *self.config.lock().unwrap() = Some(config);
 
         self.ensure_inbox(name)?;
 
@@ -1004,6 +1032,7 @@ impl TeamsManager {
 
     /// Remove a member from the team (e.g., when a worker is shut down).
     pub fn remove_member(&self, name: &str) -> anyhow::Result<()> {
+        self.ensure_team_tree()?;
         let config_path = self.teams_dir.join("config.json");
         let json = std::fs::read_to_string(&config_path)?;
         let mut config: TeamConfig = serde_json::from_str(&json)?;
@@ -1012,6 +1041,7 @@ impl TeamsManager {
 
         let json = serde_json::to_string_pretty(&config)?;
         std::fs::write(&config_path, json)?;
+        *self.config.lock().unwrap() = Some(config);
 
         // Remove inbox file
         let inbox_path = self.inboxes_dir.join(format!("{}.json", name));
@@ -1173,12 +1203,10 @@ impl TeamsManager {
         retract_task: Option<&str>,
         retract_epic: Option<&str>,
     ) -> anyhow::Result<()> {
+        self.ensure_team_tree()?;
         let inbox_path = self.inboxes_dir.join(format!("{}.json", target));
 
-        // Ensure inbox file exists
-        if !inbox_path.exists() {
-            std::fs::write(&inbox_path, "[]")?;
-        }
+        self.ensure_inbox(target)?;
 
         Self::with_exclusive_inbox_lock(&inbox_path, || {
             // Read existing messages
@@ -1429,8 +1457,57 @@ impl TeamsManager {
     /// Ensure an inbox file exists for the given agent.
     fn ensure_inbox(&self, name: &str) -> anyhow::Result<()> {
         let inbox_path = self.inboxes_dir.join(format!("{}.json", name));
-        if !inbox_path.exists() {
-            std::fs::write(&inbox_path, "[]")?;
+        if inbox_path.exists() {
+            return Ok(());
+        }
+        // Publish a complete empty JSON document atomically. A competing
+        // writer's inbox wins without being truncated or reset to [].
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new_in(&self.inboxes_dir)?;
+        file.write_all(b"[]")?;
+        match file.persist_noclobber(&inbox_path) {
+            Ok(_) => {}
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.error.into()),
+        }
+        Ok(())
+    }
+
+    pub(crate) fn team_tree_missing(&self) -> bool {
+        !self.teams_dir.join("config.json").is_file() || !self.inboxes_dir.is_dir()
+    }
+
+    /// Restore only missing files from the live spawn roster. Existing inbox
+    /// contents and harness edits to config.json must survive a repair.
+    pub(crate) fn ensure_team_tree(&self) -> anyhow::Result<()> {
+        let config = self.config.lock().unwrap();
+        if config.is_none() {
+            // A manager that never spawned a team has no authoritative roster.
+            return Ok(());
+        }
+        let missing = self.team_tree_missing();
+        std::fs::create_dir_all(&self.inboxes_dir)?;
+        if let Some(config) = config.as_ref() {
+            let path = self.teams_dir.join("config.json");
+            if !path.exists() {
+                use std::io::Write;
+                let mut file = tempfile::NamedTempFile::new_in(&self.teams_dir)?;
+                file.write_all(serde_json::to_string_pretty(config)?.as_bytes())?;
+                // Atomic publication; a concurrent harness-created config wins.
+                match file.persist_noclobber(&path) {
+                    Ok(_) => {}
+                    Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(error) => return Err(error.error.into()),
+                }
+            }
+            for member in &config.members {
+                self.ensure_inbox(&member.name)?;
+            }
+            if missing {
+                self.write_supervisor_settings()?;
+                tracing::error!(path = %self.teams_dir.display(),
+                    "Claude team tree disappeared; restored from the live daemon roster");
+            }
         }
         Ok(())
     }
@@ -1448,17 +1525,30 @@ impl TeamsManager {
 
     /// Remove orphaned team directories whose daemon is no longer running.
     ///
-    /// Scans the active config dir's `teams/` for directories and checks if the corresponding
-    /// factory daemon socket (`~/.cas/factory-{name}.sock`) still exists. If the
-    /// socket is gone, the daemon crashed without cleaning up and the team
-    /// directory is safe to remove.
-    ///
-    /// Called once at daemon startup to clean up after previous crashes.
+    /// Never compare a shared Claude tree with sockets in an unrelated HOME.
+    /// Legacy trees without CAS ownership are left alone, as are live/recent
+    /// trees. Called once at daemon startup after previous crashes.
     pub fn cleanup_orphans() {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let teams_root = teams_root_dir();
+        Self::cleanup_orphans_in(&home, &teams_root, std::time::SystemTime::now());
+    }
 
-        let entries = match std::fs::read_dir(&teams_root) {
+    fn cleanup_orphans_in(
+        home: &std::path::Path,
+        teams_root: &std::path::Path,
+        now: std::time::SystemTime,
+    ) {
+        let (Ok(home), Ok(root)) = (home.canonicalize(), teams_root.canonicalize()) else {
+            return;
+        };
+        if !root.starts_with(&home) {
+            tracing::warn!(home = %home.display(), teams_root = %root.display(),
+                "Refusing Claude team cleanup: config directory belongs to another HOME");
+            return;
+        }
+
+        let entries = match std::fs::read_dir(teams_root) {
             Ok(entries) => entries,
             Err(_) => return, // No teams directory at all
         };
@@ -1468,12 +1558,53 @@ impl TeamsManager {
             if !path.is_dir() {
                 continue;
             }
+            // Do not follow a team symlink outside the ownership boundary.
+            if entry.file_type().is_ok_and(|kind| kind.is_symlink()) {
+                continue;
+            }
 
             let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
 
-            // Check if the factory daemon socket still exists
+            let config_path = path.join("config.json");
+            let Some(config) = std::fs::read_to_string(&config_path)
+                .ok()
+                .and_then(|json| serde_json::from_str::<TeamConfig>(&json).ok())
+            else {
+                continue;
+            };
+            if config.name != dir_name
+                || config
+                    .cas_home
+                    .as_ref()
+                    .and_then(|owner| owner.canonicalize().ok())
+                    .as_ref()
+                    != Some(&home)
+            {
+                continue;
+            }
+            if config.cas_daemon_pid.is_none_or(daemon_pid_alive) {
+                continue;
+            }
+            // An absent socket during daemon startup is not a death receipt.
+            let inboxes = path.join("inboxes");
+            let mut touched_paths = vec![path.clone(), config_path, inboxes.clone()];
+            if let Ok(entries) = std::fs::read_dir(&inboxes) {
+                touched_paths.extend(entries.flatten().map(|entry| entry.path()));
+            }
+            let recently_touched = touched_paths.iter().any(|p| {
+                std::fs::metadata(p)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|modified| now.duration_since(modified).ok())
+                    .is_none_or(|age| age < std::time::Duration::from_secs(3600))
+            });
+            if recently_touched {
+                continue;
+            }
+
+            // Check sockets in the recorded owner's identity space.
             let sock_path = home.join(".cas").join(format!("factory-{dir_name}.sock"));
 
             if !sock_path.exists() {
@@ -1502,9 +1633,11 @@ impl TeamsManager {
         color: &str,
         parent_session_id: Option<&str>,
     ) -> cas_mux::TeamsSpawnConfig {
-        let worker_settings_path = self
-            .teams_dir
-            .join(format!("{name}-settings.json"));
+        if let Err(error) = self.ensure_team_tree() {
+            tracing::error!(path = %self.teams_dir.display(), %error,
+                "Failed to restore Claude team tree before spawning a teammate");
+        }
+        let worker_settings_path = self.teams_dir.join(format!("{name}-settings.json"));
         if let Err(e) = Self::write_worker_settings_to(&worker_settings_path) {
             tracing::warn!(
                 "Failed to write worker settings for {} at {:?}: {}",
@@ -1952,7 +2085,183 @@ mod tests {
             team_name: name.to_string(),
             teams_dir,
             inboxes_dir,
+            config: std::sync::Mutex::new(None),
         }
+    }
+
+    fn owned_team_in(home: &std::path::Path, name: &str, pid: u32) -> TeamsManager {
+        let manager = manager_in(home, name);
+        manager
+            .init_team_config(
+                &["first-worker".into()],
+                home,
+                &std::collections::HashMap::new(),
+                "live-lead-session",
+            )
+            .unwrap();
+        let mut config = manager.config.lock().unwrap();
+        let roster = config.as_mut().unwrap();
+        roster.cas_home = Some(home.to_path_buf());
+        roster.cas_daemon_pid = Some(pid);
+        std::fs::write(
+            manager.teams_dir.join("config.json"),
+            serde_json::to_string_pretty(roster).unwrap(),
+        )
+        .unwrap();
+        drop(config);
+        manager
+    }
+
+    #[test]
+    fn foreign_home_cleanup_never_deletes_shared_claude_teams() {
+        let owner = tempfile::tempdir().unwrap();
+        let rig_home = tempfile::tempdir().unwrap();
+        let manager = owned_team_in(owner.path(), "live-session", std::process::id());
+        // Missing sockets in a QA HOME previously deleted this entire tree.
+        let root = owner.path().join(".claude/teams");
+        TeamsManager::cleanup_orphans_in(
+            rig_home.path(),
+            &root,
+            std::time::SystemTime::now() + std::time::Duration::from_secs(7200),
+        );
+        assert!(manager.teams_dir.join("config.json").is_file());
+        assert!(manager.inboxes_dir.join("supervisor.json").is_file());
+    }
+
+    #[test]
+    fn orphan_cleanup_requires_owner_dead_pid_and_old_tree() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join(".claude/teams");
+        let live = owned_team_in(home.path(), "live", std::process::id());
+        let dead_pid = i32::MAX as u32;
+        assert!(!daemon_pid_alive(dead_pid));
+        let dead = owned_team_in(home.path(), "dead", dead_pid);
+        let socket = owned_team_in(home.path(), "socket", dead_pid);
+        std::fs::create_dir_all(home.path().join(".cas")).unwrap();
+        std::fs::write(
+            home.path().join(".cas/factory-socket.sock"),
+            "socket marker",
+        )
+        .unwrap();
+        // A foreign or legacy Claude tree is never ours to reap.
+        let legacy = owned_team_in(home.path(), "legacy", dead_pid);
+        let mut config = legacy.config.lock().unwrap().clone().unwrap();
+        config.cas_home = None;
+        std::fs::write(
+            legacy.teams_dir.join("config.json"),
+            serde_json::to_string(&config).unwrap(),
+        )
+        .unwrap();
+
+        TeamsManager::cleanup_orphans_in(home.path(), &root, std::time::SystemTime::now());
+        assert!(
+            dead.teams_dir.exists(),
+            "recent startup without a socket is not orphaned"
+        );
+        TeamsManager::cleanup_orphans_in(
+            home.path(),
+            &root,
+            std::time::SystemTime::now() + std::time::Duration::from_secs(7200),
+        );
+        assert!(
+            live.teams_dir.exists(),
+            "a live PID wins over an absent socket"
+        );
+        assert!(
+            !dead.teams_dir.exists(),
+            "old owned dead teams can still be reclaimed"
+        );
+        assert!(socket.teams_dir.exists());
+        assert!(legacy.teams_dir.exists());
+    }
+
+    #[test]
+    fn deleted_team_tree_repairs_from_current_roster_on_next_merge_relay() {
+        let home = tempfile::tempdir().unwrap();
+        let manager = owned_team_in(home.path(), "relay-session", std::process::id());
+        manager.add_member("parked-worker", home.path(), 1).unwrap();
+        manager.remove_member("first-worker").unwrap();
+        std::fs::remove_dir_all(&manager.teams_dir).unwrap();
+        let start = std::time::Instant::now();
+        manager
+            .write_to_inbox_for_merge_alert(
+                "supervisor",
+                "parked-worker",
+                "Ready for merge",
+                Some("parked delivery"),
+                None,
+                "cas-5569",
+            )
+            .unwrap();
+        assert!(start.elapsed() < std::time::Duration::from_secs(60));
+        let restored: TeamConfig = serde_json::from_str(
+            &std::fs::read_to_string(manager.teams_dir.join("config.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(restored.lead_session_id, "live-lead-session");
+        assert!(
+            restored
+                .members
+                .iter()
+                .any(|member| member.name == "parked-worker")
+        );
+        assert!(
+            !restored
+                .members
+                .iter()
+                .any(|member| member.name == "first-worker")
+        );
+        assert!(manager.inboxes_dir.join("parked-worker.json").exists());
+        assert!(manager.teams_dir.join("supervisor-settings.json").exists());
+        manager
+            .write_to_inbox_for_merge_alert(
+                "supervisor",
+                "parked-worker",
+                "Ready for merge",
+                Some("parked delivery"),
+                None,
+                "cas-5569",
+            )
+            .unwrap();
+        let rows = read_rows(&manager.teams_dir, "supervisor");
+        assert_eq!(rows.len(), 1, "recovery/retry must not duplicate the relay");
+        assert_eq!(rows[0]["retract_task"], "cas-5569");
+    }
+
+    #[test]
+    fn repair_preserves_unread_inboxes_and_existing_harness_config() {
+        let home = tempfile::tempdir().unwrap();
+        let manager = owned_team_in(home.path(), "partial-loss", std::process::id());
+        manager
+            .write_to_inbox("supervisor", "worker", "unread", None, None)
+            .unwrap();
+        std::fs::remove_file(manager.teams_dir.join("config.json")).unwrap();
+        manager.ensure_team_tree().unwrap();
+        assert_eq!(
+            read_rows(&manager.teams_dir, "supervisor")[0]["text"],
+            "unread"
+        );
+        let config_path = manager.teams_dir.join("config.json");
+        let mut config: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        config["harnessExtension"] = serde_json::json!("preserve me");
+        let bytes = serde_json::to_vec(&config).unwrap();
+        std::fs::write(&config_path, &bytes).unwrap();
+        std::fs::remove_dir_all(&manager.inboxes_dir).unwrap();
+        manager.ensure_team_tree().unwrap();
+        assert_eq!(std::fs::read(&config_path).unwrap(), bytes);
+        assert!(manager.inboxes_dir.join("supervisor.json").is_file());
+    }
+
+    #[test]
+    fn teammate_spawn_restores_deleted_team_before_join_flags() {
+        let home = tempfile::tempdir().unwrap();
+        let manager = owned_team_in(home.path(), "spawn-session", std::process::id());
+        std::fs::remove_dir_all(&manager.teams_dir).unwrap();
+        let flags = manager.spawn_config_for("first-worker", "general-purpose", "blue", None);
+        assert_eq!(flags.team_name, "spawn-session");
+        assert!(manager.teams_dir.join("config.json").is_file());
+        assert!(std::path::Path::new(flags.settings_path.as_ref().unwrap()).is_file());
     }
 
     // ---- cas-7aa2 (GH #176): the cross-config-dir dual-write shape ----
@@ -2516,6 +2825,7 @@ mod tests {
             team_name: "cas-src-test".to_string(),
             teams_dir: tmp.path().to_path_buf(),
             inboxes_dir: inboxes_dir.clone(),
+            config: std::sync::Mutex::new(None),
         };
         let worker = "loyal-heron-7";
         let text = "Start task cas-ceae — worker inbox storm.";
@@ -2579,6 +2889,7 @@ mod tests {
             team_name: "cas-src-test".to_string(),
             teams_dir: tmp.path().to_path_buf(),
             inboxes_dir: inboxes_dir.clone(),
+            config: std::sync::Mutex::new(None),
         };
         teams
             .write_to_inbox("supervisor", "wise-phoenix-2", "merge request", None, None)

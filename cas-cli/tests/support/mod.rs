@@ -165,6 +165,7 @@ impl CasSandbox {
 
         cmd.current_dir(self.path())
             .env("HOME", &self.home_dir)
+            .env("CLAUDE_CONFIG_DIR", self.home_dir.join(".claude"))
             .env("XDG_CONFIG_HOME", &self.xdg_config_home)
             .env_remove("CLAUDE_PROJECT_DIR")
             .env("CAS_ROOT", &self.cas_root)
@@ -221,6 +222,10 @@ pub fn assert_command_is_sandboxed(cmd: &Command, sandbox: &CasSandbox) {
         Some(sandbox.path().as_os_str())
     );
     assert_eq!(env_value(cmd, "HOME"), Some(sandbox.home_dir().as_os_str()));
+    assert_eq!(
+        env_value(cmd, "CLAUDE_CONFIG_DIR"),
+        Some(sandbox.home_dir().join(".claude").as_os_str())
+    );
     assert_eq!(
         env_value(cmd, "XDG_CONFIG_HOME"),
         Some(sandbox.xdg_config_home().as_os_str())

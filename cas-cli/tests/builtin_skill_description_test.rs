@@ -541,7 +541,7 @@ fn runtime_report_publication_instructions_create_parents_before_upload_receipts
         "CAS_RELEASE_TRAIN_REPORT_USER_THREAD_TS",
         "CAS_RELEASE_TRAIN_REPORT_DEV_THREAD_TS",
         "--report",
-        "MechaCassy",
+        "Violet",
         "download",
         "decode",
         "page-count",
@@ -561,11 +561,11 @@ fn runtime_report_publication_instructions_create_parents_before_upload_receipts
 /// Active publication instructions must never select a personal Slack route.
 /// Inspect the shipped catalogs, including references, rather than only source mirrors.
 #[test]
-fn release_slack_routes_are_mecha_cassy_only() {
+fn release_slack_routes_are_violet_only() {
     let mut files = Vec::new();
     for (label, flavor) in FLAVORS {
         for skill in [
-            "mecha-cassy",
+            "violet",
             "cas-cut-release",
             "cli-routing",
             "cas-release-notes",
@@ -617,10 +617,43 @@ fn release_slack_routes_are_mecha_cassy_only() {
                 && !path.starts_with("codex/")
                 && !path.starts_with("grok/")
         {
-            if !active.contains("MechaCassy") || !active.contains("personal") {
+            if !active.contains("Violet") || !active.contains("personal") {
                 problems.push(format!(
                     "{path}: missing explicit hub-only/personal-route guard"
                 ));
+            }
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// Live skill instructions must use the primary hub tools. Dated failure logs
+/// and explicitly separated historical evidence retain the names they recorded.
+#[test]
+fn live_builtin_skills_use_violet_tool_names() {
+    let mut problems = Vec::new();
+    for (label, flavor) in FLAVORS {
+        for builtin in builtin_catalog::skills(flavor) {
+            if builtin.path.ends_with("/failure-log.md") {
+                continue;
+            }
+            let active = builtin
+                .content
+                .split("## Historical transport evidence")
+                .next()
+                .unwrap();
+            for retired in [
+                "mecha_read",
+                "mecha_post",
+                "../mecha-cassy/",
+                "skills/mecha-cassy/",
+            ] {
+                if active.contains(retired) {
+                    problems.push(format!(
+                        "{label}/{}: stale hub instruction {retired:?}",
+                        builtin.path
+                    ));
+                }
             }
         }
     }

@@ -28,9 +28,9 @@ pub fn handle_pre_tool_use(
     // A mutating `cargo fmt` selects Cargo targets rather than source paths,
     // and direct rustfmt follows child modules unless skip_children is set.
     // In a workspace that is not fmt-clean, either shape spills unrelated
-    // changes. Workers use non-mutating/scoped format commands and never run a
-    // Rust build at all (cas-4cbb): the supervisor builds and tests the epic
-    // tip once, at assembly.
+    // changes. Workers use scoped format commands and may run only capped,
+    // package-scoped cargo check --lib or --tests (cas-3efd, cas-3051).
+    // The supervisor builds and tests the epic tip once, at assembly.
     // Hoist this before the cas_root early return and factory Bash auto-allow so
     // an unscoped run always gets the loud, actionable refusal.
     // ========================================================================
@@ -52,18 +52,51 @@ pub fn handle_pre_tool_use(
                  A workspace normalization requires separate operator approval and must not be run from a worker.",
             ));
         }
-        // cas-4cbb (operator directive 2026-09-24): factory workers never run
-        // Rust builds. Five workers each compiling in their own target dir,
-        // plus CI, drove the 32-core host to load 190; one build per epic at
-        // assembly, run by the supervisor, replaces them.
-        if let Some(what) = command.and_then(worker_command_rust_build) {
+        // Only this literal Cargo shape may compile. Rewrite through the
+        // capped runner; a snapshot alone cannot prevent simultaneous starts.
+        if let Some((args, suffix)) = command.and_then(worker_check_command) {
+            let Some(root) = cas_root else {
+                return Ok(HookOutput::with_pre_tool_permission(
+                    "deny",
+                    "Worker check needs a Cassy root for max_concurrent_builders admission",
+                ));
+            };
+            let executable = std::env::current_exe()?;
+            let rewritten = format!(
+                "{} factory worker-check --cas-root {} -- {}{}",
+                shell_quote_path(&executable),
+                shell_quote_path(root),
+                args.join(" "),
+                suffix,
+            );
+            let mut updated = input.tool_input.clone().unwrap_or_default();
+            updated["command"] = serde_json::Value::String(rewritten);
+            let mut rewritten_input = input.clone();
+            rewritten_input.tool_input = Some(updated.clone());
+            // Evaluate every existing protection against the command that
+            // will actually run, including early rule-based approvals.
+            let mut output = handle_pre_tool_use(&rewritten_input, cas_root)?;
+            if let Some(cas_core::hooks::types::HookSpecificOutput::PreToolUse {
+                permission_decision,
+                updated_input,
+                ..
+            }) = output.hook_specific_output.as_mut()
+            {
+                if permission_decision.as_deref() != Some("deny") {
+                    *updated_input = Some(updated);
+                }
+                return Ok(output);
+            }
+            return Ok(HookOutput::with_pre_tool_updated_input(updated));
+        } else if let Some(what) = command.and_then(worker_command_rust_build) {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
                 &format!(
-                    "🚫 NO WORKER RUST BUILDS: `{what}` compiles Rust, and factory workers never build (operator rule, cas-4cbb). \
-                     Edit and commit, then park without building: the supervisor runs one build and test of the epic tip at assembly \
-                     and records an ASSEMBLY_PROOF on the epic. Your close needs no scoped or loaded proof receipt.\n\n\
-                     Read-only checks stay available: `cargo fmt --all -- --check`, `rustfmt --edition 2024 --check --config skip_children=true <files>`, `cargo metadata`, `cargo tree`."
+                    "🚫 NO WORKER RUST BUILDS: `{what}` is outside the compile-only exception (cas-3efd). \
+                     Use exactly `cargo check -p <crate> [-p <crate> ...] --lib` for lib-only edits or `--tests` when test files changed, optionally with log redirection and backgrounding. Choose one target flag. \
+                     The hook runs it under max_concurrent_builders using your private seeded target cache. \
+                     Commit first so a successful check records `check: PASS <sha>`. \
+                     Build/test/nextest remain supervisor-only at epic assembly (cas-4cbb)."
                 ),
             ));
         }
@@ -1032,9 +1065,38 @@ pub fn handle_pre_tool_use(
     Ok(HookOutput::empty())
 }
 
-/// Detect a worker shell command that executes Cargo tests without the
-/// zero-executed receipt wrapper.  A target scope controls cost but does not
-/// prove the filter matched anything, because Cargo exits zero for zero tests.
+/// Accept a literal check plus a simple log/background suffix, never compound
+/// commands, shell substitutions, toolchains, environment overrides or wrappers.
+fn worker_check_command(command: &str) -> Option<(Vec<String>, String)> {
+    let command = command.trim();
+    let split = command.find(['>', '&']).unwrap_or(command.len());
+    let (body, suffix) = command.split_at(split);
+    let suffix_pattern =
+        regex::Regex::new(r"^\s*(?:>{1,2}\s*[A-Za-z0-9_/.-]+\s*(?:2>&1\s*)?)?&?\s*$").ok()?;
+    if !suffix_pattern.is_match(suffix) {
+        return None;
+    }
+    let words = body.split_whitespace().collect::<Vec<_>>();
+    if words.get(..2)? != ["cargo", "check"] {
+        return None;
+    }
+    let args = words[2..]
+        .iter()
+        .map(|word| word.to_string())
+        .collect::<Vec<_>>();
+    crate::factory_worker_check::check_packages(&args)?;
+    let suffix = if suffix.is_empty() {
+        String::new()
+    } else {
+        format!(" {suffix}")
+    };
+    Some((args, suffix))
+}
+
+fn shell_quote_path(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\"'\"'"))
+}
+
 /// The Rust build a worker command would start, if any (cas-4cbb): a cargo
 /// subcommand that compiles, `cargo-nextest`, `rustc`/`rustdoc`, the scoped
 /// test wrapper, or a `make test*` target. Read-only cargo (fmt checks,

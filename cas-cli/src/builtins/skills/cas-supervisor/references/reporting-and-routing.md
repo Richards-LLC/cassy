@@ -6,7 +6,7 @@
 
 ## Release train
 
-Runtime releases use only skills/cas-cut-release/SKILL.md; it owns the mechanical gate, merge queue, publish receipt, Slack POSTED block, and host verification. The Slack transport is skills/mecha-cassy/SKILL.md — the default for every harness, so route a worker to it rather than taking its draft back by hand.
+Runtime releases use only skills/cas-cut-release/SKILL.md; it owns the mechanical gate, merge queue, publish receipt, Slack POSTED block, and host verification. The Slack transport is skills/violet/SKILL.md — the default for every harness, so route a worker to it rather than taking its draft back by hand.
 
 ## Cross-team routing
 

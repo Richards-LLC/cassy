@@ -1,9 +1,9 @@
 # cargo-nextest configuration.
 #
-# Why nextest is used at all: `cargo test` runs the 66 integration test binaries
-# ONE BINARY AT A TIME (parallel only within a binary). nextest schedules every
-# test across all binaries into one global pool, which is the shape this repo
-# needs. See GH #142.
+# cas-cli uses ten explicit integration harnesses to avoid linking its library
+# once per source suite. Nextest runs each test in its own process, preserving
+# isolation for tests that change env/cwd, and schedules one global pool.
+# Plain cargo test must use -- --test-threads=1 for these shared harnesses.
 
 [profile.default]
 # NO RETRIES, deliberately. A retry policy turns a deterministic failure into an
@@ -35,6 +35,6 @@ final-status-level = "slow"
 hub-process = { max-threads = 4 }
 
 [[profile.default.overrides]]
-filter = 'binary(hub_clean_home_test)'
+filter = 'test(hub_clean_home_test::)'
 platform = 'cfg(target_os = "macos")'
 test-group = 'hub-process'

@@ -242,7 +242,7 @@ mod tests {
         for repo in [
             "owner/repo",
             "Richards-LLC/cassy",
-            "Richards-LLC/mecha-cassy",
+            "Richards-LLC/violet_ps",
             "Richards-LLC/petra-stella-cloud",
         ] {
             assert!(rendered.contains(repo), "missing {repo}: {rendered}");

@@ -1,6 +1,7 @@
 //! Regression coverage for GH #633: team-pull entries share IDs with the
 //! author's personal rows and must reconcile by last-writer-wins.
 
+#[path = "common/mod.rs"]
 mod common;
 
 use cas::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig};

@@ -10,7 +10,7 @@
 //! # Running
 //!
 //! ```bash
-//! cargo test --test factory_latency_test
+//! cargo test --test integration_factory factory_latency_test::
 //! ```
 
 use std::net::SocketAddr;

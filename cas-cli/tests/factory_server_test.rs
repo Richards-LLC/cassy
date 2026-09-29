@@ -15,10 +15,10 @@
 //!
 //! ```bash
 //! # Run all factory server tests
-//! cargo test --test factory_server_test
+//! cargo test --test integration_factory factory_server_test::
 //!
 //! # Run including ignored tests (after cas-4d96 implementation)
-//! cargo test --test factory_server_test -- --include-ignored
+//! cargo test --test integration_factory factory_server_test:: -- --include-ignored
 //! ```
 
 use std::net::SocketAddr;

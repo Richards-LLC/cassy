@@ -639,7 +639,7 @@ fn issue_repo_registry_resolves_defaults_and_overrides_without_serializing_defau
     );
     assert_eq!(
         config.get("issues.components.mecha_cassy"),
-        Some("Richards-LLC/mecha-cassy".to_string())
+        Some("Richards-LLC/violet_ps".to_string())
     );
     assert_eq!(
         config.get("issues.components.cloud"),
@@ -649,7 +649,7 @@ fn issue_repo_registry_resolves_defaults_and_overrides_without_serializing_defau
         ("issues.components.cassy", "Richards-LLC/cassy"),
         (
             "issues.components.mecha_cassy",
-            "Richards-LLC/mecha-cassy",
+            "Richards-LLC/violet_ps",
         ),
         (
             "issues.components.cloud",
@@ -698,7 +698,7 @@ fn violet_issue_key_is_canonical_and_mecha_cassy_is_a_deprecated_alias() {
     for key in ["issues.components.violet", "issues.components.mecha_cassy"] {
         assert_eq!(
             config.get(key),
-            Some("Richards-LLC/mecha-cassy".to_string()),
+            Some("Richards-LLC/violet_ps".to_string()),
             "{key}"
         );
         let meta = meta::registry().get(key).expect("component issue metadata");
@@ -706,7 +706,7 @@ fn violet_issue_key_is_canonical_and_mecha_cassy_is_a_deprecated_alias() {
     }
     assert!(config.list().contains(&(
         "issues.components.violet".to_string(),
-        "Richards-LLC/mecha-cassy".to_string()
+        "Richards-LLC/violet_ps".to_string()
     )));
 
     // The old key writes the canonical field and both names read it back.

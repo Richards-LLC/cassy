@@ -287,6 +287,9 @@ jobs:
       && github.event_name == 'push'
       && startsWith(github.ref, 'refs/heads/factory/')
     needs: ci-diff
+    permissions:
+      contents: read
+      actions: read
     concurrency:
       group: scoped-validation-fast-${{ github.ref }}
       cancel-in-progress: true
@@ -339,31 +342,33 @@ jobs:
           && steps.classify-diff.outputs.rust-unaffected != 'true'
         uses: taiki-e/install-action@nextest
 
-      - name: Check library and mapped test targets
+      - name: Run change-scoped tests with impact evidence
         if: >-
           steps.classify-diff.outputs.fast-admission == 'true'
           && steps.classify-diff.outputs.rust-unaffected != 'true'
         env:
           BASE_SHA: ${{ github.event.before }}
           ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: |
-          set -euo pipefail
-          proof_base="$BASE_SHA"
-          if [[ "$proof_base" =~ ^0+$ ]]; then
-            proof_base="$ZERO_BASE_REF"
+          if [[ -f scripts/cas-test-targets.py ]]; then
+            python3 scripts/cas-test-targets.py cas-cli --check
           fi
-          merge_base="$(git merge-base "$proof_base" HEAD)"
-          target_line="$(scripts/check-scoped-test-surface.sh --resolve-targets --base "$merge_base" --)"
-          target_args="${target_line#SCOPED_PROOF_TARGET_ARGS:}"
-          read -r -a mapped_args <<< "$target_args"
-          cargo check -p cas --lib --tests
-          if [[ ${#mapped_args[@]} -gt 0 ]]; then
-            SCOPED_PROOF_BASE="$merge_base" \
-              scripts/run-scoped-tests.sh --proof -p cas "${mapped_args[@]}"
+          if [[ -x scripts/ci-test-impact.py ]]; then
+            python3 scripts/ci-test-impact.py history
+            python3 scripts/ci-test-impact.py run
           else
-            echo 'No Rust test targets mapped for this small delta.'
+            scripts/run-verified-tests.sh nextest run --workspace --no-fail-fast
           fi
+
+      - name: Publish CI impact evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-test-impact-${{ github.run_id }}-scoped-fast
+          path: target/ci-impact/
+          if-no-files-found: ignore
 
       - name: Test snapshot-pinned CLI output surfaces
         if: >-
@@ -478,26 +483,36 @@ jobs:
           && steps.classify-diff.outputs.rust-unaffected != 'true'
         uses: taiki-e/install-action@nextest
 
-      - name: Check library and test targets
+      - name: Run change-scoped tests with impact evidence
         if: >-
           steps.pr-dedupe.outputs.covered != 'true'
           && (github.event_name != 'push' || steps.classify-diff.outputs.fast-admission != 'true')
           && steps.classify-diff.outputs.rust-unaffected != 'true'
         env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
           ZIG: ${{ github.workspace }}/.context/zig/zig
-        run: cargo check -p cas --lib --tests
+        run: |
+          if [[ -f scripts/cas-test-targets.py ]]; then
+            python3 scripts/cas-test-targets.py cas-cli --check
+          fi
+          if [[ -x scripts/ci-test-impact.py ]]; then
+            python3 scripts/ci-test-impact.py history
+            python3 scripts/ci-test-impact.py run
+          else
+            scripts/run-verified-tests.sh nextest run --workspace --no-fail-fast
+          fi
 
-      - name: Test library target (one binary)
-        if: >-
-          steps.pr-dedupe.outputs.covered != 'true'
-          && (github.event_name != 'push' || steps.classify-diff.outputs.fast-admission != 'true')
-          && steps.classify-diff.outputs.rust-unaffected != 'true'
-        env:
-          ZIG: ${{ github.workspace }}/.context/zig/zig
-        run: scripts/run-scoped-tests.sh -p cas --lib --no-fail-fast
+      - name: Publish CI impact evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-test-impact-${{ github.run_id }}-scoped
+          path: target/ci-impact/
+          if-no-files-found: ignore
 
-      # cas-ad65: the library-only invocation above cannot exercise integration
-      # snapshots. Route only their committed CLI-output input surfaces here;
+      # cas-ad65: import selection alone cannot prove snapshot input coverage. Route only their committed CLI-output input surfaces here;
       # PRs #649/#650 and PR #657 run 33435790948 reached the queue before
       # stale doctor_snapshot output was exercised. This remains one small
       # target within Scoped Validation, never a new CI lane.
@@ -807,7 +822,11 @@ jobs:
           CARGO_PROFILE_TEST_DEBUG: "0"
           CARGO_PROFILE_DEV_STRIP: debuginfo
           CARGO_PROFILE_TEST_STRIP: debuginfo
-        run: cargo nextest archive --workspace --archive-file fast-validation-suite.tar.zst
+        run: |
+          if [[ -f scripts/cas-test-targets.py ]]; then
+            python3 scripts/cas-test-targets.py cas-cli --check
+          fi
+          cargo nextest archive --workspace --archive-file fast-validation-suite.tar.zst
 
       # The archive carries test executables, but integration tests that spawn
       # `cas` resolve it from target/debug/. Package that runner separately:
@@ -905,7 +924,30 @@ jobs:
         env:
           INSTA_WORKSPACE_ROOT: ${{ github.workspace }}
           SHARD: ${{ matrix.shard }}
-        run: scripts/run-verified-tests.sh nextest run --archive-file fast-validation-suite.tar.zst --workspace-remap "$GITHUB_WORKSPACE" --no-fail-fast --partition "count:$SHARD/3"
+          IMPACT_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+        run: |
+          mkdir -p target/ci-impact
+          start_seconds=$SECONDS
+          export VERIFIED_TEST_LOG="target/ci-impact/full-shard-$SHARD.log"
+          set +e
+          scripts/run-verified-tests.sh nextest run --archive-file fast-validation-suite.tar.zst --workspace-remap "$GITHUB_WORKSPACE" --no-fail-fast --partition "count:$SHARD/3"
+          suite_status=$?
+          set -e
+          if [[ -x scripts/ci-test-impact.py ]]; then
+            python3 scripts/ci-test-impact.py record \
+              --base-sha "$IMPACT_BASE_SHA" \
+              --log "$VERIFIED_TEST_LOG" --status "$suite_status" \
+              --elapsed "$((SECONDS - start_seconds))"
+          fi
+          exit "$suite_status"
+
+      - name: Publish full-suite recall evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-test-impact-${{ github.run_id }}-full-${{ matrix.shard }}
+          path: target/ci-impact/
+          if-no-files-found: ignore
 
       # A protected sentinel stands in for an ambient real store on hosted CI.
       # Running the protocol binary again through the real-store guard catches
@@ -921,7 +963,7 @@ jobs:
           export CAS_ROOT="$guard_dir/.cas"
           export CAS_REAL_DBS="$guard_dir/.cas/cas.db"
           export CARGO_CMD="nextest run --archive-file $GITHUB_WORKSPACE/fast-validation-suite.tar.zst --workspace-remap $GITHUB_WORKSPACE"
-          make -C cas-cli test-real-store-untouched REAL_STORE_ARGS="-E 'binary(mcp_protocol_test)'"
+          make -C cas-cli test-real-store-untouched REAL_STORE_ARGS="-E 'test(mcp_protocol_test::)'"
 
   # Keep the protected ruleset's exact full-suite context while the actual
   # test execution fans out after the shared archive. This job runs even when a shard fails and

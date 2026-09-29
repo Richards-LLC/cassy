@@ -6,7 +6,7 @@
 
 ## Where to post
 
-- **Channel:** `<#channel-name>` (`<CHANNEL_ID>`). The MechaCassy hub posts only to a
+- **Channel:** `<#channel-name>` (`<CHANNEL_ID>`). The Violet hub posts only to a
   channel matching `*-internal` or one it allowlists, and the bot must be a member.
 - **Deploy targets:**
   - merged to `<staging-branch>` → label **`Staging`**
@@ -14,9 +14,9 @@
 
 ## Transport
 
-Use only the MechaCassy hub/bot via the `mecha-cassy` skill. Never use Claude.ai
+Use only the Violet hub/bot via the `violet` skill. Never use Claude.ai
 Slack or a personal connector. Require authenticated `tools/list` and the
-skill's bounded `mecha_read` dedupe procedure before `mecha_post`; preserve
+skill's bounded `violet_read` dedupe procedure before `violet_post`; preserve
 message and upload-integrity receipts. If the hub cannot complete publication,
 save the draft and partial receipts and report blocked; handoff uses the same hub.
 
@@ -79,7 +79,7 @@ that the announcement happened.
 ## Example shape
 
 Slack renders mrkdwn, not Markdown: single `*bold*`, `_italic_`, backtick code
-and `•` bullets. The MechaCassy transport refuses a body containing `**`, a
+and `•` bullets. The Violet transport refuses a body containing `**`, a
 `#` heading or a `- ` bullet, so write the draft in mrkdwn from the start.
 
 User top-level:

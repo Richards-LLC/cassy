@@ -1577,7 +1577,7 @@ fn format_undelivered_relay_section(rows: &[cas_store::UndeliveredLifecycleRelay
     let displayed = actionable.len().min(10);
     let mut out = String::new();
     out.push_str(&format!(
-        "⚠ UNDELIVERED SUPERVISOR RELAY ({total} total; displaying {displayed}) — these never reached you:\n",
+        "🔴 UNDELIVERED SUPERVISOR RELAY ({total} total; displaying {displayed}) — these never reached you:\n",
     ));
     for row in actionable.into_iter().take(displayed) {
         let what = row
@@ -1596,10 +1596,14 @@ fn format_undelivered_relay_section(rows: &[cas_store::UndeliveredLifecycleRelay
             })
             .unwrap_or_default();
         out.push_str(&format!(
-            "  • {what} (queued {}, source {}{acknowledge})\n",
+            "  • {what} (queued {}, source {}, stage {}{acknowledge})\n",
             row.created_at.to_rfc3339(),
-            row.source
+            row.source,
+            row.stage
         ));
+        if let Some(detail) = &row.detail {
+            out.push_str(&format!("    {detail}\n"));
+        }
     }
     out.push_str(
         "  These lanes may still be waiting on you. Open each task directly \
@@ -10911,6 +10915,11 @@ mod spawn_lifecycle_tests {
             "the banner must state the failure outright: {out}"
         );
         assert!(out.contains("cas-fe23"), "must name the task: {out}");
+        assert!(
+            out.starts_with("🔴"),
+            "undelivered relays are a red incident: {out}"
+        );
+        assert!(out.contains("stage abandoned") && out.contains("task closed before delivery"));
         assert!(
             out.contains("message_ack notification_id=3386"),
             "the exact acknowledge action must be visible rather than making a reconciled relay replay forever: {out}"

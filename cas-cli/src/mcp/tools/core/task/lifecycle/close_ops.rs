@@ -2838,18 +2838,24 @@ mod risk_proof_tests {
             "the same changed-path set must reuse the close-local cache"
         );
         assert_eq!(cache.entries.len(), 1);
+        // Canonicalization sorts/deduplicates the checker targets; coverage
+        // agrees by set, independently of the checker's traversal order.
+        let expected = [
+            "hub_contract_test".to_string(),
+            "mcp_tools_test".to_string(),
+            "builtin_archive_portability_test".to_string(),
+            "builtin_flavor_drift_test".to_string(),
+            "agent_definition_contract_test".to_string(),
+            "factory_codex_skill_guardrails".to_string(),
+            "builtin_demo_test".to_string(),
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(
-            targets,
-            [
-                "hub_contract_test".to_string(),
-                "mcp_tools_test".to_string(),
-                "builtin_archive_portability_test".to_string(),
-                "builtin_flavor_drift_test".to_string(),
-                "agent_definition_contract_test".to_string(),
-                "factory_codex_skill_guardrails".to_string(),
-                "builtin_demo_test".to_string(),
-            ]
+            targets.iter().cloned().collect::<std::collections::BTreeSet<_>>(),
+            expected
         );
+        assert_eq!(targets.len(), expected.len(), "canonical targets must be unique");
 
         let checker = dir.path().join("scripts/check-scoped-test-surface.sh");
         let actual_diff = std::process::Command::new("bash")
@@ -21617,12 +21623,38 @@ mod merge_state_gate_tests {
         let mut blocked = cas_store::TaskStore::get(&store, &task.id).unwrap();
         blocked.status = TaskStatus::Blocked;
         blocked.updated_at = chrono::Utc::now();
-        cas_store::TaskStore::update(&store, &blocked).unwrap();
-        let expected = blocked.updated_at;
+        // Ordinary updates own their timestamp; the caller's timestamp is
+        // not the persisted optimistic-lock token used by proof correction.
+        let expected = cas_store::TaskStore::update(&store, &blocked).unwrap();
         blocked.status = TaskStatus::Open;
         blocked.updated_at = chrono::Utc::now();
         blocked.proof_targets.push("wider coverage".into());
-        cas_store::correct_parked_delivery_proof_targets(root.path(), &blocked, expected, "supervisor", "repair after blocker report").unwrap();
+        let error = cas_store::correct_parked_delivery_proof_targets(
+            root.path(),
+            &blocked,
+            expected - chrono::Duration::seconds(1),
+            "supervisor",
+            "repair after blocker report",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("requires the unchanged"), "{error}");
+        assert_eq!(
+            cas_store::TaskStore::get(&store, &task.id).unwrap().status,
+            TaskStatus::Blocked
+        );
+        cas_store::correct_parked_delivery_proof_targets(
+            root.path(),
+            &blocked,
+            expected,
+            "supervisor",
+            "repair after blocker report",
+        )
+        .unwrap();
+        assert_eq!(
+            cas_store::TaskStore::get(&store, &task.id).unwrap().status,
+            TaskStatus::Open
+        );
     }
 
     #[test]

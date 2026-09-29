@@ -6001,13 +6001,19 @@ mod tests {
                 .unwrap()
                 .contains("os error 2")
         );
-        store.mark_transport_delivered(id).unwrap();
+        // An abandoned relay is forensic evidence, not a pending delivery.
+        // A later handoff cannot rewrite its terminal sibling stage.
+        let error = store.mark_transport_delivered(id).unwrap_err().to_string();
         assert!(
-            store
-                .list_undelivered_lifecycle_relays(10)
-                .unwrap()
-                .is_empty()
+            error.contains("illegal stage transition abandoned → delivered"),
+            "{error}"
         );
+        let report = store.message_delivery_report(id).unwrap().unwrap();
+        assert!(report.delivered_at.is_none());
+        assert_eq!(report.stage, DeliveryStage::Abandoned);
+        let reported = store.list_undelivered_lifecycle_relays(10).unwrap();
+        assert_eq!(reported.len(), 1);
+        assert_eq!(reported[0].prompt_id, id);
     }
 
     #[test]

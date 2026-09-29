@@ -2117,17 +2117,19 @@ mod status_transition_tests {
         task.deliverables.parked_branch = Some("factory/worker".into());
         store.add(&task).unwrap();
 
-        let req: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
-            "id": task.id,
-            "status": "in_progress"
-        }))
-        .unwrap();
-        let error = core
-            .cas_task_update(Parameters(req))
-            .await
-            .expect_err("generic update must not silently reopen a terminal task");
-        assert!(error.message.contains("action=reopen"), "{}", error.message);
-        assert_eq!(store.get("cas-anchor").unwrap().status, TaskStatus::Closed);
+        for status in ["in_progress", "blocked"] {
+            let req: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+                "id": task.id,
+                "status": status
+            }))
+            .unwrap();
+            let error = core
+                .cas_task_update(Parameters(req))
+                .await
+                .expect_err("generic update must not silently reopen a terminal task");
+            assert!(error.message.contains("action=reopen"), "{}", error.message);
+            assert_eq!(store.get("cas-anchor").unwrap().status, TaskStatus::Closed);
+        }
 
         // The attributed supervisor-only reopen path remains the sanctioned
         // way to start a fresh close cycle.

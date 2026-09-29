@@ -503,7 +503,10 @@ mod tests {
         assert!(error.contains("title"), "{error}");
         request.title = None;
         task.status = TaskStatus::Closed;
-        assert!(guard_task_proof_scope(root.path(), &task, operation(&request)).is_err());
+        // With no active exact proof there is no proof-scope lock. Terminal
+        // status policy belongs to cas_task_update, which must still reject
+        // this status change (covered by its handler regression).
+        guard_task_proof_scope(root.path(), &task, operation(&request)).unwrap();
     }
 
     #[test]

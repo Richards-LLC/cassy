@@ -3344,6 +3344,7 @@ dialog form > *,
 .thread .turn.you .bub { background: var(--you-bubble-bg); color: var(--you-bubble-fg); border-radius: 22px 8px 8px 22px; }
 .thread .turn.you .bub.group-first { border-top-right-radius: 22px; }
 .thread .bub p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.thread .conversation-send-origin { display: block; margin-bottom: 4px; font: var(--weight-medium) 11px/1.3 var(--font-ui); opacity: .72; }
 .thread .bub p + p { margin-top: 8px; }
 .thread .markdown-heading, .pinned-ask .markdown-heading { font-weight: var(--weight-semibold); }
 .thread .markdown-list, .pinned-ask .markdown-list { margin: 8px 0 0; padding-inline-start: 1.35em; }
@@ -3972,8 +3973,13 @@ button.chip:disabled { cursor: default; }
 .launch-summary { flex: 1 0 100%; order: -1; margin: 0; color: var(--text-hi); font-size: var(--fs-meta); }
 .launch-actions .primary { min-width: 7rem; }
 .launch-grant-command { flex-wrap: wrap; justify-content: flex-start; align-items: center; gap: var(--space-2); padding: var(--space-3); background: var(--panel); border-radius: var(--radius-card); }
+.launch-grant-command[hidden], .launch-grant-invite[hidden], .launch-grant-note[hidden], .launch-grant-error[hidden], .launch-grant [data-launch-action="allow"][hidden] { display: none; }
 .launch-grant-command code { min-width: 0; overflow-wrap: anywhere; color: var(--text-hi); font-size: var(--fs-meta); }
 .launch-grant .launch-lead { color: var(--text-hi); font-size: var(--fs-md); }
+.launch-grant .launch-lead, .launch-confirm-copy { overflow-wrap: anywhere; }
+.launch-grant .dialog-actions, .launch-confirm .dialog-actions { min-width: 0; }
+.launch-grant .dialog-actions button, .launch-confirm .dialog-actions button { max-width: 100%; min-width: 0; white-space: normal; overflow-wrap: anywhere; text-align: center; }
+.launch-grant-error:not([hidden]) { padding: var(--space-3) var(--space-4); color: var(--text-hi); background: var(--panel); border-inline-start: 4px solid var(--state-crit); border-radius: var(--radius-card); }
 .launch-progress { display: grid; gap: var(--space-2); padding: var(--space-4) 0; border-top: var(--rule-hero) solid var(--color-verdict); }
 .launch-progress-title { color: var(--text-hi); font: var(--weight-regular) var(--fs-lg)/1.3 var(--font-display); }
 .launch-elapsed { color: var(--text-mid); font: var(--fs-meta)/1 var(--font-mono); white-space: nowrap; }

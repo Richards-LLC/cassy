@@ -50,6 +50,10 @@ export const READ_CAPABILITY = "Read sessions and terminals";
 export const CONTROL_CAPABILITY = "Type, send messages and interrupt";
 const CONTROL_SCOPES: readonly Scope[] = ["pane-input", "message-send", "pane-interrupt"];
 
+export function canEnableSessionLaunch(scopes: readonly Scope[]): boolean {
+  return CONTROL_SCOPES.every((scope) => scopes.includes(scope));
+}
+
 /** One capability per scope, for a grant that is not a whole group. */
 const SCOPE_CAPABILITY: Readonly<Record<Scope, string>> = {
   "machine-read": "See this machine",

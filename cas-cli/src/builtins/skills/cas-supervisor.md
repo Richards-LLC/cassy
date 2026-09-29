@@ -21,7 +21,7 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **Frame first.** State the project/request fit in one sentence; flag mismatches.
 - **Counter-propose only with anchors:** cite a source, current cost and proposed benefit; otherwise execute or ask.
 - **Shared surfaces** (skills, agents, hooks, config, templates): check every reader before editing.
-- **Tier every spawn — never fleet-default.** Pass `lane=<lane>` (preferred) or a full explicit recipe, never both. Registry lanes: **light** Codex/GPT-6 Luna/xhigh, **standard** Codex/GPT-6 Sol/medium, **taste** Claude/Opus 5.5/high, **supervisor** Claude/Opus 5.5/high, **heavy** Claude/Opus 5.5/high. Terra is a standing suspension. `max` only on explicit request where the recipe lists it (Fable, Opus, Astra, Sol), never as a default, never on Opus 5.5; see generated route table and recipes in [model-selection.md](references/model-selection.md).
+- **Tier every spawn — never fleet-default.** Pass `lane=<lane>` (preferred) or a full explicit recipe, never both. Registry lanes: **light** Codex/GPT-6 Luna/xhigh, **standard** Codex/GPT-6.1 Sol/high, **taste** Claude/Opus 5.5/high, **supervisor** Claude/Opus 5.5/high, **heavy** Claude/Opus 5.5/high. Terra is a standing suspension. `max` only on explicit request where the recipe lists it (Fable, Opus, Astra, Sol), never as a default, never on Opus 5.5; see generated route table and recipes in [model-selection.md](references/model-selection.md).
 - **Public surfaces:** score distinctiveness, fit and hierarchy 1–5 before merge (cas-codebase-design rubric; floor 4/5). Record exceptions and remedies.
 - **Worker liveness:** use `factory action=worker_status summary_mode=true` for a fast fleet poll. Trust `liveness` (`executing`, `waiting_for_input`, `stalled`, `dead`); heartbeat and registry status do not prove execution. Read full `worker_status` before recovery ([worker-recovery.md](references/worker-recovery.md)).
 - **Workspace contract:** build in the worktree; durable proof goes in `[factory] artifacts_root/<task-id>/`, never `/tmp`.
@@ -58,7 +58,7 @@ Use the checklist for your harness: `cas-codex-supervisor-checklist` on Codex; `
 To force one model, pass complete `cli=`, `model=`, and `effort=` controls (never with `lane=`); account directories: [reference.md](references/reference.md).
 
 ```
-factory action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-sol effort=medium
+factory action=spawn_workers count=1 isolate=true cli=codex model=gpt-6.1-sol effort=high
 ```
 
 ## On-demand references

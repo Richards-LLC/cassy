@@ -169,10 +169,10 @@ pub struct ConversationHistoryMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<i64>,
     pub device_id: String,
+    /// Display source for the operator turn (paired device label or Terminal).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operator_label: Option<String>,
-    /// Factory session that produced this turn. History is project-scoped, so
-    /// the Commander can mark boundaries when several sessions are hydrated.
+    /// Factory session that produced this turn.
     #[serde(default)]
     pub session: String,
     pub at: String,
@@ -462,12 +462,17 @@ pub enum DaemonMessage {
         next_before: Option<i64>,
     },
 
+    /// A newly queued operator send visible to other paired viewers.
+    OperatorMessage(ConversationHistoryMessage),
+
     /// Durable acknowledgment for a Commander semantic message.
     MessageQueued {
         client_ref: Option<String>,
         notification_id: i64,
         target: String,
         stamped: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device_label: Option<String>,
     },
 
     /// An authoritative ANSI serialization of the pane's current terminal state.
@@ -997,6 +1002,7 @@ mod tests {
             notification_id: 812,
             target: "patient-pelican-9".to_string(),
             stamped: true,
+            device_label: None,
         };
         let json = serde_json::to_string(&message).unwrap();
         assert_eq!(
@@ -1010,6 +1016,7 @@ mod tests {
                 notification_id: 812,
                 target,
                 stamped: true,
+                device_label: None,
             } if client_ref == "send-42" && target == "patient-pelican-9"
         ));
     }

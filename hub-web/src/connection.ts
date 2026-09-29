@@ -2,6 +2,7 @@ import { anySignal } from "./abort-signals";
 import { browserSupport, unsupportedBrowserNotice } from "./browser-support";
 import { dpopHeaders } from "./dpop";
 import type { ArtifactView, ArtifactViewResult } from "./artifact-open";
+import { SessionLaunchGrantError } from "./launch-session";
 import type { BrowseListing, LaunchProfiles, LaunchRequest, LaunchResult, ProjectCatalog } from "./launch-session";
 import {
   backoffDelay,
@@ -18,7 +19,7 @@ import {
   type ConnectionStage,
   type AttachSnapshot,
 } from "./connection-state";
-import type { ConversationHistoryPage, HubSession, LeaseState, MessageQueued, OperatorReply, PaneInfo, SessionCardSummary, SessionState, StoredMachine } from "./types";
+import type { ConversationHistoryMessage, ConversationHistoryPage, HubSession, LeaseState, MessageQueued, OperatorReply, PaneInfo, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
 import { sessionsPath, workersRevealed } from "./worker-visibility";
 import { dormantRevealed } from "./dormant-visibility";
@@ -79,6 +80,7 @@ export interface HubCallbacks {
   onSessionState(session: string, state: SessionState, scrollback?: Record<string, number[][]>, authoritativeKeyframes?: boolean): void;
   onOutput(session: string, paneId: string, data: Uint8Array): void;
   onMessageQueued?(session: string, queued: MessageQueued): void;
+  onOperatorMessage?(session: string, message: ConversationHistoryMessage): void;
   onMessageRejected?(session: string, clientRef: string, detail: string, rejection?: MessageRejection): void;
   onOperatorReply?(session: string, reply: OperatorReply): void;
   onConversationHistory?(session: string, page: ConversationHistoryPage): void;
@@ -581,6 +583,20 @@ export class HubConnectionSupervisor {
       ...(typeof body?.error === "string" ? { code: body.error } : {}),
       ...(typeof body?.detail === "string" ? { detail: body.detail } : typeof body?.reason === "string" ? { detail: body.reason } : {}),
     };
+  }
+
+  /** Add session launch to this paired device; keep the live and stored scope sets in sync. */
+  async enableSessionLaunch(): Promise<void> {
+    const { response } = await this.authorizedFetch("POST", "/v1/auth/scopes", {
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ add: ["session-launch"] }),
+    });
+    if (!response.ok) throw new SessionLaunchGrantError(response.status, response.status === 403
+      ? "This pairing no longer has control access. Pair with a control invitation, then try again."
+      : `Could not enable session launch (${response.status}). Try again.`);
+    const body = await response.json() as { scopes: StoredMachine["scopes"] };
+    this.machine.scopes = body.scopes;
+    await this.callbacks.onCredentialRefreshed?.(this.machine);
   }
 
   async status(session: string): Promise<Record<string, unknown>> {
@@ -1490,6 +1506,8 @@ export class HubConnectionSupervisor {
       if (queued) this.callbacks.onMessageQueued?.(session, queued);
     } else if (message.OperatorReply) {
       this.callbacks.onOperatorReply?.(session, message.OperatorReply as OperatorReply);
+    } else if (message.OperatorMessage) {
+      this.callbacks.onOperatorMessage?.(session, message.OperatorMessage as ConversationHistoryMessage);
     } else if (message.ConversationHistory) {
       this.callbacks.onConversationHistory?.(session, message.ConversationHistory as ConversationHistoryPage);
     } else if (message.SessionSummary) {
@@ -1532,6 +1550,7 @@ export function messageQueuedFromDaemon(message: Record<string, any>): MessageQu
     notification_id: Number(value.notification_id),
     target: value.target,
     stamped: value.stamped === true,
+    ...(typeof value.device_label === "string" ? { device_label: value.device_label } : {}),
   };
 }
 

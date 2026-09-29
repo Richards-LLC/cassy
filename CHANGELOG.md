@@ -7,6 +7,42 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.37.0] - 2026-09-29
+
+### Added
+
+- Commander can enable starting sessions from a device that is already
+  paired with full control (type, send messages and interrupt). The New
+  session sheet offers "Allow starting sessions on <machine>"; after one
+  confirmation the hub adds only the session-launch permission to that
+  device, writes an audit row, and the launch sheet opens. Read-only devices
+  still need a pairing invitation that includes session launch. The hub
+  endpoint is `POST /v1/auth/scopes` with `{"add":["session-launch"]}`.
+
+### Changed
+
+- Commander history is one conversation per machine: every paired device
+  sees every operator message and supervisor reply, each labelled with the
+  device it came from, and a send from one device appears live on the others.
+  Delivery receipts still go only to the device a reply was addressed to.
+- Lines the operator types directly into a supervisor's terminal now appear
+  in Commander history as Terminal turns. Machine-generated prompts (task
+  notifications, relays, wakes, reminders) are left out.
+- Factory workers default to Codex `gpt-6.1-sol` at high reasoning effort.
+  The standard lane uses it, falling back to `gpt-6-sol`. A spawn without an
+  explicit model honors `llm.worker.harness`, `llm.worker.model` and
+  `llm.worker.reasoning_effort`, and those settings apply only when the spawn
+  uses the configured harness.
+
+### Fixed
+
+- On Linux without a systemd user session, a session started from Commander
+  now runs in the selected project instead of the hub's folder, so it appears
+  and opens.
+- A supervisor's pane answer is no longer dropped from Commander history when
+  the same turn also sent a message to the operator, or when a thinking-only
+  entry came before the answer.
+
 ## [3.36.0] - 2026-09-29
 
 ### Changed

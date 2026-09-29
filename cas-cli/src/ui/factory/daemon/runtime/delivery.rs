@@ -734,11 +734,21 @@ impl FactoryDaemon {
                     );
                 }
                 let receipt = outcome.receipt();
+                if matches!(outcome, SendOutcome::Enqueued(_)) {
+                    match self.live_operator_message(receipt.notification_id) {
+                        Ok(Some(message)) => self.broadcast_daemon_message(
+                            &crate::ui::factory::DaemonMessage::OperatorMessage(message),
+                        ),
+                        Ok(None) => tracing::warn!(notification_id = receipt.notification_id, "queued operator send could not be projected for live viewers"),
+                        Err(error) => tracing::warn!(notification_id = receipt.notification_id, %error, "queued operator send could not be loaded for live viewers"),
+                    }
+                }
                 Ok(Some(crate::ui::factory::DaemonMessage::MessageQueued {
                     client_ref,
                     notification_id: receipt.notification_id,
                     target,
                     stamped: receipt.stamped,
+                    device_label: attribution.device_label,
                 }))
             }
         }

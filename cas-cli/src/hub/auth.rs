@@ -1191,6 +1191,64 @@ impl AuthStore {
             .collect())
     }
 
+    /// A device with all three pane controls may add only session launch to
+    /// its own credential. Recheck the persisted device under the store lock:
+    /// the authenticated context can predate a concurrent revocation.
+    pub fn grant_own_session_launch(
+        &self,
+        context: &AuthContext,
+        now: DateTime<Utc>,
+    ) -> Result<BTreeSet<Scope>> {
+        let mut state = self.lock()?;
+        Self::ensure_active_context_in_state(&state, context, now)?;
+        let device = state
+            .devices
+            .iter_mut()
+            .find(|device| {
+                device.device_id == context.device_id
+                    && device.credential_id == context.credential_id
+            })
+            .context("authorization refused")?;
+        anyhow::ensure!(
+            [Scope::PaneInput, Scope::MessageSend, Scope::PaneInterrupt]
+                .into_iter()
+                .all(|scope| device.scopes.contains(&scope)),
+            "scope denied"
+        );
+        if device.scopes.contains(&Scope::SessionLaunch) {
+            return Ok(device.scopes.clone());
+        }
+        // The audit must succeed before the capability becomes durable.
+        // This is the same append-only audit used by session launch itself.
+        let record = AuditRecord {
+            timestamp: now,
+            machine_id: &self.0.machine_id,
+            request_id: &context.request_id,
+            outcome: "allowed",
+            action: "self_grant_session_launch",
+            required_scope: Some(Scope::SessionLaunch.as_str()),
+            device_id: Some(&context.device_id),
+            credential_id: Some(&context.credential_id),
+            device_label: Some(&context.device_label),
+            operator_label: Some(&context.operator_label),
+            controller_origin: Some(&context.controller_origin),
+            target_session: None,
+            project: None,
+            supervisor_cli: None,
+            profile: None,
+            placement: None,
+            reason: None,
+            detail: None,
+        };
+        let written = append_private_json_line(&self.0.root.join(AUDIT_LOG_FILE), &record);
+        self.record_audit_outcome("self_grant_session_launch", now, written.as_ref().err());
+        written?;
+        device.scopes.insert(Scope::SessionLaunch);
+        let scopes = device.scopes.clone();
+        self.persist(&state)?;
+        Ok(scopes)
+    }
+
     pub fn is_paired_origin(&self, origin: &str, now: DateTime<Utc>) -> Result<bool> {
         Ok(self.lock()?.devices.iter().any(|device| {
             device.controller_origin == origin

@@ -939,8 +939,17 @@ fn classify_session_cwd(cwd: &str, cas_root: &Path, current_project: &str) -> Pr
     {
         ProvenanceState::Authored
     } else {
+        // A home-level ~/.cas can hold sessions from many projects. Its
+        // fallback folder identity is not evidence that a row belongs to a
+        // different project, so never feed it to the automatic purge set.
+        let Some(found_project_root) = found.parent() else {
+            return ProvenanceState::Unknown;
+        };
+        if !crate::store::known_repos::is_project_root(found_project_root) {
+            return ProvenanceState::Unknown;
+        }
         let project = crate::cloud::resolve_canonical_id(&found)
-            .unwrap_or_else(|| found.parent().unwrap_or(&found).display().to_string());
+            .unwrap_or_else(|| found_project_root.display().to_string());
         if crate::cloud::project_ids_match(&project, current_project) {
             ProvenanceState::Authored
         } else {
@@ -1194,8 +1203,15 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let local = temp.path().join("local");
         let foreign = temp.path().join("foreign");
+        let home = temp.path().join("home");
         std::fs::create_dir_all(local.join(".cas")).unwrap();
         std::fs::create_dir_all(foreign.join(".cas")).unwrap();
+        std::fs::create_dir_all(home.join(".cas")).unwrap();
+        std::fs::write(
+            foreign.join(".cas/config.toml"),
+            "[project]\ncanonical_id = \"other-project\"\n",
+        )
+        .unwrap();
         let conn = rusqlite::Connection::open(local.join(".cas/cas.db")).unwrap();
         conn.execute_batch(
             "CREATE TABLE sessions (session_id TEXT, cwd TEXT);
@@ -1214,14 +1230,19 @@ mod tests {
             [foreign.to_string_lossy().to_string()],
         )
         .unwrap();
+        conn.execute(
+            "INSERT INTO sessions VALUES ('home', ?1)",
+            [home.to_string_lossy().to_string()],
+        )
+        .unwrap();
         conn.execute_batch(
             "INSERT INTO tasks VALUES ('own-task','own','local'), ('foreign-task','foreign','other-project'), ('unknown-task','unknown','unknown');
-             INSERT INTO entries VALUES ('own-entry','own','', 'local','local'), ('foreign-entry','foreign','', 'local','other'), ('unknown-entry','unknown','', 'unknown',NULL);
+             INSERT INTO entries VALUES ('own-entry','own','', 'local','local'), ('foreign-entry','foreign','', 'local','other'), ('unknown-entry','unknown','', 'unknown',NULL), ('home-entry','home','', 'unknown','home'), ('home-local-entry','home local','', 'local','home');
              INSERT INTO rules VALUES ('own-rule','own','local','[\"own-entry\"]'), ('foreign-rule','foreign','local','[\"foreign-entry\"]'), ('unknown-rule','unknown','unknown',NULL);
              INSERT INTO events (entity_type,entity_id,session_id) VALUES ('task','own-task','local'), ('task','unknown-task','other');",
         ).unwrap();
         let rows = read_provenance(&conn, &local.join(".cas"), "local").unwrap();
-        for id in ["own-task", "own-entry", "own-rule"] {
+        for id in ["own-task", "own-entry", "own-rule", "home-local-entry"] {
             assert!(
                 matches!(
                     &rows.iter().find(|row| row.id == id).unwrap().state,
@@ -1244,7 +1265,7 @@ mod tests {
                 "{id}"
             );
         }
-        for id in ["unknown-entry", "unknown-rule"] {
+        for id in ["unknown-entry", "unknown-rule", "home-entry"] {
             assert!(
                 matches!(
                     &rows.iter().find(|row| row.id == id).unwrap().state,
@@ -1253,6 +1274,10 @@ mod tests {
                 "{id}"
             );
         }
+        assert!(matches!(
+            classify_session_cwd(&home.to_string_lossy(), &local.join(".cas"), "local"),
+            ProvenanceState::Unknown
+        ));
     }
 
     fn attributed_fixture() -> (tempfile::TempDir, PathBuf) {

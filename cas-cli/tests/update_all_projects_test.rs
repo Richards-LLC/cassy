@@ -25,6 +25,12 @@ fn cas_cmd(root: &Path) -> Command {
 
 fn init_project(root: &Path, project: &Path) {
     std::fs::create_dir_all(project).unwrap();
+    let git = std::process::Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(project)
+        .status()
+        .expect("initialize fixture Git root");
+    assert!(git.success(), "initialize fixture Git root");
     cas_cmd(root)
         .current_dir(project)
         .args(["init", "--yes"])
@@ -126,6 +132,11 @@ fn all_projects_refreshes_nested_projects_and_the_user_level_store() {
     // A `.cas/` with no store: nothing to migrate, so it must be listed rather
     // than silently dropped from the receipt.
     std::fs::create_dir_all(projects.join("storeless/.cas")).unwrap();
+    std::fs::write(
+        projects.join("storeless/.cas/config.toml"),
+        "[project]\ncanonical_id = \"storeless\"\n",
+    )
+    .unwrap();
 
     let update = cas_cmd(root)
         .current_dir(root)

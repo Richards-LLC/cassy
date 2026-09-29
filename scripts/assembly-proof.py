@@ -225,6 +225,25 @@ def no_cas_ancestor(path):
             raise ValueError("plain clone must have no .cas ancestor: " + str(parent))
 
 
+def clone_scratch(env):
+    scratch = Path(env.get("CAS_RELEASE_GATE_HOME_DIR") or "/var/tmp/cas-release-gate/base").resolve()
+    # Keep the temp-root list in sync with known_repos::temp_root and
+    # cloud::ephemeral_project:
+    # a plain clone must exercise durable-project discovery, not a throwaway.
+    roots = [Path(name) for name in ("/tmp", "/var/tmp", "/private/tmp", "/private/var/tmp")]
+    if env.get("TMPDIR"):
+        roots.append(Path(env["TMPDIR"]))
+    for root in roots:
+        for spelling in (root.absolute(), root.resolve()):
+            if scratch == spelling or spelling in scratch.parents:
+                raise ValueError(
+                    f"plain clone scratch {scratch} is under Cassy disposable root {root}; "
+                    "set CAS_RELEASE_GATE_HOME_DIR to a base on the checkout filesystem "
+                    "outside system temporary roots, TMPDIR and every .cas ancestor")
+    no_cas_ancestor(scratch.parent)
+    return scratch
+
+
 def run_row(root, row, env, log_dir):
     row_env = dict(env)
     row_env["CAS_RELEASE_GATE_LOG_DIR"] = str(log_dir / (row + "-rows"))
@@ -248,6 +267,8 @@ def run_row(root, row, env, log_dir):
 
 
 def prove(root):
+    # Refuse an unusable clone context before tool probing or the native suite.
+    scratch = clone_scratch(os.environ)
     expected, env = inputs(root)
     path = receipt_path(root, expected)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -263,8 +284,6 @@ def prove(root):
         log_dir = path.parent / (path.stem + "-logs")
         log_dir.mkdir(exist_ok=True)
         record["contexts"]["worktree"] = run_row(root, "nextest", env, log_dir)
-        # Default to a real disk, away from both the source .cas and ~/.cas.
-        scratch = Path(env.get("CAS_RELEASE_GATE_HOME_DIR", "/var/tmp/cas-release-gate/base"))
         scratch.parent.mkdir(parents=True, exist_ok=True)
         no_cas_ancestor(scratch.parent)
         with tempfile.TemporaryDirectory(prefix="assembly-clone-", dir=scratch.parent) as directory:

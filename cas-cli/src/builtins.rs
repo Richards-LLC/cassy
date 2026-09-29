@@ -4338,7 +4338,7 @@ This is the body content."#;
             "model-selection.md",
             // cas-a7d1: registry lane summary in the small body.
             "Codex/GPT-6 Luna/xhigh",
-            "Codex/GPT-6 Sol/medium",
+            "Codex/GPT-6.1 Sol/high",
             "Claude/Opus 5.5/high",
         ] {
             assert!(
@@ -8710,7 +8710,7 @@ This is the body content."#;
             // cas-a7d1: registry lane summary in the small body.
             "Registry lanes",
             "Codex/GPT-6 Luna/xhigh",
-            "Codex/GPT-6 Sol/medium",
+            "Codex/GPT-6.1 Sol/high",
             "Claude/Opus 5.5/high",
             "standing suspension",
             "generated route table and recipes",

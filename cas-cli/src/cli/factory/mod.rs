@@ -2651,8 +2651,10 @@ mod tests {
         normalize_supervisor_spec(&mut spec, &sources).unwrap();
 
         assert_eq!(spec.cli, cas_mux::SupervisorCli::Codex);
-        assert_eq!(spec.model.as_deref(), Some("gpt-6-sol"));
-        assert_eq!(spec.effort, Some(cas_mux::Effort::Medium));
+        assert_eq!(spec.model.as_deref(), Some("gpt-6.1-sol"));
+        // Repairing the inherited Claude model also selects Sol 6.1's
+        // default effort; the inherited medium value is not explicit here.
+        assert_eq!(spec.effort, Some(cas_mux::Effort::High));
 
         let (supervisor_cli, supervisor_model, supervisor_effort) =
             launch_fields_from_spec(&spec);
@@ -2677,13 +2679,13 @@ mod tests {
             .expect("Codex supervisor must receive a model argument");
         assert_eq!(
             supervisor.args.get(model_idx + 1).map(String::as_str),
-            Some("gpt-6-sol")
+            Some("gpt-6.1-sol")
         );
         assert!(
             supervisor
                 .args
                 .iter()
-                .any(|arg| arg == "model_reasoning_effort=medium"),
+                .any(|arg| arg == "model_reasoning_effort=high"),
             "Codex supervisor must receive the resolved Codex effort"
         );
     }

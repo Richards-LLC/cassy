@@ -48,7 +48,7 @@ spawn straight onto it:
 
 ```
 task action=create title="..." description="..." risk=none
-factory action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-sol effort=medium task_id=<task-id>
+factory action=spawn_workers count=1 isolate=true cli=codex model=gpt-6.1-sol effort=high task_id=<task-id>
 ```
 
 An open, unassigned `task_id` authorizes the spawn on its own; the refusal rules are in the
@@ -79,7 +79,7 @@ goes through the [retry policy](worker-recovery.md#retry-policy-by-failure-mode)
 
 1. Spawn workers:
    ```
-   factory action=spawn_workers count=N isolate=true cli=codex model=gpt-6-sol effort=medium
+   factory action=spawn_workers count=N isolate=true cli=codex model=gpt-6.1-sol effort=high
    ```
 
    **Worker GitHub access (GH #1005).** Workers never inherit your GitHub
@@ -106,8 +106,8 @@ Copy-paste commands generated from the registry; every recipe pins `cli`, `model
 # light — recipe codex_luna_6 (fallback: claude_opus_5_5_low)
 factory action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-luna effort=xhigh
 
-# standard — recipe codex_sol_6 (fallback: codex_luna_6)
-factory action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-sol effort=medium
+# standard — recipe codex_sol_6_1 (fallback: codex_sol_6)
+factory action=spawn_workers count=1 isolate=true cli=codex model=gpt-6.1-sol effort=high
 
 # taste — recipe claude_opus_5_5 (fallback: claude_opus)
 factory action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5-5 effort=high

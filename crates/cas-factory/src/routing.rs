@@ -1016,7 +1016,7 @@ pub fn validate_model_effort_policy(model: &str, effort: Option<Effort>) -> Resu
     Ok(())
 }
 
-/// Return the behavior-preserving stock model for a harness.
+/// Return the registry's stock model for a harness.
 pub fn default_worker_model_for_cli(cli: SupervisorCli) -> &'static str {
     registry()
         .expect("embedded lane registry must be valid")
@@ -1025,7 +1025,7 @@ pub fn default_worker_model_for_cli(cli: SupervisorCli) -> &'static str {
         .map_or_else(
             || match cli {
                 SupervisorCli::Claude => "opus",
-                SupervisorCli::Codex => "gpt-6-sol",
+                SupervisorCli::Codex => "gpt-6.1-sol",
                 SupervisorCli::Grok => "grok-4.5",
                 SupervisorCli::OpenCode => "qwencloud/qwen3.8-max",
             },
@@ -1033,7 +1033,7 @@ pub fn default_worker_model_for_cli(cli: SupervisorCli) -> &'static str {
         )
 }
 
-/// Return the behavior-preserving stock effort for a harness.
+/// Return the registry's stock effort for a harness.
 pub fn default_worker_effort_for_cli(cli: SupervisorCli) -> Effort {
     registry()
         .expect("embedded lane registry must be valid")
@@ -1041,7 +1041,7 @@ pub fn default_worker_effort_for_cli(cli: SupervisorCli) -> Effort {
         .get(cli_key(cli))
         .map_or_else(
             || match cli {
-                SupervisorCli::Codex => Effort::Medium,
+                SupervisorCli::Codex => Effort::High,
                 SupervisorCli::Claude | SupervisorCli::Grok => Effort::High,
                 SupervisorCli::OpenCode => Effort::Medium,
             },
@@ -1376,11 +1376,8 @@ candidates = ["codex_luna"]
             ["codex_luna_6"]
         );
         assert_eq!(registry.lanes["light"].fallbacks, ["claude_opus_5_5_low"]);
-        assert_eq!(
-            registry.lanes["standard"].candidates,
-            ["codex_sol_6"]
-        );
-        assert_eq!(registry.lanes["standard"].fallbacks, ["codex_luna_6"]);
+        assert_eq!(registry.lanes["standard"].candidates, ["codex_sol_6_1"]);
+        assert_eq!(registry.lanes["standard"].fallbacks, ["codex_sol_6"]);
         assert_eq!(registry.lanes["taste"].candidates, ["claude_opus_5_5"]);
         assert_eq!(registry.lanes["taste"].fallbacks, ["claude_opus"]);
         assert!(!registry.lanes["taste"].no_fallback);
@@ -1394,6 +1391,21 @@ candidates = ["codex_luna"]
         assert_eq!(registry.lanes["heavy"].fallbacks, ["codex_astra_high"]);
 
         assert!(!registry.recipes.contains_key("claude_haiku"));
+        assert_eq!(registry.recipes["codex_sol_6_1"].model, "gpt-6.1-sol");
+        assert_eq!(
+            registry.recipes["codex_sol_6_1"].default_effort,
+            Effort::High
+        );
+        assert_eq!(
+            registry.recipes["codex_sol_6_1"].allowed_efforts,
+            [
+                Effort::Low,
+                Effort::Medium,
+                Effort::High,
+                Effort::XHigh,
+                Effort::Max
+            ]
+        );
         assert_eq!(registry.recipes["codex_sol_6"].model, "gpt-6-sol");
         assert_eq!(registry.recipes["codex_sol_6"].default_effort, Effort::Medium);
         assert_eq!(registry.recipes["codex_luna_6"].model, "gpt-6-luna");
@@ -1621,7 +1633,7 @@ candidates = ["codex_luna"]
         assert_eq!(default_worker_model_for_cli(SupervisorCli::Claude), "opus");
         assert_eq!(
             default_worker_model_for_cli(SupervisorCli::Codex),
-            "gpt-6-sol"
+            "gpt-6.1-sol"
         );
         assert_eq!(
             default_worker_model_for_cli(SupervisorCli::Grok),
@@ -1629,7 +1641,7 @@ candidates = ["codex_luna"]
         );
         assert_eq!(
             default_worker_effort_for_cli(SupervisorCli::Codex),
-            Effort::Medium
+            Effort::High
         );
         assert_eq!(
             default_worker_effort_for_cli(SupervisorCli::Claude),
@@ -1641,6 +1653,29 @@ candidates = ["codex_luna"]
                 .contains("operator decision pending")
         );
         assert!(validate_model_effort_policy("gpt-5.6-luna", Some(Effort::High)).is_err());
+    }
+
+    #[test]
+    fn sol_6_1_accepts_only_its_declared_efforts() {
+        let mut spec = WorkerSpec::builtin_default();
+        spec.cli = SupervisorCli::Codex;
+        spec.model = Some("gpt-6.1-sol".to_string());
+        for effort in [
+            Effort::Low,
+            Effort::Medium,
+            Effort::High,
+            Effort::XHigh,
+            Effort::Max,
+        ] {
+            spec.effort = Some(effort);
+            validate_explicit(&spec, &CapabilitySnapshot::default()).unwrap();
+        }
+        spec.effort = Some(Effort::Minimal);
+        let error = validate_explicit(&spec, &CapabilitySnapshot::default())
+            .expect_err("Sol 6.1 has no minimal reasoning mode")
+            .to_string();
+        assert!(error.contains("allowed effort"), "{error}");
+        assert!(error.contains("low|medium|high|xhigh|max"), "{error}");
     }
 
     #[test]
@@ -1752,8 +1787,20 @@ candidates = ["first"]
         let registry = registry().unwrap();
         let now = CapabilitySnapshot::now_ms();
         for (lane, primary, fallback, model, effort) in [
-            ("light", "codex_luna_6", "claude_opus_5_5_low", "claude-opus-5-5", Effort::Low),
-            ("standard", "codex_sol_6", "codex_luna_6", "gpt-6-luna", Effort::XHigh),
+            (
+                "light",
+                "codex_luna_6",
+                "claude_opus_5_5_low",
+                "claude-opus-5-5",
+                Effort::Low,
+            ),
+            (
+                "standard",
+                "codex_sol_6_1",
+                "codex_sol_6",
+                "gpt-6-sol",
+                Effort::Medium,
+            ),
         ] {
             let mut snapshot = CapabilitySnapshot::default();
             snapshot.record(
@@ -1859,8 +1906,9 @@ candidates = ["first"]
         assert_eq!(decisions.len(), 3);
         assert!(decisions.iter().all(|decision| {
             decision.lane == "standard"
-                && decision.recipe_id == "codex_sol_6"
-                && decision.spec.model.as_deref() == Some("gpt-6-sol")
+                && decision.recipe_id == "codex_sol_6_1"
+                && decision.spec.model.as_deref() == Some("gpt-6.1-sol")
+                && decision.spec.effort == Some(Effort::High)
         }));
     }
 
@@ -2073,6 +2121,7 @@ no_fallback = true
         };
         for (cli, model) in [
             (SupervisorCli::Codex, "gpt-6-astra"),
+            (SupervisorCli::Codex, "gpt-6.1-sol"),
             (SupervisorCli::Codex, "gpt-6-sol"),
             (SupervisorCli::Codex, "gpt-6-luna"),
             (SupervisorCli::Codex, "gpt-5.6-sol"),

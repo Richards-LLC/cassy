@@ -7,6 +7,50 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.35.0] - 2026-09-29
+
+### Added
+
+- Commander can start a factory session on any paired machine, with no SSH.
+  The New session sheet picks the machine, a project (its main folders, or a
+  folder browsed under the machine's launch roots), the supervisor CLI
+  (Claude, Codex or Grok), the account and an optional worker count. A
+  project that already has a running session offers Attach instead.
+  - The session keeps running after the browser closes and across hub
+    restarts. On Linux it runs in its own systemd user unit, outside the hub's
+    unit; on macOS it detaches into its own session. A small reaper records
+    its exit, so Commander still explains why a session ended.
+  - Starting sessions needs the new `session:launch` scope. It is never part
+    of a default pairing; grant it with `cas hub pair --scopes …,session:launch`,
+    and `cas hub auth revoke` removes it. Every launch is audited with the
+    device, project, CLI, account and placement.
+  - Every Claude and Codex account on the machine is listed. The machine's
+    default is preselected, and logged-out accounts show their login command.
+    Login state comes only from the official CLI, never from credential files.
+- Hub endpoints for this: `GET /v1/projects`, `GET /v1/projects/browse`,
+  `GET /v1/launch/profiles` and `POST /v1/sessions`, and `/v1/machine` now
+  reports `default_supervisor_cli`.
+- `[hub] launch_roots` sets the folders Commander may browse (default
+  `~/Petrastella` when it exists; an empty list turns browsing off).
+  `[hub.launch_profiles]` sets the account each CLI starts on.
+  `cas hub service install` and `restart` record the installing shell's
+  account when none is set.
+- `cas doctor` and `cas hub service status` report, per CLI, whether a hub
+  launch is ready and which account it will use.
+- A per-project `cloud.team_only` opt-in in `.cas/config.toml`. With a team
+  configured, project tasks, dependencies, memories, rules, skills and
+  knowledge sync only to the team, and queued personal copies are cleared
+  locally. Personal and global rows are held and counted rather than sent
+  under a project identity. It does nothing until a team is set.
+
+### Changed
+
+- `cas doctor` no longer warns about a supervisor CLI that is not installed;
+  it reports it as "not installed". An installed CLI that cannot launch
+  (logged out, or its account folder is missing) still warns.
+- `cas hub service install` and `restart` keep going, with a warning on
+  stderr, if they can't record the launch account.
+
 ## [3.34.1] - 2026-09-28
 
 ### Fixed

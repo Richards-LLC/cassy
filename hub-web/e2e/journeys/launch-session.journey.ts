@@ -56,10 +56,13 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
     await page.getByRole("button", { name: "Allow new sessions" }).tap();
     await expect(sheet).toBeVisible();
     await expect(sheet.getByRole("button", { name: "Allow starting sessions on Atlas · Linux" })).toBeVisible();
+    await expect(sheet.getByRole("button", { name: "Allow starting sessions on Atlas · Linux" })).toBeFocused();
     await sheet.getByRole("button", { name: "Allow starting sessions on Atlas · Linux" }).tap();
     await expect(sheet.getByText("Allow “Start new sessions” on Atlas · Linux?")).toBeVisible();
+    await expect(sheet.getByRole("button", { name: "Allow starting sessions", exact: true })).toBeFocused();
     await sheet.getByRole("button", { name: "Allow starting sessions", exact: true }).tap();
     await expect(sheet.getByRole("radio", { name: /ledger-api/ })).toBeVisible();
+    await expect(sheet.getByRole("searchbox", { name: "Filter projects" })).toBeFocused();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scrolling").toBe(true);
     await sheet.getByRole("button", { name: "Cancel", exact: true }).tap();
     await expect(sheet).toBeHidden();
@@ -157,5 +160,23 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
     await expect(sheet).toBeHidden({ timeout: 15_000 });
     await expect(page.getByRole("button", { name: "Send to quiet-fox-5", exact: true })).toBeVisible();
     expect(hub.launches.at(-1)?.body).toEqual({ target: { kind: "browse", root_id: "root-code", path: "clients/acme-portal" }, supervisor_cli: "claude", profile: "main" });
+  });
+
+  await journey.stage("A long machine name fits the phone consent", async () => {
+    const originalLabel = ATLAS.label;
+    ATLAS.label = "soundwave — a very long personal workstation name with several extra words and anunbrokentailthatneedstowrap";
+    hub.setScopes("atlas", [...SCOPES]);
+    await hub.seedPaired();
+    await page.reload();
+    await page.getByRole("button", { name: "Allow new sessions" }).tap();
+    const allow = sheet.getByRole("button", { name: `Allow starting sessions on ${ATLAS.label}` });
+    await expect(allow).toBeVisible();
+    await expect(sheet.getByRole("button", { name: "Close", exact: true })).toBeVisible();
+    expect(await allow.evaluate((button) => button.getBoundingClientRect().right <= innerWidth), "the long button fits the viewport").toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scroll").toBe(true);
+    await allow.tap();
+    await expect(sheet.getByText(`Allow “Start new sessions” on ${ATLAS.label}?`)).toBeVisible();
+    await expect(sheet.getByRole("button", { name: "Allow starting sessions", exact: true })).toBeFocused();
+    ATLAS.label = originalLabel;
   });
 });

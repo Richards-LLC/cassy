@@ -92,6 +92,54 @@ pub(crate) enum DeliveryChannel {
     TeamsInbox,
 }
 
+fn teams_path_missing(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    })
+}
+
+/// Durable, once-per-session incident: desktop notification alone disappears
+/// when the operator is away. Commander must carry the missing path too.
+fn queue_team_tree_incident(
+    cas_dir: &Path,
+    session: &str,
+    team_dir: &Path,
+) -> anyhow::Result<bool> {
+    let queue = crate::store::open_prompt_queue_store(cas_dir)?;
+    let summary = "Claude team delivery files disappeared";
+    let payload = serde_json::to_string(&crate::ui::factory::OperatorReplyPayload {
+        schema_version: 2,
+        reply_to: None,
+        message: format!(
+            "Claude team delivery lost {} or {}. Cassy is restoring the live roster and inboxes; if a path is still missing, the relay uses the supervisor/worker pane immediately. Check the supervisor pane if work remains parked.",
+            team_dir.join("config.json").display(),
+            team_dir.join("inboxes").display()
+        ),
+        summary: summary.to_string(),
+        device_id: "*".to_string(),
+        operator_label: None,
+        kind: crate::ui::factory::OperatorTurnKind::Blocker,
+        attachments: Vec::new(),
+    })?;
+    let result = queue.enqueue_idempotent(
+        "teams-recovery",
+        "operator",
+        &payload,
+        Some(session),
+        Some(summary),
+        Some(cas_store::NotificationPriority::High),
+        &format!("teams-tree-incident:{session}:{}", team_dir.display()),
+        Some(&cas_store::QueueOrigin::Daemon),
+    )?;
+    wake_daemon_after_enqueue(cas_dir);
+    Ok(matches!(
+        result,
+        cas_store::EnqueueIdempotentResult::Created(_)
+    ))
+}
+
 /// Pure routing decision — the single source of truth for *recipient-aware*
 /// delivery. Kept free of `self` so it is exhaustively unit-testable.
 ///
@@ -920,6 +968,46 @@ impl FactoryDaemon {
         retract_task: Option<&str>,
         retract_epic: Option<&str>,
     ) -> anyhow::Result<InjectOutcome> {
+        self.deliver_to_worker_via_channel(
+            target,
+            source,
+            text,
+            summary,
+            color,
+            retract_worker,
+            retract_task,
+            retract_epic,
+        )
+        .await
+        .map(|(outcome, _)| outcome)
+    }
+
+    fn alert_missing_team_tree(&self, teams: &super::teams::TeamsManager) {
+        match queue_team_tree_incident(self.app.cas_dir(), teams.team_name(), teams.teams_dir()) {
+            Ok(true) => self.app.notifier().notify(
+                "Claude delivery interrupted",
+                &format!(
+                    "Missing team files at {}; restoring the roster or using pane delivery.",
+                    teams.teams_dir().display()
+                ),
+            ),
+            Ok(false) => {}
+            Err(error) => tracing::error!(path = %teams.teams_dir().display(), %error,
+                "Could not publish missing Claude team tree incident to Commander"),
+        }
+    }
+
+    async fn deliver_to_worker_via_channel(
+        &self,
+        target: &str,
+        source: &str,
+        text: &str,
+        summary: Option<&str>,
+        color: Option<&str>,
+        retract_worker: Option<&str>,
+        retract_task: Option<&str>,
+        retract_epic: Option<&str>,
+    ) -> anyhow::Result<(InjectOutcome, DeliveryChannel)> {
         // Normalise the target into the two name forms the two channels expect:
         //   - `pane_target`  : the real pane id `Mux::inject` routes on
         //   - `inbox_target` : the logical team member name `write_to_inbox` expects
@@ -944,11 +1032,17 @@ impl FactoryDaemon {
                     .teams
                     .as_ref()
                     .expect("TeamsInbox channel requires active teams");
+                if primary.team_tree_missing() {
+                    self.alert_missing_team_tree(primary);
+                }
                 // cas-c73d: a `config_dir`-spawned worker polls a tree in ITS
                 // config dir, not the daemon's. Write where the reader looks.
                 let recipient_view = self.recipient_teams_view(pane_target);
                 let teams = recipient_view.as_ref().unwrap_or(primary);
-                match (retract_worker, retract_task, retract_epic) {
+                if teams.team_tree_missing() {
+                    self.alert_missing_team_tree(teams);
+                }
+                let write = match (retract_worker, retract_task, retract_epic) {
                     (Some(worker), _, _) => teams.write_to_inbox_for_worker_idle(
                         inbox_target,
                         source,
@@ -976,8 +1070,31 @@ impl FactoryDaemon {
                     (None, None, None) => {
                         teams.write_to_inbox(inbox_target, source, text, summary, color)
                     }
+                };
+                match write {
+                    Ok(()) => Ok((InjectOutcome::Delivered, DeliveryChannel::TeamsInbox)),
+                    Err(error) if teams_path_missing(&error) => {
+                        tracing::error!(path = %teams.teams_dir().display(), %error,
+                            target_agent = %pane_target,
+                            "Claude inbox ENOENT; falling back to PTY on the first attempt");
+                        self.alert_missing_team_tree(teams);
+                        let payload = prepare_pty_machine_delivery(
+                            self.app.cas_dir(),
+                            pane_target,
+                            harness,
+                            source,
+                            text,
+                            None,
+                        );
+                        self.app
+                            .mux
+                            .inject(pane_target, &payload)
+                            .await
+                            .map(|outcome| (outcome, DeliveryChannel::Pty))
+                            .map_err(Into::into)
+                    }
+                    Err(error) => Err(error),
                 }
-                .map(|()| InjectOutcome::Delivered)
             }
             DeliveryChannel::Pty => {
                 // Frame based on the RECIPIENT's harness, not teams mode: a Codex
@@ -997,6 +1114,7 @@ impl FactoryDaemon {
                     .mux
                     .inject(pane_target, &payload)
                     .await
+                    .map(|outcome| (outcome, DeliveryChannel::Pty))
                     .map_err(Into::into)
             }
         }
@@ -1048,14 +1166,29 @@ impl FactoryDaemon {
         retract_task: Option<&str>,
         notification_id: Option<i64>,
     ) -> anyhow::Result<NudgeReport> {
-        let primary_outcome = self
-            .deliver_to_worker(target, source, text, summary, color, None, retract_task, None)
+        let (primary_outcome, channel) = self
+            .deliver_to_worker_via_channel(
+                target,
+                source,
+                text,
+                summary,
+                color,
+                None,
+                retract_task,
+                None,
+            )
             .await?;
 
         if primary_outcome != InjectOutcome::Delivered {
             return Ok(NudgeReport::not_attempted(
                 primary_outcome,
                 "primary delivery did not complete; no wake attempted",
+            ));
+        }
+        if channel == DeliveryChannel::Pty {
+            return Ok(NudgeReport::not_attempted(
+                primary_outcome,
+                "recipient delivered via PTY; the delivery itself is the turn",
             ));
         }
         if !wake.allowed {
@@ -1259,6 +1392,41 @@ impl FactoryDaemon {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_team_path_triggers_fallback_but_other_errors_do_not() {
+        let missing = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::NotFound))
+            .context("write supervisor inbox");
+        assert!(teams_path_missing(&missing));
+        assert!(!teams_path_missing(&anyhow::Error::new(
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied)
+        )));
+    }
+
+    #[test]
+    fn missing_team_tree_incident_is_durable_deduped_and_names_the_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let team_dir = temp.path().join(".claude/teams/live-session");
+        assert!(queue_team_tree_incident(&cas_dir, "live-session", &team_dir).unwrap());
+        assert!(!queue_team_tree_incident(&cas_dir, "live-session", &team_dir).unwrap());
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let rows = queue.peek_operator_replies("live-session", 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        let payload: crate::ui::factory::OperatorReplyPayload =
+            serde_json::from_str(&rows[0].prompt).unwrap();
+        assert_eq!(payload.kind, crate::ui::factory::OperatorTurnKind::Blocker);
+        assert!(
+            payload
+                .message
+                .contains(&team_dir.join("config.json").display().to_string())
+        );
+        assert!(
+            payload
+                .message
+                .contains(&team_dir.join("inboxes").display().to_string())
+        );
+    }
 
     fn commander_attribution() -> crate::ui::factory::protocol::MessageAttribution {
         crate::ui::factory::protocol::MessageAttribution {

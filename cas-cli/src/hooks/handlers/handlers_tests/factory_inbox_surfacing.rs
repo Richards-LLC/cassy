@@ -10,7 +10,9 @@
 //! because the failure was never in one component: delivery worked, the queue
 //! worked, and there was simply no code path from the queue back to a turn.
 
-use cas_core::hooks::types::{HookInput, HookSpecificOutput, MachinePromptOrigin};
+use cas_core::hooks::types::{
+    HookInput, HookSpecificOutput, MachinePromptOrigin, MachinePromptProvenance,
+};
 use cas_mux::SupervisorCli;
 use cas_store::{PromptQueueStore, SqlitePromptQueueStore};
 use tempfile::TempDir;
@@ -300,22 +302,43 @@ fn the_supervisor_reminder_is_unchanged_when_there_is_no_mail() {
 }
 
 #[test]
-fn supervisor_terminal_input_enters_history_but_machine_relays_do_not() {
+fn supervisor_terminal_input_enters_history_but_harness_envelopes_do_not() {
     let _lock = super::env_lock();
     let _env = supervisor_env();
     let temp = TempDir::new().unwrap();
     let store = store_at(&temp);
     let mut typed = input("supervisor");
-    typed.user_prompt = Some("Check the desktop reply too".into());
+    typed.user_prompt = Some("Please check the CAS wake: logs and the desktop reply".into());
     handle_user_prompt_submit(&typed, Some(temp.path())).unwrap();
-    typed.user_prompt = Some("[cas #123 operator Daniel@Pixel verified 0s first] relay".into());
+    for harness_prompt in [
+        "[cas #123 operator Daniel@Pixel verified 0s first] relay",
+        "[supervisor reminder] generated",
+        "[lifecycle wake] generated",
+        "[system-reminder] generated",
+        "<task-notification>\n<task-id>bqa23xyz</task-id>\n<status>completed</status>\n</task-notification>",
+        "Another Claude session sent a message:\n<teammate-message teammate_id=\"director\">\n[cas #21 operator Daniel@Pixel 10 verified 0s first] relay\n</teammate-message>",
+        "<teammate-message teammate_id=\"director\">relay</teammate-message>",
+        "CAS wake: message 26297 from supervisor is in your inbox",
+        "CAS provenance: machine delivery from supervisor",
+        "<system-reminder>generated context</system-reminder>",
+    ] {
+        typed.user_prompt = Some(harness_prompt.into());
+        handle_user_prompt_submit(&typed, Some(temp.path())).unwrap();
+    }
+    typed.user_prompt = Some("A machine relay with an ordinary looking first line\n[cas #22 operator Daniel@Pixel verified 0s first] relay".into());
     handle_user_prompt_submit(&typed, Some(temp.path())).unwrap();
-    typed.user_prompt = Some("[supervisor reminder] generated".into());
+    typed.user_prompt = Some("Looks like an ordinary line".into());
+    typed.machine_prompt_provenance = Some(MachinePromptProvenance {
+        notification_id: 9,
+        origin: MachinePromptOrigin::AgentAuthored,
+        queued_at: "2026-09-29T16:00:00Z".into(),
+        delivery: "first-delivery".into(),
+    });
     handle_user_prompt_submit(&typed, Some(temp.path())).unwrap();
     let history = store.conversation_history(SESSION, "paired-device", None, 10).unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].source, "terminal");
-    assert_eq!(history[0].prompt, "Check the desktop reply too");
+    assert_eq!(history[0].prompt, "Please check the CAS wake: logs and the desktop reply");
     assert!(history[0].processed_at.is_some());
 }
 

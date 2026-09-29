@@ -43,6 +43,36 @@ fn merge_prompt_context(factory_context: String, base: HookOutput) -> HookOutput
     }
 }
 
+/// Claude also submits its own notifications through UserPromptSubmit. The
+/// hook wire has no keyboard-origin bit, so require absent factory provenance
+/// and reject the harness envelopes observed at this boundary. Check every
+/// line: Claude can wrap a Commander relay in a teammate message before its
+/// `[cas #…]` line.
+fn is_operator_terminal_prompt(input: &HookInput, prompt: &str) -> bool {
+    if !matches!(
+        input.submitted_prompt_origin(),
+        cas_core::hooks::types::SubmittedPromptOrigin::Operator
+    ) {
+        return false;
+    }
+    const MACHINE_PREFIXES: &[&str] = &[
+        "Another Claude session sent a message:",
+        "CAS wake:",
+        "CAS provenance:",
+        "[cas #",
+        "[supervisor reminder]",
+        "[lifecycle",
+        "[system-reminder]",
+        "<task-notification",
+        "<teammate-message",
+        "<system-reminder",
+    ];
+    !prompt.lines().any(|line| {
+        let line = line.trim_start();
+        MACHINE_PREFIXES.iter().any(|prefix| line.starts_with(prefix))
+    })
+}
+
 pub fn handle_user_prompt_submit(
     input: &HookInput,
     cas_root: Option<&Path>,
@@ -104,20 +134,9 @@ pub fn handle_user_prompt_submit(
             std::env::var("CAS_FACTORY_SESSION"),
         ) {
             let prompt = prompt.trim();
-            let machine_prompt = prompt
-                .lines()
-                .next()
-                .is_some_and(|line| line.contains("[cas #"))
-                || prompt.starts_with("[supervisor reminder]")
-                || prompt.starts_with("[lifecycle")
-                || prompt.starts_with("[system-reminder]");
             if !session.is_empty()
                 && !prompt.is_empty()
-                && !machine_prompt
-                && matches!(
-                    input.submitted_prompt_origin(),
-                    cas_core::hooks::types::SubmittedPromptOrigin::Operator
-                )
+                && is_operator_terminal_prompt(input, prompt)
             {
                 if let Ok(queue) = crate::store::open_prompt_queue_store(root) {
                     let _ = queue.record_terminal_operator_turn(&session, prompt);

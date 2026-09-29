@@ -1063,6 +1063,69 @@ fn scoped_proof_cargo_test_target_exists(repo: &std::path::Path, target: &str) -
         })
 }
 
+/// Use the checkout's authoritative original-stem -> configured harness map.
+/// This is inspection only; no Cargo process runs at close.
+fn scoped_proof_test_inventory(
+    repo: &std::path::Path,
+) -> std::collections::BTreeMap<String, String> {
+    let helper = repo.join("scripts/cas-test-targets.py");
+    if !helper.is_file() {
+        return Default::default();
+    }
+    let package = repo.join("cas-cli");
+    let output = std::process::Command::new("python3")
+        .arg(&helper)
+        .arg(&package)
+        .arg("--check")
+        .output();
+    if !output.is_ok_and(|output| output.status.success()) {
+        return Default::default();
+    }
+    let Ok(output) = std::process::Command::new("python3")
+        .arg(helper)
+        .arg(package)
+        .output()
+    else {
+        return Default::default();
+    };
+    if !output.status.success() {
+        return Default::default();
+    }
+    let safe_name = |value: &str| {
+        !value.is_empty()
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (stem, target) = line.split_once('|')?;
+            (safe_name(stem) && safe_name(target)).then(|| (stem.to_string(), target.to_string()))
+        })
+        .collect()
+}
+
+fn canonical_scoped_proof_targets(
+    repo: &std::path::Path,
+    targets: Vec<String>,
+) -> Option<Vec<String>> {
+    let inventory = scoped_proof_test_inventory(repo);
+    let mut canonical = std::collections::BTreeSet::new();
+    for target in targets {
+        let target = if scoped_proof_cargo_test_target_exists(repo, &target) {
+            target
+        } else {
+            inventory.get(&target)?.clone()
+        };
+        if !scoped_proof_cargo_test_target_exists(repo, &target) {
+            return None;
+        }
+        canonical.insert(target);
+    }
+    Some(canonical.into_iter().collect())
+}
+
 fn scoped_proof_test_target(repo: &std::path::Path, path: &str) -> Option<String> {
     let relative = path.strip_prefix("cas-cli/tests/")?;
     if let Some(target) = scoped_proof_manifest_test_target(repo, path) {
@@ -1233,17 +1296,44 @@ fn legacy_required_scoped_proof_targets(
     let tests_root = repo.join("cas-cli/tests");
     let test_files = scoped_proof_rust_files(&tests_root);
     let mut targets = std::collections::BTreeSet::new();
+    let inventory = scoped_proof_test_inventory(repo);
+    if repo.join("scripts/cas-test-targets.py").is_file() && inventory.is_empty() {
+        // An invalid explicit inventory cannot erase proof coverage. Require
+        // every configured harness instead of inventing obsolete suite names.
+        return scoped_proof_manifest_document(repo)
+            .and_then(|document| {
+                document
+                    .get("test")
+                    .and_then(toml::Value::as_array)
+                    .cloned()
+            })
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|test| test.get("name").and_then(toml::Value::as_str))
+            .filter(|target| scoped_proof_cargo_test_target_exists(repo, target))
+            .map(str::to_string)
+            .collect();
+    }
+    let target_for_path = |path: &str| {
+        let stem = path
+            .strip_prefix("cas-cli/tests/")?
+            .split('/')
+            .next()?
+            .trim_end_matches(".rs");
+        inventory
+            .get(stem)
+            .filter(|target| scoped_proof_cargo_test_target_exists(repo, target))
+            .cloned()
+            .or_else(|| scoped_proof_test_target(repo, path))
+    };
 
     for path in changed_paths {
         let normalized = path.replace('\\', "/");
         if normalized.starts_with("cas-cli/tests/") {
-            if let Some(target) = scoped_proof_test_target(repo, &normalized) {
+            if let Some(target) = target_for_path(&normalized) {
                 add_scoped_proof_target(&mut targets, target);
             }
-            add_scoped_proof_target(
-                &mut targets,
-                "builtin_archive_portability_test".to_string(),
-            );
+            add_scoped_proof_target(&mut targets, "builtin_archive_portability_test".to_string());
         }
         if normalized.starts_with("cas-cli/src/hooks/")
             || normalized.starts_with("cas-cli/src/cli/hook/")
@@ -1266,57 +1356,45 @@ fn legacy_required_scoped_proof_targets(
             let Ok(test_body) = std::fs::read_to_string(test_file) else {
                 continue;
             };
-            let path_reference = scoped_proof_path_reference(
-                &test_body,
-                &module_path,
-                &normalized,
-            );
-            let symbol_reference = symbols
-                .iter()
-                .any(|symbol| {
-                    let symbol = symbol.strip_prefix("factory_").unwrap_or(symbol);
-                    scoped_proof_symbol_reference(
-                        &test_body,
-                        &format!("{module_path}::{symbol}"),
-                    )
-                });
+            let path_reference = scoped_proof_path_reference(&test_body, &module_path, &normalized);
+            let symbol_reference = symbols.iter().any(|symbol| {
+                let symbol = symbol.strip_prefix("factory_").unwrap_or(symbol);
+                scoped_proof_symbol_reference(&test_body, &format!("{module_path}::{symbol}"))
+            });
             if !(path_reference || symbol_reference) {
                 continue;
             }
-            let Some(test_path) = test_file.strip_prefix(repo).ok().and_then(|path| path.to_str())
+            let Some(test_path) = test_file
+                .strip_prefix(repo)
+                .ok()
+                .and_then(|path| path.to_str())
             else {
                 continue;
             };
-            if let Some(target) = scoped_proof_test_target(repo, test_path) {
+            if let Some(target) = target_for_path(test_path) {
                 add_scoped_proof_target(&mut targets, target);
             }
         }
         if scoped_proof_builtin_path(&normalized) {
             add_scoped_proof_target(&mut targets, "builtin_flavor_drift_test".to_string());
-            add_scoped_proof_target(
-                &mut targets,
-                "agent_definition_contract_test".to_string(),
-            );
-            add_scoped_proof_target(
-                &mut targets,
-                "factory_codex_skill_guardrails".to_string(),
-            );
+            add_scoped_proof_target(&mut targets, "agent_definition_contract_test".to_string());
+            add_scoped_proof_target(&mut targets, "factory_codex_skill_guardrails".to_string());
             for test_file in &test_files {
                 let Some(name) = test_file.file_name().and_then(|name| name.to_str()) else {
                     continue;
                 };
                 if name.starts_with("builtin_") {
-                    add_scoped_proof_target(
-                        &mut targets,
-                        name.trim_end_matches(".rs").to_string(),
-                    );
+                    add_scoped_proof_target(&mut targets, name.trim_end_matches(".rs").to_string());
                 }
             }
         }
     }
     targets
         .into_iter()
+        .map(|target| inventory.get(&target).cloned().unwrap_or(target))
         .filter(|target| scoped_proof_cargo_test_target_exists(repo, target))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
         .collect()
 }
 
@@ -1433,7 +1511,9 @@ fn resolve_scoped_proof_targets_without_cache(
                 && let Some(targets) =
                     parse_scoped_proof_target_args(&String::from_utf8_lossy(&output.stdout))
             {
-                return targets;
+                if let Some(canonical) = canonical_scoped_proof_targets(proof_repo, targets) {
+                    return canonical;
+                }
             }
         }
     }
@@ -1489,7 +1569,10 @@ fn proof_validation_targets(
     if !output.status.success() {
         return None;
     }
-    parse_scoped_proof_target_args(&String::from_utf8_lossy(&output.stdout))
+    canonical_scoped_proof_targets(
+        proof_repo,
+        parse_scoped_proof_target_args(&String::from_utf8_lossy(&output.stdout))?,
+    )
 }
 
 /// cas-0db7: the command a scoped-proof refusal suggests. Its `--test` list
@@ -1935,20 +2018,31 @@ fn declared_risk_close_gaps(task: &Task, changed_paths: &[String]) -> Vec<String
     gaps
 }
 
-/// The latest passing `ASSEMBLY_PROOF:` line recorded on an epic (cas-4cbb):
+/// The latest `ASSEMBLY_PROOF:` line on an epic, only when passing (cas-4cbb):
 /// the supervisor's single build and test of the epic tip.
 fn assembly_proof_line(notes: &str) -> Option<String> {
-    notes
+    // A later failed assembly invalidates an earlier pass. A substring such
+    // as result=PASSING is not a passing receipt.
+    let line = notes
         .lines()
         .filter_map(|line| {
             let start = line.find("ASSEMBLY_PROOF:")?;
-            let proof = line[start..].trim();
-            proof
-                .to_ascii_lowercase()
-                .contains("result=pass")
-                .then(|| proof.to_string())
+            Some(line[start..].trim())
         })
-        .last()
+        .last()?;
+    scoped_proof_receipt_field(line, "result=")
+        .is_some_and(|result| result.eq_ignore_ascii_case("pass"))
+        .then(|| line.to_string())
+}
+
+fn matching_assembly_proof(
+    notes: &str,
+    repo: &std::path::Path,
+    delivered: Option<&str>,
+) -> Option<String> {
+    let line = assembly_proof_line(notes)?;
+    let head = scoped_proof_receipt_field(&line, "head=")?;
+    git_commit_is_ancestor(repo, delivered?, &head).then_some(line)
 }
 
 fn close_delivered_tip(
@@ -3176,6 +3270,97 @@ mod risk_proof_tests {
     /// diff and risk that refuse a supervisor close without a scoped receipt
     /// or loaded proof pass when the proofs are deferred to epic assembly.
     #[test]
+    fn consolidated_inventory_repairs_legacy_checker_and_fallback_targets_cas_d1ee() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let files = [
+            (
+                "cas-cli/Cargo.toml",
+                "[package]\nname=\"cas\"\nversion=\"0.1.0\"\nautotests=false\n[[test]]\nname=\"integration_cloud\"\npath=\"tests/integration/cloud.rs\"\n[[test]]\nname=\"integration_factory\"\npath=\"tests/integration/factory.rs\"\n[[test]]\nname=\"builtin_archive_portability_test\"\npath=\"tests/builtin_archive_portability_test.rs\"\n",
+            ),
+            (
+                "cas-cli/tests/integration/cloud.rs",
+                "#[path = \"../retrieval_eval_test.rs\"] mod retrieval_eval_test;\n",
+            ),
+            (
+                "cas-cli/tests/integration/factory.rs",
+                "#[path = \"../distributed_factory_test.rs\"] mod distributed_factory_test;\n",
+            ),
+            (
+                "cas-cli/tests/retrieval_eval_test.rs",
+                "// unchanged original suite\n",
+            ),
+            (
+                "cas-cli/tests/distributed_factory_test.rs",
+                "// unchanged original suite\n",
+            ),
+            (
+                "cas-cli/tests/builtin_archive_portability_test.rs",
+                "// archive guard\n",
+            ),
+        ];
+        for (path, body) in files {
+            let path = repo.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        }
+        std::fs::create_dir_all(repo.join("scripts")).unwrap();
+        std::fs::copy(
+            crate::test_paths::workspace_root().join("scripts/cas-test-targets.py"),
+            repo.join("scripts/cas-test-targets.py"),
+        )
+        .unwrap();
+        initialize_scoped_proof_git_fixture(repo);
+        let target = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(target.path().join("scripts")).unwrap();
+        std::fs::write(target.path().join("scripts/check-scoped-test-surface.sh"),
+            "#!/bin/bash\nprintf '%s\\n' 'SCOPED_PROOF_TARGET_ARGS: --test retrieval_eval_test --test distributed_factory_test'\n").unwrap();
+        let changed = vec![
+            "cas-cli/tests/retrieval_eval_test.rs".into(),
+            "cas-cli/tests/distributed_factory_test.rs".into(),
+        ];
+        let mut cache = ScopedProofTargetCache::default();
+        let required = required_scoped_proof_targets(repo, target.path(), &changed, &mut cache);
+        assert_eq!(required, ["integration_cloud", "integration_factory"]);
+        let fallback = legacy_required_scoped_proof_targets(repo, &changed);
+        assert_eq!(
+            fallback,
+            [
+                "builtin_archive_portability_test",
+                "integration_cloud",
+                "integration_factory"
+            ]
+        );
+        let command = suggested_scoped_proof_command(&required, repo, target.path(), None);
+        assert!(
+            command.contains("--test integration_cloud")
+                && command.contains("--test integration_factory"),
+            "{command}"
+        );
+        assert!(
+            !command.contains("--test retrieval_eval_test")
+                && !command.contains("--test distributed_factory_test"),
+            "{command}"
+        );
+        assert!(canonical_scoped_proof_targets(repo, vec!["missing_target".into()]).is_none());
+        std::fs::write(
+            repo.join("scripts/cas-test-targets.py"),
+            "raise SystemExit(1)\n",
+        )
+        .unwrap();
+        let mut widened = legacy_required_scoped_proof_targets(repo, &changed);
+        widened.sort();
+        assert_eq!(
+            widened,
+            [
+                "builtin_archive_portability_test",
+                "integration_cloud",
+                "integration_factory"
+            ]
+        );
+    }
+
+    #[test]
     fn worker_close_needs_no_scoped_or_loaded_proof_when_deferred_to_assembly() {
         let dir = scoped_proof_fixture();
         let mut task = Task::new("cas-4cbb-close".into(), "worker close".into());
@@ -3254,6 +3439,8 @@ mod risk_proof_tests {
             Some("ASSEMBLY_PROOF: head=bbb result=PASS command=cargo nextest run -p cas")
         );
         assert_eq!(assembly_proof_line("no proof here"), None);
+        assert_eq!(assembly_proof_line("ASSEMBLY_PROOF: head=aaa result=PASS\nASSEMBLY_PROOF: head=aaa result=FAIL"), None);
+        assert_eq!(assembly_proof_line("ASSEMBLY_PROOF: head=aaa result=PASSING"), None);
     }
 
     /// cas-a9a1: a worker's proof run without SCOPED_PROOF_BASE records the
@@ -7726,15 +7913,8 @@ impl CasCore {
             // epic whose tested head contains this delivery also stands for a
             // supervisor's close of the child.
             let assembly_proof = parent_epic.as_ref().and_then(|epic| {
-                let line = assembly_proof_line(&epic.notes)?;
-                let head = scoped_proof_receipt_field(&line, "head=")?;
-                let delivered = delivered_tip.as_deref()?;
-                std::process::Command::new("git")
-                    .args(["merge-base", "--is-ancestor", delivered, &head])
-                    .current_dir(proof_repo)
-                    .status()
-                    .is_ok_and(|status| status.success())
-                    .then(|| (epic.id.clone(), line))
+                matching_assembly_proof(&epic.notes, proof_repo, delivered_tip.as_deref())
+                    .map(|line| (epic.id.clone(), line))
             });
             if let Some(receipt) = delivered_tip.as_deref().and_then(|head| {
                 crate::factory_worker_check::passing_receipt(&self.cas_root, proof_repo, head)
@@ -10512,15 +10692,59 @@ fn dropped_line_samples(
     }
 }
 
+/// Only an authenticated supervisor's explicit content-drop review may
+/// waive measured loss; ordinary risk waivers do not authorize it.
+fn reviewed_delivery_drop_reason(reason: Option<&str>) -> Option<&str> {
+    let review = reason?.trim().strip_prefix("reviewed-drop:")?.trim();
+    (!review.is_empty()).then_some(review)
+}
+
 fn anchored_delivery_content_gate(
-    task_id: &str,
+    task: &Task,
     repo_path: &std::path::Path,
     anchor: &str,
     parent_branch: &str,
     content_window: Option<&TaskCommitReceiptWindow>,
     content_identity: &TaskCommitIdentity,
     commit_receipt: Option<&str>,
+    supervisor_override_reason: Option<&str>,
 ) -> Option<MergeStateGateOutcome> {
+    let task_id = &task.id;
+    // A supervisor-declined anchor is history, not this cycle's final tree.
+    // A re-delivered merge container identical to the current target is an
+    // exact snapshot; don't measure the rejected version inside its history.
+    // Require the active anchor to be the live assigned tip, so serial work
+    // cannot authorize an older task, and preserve unmerged/unknown failures.
+    if let Some(active) = task.deliverables.factory_branch_anchor.as_deref()
+        && let Some(assignee) = task.assignee.as_deref()
+        && resolve_branch_sha(repo_path, anchor).as_deref() == Some(active)
+        && resolve_branch_sha(
+            repo_path,
+            &close_measured_factory_branch(repo_path, task, assignee),
+        )
+        .as_deref()
+            == Some(active)
+        && task
+            .deliverables
+            .historical_factory_branch_anchors
+            .iter()
+            .any(|old| old != active && git_commit_is_ancestor(repo_path, old, active))
+    {
+        let origin = format!("origin/{parent_branch}");
+        let target = if git_commit_is_ancestor(repo_path, active, &origin) {
+            origin
+        } else {
+            parent_branch.to_string()
+        };
+        if git_commit_is_ancestor(repo_path, active, &target)
+            && let Some(tree) = resolve_branch_sha(repo_path, &format!("{active}^{{tree}}"))
+            && resolve_branch_sha(repo_path, &format!("{target}^{{tree}}")) == Some(tree)
+        {
+            return Some(MergeStateGateOutcome::ProceedWithNote(format!(
+                "DECISION: current delivery anchor {active} for task {task_id} exactly matches {target}'s tree after supervisor recovery; declined anchors remain attribution history, not current content proof."
+            )));
+        }
+    }
     // cas-f7c8 / GH #819: a worker may merge the integration target into its
     // factory branch before handing it back. The resulting merge tip can have
     // no first-parent tree effect, so proving that tip alone rejects a
@@ -10549,6 +10773,15 @@ fn anchored_delivery_content_gate(
         DeliveryContentPresence::Present { .. } | DeliveryContentPresence::Superseded { .. } => {
             None
         }
+        DeliveryContentPresence::Dropped { paths }
+            if reviewed_delivery_drop_reason(supervisor_override_reason).is_some() =>
+        {
+            Some(MergeStateGateOutcome::ProceedWithNote(format!(
+                "DECISION: reviewed delivery content drop accepted for task {task_id}; anchor={anchor}; target={parent_branch}; dropped paths: {}; supervisor review: {}",
+                paths.join(", "),
+                reviewed_delivery_drop_reason(supervisor_override_reason).unwrap(),
+            )))
+        }
         DeliveryContentPresence::Dropped { paths } => Some(MergeStateGateOutcome::Reject(format!(
             "⚠️ DELIVERY CONTENT DROPPED\n\n\
                  task close rejected: delivery anchor `{anchor}` is reachable from \
@@ -10558,7 +10791,10 @@ fn anchored_delivery_content_gate(
                  Cassy measured the missing tree effect; it cannot identify the \
                  change that removed it. Restore the missing delivery content on \
                  the assigned factory branch, commit it, and retry close; do not \
-                 re-merge the already-reachable anchor for task {task_id}.",
+                 re-merge the already-reachable anchor for task {task_id}. If the \
+                 drop is intentional, a live registered supervisor may close with \
+                 supervisor_override=true reason=\"reviewed-drop: <why the named content was intentionally superseded>\"; \
+                 the dropped paths and review are recorded.",
             paths.join(", "),
             dropped_line_samples(repo_path, anchor, parent_branch, &paths),
         ))),
@@ -11165,13 +11401,14 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
                 validated_content_receipt,
             );
             if let Some(rejection) = anchored_delivery_content_gate(
-                &task.id,
+                task,
                 repo_path,
                 anchor,
                 parent_branch,
                 attribution.window,
                 content_identity,
                 validated_content_receipt,
+                attribution.window.and_then(|window| window.supervisor_override_reason.as_deref()),
             ) {
                 return rejection;
             }
@@ -11228,13 +11465,14 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
                 validated_content_receipt,
             );
             if let Some(rejection) = anchored_delivery_content_gate(
-                &task.id,
+                task,
                 repo_path,
                 anchor,
                 parent_branch,
                 attribution.window,
                 content_identity,
                 validated_content_receipt,
+                attribution.window.and_then(|window| window.supervisor_override_reason.as_deref()),
             ) {
                 return rejection;
             }
@@ -11265,13 +11503,14 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
                 validated_content_receipt,
             );
             if let Some(rejection) = anchored_delivery_content_gate(
-                &task.id,
+                task,
                 repo_path,
                 anchor,
                 parent_branch,
                 attribution.window,
                 content_identity,
                 validated_content_receipt,
+                attribution.window.and_then(|window| window.supervisor_override_reason.as_deref()),
             ) {
                 return rejection;
             }
@@ -13791,6 +14030,30 @@ pub(crate) fn commit_is_merged_into_parent(
         && git_commit_is_ancestor(repo_path, commit_ish, &origin_parent)
 }
 
+/// Observe a plain supervisor Git merge on the declared target, including
+/// its refreshed remote-tracking ref when the local branch is stale. Return
+/// the exact tested target tip, not just a reachability boolean, for the
+/// immutable merge-observation audit. Git failures never authorize repair.
+pub(crate) fn observed_merged_delivery_tip(
+    repo: &std::path::Path,
+    delivery: &str,
+    target: &str,
+) -> Option<String> {
+    if !is_safe_git_refname(delivery) || !is_safe_git_refname(target) {
+        return None;
+    }
+    let _ = fetch_parent_branch_best_effort(repo, target);
+    for candidate in [format!("origin/{target}"), target.to_string()] {
+        let Some(tip) = resolve_branch_sha(repo, &candidate) else {
+            continue;
+        };
+        if git_commit_is_ancestor(repo, delivery, &tip) {
+            return Some(tip);
+        }
+    }
+    None
+}
+
 /// Delivery authorization companion to [`commit_is_merged_into_parent`].
 /// Reachability alone is insufficient for a close/receipt decision; the
 /// delivery must be present or explicitly superseded on the target.
@@ -14004,6 +14267,8 @@ pub(crate) fn validate_task_commit_receipt(
     // replacement for those topology/attribution diagnostics.
     match delivery_content_presence_in_parent(repo_path, &full_receipt, parent_branch) {
         DeliveryContentPresence::Present { .. } | DeliveryContentPresence::Superseded { .. } => {}
+        DeliveryContentPresence::Dropped { .. }
+            if reviewed_delivery_drop_reason(window.supervisor_override_reason.as_deref()).is_some() => {}
         DeliveryContentPresence::Dropped { paths } => {
             return Err(format!(
                 "the commit is reachable from {parent_branch} or origin/{parent_branch}, but its delivery content is absent from the current target tree; dropped path(s): {}",
@@ -14017,6 +14282,9 @@ pub(crate) fn validate_task_commit_receipt(
         }
     }
 
+    let drop_review = reviewed_delivery_drop_reason(window.supervisor_override_reason.as_deref())
+        .map(|review| format!(" Explicit reviewed-drop authorization: {review}."))
+        .unwrap_or_default();
     Ok(format!(
         "decision: accepted commit_receipt `{receipt}` resolved to full commit `{full_receipt}` \
          as task-attributed merge evidence; \
@@ -14026,7 +14294,7 @@ pub(crate) fn validate_task_commit_receipt(
         window.not_before.to_rfc3339(),
         window.basis,
         COMMIT_RECEIPT_CLOCK_SKEW_SECS,
-        prior_cycle_basis.unwrap_or_default()
+        format!("{}{drop_review}", prior_cycle_basis.unwrap_or_default())
     ))
 }
 
@@ -21250,6 +21518,307 @@ mod merge_state_gate_tests {
                 other => panic!("expected Reject for stranded factory branch, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn plain_git_merge_on_origin_is_a_proof_correction_observation_cas_d1ee() {
+        let dir = init_factory_repo("worker");
+        let repo = dir.path();
+        commit_file_at(
+            repo,
+            "delivered.rs",
+            "// delivered\n",
+            "2026-08-04T12:00:00Z",
+        );
+        let anchor = head_sha(repo);
+        // Exactly the production topology: local main is stale, but the
+        // remote-tracking target contains the plain supervisor merge.
+        git(repo, &["update-ref", "refs/remotes/origin/main", &anchor]);
+        assert!(!git_commit_is_ancestor(repo, &anchor, "main"));
+        assert_eq!(
+            observed_merged_delivery_tip(repo, &anchor, "main"),
+            Some(anchor.clone())
+        );
+        assert_eq!(observed_merged_delivery_tip(repo, &anchor, "missing"), None);
+        assert_eq!(observed_merged_delivery_tip(repo, "--help", "main"), None);
+
+        let root = tempfile::tempdir().unwrap();
+        let store = cas_store::SqliteTaskStore::open(root.path()).unwrap();
+        cas_store::TaskStore::init(&store).unwrap();
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        task.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:fixture".into(),
+            target_branch: "main".into(),
+        });
+        cas_store::TaskStore::add(&store, &task).unwrap();
+        let expected = task.updated_at;
+        task.proof_targets.push("delivery".into());
+        task.status = TaskStatus::Open;
+        task.updated_at = chrono::Utc::now();
+        let error = cas_store::correct_parked_delivery_proof_targets(
+            root.path(),
+            &task,
+            expected,
+            "supervisor",
+            "widen proof",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("requires a merged"), "{error}");
+        assert!(!error.contains("parse error"), "{error}");
+        let merged = observed_merged_delivery_tip(repo, &anchor, "main").unwrap();
+        cas_store::record_observed_delivery_merge(
+            root.path(),
+            &task.id,
+            "commit:old",
+            "main",
+            &"0".repeat(40),
+            &merged,
+            "supervisor",
+        )
+        .unwrap();
+        assert!(
+            cas_store::correct_parked_delivery_proof_targets(
+                root.path(),
+                &task,
+                expected,
+                "supervisor",
+                "widen proof"
+            )
+            .is_err(),
+            "an observation for another delivery cannot authorize this cycle"
+        );
+        cas_store::record_observed_delivery_merge(
+            root.path(),
+            &task.id,
+            &format!("commit:{anchor}"),
+            "main",
+            &anchor,
+            &merged,
+            "supervisor",
+        )
+        .unwrap();
+        cas_store::correct_parked_delivery_proof_targets(
+            root.path(),
+            &task,
+            expected,
+            "supervisor",
+            "widen proof",
+        )
+        .unwrap();
+        assert_eq!(
+            cas_store::TaskStore::get(&store, &task.id).unwrap().status,
+            TaskStatus::Open
+        );
+        // Reporting the blocker must leave the administrative recovery exit
+        // usable, rather than creating another status-dependent dead end.
+        let mut blocked = cas_store::TaskStore::get(&store, &task.id).unwrap();
+        blocked.status = TaskStatus::Blocked;
+        blocked.updated_at = chrono::Utc::now();
+        cas_store::TaskStore::update(&store, &blocked).unwrap();
+        let expected = blocked.updated_at;
+        blocked.status = TaskStatus::Open;
+        blocked.updated_at = chrono::Utc::now();
+        blocked.proof_targets.push("wider coverage".into());
+        cas_store::correct_parked_delivery_proof_targets(root.path(), &blocked, expected, "supervisor", "repair after blocker report").unwrap();
+    }
+
+    #[test]
+    fn matching_epic_assembly_proves_supervisor_close_without_worker_receipt_cas_d1ee() {
+        let dir = init_factory_repo("worker");
+        let repo = dir.path();
+        let old = head_sha(repo);
+        commit_file_at(repo, "delivery.rs", "// delivery\n", "2026-08-04T12:00:00Z");
+        let delivery = head_sha(repo);
+        let task = worker_task("worker");
+        let notes = format!(
+            "ASSEMBLY_PROOF: head={delivery} result=PASS command=cargo nextest run --workspace log=assembly.log"
+        );
+        let covered = matching_assembly_proof(&notes, repo, Some(&delivery));
+        assert!(covered.is_some());
+        let proofs = if covered.is_some() {
+            BuildProofs::DeferredToAssembly
+        } else {
+            BuildProofs::Required
+        };
+        let mut task = task;
+        task.risk = vec![TaskRisk::Concurrency];
+        validate_risk_close_proofs_with_base_and_target_and_cache(
+            &task,
+            &["cas-cli/src/retrieval_eval.rs".into()],
+            repo,
+            repo,
+            Some(&old),
+            Some(&delivery),
+            proofs,
+            &mut ScopedProofTargetCache::default(),
+        )
+        .unwrap();
+        assert!(
+            matching_assembly_proof(
+                &format!("ASSEMBLY_PROOF: head={old} result=PASS"),
+                repo,
+                Some(&delivery)
+            )
+            .is_none()
+        );
+        assert!(
+            matching_assembly_proof(
+                &format!("{notes}\nASSEMBLY_PROOF: head={delivery} result=FAIL"),
+                repo,
+                Some(&delivery)
+            )
+            .is_none()
+        );
+        assert!(
+            matching_assembly_proof("ASSEMBLY_PROOF: result=PASS", repo, Some(&delivery)).is_none()
+        );
+    }
+
+    #[test]
+    fn request_changes_measures_current_delivery_and_reviewed_drop_is_explicit_cas_d1ee() {
+        let dir = init_factory_repo("worker");
+        let repo = dir.path();
+        commit_file_at(
+            repo,
+            "delivery.rs",
+            "// original delivery\n",
+            "2026-08-04T12:00:00Z",
+        );
+        let original = head_sha(repo);
+        git(repo, &["checkout", "-q", "main"]);
+        git(
+            repo,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "-s",
+                "ours",
+                "factory/worker",
+                "-m",
+                "reviewed integration resolution",
+            ],
+        );
+        let current = head_sha(repo);
+        git(repo, &["checkout", "-q", "factory/worker"]);
+        git(repo, &["merge", "--ff-only", "main"]);
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(original.clone());
+        let req = base_req(&task.id);
+        assert!(matches!(
+            run_factory_branch_merge_gate(&task, &req, "main", repo),
+            MergeStateGateOutcome::Reject(_)
+        ));
+
+        let mut window = window_at(0, "supervisor content review");
+        window.supervisor_override_reason = Some("reviewed risk mismatch".into());
+        let attribution = TaskCommitAttribution {
+            receipt: None,
+            window: Some(&window),
+        };
+        assert!(matches!(
+            run_factory_branch_merge_gate_with_attribution(&task, &req, "main", repo, attribution),
+            MergeStateGateOutcome::Reject(_)
+        ));
+        window.supervisor_override_reason = Some(
+            "reviewed-drop: original lines intentionally replaced by the approved sibling".into(),
+        );
+        let outcome = run_factory_branch_merge_gate_with_attribution(
+            &task,
+            &req,
+            "main",
+            repo,
+            TaskCommitAttribution {
+                receipt: None,
+                window: Some(&window),
+            },
+        );
+        let MergeStateGateOutcome::ProceedWithNote(note) = outcome else {
+            panic!("explicit reviewed drop must be audited: {outcome:?}");
+        };
+        assert!(
+            note.contains(&original)
+                && note.contains("delivery.rs")
+                && note.contains("approved sibling"),
+            "{note}"
+        );
+        assert!(reviewed_delivery_drop_reason(Some("reviewed-drop: ")).is_none());
+        assert!(
+            validate_task_commit_receipt(repo, &original, "main", &window)
+                .unwrap()
+                .contains("reviewed-drop")
+        );
+        commit_file_at(
+            repo,
+            "unmerged.rs",
+            "// never integrated\n",
+            "2026-08-04T12:02:00Z",
+        );
+        let unmerged = head_sha(repo);
+        let outcome = run_factory_branch_merge_gate_with_attribution(
+            &task,
+            &req,
+            "main",
+            repo,
+            TaskCommitAttribution {
+                receipt: Some(&unmerged),
+                window: Some(&window),
+            },
+        );
+        assert!(
+            matches!(outcome, MergeStateGateOutcome::Reject(_)),
+            "reviewed drop must not waive unmerged work: {outcome:?}"
+        );
+        // Restore the exact already-approved target for the fresh-cycle case.
+        git(repo, &["checkout", "-q", "-B", "factory/worker", &current]);
+
+        let root = tempfile::tempdir().unwrap();
+        let store = cas_store::SqliteTaskStore::open(root.path()).unwrap();
+        cas_store::TaskStore::init(&store).unwrap();
+        cas_store::TaskStore::add(&store, &task).unwrap();
+        cas_store::request_changes_for_parked_delivery(
+            root.path(),
+            &task.id,
+            "supervisor",
+            "Re-deliver the approved current target; no code change required",
+        )
+        .unwrap();
+        let mut fresh = cas_store::TaskStore::get(&store, &task.id).unwrap();
+        assert!(fresh.deliverables.factory_branch_anchor.is_none());
+        assert!(
+            fresh
+                .deliverables
+                .historical_factory_branch_anchors
+                .contains(&original)
+        );
+        fresh.status = TaskStatus::InProgress;
+        // History remains attribution evidence, never the active content anchor.
+        let mut fresh_window = window_at(0, "fresh reviewed delivery");
+        fresh_window.identity = task_commit_identity(&fresh, None);
+        let outcome = run_factory_branch_merge_gate_with_attribution(
+            &fresh,
+            &req,
+            "main",
+            repo,
+            TaskCommitAttribution {
+                receipt: Some(&current),
+                window: Some(&fresh_window),
+            },
+        );
+        assert!(
+            matches!(outcome, MergeStateGateOutcome::Proceed),
+            "{outcome:?}"
+        );
+        fresh.status = TaskStatus::AwaitingMerge;
+        fresh.deliverables.factory_branch_anchor = Some(current);
+        assert!(matches!(
+            run_factory_branch_merge_gate(&fresh, &req, "main", repo),
+            MergeStateGateOutcome::ProceedWithNote(_)
+        ));
     }
 
     #[test]

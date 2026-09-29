@@ -592,11 +592,11 @@ impl CasCore {
                     data: None,
                 });
             }
-            if !matches!(task.status, TaskStatus::AwaitingMerge | TaskStatus::InProgress) {
+            if !matches!(task.status, TaskStatus::AwaitingMerge | TaskStatus::InProgress | TaskStatus::Blocked) {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(format!(
-                        "PROOF-SCOPE FIX REJECTED: task {} is {} rather than awaiting_merge or in_progress; this path repairs only an active delivery proof cycle.",
+                        "PROOF-SCOPE FIX REJECTED: task {} is {} rather than awaiting_merge, in_progress, or blocked; this path repairs only an active delivery proof cycle.",
                         task.id, task.status
                     )),
                     data: None,
@@ -610,7 +610,11 @@ impl CasCore {
                 ),
                 data: None,
             })?;
-            let parked_anchor = task.deliverables.factory_branch_anchor.clone();
+            // request_changes clears the active anchor but preserves this
+            // task's declined delivery identity. A scope repair may observe
+            // that already-merged work; close still checks any new delivery.
+            let parked_anchor = task.deliverables.factory_branch_anchor.clone()
+                .or_else(|| task.deliverables.historical_factory_branch_anchors.last().cloned());
 
             let corrected_target = if proof_targets_fix || risk_fix {
                 task.deliverables.work_target.clone()
@@ -753,13 +757,9 @@ impl CasCore {
             if let (Some(anchor), Some(target)) =
                 (parked_anchor.as_deref(), corrected_target.as_ref())
                 && let Ok(context) = super::repo_context::resolve_repo_context(&self.cas_root, target)
-                && super::lifecycle::close_ops::git_commit_is_ancestor(
+                && let Some(merged_tip) = super::lifecycle::close_ops::observed_merged_delivery_tip(
                     &context.repo_root,
                     anchor,
-                    &context.target_branch,
-                )
-                && let Some(merged_tip) = super::lifecycle::close_ops::resolve_branch_sha(
-                    &context.repo_root,
                     &context.target_branch,
                 )
             {

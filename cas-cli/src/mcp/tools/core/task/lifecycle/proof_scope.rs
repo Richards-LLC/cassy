@@ -261,6 +261,15 @@ pub(crate) fn guard_task_proof_scope(
     }
 
     let mut locked_fields = operation.locked_fields();
+    // Blocked is an operational report, not a change to the reviewed scope.
+    // Keep semantic fields locked in a mixed update and keep terminal tasks
+    // immutable; the delivery transaction and proof remain intact.
+    if let ProofScopeOperation::TaskUpdate { request, .. } = operation
+        && !super::stale_close_guard::is_terminal_closed(task.status)
+        && request.status.as_deref().is_some_and(|status| status.eq_ignore_ascii_case("blocked"))
+    {
+        locked_fields.retain(|field| *field != "status");
+    }
     // cas-8a49 / GH #304: a no-code delivery cannot know its durable proof
     // reference until the artifact/report has actually been produced. Parking
     // the task must not freeze the one transition close still requires. This
@@ -472,6 +481,29 @@ mod tests {
                 "target_branch",
             ]
         );
+    }
+
+    #[test]
+    fn blocked_report_preserves_exact_scope_and_mixed_updates_stay_locked_cas_d1ee() {
+        let root = TempDir::new().unwrap();
+        let mut task = Task::new("cas-blocked-scope".into(), "parked proof".into());
+        task.status = TaskStatus::AwaitingMerge;
+        let mut request = empty_update();
+        request.status = Some("blocked".into());
+        fn operation(request: &TaskUpdateRequest) -> ProofScopeOperation<'_> {
+            ProofScopeOperation::TaskUpdate {
+                request,
+                target_repo_supplied: false,
+                target_branch_supplied: false,
+            }
+        }
+        guard_task_proof_scope(root.path(), &task, operation(&request)).unwrap();
+        request.title = Some("different review scope".into());
+        let error = guard_task_proof_scope(root.path(), &task, operation(&request)).unwrap_err();
+        assert!(error.contains("title"), "{error}");
+        request.title = None;
+        task.status = TaskStatus::Closed;
+        assert!(guard_task_proof_scope(root.path(), &task, operation(&request)).is_err());
     }
 
     #[test]

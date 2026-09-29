@@ -728,7 +728,7 @@ mod tests {
                 "opus",
                 CapabilityAvailability::Available,
             ),
-            (Harness::CodexCli, "gpt-6-sol", codex),
+            (Harness::CodexCli, "gpt-6.1-sol", codex),
             (
                 Harness::GrokBuild,
                 "grok-4.5",

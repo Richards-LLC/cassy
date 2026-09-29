@@ -1018,6 +1018,27 @@ fn build_spawn_specs_with_project_config(
     workers_json: Option<&str>,
     project_config: Option<std::path::PathBuf>,
 ) -> Result<Vec<cas_mux::WorkerSpec>, String> {
+    resolve_spawn_specs_with_project_config(
+        slots,
+        cli,
+        model,
+        effort,
+        config_dir,
+        workers_json,
+        project_config,
+    )
+    .map(|(specs, _)| specs)
+}
+
+fn resolve_spawn_specs_with_project_config(
+    slots: usize,
+    cli: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
+    config_dir: Option<&str>,
+    workers_json: Option<&str>,
+    project_config: Option<std::path::PathBuf>,
+) -> Result<(Vec<cas_mux::WorkerSpec>, String), String> {
     let worker_spec_jsons = parse_spawn_worker_specs(workers_json, slots)?;
     let parsed_cli = parse_spawn_cli(cli)?;
     let parsed_effort = parse_spawn_effort(effort)?;
@@ -1038,25 +1059,27 @@ fn build_spawn_specs_with_project_config(
         worker_spec_jsons: worker_spec_jsons.clone(),
         ..Default::default()
     };
-    let configured: Vec<(bool, bool)> = (0..slots)
+    let llm = cas_factory::configured_worker_llm_defaults(&sources)
+        .map_err(|error| format!("failed to resolve worker LLM config: {error}"))?;
+    let configured: Vec<(bool, bool, bool)> = (0..slots)
         .map(|slot| {
             Ok((
                 cas_factory::worker_slot_cli_configured(slot, &sources)
                     .map_err(|e| format!("failed to inspect worker cli config: {e}"))?,
                 cas_factory::worker_slot_effort_configured(slot, &sources)
                     .map_err(|e| format!("failed to inspect worker effort config: {e}"))?,
+                cas_factory::worker_slot_model_configured(slot, &sources)
+                    .map_err(|e| format!("failed to inspect worker model config: {e}"))?,
             ))
         })
         .collect::<Result<_, String>>()?;
     let mut specs = cas_factory::resolve_specs(slots, sources)
         .map_err(|e| format!("failed to resolve worker spec: {e}"))?;
     let opencode_accepted_efforts = configured_opencode_efforts(project_config.as_deref())?;
+    let mut source_notices = Vec::new();
 
-    // EPIC cas-8888 (cas-9a31, Phase 1) SILENT SITE — audited, left AS-IS
-    // per the task's own guidance: this default-cli auto-upgrade only ever
-    // fires when the resolved default happens to be Claude (never Grok, since
-    // nothing defaults TO Grok yet — it isn't a stock/default CLI at this
-    // phase), so no Grok arm is needed here.
+    // Apply role fallbacks only to fields omitted by factory recipes and
+    // the request. Lane requests bypass this cascade entirely.
     for (slot, spec) in specs.iter_mut().enumerate() {
         let override_value = worker_spec_jsons
             .get(slot)
@@ -1065,14 +1088,51 @@ fn build_spawn_specs_with_project_config(
             override_value
                 .as_ref()
                 .and_then(|value| value.get(field))
-                .is_some()
+                .is_some_and(|value| !value.is_null())
         };
         let cli_explicit = cli.is_some() || override_has("cli");
         let model_explicit = model.is_some() || override_has("model");
         let effort_explicit = effort.is_some() || override_has("effort");
-        let (configured_cli, configured_effort) = configured[slot];
+        let (configured_cli, configured_effort, configured_model) = configured[slot];
+        let source = |explicit, factory, llm| {
+            if explicit {
+                "explicit"
+            } else if factory {
+                "factory config"
+            } else if llm {
+                "llm config"
+            } else {
+                "registry"
+            }
+        };
+        let mut cli_source = source(cli_explicit, configured_cli, llm.cli.is_some());
+        let mut model_source = source(model_explicit, configured_model, llm.model.is_some());
+        let mut effort_source = source(effort_explicit, configured_effort, llm.effort.is_some());
 
-        if !cli_explicit && !configured_cli && spec.cli == cas_mux::SupervisorCli::Claude {
+        if !cli_explicit
+            && !configured_cli
+            && let Some(cli) = llm.cli
+        {
+            spec.cli = cli;
+        }
+        if !model_explicit
+            && !configured_model
+            && let Some(model) = &llm.model
+        {
+            spec.model = Some(model.clone());
+        }
+        if !effort_explicit
+            && !configured_effort
+            && let Some(effort) = llm.effort
+        {
+            spec.effort = Some(effort);
+        }
+
+        if !cli_explicit
+            && !configured_cli
+            && llm.cli.is_none()
+            && spec.cli == cas_mux::SupervisorCli::Claude
+        {
             spec.cli = cas_mux::SupervisorCli::Codex;
         }
         // cas-28a4 (GH #71): an unambiguous per-worker model slug is the
@@ -1094,13 +1154,35 @@ fn build_spawn_specs_with_project_config(
                         "cas-28a4: explicit model slug overrides the resolved default cli"
                     );
                     spec.cli = model_cli;
+                    cli_source = "explicit model";
                 }
+            }
+        }
+        // A role default belongs to its configured harness. An explicit
+        // harness/model switch must not inherit an incompatible role recipe.
+        if !model_explicit
+            && !configured_model
+            && spec
+                .model
+                .as_deref()
+                .and_then(cli_for_model_slug)
+                .is_some_and(|model_cli| model_cli != spec.cli)
+        {
+            spec.model = None;
+            model_source = "registry";
+            if !effort_explicit && !configured_effort {
+                spec.effort = Some(default_worker_effort_for_cli(spec.cli));
+                effort_source = "registry";
             }
         }
         if !model_explicit && spec.model.is_none() {
             spec.model = Some(default_worker_model_for_cli(spec.cli).to_string());
         }
-        if !effort_explicit && !configured_effort && spec.cli == cas_mux::SupervisorCli::OpenCode {
+        if !effort_explicit
+            && !configured_effort
+            && llm.effort.is_none()
+            && spec.cli == cas_mux::SupervisorCli::OpenCode
+        {
             // The shared resolver's High placeholder is not an OpenCode
             // endpoint contract. Omitted effort means let the configured
             // local provider choose its own default; only explicit/configured
@@ -1108,6 +1190,7 @@ fn build_spawn_specs_with_project_config(
             spec.effort = None;
         } else if !effort_explicit
             && !configured_effort
+            && llm.effort.is_none()
             && spec.effort == Some(cas_mux::Effort::High)
             && spec.cli != cas_mux::SupervisorCli::OpenCode
         {
@@ -1148,8 +1231,15 @@ fn build_spawn_specs_with_project_config(
         if let Some(model) = spec.model.as_deref() {
             validate_model_matches_cli(spec.cli, model)?;
         }
+        source_notices.push(format!(
+            "slot {}: cli={cli_source}, model={model_source}, effort={effort_source}",
+            slot + 1,
+        ));
     }
-    Ok(specs)
+    Ok((
+        specs,
+        format!("\nWorker spec sources: {}", source_notices.join("; ")),
+    ))
 }
 
 /// Decode MCP's JSON-array field while keeping the shared resolver responsible
@@ -1227,18 +1317,8 @@ fn spawn_spec_warning(model_explicit: bool, effort_explicit: bool, spec_json: &s
         };
         match serde_json::from_str::<cas_mux::WorkerSpec>(spec_json) {
             Ok(spec) => {
-                let model_uses_policy = model_explicit
-                    || spec.model.as_deref() == Some(default_worker_model_for_cli(spec.cli));
-                let effort_uses_policy = effort_explicit
-                    || (spec.cli == cas_mux::SupervisorCli::OpenCode && spec.effort.is_none())
-                    || spec.effort == Some(default_worker_effort_for_cli(spec.cli));
-                let fallback = if model_uses_policy && effort_uses_policy {
-                    "policy default"
-                } else {
-                    "configured fallback"
-                };
                 warnings.push(format!(
-                    "Warning: spawn_workers omitted {omitted}; resolved to {fallback} {}/{}/{} — pass model=/effort= explicitly to tier the spawn.",
+                    "Warning: spawn_workers omitted {omitted}; resolved to {}/{}/{} — pass model=/effort= explicitly to tier the spawn.",
                     spec.cli.backend().name(),
                     spec.model.as_deref().unwrap_or("(backend default)"),
                     format_effort(spec.effort)
@@ -2342,45 +2422,47 @@ impl CasService {
         // Resolve a concrete WorkerSpec per queued worker. Batch-level fields
         // remain the resolver defaults; `workers=[{...}]` is its final,
         // per-slot layer.
-        let (mut specs, lane_recipe, lane_warnings) = if let Some(lane) = req.lane.as_deref() {
-            validate_lane_request(
-                lane,
-                req.cli.is_some(),
-                req.model.is_some(),
-                req.effort.is_some(),
-            )
-            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
-            let snapshot = tokio::task::spawn_blocking(
-                crate::factory_preflight::collect_live_capability_snapshot,
-            )
-            .await
-            .map_err(|error| {
-                Self::error(
-                    ErrorCode::INTERNAL_ERROR,
-                    format!("failed to collect lane capability snapshot: {error}"),
+        let (mut specs, lane_recipe, lane_warnings, default_sources_notice) =
+            if let Some(lane) = req.lane.as_deref() {
+                validate_lane_request(
+                    lane,
+                    req.cli.is_some(),
+                    req.model.is_some(),
+                    req.effort.is_some(),
                 )
-            })?;
-            build_lane_spawn_specs(
-                slots,
-                lane,
-                req.config_dir.as_deref(),
-                req.workers.as_deref(),
-                &snapshot,
-            )
-            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?
-        } else {
-            let specs = build_spawn_specs_with_project_config(
-                slots,
-                req.cli.as_deref(),
-                req.model.as_deref(),
-                req.effort.as_deref(),
-                req.config_dir.as_deref(),
-                req.workers.as_deref(),
-                Some(self.inner.cas_root.join("config.toml")),
-            )
-            .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
-            (specs, String::new(), Vec::new())
-        };
+                .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+                let snapshot = tokio::task::spawn_blocking(
+                    crate::factory_preflight::collect_live_capability_snapshot,
+                )
+                .await
+                .map_err(|error| {
+                    Self::error(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!("failed to collect lane capability snapshot: {error}"),
+                    )
+                })?;
+                let (specs, recipe, warnings) = build_lane_spawn_specs(
+                    slots,
+                    lane,
+                    req.config_dir.as_deref(),
+                    req.workers.as_deref(),
+                    &snapshot,
+                )
+                .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+                (specs, recipe, warnings, String::new())
+            } else {
+                let (specs, sources_notice) = resolve_spawn_specs_with_project_config(
+                    slots,
+                    req.cli.as_deref(),
+                    req.model.as_deref(),
+                    req.effort.as_deref(),
+                    req.config_dir.as_deref(),
+                    req.workers.as_deref(),
+                    Some(self.inner.cas_root.join("config.toml")),
+                )
+                .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
+                (specs, String::new(), Vec::new(), sources_notice)
+            };
 
         // Hosted DashScope is an explicit route with its own auth/model
         // preflight.  This is intentionally after spec resolution and before
@@ -2691,11 +2773,11 @@ impl CasService {
 
         let msg = if worker_names.is_empty() {
             format!(
-                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{lane_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}"
+                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}"
             )
         } else {
             format!(
-                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{lane_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}",
+                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}",
                 worker_names.join(", "),
                 request_id
             )
@@ -12575,6 +12657,7 @@ model = "local/qwen3.8"
         for (cli, model) in [
             ("claude", "claude-opus-5"),
             ("claude", "opus"),
+            ("codex", "gpt-6.1-sol"),
             ("codex", "gpt-6-sol"),
             ("grok", "grok-4.5"),
             ("codex", "some-unreleased-slug"),
@@ -12637,6 +12720,153 @@ model = "local/qwen3.8"
     }
 
     #[test]
+    fn spawn_defaults_honor_worker_llm_config_and_report_actual_sources() {
+        let _home = TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let config = project.path().join("config.toml");
+        for (section, harness, model, effort) in [
+            ("llm", "codex", "gpt-6.1-sol", "high"),
+            ("llm.worker", "codex", "gpt-6.1-sol", "high"),
+            ("llm.worker", "codex", "gpt-6-sol", "low"),
+            ("llm.worker", "claude", "opus", "high"),
+        ] {
+            std::fs::write(&config, format!(
+                "[{section}]\nharness = \"{harness}\"\nmodel = \"{model}\"\nreasoning_effort = \"{effort}\"\n",
+            )).unwrap();
+            let (specs, sources) = resolve_spawn_specs_with_project_config(
+                1,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(config.clone()),
+            )
+            .unwrap();
+            assert_eq!(specs[0].cli, parse_spawn_cli(Some(harness)).unwrap().unwrap());
+            assert_eq!(specs[0].model.as_deref(), Some(model));
+            assert_eq!(specs[0].effort, Some(effort.parse().unwrap()));
+            // Same as stock is still configured; re-reading a changed file
+            // must affect the very next request, without a daemon restart.
+            assert!(
+                sources.contains("cli=llm config, model=llm config, effort=llm config"),
+                "{sources}"
+            );
+        }
+        std::fs::write(&config, "").unwrap();
+        let (specs, sources) =
+            resolve_spawn_specs_with_project_config(1, None, None, None, None, None, Some(config))
+                .unwrap();
+        assert_eq!(specs[0].model.as_deref(), Some("gpt-6.1-sol"));
+        assert_eq!(specs[0].effort, Some(cas_mux::Effort::High));
+        assert!(
+            sources.contains("cli=registry, model=registry, effort=registry"),
+            "{sources}"
+        );
+    }
+
+    #[test]
+    fn spawn_worker_llm_defaults_merge_user_project_and_role_fields() {
+        let _home = TestEnvGuard::temp_home();
+        let user_dir = dirs::home_dir().unwrap().join(".cas");
+        std::fs::create_dir_all(&user_dir).unwrap();
+        std::fs::write(user_dir.join("config.toml"),
+            "[llm]\nharness = \"claude\"\nmodel = \"opus\"\nreasoning_effort = \"high\"\n[llm.worker]\nharness = \"codex\"\nmodel = \"gpt-6-sol\"\n",
+        ).unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let config = project.path().join("config.toml");
+        std::fs::write(&config,
+            "[llm]\nmodel = \"sonnet\"\n[llm.worker]\nmodel = \"gpt-6.1-sol\"\nreasoning_effort = \"low\"\n",
+        ).unwrap();
+        let specs =
+            build_spawn_specs_with_project_config(1, None, None, None, None, None, Some(config))
+                .unwrap();
+        assert_eq!(specs[0].cli, cas_mux::SupervisorCli::Codex);
+        assert_eq!(specs[0].model.as_deref(), Some("gpt-6.1-sol"));
+        assert_eq!(specs[0].effort, Some(cas_mux::Effort::Low));
+        let user_specs =
+            build_spawn_specs_with_project_config(1, None, None, None, None, None, None).unwrap();
+        assert_eq!(user_specs[0].model.as_deref(), Some("gpt-6-sol"));
+        assert_eq!(user_specs[0].effort, Some(cas_mux::Effort::High));
+    }
+
+    #[test]
+    fn spawn_factory_and_explicit_recipes_override_worker_llm_defaults() {
+        let _home = TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let config = project.path().join("config.toml");
+        std::fs::write(&config,
+            "[llm.worker]\nharness = \"codex\"\nmodel = \"gpt-6.1-sol\"\nreasoning_effort = \"high\"\n[factory.defaults]\ncli = \"codex\"\nmodel = \"gpt-6-sol\"\neffort = \"medium\"\n",
+        ).unwrap();
+        let (specs, sources) = resolve_spawn_specs_with_project_config(
+            1,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(config.clone()),
+        )
+        .unwrap();
+        assert_eq!(specs[0].model.as_deref(), Some("gpt-6-sol"));
+        assert_eq!(specs[0].effort, Some(cas_mux::Effort::Medium));
+        assert!(
+            sources.contains("cli=factory config, model=factory config, effort=factory config"),
+            "{sources}"
+        );
+        let (specs, sources) = resolve_spawn_specs_with_project_config(
+            2,
+            Some("codex"),
+            Some("gpt-6.1-sol"),
+            Some("low"),
+            None,
+            Some(r#"[{"cli":"claude","model":"opus","effort":"high"}]"#),
+            Some(config),
+        )
+        .unwrap();
+        assert_eq!(specs[0].cli, cas_mux::SupervisorCli::Claude);
+        assert_eq!(specs[0].model.as_deref(), Some("opus"));
+        assert_eq!(specs[0].effort, Some(cas_mux::Effort::High));
+        assert_eq!(specs[1].model.as_deref(), Some("gpt-6.1-sol"));
+        assert_eq!(specs[1].effort, Some(cas_mux::Effort::Low));
+        assert!(
+            sources.contains("slot 1: cli=explicit, model=explicit, effort=explicit"),
+            "{sources}"
+        );
+        assert!(
+            sources.contains("slot 2: cli=explicit, model=explicit, effort=explicit"),
+            "{sources}"
+        );
+    }
+
+    #[test]
+    fn spawn_explicit_harness_repairs_incompatible_worker_role_model() {
+        let _home = TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let config = project.path().join("config.toml");
+        std::fs::write(&config,
+            "[llm.worker]\nharness = \"codex\"\nmodel = \"gpt-6.1-sol\"\nreasoning_effort = \"low\"\n",
+        ).unwrap();
+        let (specs, sources) = resolve_spawn_specs_with_project_config(
+            1,
+            Some("claude"),
+            None,
+            None,
+            None,
+            None,
+            Some(config),
+        )
+        .unwrap();
+        assert_eq!(specs[0].cli, cas_mux::SupervisorCli::Claude);
+        assert_eq!(specs[0].model.as_deref(), Some("opus"));
+        assert_eq!(specs[0].effort, Some(cas_mux::Effort::High));
+        assert!(
+            sources.contains("cli=explicit, model=registry, effort=registry"),
+            "{sources}"
+        );
+    }
+
+    #[test]
     fn spawn_policy_fallback_models_are_allowed_by_shipped_routing_doc() {
         // Isolate HOME so no user or project-level worker override can mask
         // the stock fallback this regression is intended to guard.
@@ -12673,7 +12903,7 @@ model = "local/qwen3.8"
         let warning = spawn_spec_warning(false, false, &json);
 
         assert!(
-            warning.contains("policy default codex/gpt-6-sol/medium"),
+            warning.contains("resolved to codex/gpt-6.1-sol/high"),
             "{warning}"
         );
         assert!(
@@ -12693,11 +12923,11 @@ model = "local/qwen3.8"
         let warning = spawn_specs_warning(false, false, &specs);
 
         assert!(
-            warning.contains("policy default codex/gpt-6-sol/medium"),
+            warning.contains("resolved to codex/gpt-6.1-sol/high"),
             "{warning}"
         );
         assert!(
-            warning.contains("policy default claude/opus/high"),
+            warning.contains("resolved to claude/opus/high"),
             "{warning}"
         );
     }
@@ -12739,7 +12969,7 @@ effort = "high"
         assert_eq!(spec.model.as_deref(), Some("sonnet"));
         assert_eq!(spec.effort, Some(cas_mux::Effort::High));
         assert!(
-            warning.contains("configured fallback claude/sonnet/high"),
+            warning.contains("resolved to claude/sonnet/high"),
             "{warning}"
         );
     }

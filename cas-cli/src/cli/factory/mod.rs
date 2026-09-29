@@ -2639,7 +2639,7 @@ mod tests {
         normalize_supervisor_spec(&mut spec, &sources).unwrap();
 
         assert_eq!(spec.cli, cas_mux::SupervisorCli::Codex);
-        assert_eq!(spec.model.as_deref(), Some("gpt-6-sol"));
+        assert_eq!(spec.model.as_deref(), Some("gpt-6.1-sol"));
         assert_eq!(spec.effort, Some(cas_mux::Effort::Medium));
 
         let (supervisor_cli, supervisor_model, supervisor_effort) =
@@ -2665,7 +2665,7 @@ mod tests {
             .expect("Codex supervisor must receive a model argument");
         assert_eq!(
             supervisor.args.get(model_idx + 1).map(String::as_str),
-            Some("gpt-6-sol")
+            Some("gpt-6.1-sol")
         );
         assert!(
             supervisor

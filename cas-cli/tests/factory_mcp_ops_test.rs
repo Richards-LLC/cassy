@@ -1524,11 +1524,15 @@ async fn test_spawn_workers_isolate_flag_in_isolated_child() {
     let text = get_text(&result);
     assert!(
         text.contains(&format!(
-            "policy default codex/{}/{}",
+            "resolved to codex/{}/{}",
             cas::config::STOCK_WORKER_MODEL,
             cas::config::STOCK_WORKER_REASONING_EFFORT
         )),
-        "caller-facing response must name the resolved policy fallback: {text}"
+        "caller-facing response must name the resolved fallback: {text}"
+    );
+    assert!(
+        text.contains("cli=registry, model=registry, effort=registry"),
+        "{text}"
     );
 
     let entries = env.spawn_queue().peek(10).expect("peek");
@@ -2232,6 +2236,57 @@ async fn test_spawn_workers_no_cli_override_queues_safe_worker_spec_in_isolated_
         spec.effort,
         Some(cas::config::STOCK_WORKER_REASONING_EFFORT.parse().unwrap())
     );
+}
+
+#[test]
+fn test_spawn_workers_worker_llm_config_reaches_queue_and_receipt() {
+    run_isolated_codex_test(
+        "test_spawn_workers_worker_llm_config_reaches_queue_and_receipt_in_isolated_child",
+        IsolatedCodexState::Available,
+    );
+}
+
+#[tokio::test]
+#[ignore = "subprocess helper for deterministic available-Codex probe"]
+async fn test_spawn_workers_worker_llm_config_reaches_queue_and_receipt_in_isolated_child() {
+    let env = factory_env_in_isolated_codex_child(
+        "test_spawn_workers_worker_llm_config_reaches_queue_and_receipt_in_isolated_child",
+    );
+    env.create_epic("Worker defaults Epic");
+    std::fs::write(
+        env.cas_root.join("config.toml"),
+        "[llm.worker]\nharness = \"codex\"\nmodel = \"gpt-6.1-sol\"\nreasoning_effort = \"high\"\n",
+    )
+    .expect("write worker overrides");
+    let mut req = factory_req("spawn_workers");
+    req.count = Some(1);
+    req.isolate = Some(true);
+    let result = env
+        .service
+        .factory_request(Parameters(req))
+        .await
+        .expect("configured spawn");
+    let text = get_text(&result);
+    assert!(
+        text.contains("codex model=gpt-6.1-sol effort=high"),
+        "{text}"
+    );
+    assert!(
+        text.contains("cli=llm config, model=llm config, effort=llm config"),
+        "{text}"
+    );
+    let entries = env.spawn_queue().peek(10).expect("peek");
+    assert_eq!(entries.len(), 1);
+    let spec: cas_mux::WorkerSpec = serde_json::from_str(
+        entries[0]
+            .worker_spec
+            .as_deref()
+            .expect("resolved queue spec"),
+    )
+    .expect("valid WorkerSpec");
+    assert_eq!(spec.cli, cas_mux::SupervisorCli::Codex);
+    assert_eq!(spec.model.as_deref(), Some("gpt-6.1-sol"));
+    assert_eq!(spec.effort, Some(cas_mux::Effort::High));
 }
 
 // =============================================================================

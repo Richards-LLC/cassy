@@ -5,8 +5,8 @@ model = "opus"
 effort = "high"
 
 [defaults.codex]
-model = "gpt-6-sol"
-effort = "medium"
+model = "gpt-6.1-sol"
+effort = "high"
 
 [defaults.grok]
 model = "grok-4.5"
@@ -15,6 +15,15 @@ effort = "high"
 [defaults.opencode]
 model = "qwencloud/qwen3.8-max"
 effort = "medium"
+
+[recipes.codex_sol_6_1]
+harness = "codex"
+provider = "openai"
+model = "gpt-6.1-sol"
+default_effort = "high"
+allowed_efforts = ["low", "medium", "high", "xhigh", "max"]
+status = "active"
+required_capability = "codex-account"
 
 [recipes.codex_sol_6]
 harness = "codex"
@@ -147,8 +156,8 @@ candidates = ["codex_luna_6"]
 fallbacks = ["claude_opus_5_5_low"]
 
 [lanes.standard]
-candidates = ["codex_sol_6"]
-fallbacks = ["codex_luna_6"]
+candidates = ["codex_sol_6_1"]
+fallbacks = ["codex_sol_6"]
 
 [lanes.taste]
 candidates = ["claude_opus_5_5"]

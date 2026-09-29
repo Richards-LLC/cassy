@@ -1848,6 +1848,9 @@ new_cut_fixture() {
       git config user.email test@test.invalid
       git config user.name 'Release Train Test'
       mkdir -p scripts cas-cli/src/builtins .context/zig .cas/merge-sweeps
+      # Delivery-target locks are expected assembly bookkeeping; runtime logs
+      # remain visible to the session-discovery dirty-tree regression.
+      printf '.cas/locks/\n' > .gitignore
       printf '# release fixture\n\n## [Unreleased]\n\n- pending\n' > CHANGELOG.md
       if [[ "$include_heading" == 1 ]]; then
           printf '\n## [%s] - %s\n\n- fixture release\n' "$version" "$(date -u +%F)" >> CHANGELOG.md
@@ -2285,6 +2288,9 @@ cat >"$combined_gate" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' gate >>"${CUT_LOG:?}"
+if [[ -n "${COMBINED_GATE_REQUIRE_FILE:-}" && ! -f "$COMBINED_GATE_REQUIRE_FILE" ]]; then
+    exit 18
+fi
 if [[ -n "${COMBINED_GATE_FAIL_MARKER:-}" && ! -e "$COMBINED_GATE_FAIL_MARKER" ]]; then
     : >"$COMBINED_GATE_FAIL_MARKER"
     exit 17
@@ -2427,12 +2433,71 @@ else
         bad "announce blocker receipt contract failed: $announce_blocker_out"
     fi
 fi
+# Another sweep may be pending while this already-published cut announces.
+# Its assembly suffix must stay frozen at the landed release.
+python3 - "$combined_resume_wt/.cas/merge-sweeps/integration.json" <<'PYFIX'
+import json
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+data.update(status='RUNNING', tip='1' * 40)
+path.write_text(json.dumps(data))
+PYFIX
 if run_combined_cut "$combined_resume_version" "$combined_resume_wt" --cut --resume >/dev/null 2>&1 \
     && [[ -s "$combined_resume_dir/stage.host-update.done" ]] \
     && [[ "$(grep -c '^gate$' "$combined_log")" == 3 ]]; then
-    ok '--cut --resume is idempotent after gate and announce blockers'
+    ok '--cut --resume is idempotent after gate and announce blockers despite a newer pending union'
 else
     bad 'final --cut --resume did not finish or reran the gate'
+fi
+
+# A fixed epic advances integration after the first gate fails. Resume must
+# consume it and prepare the release again, retaining its draft.
+refresh_version=9.99.27
+rm -f "$combined_resume_dir/receipts.commit"
+refresh_wt="$(new_combined_cut_fixture integration-refresh "$refresh_version")"
+refresh_dir="$($train "$refresh_version" "$refresh_wt" --print-run-dir)"
+combined_gate_fail_marker=""
+combined_announce_fail_marker=""
+if COMBINED_GATE_REQUIRE_FILE=integration-fixed.txt run_combined_cut "$refresh_version" "$refresh_wt" --cut \
+    >"$tmp/refresh-first.out" 2>&1; then
+    bad 'integration refresh fixture missed its first gate failure'
+elif ! grep -qF 'BLOCKER gate' "$tmp/refresh-first.out"; then
+    bad "integration refresh fixture failed before the gate: $(cat "$tmp/refresh-first.out")"
+fi
+refresh_project="$(basename "$refresh_wt")"
+old_refresh_tip="$(git -C "$refresh_wt" rev-parse "integration/$refresh_project")"
+git -C "$refresh_wt" checkout -qb epic/gate-fix "$old_refresh_tip"
+printf 'fixed gate input\n' >"$refresh_wt/integration-fixed.txt"
+git -C "$refresh_wt" add integration-fixed.txt
+git -C "$refresh_wt" commit -qm 'fix gate on epic'
+new_refresh_tip="$(git -C "$refresh_wt" rev-parse HEAD)"
+git -C "$refresh_wt" update-ref "refs/heads/integration/$refresh_project" "$new_refresh_tip"
+python3 - "$refresh_wt/.cas/merge-sweeps/integration.json" "$new_refresh_tip" <<'PYFIX'
+import json
+from pathlib import Path
+import sys
+path, tip = Path(sys.argv[1]), sys.argv[2]
+data = json.loads(path.read_text())
+data.update(status='PASSED', tip=tip, epics=[{'branch': 'epic/gate-fix', 'tip': tip}])
+path.write_text(json.dumps(data))
+PYFIX
+git -C "$refresh_wt" checkout -q "release/$refresh_version"
+refresh_draft="$refresh_wt/docs/release-notes/2099-01-02-v${refresh_version}-slack.md"
+printf '\nPreserve this release draft edit.\n' >>"$refresh_draft"
+git -C "$refresh_wt" add docs/release-notes
+git -C "$refresh_wt" commit -qm 'keep release docs after gate failure'
+COMBINED_GATE_REQUIRE_FILE=integration-fixed.txt CAS_RELEASE_TRAIN_CUT_STOP_AFTER=gate \
+    run_combined_cut "$refresh_version" "$refresh_wt" --cut --resume >"$tmp/refresh-resume.out" 2>&1 || true
+if grep -qF 'stopped after stage gate' "$tmp/refresh-resume.out" \
+    && git -C "$refresh_wt" merge-base --is-ancestor "$new_refresh_tip" HEAD \
+    && grep -qF 'Preserve this release draft edit.' "$refresh_draft" \
+    && grep -qF 'stage prep: start' "$tmp/refresh-resume.out" \
+    && grep -qF 'stage ledger: start' "$tmp/refresh-resume.out"; then
+    ok 'gate failure resume consumes advanced integration, retains draft and reruns prep/ledger before gating'
+else
+    bad "gate failure resume tested the stale integration tip: $(cat "$tmp/refresh-resume.out")"
 fi
 
 combined_lint_version=9.99.14

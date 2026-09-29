@@ -30,11 +30,6 @@ fn minimum_version_from_gate_error(error: &str) -> Option<(u64, u64, u64)> {
 }
 
 /// The build that is recording a queue verdict right now.
-///
-/// Stamping every failure with it is what makes "requeue once after an
-/// upgrade" decidable: a row parked by an older build (or by a build old
-/// enough to predate the column, leaving NULL) gets exactly one fresh attempt
-/// under the new client, while a row this build already parked stays parked.
 pub(crate) fn recording_client_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
@@ -315,10 +310,11 @@ impl SyncQueue {
         Ok(reset)
     }
 
-    /// Requeue terminal failures caused by an older client once this build
-    /// meets the server's recorded minimum version. The diagnostic is cleared
-    /// with the retry counter so the operation is idempotent: a second push
-    /// sees no matching gate error after the first reset.
+    /// Requeue terminal failures caused by a client version gate once this
+    /// build meets the server's recorded minimum version. `last_error` is the
+    /// latest failure even when an earlier cloud verdict remains in
+    /// `last_outcome`. The diagnostic is cleared with the retry counter so a
+    /// second push cannot repeat the reset.
     pub fn requeue_version_gated_failures(
         &self,
         current_version: &str,
@@ -356,70 +352,6 @@ impl SyncQueue {
             requeued += tx.execute(
                 "UPDATE sync_queue SET retry_count = 0, last_error = NULL WHERE id = ?1 AND last_error = ?2",
                 params![id, error],
-            )?;
-        }
-        tx.commit()?;
-        Ok(requeued)
-    }
-
-    /// Give terminal rows parked by an older client build exactly one fresh
-    /// attempt after an upgrade.
-    ///
-    /// A row that only this build parked is left alone, and a row the cloud
-    /// refused for a permanent reason (an ownership collision that no client
-    /// version can repair) stays parked with its reason intact. Every requeued
-    /// row is stamped with the current build, so the operation is idempotent
-    /// within a version even if the row is never attempted again.
-    pub fn requeue_stale_client_failures(
-        &self,
-        current_version: &str,
-        max_retries: i32,
-    ) -> Result<usize, CasError> {
-        let Some(current) = parse_numeric_version(current_version) else {
-            return Ok(0);
-        };
-
-        let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
-        let candidates = {
-            let mut stmt = tx.prepare(
-                r#"
-                SELECT id, failed_client_version, last_outcome, last_reason
-                FROM sync_queue
-                WHERE retry_count >= ?1
-                "#,
-            )?;
-            stmt.query_map(params![max_retries], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?
-        };
-
-        let mut requeued = 0;
-        for (id, parked_by, outcome, reason) in candidates {
-            if outcome.as_deref() == Some("rejected")
-                && crate::cloud::syncer::push_reason_is_permanent(reason.as_deref().unwrap_or(""))
-            {
-                continue;
-            }
-            // A NULL stamp is a row parked before this client learned to record
-            // the build, which is by definition older than the current one.
-            if let Some(parked_by) = parked_by.as_deref() {
-                match parse_numeric_version(parked_by) {
-                    Some(parked) if parked >= current => continue,
-                    // An unparseable stamp is not evidence of a newer build;
-                    // treat it like an unknown older client and retry once.
-                    _ => {}
-                }
-            }
-            requeued += tx.execute(
-                "UPDATE sync_queue SET retry_count = 0, failed_client_version = ?2 WHERE id = ?1",
-                params![id, current_version],
             )?;
         }
         tx.commit()?;

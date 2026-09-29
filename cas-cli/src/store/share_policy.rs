@@ -47,6 +47,16 @@ pub(crate) fn resolve_team_id(cloud_config: &CloudConfig) -> Option<Arc<str>> {
     cloud_config.active_team_id().map(Arc::from)
 }
 
+/// An explicit foreign or migration-unknown origin cannot be published by
+/// this project's syncing wrappers. Older unstamped test fixtures keep their
+/// legacy path; the push guard handles them before any HTTP request.
+pub(crate) fn origin_is_foreign_or_unknown(origin: Option<&str>, local: Option<&str>) -> bool {
+    origin.is_some_and(|origin| {
+        origin == "unknown"
+            || local.is_some_and(|local| !crate::cloud::project_ids_match(origin, local))
+    })
+}
+
 /// Filter policy for an `Entry`.
 ///
 /// Per filter-policy Decision 1 + Decision 2 precedence table:
@@ -102,6 +112,7 @@ mod tests {
 
     fn entry_with(scope: Scope, entry_type: EntryType, share: Option<ShareScope>) -> Entry {
         Entry {
+            origin_project: None,
             source_ids: Vec::new(),
             id: "p-test-001".to_string(),
             scope,
@@ -142,10 +153,18 @@ mod tests {
 
     #[test]
     fn entry_share_private_blocks_promotion_regardless_of_scope_or_type() {
-        let e = entry_with(Scope::Project, EntryType::Learning, Some(ShareScope::Private));
+        let e = entry_with(
+            Scope::Project,
+            EntryType::Learning,
+            Some(ShareScope::Private),
+        );
         assert!(!eligible_for_team_entry(&e));
 
-        let e = entry_with(Scope::Global, EntryType::Learning, Some(ShareScope::Private));
+        let e = entry_with(
+            Scope::Global,
+            EntryType::Learning,
+            Some(ShareScope::Private),
+        );
         assert!(!eligible_for_team_entry(&e));
 
         let e = entry_with(

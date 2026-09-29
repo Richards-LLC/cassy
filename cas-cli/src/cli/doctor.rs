@@ -3535,6 +3535,30 @@ fn output_foreign_rows_detail(
     ))?;
     fmt.newline()?;
 
+    for kind in ["task", "entry", "rule"] {
+        let mut authored = 0;
+        let mut foreign = 0;
+        let mut unknown = 0;
+        for row in report.provenance.iter().filter(|row| row.kind == kind) {
+            match &row.state {
+                crate::cli::foreign_rows::ProvenanceState::Authored => authored += 1,
+                crate::cli::foreign_rows::ProvenanceState::Foreign { .. } => foreign += 1,
+                crate::cli::foreign_rows::ProvenanceState::Unknown => unknown += 1,
+            }
+        }
+        let plural = match kind {
+            "entry" => "entries",
+            "task" => "tasks",
+            _ => "rules",
+        };
+        fmt.write_raw(&format!(
+            "  {plural}: {authored} authored, {foreign} foreign, {unknown} unknown"
+        ))?;
+        fmt.newline()?;
+    }
+    fmt.write_muted("  Review: cas cloud purge-foreign --dry-run; unknown: cas cloud adopt-unknown --dry-run")?;
+    fmt.newline()?;
+
     for peer in &report.peers_unreadable {
         fmt.warning(&format!(
             "NOT COMPARED: {} ({}) — {}",
@@ -5552,8 +5576,8 @@ mod tests {
     #[test]
     fn hub_audit_check_errors_only_on_a_recorded_writer_failure() {
         let temp = TempDir::new().unwrap();
-        let now = chrono::Utc::now();
         fs::write(temp.path().join(crate::hub::AUDIT_LOG_FILE), b"{}\n").unwrap();
+        let now = chrono::Utc::now();
         let quiet = hub_audit_check_for(temp.path(), now + chrono::Duration::days(2));
         assert!(matches!(quiet.status, CheckStatus::Ok), "{}", quiet.message);
         assert!(quiet.message.starts_with("last row 2d ago"), "{}", quiet.message);
@@ -6792,6 +6816,26 @@ mod tests {
     }
 
     #[test]
+    fn doctor_names_task_entry_rule_provenance_counts_and_commands() {
+        use crate::cli::foreign_rows::{ForeignRowReport, ProvenanceRow, ProvenanceState};
+        let report = ForeignRowReport {
+            provenance: vec![
+                ProvenanceRow { kind: "task", id: "t".into(), label: "task".into(), state: ProvenanceState::Foreign { project: "other".into(), source: "origin_project" } },
+                ProvenanceRow { kind: "entry", id: "e".into(), label: "entry".into(), state: ProvenanceState::Unknown },
+                ProvenanceRow { kind: "rule", id: "r".into(), label: "rule".into(), state: ProvenanceState::Authored },
+            ],
+            ..Default::default()
+        };
+        let check = foreign_rows_check(Ok(&report), None, 0);
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(check.message.contains("tasks: 0 authored, 1 foreign, 0 unknown"));
+        assert!(check.message.contains("entries: 0 authored, 0 foreign, 1 unknown"));
+        assert!(check.message.contains("rules: 1 authored, 0 foreign, 0 unknown"));
+        assert!(check.message.contains("cas cloud purge-foreign --dry-run"));
+        assert!(check.message.contains("cas cloud adopt-unknown --dry-run"));
+    }
+
+    #[test]
     fn foreign_rows_check_explains_when_purge_cannot_reach_evidence_rows() {
         use crate::cli::cloud::{PurgeDeleteSet, PurgeEntity, PurgeForeignAnalysis};
         use crate::cli::foreign_rows::{ForeignRow, ForeignRowReport};
@@ -7626,6 +7670,7 @@ mod tests {
             crate::store::known_repos::ensure_host_schema().unwrap();
             let without_store = home.join("registered-without-cas");
             std::fs::create_dir_all(&without_store).unwrap();
+            std::process::Command::new("git").arg("init").arg(&without_store).output().unwrap();
             crate::store::known_repos::register_repo_strict(&without_store).unwrap();
 
             let check = host_known_repos_check();
@@ -7649,7 +7694,7 @@ mod tests {
         crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
             crate::store::known_repos::ensure_host_schema().unwrap();
             let gone = home.join("gone-repo");
-            crate::store::known_repos::register_repo_strict(&gone).unwrap();
+            crate::store::known_repos::open_host_known_repo_store().unwrap().upsert(&gone).unwrap();
 
             let check = host_known_repos_check();
             assert!(matches!(check.status, CheckStatus::Warning));
@@ -7704,6 +7749,7 @@ mod tests {
             let current = home.join("current-project");
             let other = home.join("other-project");
             std::fs::create_dir_all(current.join(".cas")).unwrap();
+            std::fs::write(current.join(".cas/config.toml"), "[project]\ncanonical_id = \"current\"\n").unwrap();
             crate::store::known_repos::register_repo_strict(&current).unwrap();
 
             let current_only = registered_project_root_checks(&current);
@@ -7712,6 +7758,7 @@ mod tests {
             assert!(current_only[0].message.contains("no registered"));
 
             std::fs::create_dir_all(other.join(".cas")).unwrap();
+            std::fs::write(other.join(".cas/config.toml"), "[project]\ncanonical_id = \"other\"\n").unwrap();
             crate::store::known_repos::register_repo_strict(&other).unwrap();
             let checks = registered_project_root_checks(&current);
             let messages = checks

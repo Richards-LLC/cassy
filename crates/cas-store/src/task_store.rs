@@ -316,7 +316,7 @@ impl SqliteTaskStore {
              pending_verification = ?18, pending_worktree_merge = ?19,
              epic_verification_owner = ?20, team_id = ?21, deliverables = ?22,
              demo_statement = ?23, execution_note = ?24, share = ?25, depth = ?26,
-             terminal_outcome = ?27, origin_project = ?28, delivery_mode = ?29,
+             terminal_outcome = ?27, origin_project = COALESCE(?28, origin_project), delivery_mode = ?29,
              risk = ?30, proof_targets = ?31
              WHERE id = ?32 AND status = ?33 AND updated_at = ?34",
             params![
@@ -959,10 +959,10 @@ impl TaskStore for SqliteTaskStore {
                 persisted_deliverables.merge_conflicted = false;
             }
 
-            let persisted_origin_project = task
-                .origin_project
-                .as_ref()
-                .or(self.origin_project.as_ref());
+            // Updates preserve the row's provenance. Only creation supplies a
+            // default; an unattributed imported task must not become local on
+            // its next edit.
+            let persisted_origin_project = task.origin_project.as_ref();
 
             let rows = tx.execute(
             "UPDATE tasks SET title = ?1, description = ?2, design = ?3,
@@ -972,7 +972,7 @@ impl TaskStore for SqliteTaskStore {
              branch = ?16, worktree_id = ?17,
              pending_verification = ?18, pending_worktree_merge = ?19, epic_verification_owner = ?20, team_id = ?21,
              deliverables = ?22, demo_statement = ?23, execution_note = ?24, share = ?25, depth = ?26,
-             terminal_outcome = ?27, origin_project = ?28, delivery_mode = ?29,
+             terminal_outcome = ?27, origin_project = COALESCE(?28, origin_project), delivery_mode = ?29,
              risk = ?30, proof_targets = ?31
              WHERE id = ?32",
             params![

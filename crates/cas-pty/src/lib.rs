@@ -61,6 +61,7 @@ pub use conformance::{
     opencode_11823_token_plan_conformance_receipt,
 };
 pub use error::{Error, Result};
+pub use pty::claude_supports_chrome_flag;
 pub use pty::{
     ContractRole, PROTECTED_OPERATOR_ENV, claude_supervisor_contract, claude_worker_contract,
     missing_contract_elements, rendered_contract_surface,

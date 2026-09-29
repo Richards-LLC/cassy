@@ -11,6 +11,7 @@ mod common;
 use common::make_cloud_config;
 
 use cas::cloud::{CloudSyncer, CloudSyncerConfig, EntityType, SyncOperation, SyncQueue};
+use cas::store::{open_store_local, open_task_store_local};
 use tempfile::TempDir;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -26,8 +27,14 @@ fn entry_payload(id: &str) -> String {
         "content": "x",
         "type": "learning",
         "scope": "project",
+        "origin_project": "p",
     })
     .to_string()
+}
+
+fn init_entries(root: &TempDir) {
+    open_store_local(root.path()).unwrap();
+    open_task_store_local(root.path()).unwrap();
 }
 
 /// Aggregate-only skips are last-write-wins acknowledgements: the row is
@@ -51,7 +58,12 @@ async fn skipped_response_is_acknowledged_as_lww() {
     let tmp = TempDir::new().unwrap();
     // Pin the scratch root: the ephemeral-project guard refuses an unpinned
     // root under the temp directory, and a TempDir is exactly that.
-    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
+    std::fs::write(
+        tmp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"p\"\n",
+    )
+    .unwrap();
+    init_entries(&tmp);
     let cas_dir = tmp.path();
 
     // Seed: one queued upsert for an entry. Use a fresh cas.db in TempDir
@@ -142,7 +154,12 @@ async fn per_row_rejected_outcome_stays_visible_with_reason() {
     let tmp = TempDir::new().unwrap();
     // Pin the scratch root: the ephemeral-project guard refuses an unpinned
     // root under the temp directory, and a TempDir is exactly that.
-    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
+    std::fs::write(
+        tmp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"p\"\n",
+    )
+    .unwrap();
+    init_entries(&tmp);
     let queue = SyncQueue::open(tmp.path()).unwrap();
     queue.init().unwrap();
     queue
@@ -209,7 +226,12 @@ async fn itemized_rejection_syncs_owned_row_and_names_project_mismatch() {
     let tmp = TempDir::new().unwrap();
     // Pin the scratch root: the ephemeral-project guard refuses an unpinned
     // root under the temp directory, and a TempDir is exactly that.
-    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
+    std::fs::write(
+        tmp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"p\"\n",
+    )
+    .unwrap();
+    init_entries(&tmp);
     let queue = SyncQueue::open(tmp.path()).unwrap();
     queue.init().unwrap();
     for id in ["owned-project-entry-001", "rejected-project-entry-002"] {
@@ -287,7 +309,12 @@ async fn itemized_rejection_subset_settles_unrejected_rows_for_six_of_twenty() {
     let tmp = TempDir::new().unwrap();
     // Pin the scratch root: the ephemeral-project guard refuses an unpinned
     // root under the temp directory, and a TempDir is exactly that.
-    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
+    std::fs::write(
+        tmp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"p\"\n",
+    )
+    .unwrap();
+    init_entries(&tmp);
     let queue = SyncQueue::open(tmp.path()).unwrap();
     queue.init().unwrap();
     let all_ids = rejected_ids
@@ -360,7 +387,12 @@ async fn legacy_response_without_skipped_field_marks_items_synced() {
     let tmp = TempDir::new().unwrap();
     // Pin the scratch root: the ephemeral-project guard refuses an unpinned
     // root under the temp directory, and a TempDir is exactly that.
-    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
+    std::fs::write(
+        tmp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"p\"\n",
+    )
+    .unwrap();
+    init_entries(&tmp);
     let cas_dir = tmp.path();
 
     let queue = SyncQueue::open(cas_dir).unwrap();

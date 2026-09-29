@@ -9,13 +9,13 @@ use crate::cloud::{EntityType, QueuedSync, SyncOperation, canonical_project_id_w
 use crate::error::CasError;
 use chrono::Utc;
 
-fn stamp_task_origin_project(value: &mut serde_json::Value, project_id: &str) {
+fn prepare_task_origin_project(value: &mut serde_json::Value, project_id: &str) -> bool {
     if let Some(task) = value.as_object_mut() {
         // Global tasks are personal-only and deliberately carry no project
         // identity in their queued payload. Leave both fields untouched if a
         // legacy caller routes one through this helper.
         if task.get("scope").and_then(serde_json::Value::as_str) == Some("global") {
-            return;
+            return false;
         }
 
         // Team task rows are project-scoped. Legacy queue payloads may have
@@ -27,84 +27,76 @@ fn stamp_task_origin_project(value: &mut serde_json::Value, project_id: &str) {
             serde_json::Value::String("project".to_string()),
         );
 
-        // Supervisor reassignment is carried by a non-empty origin_project in
-        // the queued payload. Only legacy rows without a usable identity need
-        // to inherit the project performing the push.
+        // The stored origin is authoritative. A legacy payload without it
+        // cannot safely claim the project performing this push.
         let explicit_origin = task
             .get("origin_project")
             .and_then(serde_json::Value::as_str)
             .map(str::trim)
             .filter(|origin| !origin.is_empty());
-        if let Some(origin) = explicit_origin {
+        if let Some(origin) = explicit_origin.filter(|origin| {
+            *origin != "unknown" && crate::cloud::project_ids_match(origin, project_id)
+        }) {
             if let Some(canonical) = canonical_project_id_with_pin(origin, Some(project_id)) {
                 task.insert(
                     "origin_project".to_string(),
                     serde_json::Value::String(canonical),
                 );
+                return true;
             }
-        } else {
-            task.insert(
-                "origin_project".to_string(),
-                serde_json::Value::String(
-                    canonical_project_id_with_pin(project_id, Some(project_id))
-                        .unwrap_or_else(|| project_id.to_string()),
-                ),
-            );
         }
     }
+    false
 }
 
-/// cas-3a90 (GH #909): entries, rules and skills carry the project that
-/// authored them, so a pull elsewhere can refuse a row that is not its own
-/// instead of trusting the echoed project scope. An explicit origin is kept.
-/// Global-scope rows are personal and stay unstamped, as global tasks do.
-pub(super) fn stamp_row_origin_project(value: &mut serde_json::Value, project_id: &str) {
+/// Skills have no stored origin column yet, so only a missing payload origin
+/// may be stamped with the project selected for this push.
+pub(super) fn stamp_row_origin_project(value: &mut serde_json::Value, project_id: &str) -> bool {
     let Some(row) = value.as_object_mut() else {
-        return;
+        return false;
     };
+    if let Some(origin) = row.get("origin_project") {
+        return origin.as_str().is_some_and(|origin| {
+            let origin = origin.trim();
+            !origin.is_empty()
+                && origin != "unknown"
+                && crate::cloud::project_ids_match(origin, project_id)
+        });
+    }
     if row.get("scope").and_then(serde_json::Value::as_str) == Some("global") {
-        return;
+        return true;
     }
-    let has_origin = row
-        .get("origin_project")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|origin| !origin.trim().is_empty());
-    if !has_origin {
-        row.insert(
-            "origin_project".to_string(),
-            serde_json::Value::String(
-                canonical_project_id_with_pin(project_id, Some(project_id))
-                    .unwrap_or_else(|| project_id.to_string()),
-            ),
-        );
-    }
+    let Some(canonical) = canonical_project_id_with_pin(project_id, Some(project_id)) else {
+        return false;
+    };
+    row.insert(
+        "origin_project".to_string(),
+        serde_json::Value::String(canonical),
+    );
+    true
 }
 
-fn stamp_task_dependency_origin_project(value: &mut serde_json::Value, project_id: &str) {
+fn stamp_task_dependency_origin_project(value: &mut serde_json::Value, project_id: &str) -> bool {
     let Some(object) = value.as_object_mut() else {
-        return;
+        return false;
     };
     let explicit_origin = object
         .get("origin_project")
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|origin| !origin.is_empty());
-    if let Some(origin) = explicit_origin {
+    if let Some(origin) = explicit_origin.filter(|origin| {
+        *origin != "unknown" && crate::cloud::project_ids_match(origin, project_id)
+    }) {
         if let Some(canonical) = canonical_project_id_with_pin(origin, Some(project_id)) {
             object.insert(
                 "origin_project".to_string(),
                 serde_json::Value::String(canonical),
             );
+            return true;
         }
-    } else {
-        object.insert(
-            "origin_project".to_string(),
-            serde_json::Value::String(
-                canonical_project_id_with_pin(project_id, Some(project_id))
-                    .unwrap_or_else(|| project_id.to_string()),
-            ),
-        );
     }
+    false
 }
 
 /// Preserve the response diagnostics that ureq otherwise hides behind its
@@ -130,6 +122,8 @@ impl CloudSyncer {
     pub fn push_team(&self, team_id: &str) -> Result<SyncResult, CasError> {
         let mut result = SyncResult::default();
         let start = Instant::now();
+
+        self.queue.drop_queued_user_prompts()?;
 
         self.requeue_version_gated_items()?;
 
@@ -341,21 +335,54 @@ impl CloudSyncer {
                 Some(payload) => match serde_json::from_str::<serde_json::Value>(payload) {
                     Ok(mut value) => {
                         let target_project = item.project_id.as_deref().unwrap_or(project_id);
-                        // Rows queued before origin_project existed still need
-                        // the target scoped identity when they are retried. The
-                        // outer project_canonical_id is not a substitute: task
-                        // consumers also rely on the row-level field.
-                        if entity_type == EntityType::Task {
-                            stamp_task_origin_project(&mut value, target_project);
-                        }
-                        if entity_type == EntityType::TaskDependency {
-                            stamp_task_dependency_origin_project(&mut value, target_project);
-                        }
                         if matches!(
                             entity_type,
-                            EntityType::Entry | EntityType::Rule | EntityType::Skill
+                            EntityType::Task | EntityType::Entry | EntityType::Rule
                         ) {
-                            stamp_row_origin_project(&mut value, target_project);
+                            match self.restore_queued_origin(
+                                &mut value,
+                                entity_type,
+                                &item.entity_id,
+                                project_id,
+                            ) {
+                                Ok(true) => {}
+                                Ok(false) => {
+                                    let _ = self.queue.park_failed(
+                                        item.id,
+                                        "row has no attributable origin_project",
+                                        self.config.max_retries,
+                                    );
+                                    continue;
+                                }
+                                Err(error) => {
+                                    let _ = self.queue.mark_failed(item.id, &error.to_string());
+                                    continue;
+                                }
+                            }
+                        }
+                        // The outer project_canonical_id is a routing key; it
+                        // cannot establish a legacy row's authoring project.
+                        if entity_type == EntityType::Task
+                            && !prepare_task_origin_project(&mut value, target_project)
+                        {
+                            let _ = self.queue.park_failed(
+                                item.id,
+                                "task has no attributable origin_project",
+                                self.config.max_retries,
+                            );
+                            continue;
+                        }
+                        if (entity_type == EntityType::TaskDependency
+                            && !stamp_task_dependency_origin_project(&mut value, target_project))
+                            || (entity_type == EntityType::Skill
+                                && !stamp_row_origin_project(&mut value, target_project))
+                        {
+                            let _ = self.queue.park_failed(
+                                item.id,
+                                "row has no local attributable origin_project",
+                                self.config.max_retries,
+                            );
+                            continue;
                         }
                         upserts_by_project
                             .entry(target_project.to_string())
@@ -575,9 +602,9 @@ impl CloudSyncer {
                     for item in &batch_items {
                         let _ = self.queue.mark_failed(item.id, &e.to_string());
                         if let Some(reason) = reason.as_deref() {
-                            let _ = self
-                                .queue
-                                .record_row_outcome(item.id, "rejected", Some(reason));
+                            let _ =
+                                self.queue
+                                    .record_row_outcome(item.id, "rejected", Some(reason));
                         }
                     }
                     errors.push(format!("{entity_key} push failed: {e}"));
@@ -950,99 +977,91 @@ impl CloudSyncer {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn queued_task_payloads_receive_current_project_identity() {
-        let mut value = serde_json::json!({"id": "cas-legacy", "title": "old payload"});
-        super::stamp_task_origin_project(&mut value, "acme/accounting");
-        assert_eq!(
-            value.get("scope").and_then(|value| value.as_str()),
-            Some("project")
-        );
-        assert_eq!(
-            value.get("origin_project").and_then(|value| value.as_str()),
-            Some("acme/accounting")
-        );
+    fn team_skill_push_stamps_missing_origin_but_rejects_explicit_unauthored_origin() {
+        let mut local = serde_json::json!({"id": "skill-local", "scope": "project"});
+        assert!(super::stamp_row_origin_project(
+            &mut local,
+            "acme/accounting"
+        ));
+        assert_eq!(local["origin_project"], "acme/accounting");
+
+        for origin in ["unknown", "pulse-card"] {
+            let mut unauthored = serde_json::json!({
+                "id": "skill-foreign", "scope": "project", "origin_project": origin,
+            });
+            assert!(!super::stamp_row_origin_project(
+                &mut unauthored,
+                "acme/accounting"
+            ));
+            assert_eq!(unauthored["origin_project"], origin);
+        }
     }
 
     #[test]
-    fn explicit_task_origin_project_survives_team_push_stamping() {
+    fn queued_task_without_origin_is_rejected_without_stamping() {
+        let mut value = serde_json::json!({"id": "cas-legacy", "title": "old payload"});
+        assert!(!super::prepare_task_origin_project(
+            &mut value,
+            "acme/accounting"
+        ));
+        assert_eq!(value["scope"], "project");
+        assert!(value.get("origin_project").is_none());
+    }
+
+    #[test]
+    fn foreign_task_origin_is_rejected_before_team_push() {
         let mut value = serde_json::json!({
             "id": "cas-reassigned",
             "scope": "project",
             "origin_project": "pulse-card",
         });
-
-        super::stamp_task_origin_project(&mut value, "acme/accounting");
-
-        assert_eq!(
-            value.get("origin_project").and_then(|value| value.as_str()),
-            Some("pulse-card")
-        );
-    }
-
-    #[test]
-    fn missing_task_origin_project_receives_current_project_identity() {
-        let mut value = serde_json::json!({"id": "cas-legacy", "scope": "project"});
-
-        super::stamp_task_origin_project(&mut value, "acme/accounting");
-
-        assert_eq!(
-            value.get("origin_project").and_then(|value| value.as_str()),
-            Some("acme/accounting")
-        );
-    }
-
-    #[test]
-    fn empty_task_origin_project_receives_current_project_identity() {
-        let mut value = serde_json::json!({
-            "id": "cas-legacy",
-            "scope": "project",
-            "origin_project": "",
-        });
-
-        super::stamp_task_origin_project(&mut value, "acme/accounting");
-
-        assert_eq!(
-            value.get("origin_project").and_then(|value| value.as_str()),
-            Some("acme/accounting")
-        );
-    }
-
-    #[test]
-    fn global_task_origin_project_remains_unstamped() {
-        let mut value = serde_json::json!({
-            "id": "cas-global",
-            "scope": "global",
-            "origin_project": null,
-        });
-
-        super::stamp_task_origin_project(&mut value, "acme/accounting");
-
-        assert_eq!(
-            value.get("scope").and_then(|value| value.as_str()),
-            Some("global")
-        );
-        assert!(
-            value
-                .get("origin_project")
-                .is_some_and(serde_json::Value::is_null)
-        );
-    }
-
-    #[test]
-    fn canonical_identity_team_push_stamps_remote_alias_as_canonical() {
-        let mut value = serde_json::json!({
-            "id": "cas-alias",
-            "scope": "project",
-        });
-
-        super::stamp_task_origin_project(
+        assert!(!super::prepare_task_origin_project(
             &mut value,
-            "git@GitHub.com:Richards-LLC/gabber-studio.git",
-        );
+            "acme/accounting"
+        ));
+        assert_eq!(value["origin_project"], "pulse-card");
+    }
 
+    #[test]
+    fn empty_or_unknown_task_origin_is_rejected() {
+        for origin in ["", "unknown"] {
+            let mut value = serde_json::json!({
+                "id": "cas-legacy", "scope": "project", "origin_project": origin,
+            });
+            assert!(!super::prepare_task_origin_project(
+                &mut value,
+                "acme/accounting"
+            ));
+            assert_eq!(value["origin_project"], origin);
+        }
+    }
+
+    #[test]
+    fn global_task_remains_unstamped() {
+        let mut value = serde_json::json!({
+            "id": "cas-global", "scope": "global", "origin_project": null,
+        });
+        assert!(!super::prepare_task_origin_project(
+            &mut value,
+            "acme/accounting"
+        ));
+        assert_eq!(value["scope"], "global");
+        assert!(value["origin_project"].is_null());
+    }
+
+    #[test]
+    fn explicit_remote_origin_is_canonicalized_for_its_project() {
+        let mut value = serde_json::json!({
+            "id": "cas-alias", "scope": "project",
+            "origin_project": "git@GitHub.com:Richards-LLC/gabber-studio.git",
+        });
+        assert!(super::prepare_task_origin_project(
+            &mut value,
+            "github.com/richards-llc/gabber-studio",
+        ));
         assert_eq!(
-            value.get("origin_project").and_then(|value| value.as_str()),
-            Some("github.com/richards-llc/gabber-studio")
+            value["origin_project"],
+            "github.com/richards-llc/gabber-studio"
         );
     }
 
@@ -1053,11 +1072,14 @@ mod tests {
             "origin_project": "git@GitHub.com:Richards-LLC/gabber-studio.git",
         });
 
-        super::stamp_task_dependency_origin_project(&mut value, "gabber-studio");
+        assert!(super::stamp_task_dependency_origin_project(
+            &mut value,
+            "github.com/richards-llc/gabber-studio"
+        ));
 
         assert_eq!(
             value.get("origin_project").and_then(|value| value.as_str()),
-            Some("gabber-studio")
+            Some("github.com/richards-llc/gabber-studio")
         );
     }
 }

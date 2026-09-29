@@ -76,8 +76,8 @@ pub struct SyncResult {
     /// them separately is what stops a benign LWW loss reading as "rows
     /// failed".
     pub skipped_lww_acked: usize,
-    /// Terminal rows requeued once because only an older client build had
-    /// parked them.
+    /// Terminal rows requeued because this client meets the cloud's recorded
+    /// minimum version.
     pub requeued_after_upgrade: usize,
     /// Number of entries pulled
     pub pulled_entries: usize,
@@ -448,7 +448,6 @@ impl SyncConflict {
             self.resolution.as_str()
         }
     }
-
 }
 
 /// Configuration for CloudSyncer
@@ -526,6 +525,36 @@ pub struct CloudSyncer {
 }
 
 impl CloudSyncer {
+    /// Fill a legacy queued payload only from its persisted row, never from
+    /// the project performing this push. Returns false for missing or unknown
+    /// provenance so callers can park it permanently.
+    pub(super) fn restore_queued_origin(
+        &self,
+        value: &mut serde_json::Value,
+        entity_type: EntityType,
+        entity_id: &str,
+        expected_project: &str,
+    ) -> Result<bool, CasError> {
+        if value.get("scope").and_then(serde_json::Value::as_str) == Some("global") {
+            return Ok(true);
+        }
+        let payload_origin = value
+            .get("origin_project")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let stored = self.queue.stored_origin_project(entity_type, entity_id)?;
+        let Some(origin) = stored.or(payload_origin).filter(|origin| {
+            origin.as_str() != "unknown"
+                && crate::cloud::project_ids_match(origin, expected_project)
+        }) else {
+            return Ok(false);
+        };
+        if let Some(object) = value.as_object_mut() {
+            object.insert("origin_project".into(), serde_json::Value::String(origin));
+            return Ok(true);
+        }
+        Ok(false)
+    }
     /// Create a new cloud syncer
     pub fn new(
         queue: Arc<SyncQueue>,
@@ -533,8 +562,7 @@ impl CloudSyncer {
         config: CloudSyncerConfig,
     ) -> Self {
         let cas_root = queue.cas_dir().to_path_buf();
-        let personal_push_git_remote =
-            crate::cloud::normalized_git_remote_for_push(&cas_root);
+        let personal_push_git_remote = crate::cloud::normalized_git_remote_for_push(&cas_root);
         // The queue lives in the project's own .cas, so every identity and
         // guard must judge that root rather than whatever project the process
         // happens to run inside.
@@ -613,22 +641,6 @@ impl CloudSyncer {
         Ok(requeued)
     }
 
-    /// Give rows that only an older client build parked one fresh attempt.
-    ///
-    /// This is the general form of the version-gate requeue: a row parked by
-    /// a 429 storm, a transport failure, or a server refusal an older client
-    /// could not classify is not evidence that this build cannot push it.
-    /// Permanent per-row rejections are excluded by the queue itself.
-    pub(crate) fn requeue_stale_client_failures(&self) -> Result<usize, CasError> {
-        let requeued = self
-            .queue
-            .requeue_stale_client_failures(env!("CARGO_PKG_VERSION"), self.config.max_retries)?;
-        if requeued > 0 {
-            tracing::debug!("requeued {requeued} item(s) parked by an older client build");
-        }
-        Ok(requeued)
-    }
-
     /// Get the sync queue
     pub fn queue(&self) -> &SyncQueue {
         &self.queue
@@ -647,15 +659,11 @@ impl CloudSyncer {
     ) -> ConflictAction {
         let local_revision = EntityType::parse(entity_type)
             .and_then(|entity| self.queue.revision(entity, entity_id).ok().flatten());
-        let remote_revision = self
-            .incoming_revisions
-            .lock()
-            .ok()
-            .and_then(|revisions| {
-                revisions
-                    .get(&(entity_type.to_string(), entity_id.to_string()))
-                    .copied()
-            });
+        let remote_revision = self.incoming_revisions.lock().ok().and_then(|revisions| {
+            revisions
+                .get(&(entity_type.to_string(), entity_id.to_string()))
+                .copied()
+        });
         self.resolve_conflict_with_revisions(
             entity_type,
             entity_id,
@@ -1037,16 +1045,6 @@ impl PushRowResult {
                 | "timeout"
         )
     }
-}
-
-/// Whether a cloud rejection reason describes a condition no client retry can
-/// repair. Permanent reasons must survive a client upgrade: requeueing them
-/// only replays the same refusal and hides the row's real diagnosis.
-pub(crate) fn push_reason_is_permanent(reason: &str) -> bool {
-    matches!(
-        reason.trim().to_ascii_lowercase().as_str(),
-        "project_mismatch" | "project_identity_conflict" | "scope_mismatch"
-    )
 }
 
 /// The operator-facing next step for one cloud rejection reason.

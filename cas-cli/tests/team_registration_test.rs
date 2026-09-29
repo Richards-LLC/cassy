@@ -593,7 +593,15 @@ async fn sync_adopts_resolved_id_before_its_team_push_and_pull() {
             EntityType::Entry,
             "legacy-id-proof-entry",
             SyncOperation::Upsert,
-            Some(r#"{"id":"legacy-id-proof-entry","scope":"project","content":"proof"}"#),
+            Some(
+                &serde_json::json!({
+                    "id": "legacy-id-proof-entry",
+                    "scope": "project",
+                    "origin_project": sent_id,
+                    "content": "proof",
+                })
+                .to_string(),
+            ),
             TEST_TEAM,
         )
         .unwrap();

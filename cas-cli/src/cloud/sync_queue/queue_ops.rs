@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::cloud::sync_queue::{EntityType, QueuedSync, SyncOperation, SyncQueue};
 use crate::error::CasError;
@@ -94,6 +94,154 @@ pub(super) fn remove_legacy_team_upsert_row(
 }
 
 impl SyncQueue {
+    /// Provenance for a queued project entity. The stored row wins over a
+    /// potentially stale payload; older payloads can still use their own
+    /// stamp when the row was subsequently deleted.
+    pub(super) fn queued_origin(
+        conn: &Connection,
+        entity_type: EntityType,
+        entity_id: &str,
+        payload: Option<&str>,
+    ) -> Option<String> {
+        let table = match entity_type {
+            EntityType::Entry => "entries",
+            EntityType::Rule => "rules",
+            EntityType::Task => "tasks",
+            _ => "",
+        };
+        if !table.is_empty() {
+            let stored = conn
+                .query_row(
+                    &format!("SELECT origin_project FROM {table} WHERE id = ?1"),
+                    params![entity_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()
+                .ok()
+                .flatten()
+                .flatten();
+            if stored.is_some() {
+                return stored;
+            }
+        }
+        payload
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|value| {
+                value
+                    .get("origin_project")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned)
+            })
+    }
+
+    pub(super) fn record_unauthored_skip(conn: &Connection) -> Result<(), CasError> {
+        conn.execute(
+            "INSERT INTO sync_metadata (key, value) VALUES ('unauthored_skipped', '1')
+             ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1",
+            [],
+        )?;
+        Ok(())
+    }
+
+    pub fn unauthored_skipped_count(&self) -> Result<usize, CasError> {
+        Ok(self
+            .get_metadata("unauthored_skipped")?
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0))
+    }
+
+    /// Purge queued copies whose persisted provenance or payload identifies
+    /// another authoring project. Both personal and team queues are covered.
+    pub fn drop_queued_rows_with_foreign_origin(&self, local: &str) -> Result<usize, CasError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let rows = {
+            let mut stmt = tx.prepare(
+                "SELECT id, entity_type, entity_id, operation, payload, project_id FROM sync_queue
+                 WHERE entity_type IN ('entry', 'rule', 'task', 'task_dependency')",
+            )?;
+            stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut dropped = 0;
+        for (id, kind, entity_id, operation, payload, project_id) in rows {
+            let value = payload
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+            if value
+                .as_ref()
+                .is_some_and(|v| v.get("scope").and_then(|x| x.as_str()) == Some("global"))
+            {
+                continue;
+            }
+            let Some(kind) = EntityType::parse(&kind) else {
+                continue;
+            };
+            let origin = Self::queued_origin(&tx, kind, &entity_id, payload.as_deref());
+            let foreign_target = project_id
+                .as_deref()
+                .is_some_and(|id| !crate::cloud::project_ids_match(id, local));
+            // Deleting this project's old cloud key remains valid after a
+            // local task move gives the stored row a different origin.
+            let foreign_origin = operation != SyncOperation::Delete.as_str()
+                && origin.as_deref().is_some_and(|origin| {
+                    origin == "unknown" || !crate::cloud::project_ids_match(origin, local)
+                });
+            if foreign_target || foreign_origin {
+                dropped += tx.execute("DELETE FROM sync_queue WHERE id = ?1", params![id])?;
+            }
+        }
+        if dropped > 0 {
+            tx.execute(
+                "INSERT INTO sync_metadata (key, value) VALUES ('unauthored_skipped', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + ?1",
+                params![dropped.to_string()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(dropped)
+    }
+
+    /// Remove legacy prompt capture upserts before either personal or team
+    /// push reads the outbox. The queued payload retains its entry tags.
+    pub fn drop_queued_user_prompts(&self) -> Result<usize, CasError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let ids = {
+            let mut stmt = tx.prepare(
+                "SELECT id, payload FROM sync_queue WHERE entity_type = 'entry' AND payload IS NOT NULL",
+            )?;
+            stmt.query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter_map(|(id, payload)| {
+                let value = serde_json::from_str::<serde_json::Value>(&payload).ok()?;
+                value
+                    .get("tags")
+                    .and_then(|tags| tags.as_array())
+                    .is_some_and(|tags| tags.iter().any(|tag| tag.as_str() == Some("user-prompt")))
+                    .then_some(id)
+            })
+            .collect::<Vec<_>>()
+        };
+        for id in &ids {
+            tx.execute("DELETE FROM sync_queue WHERE id = ?1", params![id])?;
+        }
+        tx.commit()?;
+        Ok(ids.len())
+    }
+
     /// Remove one stale personal outbox row when a project write is now
     /// routed exclusively to its team. Team rows and cloud data are untouched.
     pub fn drop_personal_queued_push_for(
@@ -238,9 +386,7 @@ impl SyncQueue {
     /// Enqueue a team operation targeted at a specific project identity.
     ///
     /// Ordinary writes leave `project_id` unset so the pusher's project is
-    /// used. Foreign-owned task replicas and project-move replacements set it
-    /// to the destination owner so their envelopes cannot recreate the row
-    /// under the pusher's project key.
+    /// used. An explicit foreign target is refused by the provenance guard.
     pub fn enqueue_for_team_project(
         &self,
         entity_type: EntityType,
@@ -280,7 +426,26 @@ impl SyncQueue {
         team_id: &str,
         project_id: Option<&str>,
     ) -> Result<(), CasError> {
+        let local = crate::cloud::resolve_canonical_id(&self.cas_dir);
         let conn = self.conn.lock().unwrap();
+        if let Some(local) = local.as_deref() {
+            let scope_is_global = payload
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                .is_some_and(|value| value.get("scope").and_then(|v| v.as_str()) == Some("global"));
+            if !scope_is_global {
+                let origin = Self::queued_origin(&conn, entity_type, entity_id, payload);
+                let foreign_target =
+                    project_id.is_some_and(|id| !crate::cloud::project_ids_match(id, local));
+                if foreign_target
+                    || origin.as_deref().is_some_and(|origin| {
+                        origin == "unknown" || !crate::cloud::project_ids_match(origin, local)
+                    })
+                {
+                    Self::record_unauthored_skip(&conn)?;
+                    return Ok(());
+                }
+            }
+        }
         upsert_queue_row(
             &conn,
             entity_type,

@@ -177,6 +177,7 @@ pub(crate) fn run_consolidation(
 
             let id = store.generate_id()?;
             let entry = Entry {
+                origin_project: None,
                 id,
                 scope: Scope::default(),
                 entry_type: EntryType::Learning,

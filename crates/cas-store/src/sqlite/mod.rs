@@ -71,7 +71,8 @@ CREATE TABLE IF NOT EXISTS entries (
     updated_at TEXT,
     indexed_at TEXT,
     -- Entry provenance (JSON array of source entry IDs)
-    source_ids TEXT
+    source_ids TEXT,
+    origin_project TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_entries_created ON entries(created DESC);
@@ -116,7 +117,8 @@ CREATE TABLE IF NOT EXISTS rules (
     -- Team-promotion share override (private | team)
     share TEXT,
     -- cas-5372: operator hard-rule authorisation, `<author>|<content sha256>`
-    operator_authority TEXT
+    operator_authority TEXT,
+    origin_project TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_rules_created ON rules(created DESC);
@@ -170,17 +172,23 @@ CREATE INDEX IF NOT EXISTS idx_entries_helpful_score ON entries(
 pub struct SqliteStore {
     conn: Arc<Mutex<Connection>>,
     cas_dir: PathBuf,
+    origin_project: Option<String>,
 }
 
 impl SqliteStore {
     /// Open or create a SQLite store
     pub fn open(cas_dir: &Path) -> Result<Self> {
+        Self::open_with_origin_project(cas_dir, None)
+    }
+
+    pub fn open_with_origin_project(cas_dir: &Path, origin_project: Option<&str>) -> Result<Self> {
         let db_path = cas_dir.join("cas.db");
         let conn = crate::shared_db::shared_connection(&db_path)?;
 
         Ok(Self {
             conn,
             cas_dir: cas_dir.to_path_buf(),
+            origin_project: origin_project.map(str::to_owned),
         })
     }
 
@@ -269,6 +277,7 @@ impl SqliteStore {
             session_id: row.get(10)?,
             source_tool: row.get(11)?,
             source_ids: Self::parse_source_ids(row.get(32)?),
+            origin_project: row.get(33)?,
             pending_extraction: row.get::<_, i32>(12).unwrap_or(0) != 0,
             stability: row.get::<_, f32>(14).unwrap_or(0.5),
             access_count: row.get::<_, i32>(15).unwrap_or(0),
@@ -726,15 +735,23 @@ impl SqliteStore {
 
 pub struct SqliteRuleStore {
     conn: Arc<Mutex<Connection>>,
+    origin_project: Option<String>,
 }
 
 impl SqliteRuleStore {
     /// Open or create a SQLite rule store (uses same database as entry store)
     pub fn open(cas_dir: &Path) -> Result<Self> {
+        Self::open_with_origin_project(cas_dir, None)
+    }
+
+    pub fn open_with_origin_project(cas_dir: &Path, origin_project: Option<&str>) -> Result<Self> {
         let db_path = cas_dir.join("cas.db");
         let conn = crate::shared_db::shared_connection(&db_path)?;
 
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            origin_project: origin_project.map(str::to_owned),
+        })
     }
 
     fn parse_datetime(s: &str) -> Option<DateTime<Utc>> {
@@ -797,7 +814,7 @@ impl SqliteRuleStore {
         let mut stmt = conn.prepare_cached(
             "SELECT id, created, source_ids, helpful_count, harmful_count,
              tags, paths, content, status, last_accessed, review_after,
-             category, priority, surface_count, scope, auto_approve_tools, auto_approve_paths, team_id, share, operator_authority
+             category, priority, surface_count, scope, auto_approve_tools, auto_approve_paths, team_id, share, operator_authority, origin_project
              FROM rules WHERE status = 'proven' ORDER BY priority ASC, created DESC",
         )?;
 
@@ -837,6 +854,7 @@ impl SqliteRuleStore {
                         .get::<_, Option<String>>(18)?
                         .as_deref()
                         .and_then(|s| s.parse().ok()),
+                    origin_project: row.get(20)?,
                     operator_authority: row
                         .get::<_, Option<String>>(19)?
                         .as_deref()
@@ -854,7 +872,7 @@ impl SqliteRuleStore {
         let mut stmt = conn.prepare_cached(
             "SELECT id, created, source_ids, helpful_count, harmful_count,
              tags, paths, content, status, last_accessed, review_after,
-             category, priority, surface_count, scope, auto_approve_tools, auto_approve_paths, team_id, share, operator_authority
+             category, priority, surface_count, scope, auto_approve_tools, auto_approve_paths, team_id, share, operator_authority, origin_project
              FROM rules WHERE priority = 0 AND status IN ('proven', 'draft') ORDER BY created DESC",
         )?;
 
@@ -894,6 +912,7 @@ impl SqliteRuleStore {
                         .get::<_, Option<String>>(18)?
                         .as_deref()
                         .and_then(|s| s.parse().ok()),
+                    origin_project: row.get(20)?,
                     operator_authority: row
                         .get::<_, Option<String>>(19)?
                         .as_deref()

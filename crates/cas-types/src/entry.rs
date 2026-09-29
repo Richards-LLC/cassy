@@ -55,11 +55,20 @@ impl FromStr for BeliefType {
     type Err = TypeError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.eq_ignore_ascii_case("fact") || s.eq_ignore_ascii_case("factual") || s.eq_ignore_ascii_case("objective") {
+        if s.eq_ignore_ascii_case("fact")
+            || s.eq_ignore_ascii_case("factual")
+            || s.eq_ignore_ascii_case("objective")
+        {
             Ok(BeliefType::Fact)
-        } else if s.eq_ignore_ascii_case("opinion") || s.eq_ignore_ascii_case("subjective") || s.eq_ignore_ascii_case("belief") {
+        } else if s.eq_ignore_ascii_case("opinion")
+            || s.eq_ignore_ascii_case("subjective")
+            || s.eq_ignore_ascii_case("belief")
+        {
             Ok(BeliefType::Opinion)
-        } else if s.eq_ignore_ascii_case("hypothesis") || s.eq_ignore_ascii_case("tentative") || s.eq_ignore_ascii_case("speculation") {
+        } else if s.eq_ignore_ascii_case("hypothesis")
+            || s.eq_ignore_ascii_case("tentative")
+            || s.eq_ignore_ascii_case("speculation")
+        {
             Ok(BeliefType::Hypothesis)
         } else {
             Err(TypeError::Parse(format!("Invalid belief type: {s}")))
@@ -118,18 +127,31 @@ impl FromStr for ObservationType {
     type Err = TypeError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.eq_ignore_ascii_case("general") { Ok(ObservationType::General) }
-        else if s.eq_ignore_ascii_case("decision") { Ok(ObservationType::Decision) }
-        else if s.eq_ignore_ascii_case("bugfix") || s.eq_ignore_ascii_case("bug") { Ok(ObservationType::Bugfix) }
-        else if s.eq_ignore_ascii_case("feature") { Ok(ObservationType::Feature) }
-        else if s.eq_ignore_ascii_case("refactor") { Ok(ObservationType::Refactor) }
-        else if s.eq_ignore_ascii_case("discovery") { Ok(ObservationType::Discovery) }
-        else if s.eq_ignore_ascii_case("change") { Ok(ObservationType::Change) }
-        else if s.eq_ignore_ascii_case("preference") { Ok(ObservationType::Preference) }
-        else if s.eq_ignore_ascii_case("pattern") { Ok(ObservationType::Pattern) }
-        else if s.eq_ignore_ascii_case("test") { Ok(ObservationType::Test) }
-        else if s.eq_ignore_ascii_case("config") { Ok(ObservationType::Config) }
-        else { Err(TypeError::Parse(format!("Invalid observation type: {s}"))) }
+        if s.eq_ignore_ascii_case("general") {
+            Ok(ObservationType::General)
+        } else if s.eq_ignore_ascii_case("decision") {
+            Ok(ObservationType::Decision)
+        } else if s.eq_ignore_ascii_case("bugfix") || s.eq_ignore_ascii_case("bug") {
+            Ok(ObservationType::Bugfix)
+        } else if s.eq_ignore_ascii_case("feature") {
+            Ok(ObservationType::Feature)
+        } else if s.eq_ignore_ascii_case("refactor") {
+            Ok(ObservationType::Refactor)
+        } else if s.eq_ignore_ascii_case("discovery") {
+            Ok(ObservationType::Discovery)
+        } else if s.eq_ignore_ascii_case("change") {
+            Ok(ObservationType::Change)
+        } else if s.eq_ignore_ascii_case("preference") {
+            Ok(ObservationType::Preference)
+        } else if s.eq_ignore_ascii_case("pattern") {
+            Ok(ObservationType::Pattern)
+        } else if s.eq_ignore_ascii_case("test") {
+            Ok(ObservationType::Test)
+        } else if s.eq_ignore_ascii_case("config") {
+            Ok(ObservationType::Config)
+        } else {
+            Err(TypeError::Parse(format!("Invalid observation type: {s}")))
+        }
     }
 }
 
@@ -148,11 +170,17 @@ impl FromStr for EntryType {
     type Err = TypeError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.eq_ignore_ascii_case("learning") { Ok(EntryType::Learning) }
-        else if s.eq_ignore_ascii_case("preference") { Ok(EntryType::Preference) }
-        else if s.eq_ignore_ascii_case("context") { Ok(EntryType::Context) }
-        else if s.eq_ignore_ascii_case("observation") { Ok(EntryType::Observation) }
-        else { Err(TypeError::InvalidEntryType(s.to_string())) }
+        if s.eq_ignore_ascii_case("learning") {
+            Ok(EntryType::Learning)
+        } else if s.eq_ignore_ascii_case("preference") {
+            Ok(EntryType::Preference)
+        } else if s.eq_ignore_ascii_case("context") {
+            Ok(EntryType::Context)
+        } else if s.eq_ignore_ascii_case("observation") {
+            Ok(EntryType::Observation)
+        } else {
+            Err(TypeError::InvalidEntryType(s.to_string()))
+        }
     }
 }
 
@@ -200,12 +228,15 @@ impl FromStr for MemoryTier {
     type Err = TypeError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.eq_ignore_ascii_case("in-context") || s.eq_ignore_ascii_case("in_context")
-            || s.eq_ignore_ascii_case("incontext") || s.eq_ignore_ascii_case("pinned")
+        if s.eq_ignore_ascii_case("in-context")
+            || s.eq_ignore_ascii_case("in_context")
+            || s.eq_ignore_ascii_case("incontext")
+            || s.eq_ignore_ascii_case("pinned")
             || s.eq_ignore_ascii_case("core")
         {
             Ok(MemoryTier::InContext)
-        } else if s.eq_ignore_ascii_case("working") || s.eq_ignore_ascii_case("hot")
+        } else if s.eq_ignore_ascii_case("working")
+            || s.eq_ignore_ascii_case("hot")
             || s.eq_ignore_ascii_case("active")
         {
             Ok(MemoryTier::Working)
@@ -230,6 +261,10 @@ pub struct Entry {
     /// Project: technical context, codebase-specific info stored in ./.cas/
     #[serde(default)]
     pub scope: Scope,
+
+    /// Canonical project that originally authored this row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_project: Option<String>,
 
     /// Type of entry
     #[serde(rename = "type", default)]

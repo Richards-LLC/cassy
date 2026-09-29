@@ -10,6 +10,144 @@ fn create_test_queue() -> (TempDir, SyncQueue) {
 }
 
 #[test]
+fn foreign_and_unknown_stored_entries_never_enter_personal_or_team_queue() {
+    use rusqlite::Connection;
+
+    let (temp, queue) = create_test_queue();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"local-project\"\n",
+    )
+    .unwrap();
+    let conn = Connection::open(temp.path().join("cas.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS entries (id TEXT PRIMARY KEY, origin_project TEXT);
+         INSERT INTO entries (id, origin_project) VALUES
+           ('foreign', 'other-project'), ('unknown', 'unknown'),
+           ('authored', 'local-project');",
+    )
+    .unwrap();
+
+    for id in ["foreign", "unknown", "authored"] {
+        let payload = format!(r#"{{"id":"{id}","scope":"project"}}"#);
+        queue
+            .enqueue(EntityType::Entry, id, SyncOperation::Upsert, Some(&payload))
+            .unwrap();
+        queue
+            .enqueue_for_team(
+                EntityType::Entry,
+                id,
+                SyncOperation::Upsert,
+                Some(&payload),
+                "team-1",
+            )
+            .unwrap();
+    }
+    assert_eq!(queue.unauthored_skipped_count().unwrap(), 4);
+    assert_eq!(queue.pending(10, 5).unwrap().len(), 1);
+    assert_eq!(queue.pending_for_team("team-1", 10, 5).unwrap().len(), 1);
+    assert_eq!(queue.pending(10, 5).unwrap()[0].entity_id, "authored");
+
+    // Simulate rows left by an older client that had no enqueue guard.
+    conn.execute(
+        "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, team_id, created_at)
+         VALUES ('entry', 'foreign', 'upsert', '{}', '', '2026-01-01T00:00:00Z')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, team_id, created_at)
+         VALUES ('entry', 'unknown', 'upsert', '{}', 'team-1', '2026-01-01T00:00:00Z')",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        queue
+            .drop_queued_rows_with_foreign_origin("local-project")
+            .unwrap(),
+        2
+    );
+    assert_eq!(queue.unauthored_skipped_count().unwrap(), 6);
+    assert_eq!(queue.pending(10, 5).unwrap().len(), 1);
+    assert_eq!(queue.pending_for_team("team-1", 10, 5).unwrap().len(), 1);
+}
+
+#[test]
+fn local_key_delete_survives_foreign_stored_origin_after_move() {
+    use rusqlite::Connection;
+
+    let (temp, queue) = create_test_queue();
+    let conn = Connection::open(temp.path().join("cas.db")).unwrap();
+    conn.execute_batch(
+        r#"CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, origin_project TEXT);
+         INSERT INTO tasks (id, origin_project) VALUES
+           ('old-key', 'new-project'), ('legacy-key', 'new-project'),
+           ('foreign-key', 'new-project'), ('foreign-upsert', 'new-project');
+         INSERT INTO sync_queue
+           (entity_type, entity_id, operation, payload, team_id, project_id, created_at)
+         VALUES
+           ('task', 'old-key', 'delete', NULL, 'team-1', 'local-project', '2026-01-01T00:00:00Z'),
+           ('task', 'legacy-key', 'delete', NULL, 'team-1', NULL, '2026-01-01T00:00:00Z'),
+           ('task', 'foreign-key', 'delete', NULL, 'team-1', 'new-project', '2026-01-01T00:00:00Z'),
+           ('task', 'foreign-upsert', 'upsert', '{"id":"foreign-upsert"}', 'team-1', NULL, '2026-01-01T00:00:00Z');"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        queue
+            .drop_queued_rows_with_foreign_origin("local-project")
+            .unwrap(),
+        2
+    );
+    let surviving = queue.pending_for_team("team-1", 10, 5).unwrap();
+    assert_eq!(surviving.len(), 2);
+    assert!(
+        surviving
+            .iter()
+            .all(|row| row.operation == SyncOperation::Delete)
+    );
+    assert!(surviving.iter().any(|row| row.entity_id == "old-key"));
+    assert!(surviving.iter().any(|row| row.entity_id == "legacy-key"));
+}
+
+#[test]
+fn queued_user_prompts_are_dropped_across_personal_and_team_scopes() {
+    let (_temp, queue) = create_test_queue();
+    let prompt = serde_json::json!({"tags": ["user-prompt"], "content": "User request: fix this"});
+    let ordinary = serde_json::json!({"tags": ["context"], "content": "Keep this"});
+    queue
+        .enqueue(
+            EntityType::Entry,
+            "prompt",
+            SyncOperation::Upsert,
+            Some(&prompt.to_string()),
+        )
+        .unwrap();
+    queue
+        .enqueue_for_team(
+            EntityType::Entry,
+            "prompt",
+            SyncOperation::Upsert,
+            Some(&prompt.to_string()),
+            "team-1",
+        )
+        .unwrap();
+    queue
+        .enqueue(
+            EntityType::Entry,
+            "ordinary",
+            SyncOperation::Upsert,
+            Some(&ordinary.to_string()),
+        )
+        .unwrap();
+
+    assert_eq!(queue.drop_queued_user_prompts().unwrap(), 2);
+    assert_eq!(queue.drop_queued_user_prompts().unwrap(), 0);
+    assert_eq!(queue.pending(10, 5).unwrap().len(), 1);
+    assert!(queue.pending_for_team("team-1", 10, 5).unwrap().is_empty());
+}
+
+#[test]
 fn team_only_neutralizes_project_copies_without_deleting_personal_rows() {
     let (_temp, queue) = create_test_queue();
     for (kind, id, payload) in [
@@ -912,8 +1050,13 @@ fn project_id_migration_preserves_legacy_rows_and_allows_move_pair() {
 }
 
 #[test]
-fn enqueue_for_team_project_targets_a_foreign_owner() {
-    let (_temp, queue) = create_test_queue();
+fn enqueue_for_team_project_refuses_a_foreign_owner() {
+    let (temp, queue) = create_test_queue();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"local-project\"\n",
+    )
+    .unwrap();
 
     queue
         .enqueue_for_team_project(
@@ -927,11 +1070,8 @@ fn enqueue_for_team_project_targets_a_foreign_owner() {
         .unwrap();
 
     let pending = queue.pending_for_team("team-123", 10, 5).unwrap();
-    assert_eq!(pending.len(), 1);
-    assert_eq!(
-        pending[0].project_id.as_deref(),
-        Some("destination-project")
-    );
+    assert!(pending.is_empty());
+    assert_eq!(queue.unauthored_skipped_count().unwrap(), 1);
 }
 
 #[test]
@@ -1086,11 +1226,11 @@ fn terminal_row_id(queue: &SyncQueue, entity_id: &str, max_retries: i32) -> i64 
         .id
 }
 
-/// GH #668: rows an older client parked (including rows parked before the
-/// client recorded its build at all) get exactly one fresh attempt after an
-/// upgrade, and a permanent cloud rejection is never resurrected.
+/// Only a satisfied client version gate may requeue a terminal row on upgrade.
+/// Retry exhaustion, manual parks, and cloud rejections require operator retry,
+/// even when the row predates client version stamps.
 #[test]
-fn stale_client_failures_requeue_once_per_upgrade() {
+fn upgrade_requeues_only_version_gated_failures() {
     use rusqlite::Connection;
 
     let temp = TempDir::new().unwrap();
@@ -1098,22 +1238,61 @@ fn stale_client_failures_requeue_once_per_upgrade() {
     queue.init().unwrap();
     const MAX_RETRIES: i32 = 5;
 
-    for id in ["task-429", "task-permanent", "task-retryable-reason"] {
-        queue
-            .enqueue(EntityType::Task, id, SyncOperation::Upsert, Some("{}"))
-            .unwrap();
-        let row_id = terminal_row_id(&queue, id, MAX_RETRIES);
-        queue
-            .park_failed(row_id, "parked by an older build", MAX_RETRIES)
-            .unwrap();
-        match id {
-            "task-permanent" => queue
-                .record_row_outcome(row_id, "rejected", Some("project_mismatch"))
-                .unwrap(),
-            "task-retryable-reason" => queue
+    for id in [
+        "task-parked",
+        "task-rejected",
+        "task-version-gated",
+        "task-stale-outcome",
+        "task-team",
+    ] {
+        if id == "task-team" {
+            queue
+                .enqueue_for_team(
+                    EntityType::Task,
+                    id,
+                    SyncOperation::Upsert,
+                    Some("{}"),
+                    "team-1",
+                )
+                .unwrap();
+        } else {
+            queue
+                .enqueue(EntityType::Task, id, SyncOperation::Upsert, Some("{}"))
+                .unwrap();
+        }
+        let row_id = queue
+            .list_all(10)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.entity_id == id)
+            .unwrap()
+            .id;
+        if id == "task-stale-outcome" {
+            queue
                 .record_row_outcome(row_id, "rejected", Some("revision_conflict"))
-                .unwrap(),
-            _ => {}
+                .unwrap();
+            for _ in 0..MAX_RETRIES {
+                queue
+                    .mark_failed(row_id, "Client version 3.4.2 is below minimum 3.5.0")
+                    .unwrap();
+            }
+            continue;
+        }
+        queue
+            .park_failed(
+                row_id,
+                if id == "task-version-gated" {
+                    "Client version 3.4.2 is below minimum 3.5.0"
+                } else {
+                    "parked by operator or rejected by cloud"
+                },
+                MAX_RETRIES,
+            )
+            .unwrap();
+        if id == "task-rejected" {
+            queue
+                .record_row_outcome(row_id, "rejected", Some("team_owned_project"))
+                .unwrap();
         }
     }
 
@@ -1124,22 +1303,19 @@ fn stale_client_failures_requeue_once_per_upgrade() {
             .unwrap();
     }
 
-    // The build that records failures is this crate's own version, so the
-    // test must ask the same question production does.
-    let this_build = env!("CARGO_PKG_VERSION");
     assert_eq!(
         queue
-            .requeue_stale_client_failures(this_build, MAX_RETRIES)
+            .requeue_version_gated_failures("3.5.0", MAX_RETRIES)
             .unwrap(),
         2,
-        "the 429 row and the retryable rejection get one more attempt"
+        "both version gates retry, including one with an earlier cloud rejection"
     );
     assert_eq!(
         queue
-            .requeue_stale_client_failures(this_build, MAX_RETRIES)
+            .requeue_version_gated_failures("99.0.0", MAX_RETRIES)
             .unwrap(),
         0,
-        "the same build must not requeue the same rows twice"
+        "a later upgrade must leave all other terminal rows parked"
     );
 
     let pending = queue
@@ -1148,36 +1324,36 @@ fn stale_client_failures_requeue_once_per_upgrade() {
         .into_iter()
         .map(|row| row.entity_id)
         .collect::<Vec<_>>();
-    assert_eq!(pending, vec!["task-429", "task-retryable-reason"]);
+    assert_eq!(pending, vec!["task-version-gated", "task-stale-outcome"]);
+    assert!(
+        queue
+            .pending_for_team("team-1", 10, MAX_RETRIES)
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         queue
             .rejected_reason_counts_for_entity_type(None, MAX_RETRIES)
             .unwrap()
-            .get("project_mismatch")
+            .get("team_owned_project")
             .copied(),
         Some(1),
-        "a permanent rejection stays parked with its reason"
+        "a cloud rejection stays parked with its reason"
     );
 
-    // A later build finds the requeued rows terminal again and gives them one
-    // more attempt; the same build does not.
-    for id in ["task-429", "task-retryable-reason"] {
-        let row_id = terminal_row_id(&queue, id, MAX_RETRIES);
-        queue
-            .park_failed(row_id, "still failing", MAX_RETRIES)
-            .unwrap();
-    }
     assert_eq!(
         queue
-            .requeue_stale_client_failures(this_build, MAX_RETRIES)
+            .retry_failed_for_reason("rejected by cloud", MAX_RETRIES)
             .unwrap(),
-        0
+        3
     );
+    assert_eq!(queue.pending(10, MAX_RETRIES).unwrap().len(), 4);
     assert_eq!(
         queue
-            .requeue_stale_client_failures("99.0.0", MAX_RETRIES)
-            .unwrap(),
-        2
+            .pending_for_team("team-1", 10, MAX_RETRIES)
+            .unwrap()
+            .len(),
+        1
     );
 }
 
@@ -1224,10 +1400,8 @@ fn row_outcome_columns_are_added_to_legacy_databases() {
         0
     );
     assert_eq!(
-        queue
-            .requeue_stale_client_failures(env!("CARGO_PKG_VERSION"), 5)
-            .unwrap(),
-        1,
-        "a row parked without a build stamp is an older-client failure"
+        queue.requeue_version_gated_failures("99.0.0", 5).unwrap(),
+        0
     );
+    assert_eq!(queue.retry_failed(5).unwrap(), 1);
 }

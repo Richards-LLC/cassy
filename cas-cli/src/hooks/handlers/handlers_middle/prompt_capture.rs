@@ -168,6 +168,7 @@ fn handle_user_prompt_submit_capture(
                     entry_type: EntryType::Context,
                     content: format!("User request: {prompt_text}"),
                     tags: vec!["user-prompt".to_string()],
+                    share: Some(cas_types::ShareScope::Private),
                     session_id: Some(input.session_id.clone()),
                     importance: 0.6, // User prompts are moderately important
                     ..Default::default()
@@ -195,6 +196,7 @@ fn handle_user_prompt_submit_capture(
                 };
 
                 let rule = crate::types::Rule {
+                    origin_project: None,
                     id: rule_id.clone(),
                     content: preference.content.clone(),
                     scope,
@@ -610,5 +612,49 @@ If this is NOT a preference to remember, respond with: null"#
         Ok(pref) if pref.confidence >= 0.7 => Ok(Some(pref)),
         Ok(_) => Ok(None),  // Low confidence, ignore
         Err(_) => Ok(None), // Parse failed, ignore
+    }
+}
+
+#[cfg(test)]
+mod local_prompt_tests {
+    use super::*;
+    use crate::cloud::{CloudConfig, SyncQueue};
+    use crate::store::{SqliteStore, Store, open_store_local};
+    use crate::types::ShareScope;
+    use tempfile::TempDir;
+
+    #[test]
+    fn captured_user_request_is_private_local_context_without_queue_rows() {
+        let temp = TempDir::new().unwrap();
+        let local = SqliteStore::open(temp.path()).unwrap();
+        local.init().unwrap();
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        CloudConfig {
+            token: Some("test-token".to_string()),
+            ..Default::default()
+        }
+        .save_to_cas_dir(temp.path())
+        .unwrap();
+
+        let input: HookInput = serde_json::from_str(
+            r#"{"session_id":"session-prompt-local","transcript_path":"/tmp/prompt-local.jsonl","cwd":"/tmp","hook_event_name":"UserPromptSubmit","prompt":"Please implement a durable local context capture for this project"}"#,
+        )
+        .unwrap();
+        handle_user_prompt_submit_capture(
+            &input,
+            Some(temp.path()),
+            input.submitted_prompt().unwrap(),
+        )
+        .unwrap();
+
+        let entries = open_store_local(temp.path()).unwrap().list().unwrap();
+        let captured = entries
+            .iter()
+            .find(|entry| entry.tags.iter().any(|tag| tag == "user-prompt"))
+            .expect("prompt captured as local context");
+        assert_eq!(captured.share, Some(ShareScope::Private));
+        assert!(captured.content.starts_with("User request: "));
+        assert_eq!(queue.queue_depth().unwrap(), 0);
     }
 }

@@ -22,6 +22,7 @@
 //! root per `ui/factory/session.rs:22-26`.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use rusqlite::params;
 use tracing::{debug, warn};
@@ -159,6 +160,19 @@ pub fn open_host_known_repo_store() -> anyhow::Result<SqliteKnownRepoStore> {
     Ok(store)
 }
 
+/// Delete one stored spelling without canonicalizing it first. Legacy rows can
+/// contain symlink aliases that `KnownRepoStore::forget` would resolve to the
+/// keeper's path instead of deleting the alias itself.
+pub(crate) fn forget_known_repo_row_exact(path: &Path) -> anyhow::Result<usize> {
+    let db_path = host_cas_dir().join("cas.db");
+    let conn = cas_store::shared_db::shared_connection(&db_path)?;
+    let conn = conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    Ok(conn.execute(
+        "DELETE FROM known_repos WHERE path = ?1",
+        params![path.to_string_lossy().to_string()],
+    )?)
+}
+
 /// Why a path is disposable by construction for host-wide discovery.
 ///
 /// These paths may still be registered because local startup and explicit
@@ -178,6 +192,10 @@ pub fn open_host_known_repo_store() -> anyhow::Result<SqliteKnownRepoStore> {
 /// abandoned by tooling, not checkouts an operator works in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegistrySkip {
+    /// A container, subdirectory of a repository, or unpinned ordinary folder.
+    NotProjectRoot(PathBuf),
+    /// Archived projects are never part of the live host registry.
+    Archive(PathBuf),
     /// Under the resolved `[factory] artifacts_root`.
     Artifacts(PathBuf),
     /// Under `~/.cas/scratch`, the sanctioned home for disposable roots.
@@ -199,7 +217,11 @@ impl RegistrySkip {
     /// The disposable root the path was matched against.
     pub fn base(&self) -> &Path {
         match self {
-            Self::Artifacts(base) | Self::Scratch(base) | Self::Temp(base) => base,
+            Self::Artifacts(base)
+            | Self::Scratch(base)
+            | Self::Temp(base)
+            | Self::NotProjectRoot(base)
+            | Self::Archive(base) => base,
             Self::NestedArtifacts { artifacts, .. } => artifacts,
             Self::BareFolderIdentity(path) => path,
         }
@@ -209,6 +231,11 @@ impl RegistrySkip {
     /// the decision can be checked rather than trusted.
     pub fn reason(&self) -> String {
         match self {
+            Self::NotProjectRoot(path) => format!(
+                "{} is neither a git top level nor pinned by .cas/config.toml [project] canonical_id",
+                path.display()
+            ),
+            Self::Archive(path) => format!("{} is below ~/Archive", path.display()),
             Self::Artifacts(base) => format!(
                 "below the configured [factory] artifacts_root {}",
                 base.display()
@@ -237,6 +264,12 @@ impl RegistrySkip {
 pub fn registry_skip(repo_path: &Path) -> Option<RegistrySkip> {
     let candidates = path_spellings(repo_path);
 
+    if let Some(home) = dirs::home_dir()
+        && let Some(base) = matching_base(&candidates, &home.join("Archive"))
+    {
+        return Some(RegistrySkip::Archive(base));
+    }
+
     for root in artifacts_roots(repo_path) {
         if let Some(base) = matching_base(&candidates, &root) {
             return Some(RegistrySkip::Artifacts(base));
@@ -248,14 +281,42 @@ pub fn registry_skip(repo_path: &Path) -> Option<RegistrySkip> {
     if let Some(skip) = temp_root(&candidates) {
         return Some(skip);
     }
-    let cas_root = repo_path.join(".cas");
-    if cas_root.is_dir()
-        && crate::cloud::canonical_id_from_config_toml(&cas_root).is_none()
-        && crate::cloud::git_origin_url(&cas_root).is_none()
-    {
-        return Some(RegistrySkip::BareFolderIdentity(repo_path.to_path_buf()));
+    if !is_project_root(repo_path) {
+        return Some(RegistrySkip::NotProjectRoot(repo_path.to_path_buf()));
     }
     None
+}
+
+/// A project is an exact Git worktree root or has an explicit local identity
+/// pin. `git -C` alone is insufficient: it also succeeds in ordinary folders
+/// inside a parent checkout.
+pub fn is_project_root(dir: &Path) -> bool {
+    if !dir.is_dir() || is_under_home_archive(dir) {
+        return false;
+    }
+    if crate::cloud::canonical_id_from_config_toml(&dir.join(".cas")).is_some() {
+        return true;
+    }
+    let Ok(output) = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+    else {
+        return false;
+    };
+    output.status.success()
+        && String::from_utf8(output.stdout)
+            .ok()
+            .map(|root| canonical_path(Path::new(root.trim())) == canonical_path(dir))
+            .unwrap_or(false)
+}
+
+fn is_under_home_archive(dir: &Path) -> bool {
+    dirs::home_dir().is_some_and(|home| {
+        let candidates = path_spellings(dir);
+        matching_base(&candidates, &home.join("Archive")).is_some()
+    })
 }
 
 /// Classify a registry path with the additional rule that an initialized
@@ -266,8 +327,11 @@ pub fn registry_skip_for_known_roots(
     repo_path: &Path,
     known_roots: &[PathBuf],
 ) -> Option<RegistrySkip> {
-    if let Some(skip) = registry_skip(repo_path) {
-        return Some(skip);
+    let skip = registry_skip(repo_path);
+    // A copy beneath a registered project's artifacts is more specific than
+    // the generic missing-project-root reason, and names the source project.
+    if skip.is_some() && !matches!(&skip, Some(RegistrySkip::NotProjectRoot(_))) {
+        return skip;
     }
 
     let candidate = path_spellings(repo_path);
@@ -282,7 +346,7 @@ pub fn registry_skip_for_known_roots(
             return Some(RegistrySkip::NestedArtifacts { project, artifacts });
         }
     }
-    None
+    skip
 }
 
 /// Every artifacts root this process could plausibly mean: the default
@@ -393,14 +457,45 @@ pub fn register_repo(repo_path: &Path) {
 /// to propagate the error (e.g. a CLI `cas known-repos add` explicitly run
 /// by the user). Note: does NOT install schema — run
 /// [`ensure_host_schema`] first if the caller is the bootstrap site.
-/// Registration deliberately does not apply [`registry_skip`]: local startup
-/// and explicit bindings must be able to read back every path they register.
-/// Host-wide discovery applies the disposable-root policy when it sweeps this
-/// registry instead.
+/// Registration requires a real project root. Discovery applies its additional
+/// disposable-root policy when it sweeps the registry.
 pub fn register_repo_strict(repo_path: &Path) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        is_project_root(repo_path),
+        "{} is not a project root (git top level or pinned canonical_id), or is below ~/Archive",
+        repo_path.display()
+    );
     let store = open_host_known_repo_store()?;
-    store.upsert(repo_path)?;
+    let target = registered_path_for_inode(repo_path, &store.list()?);
+    store.upsert(&target)?;
     Ok(())
+}
+
+/// Retain the first registered spelling of a directory when bind mounts give
+/// one inode multiple real paths. Symlinks already collapse via canonicalize.
+pub fn registered_path_for_inode(path: &Path, registered: &[cas_store::KnownRepo]) -> PathBuf {
+    let canonical = canonical_path(path);
+    if let Some(inode) = project_inode_key(&canonical) {
+        if let Some(existing) = registered.iter().find(|repo| {
+            project_inode_key(&repo.path) == Some(inode) && is_project_root(&repo.path)
+        }) {
+            return existing.path.clone();
+        }
+    }
+    canonical
+}
+
+/// Filesystem identity for real-path deduplication across bind mounts.
+#[cfg(unix)]
+pub fn project_inode_key(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::metadata(path).ok()?;
+    Some((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(unix))]
+pub fn project_inode_key(_path: &Path) -> Option<(u64, u64)> {
+    None
 }
 
 /// Describe a host-registry failure as an infrastructure problem, including
@@ -518,7 +613,12 @@ mod tests {
             let external =
                 tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
             let repo = external.path().join("myproject");
-            std::fs::create_dir_all(&repo).unwrap();
+            std::fs::create_dir_all(repo.join(".cas")).unwrap();
+            std::fs::write(
+                repo.join(".cas/config.toml"),
+                "[project]\ncanonical_id = \"myproject\"\n",
+            )
+            .unwrap();
 
             // Bootstrap schema first — mirrors the `cas init` contract.
             ensure_host_schema().unwrap();
@@ -540,7 +640,12 @@ mod tests {
             let external =
                 tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
             let repo = external.path().join("pre-init-repo");
-            std::fs::create_dir_all(&repo).unwrap();
+            std::fs::create_dir_all(repo.join(".cas")).unwrap();
+            std::fs::write(
+                repo.join(".cas/config.toml"),
+                "[project]\ncanonical_id = \"pre-init\"\n",
+            )
+            .unwrap();
             // Schema intentionally not installed.
             register_repo(&repo); // expect no panic, no abort
         });
@@ -578,7 +683,7 @@ mod tests {
     /// no command that cleared it, because the path existed so `prune-missing`
     /// refused to touch it.
     #[test]
-    fn registered_disposable_roots_remain_available_for_local_use_cas_c8ab() {
+    fn registration_rejects_unpinned_container_and_artifact_copy() {
         TestEnvGuard::run_with_temp_home(|home| {
             ensure_host_schema().unwrap();
             let fixture = home.join(".cas/artifacts/cas-1bfb/fresh-proxy");
@@ -586,7 +691,12 @@ mod tests {
             let external =
                 tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
             let real = external.path().join("myproject");
-            std::fs::create_dir_all(&real).unwrap();
+            std::fs::create_dir_all(real.join(".cas")).unwrap();
+            std::fs::write(
+                real.join(".cas/config.toml"),
+                "[project]\ncanonical_id = \"myproject\"\n",
+            )
+            .unwrap();
 
             register_repo(&fixture);
             register_repo_strict(&real).unwrap();
@@ -598,14 +708,19 @@ mod tests {
                 .into_iter()
                 .map(|repo| repo.path)
                 .collect();
-            assert_eq!(paths.len(), 2);
-            assert!(paths.contains(&fixture.canonicalize().unwrap()));
+            assert_eq!(paths.len(), 1);
+            assert!(!paths.contains(&fixture.canonicalize().unwrap()));
             assert!(paths.contains(&real.canonicalize().unwrap()));
             assert!(matches!(
                 registry_skip(&fixture),
                 Some(RegistrySkip::Artifacts(_))
             ));
-            assert!(registry_skip(&real).is_none());
+            // A real pinned project may still be excluded from discovery when
+            // this test binary runs beneath a disposable temp root.
+            assert!(matches!(
+                registry_skip(&real),
+                None | Some(RegistrySkip::Temp(_))
+            ));
         });
     }
 
@@ -614,21 +729,16 @@ mod tests {
     /// local startup and binding flows can resolve them; update discovery
     /// applies `registry_skip_for_known_roots` when it sweeps the registry.
     #[test]
-    fn register_repo_strict_registers_disposable_root_for_local_use_cas_c8ab() {
+    fn register_repo_strict_rejects_unpinned_scratch_root() {
         TestEnvGuard::run_with_temp_home(|home| {
             ensure_host_schema().unwrap();
             let scratch = home.join(".cas/scratch/fresh-proxy");
             std::fs::create_dir_all(scratch.join(".cas")).unwrap();
 
-            register_repo_strict(&scratch).unwrap();
-            register_repo_strict(&scratch).unwrap();
+            assert!(register_repo_strict(&scratch).is_err());
 
             let store = open_host_known_repo_store().unwrap();
-            assert_eq!(store.count().unwrap(), 1);
-            assert_eq!(
-                store.list().unwrap()[0].path,
-                scratch.canonicalize().unwrap()
-            );
+            assert_eq!(store.count().unwrap(), 0);
             assert!(matches!(
                 registry_skip(&scratch),
                 Some(RegistrySkip::Scratch(_))
@@ -719,7 +829,7 @@ mod tests {
             std::fs::create_dir_all(bare.path().join(".cas")).unwrap();
             assert!(matches!(
                 registry_skip(bare.path()),
-                Some(RegistrySkip::BareFolderIdentity(_))
+                Some(RegistrySkip::NotProjectRoot(_))
             ));
 
             let project = PathBuf::from("/home/u/registered-project");
@@ -729,6 +839,72 @@ mod tests {
                 Some(RegistrySkip::NestedArtifacts { .. })
             ));
         }
+    }
+
+    #[test]
+    fn project_root_requires_exact_git_top_level_or_pin_and_excludes_archive() {
+        TestEnvGuard::run_with_temp_home(|home| {
+            let container = home.join("Projects");
+            let first = container.join("Accounting");
+            let nested = first.join("Roark Realty/2022");
+            std::fs::create_dir_all(&nested).unwrap();
+            for root in [&first, &nested] {
+                assert!(
+                    Command::new("git")
+                        .arg("init")
+                        .arg(root)
+                        .output()
+                        .unwrap()
+                        .status
+                        .success()
+                );
+            }
+            assert!(!is_project_root(&container));
+            assert!(is_project_root(&first));
+            assert!(is_project_root(&nested));
+            assert!(!is_project_root(&first.join("Roark Realty")));
+
+            let archive = home.join("Archive/OldProject");
+            std::fs::create_dir_all(archive.join(".cas")).unwrap();
+            std::fs::write(
+                archive.join(".cas/config.toml"),
+                "[project]\ncanonical_id = \"old\"\n",
+            )
+            .unwrap();
+            assert!(!is_project_root(&archive));
+            assert!(matches!(
+                registry_skip(&archive),
+                Some(RegistrySkip::Archive(_))
+            ));
+
+            ensure_host_schema().unwrap();
+            assert!(register_repo_strict(&container).is_err());
+            assert!(register_repo_strict(&archive).is_err());
+            register_repo_strict(&first).unwrap();
+            register_repo_strict(&nested).unwrap();
+            assert_eq!(open_host_known_repo_store().unwrap().count().unwrap(), 2);
+            assert!(!container.join(".cas").exists());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_project_registers_once() {
+        TestEnvGuard::run_with_temp_home(|home| {
+            let project = home.join("Documents/Accounting");
+            std::fs::create_dir_all(project.join(".cas")).unwrap();
+            std::fs::write(
+                project.join(".cas/config.toml"),
+                "[project]\ncanonical_id = \"accounting\"\n",
+            )
+            .unwrap();
+            let alias = home.join("Accounting");
+            std::os::unix::fs::symlink(&project, &alias).unwrap();
+            ensure_host_schema().unwrap();
+            register_repo_strict(&project).unwrap();
+            register_repo_strict(&alias).unwrap();
+            assert_eq!(open_host_known_repo_store().unwrap().count().unwrap(), 1);
+        });
     }
 
     #[test]

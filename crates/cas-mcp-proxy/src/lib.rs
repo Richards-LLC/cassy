@@ -1975,9 +1975,9 @@ fn expand_environment_placeholders(value: &str) -> Result<String> {
             continue;
         }
 
-        match std::env::var(name) {
-            Ok(current) if default.is_none() || !current.is_empty() => expanded.push_str(&current),
-            Ok(_) | Err(_) => match default {
+        match config::violet_credential_value(name, |candidate| std::env::var(candidate).ok()) {
+            Some(current) if default.is_none() || !current.is_empty() => expanded.push_str(&current),
+            Some(_) | None => match default {
                 Some(default) => expanded.push_str(default),
                 None => return resolve_environment_variable(name),
             },
@@ -1990,7 +1990,7 @@ fn expand_environment_placeholders(value: &str) -> Result<String> {
 }
 
 fn resolve_environment_variable(name: &str) -> Result<String> {
-    std::env::var(name).map_err(|_| {
+    config::violet_credential_value(name, |candidate| std::env::var(candidate).ok()).ok_or_else(|| {
         anyhow::Error::new(MissingCredentialError {
             name: name.to_string(),
         })

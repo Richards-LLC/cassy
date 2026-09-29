@@ -154,7 +154,9 @@ fn grant_worker_github_read_token(config: &mut PtyConfig, project_grants: &BTree
         .iter()
         .any(|key| key == WORKER_GITHUB_READ_TOKEN_ENV)
     {
-        config.env_remove.push(WORKER_GITHUB_READ_TOKEN_ENV.to_string());
+        config
+            .env_remove
+            .push(WORKER_GITHUB_READ_TOKEN_ENV.to_string());
     }
     // A project proxy that already grants GH_TOKEN is a deliberate,
     // auditable decision; the read-only token never downgrades it.
@@ -439,6 +441,21 @@ fn collect_env_references(value: &toml::Value, names: &mut BTreeSet<String>) {
                 });
             if let Some(name) = name {
                 names.insert(name.to_string());
+                // Either registration spelling may run with the other
+                // generation's credentials. Forward both matching names;
+                // the proxy resolves Violet first and legacy second.
+                if let Some(suffix) = name
+                    .strip_prefix("VIOLET_SLACK_TOKEN")
+                    .or_else(|| name.strip_prefix("MECHA_SLACK_TOKEN"))
+                    .filter(|suffix| suffix.is_empty() || suffix.starts_with('_'))
+                {
+                    names.insert(format!("VIOLET_SLACK_TOKEN{suffix}"));
+                    names.insert(format!("MECHA_SLACK_TOKEN{suffix}"));
+                }
+                if matches!(name, "VIOLET_VERCEL_BYPASS" | "MECHA_VERCEL_BYPASS") {
+                    names.insert("VIOLET_VERCEL_BYPASS".to_string());
+                    names.insert("MECHA_VERCEL_BYPASS".to_string());
+                }
             }
         }
         toml::Value::Array(values) => {

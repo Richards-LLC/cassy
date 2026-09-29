@@ -110,7 +110,7 @@ fn configured_supervisor_sees_issue_count_recent_titles_and_reuses_fresh_cache()
     for repo in [
         "owner/cas",
         "Richards-LLC/cassy",
-        "Richards-LLC/mecha-cassy",
+        "Richards-LLC/violet_ps",
         "Richards-LLC/petra-stella-cloud",
     ] {
         assert!(first.contains(repo), "missing {repo}: {first}");

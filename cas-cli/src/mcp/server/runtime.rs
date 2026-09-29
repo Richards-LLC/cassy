@@ -331,6 +331,14 @@ async fn run_server_impl() -> anyhow::Result<()> {
         eprintln!("[Cassy] Failed to refresh managed Viktor proxy config: {error}");
     }
 
+    #[cfg(feature = "mcp-proxy")]
+    if !project_proxy_path.exists()
+        && let Ok(path) = cmcp_core::config::Scope::User.config_path()
+        && let Err(error) = cmcp_core::config::Config::refresh_violet_managed_default(&path)
+    {
+        eprintln!("[Cassy] Failed to refresh managed Violet proxy config: {error}");
+    }
+
     // Load MCP proxy config from .cas/proxy.toml (project) and ~/.config/code-mode-mcp/config.toml (user)
     #[cfg(feature = "mcp-proxy")]
     let proxy = {
@@ -342,7 +350,7 @@ async fn run_server_impl() -> anyhow::Result<()> {
         match cfg {
             Ok(mut cfg) if !cfg.servers.is_empty() => {
                 if let Err(error) =
-                    crate::cli::integrate::mecha_cassy::load_machine_credentials_into_process_env()
+                    crate::cli::integrate::violet::load_machine_credentials_into_process_env()
                 {
                     eprintln!("[Cassy] Failed to load machine-scoped proxy credentials: {error}");
                 }

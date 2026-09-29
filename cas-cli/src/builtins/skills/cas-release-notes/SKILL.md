@@ -25,13 +25,13 @@ Use the project's release rubric as the contract. The procedure is:
    implementation process.
 4. **Save the draft.** Write the exact postable text to
    `docs/release-notes/<date>-<topic>-slack.md` before posting.
-5. **Post in rubric order** through [mecha-cassy](../mecha-cassy/SKILL.md),
+5. **Post in rubric order** through [violet](../violet/SKILL.md),
    steps 3–6. It owns preflight, posting order, pacing, upload integrity and
-   failure handling. Publish only through the MechaCassy hub; never use
+   failure handling. Publish only through the Violet hub; never use
    Claude.ai Slack or a personal Slack connector. If the
    hub cannot complete publication, report the measured failure with the
    partial receipts; never claim that it was posted.
-6. **Record the receipt.** mecha-cassy step 6 appends the `## POSTED` block to
+6. **Record the receipt.** violet step 6 appends the `## POSTED` block to
    the saved draft.
 
 Done when the saved draft carries a `## POSTED` block, or a blocked report

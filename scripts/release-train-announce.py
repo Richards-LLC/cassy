@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate and post the four release-draft bodies through MechaCassy."""
+"""Validate and post the four release-draft bodies through Violet."""
 
 from __future__ import annotations
 
@@ -124,9 +124,10 @@ def load_report_adapter() -> Any:
 
 
 def proxy_token_env() -> str | None:
-    configured = os.environ.get("MECHA_SLACK_TOKEN_ENV") or os.environ.get(
-        "CAS_RELEASE_TRAIN_MECHA_TOKEN_ENV"
-    )
+    configured = (os.environ.get("VIOLET_SLACK_TOKEN_ENV")
+                  or os.environ.get("CAS_RELEASE_TRAIN_VIOLET_TOKEN_ENV")
+                  or os.environ.get("MECHA_SLACK_TOKEN_ENV")
+                  or os.environ.get("CAS_RELEASE_TRAIN_MECHA_TOKEN_ENV"))
     if configured:
         return configured
     proxy = os.environ.get("CAS_RELEASE_TRAIN_PROXY_TOML")
@@ -146,18 +147,19 @@ def announce_token_env(credentials: dict[str, str]) -> str | None:
     cas-fed5: the project proxy.toml names the token variable of the host it
     was written on. A different host (a Mac cutting a release) may not set
     that variable; pinning it anyway failed the announce with "unset or
-    empty" although this machine's registered MechaCassy token was present.
+    empty" although this machine's registered Violet token was present.
     A proxy-derived name is pinned only when it resolves here; otherwise the
     adapter picks this machine's registered or only token. An operator's
     explicit MECHA_SLACK_TOKEN_ENV is never overridden.
     """
 
-    if os.environ.get("MECHA_SLACK_TOKEN_ENV"):
+    if os.environ.get("VIOLET_SLACK_TOKEN_ENV") or os.environ.get("MECHA_SLACK_TOKEN_ENV"):
         return None
     token_env = proxy_token_env()
     if not token_env:
         return None
-    if os.environ.get(token_env) or credentials.get(token_env):
+    adapter = load_report_adapter()
+    if any(os.environ.get(name) or credentials.get(name) for name in adapter.credential_names(token_env)):
         return token_env
     return None
 
@@ -184,9 +186,9 @@ def post(version: str, draft_arg: str, receipt_arg: str, body_dir_arg: str) -> N
     credentials = adapter.parse_credentials(adapter.credential_file())
     token_env = announce_token_env(credentials)
     if token_env:
-        os.environ["MECHA_SLACK_TOKEN_ENV"] = token_env
+        os.environ["VIOLET_SLACK_TOKEN_ENV"] = token_env
     token = adapter.resolve_token(credentials)
-    bypass = adapter.resolve_secret("MECHA_VERCEL_BYPASS", None, credentials)
+    bypass = adapter.resolve_secret("VIOLET_VERCEL_BYPASS", None, credentials)
     url = os.environ.get("CAS_RELEASE_TRAIN_ANNOUNCE_MCP_URL", adapter.DEFAULT_MCP_URL)
     channel = os.environ.get("CAS_RELEASE_TRAIN_ANNOUNCE_CHANNEL", adapter.DEFAULT_CHANNEL)
     timeout = float(os.environ.get("CAS_RELEASE_TRAIN_ANNOUNCE_TIMEOUT_SECS", "30"))
@@ -206,14 +208,14 @@ def post(version: str, draft_arg: str, receipt_arg: str, body_dir_arg: str) -> N
         for item in tools.get("tools", [])
         if isinstance(item, dict) and isinstance(item.get("name"), str)
     }
-    if names != {"mecha_read", "mecha_post"}:
-        fail("authenticated MechaCassy tools/list must expose exactly mecha_read and mecha_post")
+    if not {"violet_read", "violet_post"}.issubset(names):
+        fail("authenticated Violet tools/list must expose violet_read and violet_post")
     since = os.environ.get(
         "CAS_RELEASE_TRAIN_ANNOUNCE_READ_SINCE",
         datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"),
     )
     client.tool(
-        "mecha_read",
+        "violet_read",
         {
             "channel": channel,
             "since": since,
@@ -237,7 +239,7 @@ def post(version: str, draft_arg: str, receipt_arg: str, body_dir_arg: str) -> N
             arguments["reply_to"] = parent
         elif index == 3:
             arguments["reply_to"] = dev_parent
-        envelope = client.tool("mecha_post", arguments)
+        envelope = client.tool("violet_post", arguments)
         message_id, permalink = adapter.message_receipt(envelope, BODY_NAMES[index])
         if index == 0:
             channel_block = envelope.get("channel")

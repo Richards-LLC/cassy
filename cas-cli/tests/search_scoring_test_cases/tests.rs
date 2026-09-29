@@ -1,4 +1,4 @@
-use crate::*;
+use super::*;
 
 #[test]
 #[ignore = "add/search CLI commands removed - tests need MCP fixtures"]

@@ -142,12 +142,19 @@ cargo build --release                # Release build (LTO, strip)
 cargo build --profile release-fast   # Fast release (thin LTO, 16 codegen units)
 cargo check -p cas --lib --tests     # Compile feedback, no test linking/runs
 scripts/run-scoped-tests.sh -p cas --lib module_name
-scripts/run-scoped-tests.sh -p cas --test cli_test
+scripts/run-scoped-tests.sh -p cas --test integration_cli cli_test::
 cargo nextest run -p cas             # Full suite: epic assembly and release gates
 cargo test -p cas --doc              # Doctests (nextest does not support them)
 cargo bench --bench code_indexing    # Benchmarks
 make test-release-panic              # Verify A2/A3/B3 panic isolation under release profiles
 ```
+
+The integration suites link through ten explicit Cargo harnesses. Use the
+source suite's module prefix to select its tests; the six standalone release
+and fixture targets keep their names. See [integration harnesses](../tests/integration/README.md)
+for the inventory and per-test process isolation rules. Run
+`python3 scripts/cas-test-targets.py cas-cli --check` from the repository root
+after adding an integration suite so a missing module cannot silently drop tests.
 
 Install the standard local runner once with `cargo install cargo-nextest` (or
 `make -C cas-cli install-tools`). `scripts/run-scoped-tests.sh` defaults to

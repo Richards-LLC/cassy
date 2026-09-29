@@ -23,6 +23,7 @@
 
 use std::process::Command;
 
+#[path = "support/mod.rs"]
 mod support;
 use support::{CasSandbox, INIT_TIMEOUT_SECS_ENV};
 

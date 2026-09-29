@@ -16,6 +16,7 @@ use cas::cli::cloud::{CloudTeamDefaultArgs, execute_team_default_for_test};
 use cas::cloud::{CloudConfig, TeamInfo};
 use tempfile::TempDir;
 
+#[path = "common/mod.rs"]
 mod common;
 use common::make_cli_json;
 

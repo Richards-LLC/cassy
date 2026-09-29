@@ -42,7 +42,7 @@
 #
 #   scripts/run-scoped-tests.sh -p cas --lib my_module
 #   scripts/run-scoped-tests.sh --proof -p cas --lib my_module
-#   scripts/run-scoped-tests.sh --proof -p cas --test cli_test
+#   scripts/run-scoped-tests.sh --proof -p cas --test integration_cli
 #   scripts/run-scoped-tests.sh --lib -- --nocapture
 #
 # To leave out one known-broken test from a --proof run, use nextest's filter

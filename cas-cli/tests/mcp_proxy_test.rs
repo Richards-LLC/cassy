@@ -15,6 +15,7 @@ use cmcp_core::config::{Config, Scope, ServerConfig};
 use cmcp_core::{CatalogEntry, ProxyCaller, ProxyEngine, UpstreamState};
 use serde_json::{Value, json};
 
+#[path = "support/mod.rs"]
 mod support;
 use support::CasSandbox;
 

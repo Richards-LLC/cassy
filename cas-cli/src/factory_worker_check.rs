@@ -153,6 +153,15 @@ fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Res
         );
     }
     let head = clean_head(&repo)?;
+    let config = crate::config::Config::load(&cas_root)?.factory();
+    let slots = cas_root.join("worker-check-slots");
+    std::fs::create_dir_all(&slots)?;
+    // One check per lane also prevents concurrent PASS/FAIL receipts at the
+    // same commit from overwriting one another.
+    let lane_key = hex::encode(Sha256::digest(repo.as_os_str().as_encoded_bytes()));
+    let lane = lock_file(&slots.join(format!("lane-{lane_key}.lock")))?;
+    lane.try_lock_exclusive()
+        .context("This worktree already has a worker check; retry later")?;
     let receipt = receipt_path(&cas_root, &repo, &head);
     // A failed retry must not leave an earlier PASS at this SHA.
     match std::fs::remove_file(&receipt) {
@@ -160,9 +169,6 @@ fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Res
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    let config = crate::config::Config::load(&cas_root)?.factory();
-    let slots = cas_root.join("worker-check-slots");
-    std::fs::create_dir_all(&slots)?;
     let admission = lock_file(&slots.join("admission.lock"))?;
     admission.lock_exclusive()?;
     let snapshot = crate::factory_build_guard::inspect(&cas_root, &config, 1);
@@ -176,6 +182,7 @@ fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Res
     // environment override is set. No force/disable option bypasses the cap.
     let slot = acquire_slot(&slots, config.max_concurrent_builders)?;
     inherit_slot(&slot)?;
+    inherit_slot(&lane)?;
     let mut child = Command::new(cargo)
         .arg("check")
         .args(args)

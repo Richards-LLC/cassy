@@ -4925,7 +4925,13 @@ This is the body content."#;
                 );
             }
             // Worker check receipts complement assembly execution proof.
-            for required in ["ASSEMBLY_PROOF", "loaded_proof", "cargo check -p <crate>", "max_concurrent_builders", "check: PASS <sha>"] {
+            for required in [
+                "ASSEMBLY_PROOF",
+                "loaded_proof",
+                "cargo check -p <crate>",
+                "max_concurrent_builders",
+                "check: PASS <sha>",
+            ] {
                 assert!(
                     ref_content.contains(required),
                     "{label} cas-worker discipline.md missing compile-only rule: {required:?}"

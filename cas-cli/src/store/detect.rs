@@ -341,13 +341,16 @@ pub fn detect_store_type(cas_dir: &Path) -> StoreType {
 
 /// Open base entry store (sqlite/markdown + optional notifier).
 /// Never wraps with [`SyncingEntryStore`] — safe for pull/apply-remote.
-fn open_store_base(cas_dir: &Path) -> Result<Arc<dyn Store>> {
+fn open_store_base(cas_dir: &Path, stamp_origin: bool) -> Result<Arc<dyn Store>> {
     let store_type = detect_store_type(cas_dir);
     let config = Config::load(cas_dir).unwrap_or_default();
 
     let base_store: Arc<dyn Store> = match store_type {
         StoreType::Sqlite => {
-            let store = SqliteStore::open(cas_dir)?;
+            let origin = stamp_origin
+                .then(|| crate::cloud::resolve_canonical_id(cas_dir))
+                .flatten();
+            let store = SqliteStore::open_with_origin_project(cas_dir, origin.as_deref())?;
             store.init()?;
             Arc::new(store)
         }
@@ -376,7 +379,7 @@ fn open_store_base(cas_dir: &Path) -> Result<Arc<dyn Store>> {
 /// [`open_store_local`] instead — otherwise every pulled row re-enters the
 /// queue and push↔pull never settles (cas-7fbb).
 pub fn open_store(cas_dir: &Path) -> Result<Arc<dyn Store>> {
-    let base_store = open_store_base(cas_dir)?;
+    let base_store = open_store_base(cas_dir, true)?;
 
     // Wrap with cloud sync if logged in
     if let Ok(cloud_config) = CloudConfig::load_from_cas_dir(cas_dir) {
@@ -399,7 +402,7 @@ pub fn open_store(cas_dir: &Path) -> Result<Arc<dyn Store>> {
 /// Use on pull / team-pull / daemon cloud-sync apply paths so remote rows
 /// are written locally without re-enqueueing (cas-7fbb).
 pub fn open_store_local(cas_dir: &Path) -> Result<Arc<dyn Store>> {
-    open_store_base(cas_dir)
+    open_store_base(cas_dir, false)
 }
 
 /// Open base task store (+ optional notifier). No SyncingTaskStore.
@@ -419,7 +422,10 @@ fn open_task_store_base(cas_dir: &Path) -> Result<Arc<dyn TaskStore>> {
     // the whole task store down with it.
     if let Ok(queue) = crate::cloud::SyncQueue::open(cas_dir) {
         let queue = Arc::new(queue);
-        if queue.quarantined_count(crate::cloud::QUARANTINE_TASK).is_ok() {
+        if queue
+            .quarantined_count(crate::cloud::QUARANTINE_TASK)
+            .is_ok()
+        {
             base_store = Arc::new(crate::store::QuarantineFilteringTaskStore::new(
                 base_store, queue,
             ));
@@ -622,13 +628,16 @@ pub fn open_spec_store(cas_dir: &Path) -> Result<Arc<dyn SpecStore>> {
 }
 
 /// Open base rule store (+ optional notifier). No SyncingRuleStore / SyncQueue.
-fn open_rule_store_base(cas_dir: &Path) -> Result<Arc<dyn RuleStore>> {
+fn open_rule_store_base(cas_dir: &Path, stamp_origin: bool) -> Result<Arc<dyn RuleStore>> {
     let store_type = detect_store_type(cas_dir);
     let config = Config::load(cas_dir).unwrap_or_default();
 
     let base_store: Arc<dyn RuleStore> = match store_type {
         StoreType::Sqlite => {
-            let store = SqliteRuleStore::open(cas_dir)?;
+            let origin = stamp_origin
+                .then(|| crate::cloud::resolve_canonical_id(cas_dir))
+                .flatten();
+            let store = SqliteRuleStore::open_with_origin_project(cas_dir, origin.as_deref())?;
             store.init()?;
             Arc::new(store)
         }
@@ -653,7 +662,7 @@ fn open_rule_store_base(cas_dir: &Path) -> Result<Arc<dyn RuleStore>> {
 /// Prefer [`open_rule_store_local`] for pull/apply-remote paths.
 pub fn open_rule_store(cas_dir: &Path) -> Result<Arc<dyn RuleStore>> {
     let config = Config::load(cas_dir).unwrap_or_default();
-    let base_store = open_rule_store_base(cas_dir)?;
+    let base_store = open_rule_store_base(cas_dir, true)?;
 
     // Wrap with syncing store if sync is enabled
     if config.sync.enabled && !Config::is_sync_disabled() {
@@ -704,7 +713,7 @@ pub fn open_rule_store(cas_dir: &Path) -> Result<Arc<dyn RuleStore>> {
 /// apply does not re-feed the queue. Local rule-file sync still runs on
 /// normal edit paths via [`open_rule_store`].
 pub fn open_rule_store_local(cas_dir: &Path) -> Result<Arc<dyn RuleStore>> {
-    open_rule_store_base(cas_dir)
+    open_rule_store_base(cas_dir, false)
 }
 
 /// Initialize a new .cas directory
@@ -1027,7 +1036,6 @@ mod tests {
         // After init, should return true
         init_cas_dir(&temp_path).unwrap();
         assert!(has_project_cas(), "Expected .cas to be found after init");
-
     }
 
     #[test]
@@ -1227,8 +1235,10 @@ mod tests {
         init_cas_dir(&copy).unwrap();
         init_cas_dir(&live).unwrap();
 
-        let _env =
-            TestEnvGuard::with_optional_vars(&[("CAS_ROOT", Some(live.join(".cas").to_str().unwrap()))]);
+        let _env = TestEnvGuard::with_optional_vars(&[(
+            "CAS_ROOT",
+            Some(live.join(".cas").to_str().unwrap()),
+        )]);
 
         // Precedence is unchanged: CAS_ROOT still wins the actual resolution...
         assert_eq!(
@@ -1237,7 +1247,10 @@ mod tests {
             "CAS_ROOT precedence must NOT change — factory workers depend on it"
         );
         // ...but the losing root is knowable, which is what the notice reports.
-        assert_eq!(find_cas_root_ignoring_env(&copy).unwrap(), copy.join(".cas"));
+        assert_eq!(
+            find_cas_root_ignoring_env(&copy).unwrap(),
+            copy.join(".cas")
+        );
         assert!(
             root_override_notice(&live.join(".cas"), &copy.join(".cas")).is_some(),
             "a cwd store different from CAS_ROOT must be reported"
@@ -1256,7 +1269,6 @@ mod tests {
         // find_cas_root should use CAS_ROOT
         let found = find_cas_root().unwrap();
         assert_eq!(found, cas_dir);
-
     }
 
     #[test]
@@ -1281,6 +1293,5 @@ mod tests {
         // Should fall back to directory walk and find the real .cas
         let found = find_cas_root().unwrap();
         assert_eq!(found, temp_path.join(".cas"));
-
     }
 }

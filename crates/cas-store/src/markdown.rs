@@ -66,6 +66,7 @@ impl MarkdownStore {
         let fm: Frontmatter = serde_yaml::from_str(frontmatter)?;
 
         Ok(Entry {
+            origin_project: None,
             id: fm.id,
             scope: Scope::default(),
             entry_type: fm
@@ -450,6 +451,7 @@ impl MarkdownRuleStore {
         let fm: Frontmatter = serde_yaml::from_str(frontmatter)?;
 
         Ok(Rule {
+            origin_project: None,
             id: fm.id,
             scope: Scope::default(),
             created: fm.created,

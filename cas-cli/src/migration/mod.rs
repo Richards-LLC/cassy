@@ -752,23 +752,112 @@ fn is_db_initialized(conn: &Connection) -> bool {
     count >= 3
 }
 
-/// Assign the current project's canonical identity to legacy task rows that
-/// predate m241. A nullable column is intentional: a caller may have a
-/// database without enough project configuration to derive an identity, and
-/// such rows must remain excluded from project-scoped task surfaces until an
-/// operator resolves them.
-fn backfill_task_origin_project(conn: &Connection, cas_dir: &Path) -> Result<()> {
-    if !cas_store::shared_db::column_exists(conn, "tasks", "origin_project") {
-        return Ok(());
+/// Attribute pre-m260 rows once, in the migration transaction. A session cwd
+/// must resolve inside this store's project before its row can claim the local
+/// identity. Missing or foreign provenance is explicitly unknown.
+fn backfill_legacy_origin_project(conn: &Connection, cas_dir: &Path) -> Result<()> {
+    let root = cas_dir.parent().and_then(|path| path.canonicalize().ok());
+    let canonical_cas_dir = cas_dir.canonicalize().ok();
+    let project_id = crate::cloud::resolve_canonical_id(cas_dir);
+    let mut session_origins = std::collections::HashMap::new();
+    let sessions: Vec<(String, String)> = conn
+        .prepare("SELECT session_id, cwd FROM sessions")?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+    // Session volume can be much larger than distinct cwd volume. Resolve
+    // each path only once; the resolver may probe Git and the filesystem.
+    let mut cwd_origins = std::collections::HashMap::new();
+    for (session_id, cwd) in sessions {
+        let origin = cwd_origins.entry(cwd.clone()).or_insert_with(|| {
+            if let (Some(root), Some(cas_dir), Some(project_id)) =
+                (&root, &canonical_cas_dir, &project_id)
+                && Path::new(&cwd).canonicalize().ok().is_some_and(|cwd| {
+                    cwd.starts_with(root)
+                        && crate::store::find_cas_root_ignoring_env(&cwd)
+                            .ok()
+                            .and_then(|found| found.canonicalize().ok())
+                            .as_ref()
+                            == Some(cas_dir)
+                })
+            {
+                project_id.clone()
+            } else {
+                "unknown".into()
+            }
+        });
+        session_origins.insert(session_id, origin.clone());
     }
-    let Some(project_id) = crate::cloud::resolve_canonical_id(cas_dir) else {
-        return Ok(());
+    let session_origin = |session_id: Option<String>| -> String {
+        session_id
+            .and_then(|id| session_origins.get(&id).cloned())
+            .unwrap_or_else(|| "unknown".into())
     };
-    conn.execute(
-        "UPDATE tasks SET origin_project = ?1
-         WHERE origin_project IS NULL OR trim(origin_project) = ''",
-        [project_id],
+
+    let entries: Vec<(String, Option<String>)> = conn
+        .prepare("SELECT id, session_id FROM entries WHERE origin_project IS NULL OR trim(origin_project) = ''")?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+    for (id, session_id) in entries {
+        conn.execute(
+            "UPDATE entries SET origin_project = ?1 WHERE id = ?2",
+            params![session_origin(session_id), id],
+        )?;
+    }
+
+    let has_events = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'events')",
+        [],
+        |row| row.get::<_, bool>(0),
     )?;
+    let tasks: Vec<(String, Option<String>)> = if has_events {
+        conn.prepare("SELECT t.id, (SELECT e.session_id FROM events e WHERE e.entity_id = t.id AND e.entity_type = 'task' AND e.session_id IS NOT NULL ORDER BY e.id LIMIT 1)
+                      FROM tasks t WHERE t.origin_project IS NULL OR trim(t.origin_project) = ''")?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?
+    } else {
+        conn.prepare(
+            "SELECT id, NULL FROM tasks WHERE origin_project IS NULL OR trim(origin_project) = ''",
+        )?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<std::result::Result<_, _>>()?
+    };
+    for (id, session_id) in tasks {
+        conn.execute(
+            "UPDATE tasks SET origin_project = ?1 WHERE id = ?2",
+            params![session_origin(session_id), id],
+        )?;
+    }
+
+    // Rules have no session_id column. Their source entry is the only durable
+    // session link; absent or unresolvable sources remain unknown.
+    let rules: Vec<(String, Option<String>)> = conn
+        .prepare("SELECT id, source_ids FROM rules WHERE origin_project IS NULL OR trim(origin_project) = ''")?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+    for (id, source_ids) in rules {
+        let source_ids: Vec<String> = source_ids
+            .as_deref()
+            .map(|value| {
+                serde_json::from_str(value)
+                    .unwrap_or_else(|_| value.split(',').map(|id| id.trim().to_string()).collect())
+            })
+            .unwrap_or_default();
+        let session_id = source_ids.iter().find_map(|source_id| {
+            conn.query_row(
+                "SELECT session_id FROM entries WHERE id = ?1",
+                [source_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .flatten()
+        });
+        conn.execute(
+            "UPDATE rules SET origin_project = ?1 WHERE id = ?2",
+            params![session_origin(session_id), id],
+        )?;
+    }
     Ok(())
 }
 
@@ -882,6 +971,9 @@ pub fn run_migrations(cas_dir: &Path, dry_run: bool) -> Result<MigrationResult> 
         if migration_is_detected(&conn, migration) {
             match record_detected_migration(&conn, migration) {
                 Ok(true) => {
+                    if migration.id == 260 {
+                        backfill_legacy_origin_project(&conn, cas_dir)?;
+                    }
                     conn.execute("COMMIT", [])?;
                     continue;
                 }
@@ -902,9 +994,7 @@ pub fn run_migrations(cas_dir: &Path, dry_run: bool) -> Result<MigrationResult> 
                             id = migration.id,
                         ),
                     };
-                    result
-                        .errors
-                        .push((migration.name.to_string(), reason));
+                    result.errors.push((migration.name.to_string(), reason));
                     continue;
                 }
                 Err(error) => {
@@ -919,6 +1009,9 @@ pub fn run_migrations(cas_dir: &Path, dry_run: bool) -> Result<MigrationResult> 
 
         match apply_migration(&conn, migration) {
             Ok(()) => {
+                if migration.id == 260 {
+                    backfill_legacy_origin_project(&conn, cas_dir)?;
+                }
                 conn.execute("COMMIT", [])?;
                 result.applied_count += 1;
                 result.applied_names.push(migration.name.to_string());
@@ -931,8 +1024,6 @@ pub fn run_migrations(cas_dir: &Path, dry_run: bool) -> Result<MigrationResult> 
             }
         }
     }
-
-    backfill_task_origin_project(&conn, cas_dir)?;
 
     // Every pending migration got its turn. A failure is still loud — callers
     // (cas update, doctor --fix, MCP startup, init) treat Err as failure — but
@@ -1117,7 +1208,10 @@ mod tests {
 
     fn assert_repaired_v225_knowledge_gap(cas_dir: &Path, expected_m226_ledger: &str) {
         let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
-        for id in [225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246] {
+        for id in [
+            225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241,
+            242, 243, 244, 245, 246,
+        ] {
             assert_eq!(
                 conn.query_row(
                     "SELECT COUNT(*) FROM cas_migrations WHERE id = ?1",
@@ -1448,45 +1542,89 @@ mod tests {
     }
 
     #[test]
-    fn m241_backfills_blank_task_origins_from_current_project() {
+    fn legacy_origin_uses_only_sessions_inside_this_project() {
         let home = TempDir::new().unwrap();
         let project = home.path().join("accounting");
         let cas_dir = project.join(".cas");
         std::fs::create_dir_all(&cas_dir).unwrap();
+        let foreign = home.path().join("foreign");
+        std::fs::create_dir_all(&foreign).unwrap();
         let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
         conn.execute_batch(
-            "CREATE TABLE tasks (
-                 id TEXT PRIMARY KEY,
-                 origin_project TEXT
-             );
-             INSERT INTO tasks (id, origin_project) VALUES
-                 ('legacy-null', NULL),
-                 ('legacy-blank', '  '),
-                 ('already-assigned', 'acme/other');
-             CREATE INDEX idx_tasks_origin_project ON tasks(origin_project);",
+            "CREATE TABLE sessions (session_id TEXT PRIMARY KEY, cwd TEXT NOT NULL);
+             CREATE TABLE tasks (id TEXT PRIMARY KEY, origin_project TEXT);
+             CREATE TABLE entries (id TEXT PRIMARY KEY, session_id TEXT, origin_project TEXT);
+             CREATE TABLE rules (id TEXT PRIMARY KEY, source_ids TEXT, origin_project TEXT);
+             CREATE TABLE events (id INTEGER PRIMARY KEY, entity_type TEXT, entity_id TEXT, session_id TEXT);
+             INSERT INTO tasks VALUES ('native', NULL), ('foreign', NULL), ('missing', NULL), ('pulled', 'remote/project');
+             INSERT INTO entries VALUES ('native-entry', 'here', NULL), ('foreign-entry', 'there', NULL);
+             INSERT INTO rules VALUES ('native-rule', '[\"native-entry\"]', NULL), ('foreign-rule', '[\"foreign-entry\"]', NULL);
+             INSERT INTO events (entity_type, entity_id, session_id) VALUES
+               ('task', 'native', 'here'), ('task', 'foreign', 'there');",
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO sessions VALUES ('here', ?1)",
+            [project.to_str().unwrap()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions VALUES ('there', ?1)",
+            [foreign.to_str().unwrap()],
         )
         .unwrap();
 
-        let expected = crate::cloud::resolve_canonical_id(&cas_dir).unwrap();
-        super::backfill_task_origin_project(&conn, &cas_dir).unwrap();
-        let origins = conn
-            .prepare("SELECT id, origin_project FROM tasks ORDER BY id")
-            .unwrap()
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .unwrap()
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .unwrap();
+        let local = crate::cloud::resolve_canonical_id(&cas_dir).unwrap();
+        super::backfill_legacy_origin_project(&conn, &cas_dir).unwrap();
+        for (table, id, expected) in [
+            ("tasks", "native", local.as_str()),
+            ("tasks", "foreign", "unknown"),
+            ("tasks", "missing", "unknown"),
+            ("tasks", "pulled", "remote/project"),
+            ("entries", "native-entry", local.as_str()),
+            ("entries", "foreign-entry", "unknown"),
+            ("rules", "native-rule", local.as_str()),
+            ("rules", "foreign-rule", "unknown"),
+        ] {
+            let actual: String = conn
+                .query_row(
+                    &format!("SELECT origin_project FROM {table} WHERE id = ?1"),
+                    [id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(actual, expected, "{table}:{id}");
+        }
+    }
 
-        assert_eq!(
-            origins,
-            vec![
-                ("already-assigned".to_string(), "acme/other".to_string()),
-                ("legacy-blank".to_string(), expected.clone()),
-                ("legacy-null".to_string(), expected),
-            ]
-        );
+    #[test]
+    fn second_migration_run_does_not_restamp_an_empty_task_origin() {
+        let home = TempDir::new().unwrap();
+        let cas_dir = home.path().join("project/.cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        let entries = cas_store::SqliteStore::open(&cas_dir).unwrap();
+        cas_store::Store::init(&entries).unwrap();
+        let tasks = cas_store::SqliteTaskStore::open(&cas_dir).unwrap();
+        cas_store::TaskStore::init(&tasks).unwrap();
+        super::run_migrations(&cas_dir, false).unwrap();
+        let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, title, created_at, updated_at, origin_project)
+             VALUES ('later-pull', 'foreign', '2026-09-29', '2026-09-29', NULL)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        super::run_migrations(&cas_dir, false).unwrap();
+        let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
+        let origin: Option<String> = conn
+            .query_row(
+                "SELECT origin_project FROM tasks WHERE id = 'later-pull'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(origin, None);
     }
 
     #[test]

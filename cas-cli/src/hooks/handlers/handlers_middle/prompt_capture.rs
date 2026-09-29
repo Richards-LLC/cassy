@@ -196,6 +196,7 @@ fn handle_user_prompt_submit_capture(
                 };
 
                 let rule = crate::types::Rule {
+                    origin_project: None,
                     id: rule_id.clone(),
                     content: preference.content.clone(),
                     scope,

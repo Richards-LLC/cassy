@@ -199,8 +199,9 @@ impl RuleStore for SyncingRuleStore {
 
     fn add(&self, rule: &Rule) -> Result<()> {
         self.inner.add(rule)?;
-        self.try_sync(rule);
-        self.queue_upsert(rule);
+        let stored = self.inner.get(&rule.id)?;
+        self.try_sync(&stored);
+        self.queue_upsert(&stored);
         Ok(())
     }
 
@@ -210,8 +211,9 @@ impl RuleStore for SyncingRuleStore {
 
     fn update(&self, rule: &Rule) -> Result<()> {
         self.inner.update(rule)?;
-        self.try_sync(rule);
-        self.queue_upsert(rule);
+        let stored = self.inner.get(&rule.id)?;
+        self.try_sync(&stored);
+        self.queue_upsert(&stored);
         Ok(())
     }
 
@@ -223,8 +225,9 @@ impl RuleStore for SyncingRuleStore {
     ) -> Result<()> {
         self.inner
             .update_with_metadata(rule, changed_by, change_note)?;
-        self.try_sync(rule);
-        self.queue_upsert(rule);
+        let stored = self.inner.get(&rule.id)?;
+        self.try_sync(&stored);
+        self.queue_upsert(&stored);
         Ok(())
     }
 

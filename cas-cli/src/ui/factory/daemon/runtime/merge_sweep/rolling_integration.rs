@@ -1001,7 +1001,25 @@ fn write_sweep_row_receipt(
     )?;
     let checkout_identity = sha256_hex(format!("{common_dir}\n").as_bytes());
     let tree_ref = format!("{}^{{tree}}", request.commit);
-    let input_hash = git_output(project_root, &["rev-parse", &tree_ref])?;
+    let helper = worktree.join("scripts/assembly-proof.py");
+    let input_hash = if helper.is_file() {
+        let output = Command::new("python3")
+            .arg(helper)
+            .arg("input")
+            .arg(&worktree)
+            .output()
+            .map_err(|error| format!("assembly input hash: {error}"))?;
+        let hash = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if !output.status.success()
+            || hash.len() != 64
+            || !hash.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err("could not compute assembly code-input hash".to_owned());
+        }
+        hash
+    } else {
+        git_output(project_root, &["rev-parse", &tree_ref])?
+    };
     let effective_zig = resolve_zig(&worktree);
     let environment = environment_fingerprint(effective_zig.as_deref());
     let toolchain = toolchain_fingerprint()?;

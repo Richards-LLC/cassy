@@ -338,6 +338,11 @@ When workers share the main directory, there's no branch merging — workers com
 3. Run the final assembled-tree gate. This is the epic's single build + test:
    worker checks execute no tests, so one full assembly gate run
    on the epic tip proves every child and checks cross-task integration.
+   In a project with `scripts/assembly-proof.py`, the assembly command is
+   `python3 scripts/assembly-proof.py prove <epic-worktree>`: it proves native
+   nextest in the worktree and archive-mode in a plain clone. A matching code
+   tree reuses its durable two-context PASS; integration recovery and the
+   release gate cite that receipt instead of running the suite again.
    On exit 0, record a progress note on the epic:
    `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>`,
    with the log under `[factory] artifacts_root/<epic-id>/`. Child task closes

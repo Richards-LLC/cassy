@@ -723,7 +723,9 @@ fn atexit_backstop_reaps_forgotten_fixture_home() {
         .map(|(_, module)| format!("{module}::atexit_backstop_helper"))
         .unwrap_or_else(|| "atexit_backstop_helper".to_string());
     let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", &child_test, "--ignored"])
+        // One test thread makes libtest name the test before running it; the
+        // helper exits before the result line, so this is its only trace.
+        .args(["--exact", &child_test, "--ignored", "--test-threads=1"])
         .env("CAS_HUB_ATEXIT_RECEIPT", &receipt_path)
         .output()
         .unwrap();

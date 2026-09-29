@@ -13,6 +13,7 @@ members = [
     "crates/cas-recording",
     "crates/cas-factory-protocol",
     "crates/cas-diffs",
+    "crates/cas-hub-state",
     "crates/cas-factory",
     "crates/cas-tui-test",
     "crates/cas-mcp-proxy",

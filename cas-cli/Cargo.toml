@@ -22,6 +22,8 @@ name = "cas"
 path = "src/main.rs"
 
 [dependencies]
+# Measurement-only cas-a4b1 extraction; not a production split.
+cas-hub-state = { path = "../crates/cas-hub-state" }
 quick-xml = "0.37.5"
 # Core types (workspace crate)
 cas-types = { path = "../crates/cas-types" }

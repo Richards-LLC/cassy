@@ -206,8 +206,9 @@ def post(version: str, draft_arg: str, receipt_arg: str, body_dir_arg: str) -> N
         for item in tools.get("tools", [])
         if isinstance(item, dict) and isinstance(item.get("name"), str)
     }
-    if names != {"mecha_read", "mecha_post"}:
-        fail("authenticated MechaCassy tools/list must expose exactly mecha_read and mecha_post")
+    # The hub also lists the renamed violet_* tools; require the pair used here.
+    if not {"mecha_read", "mecha_post"}.issubset(names):
+        fail("authenticated MechaCassy tools/list must expose mecha_read and mecha_post")
     since = os.environ.get(
         "CAS_RELEASE_TRAIN_ANNOUNCE_READ_SINCE",
         datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"),

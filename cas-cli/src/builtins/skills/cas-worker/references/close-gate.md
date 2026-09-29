@@ -72,8 +72,9 @@ The 6 checks below apply to every task type. These gates sit on top of them:
   - **Skip markers, on every delivery:** added `test.fixme`/`.skip`/`.only` markers are refused unless the marker or the line above it carries `cas-allow-skip: <reason>`.
 - **Epic** — closing an epic additionally walks its children and blocks on any child whose recorded work is not merged into the parent branch, not just on child status.
 - **Risk declaration** — read `Risk:` and `Proof Targets:` from `task show`.
-  Rust build proofs are not a worker close duty: workers never run Rust builds
-  or tests, so do not record a scoped `--proof` receipt, a `SCOPED_PROOF:` note,
+  Rust execution proof is an assembly duty; workers may carry compile-only
+  `check: PASS <sha>` evidence from the capped runner.
+  Do not record a scoped `--proof` receipt, a `SCOPED_PROOF:` note,
   or a `loaded_proof` note. The supervisor's single build + test of the epic
   tip at assembly covers `risk=blast-radius` and `risk=concurrency` and is
   recorded on the epic as
@@ -120,11 +121,11 @@ Registration checklist (varies by framework):
 rg 'changed_function' src/
 ```
 
-**Rust public-type additions:** adding a field to a `pub struct` is a silent breaking change for downstream crates that construct the struct by listing every field (no `..Default::default()`). Those crates compile fine in isolation but fail with `E0063` at workspace scope. You cannot compile to catch this: `rg` every construction site across the workspace and update it; the supervisor's workspace build at assembly is the backstop.
+**Rust public-type additions:** adding a field to a `pub struct` is a silent breaking change for downstream crates that construct the struct by listing every field (no `..Default::default()`). Those crates compile fine in isolation but fail with `E0063` at workspace scope. Trace every construction site across the workspace and include affected consumers in the package-scoped check; the supervisor's workspace build at assembly is the backstop.
 
-### 4. Tests pass — non-Rust only
+### 4. Compile checks and tests
 
-**Never run Rust builds or tests** (`cargo`, `nextest`, `rustc`, `scripts/run-scoped-tests.sh`, `make test*`); a PreToolUse guard denies them. For Rust changes, write or update the tests the change needs, commit, and park without building: the supervisor runs them in the one full build + test of the epic tip at assembly and records `ASSEMBLY_PROOF` on the epic. For non-Rust work, run the project's suite:
+For Rust changes, write or update tests and follow [discipline.md](discipline.md) for the capped package-scoped compile-only check. Record `check: PASS <sha>` or name why checking is deferred. Rust test execution remains the supervisor's one full assembly build and test, recorded as `ASSEMBLY_PROOF` on the epic. For non-Rust work, run the project's suite:
 
 ```bash
 # Examples: pnpm test, npx vitest run, npx playwright test, pytest, npm test
@@ -135,7 +136,7 @@ If tests fail in code you didn't modify:
 2. If consistent, report as blocker with the specific test name and error output.
 3. Do NOT try to fix other people's tests — that's out of scope.
 
-#### Rust: blast radius without building
+#### Rust: trace consumers before checking
 
 | What you changed | What to trace by reading and `rg` |
 |---|---|

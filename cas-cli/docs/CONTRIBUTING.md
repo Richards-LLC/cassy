@@ -153,17 +153,29 @@ Install the standard local runner once with `cargo install cargo-nextest` (or
 `make -C cas-cli install-tools`). `scripts/run-scoped-tests.sh` defaults to
 nextest and rejects a silent zero-test success.
 
-### Assembly: only the supervisor builds
+### Worker checks and supervisor assembly
 
-Factory workers never run Rust builds. Workers edit and commit code, then park
-it without building or testing Rust; a PreToolUse guard denies them any
-`cargo` build/check/test/nextest/clippy/run, `rustc`,
-`scripts/run-scoped-tests.sh`, and `make test*`. Only the supervisor builds:
-once per epic at assembly it runs one full build + test of the epic tip and
+Workers may type-check their committed change with exactly
+`cargo check -p <affected crate> [-p <crate> ...] --tests`. Include consumers of
+changed shared interfaces. The PreToolUse guard routes that command through
+`cas factory worker-check`, which holds an OS builder-slot lock until Cargo
+exits, checks the existing build guard, and enforces `max_concurrent_builders`
+even across simultaneous launches. A refusal requires retrying later. Run long
+checks in the background with a log; no test code executes.
+
+The runner requires a clean committed worktree, forces its private seeded
+`target/`, and records `check: PASS <sha>` with the selected packages. Task close
+copies matching exact-delivery receipts into worker evidence. Dirty trees,
+failed retries, other worktrees and other SHAs cannot supply this receipt.
+Check receipts are optional compile-only evidence and do not waive test proof.
+
+Only the supervisor builds and runs Rust tests: once per epic at assembly it
 records `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd>
-log=<path>` on the epic. Child task closes reference that proof instead of
-carrying a scoped `--proof` receipt or `loaded_proof` note. Non-Rust work (for
-example hub-web npm/vitest/playwright) is unaffected.
+log=<path>` on the epic. Workers still cannot run build/test/nextest/clippy/run,
+`rustc`, scoped-test scripts, or `make test*`. Child closes reference assembly
+proof rather than scoped `--proof` or `loaded_proof` notes. Non-Rust suites are
+unaffected. An older runtime that denies the check exception requires parking
+with the unverified crates named for assembly.
 
 Gate evidence: PR #655/run 33430464567; PR #657/run 33435093275.
 

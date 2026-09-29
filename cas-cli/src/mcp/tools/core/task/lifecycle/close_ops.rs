@@ -1967,7 +1967,7 @@ fn close_delivered_tip(
 enum BuildProofs {
     /// Scoped `--proof` receipt and, for concurrency risk, a loaded proof.
     Required,
-    /// A factory worker's close: it never builds. The supervisor's
+    /// A factory worker's close: checks are separate evidence. The supervisor's
     /// ASSEMBLY_PROOF on the epic, one build and test of the epic tip, stands
     /// for it.
     DeferredToAssembly,
@@ -7721,7 +7721,7 @@ impl CasCore {
                     None
                 },
             );
-            // cas-4cbb: workers never build; their build proof is the
+            // cas-3efd: compile-only checks do not replace the
             // supervisor's epic-assembly run. An ASSEMBLY_PROOF on the parent
             // epic whose tested head contains this delivery also stands for a
             // supervisor's close of the child.
@@ -7736,6 +7736,13 @@ impl CasCore {
                     .is_ok_and(|status| status.success())
                     .then(|| (epic.id.clone(), line))
             });
+            if let Some(receipt) = delivered_tip.as_deref().and_then(|head| {
+                crate::factory_worker_check::passing_receipt(&self.cas_root, proof_repo, head)
+            }) && !task.notes.contains(&receipt)
+            {
+                let ts = chrono::Utc::now().format("%Y-%m-%d %H:%M");
+                task.notes = format!("{}\n\n[{ts}] WORKER CHECK {receipt}", task.notes);
+            }
             let build_proofs = if is_factory_worker || assembly_proof.is_some() {
                 BuildProofs::DeferredToAssembly
             } else {
@@ -7755,7 +7762,7 @@ impl CasCore {
                 };
                 let ts = chrono::Utc::now().format("%Y-%m-%d %H:%M");
                 let note = format!(
-                    "[{ts}] BUILD PROOF deferred to epic assembly (cas-4cbb): factory workers do not build; {reference}."
+                    "[{ts}] BUILD PROOF deferred to epic assembly (cas-4cbb): worker checks are compile-only; {reference}."
                 );
                 if !task.notes.contains("BUILD PROOF deferred to epic assembly") {
                     task.notes = if task.notes.is_empty() {

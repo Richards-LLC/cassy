@@ -118,6 +118,7 @@ export interface MessageQueued {
   notification_id: number;
   target: string;
   stamped: boolean;
+  device_label?: string;
 }
 
 export type SessionPhase = "planning" | "editing" | "testing" | "building" | "blocked" | "reviewing" | "idle";

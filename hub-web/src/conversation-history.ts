@@ -321,6 +321,7 @@ export class ConversationHistory {
     if (!send || send.kind !== "send") return false;
     send.value.notificationId = receipt.notification_id;
     send.value.stamped = receipt.stamped;
+    if (receipt.device_label) send.value.deviceLabel = receipt.device_label;
     // A late receipt means it did go: a dismissed "failed" send is back in the thread as delivered.
     delete send.value.dismissed;
     send.value.state = this.events.some((event) => event.kind === "reply" && event.value.reply_to === receipt.notification_id) ? "replied" : "acknowledged";

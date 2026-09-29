@@ -921,7 +921,7 @@ jobs:
           export CAS_ROOT="$guard_dir/.cas"
           export CAS_REAL_DBS="$guard_dir/.cas/cas.db"
           export CARGO_CMD="nextest run --archive-file $GITHUB_WORKSPACE/fast-validation-suite.tar.zst --workspace-remap $GITHUB_WORKSPACE"
-          make -C cas-cli test-real-store-untouched REAL_STORE_ARGS='-p cas --test mcp_protocol_test'
+          make -C cas-cli test-real-store-untouched REAL_STORE_ARGS="-E 'binary(mcp_protocol_test)'"
 
   # Keep the protected ruleset's exact full-suite context while the actual
   # test execution fans out after the shared archive. This job runs even when a shard fails and

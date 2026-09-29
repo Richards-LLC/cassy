@@ -22,6 +22,7 @@
 //! `#[cfg(test)] mod` as a test-first posture concern — tests are easier
 //! to find in the integration tree than buried in a 2400-line impl file.
 
+#[path = "common/mod.rs"]
 mod common;
 use common::{TEST_TEAM, make_cli_json, make_cloud_config};
 

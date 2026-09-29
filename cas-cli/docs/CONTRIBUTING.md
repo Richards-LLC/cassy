@@ -142,28 +142,72 @@ cargo build --release                # Release build (LTO, strip)
 cargo build --profile release-fast   # Fast release (thin LTO, 16 codegen units)
 cargo check -p cas --lib --tests     # Compile feedback, no test linking/runs
 scripts/run-scoped-tests.sh -p cas --lib module_name
-scripts/run-scoped-tests.sh -p cas --test cli_test
+scripts/run-scoped-tests.sh -p cas --test integration_cli cli_test::
 cargo nextest run -p cas             # Full suite: epic assembly and release gates
 cargo test -p cas --doc              # Doctests (nextest does not support them)
 cargo bench --bench code_indexing    # Benchmarks
 make test-release-panic              # Verify A2/A3/B3 panic isolation under release profiles
 ```
 
+The integration suites link through ten explicit Cargo harnesses. Use the
+source suite's module prefix to select its tests; the six standalone release
+and fixture targets keep their names. See [integration harnesses](../tests/integration/README.md)
+for the inventory and per-test process isolation rules. Run
+`python3 scripts/cas-test-targets.py cas-cli --check` from the repository root
+after adding an integration suite so a missing module cannot silently drop tests.
+
 Install the standard local runner once with `cargo install cargo-nextest` (or
 `make -C cas-cli install-tools`). `scripts/run-scoped-tests.sh` defaults to
 nextest and rejects a silent zero-test success.
 
-### Assembly: only the supervisor builds
+### Worker checks and supervisor assembly
 
-Factory workers never run Rust builds. Workers edit and commit code, then park
-it without building or testing Rust; a PreToolUse guard denies them any
-`cargo` build/check/test/nextest/clippy/run, `rustc`,
-`scripts/run-scoped-tests.sh`, and `make test*`. Only the supervisor builds:
-once per epic at assembly it runs one full build + test of the epic tip and
+Workers may type-check their committed change with exactly
+`cargo check -p <affected crate> [-p <crate> ...] --lib` for lib-only edits or
+`--tests` when test files changed; choose one target flag. Include consumers of
+changed shared interfaces. The PreToolUse guard routes that command through
+`cas factory worker-check`, which holds an OS builder-slot lock until Cargo
+exits, checks the existing build guard, and enforces `max_concurrent_builders`
+even across simultaneous launches. A refusal requires retrying later. Run long
+checks in the background with a log; no test code executes.
+
+The runner requires a clean committed worktree, forces its private seeded
+`target/`, and records `check: PASS <sha>` with the selected packages. Task close
+copies matching exact-delivery receipts into worker evidence. Dirty trees,
+failed retries, other worktrees and other SHAs cannot supply this receipt.
+Check receipts are optional compile-only evidence and do not waive test proof.
+
+Only the supervisor builds and runs Rust tests: once per release candidate at
+assembly it runs `python3 scripts/assembly-proof.py prove <epic-worktree>` and
 records `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd>
-log=<path>` on the epic. Child task closes reference that proof instead of
-carrying a scoped `--proof` receipt or `loaded_proof` note. Non-Rust work (for
-example hub-web npm/vitest/playwright) is unaffected.
+log=<path>` on the epic. Workers still cannot run build/test/nextest/clippy/run,
+`rustc`, scoped-test scripts, or `make test*`. Child closes reference assembly
+proof rather than scoped `--proof` or `loaded_proof` notes. Non-Rust suites are
+unaffected. An older runtime that denies the check exception requires parking
+with the unverified crates named for assembly.
+
+The assembly command runs native full-workspace nextest in the factory
+worktree, then the gate's archive-mode row in a plain clone outside every
+`.cas` ancestor. The archive consumer uses the queue's remapped environment
+and excludes component-output snapshots, already covered by the native run.
+Both contexts must report nonzero passed tests before an atomic PASS is written
+under the shared `.cas/merge-sweeps/assembly-proofs/` directory. The receipt
+records the tested Git tree, each context's tree and pass count, toolchain,
+environment and archive size. Full Cassy integration sweeps and the train's
+assembly stage use this same command; retries cite the existing receipt.
+
+The first full release gate automatically reuses its nextest and archive-mode
+rows from a matching receipt. `--only` remains a fresh diagnostic. Receipts
+expire after 24 hours; dirty checkouts, changed code/manifests/scripts/workflows,
+toolchain or test environment cause a miss. Only `CHANGELOG.md` and release
+prose under `docs/release-notes/` and `docs/release-reports/` are excluded from
+the code-input hash; embedded Rust documentation fixtures remain inputs.
+The prep stage's workspace-member `[package]` version values and corresponding
+source-less member `[[package]]` lock versions are normalized. The generated
+`cas-cli/src/builtins/reference-history.json` ledger is excluded; its source
+references and generator remain inputs. Every other manifest or lock byte,
+including dependency and non-member versions, still requires a new proof.
+The helper uses Python 3.11's standard-library TOML parser.
 
 Gate evidence: PR #655/run 33430464567; PR #657/run 33435093275.
 
@@ -177,9 +221,12 @@ cache-v2 backend and keeps the cold Build Benchmark explicitly uncached.
 
 New isolated workers also seed their private `target/` from compiled artifacts
 hardlinked out of the quiescent snapshot named by `.cas/build-cache/current`;
-small Cargo dep-info files are copied with their target root rebased. Refresh that
-baseline after an epic/main integration merge with
-`scripts/refresh-worker-build-cache.sh`; the script builds a new snapshot to
+small Cargo dep-info files are copied with their target root rebased. The release
+train's host-update stage refreshes that baseline automatically from a detached
+checkout of the released tag on main. `host-update.json` records the completed
+snapshot ID and source commit; a refresh failure warns without failing the
+published release. Run `scripts/refresh-worker-build-cache.sh` for a manual refresh
+after an epic integration merge. The script builds a new snapshot to
 completion and only then publishes its pointer, so no worker ever seeds from a
 live Cargo writer. Old snapshots remain valid for in-flight seeders and should
 only be removed during a maintenance window. Set
@@ -194,9 +241,10 @@ lands; hardlink seeding is the current cross-worktree mechanism.
 
 ### CI-load policy
 
-Standing operator policy: factory/* pushes run only Scoped
-Validation; protected-default PRs run only the required Fast Validation and
-macOS Check lanes. The merge queue validates its synthetic tree once; when its
+Standing operator policy: factory/* pushes and epic-targeted PRs run
+import/dependency-selected tests in Scoped Validation. Protected-default PRs run
+only the required Fast Validation and macOS Check admission lanes. The release
+merge queue runs the complete workspace suite on its synthetic tree once; when its
 successful tree is pushed unchanged to main, the main-push Fast Validation and
 macOS lanes reuse that receipt and name the validating run. Direct pushes,
 bypass merges, receipt lookup failures, and changed trees still run those
@@ -204,7 +252,9 @@ lanes. The non-required full/heavy tier (Clippy, Test Compile Guard, Build
 Benchmark, and both Panic Isolation profiles) belongs only to
 supervisor-controlled main pushes, schedules, or manual dispatches—never
 factory/*, epic/*, tags, or pull requests. Keep this policy pinned by
-`scripts/test-ci-test-tiers.sh`, rather than relying on convention. Docs-only
+`scripts/test-ci-test-tiers.sh`, rather than relying on convention.
+[Change-scoped CI](../../docs/ci/test-impact.md) describes selection, additive
+failure history, count/time receipts and full-suite recall measurements. Docs-only
 diffs (paths under `docs/` or Markdown files outside embedded
 `cas-cli/src/` content) on pull-request, push, and merge-group events route
 only to the `Docs Lint` job; it runs Markdown lint, validates any changed

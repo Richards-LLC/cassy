@@ -245,6 +245,7 @@ fn probe_comm_cli_removes_its_generated_root_on_success_and_failure() {
 
     cas_cmd()
         .env("HOME", &home)
+        .env("CLAUDE_CONFIG_DIR", home.join(".claude"))
         .env("TMPDIR", &tmpdir)
         .args(["factory", "probe-comm", "--jsonl"])
         .arg(temp.path().join("pass.jsonl"))
@@ -253,6 +254,7 @@ fn probe_comm_cli_removes_its_generated_root_on_success_and_failure() {
 
     cas_cmd()
         .env("HOME", &home)
+        .env("CLAUDE_CONFIG_DIR", home.join(".claude"))
         .env("TMPDIR", &tmpdir)
         .args([
             "factory",

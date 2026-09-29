@@ -205,9 +205,10 @@ naming its result and integration tip.
 
 ### Required merge-review discipline
 
-Before landing a worker lane, do these two checks. Workers never build or test
-Rust, so a lane carries no build proof; do not ask for a scoped receipt. The
-Rust build happens once, at Phase 4 assembly.
+Before landing a worker lane, do these two checks. Workers may carry capped
+compile-only `check: PASS <sha>` evidence; verify it names the delivered commit
+and affected crates. Do not ask for scoped test receipts. The full Rust build
+and test execution happen once, at Phase 4 assembly.
 
 1. **Contract changes first.** If the diff changes a public contract (API shape,
    persisted field, CLI/MCP response, or behavior callers rely on), search for sibling
@@ -335,8 +336,13 @@ When workers share the main directory, there's no branch merging — workers com
 1. Verify every child is closed and merged: `factory action=epic_status id=<epic-id>` (the same source as the epic close gate; a `status=open` list misses `in_progress`, `blocked`, and `awaiting_merge`).
 2. Hold the main merge. The epic branch is not ready for base until the assembled diff has passed review and the final gate.
 3. Run the final assembled-tree gate. This is the epic's single build + test:
-   workers never build, so one full run of the project's assembly gate command
+   worker checks execute no tests, so one full assembly gate run
    on the epic tip proves every child and checks cross-task integration.
+   In a project with `scripts/assembly-proof.py`, the assembly command is
+   `python3 scripts/assembly-proof.py prove <epic-worktree>`: it proves native
+   nextest in the worktree and archive-mode in a plain clone. A matching code
+   tree reuses its durable two-context PASS; integration recovery and the
+   release gate cite that receipt instead of running the suite again.
    On exit 0, record a progress note on the epic:
    `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>`,
    with the log under `[factory] artifacts_root/<epic-id>/`. Child task closes

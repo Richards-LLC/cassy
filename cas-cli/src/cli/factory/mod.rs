@@ -647,6 +647,14 @@ pub struct KillAllArgs {
 /// Internal factory subcommands (hidden from help)
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum FactoryCommands {
+    /// Internal capped runner installed by the worker PreToolUse guard.
+    #[command(hide = true)]
+    WorkerCheck {
+        #[arg(long)]
+        cas_root: std::path::PathBuf,
+        #[arg(last = true, required = true)]
+        cargo_args: Vec<String>,
+    },
     /// Report local Claude/Codex/CAS-MCP readiness without spawning workers.
     Doctor,
 
@@ -1054,6 +1062,10 @@ pub enum FactoryCommands {
 pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>) -> Result<()> {
     if let Some(ref cmd) = args.command {
         return match cmd {
+            FactoryCommands::WorkerCheck {
+                cas_root,
+                cargo_args,
+            } => crate::factory_worker_check::execute(cas_root, cargo_args),
             FactoryCommands::Doctor => doctor::execute(args, cli, cas_root),
             FactoryCommands::Preflight {
                 cas_root: sub_cas_root,

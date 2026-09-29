@@ -52,6 +52,8 @@
 #   CAS_RELEASE_TRAIN_REPORT_USER_THREAD_TS and _DEV_THREAD_TS supplied to the adapter
 #   CAS_RELEASE_ENV_FILE          default ~/.cas/release.env
 #   CAS_RELEASE_TRAIN_CAS         default cas (assemble heal and --host-update)
+#   CAS_RELEASE_TRAIN_WORKER_CACHE_CMD  default refresh-worker-build-cache.sh (host-update)
+#   CAS_RELEASE_TRAIN_WORKER_CACHE_TIMEOUT_SECS  default 1800 (warn-only cache refresh)
 set -euo pipefail
 
 usage() {
@@ -1083,6 +1085,9 @@ case "$action" in
         CAS_RELEASE_RECEIPTS_RUN_DIR="${CAS_RELEASE_RECEIPTS_RUN_DIR:-$run_dir}" \
         CAS_RELEASE_TRAIN_RUN_DIR="${CAS_RELEASE_TRAIN_RUN_DIR:-$run_dir}" \
             python3 "$script_dir/release-integrate.py" "$worktree"
+        if [[ -f "$worktree/Cargo.toml" ]]; then
+            python3 "$script_dir/assembly-proof.py" prove "$worktree"
+        fi
         exit $?
         ;;
     --print-run-dir)

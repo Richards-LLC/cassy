@@ -24,14 +24,33 @@ fn deny_reason(out: &HookOutput) -> Option<String> {
         .map(str::to_string)
 }
 
-/// cas-4cbb: factory workers never run Rust builds; the supervisor builds the
-/// epic tip once at assembly. Every compiling shape is denied, naming the rule.
+/// Only the literal package-scoped check shape is exempt from assembly.
 #[test]
 fn worker_rust_builds_are_denied_naming_the_assembly_rule() {
     for command in [
         "cargo test",
         "cargo test -p cas --no-fail-fast",
         "cargo check -p cas --lib --tests",
+        "cargo check -p cas --tests --lib",
+        "cargo check -p cas --lib --lib",
+        "cargo check -p cas --lib --all-targets",
+        "cargo check -p cas --lib --workspace",
+        "cargo check -p cas --lib --config build.jobs=64",
+        "CARGO_BUILD_JOBS=64 cargo check -p cas --lib",
+        "cargo check -p cas --lib && cargo test",
+        "cargo check -p cas --lib; cargo build",
+        "cargo check -p cas --lib | tee check.log",
+        "cargo check -p cas --tests --workspace",
+        "cargo check -p '*' --tests",
+        "cargo +nightly check -p cas --tests",
+        "cargo check -p cas --tests && cargo test",
+        "cargo check -p cas --tests; cargo build",
+        "cargo check -p cas --tests | tee check.log",
+        "cargo check -p cas --tests --config build.jobs=64",
+        "CARGO_BUILD_JOBS=64 cargo check -p cas --tests",
+        "bash -c 'cargo check -p cas --tests'",
+        "nice -n 10 cargo check -p cas --tests",
+        "/usr/bin/cargo check -p cas --tests",
         "cargo build --release",
         "cargo +nightly clippy -p cas",
         "cargo -C cas-cli check",
@@ -60,6 +79,74 @@ fn worker_rust_builds_are_denied_naming_the_assembly_rule() {
         assert!(reason.contains("cas-4cbb"), "{reason}");
         assert!(reason.contains("assembly"), "{reason}");
     }
+}
+
+#[test]
+fn literal_worker_check_is_rewritten_to_the_capped_runner_for_both_harnesses() {
+    use crate::test_support::TestEnvGuard;
+    for harness in ["claude", "codex"] {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().to_str().unwrap();
+        let _env = TestEnvGuard::with_vars(&[
+            ("CAS_HOOK_HARNESS", harness),
+            ("CAS_CLONE_PATH", worktree),
+        ]);
+        let root = dir.path().join(".cas");
+        std::fs::create_dir(&root).unwrap();
+        for command in [
+            "cargo check -p cas --lib",
+            "cargo check -p cas -p cas-pty --lib",
+            "cargo check --lib -p cas > worker-check.log 2>&1 &",
+            "cargo check -p cas --tests",
+            "cargo check -p cas -p cas-pty --tests",
+            "cargo check --tests -p cas > worker-check.log 2>&1 &",
+        ] {
+            let mut request = input(command, "worker");
+            request.cwd = worktree.into();
+            let out = handle_pre_tool_use(&request, Some(&root)).unwrap();
+            assert!(deny_reason(&out).is_none(), "{command}: {out:?}");
+            let value = serde_json::to_value(&out).unwrap();
+            let rewritten = value
+                .pointer("/hookSpecificOutput/updatedInput/command")
+                .and_then(|v| v.as_str())
+                .expect("updated command");
+            assert!(
+                rewritten.contains("factory worker-check --cas-root"),
+                "{rewritten}"
+            );
+            let args = command.strip_prefix("cargo check ").unwrap();
+            assert!(rewritten.contains(&format!("-- {args}")), "{rewritten}");
+            if command.ends_with('&') {
+                assert!(rewritten.ends_with("2>&1 &"));
+            }
+            if harness == "codex" {
+                assert!(
+                    value
+                        .pointer("/hookSpecificOutput/permissionDecision")
+                        .is_none()
+                );
+            }
+        }
+        // Rewriting through the capped runner must preserve the workspace
+        // contract, rather than granting the check a bare /tmp escape hatch.
+        for command in [
+            "cargo check --lib -p cas > /tmp/worker-check.log 2>&1 &",
+            "cargo check --tests -p cas > /tmp/worker-check.log 2>&1 &",
+        ] {
+            let mut request = input(command, "worker");
+            request.cwd = worktree.into();
+            let out = handle_pre_tool_use(&request, Some(&root)).unwrap();
+            let reason = deny_reason(&out).expect("bare /tmp must remain denied after rewrite");
+            assert!(reason.contains("FACTORY WORKSPACE CONTRACT"), "{reason}");
+            assert!(reason.contains("/tmp/worker-check.log"), "{reason}");
+        }
+    }
+}
+
+#[test]
+fn check_without_a_shared_root_fails_closed() {
+    let out = handle_pre_tool_use(&input("cargo check -p cas --tests", "worker"), None).unwrap();
+    assert!(deny_reason(&out).unwrap().contains("Cassy root"));
 }
 
 #[test]

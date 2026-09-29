@@ -718,8 +718,14 @@ fn cleanup_refuses_hub_home_outside_test_temp_root() {
 fn atexit_backstop_reaps_forgotten_fixture_home() {
     let receipt_dir = tempfile::tempdir().unwrap();
     let receipt_path = receipt_dir.path().join("forgotten-hub.json");
+    let child_test = module_path!()
+        .split_once("::")
+        .map(|(_, module)| format!("{module}::atexit_backstop_helper"))
+        .unwrap_or_else(|| "atexit_backstop_helper".to_string());
     let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "atexit_backstop_helper", "--ignored"])
+        // One test thread makes libtest name the test before running it; the
+        // helper exits before the result line, so this is its only trace.
+        .args(["--exact", &child_test, "--ignored", "--test-threads=1"])
         .env("CAS_HUB_ATEXIT_RECEIPT", &receipt_path)
         .output()
         .unwrap();
@@ -727,6 +733,14 @@ fn atexit_backstop_reaps_forgotten_fixture_home() {
         output.status.success(),
         "atexit child failed: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+    // The helper exits before libtest's final summary so atexit can run. A
+    // zero-match invocation also exits successfully but never writes a receipt.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.lines().any(|line| line == "running 1 test")
+            && stdout.contains(&format!("test {child_test} ...")),
+        "atexit helper did not execute {child_test}:\n{stdout}"
     );
     let receipt: Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
     let pid = receipt["pid"].as_u64().unwrap() as u32;

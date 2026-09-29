@@ -7,6 +7,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+#[path = "common/mod.rs"]
 mod common;
 use common::make_cloud_config;
 

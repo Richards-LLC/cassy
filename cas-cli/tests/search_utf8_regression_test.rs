@@ -23,6 +23,7 @@ use std::process::Stdio;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+#[path = "support/mod.rs"]
 mod support;
 use support::{CasSandbox, assert_command_is_sandboxed};
 

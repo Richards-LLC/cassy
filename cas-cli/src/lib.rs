@@ -43,6 +43,7 @@ mod light_lane;
 pub use light_lane::run_detached_worker;
 pub mod factory_auth_health;
 pub(crate) mod factory_build_guard;
+pub(crate) mod factory_worker_check;
 pub mod factory_context_reset;
 pub mod factory_isolation;
 pub mod factory_permission_relay;

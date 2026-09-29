@@ -4789,8 +4789,7 @@ This is the body content."#;
                     "{label} discipline.md duplicates spawn-contract marker: {forbidden:?}"
                 );
             }
-            // cas-4cbb: workers never run Rust builds; the supervisor builds
-            // once at epic assembly.
+            // Worker checks are compile-only; execution proof is assembly.
             for required in ["ASSEMBLY_PROOF"] {
                 assert!(
                     ref_content.contains(required),
@@ -4895,11 +4894,11 @@ This is the body content."#;
 
     /// cas-4cbb (operator directive 2026-09-24) supersedes cas-3627's worker
     /// test loop: five workers each compiling in their own target dir drove
-    /// the host to load 190. Workers now never run Rust builds; the supervisor
-    /// builds and tests the epic tip once at assembly. The rule's detail is on
+    /// the host to load 190. Workers now check affected crates under the builder
+    /// cap; the supervisor builds and tests once at assembly. Detail is on
     /// demand in references/discipline.md; all three flavors carry it.
     #[test]
-    fn test_worker_skills_teach_no_rust_build_rule_cas_4cbb() {
+    fn test_worker_skills_teach_capped_compile_only_exception_cas_3efd() {
         for (label, skill_content, ref_content) in [
             (
                 "claude",
@@ -4925,13 +4924,21 @@ This is the body content."#;
                     "{label} cas-worker SKILL.md missing discipline pointer: {required:?}"
                 );
             }
-            // The rule: workers edit, commit and park unbuilt; the supervisor
-            // builds once at assembly and records ASSEMBLY_PROOF; worker closes
-            // carry no scoped or loaded proof.
-            for required in ["ASSEMBLY_PROOF", "loaded_proof"] {
+            // Worker check receipts complement assembly execution proof.
+            for required in [
+                "ASSEMBLY_PROOF",
+                "loaded_proof",
+                "cargo check -p <crate>",
+                "--lib",
+                "--tests",
+                "lib-only edits",
+                "test files changed",
+                "max_concurrent_builders",
+                "check: PASS <sha>",
+            ] {
                 assert!(
                     ref_content.contains(required),
-                    "{label} cas-worker discipline.md missing no-build rule: {required:?}"
+                    "{label} cas-worker discipline.md missing compile-only rule: {required:?}"
                 );
             }
             for forbidden in ["Batch before you verify", "banked receipt", "--lib <module>"] {
@@ -8008,7 +8015,8 @@ This is the body content."#;
             "worktree_merge id=<worker> task_id=<task-id>",
             "Hold the main merge",
             "Run the final assembled-tree gate",
-            "the project's assembly gate command",
+            "one full assembly gate run",
+            "python3 scripts/assembly-proof.py prove <epic-worktree>",
             "bounded epic-child fix-round task",
             "Never pipe the test run to `tail`",
         ] {

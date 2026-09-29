@@ -24,6 +24,21 @@ bad() { printf 'FAIL %s\n' "$1"; fail=$((fail + 1)); }
 # must never write to the operator's ~/.cas.
 export CAS_RELEASE_ARTIFACTS_ROOT="$tmp/artifacts"
 
+# Session discovery must not invoke the host's installed cas: CLI startup can
+# create .cas/logs in an otherwise clean fixture before the cut's preflight.
+# Tests for discovery, recovery and host updates supply their own commands.
+export CAS_RELEASE_TRAIN_CAS="$tmp/cas-session-discovery.sh"
+export TRAIN_FIXTURE_DISCOVERY_LOG="$tmp/cas-session-discovery.log"
+cat >"$CAS_RELEASE_TRAIN_CAS" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$#" == 5 && "$1" == --json && "$2" == list && "$3" == --project-dir \
+    && "$5" == --running-only ]]
+printf '%s\n' "$4" >>"${TRAIN_FIXTURE_DISCOVERY_LOG:?}"
+printf '{"sessions":[]}\n'
+EOF
+chmod +x "$CAS_RELEASE_TRAIN_CAS"
+
 new_worktree() {
     local name="$1"
     local dir="$tmp/$name"
@@ -1978,7 +1993,8 @@ chmod +x "$cut_cmd"
 cut_gate="$tmp/cut-gate.sh"
 new_gate_stub "$cut_gate" 0
 cut_run_dir="$("$train" "$cut_version" "$cut_wt" --print-run-dir)"
-out="$(CAS_RELEASE_ENV_FILE="$cut_wt/release.env" \
+out="$(env -u CAS_FACTORY_SESSION -u CAS_ROOT \
+    CAS_RELEASE_ENV_FILE="$cut_wt/release.env" \
     CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_COMPETING=1 CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_TOOLCHAIN=1 \
     CAS_RELEASE_TRAIN_GATE_CMD="$cut_gate" CAS_RELEASE_TRAIN_CUT_STOP_AFTER=gate \
     CAS_RELEASE_TRAIN_ASSEMBLE_CMD="$cut_cmd" CAS_RELEASE_TRAIN_PREP_CMD="$cut_cmd" \
@@ -1992,6 +2008,12 @@ if [[ "$out" == *'stopped after stage gate'* && -s "$cut_run_dir/stage.gate.done
     ok '--cut stops after gate with a durable stage receipt'
 else
     bad "--cut did not stop with the gate receipt: $out"
+fi
+if grep -Fxq "$cut_wt" "$TRAIN_FIXTURE_DISCOVERY_LOG" \
+    && [[ -z "$(git -C "$cut_wt" status --porcelain)" ]]; then
+    ok '--cut session discovery without worker identity leaves the fixture clean'
+else
+    bad "--cut session discovery dirtied the fixture or bypassed its command: $(git -C "$cut_wt" status --porcelain)"
 fi
 gate_runs_before="$(grep -c '^gate$' "$cut_log" 2>/dev/null || true)"
 CAS_RELEASE_ENV_FILE="$cut_wt/release.env" \
@@ -2010,6 +2032,178 @@ if [[ "$gate_runs_before" == "$gate_runs_after" ]] \
     ok '--cut --resume skips the completed gate and reaches the final stage'
 else
     bad "--cut --resume did not preserve gate idempotence (before=$gate_runs_before after=$gate_runs_after)"
+fi
+
+# Publish adopts a squash-merged SHA, then post-publication fills the draft.
+# Announce fails once; the printed resume must finish without manual stages.
+published_version=9.99.25
+published_wt="$(new_cut_fixture cut-published-resume "$published_version")"
+published_draft="$published_wt/docs/release-notes/$(date -u +%F)-v${published_version}-slack.md"
+printf '\nLinux {{LINUX_SHA256}}; macOS {{MACOS_SHA256}}\n' >>"$published_draft"
+git -C "$published_wt" add docs/release-notes
+git -C "$published_wt" commit -qm 'seed checksum placeholders'
+published_original="$(git -C "$published_wt" rev-parse HEAD)"
+published_dir="$($train "$published_version" "$published_wt" --print-run-dir)"
+published_cmd="$tmp/published-resume-stage.sh"
+cat >"$published_cmd" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$CUT_STAGE" >>"$CUT_LOG"
+case "$CUT_STAGE" in
+    pipeline)
+        printf 'squashed release\n' | git commit-tree 'HEAD^{tree}' -p refs/remotes/origin/main >"$CAS_RELEASE_TRAIN_RUN_DIR/landed-main.sha"
+        printf 'MERGED\n' >"$CAS_RELEASE_TRAIN_RUN_DIR/pipeline.done"
+        ;;
+    publish) git reset --hard "$(cat "$CAS_RELEASE_TRAIN_RUN_DIR/landed-main.sha")" >/dev/null ;;
+    post-publication)
+        python3 - "$PUBLISHED_DRAFT" "$CAS_RELEASE_TRAIN_RUN_DIR" <<'PYFIX'
+from pathlib import Path
+import sys
+draft, run = Path(sys.argv[1]), Path(sys.argv[2])
+draft.write_text(draft.read_text().replace('{{LINUX_SHA256}}', 'a' * 64).replace('{{MACOS_SHA256}}', 'b' * 64))
+(run / 'release-published.receipt').write_text('LINUX_SHA256=' + 'a' * 64 + '\nMACOS_SHA256=' + 'b' * 64 + '\n')
+PYFIX
+        ;;
+    announce)
+        if [[ ! -e "$CAS_RELEASE_TRAIN_RUN_DIR/announce-failed-once" ]]; then
+            touch "$CAS_RELEASE_TRAIN_RUN_DIR/announce-failed-once"
+            exit 23
+        fi
+        ;;
+    report)
+        if [[ -e "$CAS_RELEASE_TRAIN_RUN_DIR/report-fail-request" ]]; then
+            mkdir -p docs/release-reports
+            printf 'partial report\n' >"docs/release-reports/v${CAS_RELEASE_TRAIN_VERSION}.html"
+            rm "$CAS_RELEASE_TRAIN_RUN_DIR/report-fail-request"
+            exit 24
+        fi
+        ;;
+esac
+EOF
+chmod +x "$published_cmd"
+published_log="$tmp/published-stages.log"
+run_published_resume() {
+    CAS_RELEASE_ENV_FILE="$published_wt/release.env" \
+    CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_COMPETING=1 CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_TOOLCHAIN=1 \
+    CAS_RELEASE_TRAIN_GATE_CMD="$cut_gate" \
+    CAS_RELEASE_TRAIN_ASSEMBLE_CMD="$published_cmd" CAS_RELEASE_TRAIN_PREP_CMD="$published_cmd" \
+    CAS_RELEASE_TRAIN_LEDGER_CMD="$published_cmd" CAS_RELEASE_TRAIN_PIPELINE_CMD="$published_cmd" \
+    CAS_RELEASE_TRAIN_PUBLISH_CMD="$published_cmd" CAS_RELEASE_TRAIN_POST_PUBLICATION_CMD="$published_cmd" \
+    CAS_RELEASE_TRAIN_ANNOUNCE_CMD="$published_cmd" CAS_RELEASE_TRAIN_REPORT_CMD="$published_cmd" \
+    CAS_RELEASE_TRAIN_RECEIPTS_CMD="$published_cmd" CAS_RELEASE_TRAIN_HOST_UPDATE_CMD="$published_cmd" \
+    CAS_RELEASE_TRAIN_RUN_DIR="$published_dir" PUBLISHED_DRAFT="$published_draft" CUT_LOG="$published_log" \
+        "$train" "$published_version" "$published_wt" --cut "$@"
+}
+if run_published_resume >"$tmp/published-first.out" 2>&1; then
+    bad 'published fixture unexpectedly bypassed the injected announce failure'
+elif grep -qF 'BLOCKER announce' "$tmp/published-first.out" \
+    && ! git -C "$published_wt" merge-base --is-ancestor "$published_original" HEAD \
+    && [[ "$(git -C "$published_wt" diff --name-only)" == "${published_draft#"$published_wt"/}" ]]; then
+    ok 'announce failure reproduces squash-published HEAD plus the filled dirty draft'
+else
+    bad "published fixture missed the live trigger: $(cat "$tmp/published-first.out")"
+fi
+printf 'unrelated\n' >"$published_wt/unrelated.txt"
+if run_published_resume --resume >"$tmp/published-dirty.out" 2>&1; then
+    bad 'published resume accepted unrelated untracked changes'
+elif grep -qF 'BLOCKER clean-worktree' "$tmp/published-dirty.out" \
+    && [[ "$(grep -c '^announce$' "$published_log")" == 1 ]]; then
+    ok 'published resume rejects unrelated dirt before rerunning announce'
+else
+    bad "published resume did not preserve the dirty-tree guard: $(cat "$tmp/published-dirty.out")"
+fi
+rm "$published_wt/unrelated.txt"
+cp "$published_draft" "$tmp/published-filled.md"
+printf 'unreceipted prose\n' >>"$published_draft"
+if run_published_resume --resume >"$tmp/published-tamper.out" 2>&1; then
+    bad 'published resume accepted an edited draft beyond the stage output'
+elif grep -qF 'BLOCKER clean-worktree' "$tmp/published-tamper.out"; then
+    ok 'published resume accepts only the recorded draft bytes'
+else
+    bad "published resume failed to name draft tampering: $(cat "$tmp/published-tamper.out")"
+fi
+cp "$tmp/published-filled.md" "$published_draft"
+cp "$published_dir/stage.publish.done" "$tmp/published-stage.done"
+cp "$published_dir/stage.pipeline.done" "$tmp/published-pipeline.done"
+printf '%040d\n' 1 >"$published_dir/stage.publish.done"
+printf '%040d\n' 1 >"$published_dir/stage.pipeline.done"
+if run_published_resume --resume >"$tmp/published-stale.out" 2>&1; then
+    bad 'published resume accepted unrelated publication receipts'
+elif grep -qF 'stage preflight: start' "$tmp/published-stale.out" \
+    && grep -qF 'BLOCKER clean-worktree' "$tmp/published-stale.out"; then
+    ok 'invalid publication receipts cannot bypass preflight'
+else
+    bad "stale publication receipt did not return to preflight: $(cat "$tmp/published-stale.out")"
+fi
+cp "$tmp/published-stage.done" "$published_dir/stage.publish.done"
+cp "$tmp/published-pipeline.done" "$published_dir/stage.pipeline.done"
+# Upgrade compatibility: the real 3.37.0 run predates output snapshots.
+mv "$published_dir/post-publication-outputs.json" "$tmp/published-outputs.json"
+if python3 "$script_dir/release-train-resume.py" check "$published_wt" "$published_dir" \
+    "$published_version" "$published_draft"; then
+    ok 'legacy published runs accept the exact receipt-backed checksum replacement'
+else
+    bad 'legacy filled draft was not recognized'
+fi
+printf 'unreceipted prose\n' >>"$published_draft"
+if python3 "$script_dir/release-train-resume.py" check "$published_wt" "$published_dir" \
+    "$published_version" "$published_draft" >"$tmp/legacy-tamper.out" 2>&1; then
+    bad 'legacy resume accepted extra draft prose'
+else
+    ok 'legacy published runs reject draft changes beyond checksum replacement'
+fi
+cp "$tmp/published-filled.md" "$published_draft"
+mv "$tmp/published-outputs.json" "$published_dir/post-publication-outputs.json"
+if run_published_resume --resume >"$tmp/published-resume.out" 2>&1 \
+    && [[ -s "$published_dir/stage.host-update.done" ]] \
+    && [[ "$(grep -c '^pipeline$' "$published_log")" == 1 ]] \
+    && [[ "$(grep -c '^publish$' "$published_log")" == 1 ]] \
+    && [[ "$(grep -c '^post-publication$' "$published_log")" == 1 ]] \
+    && [[ "$(grep -c '^announce$' "$published_log")" == 2 ]]; then
+    ok '--cut --resume after squash publication completes announce through host-update without manual stages'
+else
+    bad "post-publication resume failed: $(cat "$tmp/published-resume.out")"
+fi
+rm "$published_dir/stage.report.done" "$published_dir/stage.receipts.done" "$published_dir/stage.host-update.done"
+touch "$published_dir/report-fail-request"
+if run_published_resume --resume >"$tmp/published-report.out" 2>&1; then
+    bad 'published resume bypassed the injected partial report failure'
+elif grep -qF 'BLOCKER report' "$tmp/published-report.out" \
+    && run_published_resume --resume >"$tmp/published-report-resume.out" 2>&1 \
+    && [[ -s "$published_dir/stage.host-update.done" ]] \
+    && [[ "$(grep -c '^announce$' "$published_log")" == 2 ]]; then
+    ok 'a partial report failure also resumes its recorded outputs through host-update'
+else
+    bad "partial report resume failed: $(cat "$tmp/published-report.out") $(cat "$tmp/published-report-resume.out" 2>/dev/null || true)"
+fi
+
+# The pipeline boundary is independently resumable before publication.
+published_version=9.99.26
+published_wt="$(new_cut_fixture cut-pipeline-resume "$published_version")"
+published_draft="$published_wt/docs/release-notes/$(date -u +%F)-v${published_version}-slack.md"
+published_dir="$($train "$published_version" "$published_wt" --print-run-dir)"
+published_log="$tmp/pipeline-stages.log"
+if CAS_RELEASE_TRAIN_CUT_STOP_AFTER=pipeline run_published_resume >"$tmp/pipeline-first.out" 2>&1; then
+    bad 'pipeline resume fixture did not stop at its receipt'
+elif grep -qF 'stopped after stage pipeline' "$tmp/pipeline-first.out"; then
+    # Publisher can adopt landed HEAD and then fail before its own receipt.
+    git -C "$published_wt" reset --hard "$(cat "$published_dir/landed-main.sha")" >/dev/null
+    touch "$published_dir/announce-failed-once"
+    if run_published_resume --resume >"$tmp/pipeline-resume.out" 2>&1 \
+        && [[ -s "$published_dir/stage.host-update.done" ]] \
+        && [[ "$(grep -c '^pipeline$' "$published_log")" == 1 ]] \
+        && [[ "$(grep -c '^publish$' "$published_log")" == 1 ]]; then
+        ok 'pipeline receipt resumes publication after HEAD moved without repeating preflight or pipeline'
+    else
+        bad "pipeline boundary resume failed: $(cat "$tmp/pipeline-resume.out")"
+    fi
+else
+    bad "pipeline resume fixture missed its boundary: $(cat "$tmp/pipeline-first.out")"
+fi
+if python3 "$script_dir/test-release-train-resume.py"; then
+    ok 'resume output guards cover index, mode, symlink, receipt identity and legacy changes'
+else
+    bad 'resume output guard tests failed'
 fi
 
 missing_wt="$(new_cut_fixture cut-missing-heading 9.99.11 0)"
@@ -2289,13 +2483,28 @@ esac
 EOF
 chmod +x "$host_stub"
 host_version=9.99.20
-host_wt="$tmp/host-update-wt"
-mkdir -p "$host_wt"
-git -C "$host_wt" init -q
+host_wt="$(new_worktree host-update-wt)"
+git -C "$host_wt" tag "v$host_version"
+git -C "$host_wt" update-ref refs/remotes/origin/main HEAD
+host_cache_stub="$tmp/host-cache"
+cat >"$host_cache_stub" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'head=%s root=%s\n' "$(git rev-parse HEAD)" "$CAS_ROOT" >>"${HOST_CACHE_LOG:?}"
+[[ "${HOST_CACHE_FAIL:-0}" == 0 ]] || { echo 'fixture refresh failed' >&2; exit 12; }
+snapshot=target-fixture-complete
+mkdir -p "$CAS_ROOT/build-cache/snapshots/$snapshot"
+printf 'source_commit=%s\n' "$(git rev-parse HEAD)" >"$CAS_ROOT/build-cache/snapshots/$snapshot/.cas-build-cache-metadata"
+printf '%s\n' "$snapshot" >"$CAS_ROOT/build-cache/current"
+printf 'Published worker target baseline: %s\n' "$snapshot"
+EOF
+chmod +x "$host_cache_stub"
 host_run_dir="$("$train" "$host_version" "$host_wt" --print-run-dir)"
 run_host_update() {
     rm -f "$host_run_dir/host-update.json"
+    rm -f "$tmp/host-cache.log"
     env CAS_RELEASE_TRAIN_CAS="$host_stub" HOST_STUB_LOG="$tmp/host-stub.log" \
+        CAS_RELEASE_TRAIN_WORKER_CACHE_CMD="$host_cache_stub" HOST_CACHE_LOG="$tmp/host-cache.log" \
         HOST_STUB_EXPECT_VERSION="$host_version" HOST_STUB_BINARY="$host_version" \
         HOST_STUB_HUB="$host_version" HOST_STUB_REFRESH="$host_version" "$@" \
         "$train" "$host_version" "$host_wt" --host-update
@@ -2306,7 +2515,8 @@ host_status() {
 }
 if out="$(run_host_update HOST_STUB_UPDATE=noop 2>&1)"; then
     bad "host-update accepted a no-op update: $out"
-elif [[ "$out" == *'BLOCKER host-update: cas update printed no refresh receipt'* && "$(host_status)" == FAIL ]]; then
+elif [[ "$out" == *'BLOCKER host-update: cas update printed no refresh receipt'* && "$(host_status)" == FAIL \
+    && ! -e "$tmp/host-cache.log" ]]; then
     ok 'host-update: a deferred/no-op update is a named blocker with a FAIL receipt'
 else
     bad "host-update no-op failure was not named: $out"
@@ -2329,10 +2539,21 @@ fi
 if out="$(run_host_update 2>&1)" && [[ "$(host_status)" == PASS ]] \
     && grep -q '"refresh_binary_version": "9.99.20"' "$host_run_dir/host-update.json" \
     && grep -q '"hub_version": "9.99.20"' "$host_run_dir/host-update.json" \
-    && grep -q '"cas_version": "9.99.20"' "$host_run_dir/host-update.json"; then
+    && grep -q '"cas_version": "9.99.20"' "$host_run_dir/host-update.json" \
+    && grep -q '"snapshot": "target-fixture-complete"' "$host_run_dir/host-update.json" \
+    && [[ "$(wc -l <"$tmp/host-cache.log" | tr -d ' ')" == 1 ]]; then
     ok 'host-update: matching cas, hub and refresh versions pass with host-update.json evidence'
 else
     bad "host-update did not pass on a converged host: $out"
+fi
+if out="$(run_host_update HOST_CACHE_FAIL=1 2>&1)" && [[ "$(host_status)" == PASS ]] \
+    && [[ "$out" == *'WARN host-update: worker build-cache refresh failed (not blocking)'* ]] \
+    && grep -q '"status": "WARN"' "$host_run_dir/host-update.json" \
+    && grep -q '"snapshot": null' "$host_run_dir/host-update.json" \
+    && [[ "$(cat "$host_wt/.cas/build-cache/current")" == target-fixture-complete ]]; then
+    ok 'host-update: worker cache failure warns, keeps published release PASS and old snapshot'
+else
+    bad "host-update cache refresh failure blocked publication or lost evidence: $out"
 fi
 cloud_project='{"project":"/srv/unrelated","migration":"ok: m","search_index":"ok: s","skills":"ok: k","membership":"ok: b","cloud_sync":"FAILED: push rejected"}'
 if out="$(run_host_update HOST_STUB_UPDATE_EXIT=1 HOST_STUB_REFRESH_STATUS=refresh_failed \
@@ -2357,6 +2578,12 @@ if python3 "$script_dir/test-release-integration.py"; then
     ok 'gap 1: rolling assembly self-heal passes the recorded factory session and supervisor identity; clean, red, dirty and locked fixtures'
 else
     bad 'rolling integration assembly fixture suite'
+fi
+
+if python3 "$script_dir/test-release-worker-build-cache.py"; then
+    ok 'host-update: real cache publisher fixtures preserve quiescent snapshots and released provenance'
+else
+    bad 'host-update worker build-cache fixture suite'
 fi
 
 # cas-fed5: the train and gate run on stock macOS. (This file's in-place edits
@@ -2539,6 +2766,41 @@ if [[ "$portable_announce" == 'None CASSY_PROXY_TOKEN_SOUNDWAVE CASSY_PROXY_TOKE
     ok "cas-fed5: announce pins the proxy token variable only when this host sets it"
 else
     bad "cas-fed5: announce token env selection: $portable_announce"
+fi
+
+# Assembly must consume the integration tip before producing/reusing proof.
+assembly_fixture="$tmp/assembly-dispatch"
+mkdir -p "$assembly_fixture/bin"
+: >"$assembly_fixture/Cargo.toml"
+cat >"$assembly_fixture/bin/python3" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$ASSEMBLY_DISPATCH_LOG"
+if [[ "$1" == */release-integrate.py && "${ASSEMBLY_INTEGRATE_FAIL:-}" == 1 ]]; then exit 7; fi
+EOF
+chmod +x "$assembly_fixture/bin/python3"
+assembly_dispatch() (
+    export PATH="$assembly_fixture/bin:$PATH" ASSEMBLY_DISPATCH_LOG="$assembly_fixture/calls"
+    script_dir="$repo_root/scripts"
+    worktree="$assembly_fixture"
+    cut_has_external_stage() { return 1; }
+    source "$script_dir/release-train.d/assemble.sh"
+    cut_stage_assemble
+)
+assembly_dispatch
+if [[ "$(wc -l <"$assembly_fixture/calls")" == 2 ]] \
+    && sed -n '1p' "$assembly_fixture/calls" | grep -qF 'release-integrate.py' \
+    && sed -n '2p' "$assembly_fixture/calls" | grep -qF "assembly-proof.py prove $assembly_fixture"; then
+    ok 'assembly consumes integration before producing the shared two-context proof'
+else
+    bad "assembly dispatch order: $(cat "$assembly_fixture/calls")"
+fi
+: >"$assembly_fixture/calls"
+if ASSEMBLY_INTEGRATE_FAIL=1 assembly_dispatch; then
+    bad 'failed integration still certified assembly'
+elif [[ "$(wc -l <"$assembly_fixture/calls")" == 1 ]]; then
+    ok 'failed integration cannot start or reuse assembly proof'
+else
+    bad 'assembly proof ran after integration failed'
 fi
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"

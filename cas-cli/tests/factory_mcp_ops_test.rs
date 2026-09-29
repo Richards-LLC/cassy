@@ -9,7 +9,7 @@
 //! `CAS_FACTORY_WORKER_NAMES`). Those tests use a process-wide, poison-tolerant
 //! lock, so the target is safe to run with Cargo's default parallelism:
 //! ```bash
-//! cargo test --test factory_mcp_ops_test -- --nocapture
+//! cargo test --test integration_factory factory_mcp_ops_test:: -- --nocapture
 //! ```
 
 use std::collections::HashMap;
@@ -376,6 +376,12 @@ enum IsolatedCodexState {
 /// environment can reach it only when the whole service call runs in this
 /// child. The parent test process never mutates PATH.
 fn run_isolated_codex_test(child_test: &str, state: IsolatedCodexState) {
+    // libtest names include the suite module in a grouped integration harness.
+    // Strip the binary crate name; keep standalone and nested-module support.
+    let child_filter = module_path!()
+        .split_once("::")
+        .map(|(_, module)| format!("{module}::{child_test}"))
+        .unwrap_or_else(|| child_test.to_string());
     let home = TempDir::new().expect("isolated Codex child HOME");
     let bin_dir = home.path().join(match state {
         IsolatedCodexState::Available => "fake-bin",
@@ -396,13 +402,14 @@ fn run_isolated_codex_test(child_test: &str, state: IsolatedCodexState) {
     let output = std::process::Command::new(
         std::env::current_exe().expect("current integration-test executable"),
     )
-    .args(["--exact", child_test, "--ignored", "--nocapture"])
+    .args(["--exact", &child_filter, "--ignored", "--nocapture"])
     .env("CAS_FACTORY_CODEX_ISOLATED_CHILD", child_test)
     // The child deliberately supplies HOME/PATH itself, so it cannot inherit
     // the TestEnvGuard-owned override from the parent test process. Keep the
     // factory build probe deterministic in this process too.
     .env("CAS_FACTORY_BUILD_GUARD", "off")
     .env("HOME", home.path())
+    .env("CLAUDE_CONFIG_DIR", home.path().join(".claude"))
     .env("PATH", &bin_dir)
     .output()
     .expect("spawn isolated Codex integration test");
@@ -415,8 +422,10 @@ fn run_isolated_codex_test(child_test: &str, state: IsolatedCodexState) {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains(child_test) && stdout.contains("test result: ok"),
-        "isolated helper did not execute {child_test}:\n{stdout}"
+        stdout.contains(&format!("test {child_filter} ..."))
+            && stdout.lines().any(|line| line == "running 1 test")
+            && stdout.contains("test result: ok"),
+        "isolated helper did not execute {child_filter}:\n{stdout}"
     );
 }
 
@@ -5106,7 +5115,7 @@ async fn test_clear_context_refuses_prompt_overflow_failure_loop() {
 /// explicitly when touching `factory_context_reset` or the reset delivery path:
 ///
 /// ```bash
-/// cargo test -p cas --test factory_mcp_ops_test -- --ignored --nocapture \
+/// cargo test -p cas --test integration_factory factory_mcp_ops_test:: -- --ignored --nocapture \
 ///     clear_context_command_really_resets_a_live_claude
 /// ```
 ///

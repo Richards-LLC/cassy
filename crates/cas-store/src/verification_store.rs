@@ -1770,8 +1770,9 @@ fn correct_parked_delivery_proof_scope_inner(
         match target_branch {
             Some(branch) => tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM observed_delivery_merges
-                 WHERE task_id = ?1 AND target_branch = ?2)",
-                params![corrected_task.id, branch],
+                 WHERE task_id = ?1 AND target_branch = ?2
+                   AND (?3 IS NULL OR source_commit_sha = ?3))",
+                params![corrected_task.id, branch, corrected_task.deliverables.factory_branch_anchor],
                 |row| row.get::<_, bool>(0),
             )?,
             None => false,
@@ -1786,7 +1787,7 @@ fn correct_parked_delivery_proof_scope_inner(
         })
         && !observed_work_target_merge
     {
-        return Err(StoreError::Parse(
+        return Err(StoreError::Other(
             "proof correction requires a merged or close-ready delivery transaction or an authenticated merge observation on the task's WorkTarget".to_string(),
         ));
     }
@@ -1872,7 +1873,7 @@ fn correct_parked_delivery_proof_scope_inner(
     let changed = tx.execute(
         "UPDATE tasks SET status = 'open', notes = ?2, deliverables = ?3,
          proof_targets = ?4, risk = ?5, pending_verification = 0, pending_worktree_merge = 0, updated_at = ?6
-         WHERE id = ?1 AND status IN ('awaiting_merge', 'in_progress') AND updated_at = ?7",
+         WHERE id = ?1 AND status IN ('awaiting_merge', 'in_progress', 'blocked') AND updated_at = ?7",
         params![
             corrected_task.id,
             corrected_task.notes,
@@ -1903,8 +1904,8 @@ fn correct_parked_delivery_proof_scope_inner(
         ],
     )?;
     if changed != 1 {
-        return Err(StoreError::Parse(
-            "proof-scope correction requires the unchanged AwaitingMerge or InProgress task".to_string(),
+        return Err(StoreError::Other(
+            "proof-scope correction requires the unchanged AwaitingMerge, InProgress, or Blocked task".to_string(),
         ));
     }
     let event = Event::new(

@@ -31,11 +31,11 @@
 #
 # Usage:
 #   scripts/check-real-store-untouched.sh                    # full suite
-#   scripts/check-real-store-untouched.sh --test cli_test    # scoped run
+#   scripts/check-real-store-untouched.sh --test integration_cli cli_test::    # scoped run
 #
 # Any arguments are passed through to `cargo nextest run`. Scoping is strongly
-# encouraged for routine use — a full suite in this repo links ~64 test
-# binaries and is expensive (see CLAUDE.md).
+# encouraged for routine use — a full suite in this repo links ten cas-cli test
+# harnesses plus other workspace tests (see CLAUDE.md).
 #
 # Exit codes: 0 = clean, 1 = drift detected or the test run failed.
 

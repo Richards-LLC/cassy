@@ -1,4 +1,4 @@
-use crate::hooks_test::*;
+use super::*;
 use tempfile::TempDir;
 
 #[test]

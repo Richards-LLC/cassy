@@ -18,6 +18,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
+#[path = "common/mod.rs"]
 mod common;
 use common::{TEST_TEAM, make_cli_json, make_cloud_config};
 

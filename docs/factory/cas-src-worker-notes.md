@@ -41,8 +41,8 @@ test to the main checkout's `.cas`. There is no `CAS_TASK_ID`.
 
 ## From `cas-worker/references/recovery.md` — stuck builds and test binaries
 
-Workers no longer run Rust builds, so this triage belongs to whoever builds at
-epic assembly.
+Workers may run capped package-scoped compile checks. Build and test triage
+beyond that exception belongs to the supervisor at epic assembly.
 
 ### A build that looks stuck: killed vs wedged
 

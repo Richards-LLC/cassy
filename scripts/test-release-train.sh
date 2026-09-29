@@ -1286,8 +1286,38 @@ else
     bad "pattern-based process matching in the release path: $pattern_hits"
 fi
 
-for flavour in skills codex/skills grok/skills; do
-    skill="$repo_root/cas-cli/src/builtins/$flavour/cas-cut-release/SKILL.md"
+# Each shipped catalog embeds the same source. Check that wiring before
+# checking its release contract; deleted harness source trees are not inputs.
+for flavour in claude codex grok; do
+    if python3 - "$repo_root/cas-cli/src/builtins.rs" "$flavour" <<'PY_CATALOG'
+from pathlib import Path
+import re
+import sys
+
+catalog_name = {
+    "claude": "BUILTIN_SKILLS",
+    "codex": "CODEX_BUILTIN_SKILLS",
+    "grok": "GROK_BUILTIN_SKILLS",
+}[sys.argv[2]]
+source = Path(sys.argv[1]).read_text()
+catalog = re.search(
+    rf"pub const {catalog_name}: &\[BuiltinFile\] = &\[(.*?)\n\];",
+    source, re.S,
+)
+entries = re.findall(r"BuiltinFile\s*\{(.*?)\}", catalog[1], re.S) if catalog else []
+registered = any(
+    'path: "skills/cas-cut-release/SKILL.md"' in entry
+    and 'include_str!("builtins/skills/cas-cut-release/SKILL.md")' in entry
+    for entry in entries
+)
+sys.exit(0 if registered else 1)
+PY_CATALOG
+    then
+        ok "cas-cut-release ($flavour) catalog embeds the shared source"
+    else
+        bad "cas-cut-release ($flavour) catalog does not embed the shared source"
+    fi
+    skill="$repo_root/cas-cli/src/builtins/skills/cas-cut-release/SKILL.md"
     if grep -q 'release-train.sh' "$skill" 2>/dev/null; then
         ok "cas-cut-release ($flavour) points at release-train.sh"
     else
@@ -1312,8 +1342,8 @@ for flavour in skills codex/skills grok/skills; do
         'four Slack POSTED' 'refresh_binary_version' 'stranded_branch_override' \
         'release.tag-complete.epoch' 'release-published.receipt' \
         'Pin the cut date' 'Cargo.lock' 'docs-only release commits' \
-        'status-check rollup' 'announcement lint' 'wording must avoid' \
-        'agent`, `worker`, `supervisor`, `daemon`, and `factory'; do
+        'status-check rollup' 'announcement lint' 'scripts/release-train-announce.py' \
+        'is the authority for User-thread'; do
         if grep -qF "$marker" "$skill" 2>/dev/null; then
             ok "cas-cut-release ($flavour) carries marker: $marker"
         else

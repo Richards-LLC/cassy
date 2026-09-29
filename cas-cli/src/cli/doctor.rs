@@ -3546,8 +3546,13 @@ fn output_foreign_rows_detail(
                 crate::cli::foreign_rows::ProvenanceState::Unknown => unknown += 1,
             }
         }
+        let plural = match kind {
+            "entry" => "entries",
+            "task" => "tasks",
+            _ => "rules",
+        };
         fmt.write_raw(&format!(
-            "  {kind}s: {authored} authored, {foreign} foreign, {unknown} unknown"
+            "  {plural}: {authored} authored, {foreign} foreign, {unknown} unknown"
         ))?;
         fmt.newline()?;
     }
@@ -5571,8 +5576,8 @@ mod tests {
     #[test]
     fn hub_audit_check_errors_only_on_a_recorded_writer_failure() {
         let temp = TempDir::new().unwrap();
-        let now = chrono::Utc::now();
         fs::write(temp.path().join(crate::hub::AUDIT_LOG_FILE), b"{}\n").unwrap();
+        let now = chrono::Utc::now();
         let quiet = hub_audit_check_for(temp.path(), now + chrono::Duration::days(2));
         assert!(matches!(quiet.status, CheckStatus::Ok), "{}", quiet.message);
         assert!(quiet.message.starts_with("last row 2d ago"), "{}", quiet.message);

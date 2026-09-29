@@ -712,7 +712,12 @@ mod tests {
                 registry_skip(&fixture),
                 Some(RegistrySkip::Artifacts(_))
             ));
-            assert!(registry_skip(&real).is_none());
+            // A real pinned project may still be excluded from discovery when
+            // this test binary runs beneath a disposable temp root.
+            assert!(matches!(
+                registry_skip(&real),
+                None | Some(RegistrySkip::Temp(_))
+            ));
         });
     }
 

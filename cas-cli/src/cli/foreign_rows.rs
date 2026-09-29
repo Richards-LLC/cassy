@@ -298,7 +298,12 @@ impl ForeignRowReport {
                         ProvenanceState::Unknown => unknown += 1,
                     }
                 }
-                format!("{kind}s: {authored} authored, {foreign} foreign, {unknown} unknown")
+                let plural = match kind {
+                    "entry" => "entries",
+                    "task" => "tasks",
+                    _ => "rules",
+                };
+                format!("{plural}: {authored} authored, {foreign} foreign, {unknown} unknown")
             });
             if !summary.is_empty() {
                 summary.push_str("; ");

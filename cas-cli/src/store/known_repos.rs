@@ -714,7 +714,10 @@ mod tests {
             ));
             // A real pinned project may still be excluded from discovery when
             // this test binary runs beneath a disposable temp root.
-            assert!(is_project_root(&real));
+            assert!(matches!(
+                registry_skip(&real),
+                None | Some(RegistrySkip::Temp(_))
+            ));
         });
     }
 

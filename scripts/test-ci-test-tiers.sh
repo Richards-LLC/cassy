@@ -475,9 +475,9 @@ require_text "$suite_shards" 'runs-on: ubuntu-latest' 'required suite shards ret
 scoped="$(job_block scoped-validation)"
 require_text "$scoped" "refs/heads/factory/" 'scoped tier selects factory branches'
 require_text "$scoped" "github.event_name == 'pull_request'" 'pull requests use scoped tier'
-require_text "$scoped" 'github.base_ref != github.event.repository.default_branch' 'scoped tier skips protected-default PRs'
-require_text "$scoped" 'cargo check -p cas --lib --tests' 'scoped tier checks target surface'
-require_text "$scoped" 'scripts/run-scoped-tests.sh -p cas --lib' 'scoped tier runs one guarded test binary'
+require_absent "$scoped" 'github.base_ref != github.event.repository.default_branch' 'scoped tier also validates protected-default PR changes'
+require_text "$scoped" 'python3 scripts/ci-test-impact.py run' 'scoped tier executes import/dependency selected tests'
+require_text "$scoped" 'python3 scripts/ci-test-impact.py history' 'scoped tier reads additive recorded failure history'
 require_text "$scoped" 'Test snapshot-pinned CLI output surfaces' 'scoped tier names the snapshot surface target'
 require_text "$scoped" 'scripts/check-scoped-snapshot-tests.sh --base-sha' 'scoped tier routes mapped snapshot surfaces'
 require_text "$scoped" 'github.event.merge_group.base_sha' 'snapshot router receives merge-group base'
@@ -518,8 +518,7 @@ require_text "$dedupe_step" "if: github.event_name == 'push'" 'only the push cop
 for expensive in \
     './.github/actions/setup-rust-linux' \
     'taiki-e/install-action@nextest' \
-    'cargo check -p cas --lib --tests' \
-    'scripts/run-scoped-tests.sh -p cas --lib' \
+    'python3 scripts/ci-test-impact.py run' \
     'scripts/check-scoped-snapshot-tests.sh --base-sha'; do
     step_block="$(awk -v needle="$expensive" '
         /^      - / {
@@ -532,6 +531,39 @@ for expensive in \
     require_text "$step_block" "steps.pr-dedupe.outputs.covered != 'true'" "scoped lane step is dedupe-gated: $expensive"
     require_text "$step_block" "steps.classify-diff.outputs.rust-unaffected != 'true'" "scoped lane step is classification-gated: $expensive"
 done
+
+# Impact selection may widen, never silently skip uncertain tests. Both factory
+# lanes retain snapshots; the release-bound queue's archive/shards stay complete.
+impact_text="$(<"$repo_root/scripts/ci-test-impact.py")"
+for job in scoped-validation scoped-validation-fast; do
+    block="$(job_block "$job")"
+    require_text "$block" 'python3 scripts/cas-test-targets.py cas-cli --check' "$job checks suite registration"
+    require_text "$block" 'python3 scripts/ci-test-impact.py history' "$job restores failure history"
+    require_text "$block" 'python3 scripts/ci-test-impact.py run' "$job executes the selected graph"
+    require_text "$block" 'ci-test-impact-${{ github.run_id }}' "$job publishes count/time/failure evidence"
+    require_absent "$block" 'cargo check -p cas --lib --tests' "$job avoids duplicate check compilation"
+    require_text "$block" 'scripts/run-verified-tests.sh nextest run --workspace --no-fail-fast' "$job fails open for an older checkout"
+done
+require_text "$impact_text" 'scripts/cas-test-targets.py' 'impact selection consumes the authoritative stem inventory'
+require_text "$impact_text" 'test({stem}::)' 'grouped integration selection names the original module'
+require_text "$impact_text" 'uncertain graph/diff/history' 'unresolved inputs widen to the workspace'
+require_text "$impact_text" 'zero selected tests: widened' 'zero matches widen instead of becoming green proof'
+require_text "$impact_text" 'post_merge_missed' 'full-suite receipts track selection recall misses'
+require_text "$suite_build" 'python3 scripts/cas-test-targets.py cas-cli --check' 'full archives reject missing suite registration'
+full_run="$(named_step_block "$suite_shards" 'Test full suite shard ${{ matrix.shard }}/3')"
+require_absent "$full_run" ' --filter-expr ' 'queue suite execution has no impact filter'
+require_absent "$full_run" ' -E ' 'queue suite executes every test rather than selected modules'
+require_text "$full_run" 'python3 scripts/ci-test-impact.py record' 'queue failures are compared with predicted selection'
+impact_fixture_log="$(mktemp)"
+if python3 "$repo_root/scripts/test-ci-test-impact.py" >"$impact_fixture_log" 2>&1; then
+    printf 'ok   impact selector Git/execution/recall fixtures pass\n'
+    pass=$((pass + 1))
+else
+    printf 'FAIL impact selector fixtures\n'
+    cat "$impact_fixture_log"
+    fail=$((fail + 1))
+fi
+rm -f "$impact_fixture_log"
 
 # The snapshot router is deliberately a separate, conditional target inside
 # Scoped Validation: it catches doctor_snapshot staleness before the merge
@@ -707,16 +739,16 @@ else
 fi
 require_text "$ci_text" 'fast-admission' 'shared CI diff action publishes the fast admission signal'
 require_text "$ci_text" 'Scoped Validation (fast)' 'CI declares the fast scoped-validation tier'
-require_text "$ci_text" 'scripts/check-scoped-test-surface.sh --resolve-targets' 'fast tier resolves mapped proof targets'
-require_text "$ci_text" 'scripts/run-scoped-tests.sh --proof' 'fast tier runs mapped proof targets through the guarded runner'
+require_text "$ci_text" 'python3 scripts/ci-test-impact.py run' 'factory and PR tiers use impact selection'
+require_text "$(<"$repo_root/scripts/ci-test-impact.py")" 'scripts/run-verified-tests.sh' 'impact selection executes through the zero-test guard'
 require_text "$(<"$repo_root/scripts/release-train.sh")" 'CAS_RELEASE_TRAIN_SCOPED_PROOF_RECEIPT' 'release train accepts a supervisor scoped-proof receipt'
 require_text "$(<"$repo_root/scripts/release-train.sh")" 'Scoped Validation (fast)' 'release train selects the fast CI job for small deltas'
 fast_job="$(job_block scoped-validation-fast)"
 require_text "$fast_job" 'startsWith(github.ref, '\''refs/heads/factory/'\'')' 'fast tier is limited to factory branch pushes'
 require_text "$fast_job" "steps.classify-diff.outputs.fast-admission == 'true'" 'fast tier requires the shared size classifier'
-require_text "$fast_job" 'cargo check -p cas --lib --tests' 'fast tier compiles the Rust test graph'
-require_text "$fast_job" 'scripts/check-scoped-test-surface.sh --resolve-targets' 'fast tier maps changed modules to integration targets'
-require_text "$fast_job" 'scripts/run-scoped-tests.sh --proof' 'fast tier executes the mapped targets with surface proof'
+require_absent "$fast_job" 'cargo check -p cas --lib --tests' 'fast tier avoids a separate duplicate check build'
+require_text "$fast_job" 'python3 scripts/ci-test-impact.py run' 'fast tier maps imports to grouped integration modules'
+require_text "$fast_job" 'python3 scripts/cas-test-targets.py cas-cli --check' 'fast tier rejects unregistered consolidated suites'
 require_text "$fast_job" 'Build and test the Slack bridge' 'fast tier covers a changed Slack bridge'
 require_text "$fast_job" "steps.classify-diff.outputs.bridge-check-needed == 'true'" 'fast tier gates bridge coverage on the shared classifier'
 require_text "$fast_job" 'scripts/check-scoped-snapshot-tests.sh --base-sha' 'fast tier routes mapped snapshot surfaces'
@@ -959,7 +991,7 @@ require_text "$suite_shards" 'INSTA_WORKSPACE_ROOT: ${{ github.workspace }}' 'sh
 require_text "$suite_shards" 'scripts/run-verified-tests.sh nextest run --archive-file fast-validation-suite.tar.zst --workspace-remap "$GITHUB_WORKSPACE" --no-fail-fast --partition "count:$SHARD/3"' 'shards execute every archived workspace nextest binary exactly once'
 require_text "$suite_shards" 'SHARD: ${{ matrix.shard }}' 'shard number enters the shell as environment data'
 require_text "$suite_shards" 'make -C cas-cli test-real-store-untouched' 'MCP protocol tests run under real-store guard in CI'
-require_text "$suite_shards" "REAL_STORE_ARGS=\"-E 'binary(mcp_protocol_test)'\"" 'archived MCP protocol test uses nextest expression selection'
+require_text "$suite_shards" "REAL_STORE_ARGS=\"-E 'test(mcp_protocol_test::)'\"" 'archived MCP protocol tests use consolidated module selection'
 require_text "$suite_shards" 'export CARGO_CMD="nextest run --archive-file' 'real-store guard reuses the shared nextest archive'
 require_text "$suite_shards" 'export CAS_ROOT="$guard_dir/.cas"' 'real-store guard plants an inherited ambient store'
 require_text "$suite_shards" 'export CAS_REAL_DBS="$guard_dir/.cas/cas.db"' 'real-store guard protects the ambient sentinel database'
@@ -1008,7 +1040,7 @@ done
 
 # Protected PRs emit only the required admission contexts. Compiling heavy
 # lanes stay on integration pushes and supervisor-controlled runs.
-require_text "$scoped" 'github.base_ref != github.event.repository.default_branch' 'non-required scoped lane skips main PRs'
+require_absent "$scoped" 'github.base_ref != github.event.repository.default_branch' 'non-required scoped lane validates selected tests for main PRs'
 for job in clippy test-compile-guard; do
     block="$(job_block "$job")"
     require_text "$block" "refs/heads/main" "$job runs on main"

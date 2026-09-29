@@ -1124,6 +1124,19 @@ fn systemd_unit_command(
     command
 }
 
+#[cfg(target_os = "linux")]
+fn cassy_scope_command(
+    executable: &std::path::Path,
+    root: &std::path::Path,
+    args: &[std::ffi::OsString],
+) -> std::process::Command {
+    // Positional arguments keep project paths and names out of shell source.
+    let mut command = std::process::Command::new("/bin/sh");
+    command.arg("-c").arg("kill -STOP $$; exec \"$@\"").arg("sh")
+        .arg(executable).args(args).current_dir(root);
+    command
+}
+
 fn spawn_factory_daemon(
     executable: &std::path::Path,
     root: &std::path::Path,
@@ -1163,12 +1176,9 @@ fn spawn_factory_daemon(
             crate::ui::factory::cgroup::remove_scope(&scope);
             anyhow::bail!("separate Cassy cgroup is inside the hub's own scope");
         }
-        // The fixed shell command stops itself before exec. Its arguments are
-        // positional, so project paths and names never become shell source.
-        let mut command = Command::new("/bin/sh");
-        command.arg("-c").arg("kill -STOP $$; exec \"$@\"").arg("sh")
-            .arg(executable).args(&args)
-            .stdin(Stdio::null()).stdout(Stdio::null());
+        // The fixed shell command stops itself before exec.
+        let mut command = cassy_scope_command(executable, root, &args);
+        command.stdin(Stdio::null()).stdout(Stdio::null());
         let log = std::fs::OpenOptions::new().create(true).append(true).open(log_path)?;
         command.stderr(Stdio::from(log));
         apply_launch_environment(&mut command, environment);
@@ -1266,6 +1276,16 @@ mod launch_tests {
         assert!(args.contains(&"--setenv=PATH".to_string()));
         assert!(args.contains(&"--property=UnsetEnvironment=INHERITED_PROFILE".to_string()));
         assert!(args.contains(&"/usr/bin/cas".to_string()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cassy_scope_fallback_uses_requested_project_as_working_directory() {
+        let root = std::path::Path::new("/projects/launchproj");
+        let args = factory_daemon_args(root, "demo-1", 0, cas_mux::SupervisorCli::Codex);
+        let command = cassy_scope_command(std::path::Path::new("/usr/bin/cas"), root, &args);
+        assert_eq!(command.get_current_dir(), Some(root));
+        assert!(command.get_args().any(|arg| arg == root.as_os_str()));
     }
 }
 

@@ -29,10 +29,12 @@ use cas::cli::cloud::execute_team_push;
 use cas::cloud::{
     CloudConfig, CloudSyncer, CloudSyncerConfig, EntityType, SyncOperation, SyncQueue,
 };
-use cas::store::open_task_store_local;
-use cas::types::Task;
+use cas::store::{open_store_local, open_task_store_local};
+use cas::types::{Entry, Task};
+use cas_store::{SqliteStore, Store};
 use flate2::read::GzDecoder;
 use std::io::Read;
+use std::process::Command;
 use std::sync::Arc;
 use tempfile::TempDir;
 use wiremock::matchers::{method, path, query_param};
@@ -42,6 +44,123 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 // wire expectations tied to that fixture root rather than the test process's
 // checkout identity.
 const FIXTURE_PROJECT_ID: &str = "p";
+
+fn init_entity_tables(root: &TempDir) {
+    open_store_local(root.path()).unwrap();
+    open_task_store_local(root.path()).unwrap();
+}
+
+#[tokio::test]
+async fn pinned_remote_stamped_origin_pushes_personal_and_team() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/sync/push"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "entries": {"inserted": 1, "updated": 0, "skipped": 0}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("/api/teams/{TEST_TEAM}/sync/push")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "synced": {"entries": {"inserted": 1, "updated": 0, "skipped": 0}}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let root = TempDir::new().unwrap();
+    std::fs::write(
+        root.path().join("config.toml"),
+        "[project]\ncanonical_id = \"pinned-bucket\"\n",
+    )
+    .unwrap();
+    assert!(
+        Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(root.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/acme/elsewhere.git"
+            ])
+            .current_dir(root.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    init_entity_tables(&root);
+    let stamped = cas::cloud::resolve_canonical_id(root.path()).unwrap();
+    assert_eq!(stamped, "pinned-bucket");
+    let entries = SqliteStore::open_with_origin_project(root.path(), Some(&stamped)).unwrap();
+    entries.init().unwrap();
+    let queue = Arc::new(SyncQueue::open(root.path()).unwrap());
+    queue.init().unwrap();
+    for (id, team) in [("personal-stamped", false), ("team-stamped", true)] {
+        entries
+            .add(&Entry::new(id.to_string(), "authored here".to_string()))
+            .unwrap();
+        assert_eq!(
+            entries.get(id).unwrap().unwrap().origin_project.as_deref(),
+            Some(stamped.as_str())
+        );
+        let payload = serde_json::json!({
+            "id": id, "scope": "project", "origin_project": stamped, "content": "authored here"
+        })
+        .to_string();
+        if team {
+            queue
+                .enqueue_for_team(
+                    EntityType::Entry,
+                    id,
+                    SyncOperation::Upsert,
+                    Some(&payload),
+                    TEST_TEAM,
+                )
+                .unwrap();
+        } else {
+            queue
+                .enqueue(EntityType::Entry, id, SyncOperation::Upsert, Some(&payload))
+                .unwrap();
+        }
+    }
+    let syncer = CloudSyncer::new_for_project(
+        queue.clone(),
+        make_cloud_config(server.uri()),
+        CloudSyncerConfig::default(),
+        stamped.clone(),
+        root.path(),
+    );
+    let (personal, team) = tokio::task::spawn_blocking(move || {
+        (
+            syncer
+                .push_scoped(cas::cloud::PushScope::EntriesOnly)
+                .unwrap(),
+            syncer.push_team(TEST_TEAM).unwrap(),
+        )
+    })
+    .await
+    .unwrap();
+    assert_eq!(personal.pushed_entries, 1);
+    assert_eq!(team.pushed_entries, 1);
+    assert!(queue.list_all(10).unwrap().is_empty());
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    for request in requests {
+        let body = decode_gzip_json(&request.body);
+        assert_eq!(body["project_canonical_id"], stamped);
+        assert_eq!(body["entries"][0]["origin_project"], stamped);
+        assert_eq!(body["git_remote"], "github.com/acme/elsewhere");
+    }
+}
 
 /// Create a `.cas`-style directory and seed the sync queue with one
 /// team-tagged entry upsert, returning the TempDir owning the files.
@@ -54,6 +173,7 @@ fn make_cas_root_with_team_item() -> TempDir {
         "[project]\ncanonical_id = \"p\"\n",
     )
     .unwrap();
+    init_entity_tables(&tmp);
     let queue = SyncQueue::open(tmp.path()).unwrap();
     queue.init().unwrap();
     queue
@@ -101,6 +221,7 @@ async fn foreign_team_task_move_rows_are_dropped_before_push() {
         "[project]\ncanonical_id = \"p\"\n",
     )
     .unwrap();
+    init_entity_tables(&tmp);
     let queue = Arc::new(SyncQueue::open(tmp.path()).unwrap());
     queue.init().unwrap();
     seed_team_task_move(&queue, "move-foreign-task");
@@ -304,6 +425,7 @@ async fn team_itemized_rejection_subset_settles_unrejected_rows_for_fourteen_of_
         "[project]\ncanonical_id = \"p\"\n",
     )
     .unwrap();
+    init_entity_tables(&tmp);
     let queue = Arc::new(SyncQueue::open(tmp.path()).unwrap());
     queue.init().unwrap();
     let all_ids = rejected_ids
@@ -382,6 +504,7 @@ async fn team_push_no_op_when_no_team_configured() {
         "[project]\ncanonical_id = \"p\"\n",
     )
     .unwrap();
+    init_entity_tables(&tmp);
     let cas_root = tmp.path().to_path_buf();
     let cli = make_cli_json();
 
@@ -435,6 +558,7 @@ async fn team_push_silent_when_queue_empty() {
         "[project]\ncanonical_id = \"p\"\n",
     )
     .unwrap();
+    init_entity_tables(&tmp);
     let queue = SyncQueue::open(tmp.path()).unwrap();
     queue.init().unwrap();
     // Deliberately no enqueue_for_team — queue is empty.
@@ -464,6 +588,7 @@ async fn team_delete_for_live_task_is_neutralized_without_http() {
         "[project]\ncanonical_id = \"p\"\n",
     )
     .unwrap();
+    init_entity_tables(&tmp);
     open_task_store_local(tmp.path())
         .unwrap()
         .add(&Task::new(
@@ -520,6 +645,7 @@ async fn team_delete_uses_singular_entity_path() {
         "[project]\ncanonical_id = \"p\"\n",
     )
     .unwrap();
+    init_entity_tables(&tmp);
     open_task_store_local(tmp.path()).unwrap();
     let queue = Arc::new(SyncQueue::open(tmp.path()).unwrap());
     queue.init().unwrap();
@@ -573,6 +699,7 @@ async fn team_task_upsert_includes_explicit_project_scope() {
         "[project]\ncanonical_id = \"p\"\n",
     )
     .unwrap();
+    init_entity_tables(&tmp);
     let queue = Arc::new(SyncQueue::open(tmp.path()).unwrap());
     queue.init().unwrap();
     queue
@@ -628,6 +755,7 @@ async fn parked_team_delete_can_be_requeued_and_flushed_after_scope_fix() {
         "[project]\ncanonical_id = \"p\"\n",
     )
     .unwrap();
+    init_entity_tables(&tmp);
     open_task_store_local(tmp.path()).unwrap();
     let queue = Arc::new(SyncQueue::open(tmp.path()).unwrap());
     queue.init().unwrap();
@@ -744,6 +872,7 @@ async fn team_push_chunks_upserts_by_payload_budget() {
         "[project]\ncanonical_id = \"p\"\n",
     )
     .unwrap();
+    init_entity_tables(&tmp);
     let queue = Arc::new(SyncQueue::open(tmp.path()).unwrap());
     queue.init().unwrap();
 

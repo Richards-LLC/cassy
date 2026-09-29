@@ -73,6 +73,44 @@ fn foreign_and_unknown_stored_entries_never_enter_personal_or_team_queue() {
 }
 
 #[test]
+fn local_key_delete_survives_foreign_stored_origin_after_move() {
+    use rusqlite::Connection;
+
+    let (temp, queue) = create_test_queue();
+    let conn = Connection::open(temp.path().join("cas.db")).unwrap();
+    conn.execute_batch(
+        r#"CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, origin_project TEXT);
+         INSERT INTO tasks (id, origin_project) VALUES
+           ('old-key', 'new-project'), ('legacy-key', 'new-project'),
+           ('foreign-key', 'new-project'), ('foreign-upsert', 'new-project');
+         INSERT INTO sync_queue
+           (entity_type, entity_id, operation, payload, team_id, project_id, created_at)
+         VALUES
+           ('task', 'old-key', 'delete', NULL, 'team-1', 'local-project', '2026-01-01T00:00:00Z'),
+           ('task', 'legacy-key', 'delete', NULL, 'team-1', NULL, '2026-01-01T00:00:00Z'),
+           ('task', 'foreign-key', 'delete', NULL, 'team-1', 'new-project', '2026-01-01T00:00:00Z'),
+           ('task', 'foreign-upsert', 'upsert', '{"id":"foreign-upsert"}', 'team-1', NULL, '2026-01-01T00:00:00Z');"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        queue
+            .drop_queued_rows_with_foreign_origin("local-project")
+            .unwrap(),
+        2
+    );
+    let surviving = queue.pending_for_team("team-1", 10, 5).unwrap();
+    assert_eq!(surviving.len(), 2);
+    assert!(
+        surviving
+            .iter()
+            .all(|row| row.operation == SyncOperation::Delete)
+    );
+    assert!(surviving.iter().any(|row| row.entity_id == "old-key"));
+    assert!(surviving.iter().any(|row| row.entity_id == "legacy-key"));
+}
+
+#[test]
 fn queued_user_prompts_are_dropped_across_personal_and_team_scopes() {
     let (_temp, queue) = create_test_queue();
     let prompt = serde_json::json!({"tags": ["user-prompt"], "content": "User request: fix this"});

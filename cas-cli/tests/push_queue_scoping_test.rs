@@ -27,6 +27,7 @@ fn seed_project(root: &TempDir, endpoint: &str, canonical_id: &str) {
         format!("[project]\ncanonical_id = \"{canonical_id}\"\n"),
     )
     .unwrap();
+    init_local_entity_tables(root);
     SyncQueue::open(root.path()).unwrap().init().unwrap();
 }
 
@@ -197,6 +198,7 @@ async fn personal_deletes_for_live_task_and_entry_are_neutralized_without_http()
         "[project]\ncanonical_id = \"p\"\n",
     )
     .unwrap();
+    init_local_entity_tables(&root);
     let entry_store = open_store_local(root.path()).unwrap();
     let task_store = open_task_store_local(root.path()).unwrap();
     entry_store
@@ -332,7 +334,7 @@ async fn personal_push_omits_team_id_even_when_the_project_has_an_active_team() 
     // root under the temp directory, and a TempDir is exactly that.
     std::fs::write(
         root.path().join("config.toml"),
-        "[project]\ncanonical_id = \"p\"\n",
+        "[project]\ncanonical_id = \"personal-project\"\n",
     )
     .unwrap();
     seed_project(&root, &server.uri(), "personal-project");
@@ -380,7 +382,7 @@ async fn personal_push_drains_more_than_two_queue_batches_in_one_invocation() {
     // root under the temp directory, and a TempDir is exactly that.
     std::fs::write(
         root.path().join("config.toml"),
-        "[project]\ncanonical_id = \"p\"\n",
+        "[project]\ncanonical_id = \"drain-project\"\n",
     )
     .unwrap();
     seed_project(&root, &server.uri(), "drain-project");
@@ -429,9 +431,10 @@ async fn personal_push_stops_after_a_failed_batch_without_replaying_forever() {
     // root under the temp directory, and a TempDir is exactly that.
     std::fs::write(
         root.path().join("config.toml"),
-        "[project]\ncanonical_id = \"p\"\n",
+        "[project]\ncanonical_id = \"stalled-project\"\n",
     )
     .unwrap();
+    init_local_entity_tables(&root);
     let queue = Arc::new(SyncQueue::open(root.path()).unwrap());
     queue.init().unwrap();
     enqueue(&queue, EntityType::Entry, "stalled-entry", 8);
@@ -478,9 +481,10 @@ async fn max_batches_bounds_a_personal_push_without_changing_request_size() {
     // root under the temp directory, and a TempDir is exactly that.
     std::fs::write(
         root.path().join("config.toml"),
-        "[project]\ncanonical_id = \"p\"\n",
+        "[project]\ncanonical_id = \"bounded-project\"\n",
     )
     .unwrap();
+    init_local_entity_tables(&root);
     let queue = Arc::new(SyncQueue::open(root.path()).unwrap());
     queue.init().unwrap();
     for index in 0..101 {
@@ -550,7 +554,7 @@ async fn personal_push_envelopes_send_normalized_git_remote_for_all_supported_fo
         // root under the temp directory, and a TempDir is exactly that.
         std::fs::write(
             root.path().join("config.toml"),
-            "[project]\ncanonical_id = \"p\"\n",
+            "[project]\ncanonical_id = \"same-canonical-id\"\n",
         )
         .unwrap();
         seed_project(&root, &server.uri(), "same-canonical-id");
@@ -620,7 +624,7 @@ async fn failed_cli_push_leaves_the_row_retryable() {
     // root under the temp directory, and a TempDir is exactly that.
     std::fs::write(
         root.path().join("config.toml"),
-        "[project]\ncanonical_id = \"p\"\n",
+        "[project]\ncanonical_id = \"retry-project\"\n",
     )
     .unwrap();
     seed_project(&root, &server.uri(), "retry-project");
@@ -659,9 +663,10 @@ fn dry_run_plans_apply_scope_before_the_batch_limit() {
     // root under the temp directory, and a TempDir is exactly that.
     std::fs::write(
         root.path().join("config.toml"),
-        "[project]\ncanonical_id = \"p\"\n",
+        "[project]\ncanonical_id = \"planned-project\"\n",
     )
     .unwrap();
+    init_local_entity_tables(&root);
     let queue = Arc::new(SyncQueue::open(root.path()).unwrap());
     queue.init().unwrap();
     enqueue(&queue, EntityType::Task, "old-task", 8);
@@ -718,9 +723,10 @@ async fn personal_requests_respect_the_exact_serialized_byte_budget() {
     // root under the temp directory, and a TempDir is exactly that.
     std::fs::write(
         root.path().join("config.toml"),
-        "[project]\ncanonical_id = \"p\"\n",
+        "[project]\ncanonical_id = \"byte-budget-project\"\n",
     )
     .unwrap();
+    init_local_entity_tables(&root);
     let queue = Arc::new(SyncQueue::open(root.path()).unwrap());
     queue.init().unwrap();
     for index in 0..3 {

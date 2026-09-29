@@ -465,7 +465,7 @@ async fn embedded_daemon_cloud_cycle_drains_team_queue() {
             EntityType::Entry,
             "daemon-team-entry",
             SyncOperation::Upsert,
-            Some(r#"{"id":"daemon-team-entry","scope":"project","content":"queued"}"#),
+            Some(r#"{"id":"daemon-team-entry","scope":"project","origin_project":"daemon-cloud-cycle","content":"queued"}"#),
             TEAM_ID,
         )
         .expect("enqueue team item");

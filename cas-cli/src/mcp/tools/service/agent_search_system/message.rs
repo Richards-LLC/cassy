@@ -715,7 +715,7 @@ impl CasService {
                 .map(|agent| agent.name.clone())
                 .unwrap_or_else(|| source.clone());
             message = crate::mcp::tools::traffic_limits::spill_message_to_artifact(
-                crate::mcp::tools::traffic_limits::message_spill_root(&config).as_deref(),
+                crate::mcp::tools::traffic_limits::message_spill_root(&self.inner.cas_root, &config).as_deref(),
                 req.task_id.as_deref(),
                 &sender,
                 &target,

@@ -354,7 +354,7 @@ When workers share the main directory, there's no branch merging — workers com
 5. After the fix lands, rerun the final assembled-tree gate yourself on the new
    tip, capture the real exit code, and record a fresh `ASSEMBLY_PROOF` for it:
    ```bash
-   <assembly gate command> > <artifacts_root>/<epic-id>/assembly-gate.log 2>&1; echo $?
+   <assembly gate command> > <artifacts_root>/<project-key>/<epic-id>/assembly-gate.log 2>&1; echo $?
    ```
    Never pipe the test run to `tail`; that captures the pipe status, not the
    test status.

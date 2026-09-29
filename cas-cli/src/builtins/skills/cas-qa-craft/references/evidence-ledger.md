@@ -1,6 +1,6 @@
 # Evidence ledger
 
-Store the file at `~/.cas/artifacts/<task-id>/LEDGER.md`. The header names the
+Store the file at `~/.cas/artifacts/<project-key>/<task-id>/LEDGER.md`. The header names the
 build revision, one-line scope, surface, 30-minute budget, headline counts for
 cells/PASS/FAIL/NOT EXERCISED, the evidence-label split, and the telemetry
 sweep state (`sweep: configured — <path>` or the exact line

@@ -1042,3 +1042,31 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         "an unset artifacts_root reads as its default"
     );
 }
+
+#[test]
+fn artifact_namespaces_distinguish_same_named_projects_and_share_store_aliases_cas_6ebf() {
+    let temp = tempfile::tempdir().unwrap();
+    let a = temp.path().join("one/project/.cas");
+    let b = temp.path().join("two/project/.cas");
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
+    let base = temp.path().join("artifacts");
+    let a_dir = project_factory_artifacts_root(&a, &base);
+    let b_dir = project_factory_artifacts_root(&b, &base);
+    assert_ne!(a_dir, b_dir);
+    assert_eq!(a_dir.parent().unwrap(), base);
+    assert_eq!(
+        factory_task_artifact_dirs(&a, &base, "cas-a4b1")[0],
+        a_dir.join("cas-a4b1")
+    );
+    assert_eq!(
+        factory_task_artifact_dirs(&a, &base, "cas-a4b1")[1],
+        base.join("cas-a4b1")
+    );
+    #[cfg(unix)]
+    {
+        let alias = temp.path().join("shared-store-alias");
+        std::os::unix::fs::symlink(&a, &alias).unwrap();
+        assert_eq!(project_factory_artifacts_root(&alias, &base), a_dir);
+    }
+}

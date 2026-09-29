@@ -338,6 +338,11 @@ fn discovery_separates_registered_projects_from_scan_only_and_storeless_ones() {
     make_project(&with_store);
     let storeless = workspace.join("storeless");
     std::fs::create_dir_all(storeless.join(".cas")).expect("create storeless fixture");
+    std::fs::write(
+        storeless.join(".cas/config.toml"),
+        "[project]\ncanonical_id = \"storeless\"\n",
+    )
+    .expect("pin scan-only project identity");
     crate::store::known_repos::ensure_host_schema().expect("bootstrap known-repos schema");
     crate::store::known_repos::register_repo_strict(&with_store)
         .expect("register temp-root fixture");

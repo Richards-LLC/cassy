@@ -61,6 +61,14 @@ impl CasSandbox {
         let xdg_config_home = temp_dir.path().join("xdg-config");
         std::fs::create_dir_all(&home_dir).expect("create sandbox HOME");
         std::fs::create_dir_all(&xdg_config_home).expect("create sandbox XDG_CONFIG_HOME");
+        if host_home.is_some() {
+            let status = Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(temp_dir.path())
+                .status()
+                .expect("initialize registration fixture Git root");
+            assert!(status.success(), "initialize registration fixture Git root");
+        }
         let sandbox = Self {
             temp_dir,
             cas_root,

@@ -551,7 +551,7 @@ origin_project_id before removing a page, then re-run a scoped pull and this aud
                 })).collect::<Vec<_>>(),
                 "identity_predicate": "byte-exact project_canonical_id/project_id match (shared with cloud pull ingest)",
             },
-            "provenance": ["task", "entry", "rule"].iter().map(|kind| {
+            "provenance": (["task", "entry", "rule"].iter().map(|kind| {
                 let rows = self.provenance.iter().filter(|row| row.kind == *kind);
                 let (mut authored, mut foreign, mut unknown) = (0, 0, 0);
                 for row in rows {
@@ -562,7 +562,7 @@ origin_project_id before removing a page, then re-run a scoped pull and this aud
                     }
                 }
                 (kind.to_string(), serde_json::json!({"authored": authored, "foreign": foreign, "unknown": unknown}))
-            }).collect::<serde_json::Map<String, serde_json::Value>>(),
+            }).collect::<serde_json::Map<String, serde_json::Value>>()),
             "clean": self.is_clean(),
             "remediation": self.remediation(),
         })

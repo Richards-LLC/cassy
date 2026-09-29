@@ -116,6 +116,7 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
                         .pointer("/message/stop_reason")
                         .and_then(Value::as_str)
                         == Some("end_turn")
+                        && final_text.is_some()
                     {
                         if let (Some((key, begun, commander_id)), Some(text)) =
                             (started.take(), final_text.take())
@@ -132,6 +133,7 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
                 }
                 if value.get("type").and_then(Value::as_str) == Some("system")
                     && value.get("subtype").and_then(Value::as_str) == Some("turn_duration")
+                    && final_text.is_some()
                     && let (Some((key, begun, commander_id)), Some(text)) =
                         (started.take(), final_text.take())
                 {
@@ -185,6 +187,7 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
                 }
                 if outer == Some("event_msg")
                     && matches!(kind, Some("task_complete" | "turn_completed"))
+                    && final_text.is_some()
                 {
                     if let (Some((key, begun, commander_id)), Some(text)) =
                         (started.take(), final_text.take())
@@ -400,6 +403,21 @@ mod tests {
         let turns = completed_turns(&values, cas_mux::SupervisorCli::Claude);
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].text, "Done");
+    }
+
+    #[test]
+    fn claude_thinking_only_end_turn_preserves_the_later_pane_answer() {
+        let values = vec![
+            serde_json::json!({"timestamp":"2026-09-29T16:11:33Z","type":"user","uuid":"prompt-alpha","message":{"content":"[cas #2 operator Daniel@Desktop verified 0s first] ALPHA"}}),
+            serde_json::json!({"timestamp":"2026-09-29T16:11:37Z","type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"internal work"}],"stop_reason":"end_turn"}}),
+            serde_json::json!({"timestamp":"2026-09-29T16:11:38Z","type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Replied ALPHA"}],"stop_reason":"end_turn"}}),
+            serde_json::json!({"timestamp":"2026-09-29T16:11:39Z","type":"system","subtype":"turn_duration"}),
+        ];
+        let turns = completed_turns(&values, cas_mux::SupervisorCli::Claude);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].key, "prompt-alpha");
+        assert_eq!(turns[0].commander_id, Some(2));
+        assert_eq!(turns[0].text, "Replied ALPHA");
     }
 
     #[test]

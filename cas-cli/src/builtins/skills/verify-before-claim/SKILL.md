@@ -29,10 +29,11 @@ A measurable claim (faster, smaller, fewer, fixed) needs a before and an after f
 
 ## Factory workers: Rust proof
 
-Factory workers never run Rust builds or tests; a PreToolUse guard denies `cargo`, `rustc`, `nextest`, `scripts/run-scoped-tests.sh` and `make test*`. For a Rust change, the worker proof is:
+Factory workers may run only the capped package-scoped compile check described in `cas-worker/references/discipline.md`; Rust test execution and other builds remain supervisor-only. For a Rust change, the worker proof is:
 
 - `git diff --stat` showing exactly the files you expected to change.
 - Wiring evidence: `rg '<symbol>'` or `git grep -n '<symbol>'` hits for every new or changed symbol outside its definition.
+- `check: PASS <sha>` for the delivered clean commit, or why checking is deferred.
 - Any non-Rust suite the change touches, with its passed count.
 
 Rust tests and builds defer to the supervisor's `ASSEMBLY_PROOF` at epic assembly; write or update the tests, commit them, and mark the run NOT VERIFIED (owner: `ASSEMBLY_PROOF`) in the close note. Rows marked "supervisor / non-factory" below do not apply to a factory worker.

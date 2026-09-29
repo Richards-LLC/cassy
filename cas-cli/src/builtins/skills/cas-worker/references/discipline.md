@@ -1,45 +1,51 @@
-# Operating Discipline — No Rust Builds
+# Factory Worker — Discipline
 
-The PTY spawn contract is the source of truth for worker availability, long
-commands, context limits, and reporting shape. This reference intentionally
-does not restate those launch-time rules. It covers the worker build rule and
-the clean-CI environment the supervisor's assembly run must respect.
+The shared launch contract in `cas-pty` carries task startup, sequential
+ownership, no-foreground-blocking, context headroom and lifecycle rules. This file
+covers compile-only evidence and non-Rust suites without restating those rules.
 
-## Workers never run Rust builds
+## Check the committed change before parking
 
-Factory workers do not build or test Rust. A PreToolUse guard denies workers
-any `cargo` build/check/test/nextest/clippy/run, `rustc`,
-`scripts/run-scoped-tests.sh`, and `make test*`. Edit and commit, then park the
-work without building:
+Workers may run exactly `cargo check -p <crate> [-p <crate> ...] --tests`.
+Select the affected crates, including consumers of changed shared interfaces.
+Commit first, then background long checks with a log in the ignored target directory:
 
-- Batch related edits into logical commits. Read your own diff and `rg` every
-  caller, struct literal, and match arm a compiler would otherwise flag.
-- Write or update the Rust tests the change needs; they run at assembly, not in
-  your worktree.
-- Do not record a scoped `--proof` receipt, a `SCOPED_PROOF:` note, or a
-  `loaded_proof` note. Worker closes no longer need them.
-- When the guard denies a build, do not route around it (another wrapper,
-  `bash -c`, a script). Park the work.
+```bash
+mkdir -p target
+cargo check -p affected-crate --tests > target/worker-check.log 2>&1 &
+```
 
-Only the supervisor builds: once per epic at assembly it runs one full build +
-test of the epic tip and records
+The PreToolUse hook routes this command through the capped runner. It uses your
+private seeded target cache, holds a builder slot for the Cargo process lifetime,
+and refuses when the existing build guard or `max_concurrent_builders` cap is
+exceeded. Retry later after a refusal; do not bypass it with a toolchain,
+environment override, shell wrapper, broader flags, or another command.
+
+On success the runner records `check: PASS <sha>` against the clean commit.
+Close copies that receipt into task notes when it matches the delivered SHA.
+A changed or dirty tree needs a new check. A check compiles test code; it executes
+no tests and does not replace the supervisor's assembly proof.
+
+Write or update Rust tests, read the diff, and trace callers, struct literals,
+and match arms across consumers. Workers still cannot build or run Rust tests,
+nextest, clippy, rustc, or scoped-test scripts. Do not record a scoped `--proof`,
+`SCOPED_PROOF:` or `loaded_proof` receipt. If the installed runtime predates the
+check exception, park and name the unverified crates for the supervisor.
+
+The supervisor runs the full build and tests once at epic assembly and records
 `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>` on
-the epic. Child task closes reference that proof; an assembly failure comes
-back as a follow-up task.
+the epic. Child closes reference it; assembly failures return as follow-up tasks.
 
 ## Non-Rust work is unaffected
 
-Non-Rust suites (for example `npm`/`vitest`/`playwright`) still run in
-the worker. A green exit code is not a green test run: the receipt must show a
-harness summary and a nonzero passed count. Record the exact passed and failed
-counts in the close note; a zero-test run is a failure to run.
+Run non-Rust suites (for example `npm`/`vitest`/`playwright`) in the worker.
+Record exact passed and failed counts in the close note. A green exit without
+a nonzero test count is a failure to run.
 
 ## Clean-CI environment
 
-Factory shells export `CAS_*` identity variables. Tests that read them can pass
-locally and fail in clean CI. When a diff touches agent resolution,
-coordination, messaging, cloud config, or another environment-sensitive path,
-say so in the close note; the supervisor's assembly run then uses the project's
-clean-environment wrapper, if it has one. In particular, `CAS_ROOT` and
-`CAS_CLONE_PATH` can redirect a test to the main checkout's `.cas`. There is no
-`CAS_TASK_ID`.
+Factory shells export `CAS_*` identity variables. When a diff touches agent
+resolution, coordination, messaging, cloud config, or another environment-sensitive
+path, name it in the close note; assembly uses the project's clean-environment
+wrapper if available. `CAS_ROOT` and `CAS_CLONE_PATH` can redirect a test to the
+main checkout's `.cas`. There is no `CAS_TASK_ID`.

@@ -1268,11 +1268,11 @@ fn hub_audit_check_for(root: &Path, now: chrono::DateTime<chrono::Utc>) -> Check
 
 #[cfg(feature = "mcp-proxy")]
 fn host_proxy_check() -> Check {
-    match crate::cli::integrate::mecha_cassy::doctor_row_from_env(None) {
+    match crate::cli::integrate::violet::doctor_row_from_env(None) {
         Some(row) => Check::new("host proxy", match row.severity {
-            crate::cli::integrate::mecha_cassy::DoctorSeverity::Ok => CheckStatus::Ok,
-            crate::cli::integrate::mecha_cassy::DoctorSeverity::Warning => CheckStatus::Warning,
-            crate::cli::integrate::mecha_cassy::DoctorSeverity::Error => CheckStatus::Error,
+            crate::cli::integrate::violet::DoctorSeverity::Ok => CheckStatus::Ok,
+            crate::cli::integrate::violet::DoctorSeverity::Warning => CheckStatus::Warning,
+            crate::cli::integrate::violet::DoctorSeverity::Error => CheckStatus::Error,
         }, row.message),
         None => Check::new("host proxy", CheckStatus::Ok, "not configured on this host"),
     }
@@ -5678,7 +5678,7 @@ mod tests {
         assert!(matches!(check.status, CheckStatus::Ok));
         assert!(check.message.contains("project=<unset>"));
         assert!(check.message.contains("cassy=Richards-LLC/cassy"));
-        assert!(check.message.contains("violet=Richards-LLC/mecha-cassy"));
+        assert!(check.message.contains("violet=Richards-LLC/violet_ps"));
         assert!(check
             .message
             .contains("cloud=Richards-LLC/petra-stella-cloud"));

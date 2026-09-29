@@ -54,12 +54,12 @@ pub mod integrations;
 pub mod keep_block;
 pub mod lock;
 pub mod md;
-/// Machine-scoped MechaCassy setup. Gated on `mcp-proxy` because the whole
+/// Machine-scoped Violet setup. Gated on `mcp-proxy` because the whole
 /// point of the command is to write a proxy registration and prove it with an
 /// authenticated `tools/list`; without that feature there is nothing to write
 /// against, so the subcommand reports the rebuild instead of half-working.
 #[cfg(feature = "mcp-proxy")]
-pub mod mecha_cassy;
+pub mod violet;
 pub mod neon;
 #[cfg(test)]
 mod neon_parsers_test;
@@ -104,12 +104,12 @@ pub enum IntegrateCommands {
     /// re-running it *is* refresh, and it always ends in a verification.
     #[cfg(feature = "mcp-proxy")]
     #[command(name = "violet")]
-    Violet(mecha_cassy::MechaCassyArgs),
+    Violet(violet::VioletArgs),
     /// Deprecated name of `cas integrate violet`, accepted for one release
     /// (GH #963).
     #[cfg(feature = "mcp-proxy")]
     #[command(name = "mecha-cassy", hide = true)]
-    MechaCassy(mecha_cassy::MechaCassyArgs),
+    MechaCassy(violet::VioletArgs),
 }
 
 /// GH #963: the warning `cas integrate mecha-cassy` prints before it runs.
@@ -144,11 +144,11 @@ pub fn execute(cmd: &IntegrateCommands, _cli: &Cli) -> anyhow::Result<()> {
         IntegrateCommands::Neon { action } => neon::execute((*action).into())?,
         IntegrateCommands::Github { action } => github::execute(action.clone())?,
         #[cfg(feature = "mcp-proxy")]
-        IntegrateCommands::Violet(args) => mecha_cassy::execute(args, _cli.json)?,
+        IntegrateCommands::Violet(args) => violet::execute(args, _cli.json)?,
         #[cfg(feature = "mcp-proxy")]
         IntegrateCommands::MechaCassy(args) => {
             eprintln!("{MECHA_CASSY_COMMAND_DEPRECATION}");
-            mecha_cassy::execute(args, _cli.json)?
+            violet::execute(args, _cli.json)?
         }
     };
     render_outcome(&outcome);
@@ -196,13 +196,13 @@ mod tests {
             IntegrateCommands::Vercel { action } => vercel::execute((*action).into()),
             IntegrateCommands::Neon { action } => neon::execute((*action).into()),
             IntegrateCommands::Github { action } => github::execute(action.clone()),
-            // Deliberately not dispatched here: `mecha-cassy` writes to
+            // Deliberately not dispatched here: `violet` writes to
             // machine-scoped paths outside the repo, so the parser-level tests
             // in this module must never execute it. Its behaviour is covered
-            // against a tempdir + fake environment in `mecha_cassy::tests`.
+            // against a tempdir + fake environment in `violet::tests`.
             #[cfg(feature = "mcp-proxy")]
             IntegrateCommands::Violet(_) | IntegrateCommands::MechaCassy(_) => {
-                anyhow::bail!("violet is exercised in mecha_cassy::tests, not via dispatch")
+                anyhow::bail!("violet is exercised in violet::tests, not via dispatch")
             }
         }
     }
@@ -315,6 +315,6 @@ mod tests {
             other => panic!("unexpected variant: {other:?}"),
         }
         assert!(MECHA_CASSY_COMMAND_DEPRECATION.contains("cas integrate violet"));
-        assert_eq!(types::Platform::MechaCassy.as_str(), "violet");
+        assert_eq!(types::Platform::Violet.as_str(), "violet");
     }
 }

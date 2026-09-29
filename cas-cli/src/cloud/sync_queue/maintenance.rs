@@ -311,9 +311,10 @@ impl SyncQueue {
     }
 
     /// Requeue terminal failures caused by a client version gate once this
-    /// build meets the server's recorded minimum version. Explicit parked and
-    /// rejected verdicts are never overridden. The diagnostic is cleared with
-    /// the retry counter so a second push cannot repeat the reset.
+    /// build meets the server's recorded minimum version. `last_error` is the
+    /// latest failure even when an earlier cloud verdict remains in
+    /// `last_outcome`. The diagnostic is cleared with the retry counter so a
+    /// second push cannot repeat the reset.
     pub fn requeue_version_gated_failures(
         &self,
         current_version: &str,
@@ -332,7 +333,6 @@ impl SyncQueue {
                 FROM sync_queue
                 WHERE retry_count >= ?1
                   AND last_error LIKE '%Client version % is below minimum %'
-                  AND (last_outcome IS NULL OR last_outcome NOT IN ('parked', 'rejected'))
                 "#,
             )?;
             stmt.query_map(params![max_retries], |row| {

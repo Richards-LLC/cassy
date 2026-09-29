@@ -1098,7 +1098,13 @@ fn upgrade_requeues_only_version_gated_failures() {
     queue.init().unwrap();
     const MAX_RETRIES: i32 = 5;
 
-    for id in ["task-parked", "task-rejected", "task-version-gated", "task-team"] {
+    for id in [
+        "task-parked",
+        "task-rejected",
+        "task-version-gated",
+        "task-stale-outcome",
+        "task-team",
+    ] {
         if id == "task-team" {
             queue
                 .enqueue_for_team(EntityType::Task, id, SyncOperation::Upsert, Some("{}"), "team-1")
@@ -1115,6 +1121,17 @@ fn upgrade_requeues_only_version_gated_failures() {
             .find(|row| row.entity_id == id)
             .unwrap()
             .id;
+        if id == "task-stale-outcome" {
+            queue
+                .record_row_outcome(row_id, "rejected", Some("revision_conflict"))
+                .unwrap();
+            for _ in 0..MAX_RETRIES {
+                queue
+                    .mark_failed(row_id, "Client version 3.4.2 is below minimum 3.5.0")
+                    .unwrap();
+            }
+            continue;
+        }
         queue
             .park_failed(
                 row_id,
@@ -1144,8 +1161,8 @@ fn upgrade_requeues_only_version_gated_failures() {
         queue
             .requeue_version_gated_failures("3.5.0", MAX_RETRIES)
             .unwrap(),
-        1,
-        "only the satisfied version gate gets an automatic retry"
+        2,
+        "both version gates retry, including one with an earlier cloud rejection"
     );
     assert_eq!(
         queue
@@ -1161,7 +1178,7 @@ fn upgrade_requeues_only_version_gated_failures() {
         .into_iter()
         .map(|row| row.entity_id)
         .collect::<Vec<_>>();
-    assert_eq!(pending, vec!["task-version-gated"]);
+    assert_eq!(pending, vec!["task-version-gated", "task-stale-outcome"]);
     assert!(queue
         .pending_for_team("team-1", 10, MAX_RETRIES)
         .unwrap()
@@ -1182,7 +1199,7 @@ fn upgrade_requeues_only_version_gated_failures() {
             .unwrap(),
         3
     );
-    assert_eq!(queue.pending(10, MAX_RETRIES).unwrap().len(), 3);
+    assert_eq!(queue.pending(10, MAX_RETRIES).unwrap().len(), 4);
     assert_eq!(
         queue.pending_for_team("team-1", 10, MAX_RETRIES).unwrap().len(),
         1

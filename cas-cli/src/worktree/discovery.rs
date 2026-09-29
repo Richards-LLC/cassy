@@ -56,9 +56,8 @@ pub struct SeedReport {
     pub existing: Vec<PathBuf>,
     /// Paths rejected because `<path>/.cas/` is not a directory.
     pub skipped_missing: Vec<PathBuf>,
-    /// Paths rejected as disposable roots (factory artifacts, `~/.cas/scratch`,
-    /// a temp root or an unpinned no-remote container), paired with the reason. These have a real `.cas/`
-    /// — they are copies of a project, not projects (cas-647c).
+    /// Paths rejected by the registry skip policy, paired with the reason.
+    /// These have a `.cas/` but are not live project roots for host sweeps.
     pub skipped_disposable: Vec<(PathBuf, String)>,
 }
 
@@ -86,8 +85,9 @@ impl SeedReport {
 /// home dir) and must be gated behind an explicit CLI flag.
 pub fn seed(include_home_scan: bool) -> Result<SeedReport> {
     let store = open_host_known_repo_store()?;
-    let already: std::collections::HashSet<PathBuf> =
-        store.list()?.into_iter().map(|r| r.path).collect();
+    let mut registered = store.list()?;
+    let mut already: std::collections::HashSet<PathBuf> =
+        registered.iter().map(|r| r.path.clone()).collect();
 
     let mut candidates: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
 
@@ -116,15 +116,17 @@ pub fn seed(include_home_scan: bool) -> Result<SeedReport> {
             debug!(
                 path = %cand.display(),
                 reason = %skip.reason(),
-                "seed skipped a disposable root",
+                "seed skipped a non-project root",
             );
             report.skipped_disposable.push((cand, skip.reason()));
             continue;
         }
-        let canonical = cand.canonicalize().unwrap_or(cand.clone());
+        let canonical = crate::store::known_repos::registered_path_for_inode(&cand, &registered);
         let is_new = !already.contains(&canonical);
-        store.upsert(&cand)?;
+        store.upsert(&canonical)?;
         if is_new {
+            already.insert(canonical.clone());
+            registered = store.list()?;
             report.new.push(canonical);
         } else {
             report.existing.push(canonical);
@@ -305,6 +307,34 @@ mod tests {
             assert_eq!(report.new.len(), 1, "only real repo seeded");
             assert_eq!(report.skipped_missing.len(), 1);
             assert!(report.new[0].ends_with("real-repo"));
+        });
+    }
+
+    #[test]
+    fn seed_does_not_initialize_container_with_two_projects() {
+        TestEnvGuard::run_with_temp_home(|home| {
+            ensure_host_schema().unwrap();
+            let container = home.join("Projects");
+            for name in ["one", "two"] {
+                let repo = container.join(name);
+                std::fs::create_dir_all(repo.join(".cas")).unwrap();
+                std::fs::write(
+                    repo.join(".cas/config.toml"),
+                    format!("[project]\ncanonical_id = \"{name}\"\n"),
+                )
+                .unwrap();
+            }
+            let sessions = home.join(".cas/sessions");
+            std::fs::create_dir_all(&sessions).unwrap();
+            std::fs::write(
+                sessions.join("container.json"),
+                serde_json::json!({"project_dir": container.to_string_lossy()}).to_string(),
+            )
+            .unwrap();
+            let report = seed(false).unwrap();
+            assert!(report.new.is_empty());
+            assert!(report.skipped_missing.contains(&container));
+            assert!(!container.join(".cas").exists());
         });
     }
 

@@ -1129,7 +1129,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn bounded_git_probe_returns_typed_timeout_without_command_details() {
-
         let dir = tempfile::tempdir().unwrap();
         let fake_git = dir.path().join("slow-git");
         crate::test_paths::warm_stub(&fake_git, "#!/bin/sh\nsleep 10\n");
@@ -1156,6 +1155,7 @@ mod tests {
             for index in 0..3 {
                 let repo = fixtures.path().join(format!("repo-{index}"));
                 std::fs::create_dir(&repo).unwrap();
+                git(&repo, &["init", "-q", "-b", "main"]);
                 crate::store::known_repos::register_repo_strict(&repo).unwrap();
             }
             assert_eq!(
@@ -1275,8 +1275,9 @@ mod tests {
             crate::store::known_repos::ensure_host_schema().unwrap();
             let stale = home.join("deleted-checkout");
             std::fs::create_dir_all(&stale).unwrap();
+            git(&stale, &["init", "-q", "-b", "main"]);
             crate::store::known_repos::register_repo_strict(&stale).unwrap();
-            std::fs::remove_dir(&stale).unwrap();
+            std::fs::remove_dir_all(&stale).unwrap();
 
             let project = home.join("active-project");
             std::fs::create_dir_all(&project).unwrap();
@@ -1994,7 +1995,10 @@ mod tests {
             // already-landed target tip must be represented by origin/master
             // as well as the local master branch. Without this remote-tracking
             // ref, the close gate must (correctly) reject local-only evidence.
-            git(&repo_b, &["update-ref", "refs/remotes/origin/master", "master"]);
+            git(
+                &repo_b,
+                &["update-ref", "refs/remotes/origin/master", "master"],
+            );
 
             let target = declare_work_target(
                 &repo_a.join(".cas"),

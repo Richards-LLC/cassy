@@ -94,6 +94,37 @@ pub(super) fn remove_legacy_team_upsert_row(
 }
 
 impl SyncQueue {
+    /// Remove legacy prompt capture upserts before either personal or team
+    /// push reads the outbox. The queued payload retains its entry tags.
+    pub fn drop_queued_user_prompts(&self) -> Result<usize, CasError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let ids = {
+            let mut stmt = tx.prepare(
+                "SELECT id, payload FROM sync_queue WHERE entity_type = 'entry' AND payload IS NOT NULL",
+            )?;
+            stmt.query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter_map(|(id, payload)| {
+                let value = serde_json::from_str::<serde_json::Value>(&payload).ok()?;
+                value
+                    .get("tags")
+                    .and_then(|tags| tags.as_array())
+                    .is_some_and(|tags| tags.iter().any(|tag| tag.as_str() == Some("user-prompt")))
+                    .then_some(id)
+            })
+            .collect::<Vec<_>>()
+        };
+        for id in &ids {
+            tx.execute("DELETE FROM sync_queue WHERE id = ?1", params![id])?;
+        }
+        tx.commit()?;
+        Ok(ids.len())
+    }
+
     /// Remove one stale personal outbox row when a project write is now
     /// routed exclusively to its team. Team rows and cloud data are untouched.
     pub fn drop_personal_queued_push_for(

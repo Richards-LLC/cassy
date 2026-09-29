@@ -14,6 +14,10 @@ use crate::store::share_policy::{eligible_for_team_entry, resolve_team_id};
 use crate::store::{Result, Store};
 use crate::types::{Entry, Scope};
 
+fn is_user_prompt(entry: &Entry) -> bool {
+    entry.tags.iter().any(|tag| tag == "user-prompt")
+}
+
 /// An entry store wrapper that queues changes for cloud sync
 pub struct SyncingEntryStore {
     inner: Arc<dyn Store>,
@@ -55,6 +59,12 @@ impl SyncingEntryStore {
     }
 
     fn queue_upsert(&self, entry: &Entry) {
+        if is_user_prompt(entry) {
+            let _ = self
+                .queue
+                .drop_queued_pushes_for(EntityType::Entry.as_str(), &entry.id);
+            return;
+        }
         // Serialise once — both enqueues share the same payload.
         let payload = match serde_json::to_string(entry) {
             Ok(p) => p,
@@ -177,11 +187,15 @@ impl Store for SyncingEntryStore {
     }
 
     fn delete(&self, id: &str) -> Result<()> {
-        let team_eligible = self
-            .inner
-            .get(id)
-            .is_ok_and(|row| eligible_for_team_entry(&row));
+        let before = self.inner.get(id).or_else(|_| self.inner.get_archived(id)).ok();
+        let team_eligible = before.as_ref().is_some_and(eligible_for_team_entry);
         self.inner.delete(id)?;
+        if before.as_ref().is_some_and(is_user_prompt) {
+            let _ = self
+                .queue
+                .drop_queued_pushes_for(EntityType::Entry.as_str(), id);
+            return Ok(());
+        }
         self.queue_delete(id, team_eligible);
         Ok(())
     }
@@ -323,6 +337,41 @@ mod tests {
         assert_eq!(pending[0].entity_type, EntityType::Entry);
         assert_eq!(pending[0].entity_id, entry.id);
         assert_eq!(pending[0].operation, SyncOperation::Upsert);
+    }
+
+    #[test]
+    fn user_prompt_stays_local_on_add_update_and_delete() {
+        let (temp, store) = create_team_store(None);
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        let mut entry = Entry::new("prompt-local".to_string(), "User request: fix this".to_string());
+        entry.tags.push("user-prompt".to_string());
+        store.add(&entry).unwrap();
+        assert_eq!(store.get(&entry.id).unwrap().content, entry.content);
+        assert_eq!(queue_counts(&queue), (0, 0));
+
+        // An older capture has no share override, but its tag still prevents
+        // both queues from receiving an update and clears legacy queued rows.
+        let payload = serde_json::to_string(&entry).unwrap();
+        queue
+            .enqueue(EntityType::Entry, &entry.id, SyncOperation::Upsert, Some(&payload))
+            .unwrap();
+        queue
+            .enqueue_for_team(
+                EntityType::Entry,
+                &entry.id,
+                SyncOperation::Upsert,
+                Some(&payload),
+                TEST_TEAM,
+            )
+            .unwrap();
+        assert_eq!(queue_counts(&queue), (1, 1));
+        entry.content.push_str(" now");
+        store.update(&entry).unwrap();
+        assert_eq!(store.get(&entry.id).unwrap().content, entry.content);
+        assert_eq!(queue_counts(&queue), (0, 0));
+
+        store.delete(&entry.id).unwrap();
+        assert_eq!(queue_counts(&queue), (0, 0));
     }
 
     #[test]

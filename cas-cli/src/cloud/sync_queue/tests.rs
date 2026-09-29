@@ -10,6 +10,33 @@ fn create_test_queue() -> (TempDir, SyncQueue) {
 }
 
 #[test]
+fn queued_user_prompts_are_dropped_across_personal_and_team_scopes() {
+    let (_temp, queue) = create_test_queue();
+    let prompt = serde_json::json!({"tags": ["user-prompt"], "content": "User request: fix this"});
+    let ordinary = serde_json::json!({"tags": ["context"], "content": "Keep this"});
+    queue
+        .enqueue(EntityType::Entry, "prompt", SyncOperation::Upsert, Some(&prompt.to_string()))
+        .unwrap();
+    queue
+        .enqueue_for_team(
+            EntityType::Entry,
+            "prompt",
+            SyncOperation::Upsert,
+            Some(&prompt.to_string()),
+            "team-1",
+        )
+        .unwrap();
+    queue
+        .enqueue(EntityType::Entry, "ordinary", SyncOperation::Upsert, Some(&ordinary.to_string()))
+        .unwrap();
+
+    assert_eq!(queue.drop_queued_user_prompts().unwrap(), 2);
+    assert_eq!(queue.drop_queued_user_prompts().unwrap(), 0);
+    assert_eq!(queue.pending(10, 5).unwrap().len(), 1);
+    assert!(queue.pending_for_team("team-1", 10, 5).unwrap().is_empty());
+}
+
+#[test]
 fn team_only_neutralizes_project_copies_without_deleting_personal_rows() {
     let (_temp, queue) = create_test_queue();
     for (kind, id, payload) in [

@@ -163,7 +163,8 @@ nextest and rejects a silent zero-test success.
 ### Worker checks and supervisor assembly
 
 Workers may type-check their committed change with exactly
-`cargo check -p <affected crate> [-p <crate> ...] --tests`. Include consumers of
+`cargo check -p <affected crate> [-p <crate> ...] --lib` for lib-only edits or
+`--tests` when test files changed; choose one target flag. Include consumers of
 changed shared interfaces. The PreToolUse guard routes that command through
 `cas factory worker-check`, which holds an OS builder-slot lock until Cargo
 exits, checks the existing build guard, and enforces `max_concurrent_builders`
@@ -220,9 +221,12 @@ cache-v2 backend and keeps the cold Build Benchmark explicitly uncached.
 
 New isolated workers also seed their private `target/` from compiled artifacts
 hardlinked out of the quiescent snapshot named by `.cas/build-cache/current`;
-small Cargo dep-info files are copied with their target root rebased. Refresh that
-baseline after an epic/main integration merge with
-`scripts/refresh-worker-build-cache.sh`; the script builds a new snapshot to
+small Cargo dep-info files are copied with their target root rebased. The release
+train's host-update stage refreshes that baseline automatically from a detached
+checkout of the released tag on main. `host-update.json` records the completed
+snapshot ID and source commit; a refresh failure warns without failing the
+published release. Run `scripts/refresh-worker-build-cache.sh` for a manual refresh
+after an epic integration merge. The script builds a new snapshot to
 completion and only then publishes its pointer, so no worker ever seeds from a
 live Cargo writer. Old snapshots remain valid for in-flight seeders and should
 only be removed during a maintenance window. Set

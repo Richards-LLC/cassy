@@ -30,7 +30,7 @@ pub(crate) fn valid_package(package: &str) -> bool {
 /// broaden the scope, and arbitrary Cargo configuration or toolchains.
 pub(crate) fn check_packages(args: &[String]) -> Option<Vec<String>> {
     let mut packages = Vec::new();
-    let mut tests = false;
+    let mut target_selected = false;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
@@ -38,14 +38,14 @@ pub(crate) fn check_packages(args: &[String]) -> Option<Vec<String>> {
                 packages.push(args[index + 1].clone());
                 index += 2;
             }
-            "--tests" if !tests => {
-                tests = true;
+            "--lib" | "--tests" if !target_selected => {
+                target_selected = true;
                 index += 1;
             }
             _ => return None,
         }
     }
-    (tests && !packages.is_empty()).then_some(packages)
+    (target_selected && !packages.is_empty()).then_some(packages)
 }
 
 fn lock_file(path: &Path) -> Result<File> {
@@ -142,7 +142,7 @@ pub(crate) fn execute(cas_root: &Path, args: &[String]) -> Result<()> {
 
 fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Result<()> {
     let packages = check_packages(args)
-        .context("Only cargo check -p <crate> [-p <crate> ...] --tests is allowed")?;
+        .context("Only cargo check -p <crate> [-p <crate> ...] with exactly one of --lib or --tests is allowed")?;
     let repo = PathBuf::from(git(cwd, &["rev-parse", "--show-toplevel"])?).canonicalize()?;
     let cas_root = cas_root.canonicalize()?;
     // Check only isolated, seeded worker caches; never use a shared target.
@@ -216,22 +216,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_package_scoped_tests_checks_are_accepted() {
+    fn only_package_scoped_lib_or_tests_checks_are_accepted() {
         let args = |text: &str| {
             text.split_whitespace()
                 .map(str::to_string)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(
-            check_packages(&args("-p cas -p cas-pty --tests")).unwrap(),
-            ["cas", "cas-pty"]
-        );
-        assert!(check_packages(&args("--tests -p cas")).is_some());
+        for target in ["--lib", "--tests"] {
+            assert_eq!(
+                check_packages(&args(&format!("-p cas -p cas-pty {target}"))).unwrap(),
+                ["cas", "cas-pty"]
+            );
+            assert!(check_packages(&args(&format!("{target} -p cas"))).is_some());
+        }
         for invalid in [
+            "--lib",
             "--tests",
             "-p cas",
             "-p '*' --tests",
             "-p cas --tests --lib",
+            "-p cas --lib --tests",
+            "-p cas --lib --lib",
+            "-p cas --lib --all-targets",
+            "-p cas --lib --workspace",
+            "-p cas --lib --config x=y",
             "-p cas --tests --workspace",
             "-p cas --tests --config x=y",
             "-p cas --tests --tests",
@@ -317,12 +325,15 @@ mod tests {
         )
         .unwrap();
         let fake = dir.path().join("fake-cargo");
-        std::fs::write(&fake, "#!/bin/sh\n[ \"$*\" = 'check -p cas --tests' ] || exit 2\n[ \"$CARGO_TARGET_DIR\" = \"$PWD/target\" ] || exit 3\n").unwrap();
+        std::fs::write(&fake, "#!/bin/sh\ncase \"$*\" in 'check -p cas --tests'|'check -p cas --lib') ;; *) exit 2 ;; esac\n[ \"$CARGO_TARGET_DIR\" = \"$PWD/target\" ] || exit 3\n").unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         let args = vec!["-p".into(), "cas".into(), "--tests".into()];
-        execute_at(&root, &args, &repo, &fake).unwrap();
         let head = clean_head(&repo).unwrap();
-        assert!(passing_receipt(&root, &repo, &head).is_some());
+        for target in ["--lib", "--tests"] {
+            let args = vec!["-p".into(), "cas".into(), target.into()];
+            execute_at(&root, &args, &repo, &fake).unwrap();
+            assert!(passing_receipt(&root, &repo, &head).is_some());
+        }
         std::fs::write(&fake, "#!/bin/sh\nexit 12\n").unwrap();
         assert!(
             execute_at(&root, &args, &repo, &fake)

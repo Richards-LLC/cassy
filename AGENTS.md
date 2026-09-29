@@ -18,7 +18,7 @@ This file is canonical for every harness; `CLAUDE.md` imports it.
 
 ## Build and test
 
-Factory workers may type-check committed changes with exactly `cargo check -p <affected crate> [-p <crate> ...] --tests`, under the existing build guard and `max_concurrent_builders` cap, using their private seeded target cache. The PreToolUse hook routes that command through the capped runner and close records `check: PASS <sha>` evidence. Only the supervisor builds and runs Rust tests: once per epic, at assembly. Other compiling Cargo commands, `rustc`, `scripts/run-scoped-tests.sh` and `make test*` remain denied to workers. Build commands, the assembly proof, worker build caches, the CI-load policy and build profiles are in [cas-cli/docs/CONTRIBUTING.md](cas-cli/docs/CONTRIBUTING.md#build-assembly-and-ci-policy). Build profiles must keep `panic = "unwind"`; a compile-time guard in `cas-cli/src/lib.rs` enforces it.
+Factory workers may type-check committed changes with exactly `cargo check -p <affected crate> [-p <crate> ...] --lib` for lib-only edits or `--tests` when test files changed. Choose one target flag, under the existing build guard and `max_concurrent_builders` cap, using the private seeded target cache. The PreToolUse hook routes that command through the capped runner and close records `check: PASS <sha>` evidence. Only the supervisor builds and runs Rust tests: once per epic, at assembly. Other compiling Cargo commands, `rustc`, `scripts/run-scoped-tests.sh` and `make test*` remain denied to workers. Build commands, the assembly proof, worker build caches, the CI-load policy and build profiles are in [cas-cli/docs/CONTRIBUTING.md](cas-cli/docs/CONTRIBUTING.md#build-assembly-and-ci-policy). Build profiles must keep `panic = "unwind"`; a compile-time guard in `cas-cli/src/lib.rs` enforces it.
 
 Minimum supported Rust version: **1.88** (edition 2024).
 
@@ -30,7 +30,7 @@ Minimum supported Rust version: **1.88** (edition 2024).
 
 ## Hooks and verification
 
-CAS installs its hooks for Claude Code (`.claude/settings.json`) and Codex (`.codex/hooks.json`), including the PreToolUse guard that permits only capped package-scoped `cargo check --tests` compilation for factory workers. Follow the factory worker lifecycle and let the supervisor own verification and review.
+CAS installs its hooks for Claude Code (`.claude/settings.json`) and Codex (`.codex/hooks.json`), including the PreToolUse guard that permits only capped package-scoped `cargo check --lib` or `--tests` compilation for factory workers. Follow the factory worker lifecycle and let the supervisor own verification and review.
 
 ## Don't assume — always verify
 

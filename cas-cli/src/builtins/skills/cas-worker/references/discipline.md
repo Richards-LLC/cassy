@@ -6,7 +6,9 @@ covers compile-only evidence and non-Rust suites without restating those rules.
 
 ## Check the committed change before parking
 
-Workers may run exactly `cargo check -p <crate> [-p <crate> ...] --tests`.
+Workers may run exactly `cargo check -p <crate> [-p <crate> ...] --lib` or
+the same command with `--tests`. Choose `--lib` for lib-only edits and `--tests`
+when test files changed; never combine the target flags.
 Select the affected crates, including consumers of changed shared interfaces.
 Commit first, then background long checks with a log in the ignored target directory:
 
@@ -23,8 +25,8 @@ environment override, shell wrapper, broader flags, or another command.
 
 On success the runner records `check: PASS <sha>` against the clean commit.
 Close copies that receipt into task notes when it matches the delivered SHA.
-A changed or dirty tree needs a new check. A check compiles test code; it executes
-no tests and does not replace the supervisor's assembly proof.
+A changed or dirty tree needs a new check. `--tests` also compiles test code;
+neither shape executes tests or replaces the supervisor's assembly proof.
 
 Write or update Rust tests, read the diff, and trace callers, struct literals,
 and match arms across consumers. Workers still cannot build or run Rust tests,

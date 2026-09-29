@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Update this host to the released version and prove it converged.
 
-Usage: release-host-update.py <version> <receipt-path>
+Usage: release-host-update.py <version> <receipt-path> <release-worktree>
 
 Runs `cas update --yes --json --version <version>` (CAS_RELEASE_TRAIN_CAS
 names the binary; default `cas`), then proves that `cas --version`, the
@@ -14,14 +14,20 @@ stayed on the previous release; a deferred or no-op update is a failure here.
 A cloud_sync phase failure in the refresh is recorded in the receipt but does
 not fail the stage: cloud sync of an unrelated project cannot make the host
 binary or hub stale. Any other failed refresh phase does fail it.
+
+After convergence, refresh the worker cache from the released commit on main.
+Cache failures warn without failing the published release. The receipt names
+the completed snapshot; the cache helper publishes only after Cargo exits.
 """
 import datetime
 import json
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
+import tempfile
 
 STAGE = "host-update"
 TOLERATED_PHASES = {"cloud_sync"}
@@ -70,8 +76,83 @@ def failed_phases(refresh):
     return failures
 
 
+def run_cache_refresh(command, timeout, cwd, env):
+    # Kill the whole writer group on timeout: terminating just its shell can
+    # leave Cargo alive with captured pipes open and a checkout being removed.
+    with subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, text=True, start_new_session=True) as child:
+        try:
+            stdout, stderr = child.communicate(timeout=timeout)
+            return child.returncode, stdout, stderr
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(child.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                stdout, stderr = child.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                stdout, stderr = child.communicate()
+            return None, stdout, stderr + f"\ntimed out after {timeout}s"
+
+
+def refresh_worker_cache(version, worktree, receipt_path):
+    """Build a detached released tree, never a dirty lane or live target writer."""
+    log = receipt_path.with_name("worker-build-cache.log")
+    evidence = {"status": "WARN", "snapshot": None, "log": str(log)}
+    try:
+        def git(*args):
+            return subprocess.run(
+                ["git", "-C", str(worktree), *args], capture_output=True,
+                text=True, check=True, timeout=60,
+            ).stdout.strip()
+
+        released = git("rev-parse", f"refs/tags/v{version}^{{commit}}")
+        git("merge-base", "--is-ancestor", released, "refs/remotes/origin/main")
+        evidence["source_commit"] = released
+        common = Path(git("rev-parse", "--path-format=absolute", "--git-common-dir"))
+        cas_root = common.parent / ".cas"
+        cache_root = cas_root / "build-cache"
+        cache_root.mkdir(parents=True, exist_ok=True)
+        command = [os.environ.get(
+            "CAS_RELEASE_TRAIN_WORKER_CACHE_CMD",
+            str(Path(__file__).with_name("refresh-worker-build-cache.sh")),
+        )]
+        evidence["command"] = command
+        timeout = int(os.environ.get("CAS_RELEASE_TRAIN_WORKER_CACHE_TIMEOUT_SECS", "1800"))
+        with tempfile.TemporaryDirectory(prefix="release-cache-", dir=cache_root) as checkout:
+            git("worktree", "add", "--detach", checkout, released)
+            try:
+                env = dict(os.environ, CAS_ROOT=str(cas_root))
+                code, stdout, stderr = run_cache_refresh(command, timeout, cwd=checkout, env=env)
+                log.write_text(stdout + stderr, encoding="utf-8")
+                evidence["exit"] = code
+                if code != 0:
+                    raise RuntimeError(f"refresh exited {code}: {stderr.strip()[-500:]}")
+                match = re.search(r"^Published worker target baseline: ([A-Za-z0-9_.-]+)$",
+                                  stdout, re.MULTILINE)
+                if not match or match[1] in {".", ".."}:
+                    raise RuntimeError("refresh reported no published snapshot")
+                snapshot = match[1]
+                metadata = (cache_root / "snapshots" / snapshot / ".cas-build-cache-metadata")
+                if f"source_commit={released}" not in metadata.read_text().splitlines():
+                    raise RuntimeError("published snapshot provenance differs from released commit")
+                evidence.update(status="PASS", snapshot=snapshot)
+            finally:
+                git("worktree", "remove", "--force", checkout)
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        evidence.update(status="WARN", detail=str(exc))
+        print(f"WARN {STAGE}: worker build-cache refresh failed (not blocking): {exc}",
+              file=sys.stderr)
+    return evidence
+
+
 def main():
-    if len(sys.argv) != 3:
+    if len(sys.argv) != 4:
         print(__doc__.strip().splitlines()[2], file=sys.stderr)
         return 2
     version, receipt_path = sys.argv[1], Path(sys.argv[2])
@@ -149,6 +230,11 @@ def main():
     evidence["status"] = "FAIL" if blockers else "PASS"
     evidence["blockers"] = blockers
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    if not blockers:
+        evidence["worker_build_cache"] = refresh_worker_cache(version, Path(sys.argv[3]), receipt_path)
+    else:
+        evidence["worker_build_cache"] = {"status": "SKIP", "snapshot": None,
+                                          "detail": "host update has blockers"}
     receipt_path.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
 
     for project, _, summary in tolerated:

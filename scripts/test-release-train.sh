@@ -2311,13 +2311,28 @@ esac
 EOF
 chmod +x "$host_stub"
 host_version=9.99.20
-host_wt="$tmp/host-update-wt"
-mkdir -p "$host_wt"
-git -C "$host_wt" init -q
+host_wt="$(new_worktree host-update-wt)"
+git -C "$host_wt" tag "v$host_version"
+git -C "$host_wt" update-ref refs/remotes/origin/main HEAD
+host_cache_stub="$tmp/host-cache"
+cat >"$host_cache_stub" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'head=%s root=%s\n' "$(git rev-parse HEAD)" "$CAS_ROOT" >>"${HOST_CACHE_LOG:?}"
+[[ "${HOST_CACHE_FAIL:-0}" == 0 ]] || { echo 'fixture refresh failed' >&2; exit 12; }
+snapshot=target-fixture-complete
+mkdir -p "$CAS_ROOT/build-cache/snapshots/$snapshot"
+printf 'source_commit=%s\n' "$(git rev-parse HEAD)" >"$CAS_ROOT/build-cache/snapshots/$snapshot/.cas-build-cache-metadata"
+printf '%s\n' "$snapshot" >"$CAS_ROOT/build-cache/current"
+printf 'Published worker target baseline: %s\n' "$snapshot"
+EOF
+chmod +x "$host_cache_stub"
 host_run_dir="$("$train" "$host_version" "$host_wt" --print-run-dir)"
 run_host_update() {
     rm -f "$host_run_dir/host-update.json"
+    rm -f "$tmp/host-cache.log"
     env CAS_RELEASE_TRAIN_CAS="$host_stub" HOST_STUB_LOG="$tmp/host-stub.log" \
+        CAS_RELEASE_TRAIN_WORKER_CACHE_CMD="$host_cache_stub" HOST_CACHE_LOG="$tmp/host-cache.log" \
         HOST_STUB_EXPECT_VERSION="$host_version" HOST_STUB_BINARY="$host_version" \
         HOST_STUB_HUB="$host_version" HOST_STUB_REFRESH="$host_version" "$@" \
         "$train" "$host_version" "$host_wt" --host-update
@@ -2328,7 +2343,8 @@ host_status() {
 }
 if out="$(run_host_update HOST_STUB_UPDATE=noop 2>&1)"; then
     bad "host-update accepted a no-op update: $out"
-elif [[ "$out" == *'BLOCKER host-update: cas update printed no refresh receipt'* && "$(host_status)" == FAIL ]]; then
+elif [[ "$out" == *'BLOCKER host-update: cas update printed no refresh receipt'* && "$(host_status)" == FAIL \
+    && ! -e "$tmp/host-cache.log" ]]; then
     ok 'host-update: a deferred/no-op update is a named blocker with a FAIL receipt'
 else
     bad "host-update no-op failure was not named: $out"
@@ -2351,10 +2367,21 @@ fi
 if out="$(run_host_update 2>&1)" && [[ "$(host_status)" == PASS ]] \
     && grep -q '"refresh_binary_version": "9.99.20"' "$host_run_dir/host-update.json" \
     && grep -q '"hub_version": "9.99.20"' "$host_run_dir/host-update.json" \
-    && grep -q '"cas_version": "9.99.20"' "$host_run_dir/host-update.json"; then
+    && grep -q '"cas_version": "9.99.20"' "$host_run_dir/host-update.json" \
+    && grep -q '"snapshot": "target-fixture-complete"' "$host_run_dir/host-update.json" \
+    && [[ "$(wc -l <"$tmp/host-cache.log" | tr -d ' ')" == 1 ]]; then
     ok 'host-update: matching cas, hub and refresh versions pass with host-update.json evidence'
 else
     bad "host-update did not pass on a converged host: $out"
+fi
+if out="$(run_host_update HOST_CACHE_FAIL=1 2>&1)" && [[ "$(host_status)" == PASS ]] \
+    && [[ "$out" == *'WARN host-update: worker build-cache refresh failed (not blocking)'* ]] \
+    && grep -q '"status": "WARN"' "$host_run_dir/host-update.json" \
+    && grep -q '"snapshot": null' "$host_run_dir/host-update.json" \
+    && [[ "$(cat "$host_wt/.cas/build-cache/current")" == target-fixture-complete ]]; then
+    ok 'host-update: worker cache failure warns, keeps published release PASS and old snapshot'
+else
+    bad "host-update cache refresh failure blocked publication or lost evidence: $out"
 fi
 cloud_project='{"project":"/srv/unrelated","migration":"ok: m","search_index":"ok: s","skills":"ok: k","membership":"ok: b","cloud_sync":"FAILED: push rejected"}'
 if out="$(run_host_update HOST_STUB_UPDATE_EXIT=1 HOST_STUB_REFRESH_STATUS=refresh_failed \
@@ -2379,6 +2406,12 @@ if python3 "$script_dir/test-release-integration.py"; then
     ok 'gap 1: rolling assembly self-heal passes the recorded factory session and supervisor identity; clean, red, dirty and locked fixtures'
 else
     bad 'rolling integration assembly fixture suite'
+fi
+
+if python3 "$script_dir/test-release-worker-build-cache.py"; then
+    ok 'host-update: real cache publisher fixtures preserve quiescent snapshots and released provenance'
+else
+    bad 'host-update worker build-cache fixture suite'
 fi
 
 # cas-fed5: the train and gate run on stock macOS. (This file's in-place edits

@@ -316,6 +316,7 @@ fn supervisor_terminal_input_enters_history_but_machine_relays_do_not() {
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].source, "terminal");
     assert_eq!(history[0].prompt, "Check the desktop reply too");
+    assert!(history[0].processed_at.is_some());
 }
 
 /// cas-0337: this is the actual factory supervisor turn path, not a direct

@@ -120,14 +120,7 @@ pub fn handle_user_prompt_submit(
                 )
             {
                 if let Ok(queue) = crate::store::open_prompt_queue_store(root) {
-                    if let Ok(id) = queue.enqueue_with_session(
-                        "terminal",
-                        "terminal-history",
-                        prompt,
-                        &session,
-                    ) {
-                        let _ = queue.mark_processed(id);
-                    }
+                    let _ = queue.record_terminal_operator_turn(&session, prompt);
                 }
             }
         }

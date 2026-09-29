@@ -1454,6 +1454,10 @@ pub trait PromptQueueStore: Send + Sync {
         factory_session: &str,
     ) -> Result<i64>;
 
+    /// Record a supervisor's terminal input as already processed history.
+    /// It must never enter the pending notification queue.
+    fn record_terminal_operator_turn(&self, factory_session: &str, prompt: &str) -> Result<i64>;
+
     /// Queue a prompt with session, summary, and priority for UI display
     fn enqueue_with_summary(
         &self,
@@ -2027,7 +2031,7 @@ pub trait PromptQueueStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<QueuedPrompt>>;
 
-    /// Read a bounded, session-scoped Commander conversation page without
+    /// Read a bounded, project-scoped Commander conversation page without
     /// consuming delivery state. The result is newest-first and may contain
     /// one extra row so callers can determine whether an earlier page exists.
     /// Verified Commander sends from every device, terminal input, and all
@@ -2035,7 +2039,7 @@ pub trait PromptQueueStore: Send + Sync {
     /// hub authenticates it before the daemon requests the page.
     fn conversation_history(
         &self,
-        factory_session: &str,
+        _factory_session: &str,
         device_id: &str,
         before: Option<i64>,
         limit: usize,
@@ -3102,6 +3106,20 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         factory_session: &str,
     ) -> Result<i64> {
         self.enqueue_full(source, target, prompt, Some(factory_session), None, None)
+    }
+
+    fn record_terminal_operator_turn(&self, factory_session: &str, prompt: &str) -> Result<i64> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO prompt_queue
+                   (source, target, prompt, created_at, processed_at, factory_session)
+                 VALUES ('terminal', 'terminal-history', ?1, ?2, ?2, ?3)",
+                params![prompt, now, factory_session],
+            )?;
+            Ok(conn.last_insert_rowid())
+        })
     }
 
     fn enqueue_urgent_with_outcome(
@@ -4748,7 +4766,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
     fn conversation_history(
         &self,
-        factory_session: &str,
+        _factory_session: &str,
         device_id: &str,
         before: Option<i64>,
         limit: usize,
@@ -4758,8 +4776,8 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         }
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         let (before_clause, limit_parameter) = before
-            .map(|_| (" AND id < ?2 ", "?3"))
-            .unwrap_or(("", "?2"));
+            .map(|_| (" AND id < ?1 ", "?2"))
+            .unwrap_or(("", "?1"));
         let sql = format!(
             "SELECT id, source, target, prompt, created_at, processed_at,
                     summary, priority, acked_at, urgent, factory_session,
@@ -4767,7 +4785,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     operator_device_id, operator_device_label, operator_scopes,
                     operator_verified, recipient_device_id, kind, attachments
              FROM prompt_queue
-             WHERE factory_session = ?1 AND (
+             WHERE (
                     (source LIKE 'commander:%'
                      AND operator_verified = 1)
                     OR (source = 'terminal' AND target = 'terminal-history'
@@ -4780,7 +4798,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                LIMIT {limit_parameter}"
         );
         let mut stmt = conn.prepare_cached(&sql)?;
-        let mut values: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(factory_session.to_owned())];
+        let mut values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if let Some(before) = before {
             values.push(Box::new(before));
         }
@@ -6091,7 +6109,7 @@ mod tests {
     }
 
     #[test]
-    fn conversation_history_is_session_scoped_and_shared_across_devices() {
+    fn conversation_history_is_project_scoped_and_shared_across_devices() {
         let (_temp, store) = create_test_store();
         let daniel = OperatorStamp {
             operator: "Daniel".into(),
@@ -6174,26 +6192,34 @@ mod tests {
             .unwrap()
             .id;
         store.stamp_recipient_device(reply_id, "phone-7").unwrap();
-        let terminal_id = store.enqueue_with_session("terminal", "terminal-history", "typed at terminal", "factory-7").unwrap();
-        store.mark_processed(terminal_id).unwrap();
+        let terminal_id = store.record_terminal_operator_turn("factory-7", "typed at terminal").unwrap();
+        assert!(store.queued_prompt(terminal_id).unwrap().unwrap().processed_at.is_some());
 
         let history = store
             .conversation_history("factory-7", "phone-7", None, 20)
             .unwrap();
-        assert_eq!(history.len(), 4);
+        assert_eq!(history.len(), 6);
         assert!(history.iter().any(|row| row.prompt == "typed at terminal"));
         assert!(history.iter().any(|row| row.prompt == "operator message"));
-        assert!(!history
+        assert!(history
             .iter()
             .any(|row| row.prompt == "older project session message"));
+        assert!(history.iter().any(|row| row.prompt.contains("older project session reply")));
         assert!(history.iter().any(|row| row.target == "operator"));
         assert!(history.iter().any(|row| row.prompt == "other device message"));
+        let computer_history = store
+            .conversation_history("factory-7", "computer-9", None, 20)
+            .unwrap();
+        assert_eq!(
+            history.iter().map(|row| row.id).collect::<Vec<_>>(),
+            computer_history.iter().map(|row| row.id).collect::<Vec<_>>()
+        );
 
         let newest = history.first().unwrap().id;
         let earlier = store
             .conversation_history("factory-7", "phone-7", Some(newest), 20)
             .unwrap();
-        assert_eq!(earlier.len(), 3, "the cursor excludes only the newest row");
+        assert_eq!(earlier.len(), 5, "the cursor excludes only the newest row");
         assert!(!earlier.iter().any(|row| row.id == newest));
     }
 

@@ -28,9 +28,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Lines the operator types directly into a supervisor's terminal now appear
   in Commander history as Terminal turns. Machine-generated prompts (task
   notifications, relays, wakes, reminders) are left out.
+- Factory workers default to Codex `gpt-6.1-sol` at high reasoning effort.
+  The standard lane uses it, falling back to `gpt-6-sol`. A spawn without an
+  explicit model honors `llm.worker.harness`, `llm.worker.model` and
+  `llm.worker.reasoning_effort`, and those settings apply only when the spawn
+  uses the configured harness.
 
 ### Fixed
 
+- On Linux without a systemd user session, a session started from Commander
+  now runs in the selected project instead of the hub's folder, so it appears
+  and opens.
 - A supervisor's pane answer is no longer dropped from Commander history when
   the same turn also sent a message to the operator, or when a thinking-only
   entry came before the answer.

@@ -2034,6 +2034,178 @@ else
     bad "--cut --resume did not preserve gate idempotence (before=$gate_runs_before after=$gate_runs_after)"
 fi
 
+# Publish adopts a squash-merged SHA, then post-publication fills the draft.
+# Announce fails once; the printed resume must finish without manual stages.
+published_version=9.99.25
+published_wt="$(new_cut_fixture cut-published-resume "$published_version")"
+published_draft="$published_wt/docs/release-notes/$(date -u +%F)-v${published_version}-slack.md"
+printf '\nLinux {{LINUX_SHA256}}; macOS {{MACOS_SHA256}}\n' >>"$published_draft"
+git -C "$published_wt" add docs/release-notes
+git -C "$published_wt" commit -qm 'seed checksum placeholders'
+published_original="$(git -C "$published_wt" rev-parse HEAD)"
+published_dir="$($train "$published_version" "$published_wt" --print-run-dir)"
+published_cmd="$tmp/published-resume-stage.sh"
+cat >"$published_cmd" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$CUT_STAGE" >>"$CUT_LOG"
+case "$CUT_STAGE" in
+    pipeline)
+        printf 'squashed release\n' | git commit-tree 'HEAD^{tree}' -p refs/remotes/origin/main >"$CAS_RELEASE_TRAIN_RUN_DIR/landed-main.sha"
+        printf 'MERGED\n' >"$CAS_RELEASE_TRAIN_RUN_DIR/pipeline.done"
+        ;;
+    publish) git reset --hard "$(cat "$CAS_RELEASE_TRAIN_RUN_DIR/landed-main.sha")" >/dev/null ;;
+    post-publication)
+        python3 - "$PUBLISHED_DRAFT" "$CAS_RELEASE_TRAIN_RUN_DIR" <<'PYFIX'
+from pathlib import Path
+import sys
+draft, run = Path(sys.argv[1]), Path(sys.argv[2])
+draft.write_text(draft.read_text().replace('{{LINUX_SHA256}}', 'a' * 64).replace('{{MACOS_SHA256}}', 'b' * 64))
+(run / 'release-published.receipt').write_text('LINUX_SHA256=' + 'a' * 64 + '\nMACOS_SHA256=' + 'b' * 64 + '\n')
+PYFIX
+        ;;
+    announce)
+        if [[ ! -e "$CAS_RELEASE_TRAIN_RUN_DIR/announce-failed-once" ]]; then
+            touch "$CAS_RELEASE_TRAIN_RUN_DIR/announce-failed-once"
+            exit 23
+        fi
+        ;;
+    report)
+        if [[ -e "$CAS_RELEASE_TRAIN_RUN_DIR/report-fail-request" ]]; then
+            mkdir -p docs/release-reports
+            printf 'partial report\n' >"docs/release-reports/v${CAS_RELEASE_TRAIN_VERSION}.html"
+            rm "$CAS_RELEASE_TRAIN_RUN_DIR/report-fail-request"
+            exit 24
+        fi
+        ;;
+esac
+EOF
+chmod +x "$published_cmd"
+published_log="$tmp/published-stages.log"
+run_published_resume() {
+    CAS_RELEASE_ENV_FILE="$published_wt/release.env" \
+    CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_COMPETING=1 CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_TOOLCHAIN=1 \
+    CAS_RELEASE_TRAIN_GATE_CMD="$cut_gate" \
+    CAS_RELEASE_TRAIN_ASSEMBLE_CMD="$published_cmd" CAS_RELEASE_TRAIN_PREP_CMD="$published_cmd" \
+    CAS_RELEASE_TRAIN_LEDGER_CMD="$published_cmd" CAS_RELEASE_TRAIN_PIPELINE_CMD="$published_cmd" \
+    CAS_RELEASE_TRAIN_PUBLISH_CMD="$published_cmd" CAS_RELEASE_TRAIN_POST_PUBLICATION_CMD="$published_cmd" \
+    CAS_RELEASE_TRAIN_ANNOUNCE_CMD="$published_cmd" CAS_RELEASE_TRAIN_REPORT_CMD="$published_cmd" \
+    CAS_RELEASE_TRAIN_RECEIPTS_CMD="$published_cmd" CAS_RELEASE_TRAIN_HOST_UPDATE_CMD="$published_cmd" \
+    CAS_RELEASE_TRAIN_RUN_DIR="$published_dir" PUBLISHED_DRAFT="$published_draft" CUT_LOG="$published_log" \
+        "$train" "$published_version" "$published_wt" --cut "$@"
+}
+if run_published_resume >"$tmp/published-first.out" 2>&1; then
+    bad 'published fixture unexpectedly bypassed the injected announce failure'
+elif grep -qF 'BLOCKER announce' "$tmp/published-first.out" \
+    && ! git -C "$published_wt" merge-base --is-ancestor "$published_original" HEAD \
+    && [[ "$(git -C "$published_wt" diff --name-only)" == "${published_draft#"$published_wt"/}" ]]; then
+    ok 'announce failure reproduces squash-published HEAD plus the filled dirty draft'
+else
+    bad "published fixture missed the live trigger: $(cat "$tmp/published-first.out")"
+fi
+printf 'unrelated\n' >"$published_wt/unrelated.txt"
+if run_published_resume --resume >"$tmp/published-dirty.out" 2>&1; then
+    bad 'published resume accepted unrelated untracked changes'
+elif grep -qF 'BLOCKER clean-worktree' "$tmp/published-dirty.out" \
+    && [[ "$(grep -c '^announce$' "$published_log")" == 1 ]]; then
+    ok 'published resume rejects unrelated dirt before rerunning announce'
+else
+    bad "published resume did not preserve the dirty-tree guard: $(cat "$tmp/published-dirty.out")"
+fi
+rm "$published_wt/unrelated.txt"
+cp "$published_draft" "$tmp/published-filled.md"
+printf 'unreceipted prose\n' >>"$published_draft"
+if run_published_resume --resume >"$tmp/published-tamper.out" 2>&1; then
+    bad 'published resume accepted an edited draft beyond the stage output'
+elif grep -qF 'BLOCKER clean-worktree' "$tmp/published-tamper.out"; then
+    ok 'published resume accepts only the recorded draft bytes'
+else
+    bad "published resume failed to name draft tampering: $(cat "$tmp/published-tamper.out")"
+fi
+cp "$tmp/published-filled.md" "$published_draft"
+cp "$published_dir/stage.publish.done" "$tmp/published-stage.done"
+cp "$published_dir/stage.pipeline.done" "$tmp/published-pipeline.done"
+printf '%040d\n' 1 >"$published_dir/stage.publish.done"
+printf '%040d\n' 1 >"$published_dir/stage.pipeline.done"
+if run_published_resume --resume >"$tmp/published-stale.out" 2>&1; then
+    bad 'published resume accepted unrelated publication receipts'
+elif grep -qF 'stage preflight: start' "$tmp/published-stale.out" \
+    && grep -qF 'BLOCKER clean-worktree' "$tmp/published-stale.out"; then
+    ok 'invalid publication receipts cannot bypass preflight'
+else
+    bad "stale publication receipt did not return to preflight: $(cat "$tmp/published-stale.out")"
+fi
+cp "$tmp/published-stage.done" "$published_dir/stage.publish.done"
+cp "$tmp/published-pipeline.done" "$published_dir/stage.pipeline.done"
+# Upgrade compatibility: the real 3.37.0 run predates output snapshots.
+mv "$published_dir/post-publication-outputs.json" "$tmp/published-outputs.json"
+if python3 "$script_dir/release-train-resume.py" check "$published_wt" "$published_dir" \
+    "$published_version" "$published_draft"; then
+    ok 'legacy published runs accept the exact receipt-backed checksum replacement'
+else
+    bad 'legacy filled draft was not recognized'
+fi
+printf 'unreceipted prose\n' >>"$published_draft"
+if python3 "$script_dir/release-train-resume.py" check "$published_wt" "$published_dir" \
+    "$published_version" "$published_draft" >"$tmp/legacy-tamper.out" 2>&1; then
+    bad 'legacy resume accepted extra draft prose'
+else
+    ok 'legacy published runs reject draft changes beyond checksum replacement'
+fi
+cp "$tmp/published-filled.md" "$published_draft"
+mv "$tmp/published-outputs.json" "$published_dir/post-publication-outputs.json"
+if run_published_resume --resume >"$tmp/published-resume.out" 2>&1 \
+    && [[ -s "$published_dir/stage.host-update.done" ]] \
+    && [[ "$(grep -c '^pipeline$' "$published_log")" == 1 ]] \
+    && [[ "$(grep -c '^publish$' "$published_log")" == 1 ]] \
+    && [[ "$(grep -c '^post-publication$' "$published_log")" == 1 ]] \
+    && [[ "$(grep -c '^announce$' "$published_log")" == 2 ]]; then
+    ok '--cut --resume after squash publication completes announce through host-update without manual stages'
+else
+    bad "post-publication resume failed: $(cat "$tmp/published-resume.out")"
+fi
+rm "$published_dir/stage.report.done" "$published_dir/stage.receipts.done" "$published_dir/stage.host-update.done"
+touch "$published_dir/report-fail-request"
+if run_published_resume --resume >"$tmp/published-report.out" 2>&1; then
+    bad 'published resume bypassed the injected partial report failure'
+elif grep -qF 'BLOCKER report' "$tmp/published-report.out" \
+    && run_published_resume --resume >"$tmp/published-report-resume.out" 2>&1 \
+    && [[ -s "$published_dir/stage.host-update.done" ]] \
+    && [[ "$(grep -c '^announce$' "$published_log")" == 2 ]]; then
+    ok 'a partial report failure also resumes its recorded outputs through host-update'
+else
+    bad "partial report resume failed: $(cat "$tmp/published-report.out") $(cat "$tmp/published-report-resume.out" 2>/dev/null || true)"
+fi
+
+# The pipeline boundary is independently resumable before publication.
+published_version=9.99.26
+published_wt="$(new_cut_fixture cut-pipeline-resume "$published_version")"
+published_draft="$published_wt/docs/release-notes/$(date -u +%F)-v${published_version}-slack.md"
+published_dir="$($train "$published_version" "$published_wt" --print-run-dir)"
+published_log="$tmp/pipeline-stages.log"
+if CAS_RELEASE_TRAIN_CUT_STOP_AFTER=pipeline run_published_resume >"$tmp/pipeline-first.out" 2>&1; then
+    bad 'pipeline resume fixture did not stop at its receipt'
+elif grep -qF 'stopped after stage pipeline' "$tmp/pipeline-first.out"; then
+    # Publisher can adopt landed HEAD and then fail before its own receipt.
+    git -C "$published_wt" reset --hard "$(cat "$published_dir/landed-main.sha")" >/dev/null
+    touch "$published_dir/announce-failed-once"
+    if run_published_resume --resume >"$tmp/pipeline-resume.out" 2>&1 \
+        && [[ -s "$published_dir/stage.host-update.done" ]] \
+        && [[ "$(grep -c '^pipeline$' "$published_log")" == 1 ]] \
+        && [[ "$(grep -c '^publish$' "$published_log")" == 1 ]]; then
+        ok 'pipeline receipt resumes publication after HEAD moved without repeating preflight or pipeline'
+    else
+        bad "pipeline boundary resume failed: $(cat "$tmp/pipeline-resume.out")"
+    fi
+else
+    bad "pipeline resume fixture missed its boundary: $(cat "$tmp/pipeline-first.out")"
+fi
+if python3 "$script_dir/test-release-train-resume.py"; then
+    ok 'resume output guards cover index, mode, symlink, receipt identity and legacy changes'
+else
+    bad 'resume output guard tests failed'
+fi
+
 missing_wt="$(new_cut_fixture cut-missing-heading 9.99.11 0)"
 missing_log="$tmp/missing-stage.log"
 missing_out="$(CAS_RELEASE_ENV_FILE="$missing_wt/release.env" \

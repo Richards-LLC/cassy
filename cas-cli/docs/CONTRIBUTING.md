@@ -176,13 +176,37 @@ copies matching exact-delivery receipts into worker evidence. Dirty trees,
 failed retries, other worktrees and other SHAs cannot supply this receipt.
 Check receipts are optional compile-only evidence and do not waive test proof.
 
-Only the supervisor builds and runs Rust tests: once per epic at assembly it
+Only the supervisor builds and runs Rust tests: once per release candidate at
+assembly it runs `python3 scripts/assembly-proof.py prove <epic-worktree>` and
 records `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd>
 log=<path>` on the epic. Workers still cannot run build/test/nextest/clippy/run,
 `rustc`, scoped-test scripts, or `make test*`. Child closes reference assembly
 proof rather than scoped `--proof` or `loaded_proof` notes. Non-Rust suites are
 unaffected. An older runtime that denies the check exception requires parking
 with the unverified crates named for assembly.
+
+The assembly command runs native full-workspace nextest in the factory
+worktree, then the gate's archive-mode row in a plain clone outside every
+`.cas` ancestor. The archive consumer uses the queue's remapped environment
+and excludes component-output snapshots, already covered by the native run.
+Both contexts must report nonzero passed tests before an atomic PASS is written
+under the shared `.cas/merge-sweeps/assembly-proofs/` directory. The receipt
+records the tested Git tree, each context's tree and pass count, toolchain,
+environment and archive size. Full Cassy integration sweeps and the train's
+assembly stage use this same command; retries cite the existing receipt.
+
+The first full release gate automatically reuses its nextest and archive-mode
+rows from a matching receipt. `--only` remains a fresh diagnostic. Receipts
+expire after 24 hours; dirty checkouts, changed code/manifests/scripts/workflows,
+toolchain or test environment cause a miss. Only `CHANGELOG.md` and release
+prose under `docs/release-notes/` and `docs/release-reports/` are excluded from
+the code-input hash; embedded Rust documentation fixtures remain inputs.
+The prep stage's workspace-member `[package]` version values and corresponding
+source-less member `[[package]]` lock versions are normalized. The generated
+`cas-cli/src/builtins/reference-history.json` ledger is excluded; its source
+references and generator remain inputs. Every other manifest or lock byte,
+including dependency and non-member versions, still requires a new proof.
+The helper uses Python 3.11's standard-library TOML parser.
 
 Gate evidence: PR #655/run 33430464567; PR #657/run 33435093275.
 

@@ -85,11 +85,11 @@ The trigger is automatic on every merge to `main` or `staging`. Use
 channel, message shape and ordering; a project with no rubric and no channel
 posts nowhere.
 
-Use only the MechaCassy hub/bot through
-[mecha-cassy](../../mecha-cassy/SKILL.md). Never use Claude.ai Slack or a personal
+Use only the Violet hub/bot through
+[violet](../../violet/SKILL.md). Never use Claude.ai Slack or a personal
 connector; the non-Slack account gate above does not authorize Slack transport.
-The hub skill owns authenticated `tools/list`, bounded `mecha_read` dedupe,
-ordered `mecha_post` calls, and message/file integrity receipts. A one-shot
+The hub skill owns authenticated `tools/list`, bounded `violet_read` dedupe,
+ordered `violet_post` calls, and message/file integrity receipts. A one-shot
 without a live proxy uses the same hub's registered direct route, as described
 in its registration reference. If that route cannot complete publication,
 save the draft and partial receipts and report the measured failure to the

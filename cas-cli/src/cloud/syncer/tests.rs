@@ -7,7 +7,7 @@ use crate::store::TaskStore;
 use crate::types::{Task, TaskStatus};
 
 #[tokio::test]
-async fn legacy_queued_entry_recovers_stored_origin_and_unknown_row_parks() {
+async fn legacy_queued_entry_recovers_stored_origin_and_unknown_row_is_skipped() {
     use crate::cloud::{CloudConfig, EntityType, SyncOperation};
     use cas_store::{RuleStore, SqliteRuleStore, SqliteStore, Store};
     use tempfile::tempdir;
@@ -84,12 +84,9 @@ async fn legacy_queued_entry_recovers_stored_origin_and_unknown_row_parks() {
     let result = syncer.push_scoped(PushScope::EntriesOnly).unwrap();
     assert_eq!(result.pushed_entries, 1);
     let remaining = queue.list_all(10).unwrap();
-    assert_eq!(remaining.len(), 2);
+    assert_eq!(remaining.len(), 1);
     for row in &remaining {
-        assert!(matches!(
-            row.entity_id.as_str(),
-            "legacy-unknown" | "legacy-missing"
-        ));
+        assert_eq!(row.entity_id, "legacy-missing");
         assert_eq!(row.retry_count, max_retries);
         assert!(
             row.last_error
@@ -98,6 +95,7 @@ async fn legacy_queued_entry_recovers_stored_origin_and_unknown_row_parks() {
                 .contains("no attributable origin_project")
         );
     }
+    assert_eq!(queue.unauthored_skipped_count().unwrap(), 1);
 
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests.len(), 1);
@@ -615,6 +613,7 @@ async fn personal_push_keeps_itemized_invalid_revision_visible_in_queue_health()
         "[project]\ncanonical_id = \"p\"\n",
     )
     .unwrap();
+    crate::store::open_store_local(temp.path()).unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     queue
@@ -642,7 +641,7 @@ async fn personal_push_keeps_itemized_invalid_revision_visible_in_queue_health()
             ..Default::default()
         },
         CloudSyncerConfig::default(),
-        "test-project".to_string(),
+        "p".to_string(),
         temp.path(),
     );
     let result = syncer.push_scoped(PushScope::EntriesOnly).unwrap();
@@ -706,7 +705,7 @@ async fn team_push_serializes_task_dependency_collection() {
             "cas-616e-from:cas-616e-to:blocks",
             SyncOperation::Upsert,
             Some(
-                r#"{"from_id":"cas-616e-from","to_id":"cas-616e-to","dep_type":"blocks","created_at":"2026-09-01T12:00:00Z"}"#,
+                r#"{"from_id":"cas-616e-from","to_id":"cas-616e-to","dep_type":"blocks","created_at":"2026-09-01T12:00:00Z","origin_project":"p"}"#,
             ),
             team_id,
         )
@@ -773,7 +772,7 @@ async fn team_push_failure_includes_body_and_trace_headers() {
             "cas-c4c4-from:cas-c4c4-to:blocks",
             SyncOperation::Upsert,
             Some(
-                r#"{"from_id":"cas-c4c4-from","to_id":"cas-c4c4-to","dep_type":"blocks","created_at":"2026-09-01T12:00:00Z"}"#,
+                r#"{"from_id":"cas-c4c4-from","to_id":"cas-c4c4-to","dep_type":"blocks","created_at":"2026-09-01T12:00:00Z","origin_project":"p"}"#,
             ),
             team_id,
         )
@@ -946,6 +945,7 @@ async fn push_response_aggregate_skip_acknowledges_the_whole_personal_batch() {
         "[project]\ncanonical_id = \"p\"\n",
     )
     .unwrap();
+    crate::store::open_store_local(temp.path()).unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     queue
@@ -973,7 +973,7 @@ async fn push_response_aggregate_skip_acknowledges_the_whole_personal_batch() {
             ..Default::default()
         },
         CloudSyncerConfig::default(),
-        "test-project".to_string(),
+        "p".to_string(),
         temp.path(),
     );
     let result = syncer.push_scoped(PushScope::EntriesOnly).unwrap();
@@ -1015,6 +1015,7 @@ async fn push_response_per_row_rejection_is_parked_without_poisoning_neighbors()
         "[project]\ncanonical_id = \"p\"\n",
     )
     .unwrap();
+    crate::store::open_store_local(temp.path()).unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     for id in ["entry-good", "entry-rejected"] {
@@ -1036,7 +1037,7 @@ async fn push_response_per_row_rejection_is_parked_without_poisoning_neighbors()
             ..Default::default()
         },
         CloudSyncerConfig::default(),
-        "test-project".to_string(),
+        "p".to_string(),
         temp.path(),
     );
     let result = syncer.push_scoped(PushScope::EntriesOnly).unwrap();
@@ -1079,7 +1080,7 @@ fn version_gate_requeues_only_after_minimum_and_is_idempotent() {
                 crate::cloud::EntityType::Task,
                 "task-old-client",
                 crate::cloud::SyncOperation::Upsert,
-                Some(r#"{"id":"task-old-client","origin_project":"test-project"}"#),
+                Some(r#"{"id":"task-old-client","origin_project":"p"}"#),
             )
             .unwrap();
         queue
@@ -1087,7 +1088,7 @@ fn version_gate_requeues_only_after_minimum_and_is_idempotent() {
                 crate::cloud::EntityType::Task,
                 "task-new-enough",
                 crate::cloud::SyncOperation::Upsert,
-                Some(r#"{"id":"task-new-enough","origin_project":"test-project"}"#),
+                Some(r#"{"id":"task-new-enough","origin_project":"p"}"#),
             )
             .unwrap();
         let ids = queue
@@ -1156,6 +1157,7 @@ async fn version_gate_push_requeues_terminal_items_before_reading_pending_queue(
         "[project]\ncanonical_id = \"p\"\n",
     )
     .unwrap();
+    crate::store::open_store_local(temp.path()).unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     queue
@@ -1184,7 +1186,7 @@ async fn version_gate_push_requeues_terminal_items_before_reading_pending_queue(
             ..Default::default()
         },
         CloudSyncerConfig::default(),
-        "test-project".to_string(),
+        "p".to_string(),
         temp.path(),
     );
     let result = syncer.push_scoped(PushScope::EntriesOnly).unwrap();
@@ -2490,6 +2492,7 @@ async fn top_level_rows_ack_lww_skips_and_park_rejections_by_reason() {
         "[project]\ncanonical_id = \"p\"\n",
     )
     .unwrap();
+    crate::store::open_store_local(temp.path()).unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     for id in ["entry-written", "entry-kept-newer", "entry-refused"] {
@@ -2511,7 +2514,7 @@ async fn top_level_rows_ack_lww_skips_and_park_rejections_by_reason() {
             ..Default::default()
         },
         CloudSyncerConfig::default(),
-        "test-project".to_string(),
+        "p".to_string(),
         temp.path(),
     );
     let result = syncer.push_scoped(PushScope::EntriesOnly).unwrap();
@@ -2565,6 +2568,7 @@ async fn responses_without_rows_keep_the_legacy_aggregate_behaviour() {
         "[project]\ncanonical_id = \"p\"\n",
     )
     .unwrap();
+    crate::store::open_store_local(temp.path()).unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
     for id in ["entry-one", "entry-two"] {
@@ -2586,7 +2590,7 @@ async fn responses_without_rows_keep_the_legacy_aggregate_behaviour() {
             ..Default::default()
         },
         CloudSyncerConfig::default(),
-        "test-project".to_string(),
+        "p".to_string(),
         temp.path(),
     );
     let result = syncer.push_scoped(PushScope::EntriesOnly).unwrap();

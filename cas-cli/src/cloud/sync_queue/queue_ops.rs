@@ -157,7 +157,7 @@ impl SyncQueue {
         let tx = conn.transaction()?;
         let rows = {
             let mut stmt = tx.prepare(
-                "SELECT id, entity_type, entity_id, payload, project_id FROM sync_queue
+                "SELECT id, entity_type, entity_id, operation, payload, project_id FROM sync_queue
                  WHERE entity_type IN ('entry', 'rule', 'task', 'task_dependency')",
             )?;
             stmt.query_map([], |row| {
@@ -165,14 +165,15 @@ impl SyncQueue {
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(3)?,
                     row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?
         };
         let mut dropped = 0;
-        for (id, kind, entity_id, payload, project_id) in rows {
+        for (id, kind, entity_id, operation, payload, project_id) in rows {
             let value = payload
                 .as_deref()
                 .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
@@ -189,9 +190,12 @@ impl SyncQueue {
             let foreign_target = project_id
                 .as_deref()
                 .is_some_and(|id| !crate::cloud::project_ids_match(id, local));
-            let foreign_origin = origin.as_deref().is_some_and(|origin| {
-                origin == "unknown" || !crate::cloud::project_ids_match(origin, local)
-            });
+            // Deleting this project's old cloud key remains valid after a
+            // local task move gives the stored row a different origin.
+            let foreign_origin = operation != SyncOperation::Delete.as_str()
+                && origin.as_deref().is_some_and(|origin| {
+                    origin == "unknown" || !crate::cloud::project_ids_match(origin, local)
+                });
             if foreign_target || foreign_origin {
                 dropped += tx.execute("DELETE FROM sync_queue WHERE id = ?1", params![id])?;
             }

@@ -44,7 +44,8 @@ The optional bypass in the create response is used first; otherwise
 `GET /api/bypass`, a read-only Vercel lookup, and one hidden prompt are tried
 in that order. The Vercel PATCH endpoint is never used because it rotates the
 shared secret. If `POST /api/clients` is absent, setup fails closed naming
-`Richards-LLC/violet_ps#5` and never mints locally.
+the Violet tracker issue (`cas config get issues.components.violet`) and never
+mints locally.
 
 The hand-written shapes below remain the reference for repairing a machine by
 hand or for a project that has never named the hub routes itself.

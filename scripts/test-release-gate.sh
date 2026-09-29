@@ -1281,6 +1281,7 @@ PYFIX
         bad "$change version incorrectly reused assembly proof"
     fi
     git -C "$repo" restore --source=HEAD~1 -- "$changed_file"
+    git -C "$repo" add "$changed_file"
     git -C "$repo" commit -qm 'restore fixture dependency'
 done
 mkdir -p "$repo/docs/release-notes"

@@ -207,6 +207,11 @@ fn make_project(root: &Path) {
     let cas_root = root.join(".cas");
     std::fs::create_dir_all(&cas_root).expect("create fixture .cas directory");
     std::fs::write(cas_root.join("cas.db"), b"").expect("create fixture store");
+    std::fs::write(
+        cas_root.join("config.toml"),
+        format!("[project]\ncanonical_id = {:?}\n", root.file_name().unwrap().to_string_lossy()),
+    )
+    .expect("pin fixture identity");
 }
 
 #[test]
@@ -239,10 +244,45 @@ fn discovery_finds_sibling_projects_below_a_parent_that_is_itself_a_project() {
             scanned
         );
     }
-    assert!(
-        scanned.contains(&home),
-        "the scanner should see home before discovery classifies host state"
-    );
+    assert!(!scanned.contains(&home), "host state is not a project root");
+}
+
+#[test]
+fn scanner_ignores_container_and_home_archive_without_creating_stores() {
+    let guard = crate::test_env_guard::TestEnvGuard::temp_home();
+    let home = guard.home().to_path_buf();
+    let container = home.join("Projects");
+    let first = container.join("one");
+    let second = container.join("two");
+    make_project(&first);
+    make_project(&second);
+    let archived = home.join("Archive/old");
+    make_project(&archived);
+    let mut scanned = BTreeSet::new();
+    scan_for_projects(&home, MAX_SCAN_DEPTH, &mut scanned);
+    assert!(!scanned.contains(&container));
+    assert!(scanned.contains(&first));
+    assert!(scanned.contains(&second));
+    assert!(!scanned.contains(&archived));
+    assert!(!container.join(".cas").exists());
+}
+
+#[test]
+fn refresh_cloud_phases_leave_unlinked_project_unlinked() {
+    let guard = crate::test_env_guard::TestEnvGuard::temp_home();
+    let project = guard.home().join("time-tracking");
+    make_project(&project);
+    let cas_root = project.join(".cas");
+    assert!(!cas_root.join("cloud.json").exists());
+    assert!(matches!(
+        refresh_project_membership(&cas_root, false),
+        ProjectPhase::Skipped(_)
+    ));
+    assert!(matches!(
+        sync_project_cloud(&cas_root, false, &update_test_cli(false)).0,
+        ProjectPhase::Skipped(_)
+    ));
+    assert!(!cas_root.join("cloud.json").exists());
 }
 
 #[test]

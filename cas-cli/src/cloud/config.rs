@@ -554,6 +554,27 @@ pub fn derive_canonical_id_from_git_remote(cas_root: &Path) -> Option<String> {
 pub fn git_origin_url(cas_root: &Path) -> Option<String> {
     use std::process::Command;
 
+    // Git searches parent directories. A nested folder must not borrow its
+    // parent's origin when it has no repository of its own.
+    let project = if cas_root.file_name().is_some_and(|name| name == ".cas") {
+        cas_root.parent()?
+    } else {
+        cas_root
+    };
+    let top = Command::new("git")
+        .arg("-C")
+        .arg(project)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !top.status.success() {
+        return None;
+    }
+    let top = String::from_utf8(top.stdout).ok()?;
+    if Path::new(top.trim()).canonicalize().ok()? != project.canonicalize().ok()? {
+        return None;
+    }
+
     let output = Command::new("git")
         .args(["-C"])
         .arg(cas_root)
@@ -1375,6 +1396,9 @@ pub fn adopt_team_scope_for_configs(
 /// `cas_root` and the user-level config, and persists the project config only
 /// when adoption actually changed it.
 pub fn maybe_adopt_team_scope(cas_root: &Path) -> Result<TeamScopeAdoption, CasError> {
+    if !cas_root.join("cloud.json").is_file() {
+        return Ok(TeamScopeAdoption::NotLoggedIn);
+    }
     let mut project_cfg = CloudConfig::load_from_cas_dir(cas_root)?;
     let user_cfg = user_level_cloud_json_path()
         .and_then(|p| CloudConfig::load_from(&p).ok())
@@ -2558,6 +2582,36 @@ mod tests {
         unsafe {
             std::env::remove_var("CAS_USER_CLOUD_JSON");
         }
+    }
+
+    #[test]
+    fn unlinked_project_does_not_gain_cloud_config_from_team_adoption() {
+        let _guard = TestEnvGuard::new();
+        let project = TempDir::new().unwrap();
+        let user = TempDir::new().unwrap();
+        let user_config = user_with_teams(&[("team-id", "team", "Team")], None);
+        user_config.save_to_cas_dir(user.path()).unwrap();
+        unsafe { std::env::set_var("CAS_USER_CLOUD_JSON", user.path().join("cloud.json")); }
+        let outcome = maybe_adopt_team_scope(project.path()).unwrap();
+        assert_eq!(outcome, TeamScopeAdoption::NotLoggedIn);
+        assert!(!project.path().join("cloud.json").exists());
+        unsafe { std::env::remove_var("CAS_USER_CLOUD_JSON"); }
+    }
+
+    #[test]
+    fn git_origin_does_not_inherit_parent_checkout() {
+        let _guard = TestEnvGuard::new();
+        let parent = TempDir::new().unwrap();
+        let status = std::process::Command::new("git").arg("init").arg(parent.path()).output().unwrap().status;
+        assert!(status.success());
+        let status = std::process::Command::new("git")
+            .arg("-C").arg(parent.path())
+            .args(["remote", "add", "origin", "https://github.com/example/parent.git"])
+            .output().unwrap().status;
+        assert!(status.success());
+        let nested_cas = parent.path().join("container/.cas");
+        std::fs::create_dir_all(&nested_cas).unwrap();
+        assert_eq!(git_origin_url(&nested_cas), None);
     }
 
     #[test]

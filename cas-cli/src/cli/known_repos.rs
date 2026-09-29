@@ -12,7 +12,8 @@ use clap::Subcommand;
 use std::path::PathBuf;
 
 use crate::store::known_repos::{
-    KnownRepoState, classify_known_repo, ensure_host_schema, open_host_known_repo_store,
+    KnownRepoState, classify_known_repo, ensure_host_schema, forget_known_repo_row_exact,
+    is_project_root, open_host_known_repo_store, project_inode_key,
 };
 use crate::worktree::discovery::{list_tracked_repos, seed};
 
@@ -51,6 +52,17 @@ pub enum KnownReposCommands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Remove rows that are not real project roots, are below ~/Archive,
+    /// or duplicate another row's filesystem directory.
+    /// Repository files and explicit selector bindings are left untouched.
+    Prune {
+        /// Remove entries that fail the project-root predicate or duplicate an inode.
+        #[arg(long)]
+        invalid: bool,
+        /// Report invalid rows without changing the registry.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Remove one registry row by path, whether or not the path still exists,
     /// along with any selector binding that points at it.
     ///
@@ -79,8 +91,48 @@ pub fn execute(cmd: &KnownReposCommands) -> Result<()> {
         KnownReposCommands::Unbind { selector } => execute_unbind(selector),
         KnownReposCommands::Seed { scan_home } => execute_seed(*scan_home),
         KnownReposCommands::PruneMissing { dry_run } => execute_prune_missing(*dry_run),
+        KnownReposCommands::Prune { invalid, dry_run } => {
+            anyhow::ensure!(
+                *invalid,
+                "select a prune mode, for example `cas known-repos prune --invalid`"
+            );
+            execute_prune_invalid(*dry_run)
+        }
         KnownReposCommands::Forget { path, yes } => execute_forget(path, *yes),
     }
+}
+
+fn execute_prune_invalid(dry_run: bool) -> Result<()> {
+    let store = open_host_known_repo_store()?;
+    let mut rows = store.list()?;
+    rows.sort_by(|left, right| left.path.cmp(&right.path));
+    let mut seen_inodes = std::collections::HashSet::new();
+    let invalid = rows
+        .into_iter()
+        .filter(|repo| {
+            !is_project_root(&repo.path)
+                || project_inode_key(&repo.path).is_some_and(|inode| !seen_inodes.insert(inode))
+        })
+        .collect::<Vec<_>>();
+    let mut affected = Vec::new();
+    for repo in &invalid {
+        if dry_run || forget_known_repo_row_exact(&repo.path)? > 0 {
+            affected.push(&repo.path);
+        }
+    }
+    println!(
+        "{} invalid or duplicate known-repo row(s) {}. Repository files were not changed.",
+        affected.len(),
+        if dry_run {
+            "would be removed (dry run)"
+        } else {
+            "removed"
+        }
+    );
+    for path in affected {
+        println!("  - {}", path.display());
+    }
+    Ok(())
 }
 
 /// What one `forget` actually changed. Returned rather than printed so the
@@ -337,6 +389,67 @@ fn execute_seed(scan_home: bool) -> Result<()> {
 mod tests {
     use super::*;
     use crate::test_support::TestEnvGuard;
+
+    #[test]
+    fn prune_invalid_reports_then_removes_container_and_archive_rows() {
+        TestEnvGuard::run_with_temp_home(|home| {
+            ensure_host_schema().unwrap();
+            let project = home.join("Projects/real");
+            let container = home.join("Projects");
+            let archive = home.join("Archive/old");
+            for path in [&project, &archive] {
+                std::fs::create_dir_all(path.join(".cas")).unwrap();
+                std::fs::write(
+                    path.join(".cas/config.toml"),
+                    "[project]\ncanonical_id = \"real\"\n",
+                )
+                .unwrap();
+            }
+            let store = open_host_known_repo_store().unwrap();
+            for path in [&project, &container, &archive] {
+                store.upsert(path).unwrap();
+            }
+            execute_prune_invalid(true).unwrap();
+            assert_eq!(store.count().unwrap(), 3);
+            execute_prune_invalid(false).unwrap();
+            let rows = store.list().unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].path, project.canonicalize().unwrap());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prune_invalid_collapses_duplicate_inode_rows() {
+        TestEnvGuard::run_with_temp_home(|home| {
+            ensure_host_schema().unwrap();
+            let project = home.join("project");
+            std::fs::create_dir_all(project.join(".cas")).unwrap();
+            std::fs::write(
+                project.join(".cas/config.toml"),
+                "[project]\ncanonical_id = \"project\"\n",
+            )
+            .unwrap();
+            let alias = home.join("zzz-alias");
+            std::os::unix::fs::symlink(&project, &alias).unwrap();
+            let store = open_host_known_repo_store().unwrap();
+            store.upsert(&project).unwrap();
+            // Legacy rows can carry a second bind-mount spelling. Insert the
+            // alias literally because the store canonicalizes new upserts.
+            let db = rusqlite::Connection::open(home.join(".cas/cas.db")).unwrap();
+            db.execute(
+                "INSERT INTO known_repos(path, first_seen_at, last_touched_at, touch_count) VALUES (?1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 1)",
+                [alias.to_string_lossy().to_string()],
+            ).unwrap();
+            assert_eq!(store.count().unwrap(), 2);
+            execute_prune_invalid(false).unwrap();
+            assert_eq!(store.count().unwrap(), 1);
+            assert_eq!(
+                store.list().unwrap()[0].path,
+                project.canonicalize().unwrap()
+            );
+        });
+    }
 
     #[test]
     fn prune_missing_dry_run_is_non_mutating_and_apply_keeps_existing_paths() {

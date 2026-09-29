@@ -404,7 +404,7 @@ waits) must be run backgrounded (`cmd > /tmp/out.log 2>&1 &`, then read the log 
 replaced by `{prefix}coordination action=remind remind_delay_secs=<n> remind_message=\"...\"` \
 plus ending your turn — a blocked turn cannot receive supervisor messages or stand-down orders. \
 Foreground `gh run watch` and CI poll loops are banned; queue the run, set a reminder, end the \
-turn, then check once with `gh run list`. Workers may type-check committed changes with exactly `cargo check -p <crate> [-p <crate> ...] --tests`, \
+turn, then check once with `gh run list`. Workers may type-check committed changes with exactly `cargo check -p <crate> [-p <crate> ...] --lib` for lib-only edits or `--tests` when test files changed; choose one target flag, \
 under the build guard and max_concurrent_builders cap, using the private seeded target cache; \
 record `check: PASS <sha>` before parking. Other Rust builds and all Rust test runs \
 (cargo build/test/nextest, rustc, run-scoped-tests.sh) remain forbidden; the supervisor builds \
@@ -6408,6 +6408,9 @@ mod tests {
                 "summary=",
                 "factory` tool is not yours",
                 "cas-worker skill",
+                "--lib` for lib-only edits",
+                "--tests` when test files changed",
+                "choose one target flag",
             ] {
                 assert!(surface.contains(marker), "missing {marker:?}: {surface}");
             }

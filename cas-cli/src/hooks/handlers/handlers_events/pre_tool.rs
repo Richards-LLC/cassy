@@ -29,8 +29,8 @@ pub fn handle_pre_tool_use(
     // and direct rustfmt follows child modules unless skip_children is set.
     // In a workspace that is not fmt-clean, either shape spills unrelated
     // changes. Workers use scoped format commands and may run only capped,
-    // package-scoped cargo check --tests (cas-3efd). The supervisor builds and
-    // tests the epic tip once, at assembly.
+    // package-scoped cargo check --lib or --tests (cas-3efd, cas-3051).
+    // The supervisor builds and tests the epic tip once, at assembly.
     // Hoist this before the cas_root early return and factory Bash auto-allow so
     // an unscoped run always gets the loud, actionable refusal.
     // ========================================================================
@@ -93,7 +93,7 @@ pub fn handle_pre_tool_use(
                 "deny",
                 &format!(
                     "🚫 NO WORKER RUST BUILDS: `{what}` is outside the compile-only exception (cas-3efd). \
-                     Use exactly `cargo check -p <crate> [-p <crate> ...] --tests`, optionally with log redirection and backgrounding. \
+                     Use exactly `cargo check -p <crate> [-p <crate> ...] --lib` for lib-only edits or `--tests` when test files changed, optionally with log redirection and backgrounding. Choose one target flag. \
                      The hook runs it under max_concurrent_builders using your private seeded target cache. \
                      Commit first so a successful check records `check: PASS <sha>`. \
                      Build/test/nextest remain supervisor-only at epic assembly (cas-4cbb)."

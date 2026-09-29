@@ -5,7 +5,7 @@
 # no-op update is a named blocker, never a done receipt (3.27.6 gap).
 release_train_host_update() {
     mkdir -p "$run_dir"
-    python3 "$script_dir/release-host-update.py" "$version" "$run_dir/host-update.json"
+    python3 "$script_dir/release-host-update.py" "$version" "$run_dir/host-update.json" "$worktree"
 }
 
 cut_stage_host_update() {

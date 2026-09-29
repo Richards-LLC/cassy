@@ -31,6 +31,15 @@ fn worker_rust_builds_are_denied_naming_the_assembly_rule() {
         "cargo test",
         "cargo test -p cas --no-fail-fast",
         "cargo check -p cas --lib --tests",
+        "cargo check -p cas --tests --lib",
+        "cargo check -p cas --lib --lib",
+        "cargo check -p cas --lib --all-targets",
+        "cargo check -p cas --lib --workspace",
+        "cargo check -p cas --lib --config build.jobs=64",
+        "CARGO_BUILD_JOBS=64 cargo check -p cas --lib",
+        "cargo check -p cas --lib && cargo test",
+        "cargo check -p cas --lib; cargo build",
+        "cargo check -p cas --lib | tee check.log",
         "cargo check -p cas --tests --workspace",
         "cargo check -p '*' --tests",
         "cargo +nightly check -p cas --tests",
@@ -81,6 +90,9 @@ fn literal_worker_check_is_rewritten_to_the_capped_runner_for_both_harnesses() {
         let root = dir.path().join(".cas");
         std::fs::create_dir(&root).unwrap();
         for command in [
+            "cargo check -p cas --lib",
+            "cargo check -p cas -p cas-pty --lib",
+            "cargo check --lib -p cas > /tmp/worker-check.log 2>&1 &",
             "cargo check -p cas --tests",
             "cargo check -p cas -p cas-pty --tests",
             "cargo check --tests -p cas > /tmp/worker-check.log 2>&1 &",
@@ -96,11 +108,8 @@ fn literal_worker_check_is_rewritten_to_the_capped_runner_for_both_harnesses() {
                 rewritten.contains("factory worker-check --cas-root"),
                 "{rewritten}"
             );
-            assert!(
-                rewritten.contains("-- -p cas --tests")
-                    || rewritten.contains("-- --tests -p cas")
-                    || rewritten.contains("-- -p cas -p cas-pty --tests")
-            );
+            let args = command.strip_prefix("cargo check ").unwrap();
+            assert!(rewritten.contains(&format!("-- {args}")), "{rewritten}");
             if command.ends_with('&') {
                 assert!(rewritten.ends_with("2>&1 &"));
             }

@@ -4929,6 +4929,10 @@ This is the body content."#;
                 "ASSEMBLY_PROOF",
                 "loaded_proof",
                 "cargo check -p <crate>",
+                "--lib",
+                "--tests",
+                "lib-only edits",
+                "test files changed",
                 "max_concurrent_builders",
                 "check: PASS <sha>",
             ] {

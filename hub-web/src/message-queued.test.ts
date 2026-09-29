@@ -17,6 +17,7 @@ describe("Commander MessageQueued callback", () => {
         notification_id: 812,
         target: "patient-pelican-9",
         stamped: true,
+        device_label: "Desktop",
       },
     });
 
@@ -25,7 +26,30 @@ describe("Commander MessageQueued callback", () => {
       notification_id: 812,
       target: "patient-pelican-9",
       stamped: true,
+      device_label: "Desktop",
     });
+  });
+});
+
+describe("Commander live operator sends", () => {
+  it("dispatches a durable send before its supervisor reply", () => {
+    const order: string[] = [];
+    const callbacks = {
+      onOperatorMessage: (_session: string, message: { text: string }) => order.push(message.text),
+      onOperatorReply: (_session: string, reply: { message: string }) => order.push(reply.message),
+    } as unknown as HubCallbacks;
+    const supervisor = new HubConnectionSupervisor({} as StoredMachine, callbacks);
+    const internals = supervisor as unknown as {
+      handleDaemonObject(session: string, message: Record<string, unknown>): void;
+    };
+    internals.handleDaemonObject("factory-a", { OperatorMessage: {
+      notification_id: 41, target: "supervisor", text: "Question", state: "sending",
+      stamped: true, device_id: "phone", operator_label: "Pixel 10", at: "2026-09-29T16:00:00Z",
+    } });
+    internals.handleDaemonObject("factory-a", { OperatorReply: {
+      notification_id: 42, reply_to: 41, message: "Answer", summary: "", device_id: "phone",
+    } });
+    expect(order).toEqual(["Question", "Answer"]);
   });
 });
 

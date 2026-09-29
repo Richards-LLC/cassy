@@ -7,7 +7,7 @@ This file is the one authoritative copy of the lane matrix; the skill body and o
 Routing is two stages. **Stage 1 — tier the task** by complexity; the tier is a stable property of the work. **Stage 2 — pick the registry lane** that fills that tier:
 
 - **Light** is Codex GPT-6 Luna at xhigh, with Claude Opus 5.5/low as fallback: bounded chores, mechanical non-public docs, and other mechanical work.
-- **Standard** is Codex GPT-6 Sol at medium, with Codex GPT-6 Luna/xhigh as fallback: the stock engineering floor for normal feature and bug work.
+- **Standard** is Codex GPT-6.1 Sol at high, with Codex GPT-6 Sol/medium as fallback: the stock engineering floor for normal feature and bug work.
 - **Supervisor** is Claude Opus 5.5 at high, with Claude Fable 5.1/high as fallback.
 - **Taste** is Claude Opus 5.5 at high: public surfaces, prompts, docs, naming, release notes, and general judgment are normal taste work, with Claude Opus 5/high as its loud fallback when Opus 5.5 is unavailable.
 - **Heavy** is Claude Opus 5.5 at high: cross-cutting refactors, concurrency/lifecycle code, migrations, and critical-path work, with Codex GPT-6 Astra/high as its loud fallback.
@@ -23,7 +23,7 @@ The route table below is generated from the embedded `cas-factory` registry. Kee
 | Lane | Recipe | Provider | CLI | Model | Effort | Status | Fallback | Notes |
 |---|---|---|---|---|---|---|---|---|
 | `light` | `codex_luna_6` | `openai` | `codex` | `gpt-6-luna` | `xhigh` | `active` | `fallback: claude_opus_5_5_low` |  |
-| `standard` | `codex_sol_6` | `openai` | `codex` | `gpt-6-sol` | `medium` | `active` | `fallback: codex_luna_6` |  |
+| `standard` | `codex_sol_6_1` | `openai` | `codex` | `gpt-6.1-sol` | `high` | `active` | `fallback: codex_sol_6` |  |
 | `taste` | `claude_opus_5_5` | `anthropic` | `claude` | `claude-opus-5-5` | `high` | `active` | `fallback: claude_opus` |  |
 | `heavy` | `claude_opus_5_5` | `anthropic` | `claude` | `claude-opus-5-5` | `high` | `active` | `fallback: codex_astra_high` |  |
 | `supervisor` | `claude_opus_5_5` | `anthropic` | `claude` | `claude-opus-5-5` | `high` | `active` | `fallback: claude_fable_high` |  |
@@ -74,20 +74,23 @@ OpenCode MCP tools are `cas_task`, `cas_coordination`, and `cas_verification`.
 
 | `cli=` | Accepted `model=` slugs | Notes |
 |---|---|---|
-| `codex` | `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-luna` | Plain slugs only — `-codex`-suffixed slugs are rejected by the API, and bare `gpt-5.6` is invalid. |
+| `codex` | `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-luna` | Plain slugs only — `-codex`-suffixed slugs are rejected by the API, and bare `gpt-5.6` is invalid. |
 | `claude` | any canonical `claude-*` id (e.g. `claude-fable-5-1`, `claude-opus-5-5`, `claude-opus-5`, `claude-sonnet-5`) or the `opus`/`sonnet` aliases | Canonical IDs accept future numeric family/version releases and the CLI's optional `[1m]` context suffix; Haiku requests are rejected. |
 | `grok` | `grok-4.5`, `grok-4.6` | Provider capacity is not an active registry lane in this matrix; never invent `cli=cursor` or a fallback recipe. |
 | `opencode` | `local/<model>`, `qwencloud/qwen3.8-max`, `alibaba/qwen3.8-max`, `alibaba-cn/qwen3.8-max` | Per-route receipt required; see [OpenCode lane](#opencode-lane-route-specific-conformance). |
 
 ### Stock fallback routes
 
-When no factory configuration supplies a route, omitted controls resolve through
-the harness stock fallback. Claude intentionally keeps the verified `opus`
+Omitted controls use factory configuration, then `[llm.worker]` (or top-level
+`[llm]`), then the harness stock fallback. Project LLM fields override user fields;
+worker-role fields override top-level fields. The spawn receipt identifies each
+field's source, even when a configured value equals stock. Lane requests resolve
+directly from the registry. Claude intentionally keeps the verified `opus`
 alias as its stock model; this is a fallback route, not a registry lane.
 
 ```text
 # Codex stock fallback
-factory action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-sol effort=medium
+factory action=spawn_workers count=1 isolate=true cli=codex model=gpt-6.1-sol effort=high
 # Claude stock fallback
 factory action=spawn_workers count=1 isolate=true cli=claude model=opus effort=high
 ```

@@ -70,7 +70,7 @@ pub use session::state::{
 };
 pub use spec_resolver::{
     ConfigSources, SpecResolverError, apply_codex_fallback, apply_codex_fallback_for_supervisor,
-    configured_factory_default_model, resolve_specs, resolve_supervisor_spec,
-    supervisor_effort_configured, supervisor_model_configured, worker_slot_cli_configured,
-    worker_slot_effort_configured, worker_slot_model_configured,
+    configured_factory_default_model, configured_worker_llm_defaults, resolve_specs,
+    resolve_supervisor_spec, supervisor_effort_configured, supervisor_model_configured,
+    worker_slot_cli_configured, worker_slot_effort_configured, worker_slot_model_configured,
 };

@@ -116,10 +116,80 @@ struct FactoryToml {
     supervisor: Option<FactorySupervisorToml>,
 }
 
-/// Minimal wrapper so we can ignore non-`factory` sections.
+/// Minimal wrapper for factory recipes and worker-role LLM fallbacks.
 #[derive(Debug, Default, Deserialize)]
 struct ConfigFileToml {
     factory: Option<FactoryToml>,
+    llm: Option<WorkerLlmToml>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct WorkerLlmToml {
+    harness: Option<String>,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    worker: Option<WorkerLlmRoleToml>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct WorkerLlmRoleToml {
+    harness: Option<String>,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+}
+
+/// Configured worker-role fallbacks, without any compiled stock values.
+/// Factory recipes and explicit spawn fields take precedence over these.
+#[derive(Debug, Default)]
+pub struct WorkerLlmDefaults {
+    pub cli: Option<SupervisorCli>,
+    pub model: Option<String>,
+    pub effort: Option<Effort>,
+}
+
+/// Read worker LLM overrides at request time. Project fields override user
+/// fields; role-specific fields override top-level LLM fields after merging.
+pub fn configured_worker_llm_defaults(
+    sources: &ConfigSources,
+) -> Result<WorkerLlmDefaults, SpecResolverError> {
+    let user_path = sources
+        .user_config
+        .clone()
+        .or_else(|| dirs::home_dir().map(|home| home.join(".cas/config.toml")));
+    let mut llm = WorkerLlmToml::default();
+    let mut worker = WorkerLlmRoleToml::default();
+    for path in [user_path.as_deref(), sources.project_config.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        let Some(config) = read_config_file(path)? else {
+            continue;
+        };
+        let Some(next) = config.llm else { continue };
+        llm.harness = next.harness.or(llm.harness);
+        llm.model = next.model.or(llm.model);
+        llm.reasoning_effort = next.reasoning_effort.or(llm.reasoning_effort);
+        if let Some(next) = next.worker {
+            worker.harness = next.harness.or(worker.harness);
+            worker.model = next.model.or(worker.model);
+            worker.reasoning_effort = next.reasoning_effort.or(worker.reasoning_effort);
+        }
+    }
+    Ok(WorkerLlmDefaults {
+        cli: worker
+            .harness
+            .or(llm.harness)
+            .as_deref()
+            .map(parse_cli)
+            .transpose()?,
+        model: worker.model.or(llm.model),
+        effort: worker
+            .reasoning_effort
+            .or(llm.reasoning_effort)
+            .as_deref()
+            .map(parse_effort)
+            .transpose()?,
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -769,6 +839,18 @@ fn load_config_file(
     )>,
     SpecResolverError,
 > {
+    let Some(config) = read_config_file(path)? else {
+        return Ok(None);
+    };
+    let factory = config.factory.unwrap_or_default();
+    Ok(Some((
+        factory.defaults,
+        factory.workers,
+        factory.supervisor,
+    )))
+}
+
+fn read_config_file(path: &std::path::Path) -> Result<Option<ConfigFileToml>, SpecResolverError> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -784,12 +866,7 @@ fn load_config_file(
             path: path.to_path_buf(),
             source: e,
         })?;
-    let factory = config.factory.unwrap_or_default();
-    Ok(Some((
-        factory.defaults,
-        factory.workers,
-        factory.supervisor,
-    )))
+    Ok(Some(config))
 }
 
 /// Apply a `[factory.defaults]` section to every spec in the vec.

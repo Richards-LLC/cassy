@@ -394,7 +394,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 ### HUB-J13 · Start a new session from Commander
 
-- **Entry:** `/commander/` on a 390 px phone paired with a machine, first without and then with the `session:launch` permission
+- **Entry:** `/commander/` on a 390 px phone paired with full control access but without `session:launch`
 - **Goal:** I start a supervisor on a project from my phone, without SSH, and land in its conversation
 - **Touches:** `hub-web/src/launch-session.ts`, `hub-web/src/pairing-scopes.ts`, `hub-web/src/connection.ts`, `hub-web/src/conversation-shell.ts`
 - **Suite:** `hub-web/e2e/journeys/launch-session.journey.ts`
@@ -402,8 +402,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 **Steps**
 
-1. Without launch permission, the button is the way to allow it — the list offers "Allow new sessions", not "New session"; it opens the exact `cas hub pair … --scopes …,session:launch` command to run on the machine
-2. Pair again with launch allowed — "New session" replaces the grant path
+1. A paired controller enables launch from Commander — "Allow new sessions" names the machine, confirms "Start new sessions", and opens the launch form without a new pairing
+2. The granted scope stays available — after reload "New session" replaces the grant path
 3. Open New session and find the project — the most recently used project leads, a running project offers Attach, Browse is offered because the machine has launch folders, filtering narrows the list, and Claude is marked as the machine's default
 4. Choose the account — every Claude account on the machine is listed with the default preselected; a logged-out one can't be picked and shows its `cas claude login <name>` command with Copy; a long address wraps; Grok has no account step; the summary names the chosen account
 5. Start it and land on its supervisor — Start shows progress ("Starting <project> with <supervisor> (<account>) on <machine>…"), sends the account, and lands in the new session's conversation once the machine lists it
@@ -411,16 +411,19 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 7. A running project attaches instead of starting again — Attach opens the existing session's conversation
 8. A launch refused by the machine says why — the machine's refusal (here, the CLI isn't logged in) is a plain heading and the next step, with the machine's own message behind a disclosure; Back keeps the choices
 9. Browse a launch folder and start a repository in it — folders open, only repository roots are selectable, and Start lands in the new session
+10. A long machine name fits the phone consent — the full name wraps in the grant button and confirmation; Close stays visible and the page does not scroll sideways
 
 **Expected experience**
 
-- One obvious New session action beside Pair a machine, and in the command palette; without the permission the same place explains how to get it.
+- One obvious New session action beside Pair a machine, and in the command palette; a paired controller can allow it on the chosen machine while a read-only device sees invitation instructions.
 - Nothing is started twice: a running project attaches.
 - A refusal names what to fix on which machine; it never reads as a lost pairing.
 
 **Edge paths**
 
 - The hub refuses the scope at start (403): the sheet switches to the grant path.
+- A read-only pairing cannot self-grant session launch; it needs a control invitation.
+- Keyboard focus moves from Allow to Confirm to the project search after grant, and a very long machine label stays readable on a phone.
 - The session does not come up within 90 s: the sheet says it was started and may still be starting.
 - A machine without launch folders hides Browse.
 - The machine can't list a CLI's accounts: the step says so with Try again, and the launch uses the machine's default account.

@@ -13,6 +13,7 @@
 
 use std::path::Path;
 
+#[path = "common/mod.rs"]
 mod common;
 use common::TEST_TEAM;
 

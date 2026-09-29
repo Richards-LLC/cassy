@@ -14,6 +14,7 @@
 
 use std::process::Command;
 
+#[path = "support/mod.rs"]
 mod support;
 use support::CasSandbox;
 

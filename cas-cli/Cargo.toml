@@ -1,5 +1,7 @@
 [package]
 name = "cas"
+# Tests are modules of the explicit harnesses below; do not auto-link each source.
+autotests = false
 version = "3.36.0"
 edition = "2024"
 rust-version = "1.88"
@@ -253,3 +255,46 @@ harness = false
 [[bench]]
 name = "memory_overlap"
 harness = false
+
+# Four grouped suites plus six roots whose fixture/snapshot or scoped-proof
+# contracts require their existing crate names. Nextest isolates every test.
+
+[[test]]
+name = "integration_contracts"
+path = "tests/integration/contracts.rs"
+
+[[test]]
+name = "integration_cli"
+path = "tests/integration/cli.rs"
+
+[[test]]
+name = "integration_cloud"
+path = "tests/integration/cloud.rs"
+
+[[test]]
+name = "integration_factory"
+path = "tests/integration/factory.rs"
+
+[[test]]
+name = "builtin_archive_portability_test"
+path = "tests/builtin_archive_portability_test.rs"
+
+[[test]]
+name = "builtin_flavor_drift_test"
+path = "tests/builtin_flavor_drift_test.rs"
+
+[[test]]
+name = "component_output_test"
+path = "tests/component_output_test.rs"
+
+[[test]]
+name = "e2e_test"
+path = "tests/e2e_test.rs"
+
+[[test]]
+name = "mcp_tools_test"
+path = "tests/mcp_tools_test.rs"
+
+[[test]]
+name = "proptest_test"
+path = "tests/proptest_test.rs"

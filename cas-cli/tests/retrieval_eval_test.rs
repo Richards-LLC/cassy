@@ -22,7 +22,7 @@
 //! # RE-BASELINE PROCEDURE (one line)
 //!
 //! ```text
-//! CAS_RETRIEVAL_EVAL_REBASELINE=1 cargo nextest run -p cas --test retrieval_eval_test
+//! CAS_RETRIEVAL_EVAL_REBASELINE=1 cargo nextest run -p cas --test integration_cloud retrieval_eval_test::
 //! ```
 //!
 //! That rewrites `cas-cli/tests/data/retrieval-eval/baseline.json` from the

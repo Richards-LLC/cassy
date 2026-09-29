@@ -9,7 +9,7 @@
 //! `CAS_FACTORY_WORKER_NAMES`). Those tests use a process-wide, poison-tolerant
 //! lock, so the target is safe to run with Cargo's default parallelism:
 //! ```bash
-//! cargo test --test factory_mcp_ops_test -- --nocapture
+//! cargo test --test integration_factory factory_mcp_ops_test:: -- --nocapture
 //! ```
 
 use std::collections::HashMap;
@@ -5052,7 +5052,7 @@ async fn test_clear_context_refuses_prompt_overflow_failure_loop() {
 /// explicitly when touching `factory_context_reset` or the reset delivery path:
 ///
 /// ```bash
-/// cargo test -p cas --test factory_mcp_ops_test -- --ignored --nocapture \
+/// cargo test -p cas --test integration_factory factory_mcp_ops_test:: -- --ignored --nocapture \
 ///     clear_context_command_really_resets_a_live_claude
 /// ```
 ///

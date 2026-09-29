@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
+#[path = "support/mod.rs"]
 mod support;
 use support::{CasSandbox, assert_command_is_sandboxed};
 

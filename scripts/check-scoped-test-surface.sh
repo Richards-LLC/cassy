@@ -53,6 +53,27 @@ repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
 }
 cd "$repo_root"
 
+# With auto-discovery disabled, a suite's source stem is no longer a Cargo
+# binary name. Resolve aliases from the explicit harness module declarations.
+consolidated_target_map=""
+if [[ -f cas-cli/Cargo.toml ]] && grep -Eq '^autotests[[:space:]]*=[[:space:]]*false' cas-cli/Cargo.toml; then
+    mapping_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/cas-test-targets.py"
+    consolidated_target_map="$(python3 "$mapping_script" "$repo_root/cas-cli")"
+fi
+
+resolve_test_target_name() {
+    local wanted="$1" suite target
+    if [[ -n "$consolidated_target_map" ]]; then
+        while IFS='|' read -r suite target; do
+            if [[ "$suite" == "$wanted" ]]; then
+                printf '%s\n' "$target"
+                return 0
+            fi
+        done <<<"$consolidated_target_map"
+    fi
+    printf '%s\n' "$wanted"
+}
+
 # GitHub-hosted runners do not guarantee ripgrep. Resolve the search backend
 # once, then keep every test-surface search on either rg or tracked git files.
 if command -v rg >/dev/null 2>&1; then
@@ -185,19 +206,16 @@ manifest_test_target_for_path() {
             sub(/\".*$/, "", line)
             return line
         }
-        /^\[\[test\]\][[:space:]]*$/ {
-            in_test=1
-            name=""
-            path=""
-            next
-        }
-        /^\[\[/ {
+        /^\[/ {
             if (in_test && path == wanted && name != "") {
                 print name
                 found=1
                 exit
             }
-            in_test=0
+            in_test=($0 ~ /^\[\[test\]\][[:space:]]*$/)
+            name=""
+            path=""
+            next
         }
         in_test && $0 ~ /^[[:space:]]*name[[:space:]]*=/ { name=value($0) }
         in_test && $0 ~ /^[[:space:]]*path[[:space:]]*=/ { path=value($0) }
@@ -216,19 +234,16 @@ manifest_test_path_for_target() {
             sub(/\".*$/, "", line)
             return line
         }
-        /^\[\[test\]\][[:space:]]*$/ {
-            in_test=1
-            name=""
-            path=""
-            next
-        }
-        /^\[\[/ {
+        /^\[/ {
             if (in_test && name == wanted && path != "") {
                 print path
                 found=1
                 exit
             }
-            in_test=0
+            in_test=($0 ~ /^\[\[test\]\][[:space:]]*$/)
+            name=""
+            path=""
+            next
         }
         in_test && $0 ~ /^[[:space:]]*name[[:space:]]*=/ { name=value($0) }
         in_test && $0 ~ /^[[:space:]]*path[[:space:]]*=/ { path=value($0) }
@@ -241,13 +256,15 @@ manifest_test_path_for_target() {
 cargo_test_target_exists() {
     local target="$1" manifest_path
     [[ -n "$target" ]] || return 1
-    [[ -f "cas-cli/tests/${target}.rs" || -f "cas-cli/tests/${target}/main.rs" ]] && return 0
+    if [[ -z "$consolidated_target_map" ]]; then
+        [[ -f "cas-cli/tests/${target}.rs" || -f "cas-cli/tests/${target}/main.rs" ]] && return 0
+    fi
     manifest_path="$(manifest_test_path_for_target "$target" || true)"
     [[ -n "$manifest_path" && -f "cas-cli/${manifest_path}" ]]
 }
 
 integration_target_for() {
-    local nested_path="$1" directory candidate manifest_target
+    local nested_path="$1" directory candidate manifest_target target
     directory="${nested_path%%/*}"
 
     manifest_target="$(manifest_test_target_for_path "cas-cli/tests/${nested_path}" || true)"
@@ -262,8 +279,9 @@ integration_target_for() {
     # Resolve that filename before inspecting file contents so a fixture that
     # merely mentions the path cannot claim ownership.
     candidate="cas-cli/tests/${directory}.rs"
-    if [[ -f "${candidate}" ]] && cargo_test_target_exists "$directory"; then
-        basename "${candidate%.rs}"
+    target="$(resolve_test_target_name "$directory")"
+    if [[ -f "${candidate}" ]] && cargo_test_target_exists "$target"; then
+        printf '%s\n' "$target"
         return 0
     fi
 
@@ -284,8 +302,7 @@ integration_target_for() {
             || grep -Eq \
             "^[[:space:]]*#\\[path[[:space:]]*=[[:space:]]*\"${directory}/[^\"[:space:]]+\"[[:space:]]*\\][[:space:]]*$" \
             "$candidate"; then
-            local target
-            target="$(basename "${candidate%.rs}")"
+            target="$(resolve_test_target_name "$(basename "${candidate%.rs}")")"
             if cargo_test_target_exists "$target"; then
                 printf '%s\n' "$target"
                 return 0
@@ -299,6 +316,7 @@ integration_target_for() {
 add_required_test_target() {
     local target="$1" known
     [[ -n "$target" ]] || return 0
+    target="$(resolve_test_target_name "$target")"
     cargo_test_target_exists "$target" || return 0
     for known in "${required_test_targets[@]}"; do
         [[ "$known" == "$target" ]] && return 0

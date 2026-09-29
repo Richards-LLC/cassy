@@ -24,6 +24,7 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+#[path = "support/mod.rs"]
 mod support;
 use support::CasSandbox;
 

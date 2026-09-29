@@ -94,6 +94,57 @@ manifest_output="$(cd "$manifest_repo" && bash ./scripts/check-scoped-test-surfa
 [[ "$manifest_output" == 'SCOPED_PROOF_TARGET_ARGS: --test custom_hooks' ]]
 printf 'ok   manifest test target mapping is preserved\n'
 
+# A source suite can remain at its old location without remaining a binary.
+# Explicit grouped harnesses must own both top-level and nested changed tests.
+grouped_repo="$tmpdir/grouped-repo"
+mkdir -p "$grouped_repo/cas-cli/tests/integration" "$grouped_repo/cas-cli/tests/factory_mcp_ops_test_cases" "$grouped_repo/scripts"
+cp "$checker" "$grouped_repo/scripts/check-scoped-test-surface.sh"
+cp "$script_dir/cas-test-targets.py" "$grouped_repo/scripts/cas-test-targets.py"
+cat >"$grouped_repo/cas-cli/Cargo.toml" <<'EOF'
+[package]
+name = "cas"
+autotests = false
+
+[[test]]
+name = "integration_factory"
+path = "tests/integration/factory.rs"
+
+[[test]]
+name = "integration_cli"
+path = "tests/integration/cli.rs"
+EOF
+printf '%s\n' '#[path = "../factory_mcp_ops_test.rs"]' 'mod factory_mcp_ops_test;' \
+    >"$grouped_repo/cas-cli/tests/integration/factory.rs"
+printf '%s\n' '#[path = "factory_mcp_ops_test_cases/tests.rs"]' 'mod tests;' \
+    >"$grouped_repo/cas-cli/tests/factory_mcp_ops_test.rs"
+printf '%s\n' '#[test] fn preserves_process_isolation() {}' \
+    >"$grouped_repo/cas-cli/tests/factory_mcp_ops_test_cases/tests.rs"
+printf '%s\n' '#[path = "../cli_test.rs"]' 'mod cli_test;' \
+    >"$grouped_repo/cas-cli/tests/integration/cli.rs"
+printf '%s\n' '#[test] fn cli_contract() {}' >"$grouped_repo/cas-cli/tests/cli_test.rs"
+git -C "$grouped_repo" init -q -b main
+git -C "$grouped_repo" add .
+git -C "$grouped_repo" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid commit -qm baseline
+git -C "$grouped_repo" checkout -qb changed
+printf '%s\n' '// changed grouped source' >>"$grouped_repo/cas-cli/tests/factory_mcp_ops_test.rs"
+printf '%s\n' '// changed nested case' >>"$grouped_repo/cas-cli/tests/factory_mcp_ops_test_cases/tests.rs"
+git -C "$grouped_repo" add .
+git -C "$grouped_repo" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid commit -qm 'change grouped test surfaces'
+grouped_output="$(cd "$grouped_repo" && bash ./scripts/check-scoped-test-surface.sh --resolve-targets --base main --)"
+[[ "$grouped_output" == 'SCOPED_PROOF_TARGET_ARGS: --test integration_factory' ]]
+(cd "$grouped_repo" && bash ./scripts/check-scoped-test-surface.sh --base main -- -p cas --test integration_factory) >/dev/null
+if (cd "$grouped_repo" && bash ./scripts/check-scoped-test-surface.sh --base main -- -p cas --test factory_mcp_ops_test) >/dev/null 2>&1; then
+    echo 'FAIL grouped source stem was accepted as a Cargo target' >&2
+    exit 1
+fi
+python3 "$script_dir/cas-test-targets.py" "$grouped_repo/cas-cli" --check
+printf '%s\n' '#[test] fn forgotten_suite() {}' >"$grouped_repo/cas-cli/tests/unwired.rs"
+if python3 "$script_dir/cas-test-targets.py" "$grouped_repo/cas-cli" --check >/dev/null 2>&1; then
+    echo 'FAIL unwired integration source was not detected' >&2
+    exit 1
+fi
+printf 'ok   grouped harnesses resolve sources, refuse phantom binaries, and detect unwired tests\n'
+
 # Two sibling source files can each have an inner `mod tests`. Their proof
 # paths must keep the parent module, and a shared prefix filter must cover
 # both (the same substring matching used by cargo nextest).

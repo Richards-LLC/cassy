@@ -12,10 +12,10 @@
 //! # Running
 //! ```bash
 //! # Run all distributed factory tests
-//! cargo test --test distributed_factory
+//! cargo test --test integration_factory distributed_factory_test::
 //!
 //! # Run with cloud (requires CAS_CLOUD_TOKEN env var)
-//! CAS_CLOUD_TOKEN=xxx cargo test --test distributed_factory
+//! CAS_CLOUD_TOKEN=xxx cargo test --test integration_factory distributed_factory_test::
 //! ```
 
 use std::path::PathBuf;

@@ -6,6 +6,7 @@
 //! legacy row without `origin_project` looks native. Local writes then enqueue
 //! those rows, and the next push must not publish any of them under B.
 
+#[path = "common/mod.rs"]
 mod common;
 
 use std::io::Read;

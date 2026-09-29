@@ -1,7 +1,7 @@
-# Slack posting runbook — publish through MechaCassy
+# Slack posting runbook — publish through Violet
 
 `docs/RELEASE_SLACK_RUBRIC.md` owns content and thread shape. Use only the
-MechaCassy hub/bot for Slack. Never use Claude.ai Slack or a personal connector,
+Violet hub/bot for Slack. Never use Claude.ai Slack or a personal connector,
 including during an outage. A supervisor handoff uses the same hub.
 
 **Target:** `#cas-internal` (`C0B44GUKDK2`); pass the name `cas-internal`.
@@ -12,12 +12,14 @@ A previous `Connected` result proves neither current access nor delivery.
 
 ## Preflight and transport
 
-Use the builtin [mecha-cassy](../cas-cli/src/builtins/skills/mecha-cassy/SKILL.md)
+Use the builtin [violet](../cas-cli/src/builtins/skills/violet/SKILL.md)
 for the live transport contract and its registration reference for setup.
 
-1. Require authenticated `tools/list` to expose exactly `mecha_read` and
-   `mecha_post`. An unauthenticated list or server status is insufficient.
-2. Call `mecha_read` on the rubric channel with explicit RFC3339 `since` and
+1. Require authenticated `tools/list` to include `violet_read` and
+   `violet_post`; the deprecated `mecha_read` / `mecha_post` aliases may also
+   appear during the compatibility release. An unauthenticated list or server
+   status is insufficient.
+2. Call `violet_read` on the rubric channel with explicit RFC3339 `since` and
    bounded `max_messages` to prove membership and deduplicate. Allow at most
    three attempts with a 10-second timeout each; retry only `error.retryable`.
 3. Preserve full redacted error envelopes (`code`, `message`, `retryable`, and
@@ -25,7 +27,7 @@ for the live transport contract and its registration reference for setup.
    permits one hub write only after authenticated listing succeeds, all bounded
    reads end in retryable `upstream_unavailable`, no write was attempted, and
    the local POSTED ledger proves no duplicate. Never retry an uncertain write.
-4. Use the Cassy proxy or configured direct MechaCassy MCP. A proxy-less
+4. Use the Cassy proxy or configured direct Violet MCP. A proxy-less
    one-shot follows the same hub registration reference; it does not select a
    personal connector. If the hub cannot complete publication, save the draft
    and partial receipts and report the measured failure to the supervisor.
@@ -60,7 +62,7 @@ HTTP output. Record statuses, tool names and redacted failures only.
 The report is a required publication artifact. After
 `cas release report <version> --pdf` produces the committed Markdown, brief,
 HTML, PDF and QA receipt, attach the exact PDF bytes to the User top-level
-thread through `mecha_post` with `kind: file`, `reply_to=user_thread_id` and
+thread through `violet_post` with `kind: file`, `reply_to=user_thread_id` and
 `content_encoding: base64`. Read/encode the bytes programmatically from disk;
 never transcribe base64 through agent context. Link HTML from the Dev thread.
 
@@ -77,7 +79,7 @@ Save `release-report.receipt` under the release-train run directory with
 `HTML_FILE_ID`, `USER_THREAD_TS` and `DEV_THREAD_TS`, alongside the returned
 thread permalinks. The remote PDF fields are written only after the adapter
 downloads the transport-returned explicit `download_url`, or re-reads the
-uploaded file by its returned ID through authenticated `mecha_read` when the
+uploaded file by its returned ID through authenticated `violet_read` when the
 current hub receipt omits a download URL, and proves exact bytes plus PDF
 decode/page count. That fallback read uses an inclusive RFC3339 `since` derived
 from the User root Slack timestamp, preserving its fractional precision so old
@@ -89,14 +91,14 @@ bypass headers only to the configured MCP origin (with the explicit same-origin
 loopback exception used by tests). External signed or private-provider HTTPS
 URLs receive no hub credentials, and cross-origin or scheme-changing redirects
 are rejected before following them. The existing `*_THREAD_TS` adapter fields carry the returned hub parent
-`message_id` values; MechaCassy has no `ts` response field. Never mark the
+`message_id` values; Violet has no `ts` response field. Never mark the
 release announced without all report and publication receipts.
 
 ## Worker handoff and one-shots
 
 A worker without hub access saves the exact draft and sends its path, channel,
 deploy target and receipt request to the supervisor. The posting owner repeats
-authenticated preflight, uses MechaCassy, and returns message IDs/permalinks for
+authenticated preflight, uses Violet, and returns message IDs/permalinks for
 the worker to record. If no hub route succeeds, report blocked; do not switch
 accounts or claim `POSTED`.
 
@@ -109,7 +111,7 @@ CLI account eligibility does not authorize another Slack transport.
 ## Historical transport evidence
 
 The following 2026-08-27 observations are retained as historical evidence only.
-Their route decisions are superseded by the MechaCassy-only policy above and
+Their route decisions are superseded by the Violet-only policy above and
 must never be used as current posting authorization.
 
 | Transport | Measured state on 2026-08-27 | Decision |

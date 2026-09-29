@@ -772,7 +772,7 @@ pub(crate) fn resolve_mcp_serve_root() -> anyhow::Result<std::path::PathBuf> {
             );
             return find_cas_root_from(&project_dir).map_err(|_| {
                 anyhow::anyhow!(
-                    "Cassy not initialized in CLAUDE_PROJECT_DIR={dir}. Run `cas init` first."
+                    "no Cassy store here (CLAUDE_PROJECT_DIR={dir}); run `cas init`"
                 )
             });
         }
@@ -788,7 +788,7 @@ pub(crate) fn resolve_mcp_serve_root() -> anyhow::Result<std::path::PathBuf> {
     }
 
     crate::store::find_cas_root()
-        .map_err(|_| anyhow::anyhow!("Cassy not initialized. Run `cas init` in your project first."))
+        .map_err(|_| anyhow::anyhow!("no Cassy store here; run `cas init`"))
 }
 
 /// Release all tasks claimed by an agent on shutdown and unregister the agent
@@ -2016,6 +2016,27 @@ mod tests {
             "error message should mention CLAUDE_PROJECT_DIR so the user knows which \
              path to run `cas init` in; got: {msg}"
         );
+    }
+
+    #[test]
+    fn nested_repo_without_store_does_not_resolve_parent_for_mcp() {
+        let tmp = TempDir::new().unwrap();
+        init_cas_dir(tmp.path()).unwrap();
+        let repo = tmp.path().join("child");
+        std::fs::create_dir_all(&repo).unwrap();
+        let output = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git init failed: {output:?}");
+
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CLAUDE_PROJECT_DIR", Some(repo.to_str().unwrap())),
+            ("CAS_ROOT", None),
+        ]);
+        let error = resolve_mcp_serve_root().unwrap_err();
+        assert!(error.to_string().contains("no Cassy store here"), "{error}");
     }
 
     /// When CLAUDE_PROJECT_DIR is not set, the function must still work via the

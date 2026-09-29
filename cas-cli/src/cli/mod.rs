@@ -693,11 +693,7 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
 }
 
 fn require_cas_root(cas_root: Option<&Path>) -> anyhow::Result<&Path> {
-    cas_root.ok_or_else(|| {
-        anyhow::anyhow!(
-            "Cassy not initialized. Run 'cas init' first or navigate to a directory with .cas/"
-        )
-    })
+    cas_root.ok_or_else(|| anyhow::anyhow!("no Cassy store here; run `cas init`"))
 }
 
 fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {

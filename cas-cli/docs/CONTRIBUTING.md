@@ -182,7 +182,12 @@ expire after 24 hours; dirty checkouts, changed code/manifests/scripts/workflows
 toolchain or test environment cause a miss. Only `CHANGELOG.md` and release
 prose under `docs/release-notes/` and `docs/release-reports/` are excluded from
 the code-input hash; embedded Rust documentation fixtures remain inputs.
-Release versions and other documentation changes still require a new proof.
+The prep stage's workspace-member `[package]` version values and corresponding
+source-less member `[[package]]` lock versions are normalized. The generated
+`cas-cli/src/builtins/reference-history.json` ledger is excluded; its source
+references and generator remain inputs. Every other manifest or lock byte,
+including dependency and non-member versions, still requires a new proof.
+The helper uses Python 3.11's standard-library TOML parser.
 
 Gate evidence: PR #655/run 33430464567; PR #657/run 33435093275.
 

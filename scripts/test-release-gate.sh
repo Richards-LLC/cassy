@@ -83,7 +83,7 @@ if [[ "${GATE_FIXTURE_REFERENCE_FAIL:-}" == 1 ]]; then
   printf 'changed ledger\n' > cas-cli/src/builtins/reference-history.json
 else
   mkdir -p cas-cli/src/builtins
-  : > cas-cli/src/builtins/reference-history.json
+  touch cas-cli/src/builtins/reference-history.json
 fi
 EOF
     chmod +x "$repo/scripts"/*.sh
@@ -1191,6 +1191,23 @@ unset CAS_RELEASE_GATE_CACHE_DIR CAS_RELEASE_GATE_LOG_DIR
 
 # Real two-context producer with Cargo stubbed, then the real first full gate.
 repo="$(new_fixture two-context-proof)"
+python3 - "$repo" <<'PYFIX'
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+packages = []
+for manifest in [root / 'cas-cli/Cargo.toml', *root.glob('crates/*/Cargo.toml')]:
+    text = manifest.read_text()
+    name = text.split('name = "', 1)[1].split('"', 1)[0]
+    packages.append(f'[[package]]\nname = "{name}"\nversion = "9.99.7"\n')
+    manifest.write_text(text + '[dependencies]\nthird-party = "0.2.0"\n')
+(root / 'Cargo.lock').write_text('version = 4\n\n' + '\n'.join(packages) +
+    '\n[[package]]\nname = "third-party"\nversion = "0.2.0"\n' +
+    '\n[[package]]\nname = "non-member"\nversion = "0.4.0"\n')
+PYFIX
+git -C "$repo" add .
+git -C "$repo" commit -qm 'seed prep manifest and lock fixture'
+proof_sha="$(git -C "$repo" rev-parse HEAD)"
 export CAS_RELEASE_GATE_LOG_DIR="$tmp/proof-gate-logs"
 : >"$tmp/cargo.log"
 run_gate "$repo" '' python3 "$repo/scripts/assembly-proof.py" prove "$repo" >"$tmp/proof.log" 2>&1 || { cat "$tmp/proof.log"; exit 1; }
@@ -1201,6 +1218,12 @@ else
     bad "assembly suite count: $(cat "$tmp/cargo.log")"
 fi
 run_gate "$repo" '' python3 "$repo/scripts/assembly-proof.py" prove "$repo" >"$tmp/proof-retry.log" 2>&1
+if [[ "$(grep -c '^nextest run ' "$tmp/cargo.log")" == 2 ]] \
+    && grep -qF "source_sha=$proof_sha" "$tmp/proof-retry.log"; then
+    ok 'assemble prove reuses the supervisor receipt and runs no additional suite'
+else
+    bad 'assemble prove reran an existing matching receipt'
+fi
 run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 >"$tmp/proof-gate.log" 2>&1
 if [[ "$(awk -F '\t' '$7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 2 ]] \
     && grep -qF 'PASS assembly receipt=' "$CAS_RELEASE_GATE_LOG_DIR/archive-mode.log" \
@@ -1209,6 +1232,57 @@ if [[ "$(awk -F '\t' '$7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_L
 else
     bad "first gate missed assembly proof: $(cat "$tmp/proof-gate.log")"
 fi
+# Exact real-cut prep/ledger delta must retain the original proof SHA.
+python3 - "$repo" <<'PYFIX'
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+for manifest in [root / 'cas-cli/Cargo.toml', *root.glob('crates/*/Cargo.toml')]:
+    manifest.write_text(manifest.read_text().replace('version = "9.99.7"', 'version = "9.99.8"'))
+lock = root / 'Cargo.lock'
+lock.write_text(lock.read_text().replace('version = "9.99.7"', 'version = "9.99.8"'))
+(root / 'cas-cli/src/builtins/reference-history.json').write_text('{"prep": []}\n')
+changelog = root / 'CHANGELOG.md'
+changelog.write_text(changelog.read_text().replace('9.99.7', '9.99.8'))
+PYFIX
+git -C "$repo" add .
+git -C "$repo" commit -qm 'simulate prep and ledger'
+run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.8 >"$tmp/proof-prep.log" 2>&1
+if [[ "$(awk -F '\t' '$1 ~ /^(nextest|archive-mode)$/ && $7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 2 ]] \
+    && grep -qF "source_sha=$proof_sha" "$CAS_RELEASE_GATE_LOG_DIR/nextest.log" \
+    && grep -qF "source_sha=$proof_sha" "$CAS_RELEASE_GATE_LOG_DIR/archive-mode.log" \
+    && [[ "$(grep -c '^nextest run --archive-file ' "$tmp/cargo.log")" == 1 ]]; then
+    ok 'prep member versions, lock and ledger reuse both rows and cite the original proof SHA'
+else
+    bad "real-cut prep missed assembly proof: $(cat "$tmp/proof-prep.log")"
+fi
+for change in manifest-dependency lock-dependency non-member; do
+    changed_file=Cargo.lock
+    [[ "$change" != manifest-dependency ]] || changed_file=cas-cli/Cargo.toml
+    python3 - "$repo/$changed_file" "$change" <<'PYFIX'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+text = path.read_text()
+if sys.argv[2] == 'manifest-dependency':
+    text = text.replace('third-party = "0.2.0"', 'third-party = "0.3.0"')
+elif sys.argv[2] == 'lock-dependency':
+    text = text.replace('name = "third-party"\nversion = "0.2.0"', 'name = "third-party"\nversion = "0.3.0"')
+else:
+    text = text.replace('name = "non-member"\nversion = "0.4.0"', 'name = "non-member"\nversion = "0.5.0"')
+path.write_text(text)
+PYFIX
+    git -C "$repo" add "$changed_file"
+    git -C "$repo" commit -qm "fixture $change changed"
+    run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.8 >"$tmp/proof-$change.log" 2>&1
+    if [[ "$(awk -F '\t' '$1 ~ /^(nextest|archive-mode)$/ && $7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 0 ]]; then
+        ok "$change version invalidates both assembly rows"
+    else
+        bad "$change version incorrectly reused assembly proof"
+    fi
+    git -C "$repo" restore --source=HEAD~1 -- "$changed_file"
+    git -C "$repo" commit -qm 'restore fixture dependency'
+done
 mkdir -p "$repo/docs/release-notes"
 printf 'release prose\n' >"$repo/docs/release-notes/new.md"
 git -C "$repo" add docs/release-notes/new.md
@@ -1218,6 +1292,7 @@ if run_gate "$repo" '' python3 "$repo/scripts/assembly-proof.py" check "$repo" >
 else
     bad 'release prose invalidated assembly proof'
 fi
+: >"$tmp/cargo.log"
 printf '// code change\n' >>"$repo/cas-cli/src/version.rs"
 git -C "$repo" add cas-cli/src/version.rs
 git -C "$repo" commit -qm 'code changed'
@@ -1227,7 +1302,7 @@ else
     ok 'changed code misses the assembly proof'
 fi
 run_gate "$repo" '' python3 "$repo/scripts/assembly-proof.py" prove "$repo" >"$tmp/proof-changed.log" 2>&1
-if [[ "$(grep -c '^nextest run --archive-file ' "$tmp/cargo.log")" == 2 ]]; then
+if [[ "$(grep -c '^nextest run --archive-file ' "$tmp/cargo.log")" == 1 ]]; then
     ok 'changed candidate reruns both contexts'
 else
     bad 'changed candidate did not rerun clone proof'

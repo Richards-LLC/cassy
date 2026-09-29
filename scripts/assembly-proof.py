@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Two-context release proof shared by assembly, recovery and the release gate.
 
-A receipt records the exact tested tree. Its key omits only release prose;
-source, embedded docs, manifests, workflows and test commands remain inputs.
+A receipt records the exact tested tree. Its key masks release prose, member package versions and the generated ledger;
+other manifest/lock content, sources and test commands remain inputs.
 No PASS is published until native nextest and archive-mode in a plain clone
 both pass. The gate's own diagnostic rows supply their zero-test guards.
 """
 import argparse
 import fcntl
+import fnmatch
 import hashlib
 import json
 import os
@@ -18,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 
 FORMAT = 1
 MAX_AGE = 86400
@@ -44,6 +46,64 @@ def common_dir(root):
                 .decode().strip()).resolve()
 
 
+def mask_version(text, table):
+    """Preserve every byte except the quoted version value in this table."""
+    active = False
+    result = []
+    for line in text.splitlines(keepends=True):
+        if line.lstrip().startswith("["):
+            active = line.split("#", 1)[0].strip() == table
+        if active:
+            match = re.match(r"""^[ \t]*version[ \t]*=[ \t]*(["'])([^"'\r\n]*)\1""", line)
+            if match:
+                start, end = match.span(2)
+                line = line[:start] + "assembly-member-version" + line[end:]
+        result.append(line)
+    return "".join(result)
+
+
+def release_metadata(root, revision, entries):
+    """Find actual workspace members in the tested revision, without Cargo."""
+    paths = {entry.split(b"\t", 1)[1].decode() for entry in entries if entry}
+    if "Cargo.toml" not in paths:
+        return {}, {}
+    root_text = git(root, "show", revision + ":Cargo.toml").decode()
+    manifest = tomllib.loads(root_text)
+    workspace = manifest.get("workspace", {})
+    patterns = workspace.get("members", [])
+    excludes = workspace.get("exclude", [])
+    member_paths = []
+    for path in paths:
+        if path.endswith("/Cargo.toml"):
+            directory = path.removesuffix("/Cargo.toml")
+            if (any(fnmatch.fnmatchcase(directory, pattern.rstrip("/")) for pattern in patterns)
+                    and not any(fnmatch.fnmatchcase(directory, pattern.rstrip("/")) for pattern in excludes)):
+                member_paths.append(path)
+    if "package" in manifest:
+        member_paths.append("Cargo.toml")
+    normalized, versions = {}, {}
+    for path in member_paths:
+        text = root_text if path == "Cargo.toml" else git(root, "show", revision + ":" + path).decode()
+        package = tomllib.loads(text).get("package", {})
+        version = package.get("version")
+        if isinstance(version, str):
+            versions[package["name"]] = version
+            normalized[path] = mask_version(text, "[package]").encode()
+    if "Cargo.lock" in paths:
+        text = git(root, "show", revision + ":Cargo.lock").decode()
+        # Each generated lock stanza is a separate TOML package table. A
+        # registry/git entry with a colliding member name remains an input.
+        parts = re.split(r"(?m)(?=^\[\[package\]\][ \t]*(?:#.*)?$)", text)
+        for index, part in enumerate(parts):
+            if part.startswith("[[package]]"):
+                package = tomllib.loads(part)["package"][0]
+                if ("source" not in package and package.get("name") in versions
+                        and package.get("version") == versions[package["name"]]):
+                    parts[index] = mask_version(part, "[[package]]")
+        normalized["Cargo.lock"] = "".join(parts).encode()
+    return normalized, versions
+
+
 def code_input(root, revision="HEAD"):
     # Exclude release prose, retaining any docs referenced by Rust sources
     # (including embedded include_str!/include_bytes! fixtures).
@@ -55,11 +115,17 @@ def code_input(root, revision="HEAD"):
     if references.returncode not in (0, 1):
         raise ValueError("cannot enumerate embedded documentation inputs")
     embedded = re.findall(rb'include_(?:str|bytes)!\s*\(\s*"[^"]*?(docs/[^"]+)"', references.stdout)
+    normalized, _ = release_metadata(root, revision, entries)
     material = []
     for entry in entries:
         if not entry:
             continue
         path = entry.split(b"\t", 1)[1]
+        if path == b"cas-cli/src/builtins/reference-history.json":
+            continue
+        if path.decode() in normalized:
+            mode_type = entry.split(b" ", 2)[:2]
+            entry = b" ".join(mode_type + [digest(normalized[path.decode()]).encode()]) + b"\t" + path
         prose = path == b"CHANGELOG.md" or path.startswith(
             (b"docs/release-notes/", b"docs/release-reports/"))
         if not prose or any(path == item or path.startswith(item.rstrip(b"/") + b"/")

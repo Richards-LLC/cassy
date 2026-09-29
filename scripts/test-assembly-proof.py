@@ -27,6 +27,18 @@ class ReceiptTests(unittest.TestCase):
         (self.root / "src/lib.rs").write_text('const DOC: &str = include_str!(\n "../docs/release-reports/embedded.md");\n')
         (self.root / "docs/release-reports/embedded.md").write_text("embedded\n")
         (self.root / "docs/release-notes/prose.md").write_text("prose\n")
+        (self.root / "Cargo.toml").write_text('[workspace]\nmembers = ["member-one", "member-two"]\n')
+        for name in ("member-one", "member-two"):
+            (self.root / name).mkdir()
+            (self.root / name / "Cargo.toml").write_text(
+                f'[package]\nname = "{name}"\nversion = "1.0.0" # preserve comment\n'
+                '[dependencies]\nthird-party = "1.0.0"\n')
+        (self.root / "Cargo.lock").write_text('version = 4\n' + "".join(
+            f'\n[[package]]\nname = "{name}"\nversion = "1.0.0"\n'
+            for name in ("member-one", "member-two", "third-party")))
+        ledger = self.root / "cas-cli/src/builtins/reference-history.json"
+        ledger.parent.mkdir(parents=True)
+        ledger.write_text('{}\n')
         self.commit()
         self.expected = {"format": proof.FORMAT, "code_input": proof.code_input(self.root)}
         self.path = proof.receipt_path(self.root, self.expected)
@@ -47,6 +59,63 @@ class ReceiptTests(unittest.TestCase):
 
     def save(self):
         proof.write(self.path, self.record)
+
+    def assert_code_miss(self):
+        self.commit()
+        changed = dict(self.expected, code_input=proof.code_input(self.root))
+        self.assertNotEqual(self.expected["code_input"], changed["code_input"])
+        self.assertIsNone(proof.matching(self.root, changed))
+
+    def test_prep_member_versions_lock_and_ledger_reuse_proof(self):
+        for name in ("member-one", "member-two"):
+            path = self.root / name / "Cargo.toml"
+            path.write_text(path.read_text().replace('version = "1.0.0"', 'version = "2.0.0"'))
+        lock = self.root / "Cargo.lock"
+        lock.write_text(lock.read_text().replace('version = "1.0.0"', 'version = "2.0.0"', 2))
+        (self.root / "cas-cli/src/builtins/reference-history.json").write_text('{"new": ["hash"]}\n')
+        self.commit()
+        self.assertEqual(self.expected["code_input"], proof.code_input(self.root))
+        found = proof.matching(self.root, self.expected)
+        self.assertIsNotNone(found)
+        self.assertEqual(found[0]["head"], self.record["head"])
+
+    def test_manifest_dependency_version_change_misses(self):
+        path = self.root / "member-one/Cargo.toml"
+        path.write_text(path.read_text().replace('third-party = "1.0.0"', 'third-party = "2.0.0"'))
+        self.assert_code_miss()
+
+    def test_lock_nonmember_dependency_version_change_misses(self):
+        path = self.root / "Cargo.lock"
+        path.write_text(path.read_text().replace('name = "third-party"\nversion = "1.0.0"',
+                                                'name = "third-party"\nversion = "2.0.0"'))
+        self.assert_code_miss()
+
+    def test_lock_member_version_must_correspond_to_manifest(self):
+        path = self.root / "Cargo.lock"
+        path.write_text(path.read_text().replace('name = "member-one"\nversion = "1.0.0"',
+                                                'name = "member-one"\nversion = "2.0.0"'))
+        self.assert_code_miss()
+
+    def test_other_member_manifest_lines_still_invalidate(self):
+        path = self.root / "member-one/Cargo.toml"
+        path.write_text(path.read_text().replace('# preserve comment', '# changed comment'))
+        self.assert_code_miss()
+
+    def test_other_lock_lines_still_invalidate(self):
+        path = self.root / "Cargo.lock"
+        path.write_text(path.read_text().replace('name = "member-one"', 'name = "renamed"'))
+        self.assert_code_miss()
+
+    def test_registry_package_colliding_with_member_name_is_not_masked(self):
+        path = self.root / "Cargo.lock"
+        path.write_text(path.read_text() + '\n[[package]]\nname = "member-one"\n'
+                        'version = "1.0.0"\nsource = "registry+https://example.invalid/index"\n')
+        self.commit()
+        baseline = proof.code_input(self.root)
+        path.write_text(path.read_text().replace(
+            'version = "1.0.0"\nsource =', 'version = "2.0.0"\nsource ='))
+        self.commit()
+        self.assertNotEqual(baseline, proof.code_input(self.root))
 
     def test_matching_tree_passes(self):
         self.assertIsNotNone(proof.matching(self.root, self.expected))

@@ -20,7 +20,7 @@ ARTIFACTS = pathlib.Path.home() / ".cas/artifacts/cas-a4b1"
 
 
 class RunnerFixture(unittest.TestCase):
-    def run_fixture(self, nightly=None, fail=False):
+    def run_fixture(self, nightly=None, fail=None):
         ARTIFACTS.mkdir(parents=True, exist_ok=True)
         temp = tempfile.TemporaryDirectory(dir=ARTIFACTS)
         self.addCleanup(temp.cleanup)
@@ -81,7 +81,8 @@ class RunnerFixture(unittest.TestCase):
             kwargs["stdout"].write(b"fixture: no Rust process launched\n")
             (target / "cargo-timings").mkdir(exist_ok=True)
             (target / "cargo-timings/cargo-timing.html").write_text("fixture timing")
-            return types.SimpleNamespace(returncode=1 if fail else 0)
+            failed = fail == "all" or fail == len(invocations) - 1
+            return types.SimpleNamespace(returncode=1 if failed else 0)
 
         argv = [str(SCRIPT), "base", "spike"] + (["--nightly"] if nightly else [])
         with patch.object(sys, "argv", argv), patch.object(subprocess, "check_output", side_effect=output), \
@@ -89,9 +90,10 @@ class RunnerFixture(unittest.TestCase):
              patch.object(shutil, "which", return_value="fixture-rustup"), \
              patch.dict(os.environ, {"CARGO_BUILD_JOBS": "2", "RUSTFLAGS": "", "CARGO_ENCODED_RUSTFLAGS": "-C\x1ftarget-cpu=x86-64"}), \
              contextlib.redirect_stdout(io.StringIO()):
-            if fail:
-                with self.assertRaises(RuntimeError):
+            if fail is not None:
+                with self.assertRaises(SystemExit) as error:
                     exec(compile(SOURCE, str(SCRIPT), "exec"), {"__name__": "__main__"})
+                self.assertEqual(error.exception.code, 1)
             else:
                 exec(compile(SOURCE, str(SCRIPT), "exec"), {"__name__": "__main__"})
         output_dir = next((home / ".cas/artifacts/cas-a4b1").iterdir())
@@ -113,6 +115,10 @@ class RunnerFixture(unittest.TestCase):
         self.assertEqual(int(metadata["jobs"]), 2)
         self.assertIn("base", calls[0][2])
         self.assertIn("spike", calls[18][2])  # second sample reverses order
+        for command, _, _ in calls:
+            if "cas-hub-state" in command:
+                self.assertIn("--features", command)
+                self.assertIn("test-support", command)
 
     def test_missing_nightly_skips_without_download(self):
         rows, metadata, summary, _ = self.run_fixture(nightly="missing")
@@ -127,12 +133,31 @@ class RunnerFixture(unittest.TestCase):
         self.assertTrue(any("--jobs-frontend=8" in env["CARGO_ENCODED_RUSTFLAGS"] for _, env, _ in calls))
         self.assertTrue(any(env.get("CARGO_PROFILE_TEST_CODEGEN_BACKEND") == "cranelift" for _, env, _ in calls))
 
-    def test_failed_workload_records_failure_and_no_success_median(self):
-        rows, _, summary, _ = self.run_fixture(fail=True)
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["exit_code"], "1")
+    def test_failed_workloads_continue_all_samples_and_cleanup(self):
+        rows, _, summary, calls = self.run_fixture(fail="all")
+        self.assertEqual(len(rows), 54)
+        self.assertTrue(all(row["exit_code"] == "1" for row in rows))
         self.assertIn("exit 1", summary)
-        self.assertNotIn("| base |", summary)
+        self.assertIn("| base | default-llvm | cold_check_tests | 0 | 3 | 0 | INCOMPLETE |", summary)
+        self.assertIn("| spike | default-llvm | cold_check_tests_equivalent_coverage | 0 | 3 | 0 | INCOMPLETE |", summary)
+        self.assertEqual(len(calls), 54)
+
+    def test_failed_warmup_invalidates_incremental_sample_then_recovers(self):
+        rows, _, summary, _ = self.run_fixture(fail=0)
+        self.assertEqual(len(rows), 54)
+        self.assertEqual(rows[0]["exit_code"], "1")
+        self.assertEqual(rows[1]["exit_code"], "0")
+        self.assertEqual(rows[1]["prerequisites_ok"], "0")
+        self.assertEqual(rows[2]["prerequisites_ok"], "1")
+        self.assertIn("| base | default-llvm | incremental_check_split | 2 | 0 | 1 | INCOMPLETE |", summary)
+        self.assertIn("| base | default-llvm | incremental_check_core | 3 | 0 | 0 |", summary)
+
+    def test_failure_does_not_stop_later_nightly_variants(self):
+        rows, _, summary, _ = self.run_fixture(nightly="installed", fail=7)
+        self.assertEqual(len(rows), 216)
+        self.assertEqual(sum(row["exit_code"] != "0" for row in rows), 1)
+        self.assertIn("| spike | default-llvm | cold_check_tests_equivalent_coverage | 2 | 1 | 0 | INCOMPLETE |", summary)
+        self.assertIn("nightly-cranelift", rows[-1]["variant"])
 
 
 if __name__ == "__main__":

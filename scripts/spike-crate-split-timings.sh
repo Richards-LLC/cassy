@@ -44,7 +44,7 @@ for label, sha in references.items():
     if not capture(["git", "show", sha + ":Cargo.toml"]):
         raise SystemExit(f"{label} is not a workspace checkout")
 skips, worktrees, rows, failures = [], {}, [], []
-columns = ["ref", "sha", "variant", "measurement", "sample", "seconds", "exit_code", "command", "log", "target_dir"]
+columns = ["ref", "sha", "variant", "measurement", "sample", "seconds", "exit_code", "prerequisites_ok", "command", "log", "target_dir"]
 tsv_path = output / "timings.tsv"
 with tsv_path.open("w") as file:
     csv.writer(file, delimiter="\t").writerow(columns)
@@ -100,46 +100,64 @@ metadata = {"base_ref": args.base_ref, "spike_ref": args.spike_ref, "commits": r
 
 def summary():
     groups = collections.defaultdict(list)
+    failed, unprepared = collections.Counter(), collections.Counter()
     for row in rows:
-        if row["exit_code"] == 0:
-            groups[row["ref"], row["variant"], row["measurement"]].append(float(row["seconds"]))
+        key = row["ref"], row["variant"], row["measurement"]
+        groups[key]  # Include groups with no usable samples in the report.
+        if row["exit_code"] != 0:
+            failed[key] += 1
+        elif not row["prerequisites_ok"]:
+            unprepared[key] += 1
+        else:
+            groups[key].append(float(row["seconds"]))
     # Sum matched sample durations before taking a median. Summing medians
     # can manufacture a sample that never existed.
-    successful = {(row["ref"], row["variant"], row["measurement"], row["sample"]): float(row["seconds"])
-                  for row in rows if row["exit_code"] == 0}
+    recorded = {(row["ref"], row["variant"], row["measurement"], row["sample"]): row for row in rows}
     equivalents = {"cold_check_tests": "moved_tests_check_companion",
                    "incremental_check_split": "incremental_check_split_companion",
                    "incremental_check_core": "incremental_check_core_companion",
                    "test_no_run_after_split_edit": "moved_tests_build_companion"}
-    for (label, variant, metric, sample), duration in successful.items():
-        if metric not in equivalents:
-            continue
-        companion = successful.get((label, variant, equivalents[metric], sample))
-        if label == "base" or companion is not None:
-            groups[label, variant, metric + "_equivalent_coverage"].append(duration + (companion or 0))
+    for label, variant, metric in list(groups):
+        if metric in equivalents:
+            key = label, variant, metric + "_equivalent_coverage"
+            values = groups[key]
+            for sample in range(1, 4):
+                root = recorded.get((label, variant, metric, sample))
+                companion = recorded.get((label, variant, equivalents[metric], sample))
+                if root is None or (label == "spike" and companion is None):
+                    continue
+                parts = [root] + ([companion] if label == "spike" else [])
+                if any(part["exit_code"] != 0 for part in parts):
+                    failed[key] += 1
+                elif not all(part["prerequisites_ok"] for part in parts):
+                    unprepared[key] += 1
+                else:
+                    values.append(sum(float(part["seconds"]) for part in parts))
     text = ["# Crate split timings", "", f"Base: {references['base']}", f"Spike: {references['spike']}", "",
             "Cold means an empty Cargo target, not a cold filesystem or empty dependency download cache.",
             "Three independent targets are used per ref/variant. Order alternates by sample.",
             "Each incremental row follows a private function-body edit; no public API changes are injected.",
+            "Failed commands do not stop later workloads. A successful row following a failed warm-up is retained but excluded from its median.",
             "Root-only checks/test builds exclude moved dependency unit tests. Companion rows compile them; compare the sum for equivalent coverage.", "",
-            "| Ref | Variant | Measurement | Successful samples | Median seconds |",
-            "| --- | --- | --- | ---: | ---: |"]
+            "Companions enable test-support to match cas's dev-dependency features and avoid measuring an artificial feature switch.", "",
+            "| Ref | Variant | Measurement | Usable samples | Failed | Unprepared | Median seconds |",
+            "| --- | --- | --- | ---: | ---: | ---: | ---: |"]
     for (label, variant, metric), values in sorted(groups.items()):
         median = f"{statistics.median(values):.3f}" if len(values) == 3 else "INCOMPLETE"
-        text.append(f"| {label} | {variant} | {metric} | {len(values)} | {median} |")
+        text.append(f"| {label} | {variant} | {metric} | {len(values)} | {failed[label, variant, metric]} | {unprepared[label, variant, metric]} | {median} |")
     text += ["", "Skipped: " + ("; ".join(skips) or "none"), "Failures: " + ("; ".join(failures) or "none"),
              "", f"Raw TSV: {tsv_path}", "Cargo output and per-command --timings HTML are under this run's logs/timings directories.",
              "Default builds remain on their existing LLVM toolchain; nightly alternatives are measurement-only."]
     (output / "summary.md").write_text("\n".join(text) + "\n")
 
-def measure(label, variant, sample, metric, command, cwd, target, env):
+def measure(label, variant, sample, metric, command, cwd, target, env, prerequisites_ok):
     log = output / "logs" / f"{label}-{variant}-{sample}-{metric}.log"
     log.parent.mkdir(exist_ok=True)
     started = time.perf_counter()
     with log.open("wb") as file:
         result = subprocess.run(command, cwd=cwd, env=env, stdout=file, stderr=subprocess.STDOUT)
     elapsed = time.perf_counter() - started
-    row = dict(zip(columns, [label, references[label], variant, metric, sample, f"{elapsed:.6f}", result.returncode,
+    row = dict(zip(columns, [label, references[label], variant, metric, sample, f"{elapsed:.6f}", result.returncode, int(prerequisites_ok),
                             shlex.join(command), str(log), str(target)]))
     rows.append(row)
     with tsv_path.open("a") as file:
@@ -147,12 +165,13 @@ def measure(label, variant, sample, metric, command, cwd, target, env):
     timings = target / "cargo-timings"
     if timings.exists():
         shutil.copytree(timings, output / "timings" / log.stem, dirs_exist_ok=True)
-    summary()
-    print(f"{label} {variant} sample={sample} {metric}: {elapsed:.3f}s exit={result.returncode}", flush=True)
     if result.returncode:
         failures.append(f"{log.stem}: exit {result.returncode}; see {log}")
-        summary()
-        raise RuntimeError(f"measurement failed: {log}")
+    summary()
+    print(f"{label} {variant} sample={sample} {metric}: {elapsed:.3f}s exit={result.returncode} prerequisites_ok={int(prerequisites_ok)}", flush=True)
+    # A completed command warms the next state even if this timing's own
+    # prerequisite failed. Only this row's median eligibility is invalidated.
+    return result.returncode == 0
 
 try:
     for label, sha in references.items():
@@ -177,29 +196,29 @@ try:
                 env.update(extra_env)
                 def edit(path, value):
                     path.write_text(originals[path] + f"\n#[allow(dead_code)]\nfn cas_a4b1_body_edit() -> usize {{ {value} }}\n")
-                def run(metric, *tail):
-                    measure(label, variant, sample, metric, cargo + list(tail) + ["--locked", "--timings"], worktree, target, env)
+                def run(metric, *tail, prerequisites_ok=True):
+                    return measure(label, variant, sample, metric, cargo + list(tail) + ["--locked", "--timings"], worktree, target, env, prerequisites_ok)
                 try:
-                    run("cold_check_tests", "check", "-p", "cas", "--tests")
+                    root_checked = run("cold_check_tests", "check", "-p", "cas", "--tests")
                     if extracted:
-                        run("moved_tests_check_companion", "check", "-p", "cas-hub-state", "--tests")
+                        moved_checked = run("moved_tests_check_companion", "check", "-p", "cas-hub-state", "--tests", "--features", "test-support", prerequisites_ok=root_checked)
                     edit(split_file, 1)
-                    run("incremental_check_split", "check", "-p", "cas", "--tests")
+                    root_checked = run("incremental_check_split", "check", "-p", "cas", "--tests", prerequisites_ok=root_checked)
                     if extracted:
-                        run("incremental_check_split_companion", "check", "-p", "cas-hub-state", "--tests")
+                        moved_checked = run("incremental_check_split_companion", "check", "-p", "cas-hub-state", "--tests", "--features", "test-support", prerequisites_ok=moved_checked and root_checked)
                     edit(core_file, 1)
-                    run("incremental_check_core", "check", "-p", "cas", "--tests")
+                    root_checked = run("incremental_check_core", "check", "-p", "cas", "--tests", prerequisites_ok=root_checked)
                     if extracted:
-                        run("incremental_check_core_companion", "check", "-p", "cas-hub-state", "--tests")
-                    run("build", "build", "-p", "cas")
+                        moved_checked = run("incremental_check_core_companion", "check", "-p", "cas-hub-state", "--tests", "--features", "test-support", prerequisites_ok=moved_checked and root_checked)
+                    root_built = run("build", "build", "-p", "cas", prerequisites_ok=root_checked)
                     edit(split_file, 2)
-                    run("incremental_build_split", "build", "-p", "cas")
+                    root_built = run("incremental_build_split", "build", "-p", "cas", prerequisites_ok=root_built)
                     edit(core_file, 2)
-                    run("incremental_build_core", "build", "-p", "cas")
+                    root_built = run("incremental_build_core", "build", "-p", "cas", prerequisites_ok=root_built)
                     edit(split_file, 3)
-                    run("test_no_run_after_split_edit", "test", "--no-run", "-p", "cas")
+                    root_test_built = run("test_no_run_after_split_edit", "test", "--no-run", "-p", "cas", prerequisites_ok=root_built)
                     if extracted:
-                        run("moved_tests_build_companion", "test", "--no-run", "-p", "cas-hub-state")
+                        run("moved_tests_build_companion", "test", "--no-run", "-p", "cas-hub-state", "--features", "test-support", prerequisites_ok=root_test_built)
                 finally:
                     for path, text in originals.items():
                         path.write_text(text)
@@ -212,4 +231,6 @@ finally:
         if result.returncode:
             print(f"Worktree cleanup failed; inspect {worktree}", file=sys.stderr)
     print(f"Results: {output}", flush=True)
+if failures:
+    raise SystemExit(1)
 PY

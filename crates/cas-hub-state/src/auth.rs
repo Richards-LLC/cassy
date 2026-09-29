@@ -227,7 +227,7 @@ impl PublicJwk {
         Ok(hash_b64(canonical.as_bytes()))
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn generator() -> Self {
         let x = hex::decode("6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296")
             .unwrap();
@@ -260,7 +260,7 @@ fn local_source() -> String {
 }
 
 impl PairingExchange {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn test_fixture(
         token: String,
         hub_id: &str,
@@ -467,7 +467,7 @@ impl AuthContext {
         self.scopes.contains(&scope)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn test_fixture(device: &str, origin: &str, scopes: BTreeSet<Scope>) -> Self {
         Self {
             device_id: device.into(),

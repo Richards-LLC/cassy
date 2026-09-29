@@ -6,6 +6,10 @@ rust-version = "1.88"
 description = "Scratch hub persistence extraction for cas-a4b1 measurement"
 license = "MIT"
 
+[features]
+# Dependency cfg(test) is not enabled by downstream test builds.
+test-support = []
+
 [lints]
 workspace = true
 

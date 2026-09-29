@@ -220,6 +220,7 @@ chrono = "0.4"
 dotenvy = "0.15"
 
 [dev-dependencies]
+cas-hub-state = { path = "../crates/cas-hub-state", features = ["test-support"] }
 assert_cmd = "2.0"
 predicates = "3.1"
 tempfile = "3.14"

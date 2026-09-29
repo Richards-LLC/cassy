@@ -128,6 +128,8 @@ impl CloudSyncer {
         let mut result = SyncResult::default();
         let start = Instant::now();
 
+        self.queue.drop_queued_user_prompts()?;
+
         self.cloud_config
             .validate_team_only()
             .map_err(CasError::Other)?;

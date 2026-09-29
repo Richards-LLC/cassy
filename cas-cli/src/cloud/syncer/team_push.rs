@@ -131,6 +131,8 @@ impl CloudSyncer {
         let mut result = SyncResult::default();
         let start = Instant::now();
 
+        self.queue.drop_queued_user_prompts()?;
+
         self.requeue_version_gated_items()?;
 
         if !self.is_available() {

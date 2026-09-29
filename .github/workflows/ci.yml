@@ -924,6 +924,7 @@ jobs:
         env:
           INSTA_WORKSPACE_ROOT: ${{ github.workspace }}
           SHARD: ${{ matrix.shard }}
+          IMPACT_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
         run: |
           mkdir -p target/ci-impact
           start_seconds=$SECONDS
@@ -934,7 +935,7 @@ jobs:
           set -e
           if [[ -x scripts/ci-test-impact.py ]]; then
             python3 scripts/ci-test-impact.py record \
-              --base-sha "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}" \
+              --base-sha "$IMPACT_BASE_SHA" \
               --log "$VERIFIED_TEST_LOG" --status "$suite_status" \
               --elapsed "$((SECONDS - start_seconds))"
           fi

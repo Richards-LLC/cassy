@@ -285,8 +285,8 @@ integration_target_for() {
         return 0
     fi
 
-    if [[ -f "cas-cli/tests/${directory}/main.rs" ]] && cargo_test_target_exists "$directory"; then
-        printf '%s\n' "$directory"
+    if [[ -f "cas-cli/tests/${directory}/main.rs" ]] && cargo_test_target_exists "$target"; then
+        printf '%s\n' "$target"
         return 0
     fi
 

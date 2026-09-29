@@ -61,12 +61,13 @@ fn process_home_mutation_uses_the_canonical_test_env_guard() {
 /// its parent is a live supervisor as it does in a clean shell.
 #[test]
 fn authority_boundary_test_is_hermetic_against_inherited_factory_env() {
+    let name = "public_registration_cannot_mint_or_capture_supervisor_verification_authority";
+    let child_test = module_path!()
+        .split_once("::")
+        .map(|(_, module)| format!("{module}::{name}"))
+        .unwrap_or_else(|| name.to_string());
     let output = Command::new(std::env::current_exe().expect("current test executable"))
-        .args([
-            "--exact",
-            "public_registration_cannot_mint_or_capture_supervisor_verification_authority",
-            "--nocapture",
-        ])
+        .args(["--exact", &child_test, "--nocapture"])
         .env("CAS_AGENT_ROLE", "supervisor")
         .env("CAS_AGENT_NAME", "inherited-supervisor")
         .env("CAS_SESSION_ID", "inherited-session")
@@ -79,6 +80,13 @@ fn authority_boundary_test_is_hermetic_against_inherited_factory_env() {
         "authority-boundary test must be hermetic under inherited CAS_* env\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.lines().any(|line| line == "running 1 test")
+            && stdout.contains(&format!("test {child_test} ..."))
+            && stdout.contains("test result: ok"),
+        "authority-boundary helper did not execute {child_test}:\n{stdout}"
     );
 }
 

@@ -40,8 +40,15 @@ python3 scripts/cas-test-targets.py cas-cli --check
 ```
 
 The checker rejects missing or duplicate suites and more than ten harnesses.
+It covers both `tests/*.rs` and Cargo's `tests/*/main.rs` entry points: 108
+source suites, including `hooks_test/main.rs`, remain in ten harnesses.
 Without `--check`, it prints `source_stem|cargo_target` mappings for selection
 tools. The supervisor measures cold and warm
 `cargo nextest run --workspace --no-run` before and after consolidation and
 compares the executed test count at assembly; source inventory alone does not
 prove runtime coverage or elapsed-time improvement.
+
+Self-reexec helpers must strip the binary crate name from `module_path!()`
+and retain the remaining suite path in their libtest `--exact` selector.
+Check that the child reports exactly one executed test: a zero-match libtest
+invocation also exits successfully.

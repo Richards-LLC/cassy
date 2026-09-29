@@ -24,6 +24,21 @@ bad() { printf 'FAIL %s\n' "$1"; fail=$((fail + 1)); }
 # must never write to the operator's ~/.cas.
 export CAS_RELEASE_ARTIFACTS_ROOT="$tmp/artifacts"
 
+# Session discovery must not invoke the host's installed cas: CLI startup can
+# create .cas/logs in an otherwise clean fixture before the cut's preflight.
+# Tests for discovery, recovery and host updates supply their own commands.
+export CAS_RELEASE_TRAIN_CAS="$tmp/cas-session-discovery.sh"
+export TRAIN_FIXTURE_DISCOVERY_LOG="$tmp/cas-session-discovery.log"
+cat >"$CAS_RELEASE_TRAIN_CAS" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$#" == 5 && "$1" == --json && "$2" == list && "$3" == --project-dir \
+    && "$5" == --running-only ]]
+printf '%s\n' "$4" >>"${TRAIN_FIXTURE_DISCOVERY_LOG:?}"
+printf '{"sessions":[]}\n'
+EOF
+chmod +x "$CAS_RELEASE_TRAIN_CAS"
+
 new_worktree() {
     local name="$1"
     local dir="$tmp/$name"
@@ -1978,7 +1993,8 @@ chmod +x "$cut_cmd"
 cut_gate="$tmp/cut-gate.sh"
 new_gate_stub "$cut_gate" 0
 cut_run_dir="$("$train" "$cut_version" "$cut_wt" --print-run-dir)"
-out="$(CAS_RELEASE_ENV_FILE="$cut_wt/release.env" \
+out="$(env -u CAS_FACTORY_SESSION -u CAS_ROOT \
+    CAS_RELEASE_ENV_FILE="$cut_wt/release.env" \
     CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_COMPETING=1 CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_TOOLCHAIN=1 \
     CAS_RELEASE_TRAIN_GATE_CMD="$cut_gate" CAS_RELEASE_TRAIN_CUT_STOP_AFTER=gate \
     CAS_RELEASE_TRAIN_ASSEMBLE_CMD="$cut_cmd" CAS_RELEASE_TRAIN_PREP_CMD="$cut_cmd" \
@@ -1992,6 +2008,12 @@ if [[ "$out" == *'stopped after stage gate'* && -s "$cut_run_dir/stage.gate.done
     ok '--cut stops after gate with a durable stage receipt'
 else
     bad "--cut did not stop with the gate receipt: $out"
+fi
+if grep -Fxq "$cut_wt" "$TRAIN_FIXTURE_DISCOVERY_LOG" \
+    && [[ -z "$(git -C "$cut_wt" status --porcelain)" ]]; then
+    ok '--cut session discovery without worker identity leaves the fixture clean'
+else
+    bad "--cut session discovery dirtied the fixture or bypassed its command: $(git -C "$cut_wt" status --porcelain)"
 fi
 gate_runs_before="$(grep -c '^gate$' "$cut_log" 2>/dev/null || true)"
 CAS_RELEASE_ENV_FILE="$cut_wt/release.env" \

@@ -349,6 +349,13 @@ pub(crate) fn build_inherited_claude_command(args: &[OsString]) -> Command {
 }
 
 fn enable_chrome_if_supported(command: &mut Command) {
+    // An explicit --chrome or --no-chrome from the caller wins.
+    if command
+        .get_args()
+        .any(|arg| arg == "--chrome" || arg == "--no-chrome")
+    {
+        return;
+    }
     enable_chrome(command, cas_pty::claude_supports_chrome_flag());
 }
 
@@ -647,6 +654,11 @@ mod tests {
         assert_eq!(
             login.get_args().collect::<Vec<_>>(),
             vec![OsStr::new("auth"), OsStr::new("login")]
+        );
+        let opted_out = build_inherited_claude_command(&[OsString::from("--no-chrome")]);
+        assert_eq!(
+            opted_out.get_args().collect::<Vec<_>>(),
+            vec![OsStr::new("--no-chrome")]
         );
         let inherited = build_inherited_claude_command(&[OsString::from("--continue")]);
         assert_eq!(

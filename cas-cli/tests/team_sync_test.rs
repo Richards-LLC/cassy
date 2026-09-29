@@ -109,7 +109,7 @@ async fn pinned_remote_stamped_origin_pushes_personal_and_team() {
             .add(&Entry::new(id.to_string(), "authored here".to_string()))
             .unwrap();
         assert_eq!(
-            entries.get(id).unwrap().unwrap().origin_project.as_deref(),
+            entries.get(id).unwrap().origin_project.as_deref(),
             Some(stamped.as_str())
         );
         let payload = serde_json::json!({

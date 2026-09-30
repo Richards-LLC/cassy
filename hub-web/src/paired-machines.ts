@@ -1,4 +1,6 @@
 import { cloudBrand, escapeHtml } from './cloud-brand';
+import { CANT_REACH_RETRYING, NEEDS_PAIRING, machineConnectionLabel, type MachineConnectionLabelState } from './connection-state';
+export { CANT_REACH_RETRYING } from './connection-state';
 
 export interface PairedMachineRow {
   id: string;
@@ -8,6 +10,7 @@ export interface PairedMachineRow {
   connected: boolean;
   /** Live at least once in this visit; until then a retry is still "Connecting". */
   everConnected?: boolean;
+  connectionState?: MachineConnectionLabelState;
   lastSeen: string;
   runtime?: string;
 }
@@ -17,16 +20,21 @@ export interface PairedMachineRow {
  * count, so it says so instead of "0 paired machines · Not paired"; a machine
  * never live in this visit is "Connecting…", not "Reconnecting" (journey F14).
  */
-/** A machine never live in this visit whose attempts have failed; retries continue. */
-export const CANT_REACH_RETRYING = "Can't reach · retrying";
-
 export function machineFooterMarkup(rows: readonly PairedMachineRow[], sessions: number, build: string, loading = false): string {
   const connected = rows.filter(row => row.connected).length;
   const machine = loading ? 'Paired machines' : rows.length === 1 ? rows[0].label : `${rows.length} paired machines`;
-  // A machine never live that has already failed is named as unreachable, the
-  // words the list and the dialog use (cas-b789).
-  const unreachable = rows.length > 0 && rows.every(row => row.connection === CANT_REACH_RETRYING);
-  const state = loading ? 'Loading…' : connected ? `${connected === rows.length ? 'Connected' : `${connected} connected`}` : rows.length ? (rows.some(row => row.everConnected) ? 'Reconnecting' : unreachable ? CANT_REACH_RETRYING : 'Connecting…') : 'Not paired';
+  const labels = rows.map(row => row.connectionState
+    ? machineConnectionLabel(row.connectionState, row.everConnected ?? false)
+    : row.connection);
+  // Authorization loss needs a new pairing, so its live history must not make
+  // another machine's first retry look like a reconnect (cas-f698).
+  const retryable = rows.filter((_row, index) => labels[index] !== NEEDS_PAIRING);
+  const unreachable = retryable.length > 0 && retryable.every(row => row.connection === CANT_REACH_RETRYING);
+  const state = loading ? 'Loading…' : connected ? `${connected === rows.length ? 'Connected' : `${connected} connected`}`
+    : !rows.length ? 'Not paired'
+    : !retryable.length ? labels[0]
+    : retryable.some(row => row.everConnected) ? 'Reconnecting'
+    : unreachable ? CANT_REACH_RETRYING : 'Connecting…';
   // The dot shows the worst machine: green only when every machine is
   // connected, the warning tone when some are down (cas-b789).
   const dot = connected && connected === rows.length ? ' connected' : connected ? ' partial' : '';

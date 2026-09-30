@@ -12,6 +12,183 @@ use std::path::Path;
 use std::time::Duration;
 use tempfile::TempDir;
 
+#[derive(Clone, Copy, Debug)]
+enum ReportKind {
+    Doctor,
+    Status,
+    Version,
+    Help,
+}
+
+// External report fixtures: doctor ends in its summary/verbose hint, while
+// status reports the entry/rule/high-value counts on one complete row.
+const COMPLETE_DOCTOR_REPORT: &str = "Store  [OK] database  [OK] schema\n29 ok · 3 warnings · 0 errors · 2ms\ncas doctor --verbose for timings and full messages\n";
+const COMPLETE_STATUS_REPORT: &str = "cas: 2 entries, 0 rules (0 proven), 0 high-value\n";
+
+#[cfg(unix)]
+fn report_fixture(stdout: &str, exit_code: &str) -> std::process::Output {
+    std::process::Command::new("sh")
+        .args([
+            "-c",
+            "printf '%s' \"$1\"; exit \"$2\"",
+            "report-fixture",
+            stdout,
+            exit_code,
+        ])
+        .output()
+        .expect("run report fixture child")
+}
+
+#[test]
+#[cfg(unix)]
+fn report_validation_rejects_command_echo() {
+    for (kind, echo) in [
+        (ReportKind::Doctor, "$ cas doctor\n"),
+        (ReportKind::Status, "$ cas status\n"),
+        (ReportKind::Version, "$ cas --version\n"),
+        (ReportKind::Help, "$ cas --help\n"),
+    ] {
+        let output = report_fixture(echo, "0");
+        let error = validate_piped_report(&output, kind).expect_err("echo is not a report");
+        assert!(error.contains("missing completed"), "{error}");
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn report_validation_rejects_empty_success() {
+    let output = report_fixture("", "0");
+    for kind in [
+        ReportKind::Doctor,
+        ReportKind::Status,
+        ReportKind::Version,
+        ReportKind::Help,
+    ] {
+        let error =
+            validate_piped_report(&output, kind).expect_err("empty success is not a report");
+        assert!(error.contains("missing completed"), "{error}");
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn report_validation_rejects_failed_children_with_completed_output() {
+    for (kind, report) in [
+        (ReportKind::Doctor, COMPLETE_DOCTOR_REPORT),
+        (ReportKind::Status, COMPLETE_STATUS_REPORT),
+        (ReportKind::Version, "cas 1.2.3\n"),
+        (ReportKind::Help, "Cassy\nUsage: cas [OPTIONS] <COMMAND>\n"),
+    ] {
+        let output = report_fixture(report, "23");
+        let error = validate_piped_report(&output, kind).expect_err("failed child is not success");
+        assert!(error.contains("child failed"), "{error}");
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn report_validation_accepts_completed_successful_reports() {
+    for (kind, report) in [
+        (ReportKind::Doctor, COMPLETE_DOCTOR_REPORT),
+        (ReportKind::Status, COMPLETE_STATUS_REPORT),
+        (ReportKind::Version, "cas 1.2.3\n"),
+        (ReportKind::Help, "Cassy\nUsage: cas [OPTIONS] <COMMAND>\n"),
+    ] {
+        let output = report_fixture(report, "0");
+        let accepted = validate_piped_report(&output, kind).expect("completed successful report");
+        assert_eq!(accepted, report);
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn plain_report_validation_rejects_ansi_in_completed_output() {
+    let output = report_fixture(&format!("\x1b[32m{COMPLETE_STATUS_REPORT}\x1b[0m"), "0");
+    let error = validate_piped_report(&output, ReportKind::Status).expect_err("ANSI is forbidden");
+    assert!(error.contains("ANSI"), "{error}");
+}
+
+#[test]
+#[cfg(unix)]
+fn pty_report_validation_rejects_echo_empty_and_failed_children() {
+    for (kind, stdout, exit_code, cause) in [
+        (
+            ReportKind::Doctor,
+            "$ cas doctor\n",
+            "0",
+            "missing completed",
+        ),
+        (
+            ReportKind::Status,
+            "$ cas status\n",
+            "0",
+            "missing completed",
+        ),
+        (ReportKind::Doctor, "", "0", "missing completed"),
+        (ReportKind::Status, "", "0", "missing completed"),
+        (
+            ReportKind::Doctor,
+            COMPLETE_DOCTOR_REPORT,
+            "23",
+            "child failed",
+        ),
+        (
+            ReportKind::Status,
+            COMPLETE_STATUS_REPORT,
+            "23",
+            "child failed",
+        ),
+    ] {
+        let mut runner = PtyRunner::new();
+        runner
+            .spawn(
+                "sh",
+                &[
+                    "-c",
+                    "printf '%s' \"$1\"; exit \"$2\"",
+                    "report-fixture",
+                    stdout,
+                    exit_code,
+                ],
+            )
+            .unwrap();
+        let error = completed_pty_report(&mut runner, kind).expect_err("invalid PTY report");
+        assert!(error.contains(cause), "{error}");
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn pty_report_validation_accepts_completed_successful_children() {
+    for (kind, report) in [
+        (ReportKind::Doctor, COMPLETE_DOCTOR_REPORT),
+        (ReportKind::Status, COMPLETE_STATUS_REPORT),
+    ] {
+        let mut runner = PtyRunner::new();
+        runner
+            .spawn(
+                "sh",
+                &["-c", "printf '%s' \"$1\"", "report-fixture", report],
+            )
+            .unwrap();
+        let captured = completed_pty_report(&mut runner, kind).expect("completed PTY report");
+        assert!(
+            screen_with_size(&captured, 80, 200)
+                .text()
+                .contains(report.lines().next().unwrap())
+        );
+    }
+}
+
+#[test]
+fn snapshot_redaction_preserves_stable_counts() {
+    let report = "host: 7 findings — see `cas doctor --host`\ncas: 2 entries, 3 rules (1 proven), 4 high-value\nEntries: 2\nTasks: 5\nSchema: 42\n";
+    assert_eq!(
+        redact_dynamic_values(report),
+        "host: [N] finding(s) — see `cas doctor --host`\ncas: 2 entries, 3 rules (1 proven), 4 high-value\nEntries: 2\nTasks: 5\nSchema: 42\n"
+    );
+}
+
 fn cas_cmd(dir: &Path) -> Command {
     let mut cmd = Command::new(cas::test_paths::cas_binary());
     let home = dir.join(".test-home");

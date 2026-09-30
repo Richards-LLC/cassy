@@ -1185,11 +1185,8 @@ impl GitOperations {
         // merge drivers/hooks, before a shared epic ref can move. Reuse the
         // detached venue and its CAS/checkout refresh rather than checking
         // after an in-place git merge has already advanced the ref.
-        if self.lane_compile_policy(target_branch, source_branch)
-            && self
-                .merge_touched_paths(target_branch, source_branch)?
-                .iter()
-                .any(|path| path.ends_with(".rs"))
+        if self.lane_compile_policy(target_branch, source_branch)?
+            && self.lane_changes_rust(target_branch, source_branch)?
         {
             self.ensure_merge_target_checked_out(&self.repo_root, target_branch)?;
             return self.merge_branch_via_temp_worktree(target_branch, source_branch, no_ff);
@@ -1198,27 +1195,54 @@ impl GitOperations {
         self.merge_branch_in_dir(&repo_root, Some(target_branch), source_branch, no_ff)
     }
 
-    fn lane_compile_policy(&self, target: &str, source: &str) -> bool {
-        [target, source].iter().any(|reference| {
-            Command::new("git")
+    fn lane_compile_policy(&self, target: &str, source: &str) -> Result<bool> {
+        for reference in [target, source] {
+            let output = Command::new("git")
                 .args([
-                    "cat-file",
-                    "-e",
-                    &format!("{reference}:scripts/check-lane-fast-rows.py"),
+                    "ls-tree",
+                    "--name-only",
+                    reference,
+                    "--",
+                    "scripts/check-lane-fast-rows.py",
                 ])
                 .current_dir(&self.repo_root)
-                .output()
-                .is_ok_and(|output| output.status.success())
-        })
+                .output()?;
+            if !output.status.success() {
+                return Err(GitError::CommandFailed(
+                    String::from_utf8_lossy(&output.stderr).into_owned(),
+                ));
+            }
+            if !output.stdout.is_empty() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn lane_changes_rust(&self, target: &str, source: &str) -> Result<bool> {
+        let output = Command::new("git")
+            .args([
+                "diff",
+                "--name-only",
+                "-z",
+                &format!("{target}...{source}"),
+                "--",
+            ])
+            .current_dir(&self.repo_root)
+            .output()?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ));
+        }
+        Ok(output
+            .stdout
+            .split(|byte| *byte == 0)
+            .any(|path| path.ends_with(b".rs")))
     }
 
     fn require_lane_compile(&self, candidate: &Path, base: &str, tip: &str) -> Result<()> {
-        if !self.lane_compile_policy(base, tip)
-            || !self
-                .merge_touched_paths(base, tip)?
-                .iter()
-                .any(|path| path.ends_with(".rs"))
-        {
+        if !self.lane_compile_policy(base, tip)? || !self.lane_changes_rust(base, tip)? {
             return Ok(());
         }
         let verifier = candidate.join("scripts/check-lane-compile.py");

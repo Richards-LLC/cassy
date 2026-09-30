@@ -50,7 +50,7 @@ fn test_git_available() {
 /// advances. These fixtures exercise admission; Cargo itself stays supervisor-owned.
 #[test]
 fn lane_compile_requires_actual_tree_before_target_advance() {
-    for shared in [false, true] {
+    for (shared, rust_path) in [(false, "lib.rs"), (true, "lib.rs"), (true, "lib\té.rs")] {
         let (_temp, repo) = create_test_repo();
         let run = |args: &[&str]| {
             let output = Command::new("git")
@@ -81,12 +81,12 @@ fn lane_compile_requires_actual_tree_before_target_advance() {
             "[package]\nname=\"lane_fixture\"\nversion=\"0.1.0\"\n",
         )
         .unwrap();
-        std::fs::write(repo.join("lib.rs"), "fn original() {}\n").unwrap();
+        std::fs::write(repo.join(rust_path), "fn original() {}\n").unwrap();
         run(&["add", "."]);
         run(&["commit", "-m", "lane admission policy"]);
         run(&["branch", "epic/compile"]);
         run(&["checkout", "-b", "factory/compile"]);
-        std::fs::write(repo.join("lib.rs"), "fn changed() {}\n").unwrap();
+        std::fs::write(repo.join(rust_path), "fn changed() {}\n").unwrap();
         run(&["add", "."]);
         run(&["commit", "-m", "Rust lane"]);
         let source = run(&["rev-parse", "HEAD"]);
@@ -127,6 +127,17 @@ fn lane_compile_requires_actual_tree_before_target_advance() {
         assert_eq!(run(&["rev-parse", "epic/compile"]), merged);
         assert_eq!(run(&["rev-parse", &format!("{merged}^{{tree}}")]), tree);
         assert_eq!(run(&["rev-parse", "factory/compile"]), source);
+        std::fs::remove_file(receipts.join(format!("{tree}.json"))).unwrap();
+        run(&["checkout", "-b", "factory/docs", &merged]);
+        std::fs::write(repo.join("notes.md"), "# Documentation only\n").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-m", "docs lane"]);
+        if shared {
+            run(&["checkout", "epic/compile"]);
+            git.merge_branch("epic/compile", "factory/docs", true).unwrap();
+        } else {
+            git.merge_branch_via_temp_worktree("epic/compile", "factory/docs", true).unwrap();
+        }
     }
 }
 

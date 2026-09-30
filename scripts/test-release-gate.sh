@@ -54,7 +54,7 @@ new_fixture() {
     cp "$script_dir/assembly-proof.py" "$repo/scripts/assembly-proof.py"
     cp "$script_dir/release-portable.sh" "$repo/scripts/release-portable.sh"
     # Real defects in the new rows are covered by test-fast-release-rows.py.
-    for helper in cas-test-targets check-changed-markdown check-test-shape check-builtin-doc-hygiene; do
+    for helper in cas-test-targets check-changed-markdown check-test-shape check-builtin-doc-hygiene check-builtin-contract-phrases; do
         printf '#!/usr/bin/env python3\n' >"$repo/scripts/$helper.py"
     done
     cp "$script_dir/check-workflow-run-interpolation.py" "$repo/scripts/check-workflow-run-interpolation.py"

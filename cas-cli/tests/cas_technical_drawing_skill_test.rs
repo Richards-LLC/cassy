@@ -49,47 +49,6 @@ fn skill_is_registered_byte_identically_in_every_harness_mirror() {
 fn skill_body_is_managed_and_covers_the_workflow() {
     let body = builtin_catalog::find(Flavor::Claude, &format!("skills/{SKILL}/SKILL.md"));
     assert!(body.starts_with("---\n"), "SKILL.md lacks frontmatter");
-    assert!(body.contains(&format!("name: {SKILL}")));
-    assert!(body.contains("managed_by: cas"));
-    assert!(body.contains("description: Use when"));
-    for marker in [
-        "concept brief",
-        "draft.mjs check",
-        "draft.mjs render",
-        "orthographic",
-        "isometric",
-        "section",
-        "exploded",
-        "joint teaching sheet",
-        "part cards",
-        "likeness critique",
-        "--plain",
-        "print contract",
-        "Never draw geometry by hand",
-        "model-schema.md",
-        "drafting-conventions.md",
-        "likeness-critique.md",
-        "--print-width-mm",
-    ] {
-        assert!(
-            body.to_ascii_lowercase().contains(&marker.to_ascii_lowercase()),
-            "SKILL.md missing workflow marker {marker:?}"
-        );
-    }
-    let conventions = builtin_catalog::find(
-        Flavor::Claude,
-        &format!("skills/{SKILL}/references/drafting-conventions.md"),
-    );
-    for marker in ["0.7", "0.35", "0.25", "Third-angle", "30°", "150°", "chain", "`projection`", "`axis-scale`", "`proportion`", "`collision`", "`dimensions`", "`text-size`", "`cut-list`"] {
-        assert!(conventions.contains(marker), "drafting-conventions.md missing {marker:?}");
-    }
-    let critique = builtin_catalog::find(
-        Flavor::Claude,
-        &format!("skills/{SKILL}/references/likeness-critique.md"),
-    );
-    for marker in ["Cold look", "Silhouette", "Proportion", "Part identification", "Floor to ship", "24 / 30", "200 px"] {
-        assert!(critique.contains(marker), "likeness-critique.md missing {marker:?}");
-    }
 }
 
 fn node() -> Option<PathBuf> {

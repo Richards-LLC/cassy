@@ -228,7 +228,16 @@ and `CAS_RELEASE_RECEIPTS_RUN_DIR` are output locations and do not invalidate
 proof. Compiler flags, HOME, PATH, local environment/config files and the
 resolved Zig binary remain inputs.
 
-Set `CAS_RELEASE_GATE_HOME_DIR` to a scratch base on the checkout filesystem
+For daemon-initiated sweeps, persist the scratch base with
+`cas config set factory.release_gate_home_dir /home/cas-release-gate/base`
+in the project's `.cas/config.toml`. The daemon passes this key to assembly
+as `CAS_RELEASE_GATE_HOME_DIR`, overriding inherited shell and sweep env values.
+An unset or blank key reports `NOT CONFIGURED`, names the key, and skips
+the suite and failure attribution. Other projects and configured sweep commands
+retain their detected or configured runner without requiring this key.
+
+For manual assembly commands, set `CAS_RELEASE_GATE_HOME_DIR` to a scratch
+base on the checkout filesystem
 outside `/tmp`, `/var/tmp`, `/private/tmp`, `/private/var/tmp`, the configured
 `TMPDIR`, and every `.cas` ancestor (for example,
 `CAS_RELEASE_GATE_HOME_DIR=/home/cas-release-gate/base` on Linux or
@@ -531,6 +540,14 @@ A live registered supervisor may use `supervisor_override=true` with a non-empty
 reason to waive additive-only/value-only posture checks and the receipt epoch
 check for a retroactive record task. Close records the decision. Repository
 binding, ancestry, non-empty delivery, and target-content checks still apply.
+
+A deliberately superseded delivery that still fails automatic content attribution
+can close with `supervisor_override=true` and
+`reason="reviewed-drop: <superseding SHA>[,<SHA>...] -- <why>"`. Each named commit
+must strictly descend from the delivery anchor, be reachable on the authoritative
+target, and touch a dropped path. Together they must cover every dropped path.
+Cassy records the full resolved commit IDs, anchor, measured target, paths and
+review. A narrative without commit receipts cannot waive the content gate.
 
 An empty `execution_note` update may clear a constraint after approval when its
 exact repository proof is unchanged. Pending, skipped, unbound, and changed

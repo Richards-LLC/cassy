@@ -1,3 +1,4 @@
+import { journeyStamp } from "./clock";
 import { test, expect, expectWholeFocusRing } from "./journey";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
 import type { Machine } from "./hub-double";
@@ -182,7 +183,7 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await expect(second).toBeFocused();
     // A summary that changes the rows themselves rebuilds the list; focus
     // follows the same session onto its rebuilt row.
-    const summary = (title: string, phase: string) => hub.send(OTTER, { SessionSummary: { summary: { title, description: title, phase, generated_at: new Date().toISOString() } } });
+    const summary = (title: string, phase: string) => hub.send(OTTER, { SessionSummary: { summary: { title, description: title, phase, generated_at: journeyStamp() } } });
     const secondSession = await second.getAttribute("data-picker-session");
     summary("Running the Mac tests", "testing");
     await expect(entry(OTTER)).toContainText("Running the Mac tests");

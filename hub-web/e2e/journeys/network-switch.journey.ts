@@ -8,9 +8,8 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
   // Eight transitions, one of them a 25 s outage with four missed heartbeats,
   // plus the held-send backoff wait and the legacy-socket stage.
   test.setTimeout(330_000);
-  // Time flows as usual; the fake clock only lets the daemon-link stage jump
-  // past the two-minute hold on a held message (cas-a355).
-  await page.clock.install();
+  // The shared journey fixture installs an advancing clock at a known instant;
+  // this journey also jumps past the two-minute message hold (cas-a355).
   const hub = await journey.hub({ machines: [ATLAS, STUDIO], paired: ["atlas", "studio"], multiplex: true });
   const composer = page.getByRole("textbox", { name: "Your message" });
   const send = page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true });
@@ -21,8 +20,8 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
   // Waits on the double's own counters without recording each miss as a
   // failed expectation; the caller asserts the final value once.
   const until = async (value: () => number, done: (n: number) => boolean, timeout: number): Promise<number> => {
-    const end = Date.now() + timeout;
-    while (!done(value()) && Date.now() < end) await page.waitForTimeout(100);
+    const end = performance.now() + timeout;
+    while (!done(value()) && performance.now() < end) await page.waitForTimeout(100);
     return value();
   };
 
@@ -57,11 +56,11 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
     await expect(page.locator("#message-status")).toHaveText("Not connected to Atlas · Linux right now. Your message will go out by itself when it's back.");
     await page.waitForTimeout(5_000);
     expect(sentTimes("While Tailscale is off")).toBe(0);
-    const restored = Date.now();
+    const restored = performance.now();
     await hub.up("atlas");
     // Back without a reload, within the 10 s retry ceiling plus a connect.
     await expect(header).toHaveText(" · Live", { timeout: 15_000 });
-    expect(Date.now() - restored, "recovered within 15 s of the network returning").toBeLessThan(15_000);
+    expect(performance.now() - restored, "recovered within 15 s of the network returning").toBeLessThan(15_000);
     // The held message went out once, on a fresh socket.
     expect(await until(() => sentTimes("While Tailscale is off"), (n) => n >= 1, 5_000)).toBe(1);
     await expect(held).toHaveCount(0);
@@ -79,12 +78,12 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
     await sendNow("During the handover");
     await expect(held).toHaveText("Waiting for the connection — sends when it's back");
     await page.waitForTimeout(3_000);
-    const restored = Date.now();
+    const restored = performance.now();
     await hub.up("atlas");
     await page.context().setOffline(false);
     // Back online retries now rather than when the backoff timer says.
     await expect(header).toHaveText(" · Live", { timeout: 5_000 });
-    expect(Date.now() - restored, "back within 5 s of coming online").toBeLessThan(5_000);
+    expect(performance.now() - restored, "back within 5 s of coming online").toBeLessThan(5_000);
     expect(await until(() => sentTimes("During the handover"), (n) => n >= 1, 5_000)).toBe(1);
     await page.waitForTimeout(1_000);
     expect(sentTimes("During the handover"), "sent once").toBe(1);
@@ -102,7 +101,7 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
     }, state);
     await setVisibility("hidden");
     await page.waitForTimeout(6_000);
-    const woke = Date.now();
+    const woke = performance.now();
     await setVisibility("visible");
     // A message written the moment the page wakes, while the socket is
     // still in doubt, is held rather than sent into it.
@@ -110,7 +109,7 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
     // Waking checks the socket (a health ping, 3 s to answer) and replaces
     // it, well before four missed heartbeats (about 20 s) would.
     expect(await until(() => hub.machineSocketOpens.get("atlas") ?? 0, (n) => n > opens, 8_000)).toBeGreaterThan(opens);
-    expect(Date.now() - woke, "socket replaced within 8 s of waking").toBeLessThan(8_000);
+    expect(performance.now() - woke, "socket replaced within 8 s of waking").toBeLessThan(8_000);
     await expect(header).toHaveText(" · Live");
     expect(await until(() => sentTimes("Right after waking"), (n) => n >= 1, 8_000)).toBe(1);
     await sendNow("After waking");
@@ -252,9 +251,9 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
     const again = hub.upstreamRefusals.length;
     await sendNow("After the session stayed live");
     expect(await until(() => hub.upstreamRefusals.length - again, (n) => n >= 1, 5_000)).toBeGreaterThanOrEqual(1);
-    const firstRefusal = Date.now();
+    const firstRefusal = performance.now();
     expect(await until(() => hub.upstreamRefusals.length - again, (n) => n >= 2, 3_000), "retried within about a second").toBeGreaterThanOrEqual(2);
-    expect(Date.now() - firstRefusal, "the backoff started afresh").toBeLessThan(3_000);
+    expect(performance.now() - firstRefusal, "the backoff started afresh").toBeLessThan(3_000);
     hub.upstreamBack(PELICAN);
     expect(await until(() => sentTimes("After the session stayed live"), (n) => n >= 1, 15_000)).toBe(1);
     await page.waitForTimeout(1_000);

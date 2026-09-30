@@ -6,6 +6,7 @@
 // shapes follow the hub wire types in src/types.ts and the relay contract in
 // src/pairing-relay.ts. Evidence label: "real-bundle, protocol-double".
 import type { Page, Route, WebSocketRoute } from "@playwright/test";
+import { journeyNow, journeyStamp } from "./clock";
 
 export const RELAY = "https://petra-stella-cloud.vercel.app";
 export const SCOPES = ["machine-read", "session-read", "pane-read", "pane-input", "message-send", "pane-interrupt"];
@@ -258,9 +259,9 @@ export class HubDouble {
       // own open at version 1 then had no upgrade to run, so every later
       // transaction failed with "object store not found". On a loaded machine
       // the app boots late enough for this seed to win the race.
-      const deadline = Date.now() + 15_000;
+      const deadline = performance.now() + 15_000;
       while (!(await indexedDB.databases()).some((db) => db.name === "cas-commander-v1")) {
-        if (Date.now() > deadline) throw new Error("hub double: the app never opened cas-commander-v1; call seedPaired after the page has booted");
+        if (performance.now() > deadline) throw new Error("hub double: the app never opened cas-commander-v1; call seedPaired after the page has booted");
         await new Promise((ok) => setTimeout(ok, 50));
       }
       // No version: join the app's database as it is, after any upgrade it runs.
@@ -371,7 +372,7 @@ export class HubDouble {
 
   /** The session's machine clock, for the stamps its history replays. */
   private machineNow(session: string): string {
-    return new Date(Date.now() + (this.options.clockAheadMs?.[session] ?? 0)).toISOString();
+    return journeyStamp(this.options.clockAheadMs?.[session] ?? 0);
   }
 
   /** Replayed like the daemon's history page: every row names its session, and a message its in_reply_to (protocol.rs ConversationHistoryMessage). */
@@ -434,7 +435,7 @@ export class HubDouble {
       return route.fulfill({
         status: 401,
         headers: { "www-authenticate": `DPoP error="${refusal.retryable ? "invalid_dpop_proof" : "invalid_token"}", error_description="${refusal.reason}"` },
-        json: { error: "unauthorized", reason: refusal.reason, retryable: refusal.retryable, server_time: Math.floor(Date.now() / 1000) },
+        json: { error: "unauthorized", reason: refusal.reason, retryable: refusal.retryable, server_time: Math.floor(journeyNow() / 1000) },
       });
     }
     if (path === "/v1/machine") {
@@ -490,7 +491,7 @@ export class HubDouble {
       // never answers.
       if (id.startsWith("art-cloud-down")) return route.fulfill({ status: 502, json: { error: "cloud_failed", status: null } });
       if (id.startsWith("art-offline")) return route.abort("connectionrefused");
-      return route.fulfill({ json: { artifact_id: id, cloud_artifact_id: `cloud-${id}`, url: `https://store.test/view/${encodeURIComponent(id)}?sig=journey`, expires_at: new Date(Date.now() + 600_000).toISOString(), name: `${id}.pdf`, mime: "application/pdf", size_bytes: 1024 } });
+      return route.fulfill({ json: { artifact_id: id, cloud_artifact_id: `cloud-${id}`, url: `https://store.test/view/${encodeURIComponent(id)}?sig=journey`, expires_at: journeyStamp(600_000), name: `${id}.pdf`, mime: "application/pdf", size_bytes: 1024 } });
     }
     if (path.endsWith("/lease")) return route.fulfill({ json: { held_by_me: true, controller_label: "Journey browser" } });
     if (path.endsWith("/status")) {
@@ -552,7 +553,7 @@ export class HubDouble {
     const relay = this.options.relay;
     if (!relay) return route.fulfill({ status: 503, json: { error: "relay not configured for this journey" } });
     const body = (route.request().postDataJSON() ?? {}) as Record<string, unknown>;
-    const expiresAt = new Date(Date.now() + 600_000).toISOString();
+    const expiresAt = journeyStamp(600_000);
     if (url.pathname.endsWith("/requests")) {
       this.requestedScopes = (body.requested_scopes as string[]) ?? [];
       return route.fulfill({

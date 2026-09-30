@@ -33,11 +33,16 @@ verify on upgrade) · 🔧 fix shipped · 🏗 EPIC · ⏭ n/a
   `mcp__cs` tools, initialized disposable `CAS_ROOT`, worktree discovery fixtures, and interrupt /
   resume recovery. The typed receipt is
   `crates/cas-pty/conformance/codex-cli-0.156.0-2026-09-23.json`.
-- **Locally installed:** **0.156.0** (`codex-cli 0.156.0`, checked 2026-09-23).
-- **Latest stable:** **0.156.0** (2026-09-22). The 0.150.0–0.156.0 stable releases are tracked
-  below; prereleases remain skimmed but untracked under this diary's stable-only policy.
-- **Gap:** none between the validated pin, local installation, and latest stable. The complete
-  isolated 0.156.0 matrix passed with `--yolo`, `xhigh` effort, direct-only `mcp__cs` tools,
+- **Locally installed:** **0.159.2** (`codex-cli 0.159.2`, checked 2026-09-30).
+- **Latest stable:** **0.159.2** (2026-09-29), confirmed through the official GitHub Releases
+  API on 2026-09-30. New stable entries are **0.156.1, 0.157.0, 0.157.1, 0.158.0,
+  0.159.0, 0.159.1, and 0.159.2**. Current 0.160/0.161 alpha notes were skimmed; they remain
+  untracked under this diary's stable-only policy.
+- **Gap:** the local/latest stable is seven published releases beyond the validated **0.156.0**
+  pin. Source review is not live conformance: approval/stdin behavior, background-server startup,
+  MCP discovery, hooks, worktrees and interrupt/resume still need a fresh installed-version matrix.
+  The 0.157.1 release explicitly has no attributable highlights; it is a named source gap below.
+- **Historical proof:** the complete isolated 0.156.0 matrix passed with `--yolo`, `xhigh` effort, direct-only `mcp__cs` tools,
   initialized disposable `CAS_ROOT`, worktree discovery fixtures, code-mode coexistence, and
   interrupt/resume recovery. The typed receipt records the live run and the scoped factory parity
   gate. The non-gating 0.149.1 probe also found `-c model_reasoning_effort=max` accepted by Codex
@@ -65,8 +70,10 @@ The load-bearing surface, all in `crates/cas-pty/src/pty.rs::PtyConfig::codex` u
   via this config key. A rename breaks role priming.
 - **`--no-alt-screen`** — required for the factory mux to render Codex panes.
 - **`--model <m>`** — model selection passthrough.
-- **`.codex/config.toml`** — registers the CAS MCP server (exposed to Codex as **`cs`**, e.g.
-  `mcp__cs__task`, `mcp__cs__coordination` — note: `cs`, not `cas`). MCP dep bumps (e.g. rmcp)
+- **MCP config (`-c mcp_servers.*`, plus `.codex/config.toml` integration)** — factory launches
+  inject the CAS stdio server through `push_codex_mcp_server_args`, including identity env,
+  even without a project config file. The server is exposed as **`cs`**, e.g.
+  `mcp__cs__task`, `mcp__cs__coordination` — note: `cs`, not `cas`. MCP dep bumps (e.g. rmcp)
   are 👀.
 - **`.codex/skills/` + `.codex/agents/`** — the Codex mirror synced from `.claude/` by
   `cas integrate` / `cas update`. Codex "skills plumbing / malformed skills field" changes are 👀.
@@ -80,6 +87,13 @@ The load-bearing surface, all in `crates/cas-pty/src/pty.rs::PtyConfig::codex` u
 
 | Codex version | Headline | Cassy verdict | Pointer |
 | --- | --- | --- | --- |
+| 0.159.2 | Windows background-process console suppression | ⏭ n/a | [release](https://github.com/openai/codex/releases/tag/rust-v0.159.2) |
+| 0.159.1 | GPT-6.1 Sol default in bundled/Bedrock catalogs | ✅ / 👀 | [release](https://github.com/openai/codex/releases/tag/rust-v0.159.1) |
+| 0.159.0 | Opt-in instant interrupt · deny preservation · MCP/command process launches | 👀 / ✅ | [release](https://github.com/openai/codex/releases/tag/rust-v0.159.0) |
+| 0.158.0 | MCP OAuth client secrets · elevated stdin approval · sandbox/command lifecycle | 👀 / ✅ | [release](https://github.com/openai/codex/releases/tag/rust-v0.158.0) |
+| 0.157.1 | Upstream cannot determine release highlights | ⏭ source gap | [release](https://github.com/openai/codex/releases/tag/rust-v0.157.1) |
+| 0.157.0 | GPT-6 Sol/Luna · automatic background server · tmux/network policy | 👀 / ✅ | [release](https://github.com/openai/codex/releases/tag/rust-v0.157.0) |
+| 0.156.1 | GPT-6 Sol/Luna picker and rate-limit recommendation | ✅ no action | [release](https://github.com/openai/codex/releases/tag/rust-v0.156.1) |
 | 0.156.0 | **Fullscreen TUI/voice/usage · worktrees default · MCP credential recovery · sandbox hardening** | 🟢 validated | [release](https://github.com/openai/codex/releases/tag/rust-v0.156.0) · receipt |
 | 0.155.0 | **Voice · daemon recovery/update · MCP Touch ID/OAuth status · sandbox hardening** | 🟢 validated | [release](https://github.com/openai/codex/releases/tag/rust-v0.155.0) · receipt |
 | 0.154.0 | **Worktrees · inline questions · plugin/skill refresh · MCP OAuth coordination · trust-gated startup** | 🟢 validated | [release](https://github.com/openai/codex/releases/tag/rust-v0.154.0) · receipt |
@@ -110,6 +124,109 @@ The load-bearing surface, all in `crates/cas-pty/src/pty.rs::PtyConfig::codex` u
 ---
 
 ## Entries
+
+### 0.159.2 — Windows background-process console suppression
+
+Reviewed 2026-09-30. Source: official
+[`rust-v0.159.2 release`](https://github.com/openai/codex/releases/tag/rust-v0.159.2)
+(published 2026-09-29).
+
+- **Windows background processes and sandbox commands no longer flash console windows.**
+  → ⏭ **n/a** to Cassy's Unix PTY launch. The patch publishes no flag, hook, MCP-discovery,
+  effort, or inherited-env change; it does not constitute a fresh Cassy validation receipt.
+
+### 0.159.1 — GPT-6.1 Sol catalog default
+
+Reviewed 2026-09-30. Source: official
+[`rust-v0.159.1 release`](https://github.com/openai/codex/releases/tag/rust-v0.159.1)
+(published 2026-09-29).
+
+- **GPT-6.1 Sol becomes the bundled and Bedrock catalog default.** → ✅ **no launch change /
+  👀 model-default watch.** `PtyConfig::codex` passes `--model` when a model is selected and
+  otherwise inherits the host default. This sweep records that drift without changing Cassy's
+  model registry or claiming the 0.156.0 receipt covers the new model.
+
+### 0.159.0 — opt-in instant interrupt · deny preservation · process launches
+
+Reviewed 2026-09-30. Source: official
+[`rust-v0.159.0 release`](https://github.com/openai/codex/releases/tag/rust-v0.159.0)
+(published 2026-09-29).
+
+- **Opt-in `instant_interrupt` steers model responses and long code-mode calls on new input.**
+  → 👀 **watch — interrupt/resume.** Cassy does not set this feature in `PtyConfig::codex`;
+  the new option does not establish compatibility for Cassy's PTY urgent-message path.
+  Retain the 0.156.0 pin until a fresh installed-version redirect matrix passes.
+- **Approved commands retain explicit filesystem denials, `.aws` gets default protection under
+  writable roots, and macOS/remote proxy sandbox access is repaired.** → 👀 **watch —
+  `--yolo`/sandbox policy.** Approval bypass is not proof that configured denies disappear;
+  review the effective policy in the next live matrix. No Cassy breakage was reproduced here.
+- **Windows MCP/code-mode/piped launches hide console windows and restrictive launchers gain
+  embedded fallback.** → ✅ **no Unix launch change.** The notes do not rename the `cs`
+  server, spawn-injected `mcp_servers.*.env`, `developer_instructions`, or reasoning-effort key.
+  Welcome screens, Mermaid, draft/voice UI and app-server pagination are ⏭ **n/a**; removal
+  of prompt suggestions and the bundled `plugin-creator` skill does not remove Cassy's mirrors.
+
+### 0.158.0 — MCP OAuth client secrets · elevated stdin approval · sandbox lifecycle
+
+Reviewed 2026-09-30. Source: official
+[`rust-v0.158.0 release`](https://github.com/openai/codex/releases/tag/rust-v0.158.0)
+(published 2026-09-28).
+
+- **MCP accepts pre-registered OAuth client secrets and exec-server WebSockets can require
+  bearer auth.** → ✅ **no action.** Cassy's injected `cs` is local stdio; its identity uses
+  `mcp_servers.*.env`, not remote OAuth or exec-server bearer credentials.
+- **Elevated commands default to terminal-input approval; runtime-only grants avoid extra
+  review. Approval reviews retry after new user input.** → 👀 **watch — unattended stdin /
+  `--yolo`.** These notes do not prove whether every Cassy-launched command avoids a prompt.
+  The new installed-version matrix must exercise command input and a busy-turn redirect;
+  no approval setting or launch flag is changed in this docs-only sweep.
+- **Linux nested writable roots and Git metadata isolation are repaired; macOS path aliases
+  honor existing permissions, and command completion includes early output/launch failure.**
+  → 👀 / 🟢 **sandbox watch / host lifecycle win.** Linked worktrees and command outcomes
+  matter to Cassy's cwd/liveness evidence; keep their compatibility unvalidated beyond 0.156.0.
+- **The detailed upstream changelog also changes command-hook spawning, shell environment
+  snapshots, MCP handler reuse/tool identities, and configurable schema budgets.** → 👀
+  **watch — hooks, env and discovery.** Cassy's trusted PreToolUse/PostToolUse hooks, inherited
+  `CAS_*` identity, and direct `mcp__cs` tool discovery need the next real matrix. Clipboard,
+  image-generation and Mermaid features are ⏭ **n/a** to that contract.
+
+### 0.157.1 — official release-note source gap
+
+Reviewed 2026-09-30. Source: official
+[`rust-v0.157.1 release`](https://github.com/openai/codex/releases/tag/rust-v0.157.1)
+(published 2026-09-26).
+
+- **Upstream explicitly cannot determine release highlights: its PR index is empty and its
+  tag comparison returned 404.** → ⏭ **source gap.** The published stable tag is evidence
+  of a release, not of particular behavior. No Cassy verdict or compatibility is inferred.
+
+### 0.157.0 — GPT-6 Sol/Luna · automatic background server · tmux/network policy
+
+Reviewed 2026-09-30. Source: official
+[`rust-v0.157.0 release`](https://github.com/openai/codex/releases/tag/rust-v0.157.0)
+(published 2026-09-25).
+
+- **GPT-6 Sol/Luna and older-model migration prompts are added.** → ✅ **no launch change.**
+  Cassy's explicit `--model` and TOML `model_reasoning_effort` overrides remain the integration
+  seam; registry/lane decisions are separate from this diary.
+- **Eligible interactive sessions automatically start a background server, with recovery for
+  incompatible settings; fullscreen transcripts default on and tmux mouse behavior is fixed.**
+  → 👀 **watch — PTY lifecycle.** Cassy still launches with `--no-alt-screen`; notes alone
+  do not establish foreground ownership, rendering, or interrupt behavior on the new runtime.
+- **Proxy routing and ongoing HTTP/WebSocket restrictions survive redirects and policy changes.**
+  → ✅ **no direct MCP change.** Cassy's local stdio server does not use those transports.
+  Network-policy enforcement remains a watch for commanded network work; import, voice,
+  forking across apps and transcript rendering are otherwise ⏭ **n/a** to the launch contract.
+
+### 0.156.1 — GPT-6 Sol/Luna picker and rate-limit recommendation
+
+Reviewed 2026-09-30. Source: official
+[`rust-v0.156.1 release`](https://github.com/openai/codex/releases/tag/rust-v0.156.1)
+(published 2026-09-23; absent from the previous sweep).
+
+- **The model picker offers GPT-6 Sol/Luna and recommends Luna on rate limits.** → ✅ **no
+  action.** Cassy's model choice passes through `--model`, not the picker. No spawn-flag,
+  MCP, hooks, effort-key, skills/AGENTS.md or env change is described by this patch's notes.
 
 ### 0.156.0 — fullscreen TUI, voice, usage analytics, and default worktrees
 

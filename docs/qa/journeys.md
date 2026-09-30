@@ -15,11 +15,18 @@ In **Steps**, the text before ` — ` must match the suite's stage
 Cassy Commander, the browser app that `cas hub` serves at `/commander/`.
 Suite: `hub-web/e2e/journeys/`. Run it with `npm run journeys` in
 `hub-web/`, or with `scripts/journey-eval.sh <dir>` to collect receipts.
+The journeys project uses UTC and an advancing browser clock starting at
+`2026-09-30T12:00:00Z`. Node protocol fixtures share that injected clock;
+calendar-day fixtures use `journeyDay()` rather than subtracting hours.
+`npm run journeys` checks for ambient `Date.now()`/`new Date()` in journey
+sources before running the suite. Use `performance.now()` for elapsed time.
+To exercise early-morning boundaries, run with
+`HUB_JOURNEY_NOW=2026-09-30T00:30:00Z` or `2026-09-30T05:59:00Z`.
 Every journey also watches each animation frame and fails if an open
 conversation shows the terminal canvas or sits on a bare panel for more than
 250 ms (`frame_defects` in `result.json`).
 
-- **Surface-wide:** `hub-web/src/main.ts`, `hub-web/src/styles.css`, `hub-web/src/types.ts`, `hub-web/src/terminal*`, `hub-web/src/terminal/*`, `hub-web/index.html`, `hub-web/package-lock.json`, `hub-web/vite.config.ts`, `hub-web/dist/*`, `hub-web/e2e/journeys/hub-double.ts`, `hub-web/e2e/journeys/journey.ts`, `hub-web/e2e/journeys/world.ts`, `hub-web/playwright.config.ts`
+- **Surface-wide:** `hub-web/src/main.ts`, `hub-web/src/styles.css`, `hub-web/src/types.ts`, `hub-web/src/terminal*`, `hub-web/src/terminal/*`, `hub-web/index.html`, `hub-web/package-lock.json`, `hub-web/vite.config.ts`, `hub-web/dist/*`, `hub-web/e2e/journeys/hub-double.ts`, `hub-web/e2e/journeys/journey.ts`, `hub-web/e2e/journeys/clock.ts`, `hub-web/e2e/journeys/world.ts`, `hub-web/playwright.config.ts`
 
 ### HUB-J1 · First open and pair a machine with a code
 
@@ -29,7 +36,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - **Suite:** `hub-web/e2e/journeys/pair-code.journey.ts`
 - **Gaps:** the relay and the machine-side `cas hub authorize` are doubled; real pairing is proven by `docs/design/hub-web/pairing-verification.md`
 
-**Steps**
+#### Steps
 
 1. Open Cassy Commander for the first time — the empty state explains what to do
 2. Ask for a pairing code — "Pair a machine", then "Create pairing code" shows `cas hub authorize <code>`
@@ -37,7 +44,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 4. Confirm and pair this browser — enter the operator label, then press Pair
 5. See the machine's supervisor ready to talk to — a toast says the machine is connected without covering the composer or any heading, and its row opens a conversation
 
-**Expected experience**
+#### Expected experience
 
 - One obvious "Pair a machine" action on the empty screen, at every width.
 - The code and the exact command to run are shown together; copying the command works.
@@ -45,7 +52,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - The confirm step names the machine and the scopes in plain words before anything is stored.
 - After pairing, the user lands on a list with the supervisor in it. No reload and no second step.
 
-**Edge paths**
+#### Edge paths
 
 - The relay is unreachable: "The pairing service is unavailable."
 - The code expires: "This pairing request has expired." A fresh code must be one action away.
@@ -61,7 +68,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - **Suite:** `hub-web/e2e/journeys/pair-link.journey.ts`
 - **Gaps:** the exchange endpoint is doubled
 
-**Steps**
+#### Steps
 
 1. Open the link the machine printed — the dialog opens by itself and the secret leaves the address bar
 2. Confirm the machine — the hub address and machine name arrive filled in from the link; only your name is left, with the focus ring on it
@@ -69,13 +76,13 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 4. Pair — the exchange goes to the link's machine
 5. Reach the supervisor — the machine's supervisor is listed and opens
 
-**Expected experience**
+#### Expected experience
 
 - The invitation is recognised at once, with no extra click to start.
 - Scopes the link did not grant are visibly unavailable, with the command to get them.
 - The hub address field says what to type (the placeholder shows a real example).
 
-**Edge paths**
+#### Edge paths
 
 - A malformed or truncated link: the "invalid or incomplete" message offers the code flow instead.
 - A link without `scopes` pre-ticks only the read-only three.
@@ -89,7 +96,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - **Suite:** `hub-web/e2e/journeys/find-conversation.journey.ts`
 - **Gaps:** none
 
-**Steps**
+#### Steps
 
 1. See every machine's supervisors in one list — every row is titled by its project, then its machine, with the supervisor codename beneath
 2. Notice a new reply while away — the row shows an unread count
@@ -103,13 +110,13 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 7. Open a conversation over a slow relay: one calm line, and the footer stays Connected — "Opening the conversation…", the attempt and relay stage only behind a closed Details
    - A first open that misses the 3-second mark retries calmly, and the footer stays Connected — the first retry of a conversation that has never opened still reads "Opening the conversation…" with the retry behind Details; no "Terminal unavailable", no retry timeline, and the footer never drops to "1 connected"; a second failure shows as a real one
 
-**Expected experience**
+#### Expected experience
 
 - Rows read project first, then machine, so two machines never look alike; the generated codename is tertiary.
 - New replies and questions waiting for me are visible on the row without opening it.
 - A visible search field finds a conversation by project, machine or supervisor; the palette does too, from anywhere.
 
-**Edge paths**
+#### Edge paths
 
 - Nothing live: "No live supervisors listed", with a route to dormant sessions.
 - A machine becomes unreachable while a message is pending: the row stays with "Unreachable · message pending".
@@ -123,20 +130,20 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - **Suite:** `hub-web/e2e/journeys/read-history.journey.ts`
 - **Gaps:** history pages come from the double; real rows are covered by `hub-web/scripts/conversation-history-qa.mjs`
 
-**Steps**
+#### Steps
 
 1. Open the conversation and see the recent turns — the latest exchange is on screen at once
 2. Load earlier turns — "Load earlier" fetches the previous page
 3. Reach the start of the conversation — "No earlier history" appears, with day separators
 4. Open a report the supervisor sent — opening the file shows the hosted copy in a new tab through a short-lived signed link from the machine; every failure is said on the file card itself, never in a toast far from it, and leaves no tab open; a file that was never uploaded to Cloud says so, and opening it again opens no tab at all; Cloud failing ("wait a minute, then open it again") says what to do; a connected machine that sends nothing says it is connected but didn't send the file, never that it is off
 
-**Expected experience**
+#### Expected experience
 
 - Recent turns appear without any action, grouped by speaker and day.
 - Loading earlier keeps the reading position; the button shows progress.
 - The end of history is stated, not implied.
 
-**Edge paths**
+#### Edge paths
 
 - The hub never answers a history request ("Loading earlier…" has no timeout).
 - The socket closes while loading.
@@ -150,7 +157,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - **Suite:** `hub-web/e2e/journeys/reply-typed.journey.ts`
 - **Gaps:** delivery by a running daemon and operator stamping are doubled
 
-**Steps**
+#### Steps
 
 1. Open the conversation — the composer names the supervisor
 2. Write and send — the message appears at once as "Sending…" and the composer clears
@@ -166,7 +173,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 11. Not confirmed settles once the supervisor replies after it — a supervisor turn that arrives after the give-up turns the card into "Not confirmed · The supervisor has replied since; send it again only if it missed this." with no Retry, so nothing invites a duplicate send; a quiet underlined "Send again" resends it without retyping
 12. Focus on the opening card moves into the conversation — with keyboard focus on the connection card's Details while a slow relay opens the conversation, focus lands in the composer when the conversation replaces the card, never the page body; focus elsewhere (the list search) stays where it is
 
-**Expected experience**
+#### Expected experience
 
 - Enter sends and Shift+Enter adds a new line.
 - The user can tell sent from delivered without reading attributes.
@@ -179,7 +186,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - A receipt that is only a few seconds late never flashes "Not confirmed", so there is no Retry that could send the message twice.
 - A screen reader hears who spoke and when for each message group ("You, 12:45"), the status as "Live", and meets no dead attach control.
 
-**Edge paths**
+#### Edge paths
 
 - Another device controls the session; nobody holds control (the page takes control first).
 - The connection is reconnecting: the message is not sent and the user is told.
@@ -193,19 +200,19 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - **Suite:** `hub-web/e2e/journeys/reply-voice.journey.ts`
 - **Gaps:** speech recognition is stubbed; a real microphone and recognizer are not exercised
 
-**Steps**
+#### Steps
 
 1. Open the conversation — the mic control is ready
 2. Dictate the reply — "Start listening", speak, and the words land in the composer
 3. Review and send — edit the transcript, then send it like a typed reply
 
-**Expected experience**
+#### Expected experience
 
 - It is clear when the mic is listening; the placeholder says to speak, then review.
 - Nothing is sent without the user pressing Send.
 - The transcript lands at the cursor, so it can extend a typed draft.
 
-**Edge paths**
+#### Edge paths
 
 - Mic permission denied: voice turns off and typing still works.
 - No speech heard; a browser without speech recognition shows "Voice input unavailable".
@@ -218,7 +225,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - **Suite:** `hub-web/e2e/journeys/answer-ask.journey.ts`
 - **Gaps:** none
 
-**Steps**
+#### Steps
 
 1. Open the conversation — the thread is live
 2. A question from an ended session does not wait — the previous session's unanswered question reads quietly in the thread with "No longer waiting: the session that asked has ended." and no choices; nothing is pinned and the context rail lists only the live blocker
@@ -229,7 +236,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 7. Reply to a machine a day ahead — no future day header: the machine's turn sits under Today at its arrival time, marked "machine clock ahead", and the reply shows the time it was sent below it
 8. Reopen the page — the thread rebuilt from history keeps every turn where the visit showed it, in the machine's order, under Today, with times reading in order
 
-**Expected experience**
+#### Expected experience
 
 - The question is impossible to miss, and its choices are buttons.
 - A question never takes the whole screen: while the operator writes on a phone it is a one-line bar, and it can be dismissed.
@@ -237,7 +244,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - After answering, the question stays readable in the thread with the answer shown.
 - Turns read in time order under the right day, even when the machine's clock runs ahead: no future day header, and a quiet "machine clock ahead" instead of a time from the future.
 
-**Edge paths**
+#### Edge paths
 
 - The hub refuses the answer: the question pins again.
 - Typing a free-text reply also answers the pinned question.
@@ -251,7 +258,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - **Suite:** `hub-web/e2e/journeys/switch-machines.journey.ts`
 - **Gaps:** none
 
-**Steps**
+#### Steps
 
 1. Start a draft on the Linux machine — the header names the project and the machine
 2. Switch to the Mac and send there — the other thread starts with an empty composer; the message goes to that machine
@@ -267,12 +274,12 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 12. A supervisor with no workers yet is listed everywhere — a live supervisor that has not spawned workers is in the conversation list, the palette's Jump rows and the session picker ("no workers · live"), and the "Switch session — N available" count and the Terminal view fleet board match all three; a stale or supervisor-less session is hidden from every one of them; on the Fleet overview each row leads with its project, and when several sessions share a project each plot row also shows the shortest distinct tail of its codename ("cas-src · pelican-9", "cas-src · otter-5"), and the same codename on two machines adds the machine's rail initials ("otter-5 · AL", "otter-5 · AT"); tags are whole and the project keeps a letter, at 1280 and 390
 13. Tell one codename apart on two machines whose initials match — with Atlas and Attic (both "AT") running the same supervisor codename, the Fleet plot marks each machine by the shortest part of its name that differs ("Atl" / "Att"), never the full machine label; a twin tag is capped to fit the 132px column at 390, trimming a long codename tail from the left ("…ter-5 · Atl", "…can-9 · Att"). At 1280 and 390 the tag stays whole and the project keeps a letter
 
-**Expected experience**
+#### Expected experience
 
 - The header always says which machine the user is talking to.
 - Drafts belong to their thread and never leak into another.
 
-**Edge paths**
+#### Edge paths
 
 - Reload restores the last machine and conversation.
 - Remove a machine from this browser (the Paired machines dialog).
@@ -285,7 +292,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - **Suite:** `hub-web/e2e/journeys/phone.journey.ts`
 - **Gaps:** a real on-screen keyboard resize is not emulated
 
-**Steps**
+#### Steps
 
 1. Open the list on a phone — full-width list, no sideways scrolling, and the search offers no keyboard shortcut
 2. Tap a conversation — the thread replaces the list, with a back control
@@ -296,12 +303,12 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 7. See the switched-off machine named plainly — the footer counts it with a warning dot, and Paired machines says "Can't reach · retrying", shows times on the thread's 24-hour clock and "Version unknown until it connects"
 8. Pair another machine and read its header at once — pairing from the phone opens its conversation, and the "connected" toast sits below the thread header, never over the back link, project and host, and on the list below the brand row
 
-**Expected experience**
+#### Expected experience
 
 - One column at a time; every target is big enough to tap.
 - The composer stays visible above the keyboard.
 
-**Edge paths**
+#### Edge paths
 
 - The "Write to a supervisor" button opens a thread straight away.
 - Attention and machine problems live in the desktop rail and are hidden on a phone.
@@ -314,7 +321,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - **Suite:** `hub-web/e2e/journeys/dark-theme.journey.ts`
 - **Gaps:** none
 
-**Steps**
+#### Steps
 
 1. Open the conversation in the light theme — a status reply is visible
 2. Choose the dark appearance — from "Appearance & commands" (Ctrl/Cmd+K)
@@ -322,12 +329,12 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 4. The choice survives a reload — dark is still applied
 5. High contrast keeps the open conversation and Send marked — with forced colours on, in dark and light, the open row is filled with Highlight (under the pointer and with focus too) and Send is a filled button with an edge
 
-**Expected experience**
+#### Expected experience
 
 - Appearance is found where the user expects it, and the change is instant.
 - Dark is fully dark: no light panels and no unreadable text.
 
-**Edge paths**
+#### Edge paths
 
 - "System" follows the device setting and changes live.
 - Nothing shows which appearance is currently selected.
@@ -340,7 +347,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - **Suite:** `hub-web/e2e/journeys/reconnect.journey.ts`
 - **Gaps:** a real network loss (heartbeat misses, offline) is simulated by closing the socket
 
-**Steps**
+#### Steps
 
 1. Open the conversation — the thread is live
 2. The network drops — "Lost connection to Atlas · Linux. Reconnecting…" appears; the header and the row say Reconnecting, and the footer counts 1 of 2 connected with a warning dot; a send is held in the thread ("Waiting for the connection — sends when it's back") and not sent; the attention rail raises no transport alarm of its own, and its counts agree
@@ -349,14 +356,14 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 5. On a phone, the banner stays readable through an outage — no toast sits on the reconnect banner, in light and dark; after it reconnects, every turn keeps its place (the message stays below its session line)
 6. In Terminal view, nothing claims all clear or live during an outage — the Attention rail names the outage instead of "All clear", the machine rail says Reconnecting, the header drops CONTROL and shows Reconnecting in place of a latency, Take/Release control and Interrupt say why they are unavailable, and the machine drawer's session row says Reconnecting, not live; all return when the session is back
 
-**Expected experience**
+#### Expected experience
 
 - The user always knows whether the conversation is live: the header, the row and the footer never disagree.
 - The attention rail defers to the banner while it reconnects; only a failure that will not retry gets a card, in the same plain words.
 - A transport alarm resolves itself when the connection comes back.
 - Nothing typed is lost, and recovery needs no action.
 
-**Edge paths**
+#### Edge paths
 
 - Pairing revoked (401/403): "Needs pairing", with a re-pair route (hidden on a phone).
 - The machine is offline for a long time: attempts back off, at most 10 s apart; a held message not sent within 2 minutes turns "Not sent" with Retry and Edit.
@@ -369,7 +376,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - **Suite:** `hub-web/e2e/journeys/network-switch.journey.ts`
 - **Gaps:** the protocol double reproduces what a switch leaves behind (reset sockets, half-open sockets, offline, no event at all); a real phone moving between radios and a laptop truly sleeping are not driven, and a sleeping page is simulated by its visibility events
 
-**Steps**
+#### Steps
 
 1. Open the conversation — the thread is live over the machine socket
 2. The route changes under the page — the sockets reset and are replaced within seconds; a message sent then goes out once
@@ -381,13 +388,13 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 8. On a legacy socket, a second message sent before the refusal arrives waits too — a hub without the machine protocol stops reading a session's socket once it refuses a send, so a message written before that refusal reached the page is held with the first; both go out once, in order, when the session is back; and once the session has stayed live for 10 s, the next drop retries after about 1 s again, receipt or not
 9. A revoked pairing says so and offers Re-pair, on a phone too — a definitive refusal shows "Needs pairing", the banner says the machine needs pairing again instead of "Reconnecting…", and carries a Re-pair control (44 px on a phone) that opens pairing
 
-**Expected experience**
+#### Expected experience
 
 - A network switch never needs a reload, and never leaves the page claiming Live on a dead socket.
 - A message is never silently lost: it goes out once when it can, or says "Not sent" with Retry.
 - Recovery is bounded: at most 10 s after the network returns, sooner when the browser says it changed.
 
-**Edge paths**
+#### Edge paths
 
 - A message sent into a socket that later proves dead gets no receipt: it turns "Not confirmed" with Retry. Sending it again automatically would need the hub to recognise a repeat (its client_ref); until it does, the operator decides.
 - The machine is unreachable for more than 2 minutes: a held message turns "Not sent" with Retry and Edit.
@@ -400,7 +407,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - **Suite:** `hub-web/e2e/journeys/launch-session.journey.ts`
 - **Gaps:** the hub's project catalog, folder browse and session start are doubled; that a hub-started session survives a hub restart and the tab closing is proven at epic assembly on a real machine
 
-**Steps**
+#### Steps
 
 1. A paired controller enables launch from Commander — "Allow new sessions" names the machine, confirms "Start new sessions", and opens the launch form without a new pairing
 2. The granted scope stays available — after reload "New session" replaces the grant path
@@ -413,13 +420,13 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 9. Browse a launch folder and start a repository in it — folders open, only repository roots are selectable, and Start lands in the new session
 10. A long machine name fits the phone consent — the full name wraps in the grant button and confirmation; Close stays visible and the page does not scroll sideways
 
-**Expected experience**
+#### Expected experience
 
 - One obvious New session action beside Pair a machine, and in the command palette; a paired controller can allow it on the chosen machine while a read-only device sees invitation instructions.
 - Nothing is started twice: a running project attaches.
 - A refusal names what to fix on which machine; it never reads as a lost pairing.
 
-**Edge paths**
+#### Edge paths
 
 - The hub refuses the scope at start (403): the sheet switches to the grant path.
 - A read-only pairing cannot self-grant session launch; it needs a control invitation.

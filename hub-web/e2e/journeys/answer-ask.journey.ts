@@ -1,4 +1,5 @@
 import { test, expect } from "./journey";
+import { journeyNow, journeyStamp } from "./clock";
 import type { Page } from "@playwright/test";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
 
@@ -16,7 +17,6 @@ async function lastSend(page: Page): Promise<{ label: string; day: string }> {
 async function threadOrder(page: Page): Promise<string[]> {
   return page.locator(".msgs > *").evaluateAll((nodes) => nodes.filter((node) => node.matches(".day, .session-divider, [role=group]")).map((node) => node.getAttribute("role") === "group" ? node.getAttribute("aria-label") ?? "" : node.textContent ?? ""));
 }
-/** "You, HH:MM" for this browser's clock now, or a minute either side if the clock ticks over. */
 /** A finger swiping `element` sideways by `dx` (touch pointer events, as a phone sends them). */
 async function swipeAway(page: Page, selector: string, dx: number): Promise<void> {
   await page.locator(selector).first().evaluate((element, dx) => {
@@ -30,15 +30,20 @@ async function swipeAway(page: Page, selector: string, dx: number): Promise<void
   }, dx);
 }
 function youNow(): string[] {
-  return [-60_000, 0, 60_000].map((offset) => { const d = new Date(Date.now() + offset); return `You, ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; });
+  // Browser and Node clocks advance independently; tolerate a minute boundary
+  // during the send while keeping both anchored to the injected UTC instant.
+  return [-60_000, 0, 60_000].map((offset) => {
+    const d = new Date(journeyNow() + offset);
+    return `You, ${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`;
+  });
 }
 
 test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
   // The machine's clock runs five minutes ahead of this browser's, and its
   // durable history holds an open blocker (cas-ce17).
-  const ahead = new Date(Date.now() + 300_000).toISOString();
+  const ahead = journeyStamp(300_000);
   // The second machine's clock runs a whole day ahead (cas-ac1f).
-  const dayAhead = new Date(Date.now() + 86_400_000).toISOString();
+  const dayAhead = journeyStamp(86_400_000);
   const hub = await journey.hub({
     machines: [ATLAS, STUDIO],
     paired: ["atlas", "studio"],
@@ -48,7 +53,7 @@ test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
       // cas-16eed: a question the previous supervisor session asked and never
       // had answered here (it was settled in the pane) sits before the blocker.
       [PELICAN]: [{ has_earlier: false, messages: [], replies: [
-        { notification_id: 899, reply_to: null, message: "All waves are done; the full suite passes.\n\n- **Ask:** open the PR to main and cut a release?", summary: "", device_id: "journey-device", kind: "ask", attachments: [], session: "patient-pelican-8", at: new Date(Date.now() - 60_000).toISOString() },
+        { notification_id: 899, reply_to: null, message: "All waves are done; the full suite passes.\n\n- **Ask:** open the PR to main and cut a release?", summary: "", device_id: "journey-device", kind: "ask", attachments: [], session: "patient-pelican-8", at: journeyStamp(-60_000) },
         { notification_id: 900, reply_to: null, message: "The release gate went red; the train is held.", summary: "", device_id: "journey-device", kind: "blocker", attachments: [], at: ahead },
       ] }],
       [OTTER]: [{ has_earlier: false, messages: [], replies: [{ notification_id: 901, reply_to: null, message: "Mac build is queued behind the nightly.", summary: "", device_id: "journey-device", kind: "answer", attachments: [], at: dayAhead }] }],

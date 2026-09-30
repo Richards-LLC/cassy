@@ -11,6 +11,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HubDouble, type DoubleOptions } from "./hub-double";
+import { JOURNEY_NOW, JOURNEY_TIMEZONE, startJourneyClock } from "./clock";
 
 export { expect };
 
@@ -33,6 +34,12 @@ function slug(text: string): string {
 }
 
 export const test = base.extend<{ journey: Journey }>({
+  page: async ({ page }, use) => {
+    // Install before navigation; time flows normally from a known instant.
+    // Freezing Date would stop the app aging receipts and heartbeat deadlines.
+    await page.clock.install({ time: startJourneyClock() });
+    await use(page);
+  },
   journey: async ({ page }, use, testInfo) => {
     const id = /^([A-Z]+-J[0-9]+)\b/.exec(testInfo.title)?.[1];
     if (!id) throw new Error(`journey test titles must start with a catalog id: "${testInfo.title}"`);
@@ -53,9 +60,9 @@ export const test = base.extend<{ journey: Journey }>({
       async stage(title, body) {
         await test.step(title, async () => {
           await page.screencast.showChapter(title, { duration: 1000 });
-          const started = Date.now();
+          const started = performance.now();
           await body();
-          const ms = Date.now() - started;
+          const ms = performance.now() - started;
           const screenshot = `J${String(stages.length + 1).padStart(2, "0")}.png`;
           await settle(page);
           await page.screenshot({ path: join(dir, screenshot) });
@@ -93,6 +100,7 @@ export const test = base.extend<{ journey: Journey }>({
       label: "real-bundle, protocol-double",
       project: testInfo.project.name,
       viewport,
+      clock: { now: new Date(JOURNEY_NOW).toISOString(), timezone: JOURNEY_TIMEZONE },
       stages,
       page_errors: errors,
       frame_defects: frames,

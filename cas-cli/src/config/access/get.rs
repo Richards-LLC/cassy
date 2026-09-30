@@ -85,6 +85,9 @@ impl Config {
                 Some(factory.merge_sweep_command.clone().unwrap_or_default())
             }
             "factory.epic_base_branch" => Some(factory.epic_base_branch.clone().unwrap_or_default()),
+            "factory.release_gate_home_dir" => {
+                Some(factory.release_gate_home_dir.clone().unwrap_or_default())
+            }
             "factory.merge_sweep_cwd" => Some(factory.merge_sweep_cwd.clone().unwrap_or_default()),
             "factory.merge_sweep_timeout_secs" => Some(factory.merge_sweep_timeout_secs.to_string()),
             "factory.ai_enrichment.enabled" => Some(factory.ai_enrichment.enabled.to_string()),

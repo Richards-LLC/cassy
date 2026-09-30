@@ -7,6 +7,39 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.41.0] - 2026-09-30
+
+### Added
+
+- `factory.release_gate_home_dir` sets the scratch base for the assembly
+  proof's plain clone. The daemon passes it to daemon-initiated rolling
+  integration as `CAS_RELEASE_GATE_HOME_DIR`; when it is unset the sweep
+  reports `NOT CONFIGURED` naming the key, instead of `FAILED` with
+  attribution probes.
+- A supervisor can close a deliberately superseded delivery with
+  `supervisor_override=true` and
+  `reason="reviewed-drop: <SHA>[,<SHA>...] -- <why>"`. Each named commit must
+  descend from the delivery anchor, be reachable on the target, change a
+  dropped path against its first parent, and together they must cover every
+  dropped path. A narrative without commit receipts no longer waives the
+  content gate.
+- `cas-tdd` references carry worked good/bad test examples in this
+  repository's idioms and a system-boundary mocking guide.
+
+### Fixed
+
+- Task close no longer strands a merged delivery whose lines later commits
+  deliberately changed. The content gate follows each delivered line through
+  descendant history and credits ordinary replacements, the task's own conflict
+  resolutions, additive list unions, and the task's own later QA rounds.
+  Reverts, stale merges, plain deletions and another task's merge resolution
+  still reject.
+
+### Documentation
+
+- The harness changelog diaries cover Claude Code through 2.1.285, Codex
+  through 0.159.2 and Grok through 1.0.44.
+
 ## [3.40.0] - 2026-09-30
 
 ### Added

@@ -182,6 +182,10 @@ impl Config {
                 factory.epic_base_branch.clone().unwrap_or_default(),
             ),
             (
+                "factory.release_gate_home_dir".to_string(),
+                factory.release_gate_home_dir.clone().unwrap_or_default(),
+            ),
+            (
                 "factory.merge_sweep_cwd".to_string(),
                 factory.merge_sweep_cwd.clone().unwrap_or_default(),
             ),

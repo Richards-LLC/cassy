@@ -1,4 +1,4 @@
-# Keep reviews in shadow mode.
+# Keep reviews in shadow mode
 
 The combined reviewers' valid reports caught **3 of 14 seeded defects (21.4%)**; legacy caught 4 (28.6%). Neither clears the proposed 90% recall gate. Fix safety remains unproven.
 
@@ -38,7 +38,7 @@ Spec and legacy each falsely flag 3/4 eligible clean cases. Those failures inclu
 
 ## Corpus and paired harness
 
-Twenty pinned authentic historical slices cover the 3.37.0/3.38.0 cycles:14 defects across 12 classes,4 eligible corrected-delivery negatives (c15,c16,c17,c20), and 2 nominal negatives retained as contaminated (c18,c19). c04–c06 share one self-reexec regression. Corrective commits, exact base/head SHAs and scoped files are in corpus.json/repairs.json. These are curated real fix cases, not a random holdout; six seeds are genuine fixture failures, rather than claims of corresponding production failures.
+Twenty pinned authentic historical slices cover the 3.37 and 3.38 release cycles:14 defects across 12 classes,4 eligible corrected-delivery negatives (c15,c16,c17,c20), and 2 nominal negatives retained as contaminated (c18,c19). c04–c06 share one self-reexec regression. Corrective commits, exact base/head SHAs and scoped files are in corpus.json/repairs.json. These are curated real fix cases, not a random holdout; six seeds are genuine fixture failures, rather than claims of corresponding production failures.
 
 Two independent discoveries were preserved: c18 drops restored hooks from CI impact inventory (cas-045f), and c19 accepts a log redirection that creates an untracked file before clean_head refuses the check (cas-c0ec). Both are excluded from the clean denominator. Supplemental c20 reuses the authentic corrected factory child-test file at 0a93e428c after c19 contamination. Its narrow scope and post-discovery selection add selection bias; it is not a new independent delivery. All three actors emitted zero findings on c20.
 

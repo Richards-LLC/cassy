@@ -6,7 +6,7 @@ rerun through the installed 3.39.0 registered shadow protocol before enabling an
 policy that relies on these reviewers.
 
 `corpus.json` pins 14 real defects (12 classes), five nominal negatives and four eligible clean
-negatives from the 3.37.0/3.38.0 cycles. Every case has authentic base, delivery
+negatives from the 3.37 and 3.38 release cycles. Every case has authentic base, delivery
 and repair SHAs. The `task_context` is a read-only export of the original task's
 current stored description and exact criteria, rather than a claimed historical
 criteria snapshot. `criteria`, `defect` and `expected_fix` outside `task_context`
@@ -20,7 +20,7 @@ model runs. This is a recorded corpus revision, not a silently removed failure.
 
 Cases c04–c06 are separate affected self-reexec callers from one regression;
 report both instance recall and grouped recall. c08–c13 include real failing
-fixtures confirmed by the 3.38.0 assembly, rather than alleged production bugs.
+fixtures confirmed by the 3.38 assembly, rather than alleged production bugs.
 The clean negatives are corrected real slices, not claims that their entire
 repositories contain no defects. A previously unseeded finding can be correct
 if independently substantiated. Standards-only source coverage is itself under

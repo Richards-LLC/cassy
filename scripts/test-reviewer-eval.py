@@ -15,9 +15,10 @@ spec.loader.exec_module(evaluation)
 
 class ReplayBoundaries(unittest.TestCase):
     def setUp(self):
-        parent = Path(os.environ['REVIEW_EVAL_TEST_DIR'])
-        parent.mkdir(parents=True, exist_ok=True)
-        self.temp = tempfile.TemporaryDirectory(dir=parent)
+        parent = os.environ.get('REVIEW_EVAL_TEST_DIR')
+        if parent:
+            Path(parent).mkdir(parents=True, exist_ok=True)
+        self.temp = tempfile.TemporaryDirectory(dir=parent or None)
         self.root = Path(self.temp.name)
         self.old_root = evaluation.ROOT
         self.repo = self.root/'source'

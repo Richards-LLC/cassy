@@ -25,4 +25,4 @@ None.
 
 Headless Chromium rendered each URL under the requested color schemes and viewports. Text nodes were checked for effective WCAG contrast, clipping, overlap, visibility, viewport escape, and fixed-size truncation.
 
-Screenshots remain in /home/pippenz/.cas/artifacts/cas-b622/report-visual-qa. JS-disabled/print receipt: report-render-receipt.json; print PDF: report-print.pdf under same task artifacts root.
+Corrective-render screenshots remain in /home/pippenz/.cas/artifacts/cas-src-5afb8f4cc4d727d9ea2d1ba8381fb0af925ef67130c95e75e7dc9720f98d54a7/cas-b622/revision-visual-qa. Original full JS-disabled/print receipt and PDF are under /home/pippenz/.cas/artifacts/cas-b622; only heading punctuation and release-cycle wording changed.

@@ -910,6 +910,106 @@ mod tests {
             },
         }
     }
+
+    fn union_list_fixture(
+        base: &str,
+        delivered: &str,
+        sibling: &str,
+        merged: &str,
+    ) -> (tempfile::TempDir, String) {
+        let dir = fixture();
+        let repo = dir.path();
+        commit(repo, "copy.txt", base, "list baseline");
+        git(repo, &["branch", "-f", "main", "HEAD"]);
+        let delivery = commit(repo, "copy.txt", delivered, "cas-taskb: delivery list");
+        git(repo, &["checkout", "main"]);
+        commit(repo, "copy.txt", sibling, "sibling list");
+        git(
+            repo,
+            &[
+                "merge",
+                "--no-ff",
+                "--no-commit",
+                "-s",
+                "ours",
+                "factory/worker",
+            ],
+        );
+        commit(repo, "copy.txt", merged, "integrate list resolution");
+        (dir, delivery)
+    }
+
+    #[test]
+    fn union_cannot_restore_removed_baseline_list_member_cas_0930() {
+        let (dir, delivery) = union_list_fixture(
+            "Alpha, ADMIN, Beta,\nneighbor();\n",
+            "Alpha, DeliveryProbe, Beta,\nneighbor();\n",
+            "Alpha, ADMIN, SiblingProbe, Beta,\nneighbor();\n",
+            "Alpha, ADMIN, DeliveryProbe, SiblingProbe, Beta,\nnew_neighbor();\n",
+        );
+        assert_eq!(
+            delivery_content_presence_on_target(dir.path(), &delivery, "main"),
+            DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn union_cannot_introduce_items_absent_from_both_parents_cas_0930() {
+        let (dir, delivery) = union_list_fixture(
+            "Alpha, Beta,\n",
+            "Alpha, DeliveryProbe, Beta,\n",
+            "Alpha, SiblingProbe, Beta,\n",
+            "Alpha, DeliveryProbe, SiblingProbe, Invented, Beta,\n",
+        );
+        assert_eq!(
+            delivery_content_presence_on_target(dir.path(), &delivery, "main"),
+            DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn union_cannot_ignore_sibling_removal_of_baseline_item_cas_0930() {
+        let (dir, delivery) = union_list_fixture(
+            "Alpha, Beta,\n",
+            "Alpha, DeliveryProbe, Beta,\n",
+            "Alpha, SiblingProbe,\n",
+            "Alpha, DeliveryProbe, SiblingProbe, Beta,\n",
+        );
+        assert_eq!(
+            delivery_content_presence_on_target(dir.path(), &delivery, "main"),
+            DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn union_transport_still_requires_later_line_survival_cas_0930() {
+        let (dir, delivery) = union_list_fixture(
+            "Alpha, Beta,\n",
+            "Alpha, DeliveryProbe, Beta,\n",
+            "Alpha, SiblingProbe, Beta,\n",
+            "Alpha, DeliveryProbe, SiblingProbe, Beta,\n",
+        );
+        assert_eq!(
+            delivery_content_presence_on_target(dir.path(), &delivery, "main"),
+            DeliveryContentPresence::Present {
+                paths: vec!["copy.txt".into()]
+            }
+        );
+        commit(dir.path(), "copy.txt", "", "delete union line");
+        assert_eq!(
+            delivery_content_presence_on_target(dir.path(), &delivery, "main"),
+            DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()]
+            }
+        );
+    }
+
     #[test]
     fn earlier_worker_resolution_cannot_revive_deleted_content_cas_0930() {
         let dir = fixture();

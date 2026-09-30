@@ -99,8 +99,119 @@ fn tokens(line: &str) -> Vec<&str> {
         .collect()
 }
 
-// Only ordinary edits may extend a line's symbols within its changed hunk.
-// A merge must transport exact content, never revive a stale superset.
+// A comma-separated identifier list is narrower than a token subsequence:
+// calls, comments, operators, strings and duplicate members cannot qualify.
+fn identifier_list(line: &str) -> Option<Vec<&str>> {
+    if !line.contains(',') {
+        return None;
+    }
+    let items: Vec<_> = line
+        .strip_suffix(',')
+        .unwrap_or(line)
+        .split(',')
+        .map(str::trim)
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    for item in &items {
+        let mut chars = item.chars();
+        if !chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+            || !seen.insert(*item)
+        {
+            return None;
+        }
+    }
+    Some(items)
+}
+
+fn ordered_subset(left: &[&str], right: &[&str]) -> bool {
+    let mut cursor = 0;
+    left.iter().all(|item| {
+        let Some(offset) = right[cursor..]
+            .iter()
+            .position(|candidate| candidate == item)
+        else {
+            return false;
+        };
+        cursor += offset + 1;
+        true
+    })
+}
+
+struct MergeUnionContext<'a> {
+    base_to_prior: &'a [Hunk],
+    base_to_other: &'a [Hunk],
+}
+
+impl MergeUnionContext<'_> {
+    fn retains_list(&self, position: usize, old: &str, new: &str) -> bool {
+        let Some(prior) = identifier_list(old) else {
+            return false;
+        };
+        let Some(merged) = identifier_list(new) else {
+            return false;
+        };
+        // The owned parent line must come from a changed single base line.
+        // This keeps correspondence positional even when an adjacent list
+        // line was inserted; a matching duplicate elsewhere proves nothing.
+        let Some(prior_hunk) = self.base_to_prior.iter().find(|hunk| {
+            hunk.new_count > 0
+                && (hunk.new_start..hunk.new_start + hunk.new_count).contains(&position)
+        }) else {
+            return false;
+        };
+        if prior_hunk.old_count != 1
+            || prior_hunk
+                .added
+                .get(position - prior_hunk.new_start)
+                .map(String::as_str)
+                != Some(old)
+        {
+            return false;
+        }
+        let Some(base_line) = prior_hunk.removed.first() else {
+            return false;
+        };
+        let Some(base) = identifier_list(base_line) else {
+            return false;
+        };
+        if base.len() >= prior.len() || !ordered_subset(&base, &prior) {
+            // In particular, removing a baseline member and later restoring
+            // it at a stale merge is never an additive union.
+            return false;
+        }
+        let Some(other_hunk) = self.base_to_other.iter().find(|hunk| {
+            hunk.old_count > 0
+                && (hunk.old_start..hunk.old_start + hunk.old_count).contains(&prior_hunk.old_start)
+        }) else {
+            return false;
+        };
+        if other_hunk.old_count != 1 || other_hunk.removed.first() != Some(base_line) {
+            return false;
+        }
+        let candidates: Vec<_> = other_hunk
+            .added
+            .iter()
+            .filter_map(|line| identifier_list(line))
+            .filter(|other| base.len() < other.len() && ordered_subset(&base, other))
+            .collect();
+        let [other] = candidates.as_slice() else {
+            return false;
+        };
+        let union: std::collections::HashSet<_> =
+            prior.iter().chain(other.iter()).copied().collect();
+        merged.len() == union.len()
+            && merged.iter().all(|item| union.contains(item))
+            && ordered_subset(&prior, &merged)
+            && ordered_subset(other, &merged)
+    }
+}
+
+// Only ordinary edits may retain a generic line's symbols in a changed hunk.
+// Merge text requires exact equality; separately proven list unions use
+// MergeUnionContext, never this token-subsequence heuristic.
 fn retains_line(old: &str, new: &str, ordinary: bool) -> bool {
     if old == new {
         return true;
@@ -137,6 +248,7 @@ fn advance(
     owner: &OwnedLines,
     changes: &[Hunk],
     ordinary: bool,
+    merge_union: Option<&MergeUnionContext<'_>>,
     resolution_parent_lines: Option<&std::collections::HashSet<String>>,
     reverted: bool,
     commit: &str,
@@ -176,11 +288,15 @@ fn advance(
                     .added
                     .iter()
                     .enumerate()
-                    .filter(|(_, new)| retains_line(old, new, ordinary))
+                    .filter(|(_, new)| {
+                        retains_line(old, new, ordinary)
+                            || merge_union.is_some_and(|union| union.retains_list(*line, old, new))
+                    })
                     .collect();
                 if let Some((index, new)) = retained.get(occurrence) {
                     next.positions.push(hunk.new_start + *index);
-                    if old != *new && !next.commits.iter().any(|known| known == commit) {
+                    if ordinary && old != *new && !next.commits.iter().any(|known| known == commit)
+                    {
                         next.commits.push(commit.to_string());
                     }
                 } else {
@@ -197,10 +313,11 @@ fn advance(
                                 .any(|line| parents.contains(line) && retains_line(old, line, true))
                     });
                     if (!ordinary && !novel_resolution)
-                        || hunk
-                            .added
-                            .iter()
-                            .any(|new| retains_line(old, new, ordinary))
+                        || hunk.added.iter().any(|new| {
+                            retains_line(old, new, ordinary)
+                                || merge_union
+                                    .is_some_and(|union| union.retains_list(*line, old, new))
+                        })
                     {
                         return None;
                     }
@@ -243,7 +360,8 @@ fn advance(
 /// Prove each delivered line's ownership through every intervening edit on
 /// an actual descendant route to the target. Deleted/reverted ownership ends;
 /// a later file touch or matching duplicate cannot resurrect it. At a merge,
-/// only a surviving line from a parent that already proves delivery counts.
+/// only surviving parent content counts, including an exact additive list
+/// union proved against both parents' edits of the same merge-base line.
 /// `None` leaves binary/deletion-only patches to the reverse-patch proof.
 pub(super) fn line_content_presence(
     repo: &Path,
@@ -321,6 +439,8 @@ pub(super) fn line_content_presence_with_resolutions(
         let commit = fields[0];
         let ordinary = fields.len() == 2;
         let reverted = is_revert_message(&text(repo, &["show", "-s", "--format=%B", commit])?);
+        let mut union_changes = None;
+        let mut union_checked = false;
         let resolution_parent_lines = if resolutions.iter().any(|resolution| resolution == commit) {
             let mut lines = std::collections::HashSet::new();
             for prior in fields.iter().skip(1) {
@@ -345,6 +465,45 @@ pub(super) fn line_content_presence_with_resolutions(
                 continue;
             };
             let changes = hunks(repo, prior, commit, path)?;
+            // Most merge edges leave owned content unchanged. Only measure
+            // both parents' base edits when a changed identifier-list hunk
+            // could actually need union transport.
+            if !union_checked
+                && fields.len() == 3
+                && previous.iter().any(Option::is_some)
+                && changes.iter().any(|hunk| {
+                    hunk.removed
+                        .iter()
+                        .any(|line| identifier_list(line).is_some())
+                        && hunk
+                            .added
+                            .iter()
+                            .any(|line| identifier_list(line).is_some())
+                })
+            {
+                union_checked = true;
+                let bases = text(repo, &["merge-base", "--all", fields[1], fields[2]])?;
+                let bases: Vec<_> = bases.lines().collect();
+                if let [base] = bases.as_slice() {
+                    union_changes = Some((
+                        hunks(repo, base, fields[1], path)?,
+                        hunks(repo, base, fields[2], path)?,
+                    ));
+                }
+            }
+            let merge_union = union_changes.as_ref().map(|(first, second)| {
+                if *prior == fields[1] {
+                    MergeUnionContext {
+                        base_to_prior: first,
+                        base_to_other: second,
+                    }
+                } else {
+                    MergeUnionContext {
+                        base_to_prior: second,
+                        base_to_other: first,
+                    }
+                }
+            });
             for (index, owner) in previous.iter().enumerate() {
                 if merged[index].is_none() {
                     merged[index] = owner.as_ref().and_then(|owner| {
@@ -352,6 +511,7 @@ pub(super) fn line_content_presence_with_resolutions(
                             owner,
                             &changes,
                             ordinary,
+                            merge_union.as_ref(),
                             resolution_parent_lines.as_ref(),
                             reverted,
                             commit,

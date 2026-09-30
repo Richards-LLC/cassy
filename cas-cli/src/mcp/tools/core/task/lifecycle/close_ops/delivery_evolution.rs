@@ -934,37 +934,6 @@ fn line_content_presence_impl(
                     })
                 })
                 .collect();
-            // The ignored production replay needs the actual ownership edge
-            // that failed, not just a missing-line sample from the final tree.
-            #[cfg(test)]
-            if Some(repo) == Path::new(env!("CARGO_MANIFEST_DIR")).parent() {
-                for (index, owner) in previous.iter().enumerate() {
-                    if let Some(owner) = owner
-                        && advanced[index].is_none()
-                    {
-                        let removed: Vec<_> = owner
-                            .positions
-                            .iter()
-                            .filter_map(|position| {
-                                let hunk = changes.iter().find(|hunk| {
-                                    hunk.old_count > 0
-                                        && (hunk.old_start..hunk.old_start + hunk.old_count)
-                                            .contains(position)
-                                })?;
-                                Some((
-                                    position,
-                                    &hunk.removed[position - hunk.old_start],
-                                    &hunk.added,
-                                ))
-                            })
-                            .collect();
-                        eprintln!(
-                            "delivery ownership edge lost: anchor={delivery} path={path} parent={prior} commit={commit} ordinary={ordinary} owner={index} edits={:?} baseline={:?} changed={removed:?}",
-                            owner.commits, owner.baseline
-                        );
-                    }
-                }
-            }
             for index in 0..previous.len() {
                 if merged[index].is_none() {
                     merged[index] = advanced[index].clone();

@@ -567,7 +567,10 @@ pub(super) fn merge_tip_content_presence(
                 && (!delivery_history.contains(resolution)
                     || !in_work_window(window, epoch, false)))
             || delivery_evolution::is_revert_message(message)
-            || references_foreign_task(message, identity)
+            // An explicitly owned QA receipt can discuss other tasks whose
+            // content it integrates. Foreign references only disqualify a
+            // resolution inferred from an otherwise unnamed work window.
+            || (!owned && references_foreign_task(message, identity))
         {
             continue;
         }
@@ -1198,6 +1201,63 @@ mod tests {
             "copy.txt",
             "resolved();\ninherited();\n",
             "cas-taskb: QA resolution",
+        );
+        git(repo, &["checkout", "main"]);
+        git(
+            repo,
+            &["merge", "--no-ff", "factory/worker", "-m", "integrate"],
+        );
+        commit(
+            repo,
+            "copy.txt",
+            "resolved();\n",
+            "delete unrelated imported side line",
+        );
+        let mut window = window();
+        window.identity.known_commits.push(tip.clone());
+        assert_eq!(
+            merge_tip_content_presence(repo, "main", &tip, Some(&window), &window.identity, None),
+            Some(DeliveryContentPresence::Superseded {
+                paths: vec!["copy.txt".into()],
+                commits: vec![tip]
+            })
+        );
+    }
+
+    #[test]
+    fn explicit_resolution_receipt_may_discuss_other_tasks_cas_0930() {
+        let dir = fixture();
+        let repo = dir.path();
+        commit(
+            repo,
+            "copy.txt",
+            "base_owned();\nbase_inherited();\n",
+            "baseline",
+        );
+        git(repo, &["branch", "-f", "main", "HEAD"]);
+        commit(
+            repo,
+            "copy.txt",
+            "worker();\nbase_inherited();\n",
+            "cas-taskb: delivery",
+        );
+        git(repo, &["checkout", "main"]);
+        commit(
+            repo,
+            "copy.txt",
+            "target();\ninherited();\n",
+            "target changes",
+        );
+        git(repo, &["checkout", "factory/worker"]);
+        git(
+            repo,
+            &["merge", "--no-ff", "--no-commit", "-s", "ours", "main"],
+        );
+        let tip = commit(
+            repo,
+            "copy.txt",
+            "resolved();\ninherited();\n",
+            "cas-taskb: QA resolution\n\nIntegrates cas-aaaa and preserves cas-bbbb behaviour.",
         );
         git(repo, &["checkout", "main"]);
         git(

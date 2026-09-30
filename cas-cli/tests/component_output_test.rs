@@ -179,6 +179,12 @@ fn pty_report_validation_rejects_echo_empty_and_failed_children() {
             "missing completed",
         ),
         (
+            ReportKind::Doctor,
+            "$ cas doctor --verbose for timings and full messages\n",
+            "0",
+            "missing completed",
+        ),
+        (
             ReportKind::Status,
             "$ cas status\n",
             "0",
@@ -189,6 +195,12 @@ fn pty_report_validation_rejects_echo_empty_and_failed_children() {
         (
             ReportKind::Doctor,
             COMPLETE_DOCTOR_REPORT,
+            "23",
+            "child failed",
+        ),
+        (
+            ReportKind::Doctor,
+            WRAPPED_DOCTOR_REPORT_80COL,
             "23",
             "child failed",
         ),
@@ -280,6 +292,24 @@ fn snapshot_redaction_preserves_stable_counts() {
 const DOCTOR_COMPLETION: &str = "cas doctor --verbose for timings and full messages";
 const STATUS_REPORT_PATTERN: &str = r"(?m)^\s*cas: \d+ entries, \d+ rules \(\d+ proven\), \d+ high-value(?:, \d+ code symbols)?\s*$";
 
+fn has_doctor_completion(stdout: &str, terminal_wrapped: bool) -> bool {
+    if stdout.contains(DOCTOR_COMPLETION) {
+        return true;
+    }
+    if !terminal_wrapped {
+        return false;
+    }
+    // Screen text inserts newlines even inside a word when a logical receipt
+    // wraps at the PTY's width. Ignore display whitespace only for this hint;
+    // the report's section/summary checks and child exit stay mandatory.
+    let compact: String = stdout.chars().filter(|c| !c.is_whitespace()).collect();
+    let completion: String = DOCTOR_COMPLETION
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    compact.contains(&completion)
+}
+
 /// Shared by real CLI/PTY tests and the negative child fixtures above. A clean
 /// buffer alone cannot prove a successful render: both completion and exit
 /// success are required before the no-ANSI assertion can pass.
@@ -301,7 +331,7 @@ fn validate_report_text(
         ReportKind::Doctor => stdout.contains("Store")
             && stdout.contains("database")
             && stdout.contains("schema")
-            && stdout.contains(DOCTOR_COMPLETION)
+            && has_doctor_completion(stdout, !require_plain)
             && regex::Regex::new(
                 r"(?m)^\s*\d+ ok [·-] (?:\d+ info [·-] )?\d+ warnings [·-] \d+ errors [·-] [^\n]+",
             )
@@ -598,9 +628,10 @@ fn pty_doctor_output() {
     decline_doctor_autofix(&mut runner);
     let output = completed_pty_report(&mut runner, ReportKind::Doctor)
         .expect("doctor must complete successfully with its final report row");
-    screen_with_size(&output, 80, 200)
-        .assert_contains(DOCTOR_COMPLETION)
-        .unwrap();
+    assert!(has_doctor_completion(
+        &screen_with_size(&output, 80, 200).text(),
+        true
+    ));
 }
 
 #[test]

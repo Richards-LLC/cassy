@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 
 const hub = resolve(dirname(fileURLToPath(import.meta.url)), '../hub-web');
-const scratch = mkdtempSync(join(hub, '.verified-fixture-'));
+const scratch = mkdtempSync(join(hub, 'e2e/.verified-fixture-'));
 let passed = 0;
 try {
   writeFileSync(join(scratch, 'vitest.config.mjs'), `export default { test: { include: ['${scratch}/*.test.js'], environment: 'node' } };`);

@@ -114,6 +114,7 @@ fn declarations(source: &str) -> (Bindings, Bindings) {
 }
 
 #[test]
+// pin: Enumerate serde declarations as well as captured payloads so a newly added unexercised wire spelling cannot evade coverage.
 fn every_hook_alias_or_rename_has_a_captured_parse_contract_or_legacy_binding() {
     let (declared, serialized) = declarations(include_str!("types.rs"));
     let mut covered: Bindings = LEGACY
@@ -160,6 +161,7 @@ fn every_hook_alias_or_rename_has_a_captured_parse_contract_or_legacy_binding() 
 }
 
 #[test]
+// pin: Mutate real serde declaration source to prove the inventory detects added, moved and deleted wire bindings.
 fn inventory_catches_new_moved_and_deleted_serde_bindings_without_handler_pins() {
     let source = include_str!("types.rs");
     let (baseline, _) = declarations(source);

@@ -1,0 +1,471 @@
+{
+  "method": "Independent curator reads of authentic historical source and real corrective patches. Labels are explicit, not keyword inferred. null is an adjudicated unresolved policy/evidence question; finding occurrences are scored, including duplicates in invalid reports. Seed matches describe the specific named defect, never merely a related defect.",
+  "findings": {
+    "c01/baseline/changelog-input-omitted": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "e452e2418 scripts/assembly-proof.py:63 excludes CHANGELOG; history/changelog.rs:535-563 reads actual repository file and asserts >20 nonempty sections. A malformed/deleted-section changelog can change this test outcome without changing code_input. No Rust execution claimed."
+    },
+    "c01/baseline/receipt-expiry-adds-suite-runs": {
+      "correct": null,
+      "seed_match": false,
+      "evidence": "e452e2418 CONTRIBUTING.md:180-181 explicitly specifies 24h expiry, retained by corrective cc5c5350d; the literal exactly-twice criterion omits this qualification. Code consequence is real but whether it is a defect conflicts with the documented policy. Leave disputed, requiring operator adjudication."
+    },
+    "c01/baseline/macos-clone-location": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "e452e2418 assembly-proof.py:201 unconditional default /var/tmp; direct prove invocation with unset override reaches it. release-portable.sh:136-146 documents /var/tmp as disposable on macOS and chooses /Users/Shared. This is a real platform-context mismatch; no macOS run claimed."
+    },
+    "c02/baseline/F1": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "d460825c6 ci-test-impact.py:151,175-190 makes main.rs wide but builds --lib/--test args, never --bin; main.rs:409-424 contains binary unit test. A main-only change can omit that unit target. Static selection-path evidence, no Rust execution."
+    },
+    "c02/baseline/F2": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "d460825c6 ci.yml scoped steps fetch history at499-500; queue shard record at934 does not. ci-test-impact.py:135-145,166-173 includes history-only failures in selection, while record predicts from absent default file. Thus its missed-test accounting can differ from the actual scoped selection. Conditional flaw substantiated, no CI run claimed."
+    },
+    "c03/baseline/missing-hook-tests": {
+      "correct": true,
+      "seed_match": true,
+      "evidence": "4fb8854c Cargo.toml autotests=false plus ten explicit harnesses omit tests/hooks_test/main.rs. Corrective 0a93e428c wires this directory root and nested imports; independent cas-f40e count reconciliation confirms 34 dropped/restored tests. This is the c03 seed."
+    },
+    "c03/baseline/inventory-misses-directory-root": {
+      "correct": true,
+      "seed_match": true,
+      "evidence": "4fb8854c cas-test-targets.py:76 root *.rs inventory omits hooks_test/main.rs. Corrective 0a93e428c adds */main.rs coverage and contract harness wiring. Both inventory and dropped execution describe the same c03 seed, counted once in recall."
+    },
+    "c04/baseline/F1": {
+      "correct": true,
+      "seed_match": true,
+      "evidence": "4fb8854c factory_mcp_ops_test.rs:399 uses --exact with leaf names after integration/factory.rs or cli.rs adds a module prefix. Corrective 0a93e428c uses module_path! qualification and actual execution evidence. This is the named case seed."
+    },
+    "c04/baseline/F2": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "4fb8854c hub_clean_home_test.rs:722 uses --exact with leaf names after integration/factory.rs or cli.rs adds a module prefix. Corrective 0a93e428c uses module_path! qualification and actual execution evidence. Correct related instance, not this case's named seed."
+    },
+    "c04/baseline/F3": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "4fb8854c worktree_surface_test.rs:64-82 uses --exact with leaf names after integration/factory.rs or cli.rs adds a module prefix. Corrective 0a93e428c uses module_path! qualification and actual execution evidence. Correct related instance, not this case's named seed."
+    },
+    "c05/baseline/B1": {
+      "correct": true,
+      "seed_match": true,
+      "evidence": "4fb8854c hub_clean_home_test.rs:722 uses --exact with leaf names after integration/factory.rs or cli.rs adds a module prefix. Corrective 0a93e428c uses module_path! qualification and actual execution evidence. This is the named case seed."
+    },
+    "c05/baseline/B2": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "4fb8854c factory_mcp_ops_test.rs:399 uses --exact with leaf names after integration/factory.rs or cli.rs adds a module prefix. Corrective 0a93e428c uses module_path! qualification and actual execution evidence. Correct related instance, not this case's named seed."
+    },
+    "c05/baseline/B3": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "4fb8854c ci.yml:924 still selects binary(mcp_protocol_test), while Cargo registers integration_cli and integration/cli.rs nests mcp_protocol_test. The archived selector names a removed binary. Independent unchanged source path confirms stale wiring; no nextest execution claimed."
+    },
+    "c05/baseline/B4": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "4fb8854c worktree_surface_test.rs:64-82 uses --exact with leaf names after integration/factory.rs or cli.rs adds a module prefix. Corrective 0a93e428c uses module_path! qualification and actual execution evidence. Correct related instance, not this case's named seed."
+    },
+    "c06/baseline/factory-child-tests": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "4fb8854c factory_mcp_ops_test.rs:399 uses --exact with leaf names after integration/factory.rs or cli.rs adds a module prefix. Corrective 0a93e428c uses module_path! qualification and actual execution evidence. Correct related instance, not this case's named seed."
+    },
+    "c06/baseline/cli-atexit-helper": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "4fb8854c hub_clean_home_test.rs:722 uses --exact with leaf names after integration/factory.rs or cli.rs adds a module prefix. Corrective 0a93e428c uses module_path! qualification and actual execution evidence. Correct related instance, not this case's named seed."
+    },
+    "c06/baseline/authority-test-vacuous": {
+      "correct": true,
+      "seed_match": true,
+      "evidence": "4fb8854c worktree_surface_test.rs:64-82 uses --exact with leaf names after integration/factory.rs or cli.rs adds a module prefix. Corrective 0a93e428c uses module_path! qualification and actual execution evidence. This is the named case seed."
+    },
+    "c01/spec/SPEC-01": {
+      "correct": null,
+      "seed_match": false,
+      "evidence": "e452e2418 assembly-proof.py:23,131 implements24h expiry expressly documented CONTRIBUTING:180-181 and retained by real corrective cc5. Literal exactly-twice AC lacks qualification; operator adjudication required. The c01 fix removes documented freshness policy; Python11/11 does not settle policy."
+    },
+    "c13/spec/SPEC-2": {
+      "correct": null,
+      "seed_match": false,
+      "evidence": "e452e2418 assembly-proof.py:23,131 implements24h expiry expressly documented CONTRIBUTING:180-181 and retained by real corrective cc5. Literal exactly-twice AC lacks qualification; operator adjudication required. The c01 fix removes documented freshness policy; Python11/11 does not settle policy."
+    },
+    "c13/spec/SPEC-S1": {
+      "correct": null,
+      "seed_match": false,
+      "evidence": "e452e2418 assembly-proof.py:23,131 implements24h expiry expressly documented CONTRIBUTING:180-181 and retained by real corrective cc5. Literal exactly-twice AC lacks qualification; operator adjudication required. The c01 fix removes documented freshness policy; Python11/11 does not settle policy."
+    },
+    "c13/baseline/matching-tree-reruns-after-expiry": {
+      "correct": null,
+      "seed_match": false,
+      "evidence": "e452e2418 assembly-proof.py:23,131 implements24h expiry expressly documented CONTRIBUTING:180-181 and retained by real corrective cc5. Literal exactly-twice AC lacks qualification; operator adjudication required. The c01 fix removes documented freshness policy; Python11/11 does not settle policy."
+    },
+    "c01/spec/SPEC-02": {
+      "correct": null,
+      "seed_match": false,
+      "evidence": "e452e2418 assembly-proof.py:213 uses archive-mode; release-gate.sh:1002 excludes component_output_test, while published reconciliation counts those13 tests separately. Real literal full-suite vs two-context scope ambiguity, not this metadata seed. Needs operator definition of the excluded component context."
+    },
+    "c13/baseline/clone-suite-incomplete": {
+      "correct": null,
+      "seed_match": false,
+      "evidence": "e452e2418 assembly-proof.py:213 uses archive-mode; release-gate.sh:1002 excludes component_output_test, while published reconciliation counts those13 tests separately. Real literal full-suite vs two-context scope ambiguity, not this metadata seed. Needs operator definition of the excluded component context."
+    },
+    "c01/spec/SPEC-03": {
+      "correct": null,
+      "seed_match": false,
+      "evidence": "e452e2418 test-assembly-proof.py:54-59 expressly reuses receipt after release prose changes, consistent with task description docs-only reuse but inconsistent with literal any-tree-mismatch AC. Report correctly flags uncertainty; source contract needs clarification."
+    },
+    "c01/standards/standards-1": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "e452e2418 test-assembly-proof.py:105-108 supplies fabricated expected fingerprint rather than changing collected tool/environment inputs. Runtime inputs include those values. Pinned test-confidence standard applies; real unseeded test blind spot, repair replaces it with collected-input tests. No Rust proof implied."
+    },
+    "c02/spec/SPEC-001": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "d460825c6 ci.yml scoped steps fetch history at499-500; queue shard record at934 does not. ci-test-impact.py:135-145,166-173 includes history-only failures in selection, while record predicts from absent default file. Thus its missed-test accounting can differ from the actual scoped selection. Conditional flaw substantiated, no CI run claimed."
+    },
+    "c02/standards/STD-001": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "d460825c6 test-ci-test-tiers.sh:547-551,743 inspects selector Python source strings with no textual runtime consumer; existing test-ci-test-impact.py executes selection behaviors. Source-text comments can preserve assertions after behavior breaks. Pinned standard supports this unseeded test-confidence finding."
+    },
+    "c03/spec/spec-1": {
+      "correct": true,
+      "seed_match": true,
+      "evidence": "4fb8854c Cargo.toml autotests=false plus ten explicit harnesses omit tests/hooks_test/main.rs. Corrective 0a93e428c wires this directory root and nested imports; independent cas-f40e count reconciliation confirms 34 dropped/restored tests. This is the c03 seed."
+    },
+    "c03/standards/STD-002": {
+      "correct": true,
+      "seed_match": true,
+      "evidence": "4fb8854c Cargo.toml autotests=false plus ten explicit harnesses omit tests/hooks_test/main.rs. Corrective 0a93e428c wires this directory root and nested imports; independent cas-f40e count reconciliation confirms 34 dropped/restored tests. This is the c03 seed."
+    },
+    "c03/standards/STD-001": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "4fb8854c cas-test-targets.py:40-41 unanchored path regex accepts commented declarations as inventory wiring; Cargo ignores them. Anchored corrective reviewer patch preserves real declarations. This is unseeded inventory false confidence, not the directory-root seed itself."
+    },
+    "c03/spec/spec-2": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "4fb8854c ci.yml:924 still selects binary(mcp_protocol_test), while Cargo registers integration_cli and integration/cli.rs nests mcp_protocol_test. The archived selector names a removed binary. Independent unchanged source path confirms stale wiring; no nextest execution claimed."
+    },
+    "c04/spec/spec-002": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "4fb8854c ci.yml:924 still selects binary(mcp_protocol_test), while Cargo registers integration_cli and integration/cli.rs nests mcp_protocol_test. The archived selector names a removed binary. Independent unchanged source path confirms stale wiring; no nextest execution claimed."
+    },
+    "c05/spec/spec-1": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "4fb8854c ci.yml:924 still selects binary(mcp_protocol_test), while Cargo registers integration_cli and integration/cli.rs nests mcp_protocol_test. The archived selector names a removed binary. Independent unchanged source path confirms stale wiring; no nextest execution claimed."
+    },
+    "c06/spec/spec-2": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "4fb8854c ci.yml:924 still selects binary(mcp_protocol_test), while Cargo registers integration_cli and integration/cli.rs nests mcp_protocol_test. The archived selector names a removed binary. Independent unchanged source path confirms stale wiring; no nextest execution claimed."
+    },
+    "c04/spec/spec-001": {
+      "correct": true,
+      "seed_match": true,
+      "evidence": "4fb8854c factory_mcp_ops_test.rs:399 uses --exact with leaf names after integration/factory.rs or cli.rs adds a module prefix. Corrective 0a93e428c uses module_path! qualification and actual execution evidence. This is the named case seed."
+    },
+    "c04/standards/standards-1": {
+      "correct": true,
+      "seed_match": true,
+      "evidence": "4fb8854c factory_mcp_ops_test.rs:399 uses --exact with leaf names after integration/factory.rs or cli.rs adds a module prefix. Corrective 0a93e428c uses module_path! qualification and actual execution evidence. This is the named case seed."
+    },
+    "c04/spec/spec-003": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "4fb8854c hub_clean_home_test.rs:722 uses --exact with leaf names after integration/factory.rs or cli.rs adds a module prefix. Corrective 0a93e428c uses module_path! qualification and actual execution evidence. Correct related instance, not this case's named seed."
+    },
+    "c04/standards/standards-3": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "4fb8854c hub_clean_home_test.rs:722 uses --exact with leaf names after integration/factory.rs or cli.rs adds a module prefix. Corrective 0a93e428c uses module_path! qualification and actual execution evidence. Correct related instance, not this case's named seed."
+    },
+    "c05/standards/STD-001": {
+      "correct": true,
+      "seed_match": true,
+      "evidence": "4fb8854c hub_clean_home_test.rs:722 uses --exact with leaf names after integration/factory.rs or cli.rs adds a module prefix. Corrective 0a93e428c uses module_path! qualification and actual execution evidence. Correct related instance, not this case's named seed."
+    },
+    "c06/spec/spec-4": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "4fb8854c hub_clean_home_test.rs:722 uses --exact with leaf names after integration/factory.rs or cli.rs adds a module prefix. Corrective 0a93e428c uses module_path! qualification and actual execution evidence. Correct related instance, not this case's named seed."
+    },
+    "c06/standards/standards-003": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "4fb8854c hub_clean_home_test.rs:722 uses --exact with leaf names after integration/factory.rs or cli.rs adds a module prefix. Corrective 0a93e428c uses module_path! qualification and actual execution evidence. Correct related instance, not this case's named seed."
+    },
+    "c04/standards/standards-2": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "4fb8854c worktree_surface_test.rs:64-82 uses --exact with leaf names after integration/factory.rs or cli.rs adds a module prefix. Corrective 0a93e428c uses module_path! qualification and actual execution evidence. Correct related instance, not this case's named seed."
+    },
+    "c05/standards/STD-003": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "4fb8854c worktree_surface_test.rs:64-82 uses --exact with leaf names after integration/factory.rs or cli.rs adds a module prefix. Corrective 0a93e428c uses module_path! qualification and actual execution evidence. Correct related instance, not this case's named seed."
+    },
+    "c06/spec/spec-1": {
+      "correct": true,
+      "seed_match": true,
+      "evidence": "4fb8854c worktree_surface_test.rs:64-82 uses --exact with leaf names after integration/factory.rs or cli.rs adds a module prefix. Corrective 0a93e428c uses module_path! qualification and actual execution evidence. Correct related instance, not this case's named seed."
+    },
+    "c06/standards/standards-001": {
+      "correct": true,
+      "seed_match": true,
+      "evidence": "4fb8854c worktree_surface_test.rs:64-82 uses --exact with leaf names after integration/factory.rs or cli.rs adds a module prefix. Corrective 0a93e428c uses module_path! qualification and actual execution evidence. Correct related instance, not this case's named seed."
+    },
+    "c05/standards/STD-002": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "4fb8854c factory_mcp_ops_test.rs:399 uses --exact with leaf names after integration/factory.rs or cli.rs adds a module prefix. Corrective 0a93e428c uses module_path! qualification and actual execution evidence. This is the named case seed."
+    },
+    "c06/spec/spec-3": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "4fb8854c factory_mcp_ops_test.rs:399 uses --exact with leaf names after integration/factory.rs or cli.rs adds a module prefix. Corrective 0a93e428c uses module_path! qualification and actual execution evidence. This is the named case seed."
+    },
+    "c06/standards/standards-002": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "4fb8854c factory_mcp_ops_test.rs:399 uses --exact with leaf names after integration/factory.rs or cli.rs adds a module prefix. Corrective 0a93e428c uses module_path! qualification and actual execution evidence. This is the named case seed."
+    },
+    "c07/baseline/recall-failure-parser": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "d460825c6 ci-test-impact.py:260 expects2 tokens after FAIL[time]; captured nextest fixture test-run-scoped-tests.sh:674 has progress token plus binary plus test (3). Parser omits such failures; no recall failure denominator is recorded. Static actual fixture-path verification; no CI run claimed."
+    },
+    "c07/baseline/recall-history-mismatch": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "d460825c6 ci.yml scoped steps fetch history at499-500; queue shard record at934 does not. ci-test-impact.py:135-145,166-173 includes history-only failures in selection, while record predicts from absent default file. Thus its missed-test accounting can differ from the actual scoped selection. Conditional flaw substantiated, no CI run claimed."
+    },
+    "c08/baseline/B1": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "4c3f0dc39 close_ops.rs:2043 matching_assembly_proof checks PASS and delivery ancestry; documented CONTRIBUTING:181-182 assembly receipt requires command/log too. close_ops:7926 defers worker proof when matching note exists. Concrete malformed-note validation gap in supervisor-only path; not a claimed worker authority bypass."
+    },
+    "c08/spec/SC-1": {
+      "correct": null,
+      "seed_match": false,
+      "evidence": "4c3f0dc39 update.rs:610-617 explicitly documents authorization to observe already-merged declined historical work after request_changes clears active anchor; close independently checks any new delivery. Historical fallback itself is intentional. NULL-anchor store matching is separately a real exact-SHA gap; simply removing fallback may remove supported repair. Unrequested behavior judgment cannot be resolved from abbreviated stored AC alone."
+    },
+    "c09/spec/SPEC-1": {
+      "correct": null,
+      "seed_match": false,
+      "evidence": "4c3f0dc39 update.rs:610-617 explicitly documents authorization to observe already-merged declined historical work after request_changes clears active anchor; close independently checks any new delivery. Historical fallback itself is intentional. NULL-anchor store matching is separately a real exact-SHA gap; simply removing fallback may remove supported repair. Unrequested behavior judgment cannot be resolved from abbreviated stored AC alone."
+    },
+    "c09/spec/SC-1": {
+      "correct": null,
+      "seed_match": false,
+      "evidence": "4c3f0dc39 update.rs:610-617 explicitly documents authorization to observe already-merged declined historical work after request_changes clears active anchor; close independently checks any new delivery. Historical fallback itself is intentional. NULL-anchor store matching is separately a real exact-SHA gap; simply removing fallback may remove supported repair. Unrequested behavior judgment cannot be resolved from abbreviated stored AC alone."
+    },
+    "c08/standards/standards-1": {
+      "correct": null,
+      "seed_match": false,
+      "evidence": "4c3f0dc39 close_ops.rs:21571-21658 exercises store correction/helper validator rather than public close/update. Pinned standard asks whether the selected seam fits the promised operation, not an automatic end-to-end mandate. Reviewer establishes narrower fixture scope but not absence of public-path coverage. Unresolved test-confidence judgment; not the seeded timestamp/set fixture failures."
+    },
+    "c08/standards/standards-2": {
+      "correct": null,
+      "seed_match": false,
+      "evidence": "4c3f0dc39 close_ops.rs:21571-21658 exercises store correction/helper validator rather than public close/update. Pinned standard asks whether the selected seam fits the promised operation, not an automatic end-to-end mandate. Reviewer establishes narrower fixture scope but not absence of public-path coverage. Unresolved test-confidence judgment; not the seeded timestamp/set fixture failures."
+    },
+    "c10/standards/standards-2": {
+      "correct": null,
+      "seed_match": false,
+      "evidence": "4c3f0dc39 close_ops.rs:21571-21658 exercises store correction/helper validator rather than public close/update. Pinned standard asks whether the selected seam fits the promised operation, not an automatic end-to-end mandate. Reviewer establishes narrower fixture scope but not absence of public-path coverage. Unresolved test-confidence judgment; not the seeded timestamp/set fixture failures."
+    },
+    "c09/baseline/F1": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "4c3f0dc39 update.rs:610-617 selects historical anchor but verification_store.rs:1774 matches any source SHA when active anchor NULL. This does not require the selected historical SHA observation. Exact older-observation authorization gap substantiated; historical fallback alone is intentional."
+    },
+    "c09/baseline/F2": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "4c3f0dc39 public request_changes close_ops.rs:9454 rejects status other than AwaitingMerge; verification_store.rs:2018 also requires it. proof_scope.rs:269 permits AwaitingMerge->Blocked preserving proof, while semantic return remains locked. Specific direct request_changes recovery fails in that state; other privileged proof repair paths are not claimed absent."
+    },
+    "c09/spec/SPEC-2": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "4c3f0dc39 proof_scope.rs:138-145 locks AwaitingMerge even if backing proof missing, but after allowed status Blocked update.rs:1598-1602 changes only status. Without dispatch/delivery, later guard returns false. Reviewer pending_worktree_merge fix targets this projection hole, not the seeded Closed helper test expectation. No Rust execution."
+    },
+    "c09/standards/standards-1": {
+      "correct": null,
+      "seed_match": false,
+      "evidence": "4c3f0dc39 proof_scope.rs:487-506 intentionally tests the private guard admission boundary. Reviewer replaces it with public update/status persistence. Possible extra confidence, but original unit seam has an actual consumer and the report does not establish missing public-path coverage. Not the Closed fixture seed at later lines."
+    },
+    "c10/baseline/stale_assembly_proof": {
+      "correct": null,
+      "seed_match": false,
+      "evidence": "4c3f0dc39 close_ops.rs:7912 explicitly accepts parent epic tested head containing child delivery, not necessarily latest unrelated epic tip. Report demonstrates age-of-head possibility but no required child test invalidation. Operator must settle latest-tip versus containing-delivery policy; no automatic false/true label."
+    },
+    "c10/standards/standards-1": {
+      "correct": null,
+      "seed_match": false,
+      "evidence": "Actual close_ops.rs:21524 fixture joins merge observation and correction; guard fixture:130-142 joins successful rewrite and denied paths. Pinned standard recommends capability grouping, but these can each be one admission/repair promise. Splitting is a maintainability judgment, not demonstrated behavioral defect. Held unresolved, with raw bridge patches and cross accepts preserved."
+    },
+    "c19/standards/STD-1": {
+      "correct": null,
+      "seed_match": false,
+      "evidence": "Actual close_ops.rs:21524 fixture joins merge observation and correction; guard fixture:130-142 joins successful rewrite and denied paths. Pinned standard recommends capability grouping, but these can each be one admission/repair promise. Splitting is a maintainability judgment, not demonstrated behavioral defect. Held unresolved, with raw bridge patches and cross accepts preserved."
+    },
+    "c11/spec/SPEC-1": {
+      "correct": false,
+      "seed_match": false,
+      "evidence": "6db2e506e CONTRIBUTING/AGENTS allow --lib for lib-only changes and --tests when test files change; actual operator authorization superseded original stored --tests-only text. Source snapshot criterion is stale. Claim that --lib itself is unrequested/illegal is false against approved delivery intent; Spec fix withdraws permitted behavior. Source-provenance gap must accompany this false-positive count."
+    },
+    "c11/spec/S1": {
+      "correct": false,
+      "seed_match": false,
+      "evidence": "6db2e506e CONTRIBUTING/AGENTS allow --lib for lib-only changes and --tests when test files change; actual operator authorization superseded original stored --tests-only text. Source snapshot criterion is stale. Claim that --lib itself is unrequested/illegal is false against approved delivery intent; Spec fix withdraws permitted behavior. Source-provenance gap must accompany this false-positive count."
+    },
+    "c11/baseline/F-1": {
+      "correct": false,
+      "seed_match": false,
+      "evidence": "6db2e506e CONTRIBUTING/AGENTS allow --lib for lib-only changes and --tests when test files change; actual operator authorization superseded original stored --tests-only text. Source snapshot criterion is stale. Claim that --lib itself is unrequested/illegal is false against approved delivery intent; Spec fix withdraws permitted behavior. Source-provenance gap must accompany this false-positive count."
+    },
+    "c11/baseline/SC-1": {
+      "correct": false,
+      "seed_match": false,
+      "evidence": "6db2e506e CONTRIBUTING/AGENTS allow --lib for lib-only changes and --tests when test files change; actual operator authorization superseded original stored --tests-only text. Source snapshot criterion is stale. Claim that --lib itself is unrequested/illegal is false against approved delivery intent; Spec fix withdraws permitted behavior. Source-provenance gap must accompany this false-positive count."
+    },
+    "c12/spec/SPEC-1": {
+      "correct": null,
+      "seed_match": false,
+      "evidence": "65e717f3b runtime teams.rs:1182-1193 missing inbox returns no unread copy; queue_and_events.rs:2753-2756 classifies drain, pointer wake omits body delivery.rs:432-440. Report identifies plausible compound tree-loss edge, but no independent full retry/restore path reproduction here. No unsupported true/false conclusion; not abandoned terminal-sibling seed."
+    },
+    "c12/standards/STD-001": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "65e717f3b prompt_queue_store.rs:5955 writes abandoned stage/reason directly in SQL, bypassing existing mark_abandoned operation before checking scan. Observable contract includes abandonment reporting, so actual transition can break while fixture passes. Changing setup to production method addresses pinned test-confidence concern, not the separate rank3 sibling seed."
+    },
+    "c12/baseline/F1": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "65e717f3b prompt_queue_store.rs:5235 includes enqueued/selected/gated rows older60s; terminal reconcile:5286 filters only suppressed/dropped/abandoned. Closed task pending row survives before worker_status report. Specific stale actionable count omission substantiated; forensic records should remain preserved."
+    },
+    "c13/spec/SPEC-3": {
+      "correct": null,
+      "seed_match": false,
+      "evidence": "e452e2418 release-gate.sh:318-357 first checks two-context receipt then existing valid row-cache PASS. Literal AC requires assembled receipt citation, while implementation retains independently valid caches. Needs policy definition; no actual invalid test result demonstrated."
+    },
+    "c13/spec/SPEC-1": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "e452e2418 supervisor workflow:341 invokes relative scripts/assembly-proof.py while --root targets another epic checkout. Different cwd can select different helper version than candidate source. Explicit epic-worktree helper path binds implementation to target tree. Real unseeded instruction-path mismatch, not stale builtin assertion seed."
+    },
+    "c14/spec/SPEC-02": {
+      "correct": null,
+      "seed_match": false,
+      "evidence": "3eff5e8b0/03f36326d reference-history ledger lacks the new reference hash and stored original rename AC says ledger updated. Release workflow regenerates generated ledger separately, so per-slice unmet deliverable vs normal release-time generation is unresolved. No runtime sync failure asserted; outside edited file scope."
+    },
+    "c15/spec/SPEC-2": {
+      "correct": null,
+      "seed_match": false,
+      "evidence": "3eff5e8b0/03f36326d reference-history ledger lacks the new reference hash and stored original rename AC says ledger updated. Release workflow regenerates generated ledger separately, so per-slice unmet deliverable vs normal release-time generation is unresolved. No runtime sync failure asserted; outside edited file scope."
+    },
+    "c14/spec/SPEC-01": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "3eff5e8b0 cli/integrate/mod.rs:147 still dispatches Violet through MechaCassyArgs; mecha_cassy.rs:73,106 constructs MECHA credentials,1297-1328/1423-1444 repairs legacy routes,1581-1651 compares legacy-filtered allowlist (proxy/config.rs:569-575). Registration doc promises VIOLET defaults/routes/tool proof. Actual runtime mismatch; clean03f adds real VioletArgs module. None catches operator-org seed."
+    },
+    "c14/spec/SPEC-03": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "3eff5e8b0 cli/integrate/mod.rs:147 still dispatches Violet through MechaCassyArgs; mecha_cassy.rs:73,106 constructs MECHA credentials,1297-1328/1423-1444 repairs legacy routes,1581-1651 compares legacy-filtered allowlist (proxy/config.rs:569-575). Registration doc promises VIOLET defaults/routes/tool proof. Actual runtime mismatch; clean03f adds real VioletArgs module. None catches operator-org seed."
+    },
+    "c14/baseline/credential-names": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "3eff5e8b0 cli/integrate/mod.rs:147 still dispatches Violet through MechaCassyArgs; mecha_cassy.rs:73,106 constructs MECHA credentials,1297-1328/1423-1444 repairs legacy routes,1581-1651 compares legacy-filtered allowlist (proxy/config.rs:569-575). Registration doc promises VIOLET defaults/routes/tool proof. Actual runtime mismatch; clean03f adds real VioletArgs module. None catches operator-org seed."
+    },
+    "c14/baseline/project-repair": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "3eff5e8b0 cli/integrate/mod.rs:147 still dispatches Violet through MechaCassyArgs; mecha_cassy.rs:73,106 constructs MECHA credentials,1297-1328/1423-1444 repairs legacy routes,1581-1651 compares legacy-filtered allowlist (proxy/config.rs:569-575). Registration doc promises VIOLET defaults/routes/tool proof. Actual runtime mismatch; clean03f adds real VioletArgs module. None catches operator-org seed."
+    },
+    "c14/baseline/tool-receipt": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "3eff5e8b0 cli/integrate/mod.rs:147 still dispatches Violet through MechaCassyArgs; mecha_cassy.rs:73,106 constructs MECHA credentials,1297-1328/1423-1444 repairs legacy routes,1581-1651 compares legacy-filtered allowlist (proxy/config.rs:569-575). Registration doc promises VIOLET defaults/routes/tool proof. Actual runtime mismatch; clean03f adds real VioletArgs module. None catches operator-org seed."
+    },
+    "c15/spec/SPEC-1": {
+      "correct": false,
+      "seed_match": false,
+      "evidence": "03f36326d actual corrective task replaces operator-specific tracker issue with configured project tracker and retains fail-closed remedy. Config repository lookup is sufficient portable escalation context; no observed operational failure from wording. Reintroducing hardcoded issue5 assumes configured repository identity, reversing approved portability intent. Original rename criteria omit this corrective clarification."
+    },
+    "c15/spec/SPEC-SCOPE-1": {
+      "correct": false,
+      "seed_match": false,
+      "evidence": "03f36326d actual corrective task replaces operator-specific tracker issue with configured project tracker and retains fail-closed remedy. Config repository lookup is sufficient portable escalation context; no observed operational failure from wording. Reintroducing hardcoded issue5 assumes configured repository identity, reversing approved portability intent. Original rename criteria omit this corrective clarification."
+    },
+    "c15/baseline/F1": {
+      "correct": false,
+      "seed_match": false,
+      "evidence": "03f36326d actual corrective task replaces operator-specific tracker issue with configured project tracker and retains fail-closed remedy. Config repository lookup is sufficient portable escalation context; no observed operational failure from wording. Reintroducing hardcoded issue5 assumes configured repository identity, reversing approved portability intent. Original rename criteria omit this corrective clarification."
+    },
+    "c16/spec/spec-1": {
+      "correct": false,
+      "seed_match": false,
+      "evidence": "b00a53e85 workflow:395-398 deliberately excludes default-branch PR scoped lane, preserved/pinned by actual corrective fc942f642 operator policy. Asking to remove exclusion reverses approved admission-only default PR policy; original short task criteria fail to carry the exception. Not a defect in this corrected negative."
+    },
+    "c16/baseline/policy-pin-for-impact-base": {
+      "correct": false,
+      "seed_match": false,
+      "evidence": "b00a53e85 workflow:927/938 actual env/argument wiring is correct. Report asks for a new future regression pin, but proves no current defect or violation of a source requirement for these two textual assertions. A proposed extra test is not itself a false delivery behavior."
+    },
+    "c17/spec/SPEC-001": {
+      "correct": false,
+      "seed_match": false,
+      "evidence": "cc5c5350d is the real operator-approved metadata normalization correction: manifest/member-lock versions and generated ledger excluded to preserve proof through prep/ledger, dependency/code changes retained. Reports demand undoing that explicit exception, not a concrete nonmetadata counterexample. Original any-tree-mismatch AC lacks exception, making this a contract-source gap as well as a gold false positive. Two fixes reverse approved behavior; duplicate report IDs remain invalid."
+    },
+    "c17/spec/SPEC-002": {
+      "correct": false,
+      "seed_match": false,
+      "evidence": "cc5c5350d is the real operator-approved metadata normalization correction: manifest/member-lock versions and generated ledger excluded to preserve proof through prep/ledger, dependency/code changes retained. Reports demand undoing that explicit exception, not a concrete nonmetadata counterexample. Original any-tree-mismatch AC lacks exception, making this a contract-source gap as well as a gold false positive. Two fixes reverse approved behavior; duplicate report IDs remain invalid."
+    },
+    "c17/baseline/version_input_collision": {
+      "correct": false,
+      "seed_match": false,
+      "evidence": "cc5c5350d is the real operator-approved metadata normalization correction: manifest/member-lock versions and generated ledger excluded to preserve proof through prep/ledger, dependency/code changes retained. Reports demand undoing that explicit exception, not a concrete nonmetadata counterexample. Original any-tree-mismatch AC lacks exception, making this a contract-source gap as well as a gold false positive. Two fixes reverse approved behavior; duplicate report IDs remain invalid."
+    },
+    "c17/baseline/ledger_input_collision": {
+      "correct": false,
+      "seed_match": false,
+      "evidence": "cc5c5350d is the real operator-approved metadata normalization correction: manifest/member-lock versions and generated ledger excluded to preserve proof through prep/ledger, dependency/code changes retained. Reports demand undoing that explicit exception, not a concrete nonmetadata counterexample. Original any-tree-mismatch AC lacks exception, making this a contract-source gap as well as a gold false positive. Two fixes reverse approved behavior; duplicate report IDs remain invalid."
+    },
+    "c18/spec/SPEC-1": {
+      "correct": false,
+      "seed_match": false,
+      "evidence": "0a93e428c hub_clean_home_test.rs:735-739 checks running1test and text test<name>..., explicitly not final passed/failed summary. The helper exits before final summary, as its comment already states. Report misdescribes the checked string as a completion line and removes execution evidence. No Rust output reproduction available; receipt still proves helper ran, but the stated source defect is unsupported."
+    },
+    "c18/standards/STD-001": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "0a93e428c cas-test-targets directory root maps hooks_test|integration_contracts; ci-test-impact.py:75 filters aliases by tests/<stem>.rs, dropping directory-main hooks. Independently reproduced on3186 tree; cas-045f filed. Genuine unseeded contamination, excluded clean-negative denominator."
+    },
+    "c18/baseline/F1": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "0a93e428c cas-test-targets directory root maps hooks_test|integration_contracts; ci-test-impact.py:75 filters aliases by tests/<stem>.rs, dropping directory-main hooks. Independently reproduced on3186 tree; cas-045f filed. Genuine unseeded contamination, excluded clean-negative denominator."
+    },
+    "c19/baseline/background-check-log-dirties-tree": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "9ee399dd7 unscoped_test_guard.rs:99/102 admits >worker-check.log inside clone; shell creates unignored file first. factory_worker_check.rs:105-107,155 rejects untracked files before Cargo, .gitignore does not ignore log. Independently traced; cas-c0ec filed. Genuine negative contamination; no Rust run claimed."
+    }
+  },
+  "commits": {}
+}

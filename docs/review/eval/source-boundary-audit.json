@@ -1,0 +1,53 @@
+{
+  "commands_inspected": 2044,
+  "external_reads": [
+    {
+      "context": "c06/baseline/events.jsonl",
+      "command": "/bin/bash -lc 'cat /home/pippenz/.codex/skills/cas-qa-craft/SKILL.md'",
+      "exit_code": 0
+    },
+    {
+      "context": "c06/baseline/events.jsonl",
+      "command": "/bin/bash -lc 'cat /home/pippenz/.codex/skills/cas-qa-craft/references/verifier-evidence-gate.md'",
+      "exit_code": 0
+    },
+    {
+      "context": "c06/baseline/events.jsonl",
+      "command": "/bin/bash -lc 'cat /home/pippenz/.codex/skills/verify-before-claim/SKILL.md'",
+      "exit_code": 0
+    },
+    {
+      "context": "c04/baseline/events.jsonl",
+      "command": "/bin/bash -lc 'cat /home/pippenz/.codex/skills/cas-qa-craft/references/verifier-evidence-gate.md'",
+      "exit_code": 0
+    },
+    {
+      "context": "c04/baseline/events.jsonl",
+      "command": "/bin/bash -lc 'cat /home/pippenz/.codex/skills/verify-before-claim/SKILL.md'",
+      "exit_code": 0
+    },
+    {
+      "context": "c20/baseline/events.jsonl",
+      "command": "/bin/bash -lc 'cat /home/pippenz/.codex/skills/cas-qa-craft/SKILL.md && cat /home/pippenz/.codex/skills/verify-before-claim/SKILL.md'",
+      "exit_code": 0
+    },
+    {
+      "context": "c01/baseline/events.jsonl",
+      "command": "/bin/bash -lc \"cat /home/pippenz/.codex/skills/cas-qa-craft/references/verifier-evidence-gate.md 2>/dev/null | sed -n '1,150p'\"",
+      "exit_code": 0
+    },
+    {
+      "context": "c16/spec/events.jsonl",
+      "command": "/bin/bash -lc 'cat /home/pippenz/.codex/skills/verify-before-claim/SKILL.md'",
+      "exit_code": 0
+    }
+  ],
+  "contexts": [
+    "c01/baseline",
+    "c04/baseline",
+    "c06/baseline",
+    "c16/spec",
+    "c20/baseline"
+  ],
+  "interpretation": "Successful live skill reads violate the requested checkout/source boundary. Quarantine these contexts for source-isolated accuracy claims. This specific audit is not a general sandbox proof; raw commands remain in the task artifacts."
+}

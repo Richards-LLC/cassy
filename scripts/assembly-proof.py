@@ -3,8 +3,8 @@
 
 A receipt records the exact tested tree. Its key masks release prose, member package versions and the generated ledger;
 other manifest/lock content, sources and test commands remain inputs.
-No PASS is published until native nextest and archive-mode in a plain clone
-both pass. The gate's own diagnostic rows supply their zero-test guards.
+No PASS is published until CI script tests, native nextest and archive-mode
+in a plain clone all pass. Rust rows supply their zero-test guards.
 """
 import argparse
 import fcntl
@@ -21,7 +21,7 @@ import tempfile
 import time
 import tomllib
 
-FORMAT = 1
+FORMAT = 2
 MAX_AGE = 86400
 IDENTITY = {"CAS_FACTORY_SESSION", "CAS_AGENT_ROLE", "CAS_AGENT_NAME",
             "CAS_SUPERVISOR_NAME", "CAS_AGENT_ID", "CAS_SESSION_ID", "CAS_ROOT"}
@@ -244,6 +244,10 @@ def matching(root, expected, diagnostic=False):
             return miss("completed_epoch", "future_or_expired")
         if len(record["tree"]) != 40:
             return miss("tree", "invalid")
+        if (record["script_tests"]["status"] != "PASS"
+                or record["script_tests"]["row"] != "ci-script-tests"
+                or record["script_tests"]["tree"] != record["tree"]):
+            return miss("script_tests", "incomplete_or_incoherent")
         if (not isinstance(record["archive_size_bytes"], int)
                 or record["archive_size_bytes"] <= 0):
             return miss("archive_size_bytes", "empty_or_invalid")
@@ -311,12 +315,17 @@ def run_row(root, row, env, log_dir):
         print(log.read_text()[-6000:], flush=True)
         raise ValueError(f"assembly proof {row} failed: {log}")
     raw = (Path(row_env["CAS_RELEASE_GATE_LOG_DIR"]) / (row + ".log")).read_text()
+    if not re.search(r"^PASS " + re.escape(row) + r" ", log.read_text(), re.M):
+        raise ValueError(f"assembly {row} did not report a pass: {log}")
+    result = {"status": "PASS", "row": row, "checkout": str(root), "log": str(log),
+              "tree": git(root, "rev-parse", "HEAD^{tree}").decode().strip()}
+    if row == "ci-script-tests":
+        return result
     passed = re.findall(r"PASS: ([1-9][0-9]*) test\(s\) passed", raw)
-    if not passed or not re.search(r"^PASS " + re.escape(row) + r" ", log.read_text(), re.M):
+    if not passed:
         raise ValueError(f"assembly {row} did not report a nonempty test pass: {log}")
-    return {"status": "PASS", "row": row, "checkout": str(root), "log": str(log),
-            "tree": git(root, "rev-parse", "HEAD^{tree}").decode().strip(),
-            "passed": sum(map(int, passed))}
+    result["passed"] = sum(map(int, passed))
+    return result
 
 
 def prove(root):
@@ -338,6 +347,7 @@ def prove(root):
         write(path, record)
         log_dir = path.parent / (path.stem + "-logs")
         log_dir.mkdir(exist_ok=True)
+        record["script_tests"] = run_row(root, "ci-script-tests", env, log_dir)
         record["contexts"]["worktree"] = run_row(root, "nextest", env, log_dir)
         scratch.parent.mkdir(parents=True, exist_ok=True)
         no_cas_ancestor(scratch.parent)
@@ -379,7 +389,7 @@ def main():
             return 1
         record, path = found
         print(f"PASS assembly receipt={path} source_sha={record['head']} tree={record['tree']} "
-              f"code_input={record['inputs']['code_input']} contexts=worktree,clone "
+              f"code_input={record['inputs']['code_input']} script_tests=PASS contexts=worktree,clone "
               f"archive_size_bytes={record['archive_size_bytes']}")
         return 0
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:

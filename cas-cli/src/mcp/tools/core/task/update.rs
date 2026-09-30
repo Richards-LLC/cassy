@@ -920,6 +920,68 @@ impl CasCore {
                 data: None,
             });
         }
+        // A recorded receipt must never silently acquire a different epic or
+        // target, including a declined delivery whose active proof was cleared.
+        // Give the supported supervisor repair before the generic scope guard
+        // obscures it, and before any task fields or parent edges are written.
+        if let Some(epic_id) = req
+            .epic
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            && (task.status == TaskStatus::AwaitingMerge
+                || cas_store::get_latest_worker_delivery(&self.cas_root, &task.id)
+                    .map_err(|error| McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(format!("Failed to read recorded delivery: {error}")),
+                        data: None,
+                    })?
+                    .is_some())
+        {
+            let epic = task_store.get(epic_id).map_err(|_| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!("Epic not found: {epic_id}")),
+                data: None,
+            })?;
+            if epic.task_type != TaskType::Epic {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!(
+                        "Task {epic_id} is not an epic (type: {})",
+                        epic.task_type
+                    )),
+                    data: None,
+                });
+            }
+            let remediation = match super::repo_context::inherited_work_target_from_epic(&epic) {
+                Some(target) => format!(
+                    "To repair the recorded delivery target, ask a live registered supervisor to run `{}task {}`. This invalidates the old proof; only after that recovery, re-link with `{}task action=dep_add id={} to_id={} dep_type=parent`.",
+                    crate::mcp::tools::core::guidance::supervisor_prefix(),
+                    serde_json::json!({
+                        "action": "update", "id": task.id,
+                        "target_branch": target.target_branch, "proof_scope_fix": true,
+                        "reason": format!("retarget recorded delivery to epic {epic_id}")
+                    }),
+                    crate::mcp::tools::core::guidance::supervisor_prefix(),
+                    task.id,
+                    epic_id,
+                ),
+                None => format!(
+                    "Ask a registered supervisor to run `{}task action=request_changes id={} reason=\"re-link recorded delivery to epic {}\"` and declare the epic work target before re-linking.",
+                    crate::mcp::tools::core::guidance::supervisor_prefix(),
+                    task.id,
+                    epic_id,
+                ),
+            };
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!(
+                    "DELIVERY PROOF SCOPE LOCKED: task {} has a recorded delivery. Refusing epic update; no task fields, work target, or parent edges changed. {remediation}",
+                    task.id,
+                )),
+                data: None,
+            });
+        }
         if let Err(message) = super::lifecycle::proof_scope::guard_task_proof_scope(
             &self.cas_root,
             &task,
@@ -1723,6 +1785,7 @@ impl CasCore {
                     .filter_map(|id| task_store.get(id).ok())
                     .collect();
                 if let Some(target) = super::repo_context::work_target_for_task_moved_into_epic(
+                    &self.cas_root,
                     &task,
                     &epic_task,
                     &previous_parents,

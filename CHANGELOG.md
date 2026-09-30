@@ -7,6 +7,38 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.40.0] - 2026-09-30
+
+### Added
+
+- A reviewer-accuracy evaluation replays 20 real past changes, 14 of them with
+  known defects, through the two-axis reviewers and the legacy verifier.
+  Both caught under a third of the defects (3 and 4 of 14), so reviews stay in
+  shadow mode and no merge policy reads their verdicts.
+- Lane merges that touch Rust need a capped compile proof of the combined
+  merge tree before the epic moves. The Git merge helper checks the actual
+  merge commit, and `release-train.sh --check-lane` requires the same receipt.
+- The full release gate and the assembly proof run the CI script suites
+  (`make test-ci-tiers`), so a script-test failure stops before the merge
+  queue.
+
+### Fixed
+
+- A quiet terminal pane shows its last bytes: the PTY reader holds back only
+  a real partial cursor-position request and flushes it when output goes idle.
+- Release trains stop on a rejected branch push and refuse to enqueue a PR
+  whose head differs from the gated commit. Reassembled release branches use
+  the train's recorded push as an exact lease, preserving concurrent pushes.
+- Post-publication waits up to 30 minutes for the Release workflow instead of
+  10.
+- Announcement lint rejects any unresolved `{{TOKEN}}` in all four Slack
+  bodies immediately before posting. Preflight, which runs before
+  publication, allows only the two checksum placeholders that
+  post-publication fills.
+- Adding a standalone task to an epic retargets its delivery to the epic
+  branch; a task with a recorded delivery is refused with the exact supervisor
+  repair command.
+
 ## [3.39.0] - 2026-09-30
 
 ### Added

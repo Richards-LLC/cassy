@@ -178,6 +178,15 @@ copies matching exact-delivery receipts into worker evidence. Dirty trees,
 failed retries, other worktrees and other SHAs cannot supply this receipt.
 Check receipts are optional compile-only evidence and do not waive test proof.
 
+Rust-touching supervisor lane merges require separate combined-tree evidence.
+Run `python3 scripts/check-lane-compile.py . <target> <source> --prove` as a
+supervisor before merging, backgrounded with a log. It uses the same capped
+runner for package-scoped `--lib` and `--tests` checks in a private preview and
+records PASS only for the resulting tree. Lane-tip receipts do not qualify.
+The preview preflight, `release-train.sh --check-lane`, and the actual detached
+Git merge enforce this evidence before the epic ref advances. Docs/scripts-only
+merges need no compile receipt. Rust merges require clean linked target checkouts.
+
 Workers may also run exactly
 `cargo nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`.
 An omitted target selects `--lib`; `--test` must name one explicit harness from
@@ -200,7 +209,14 @@ proof rather than scoped `--proof` or `loaded_proof` notes. Non-Rust suites are
 unaffected. An older runtime that denies the check exception requires parking
 with the unverified crates and test filters named for assembly.
 
-The assembly command runs native full-workspace nextest in the factory
+The assembly command first runs the gate's `ci-script-tests` row:
+`make -C cas-cli test-ci-tiers`, with factory identity and inherited make
+dry-run/ignore-error modes removed. A failing script suite retains its output
+and stops assembly before either Rust suite. The full release gate runs this
+same mandatory row before build and Rust test rows; it is excluded from the
+short `--fast-rows` lane checks.
+
+The assembly command then runs native full-workspace nextest in the factory
 worktree, then the gate's archive-mode row in a plain clone outside every
 `.cas` ancestor. The archive consumer uses the queue's remapped environment
 and excludes component-output snapshots, already covered by the native run.
@@ -221,9 +237,11 @@ Cassy's disposable roots so discovery and update tests exercise durable
 projects. Assembly refuses an unsafe base before tool probing or either suite;
 its legacy `/var/tmp` default requires this explicit override.
 
-Both contexts must report nonzero passed tests before an atomic PASS is written
+The script tier must pass, and both Rust contexts must report nonzero passed
+tests, before an atomic PASS is written
 under the shared `.cas/merge-sweeps/assembly-proofs/` directory. The receipt
-records the tested Git tree, each context's tree and pass count, toolchain,
+records the tested Git tree, script-tier status/tree/log, each Rust context's
+tree and pass count, toolchain,
 environment and archive size. Full Cassy integration sweeps and the train's
 assembly stage use this same command; retries cite the existing receipt.
 

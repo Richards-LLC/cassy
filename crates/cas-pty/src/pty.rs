@@ -2462,6 +2462,19 @@ impl Pty {
             .master
             .try_clone_reader()
             .map_err(|e| Error::pty(format!("Failed to clone reader: {e}")))?;
+        #[cfg(unix)]
+        let idle_read_fd = {
+            let fd = pair
+                .master
+                .as_raw_fd()
+                .ok_or_else(|| Error::pty("Native PTY has no pollable output descriptor"))?;
+            // SAFETY: pair.master owns this live descriptor during the clone.
+            // The owned duplicate is CLOEXEC and lives with the reader thread;
+            // borrowing the master's raw number could race drop/FD reuse.
+            unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) }
+                .try_clone_to_owned()
+                .map_err(|e| Error::pty(format!("Failed to clone PTY poll descriptor: {e}")))?
+        };
         let writer = pair
             .master
             .take_writer()
@@ -2501,7 +2514,13 @@ impl Pty {
         let reader_handle = std::thread::spawn({
             let writer = Arc::clone(&writer);
             move || {
-                Self::reader_loop(reader, writer, event_tx);
+                Self::reader_loop(
+                    reader,
+                    writer,
+                    event_tx,
+                    #[cfg(unix)]
+                    idle_read_fd,
+                );
             }
         });
 
@@ -2523,20 +2542,37 @@ impl Pty {
         mut reader: Box<dyn Read + Send>,
         writer: Arc<Mutex<Box<dyn Write + Send>>>,
         event_tx: mpsc::Sender<PtyEvent>,
+        #[cfg(unix)] idle_read_fd: std::os::fd::OwnedFd,
     ) {
         // Larger buffer for high-throughput scenarios (6 Claudes generating long responses)
         let mut buf = [0u8; 16384];
         let mut carry: Vec<u8> = Vec::new();
 
         loop {
+            #[cfg(unix)]
+            if !carry.is_empty() {
+                match wait_for_pty_read(&idle_read_fd) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        // An ambiguous ESC/CSI suffix gets a short opportunity
+                        // to finish a CPR, then becomes ordinary terminal data.
+                        if !flush_reader_carry(&mut carry, &event_tx) {
+                            break;
+                        }
+                        continue;
+                    }
+                    Err(error) => {
+                        flush_reader_carry(&mut carry, &event_tx);
+                        let _ = event_tx.blocking_send(PtyEvent::Error(error.to_string()));
+                        break;
+                    }
+                }
+            }
             match reader.read(&mut buf) {
                 Ok(0) => {
                     // PTY EOF can precede the child's wait status when a
                     // process closes its terminal descriptors before exit.
-                    if !carry.is_empty() {
-                        let _ =
-                            event_tx.blocking_send(PtyEvent::Output(std::mem::take(&mut carry)));
-                    }
+                    flush_reader_carry(&mut carry, &event_tx);
                     let _ = event_tx.blocking_send(PtyEvent::Exited(None));
                     break;
                 }
@@ -2555,7 +2591,9 @@ impl Pty {
                         break;
                     }
                 }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(e) => {
+                    flush_reader_carry(&mut carry, &event_tx);
                     let _ = event_tx.blocking_send(PtyEvent::Error(e.to_string()));
                     break;
                 }
@@ -2796,68 +2834,334 @@ impl Pty {
     }
 }
 
+fn flush_reader_carry(carry: &mut Vec<u8>, events: &mpsc::Sender<PtyEvent>) -> bool {
+    carry.is_empty()
+        || events
+            .blocking_send(PtyEvent::Output(std::mem::take(carry)))
+            .is_ok()
+}
+
+#[cfg(unix)]
+const CPR_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Wait only while a possible CPR suffix is held. Normal output retains the
+/// blocking reader path and quiet panes with no carry consume no timer ticks.
+#[cfg(unix)]
+fn wait_for_pty_read(fd: &std::os::fd::OwnedFd) -> std::io::Result<bool> {
+    use std::os::fd::AsRawFd;
+
+    let deadline = std::time::Instant::now() + CPR_IDLE_TIMEOUT;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Ok(false);
+        }
+        let mut ready = libc::pollfd {
+            fd: fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: fd stays owned by this reader thread, ready is one valid
+        // pollfd, and the timeout is bounded by CPR_IDLE_TIMEOUT (50ms).
+        let result = unsafe { libc::poll(&mut ready, 1, remaining.as_millis().max(1) as i32) };
+        if result < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if ready.revents & libc::POLLNVAL != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "PTY poll descriptor is invalid",
+            ));
+        }
+        // HUP/ERR also proceed to the existing portable-pty reader, which
+        // preserves its native EOF/error mapping and any final queued bytes.
+        return Ok(result > 0);
+    }
+}
+
 fn filter_cursor_position_requests(carry: &[u8], chunk: &[u8]) -> (Vec<u8>, Vec<u8>, bool) {
-    const CPR: [u8; 4] = [0x1b, 0x5b, 0x36, 0x6e]; // ESC [ 6 n
-    const CPR_ALT: [u8; 5] = [0x1b, 0x5b, 0x3f, 0x36, 0x6e]; // ESC [ ? 6 n
-    let max_seq = CPR_ALT.len();
-
-    let total_len = carry.len() + chunk.len();
-    if total_len == 0 {
-        return (Vec::new(), Vec::new(), false);
-    }
-
-    let process_len = total_len.saturating_sub(max_seq - 1);
-    let mut out = Vec::with_capacity(process_len);
-    let mut i = 0usize;
-    let mut saw_cpr = false;
-
-    let byte_at = |idx: usize| -> u8 {
-        if idx < carry.len() {
-            carry[idx]
-        } else {
-            chunk[idx - carry.len()]
-        }
+    const CPR: &[u8] = b"\x1b[6n";
+    const CPR_ALT: &[u8] = b"\x1b[?6n";
+    // Ordinary reads have no carry: borrow them instead of adding a copy on
+    // the high-throughput output path.
+    let bytes = if carry.is_empty() {
+        std::borrow::Cow::Borrowed(chunk)
+    } else {
+        std::borrow::Cow::Owned([carry, chunk].concat())
     };
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    let mut saw_cpr = false;
+    while index < bytes.len() {
+        let remaining = &bytes[index..];
+        if remaining.starts_with(CPR_ALT) {
+            saw_cpr = true;
+            index += CPR_ALT.len();
+        } else if remaining.starts_with(CPR) {
+            saw_cpr = true;
+            index += CPR.len();
+        } else if CPR.starts_with(remaining) || CPR_ALT.starts_with(remaining) {
+            // Only a real, incomplete sequence prefix belongs in carry.
+            break;
+        } else {
+            output.push(bytes[index]);
+            index += 1;
+        }
+    }
+    (output, bytes[index..].to_vec(), saw_cpr)
+}
 
-    while i < process_len {
-        if i + CPR_ALT.len() <= total_len {
-            let mut matches = true;
-            for (j, byte) in CPR_ALT.iter().enumerate() {
-                if byte_at(i + j) != *byte {
-                    matches = false;
-                    break;
-                }
-            }
-            if matches {
-                saw_cpr = true;
-                i += CPR_ALT.len();
-                continue;
-            }
-        }
-        if i + CPR.len() <= total_len {
-            let mut matches = true;
-            for (j, byte) in CPR.iter().enumerate() {
-                if byte_at(i + j) != *byte {
-                    matches = false;
-                    break;
-                }
-            }
-            if matches {
-                saw_cpr = true;
-                i += CPR.len();
-                continue;
-            }
-        }
-        out.push(byte_at(i));
-        i += 1;
+#[cfg(test)]
+mod cpr_tests {
+    use super::{Pty, PtyConfig, PtyEvent, filter_cursor_position_requests};
+
+    #[test]
+    fn cpr_filter_delivers_entire_quiet_prompt() {
+        let (output, carry, request) = filter_cursor_position_requests(&[], b"prompt> ");
+        assert_eq!(output, b"prompt> ");
+        assert!(carry.is_empty());
+        assert!(!request);
     }
 
-    let mut new_carry = Vec::with_capacity(total_len - process_len);
-    for idx in process_len..total_len {
-        new_carry.push(byte_at(idx));
+    #[test]
+    fn cpr_filter_matches_every_split_without_replaying_request_tail() {
+        for sequence in [b"\x1b[6n".as_slice(), b"\x1b[?6n".as_slice()] {
+            let (output, carry, request) = filter_cursor_position_requests(&[], sequence);
+            assert!(output.is_empty(), "complete CPR must not reach the viewer");
+            assert!(
+                carry.is_empty(),
+                "recognized CPR must leave no duplicate tail"
+            );
+            assert!(
+                request,
+                "complete CPR must be answered without another read"
+            );
+
+            for split in 1..sequence.len() {
+                let first = [b"head".as_slice(), &sequence[..split]].concat();
+                let (output, carry, request) = filter_cursor_position_requests(&[], &first);
+                assert_eq!(output, b"head");
+                assert_eq!(carry, sequence[..split]);
+                assert!(!request);
+
+                let second = [&sequence[split..], b" tail".as_slice()].concat();
+                let (output, carry, request) = filter_cursor_position_requests(&carry, &second);
+                assert_eq!(output, b" tail");
+                assert!(carry.is_empty());
+                assert!(request, "split CPR must be answered and filtered");
+            }
+        }
     }
 
-    (out, new_carry, saw_cpr)
+    #[test]
+    fn cpr_filter_keeps_unrelated_escape_and_utf8_bytes() {
+        for bytes in [
+            b"\x1b[31mred\x1b[0m".as_slice(),
+            b"\x1b[?25lprompt> ".as_slice(),
+            "\u{03bb}> ".as_bytes(),
+            b"\x1b[7n".as_slice(),
+            b"\x1b[?7n".as_slice(),
+        ] {
+            let (output, carry, request) = filter_cursor_position_requests(&[], bytes);
+            assert_eq!(output, bytes);
+            assert!(carry.is_empty());
+            assert!(!request);
+        }
+        // The next read disproves this partial CPR: every original byte must
+        // reach the viewer, including the previously ambiguous CSI prefix.
+        let (output, carry, request) = filter_cursor_position_requests(b"\x1b[", b"31mred");
+        assert_eq!(output, b"\x1b[31mred");
+        assert!(carry.is_empty());
+        assert!(!request);
+    }
+
+    #[cfg(unix)]
+    struct CapturedReplies(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    #[cfg(unix)]
+    impl std::io::Write for CapturedReplies {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(data);
+            Ok(data.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    struct ChunkedReader {
+        stream: std::os::unix::net::UnixStream,
+        limit: usize,
+    }
+
+    #[cfg(unix)]
+    impl std::io::Read for ChunkedReader {
+        fn read(&mut self, data: &mut [u8]) -> std::io::Result<usize> {
+            let limit = data.len().min(self.limit);
+            std::io::Read::read(&mut self.stream, &mut data[..limit])
+        }
+    }
+
+    /// Real blocking stream/readiness/channel boundary. Limiting read size
+    /// makes CPR splits deterministic without sleeps between child writes.
+    #[cfg(unix)]
+    struct ReaderProbe {
+        output: std::os::unix::net::UnixStream,
+        events: tokio::sync::mpsc::Receiver<PtyEvent>,
+        replies: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    #[cfg(unix)]
+    impl ReaderProbe {
+        fn new(read_limit: usize) -> Self {
+            use std::os::fd::AsFd;
+
+            let (output, stream) = std::os::unix::net::UnixStream::pair().unwrap();
+            let idle_fd = stream.as_fd().try_clone_to_owned().unwrap();
+            let replies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let writer: Box<dyn std::io::Write + Send> = Box::new(CapturedReplies(replies.clone()));
+            let writer = std::sync::Arc::new(tokio::sync::Mutex::new(writer));
+            let (tx, events) = tokio::sync::mpsc::channel(64);
+            let thread = std::thread::spawn(move || {
+                Pty::reader_loop(
+                    Box::new(ChunkedReader {
+                        stream,
+                        limit: read_limit,
+                    }),
+                    writer,
+                    tx,
+                    idle_fd,
+                );
+            });
+            Self {
+                output,
+                events,
+                replies,
+                thread: Some(thread),
+            }
+        }
+
+        async fn bytes(&mut self, count: usize) -> Vec<u8> {
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                let mut output = Vec::new();
+                while output.len() < count {
+                    match self.events.recv().await {
+                        Some(PtyEvent::Output(bytes)) => output.extend(bytes),
+                        event => panic!("reader ended before forwarding pending bytes: {event:?}"),
+                    }
+                }
+                output
+            })
+            .await
+            .expect("quiet reader retained output past its idle deadline")
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for ReaderProbe {
+        fn drop(&mut self) {
+            // Unblock the reader even when an assertion unwinds. Test traffic
+            // cannot fill the 64-event channel while this thread finishes.
+            let _ = self.output.shutdown(std::net::Shutdown::Write);
+            if let Some(thread) = self.thread.take() {
+                thread.join().unwrap();
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cpr_reader_flushes_ambiguous_suffix_on_idle_without_another_read() {
+        use std::io::Write;
+
+        for suffix in [b"\x1b".as_slice(), b"\x1b[", b"\x1b[6", b"\x1b[?6"] {
+            let mut reader = ReaderProbe::new(16384);
+            let bytes = [b"prompt> ".as_slice(), suffix].concat();
+            reader.output.write_all(&bytes).unwrap();
+            assert_eq!(reader.bytes(bytes.len()).await, bytes);
+            assert!(reader.replies.lock().unwrap().is_empty());
+            // The connection is still open, with no further input/EOF needed
+            // to expose the suffix. A later chunk must not replay it again.
+            reader.output.write_all(b"!").unwrap();
+            assert_eq!(reader.bytes(1).await, b"!");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cpr_reader_answers_and_filters_requests_split_across_reads() {
+        use std::io::Write;
+
+        for sequence in [b"\x1b[6n".as_slice(), b"\x1b[?6n".as_slice()] {
+            let mut reader = ReaderProbe::new(2);
+            reader
+                .output
+                .write_all(&[b"head".as_slice(), sequence, b" tail"].concat())
+                .unwrap();
+            assert_eq!(reader.bytes(9).await, b"head tail");
+            assert_eq!(*reader.replies.lock().unwrap(), b"\x1b[1;1R");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cpr_reader_flushes_partial_request_before_eof() {
+        use std::io::Write;
+
+        let mut reader = ReaderProbe::new(16384);
+        reader.output.write_all(b"\x1b[").unwrap();
+        reader.output.shutdown(std::net::Shutdown::Write).unwrap();
+        assert_eq!(reader.bytes(2).await, b"\x1b[");
+        let event = tokio::time::timeout(std::time::Duration::from_secs(3), reader.events.recv())
+            .await
+            .unwrap();
+        assert!(matches!(event, Some(PtyEvent::Exited(None))));
+        assert!(reader.replies.lock().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn quiet_pty_delivers_prompt_before_more_output_or_exit() {
+        let mut pty = Pty::spawn(
+            "quiet-prompt",
+            PtyConfig {
+                command: "sh".into(),
+                args: vec!["-c".into(), "printf 'prompt> '; read -r pending".into()],
+                ..PtyConfig::default()
+            },
+        )
+        .expect("quiet PTY must spawn");
+        let output = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let mut output = Vec::new();
+            while output.len() < 8 {
+                match pty.recv().await {
+                    Some(PtyEvent::Output(bytes)) => output.extend(bytes),
+                    _ => break,
+                }
+            }
+            output
+        })
+        .await;
+        let child_status = pty.child.try_wait();
+        // Always release the gated child, including the expected red timeout.
+        pty.kill_tree_force();
+        let _ = pty.child.wait();
+        assert_eq!(
+            output.expect("quiet prompt ending was withheld"),
+            b"prompt> "
+        );
+        assert!(
+            child_status.unwrap().is_none(),
+            "prompt must arrive while child is live"
+        );
+    }
 }
 
 #[cfg(test)]

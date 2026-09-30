@@ -1,0 +1,694 @@
+[
+  {
+    "case_id": "c01",
+    "axis": "spec",
+    "commit": "96fdb3948b6ec6d6afdb8f33ed0abfc98b016719",
+    "subject": "review(spec): SPEC-01 retain matching-tree PASS receipts beyond 24 hours",
+    "files": [
+      "scripts/assembly-proof.py",
+      "scripts/test-assembly-proof.py"
+    ],
+    "bridge_receipts": [
+      {
+        "request": {
+          "finding_id": "SPEC-01",
+          "files": [
+            "scripts/assembly-proof.py",
+            "scripts/test-assembly-proof.py"
+          ],
+          "fix": "retain matching-tree PASS receipts beyond 24 hours"
+        },
+        "response": {
+          "commit": "96fdb3948b6ec6d6afdb8f33ed0abfc98b016719",
+          "error": null,
+          "commit_execution": "simulated bridge"
+        }
+      }
+    ],
+    "targeted_test_status": "unknown"
+  },
+  {
+    "case_id": "c01",
+    "axis": "standards",
+    "commit": "33b236ff4d6cf45e2b649f65c91f64d2d392c708",
+    "subject": "review(standards): standards-1 test collected environment and toolchain fingerprints with stubbed versions",
+    "files": [
+      "scripts/test-assembly-proof.py"
+    ],
+    "bridge_receipts": [
+      {
+        "request": {
+          "finding_id": "standards-1",
+          "files": [
+            "scripts/test-assembly-proof.py"
+          ],
+          "fix": "test collected environment and toolchain fingerprints with stubbed versions"
+        },
+        "response": {
+          "commit": "33b236ff4d6cf45e2b649f65c91f64d2d392c708",
+          "error": null,
+          "commit_execution": "simulated bridge"
+        }
+      }
+    ],
+    "targeted_test_status": "unknown"
+  },
+  {
+    "case_id": "c02",
+    "axis": "spec",
+    "commit": "d08cf22646ba8733af3083dd277174866786b878",
+    "subject": "review(spec): SPEC-001 Restore failure history before planning full-shard recall receipts",
+    "files": [
+      ".github/workflows/ci.yml",
+      "scripts/test-ci-test-tiers.sh"
+    ],
+    "bridge_receipts": [
+      {
+        "request": {
+          "finding_id": "SPEC-001",
+          "files": [
+            ".github/workflows/ci.yml",
+            "scripts/test-ci-test-tiers.sh"
+          ],
+          "fix": "Restore failure history before planning full-shard recall receipts"
+        },
+        "response": {
+          "commit": "d08cf22646ba8733af3083dd277174866786b878",
+          "error": null,
+          "commit_execution": "simulated bridge"
+        }
+      }
+    ],
+    "targeted_test_status": "unknown"
+  },
+  {
+    "case_id": "c02",
+    "axis": "standards",
+    "commit": "dd5de4de656afcfc1f4999fc12c50de8fc3d9757",
+    "subject": "review(standards): STD-001 Remove source-text assertions covered by impact selector behavior fixtures",
+    "files": [
+      "scripts/test-ci-test-tiers.sh"
+    ],
+    "bridge_receipts": [
+      {
+        "request": {
+          "finding_id": "STD-001",
+          "files": [
+            "scripts/test-ci-test-tiers.sh"
+          ],
+          "fix": "Remove source-text assertions covered by impact selector behavior fixtures"
+        },
+        "response": {
+          "commit": "dd5de4de656afcfc1f4999fc12c50de8fc3d9757",
+          "error": null,
+          "commit_execution": "simulated bridge"
+        }
+      }
+    ],
+    "targeted_test_status": "unknown"
+  },
+  {
+    "case_id": "c03",
+    "axis": "spec",
+    "commit": "ea3668ddd692283755e954ab2f0acbbbd8fba136",
+    "subject": "review(spec): spec-1 Restore nested hooks integration tests in contracts harness and target mapping",
+    "files": [
+      "cas-cli/tests/integration/contracts.rs",
+      "scripts/cas-test-targets.py"
+    ],
+    "bridge_receipts": [
+      {
+        "request": {
+          "finding_id": "spec-1",
+          "files": [
+            "cas-cli/tests/integration/contracts.rs",
+            "scripts/cas-test-targets.py"
+          ],
+          "fix": "Restore nested hooks integration tests in contracts harness and target mapping"
+        },
+        "response": {
+          "commit": "ea3668ddd692283755e954ab2f0acbbbd8fba136",
+          "error": null,
+          "commit_execution": "simulated bridge"
+        }
+      }
+    ],
+    "targeted_test_status": "unknown"
+  },
+  {
+    "case_id": "c03",
+    "axis": "standards",
+    "commit": "d1f53643ea8cff717aaa91f1077e29ec9185050e",
+    "subject": "review(standards): STD-001 Anchor path-module detection to declaration lines so commented modules cannot satisfy the suite inventory",
+    "files": [
+      "scripts/cas-test-targets.py"
+    ],
+    "bridge_receipts": [
+      {
+        "request": {
+          "finding_id": "STD-001",
+          "files": [
+            "scripts/cas-test-targets.py"
+          ],
+          "fix": "Anchor path-module detection to declaration lines so commented modules cannot satisfy the suite inventory"
+        },
+        "response": {
+          "commit": "d1f53643ea8cff717aaa91f1077e29ec9185050e",
+          "error": null,
+          "commit_execution": "simulated bridge"
+        }
+      }
+    ],
+    "targeted_test_status": "unknown"
+  },
+  {
+    "case_id": "c03",
+    "axis": "standards",
+    "commit": "116c6290b15eb196028ae1f9b375ec916ad725ff",
+    "subject": "review(standards): STD-002 Link the nested hooks tests into the contracts harness and include their former Cargo root in inventory checks",
+    "files": [
+      "cas-cli/tests/integration/contracts.rs",
+      "scripts/cas-test-targets.py"
+    ],
+    "bridge_receipts": [
+      {
+        "request": {
+          "finding_id": "STD-002",
+          "files": [
+            "cas-cli/tests/integration/contracts.rs",
+            "scripts/cas-test-targets.py"
+          ],
+          "fix": "Link the nested hooks tests into the contracts harness and include their former Cargo root in inventory checks"
+        },
+        "response": {
+          "commit": "116c6290b15eb196028ae1f9b375ec916ad725ff",
+          "error": null,
+          "commit_execution": "simulated bridge"
+        }
+      }
+    ],
+    "targeted_test_status": "unknown"
+  },
+  {
+    "case_id": "c04",
+    "axis": "spec",
+    "commit": "c202a413c218f77406b207c52716eb0f499e333c",
+    "subject": "review(spec): spec-001 Qualify exact subprocess helper selectors with the integration module name",
+    "files": [
+      "cas-cli/tests/factory_mcp_ops_test.rs"
+    ],
+    "bridge_receipts": [
+      {
+        "request": {
+          "finding_id": "spec-001",
+          "files": [
+            "cas-cli/tests/factory_mcp_ops_test.rs"
+          ],
+          "fix": "Qualify exact subprocess helper selectors with the integration module name"
+        },
+        "response": {
+          "commit": "c202a413c218f77406b207c52716eb0f499e333c",
+          "error": null,
+          "commit_execution": "simulated bridge"
+        }
+      }
+    ],
+    "targeted_test_status": "unknown"
+  },
+  {
+    "case_id": "c04",
+    "axis": "standards",
+    "commit": "5e6fcdebcb1849e8023d815c1bdb75bcbf94bcff",
+    "subject": "review(standards): standards-1 Qualify isolated child test selectors for the grouped factory harness",
+    "files": [
+      "cas-cli/tests/factory_mcp_ops_test.rs"
+    ],
+    "bridge_receipts": [
+      {
+        "request": {
+          "finding_id": "standards-1",
+          "files": [
+            "cas-cli/tests/factory_mcp_ops_test.rs"
+          ],
+          "fix": "Qualify isolated child test selectors for the grouped factory harness"
+        },
+        "response": {
+          "commit": "5e6fcdebcb1849e8023d815c1bdb75bcbf94bcff",
+          "error": null,
+          "commit_execution": "simulated bridge"
+        }
+      }
+    ],
+    "targeted_test_status": "unknown"
+  },
+  {
+    "case_id": "c05",
+    "axis": "standards",
+    "commit": "093b1a8e34c382eb25d58e888122229c159aab6c",
+    "subject": "review(standards): STD-001 Use the module-qualified helper name for the exact subprocess test filter",
+    "files": [
+      "cas-cli/tests/hub_clean_home_test.rs"
+    ],
+    "bridge_receipts": [
+      {
+        "request": {
+          "finding_id": "STD-001",
+          "files": [
+            "cas-cli/tests/hub_clean_home_test.rs"
+          ],
+          "fix": "Use the module-qualified helper name for the exact subprocess test filter"
+        },
+        "response": {
+          "commit": "093b1a8e34c382eb25d58e888122229c159aab6c",
+          "error": null,
+          "commit_execution": "simulated bridge"
+        }
+      }
+    ],
+    "targeted_test_status": "unknown"
+  },
+  {
+    "case_id": "c05",
+    "axis": "standards",
+    "commit": "6e985b0d8ec0ed253ca05875db7ecbc1acdbc7e4",
+    "subject": "review(standards): STD-001-followup Correct the exact helper filter to omit the integration crate name",
+    "files": [
+      "cas-cli/tests/hub_clean_home_test.rs"
+    ],
+    "bridge_receipts": [
+      {
+        "request": {
+          "finding_id": "STD-001-followup",
+          "files": [
+            "cas-cli/tests/hub_clean_home_test.rs"
+          ],
+          "fix": "Correct the exact helper filter to omit the integration crate name"
+        },
+        "response": {
+          "commit": "6e985b0d8ec0ed253ca05875db7ecbc1acdbc7e4",
+          "error": null,
+          "commit_execution": "simulated bridge"
+        }
+      }
+    ],
+    "targeted_test_status": "unknown"
+  },
+  {
+    "case_id": "c06",
+    "axis": "spec",
+    "commit": "4cd92e9cc7984117905c3f4927d1af1d8ab2c69e",
+    "subject": "review(spec): spec-1 Use the grouped test name and require one child test to pass",
+    "files": [
+      "cas-cli/tests/worktree_surface_test.rs"
+    ],
+    "bridge_receipts": [
+      {
+        "request": {
+          "finding_id": "spec-1",
+          "files": [
+            "cas-cli/tests/worktree_surface_test.rs"
+          ],
+          "fix": "Use the grouped test name and require one child test to pass"
+        },
+        "response": {
+          "commit": "4cd92e9cc7984117905c3f4927d1af1d8ab2c69e",
+          "error": null,
+          "commit_execution": "simulated bridge"
+        }
+      }
+    ],
+    "targeted_test_status": "unknown"
+  },
+  {
+    "case_id": "c06",
+    "axis": "standards",
+    "commit": "d9db0de12c1a1c656d1775a7ce1eeaccc608e8a2",
+    "subject": "review(standards): standards-001 Select namespaced authority test and assert child executed it",
+    "files": [
+      "cas-cli/tests/worktree_surface_test.rs"
+    ],
+    "bridge_receipts": [
+      {
+        "request": {
+          "finding_id": "standards-001",
+          "files": [
+            "cas-cli/tests/worktree_surface_test.rs"
+          ],
+          "fix": "Select namespaced authority test and assert child executed it"
+        },
+        "response": {
+          "commit": "d9db0de12c1a1c656d1775a7ce1eeaccc608e8a2",
+          "error": null,
+          "commit_execution": "simulated bridge"
+        }
+      }
+    ],
+    "targeted_test_status": "unknown"
+  },
+  {
+    "case_id": "c09",
+    "axis": "spec",
+    "commit": "83b9e3b303ace1bf3277885b5cb840bfc11d8375",
+    "subject": "review(spec): SPEC-1 Observe merges only for the active delivery anchor during proof-scope repair",
+    "files": [
+      "cas-cli/src/mcp/tools/core/task/update.rs"
+    ],
+    "bridge_receipts": [
+      {
+        "request": {
+          "finding_id": "SPEC-1",
+          "files": [
+            "cas-cli/src/mcp/tools/core/task/update.rs"
+          ],
+          "fix": "Observe merges only for the active delivery anchor during proof-scope repair"
+        },
+        "response": {
+          "commit": "83b9e3b303ace1bf3277885b5cb840bfc11d8375",
+          "error": null,
+          "commit_execution": "simulated bridge"
+        }
+      }
+    ],
+    "targeted_test_status": "unknown"
+  },
+  {
+    "case_id": "c09",
+    "axis": "spec",
+    "commit": "77ee4caa50e0adcc0950658cb867a964c5aa456b",
+    "subject": "review(spec): SPEC-2 Preserve proof-scope lock after an awaiting-merge task reports blocked",
+    "files": [
+      "cas-cli/src/mcp/tools/core/task/lifecycle/proof_scope.rs",
+      "cas-cli/src/mcp/tools/core/task/update.rs"
+    ],
+    "bridge_receipts": [
+      {
+        "request": {
+          "finding_id": "SPEC-2",
+          "files": [
+            "cas-cli/src/mcp/tools/core/task/lifecycle/proof_scope.rs",
+            "cas-cli/src/mcp/tools/core/task/update.rs"
+          ],
+          "fix": "Preserve proof-scope lock after an awaiting-merge task reports blocked"
+        },
+        "response": {
+          "commit": "77ee4caa50e0adcc0950658cb867a964c5aa456b",
+          "error": null,
+          "commit_execution": "simulated bridge"
+        }
+      }
+    ],
+    "targeted_test_status": "unknown"
+  },
+  {
+    "case_id": "c09",
+    "axis": "standards",
+    "commit": "ef443e654a97370177a400a0e0fd0c4f53b660f5",
+    "subject": "review(standards): standards-1 Exercise blocked proof update through the public handler",
+    "files": [
+      "cas-cli/src/mcp/tools/core/task/update.rs"
+    ],
+    "bridge_receipts": [
+      {
+        "request": {
+          "finding_id": "standards-1",
+          "files": [
+            "cas-cli/src/mcp/tools/core/task/update.rs"
+          ],
+          "fix": "Exercise blocked proof update through the public handler"
+        },
+        "response": {
+          "commit": "ef443e654a97370177a400a0e0fd0c4f53b660f5",
+          "error": null,
+          "commit_execution": "simulated bridge"
+        }
+      }
+    ],
+    "targeted_test_status": "unknown"
+  },
+  {
+    "case_id": "c10",
+    "axis": "standards",
+    "commit": "1e394a71bde1cbdbe60d87f6417b931688239abb",
+    "subject": "review(standards): standards-1 Split merge observation and proof-target correction into focused tests",
+    "files": [
+      "cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs"
+    ],
+    "bridge_receipts": [
+      {
+        "request": {
+          "finding_id": "standards-1",
+          "files": [
+            "cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs"
+          ],
+          "fix": "Split merge observation and proof-target correction into focused tests"
+        },
+        "response": {
+          "commit": "1e394a71bde1cbdbe60d87f6417b931688239abb",
+          "error": null,
+          "commit_execution": "simulated bridge"
+        }
+      }
+    ],
+    "targeted_test_status": "unknown"
+  },
+  {
+    "case_id": "c11",
+    "axis": "spec",
+    "commit": "1b996bb10468c6ad39f1f1e1f6585929d009a383",
+    "subject": "review(spec): SPEC-1 Limit worker PreToolUse cargo check exception to --tests and align guidance and tests",
+    "files": [
+      "cas-cli/src/hooks/handlers/handlers_events/pre_tool.rs",
+      "cas-cli/src/hooks/handlers/handlers_tests/unscoped_test_guard.rs"
+    ],
+    "bridge_receipts": [
+      {
+        "request": {
+          "finding_id": "SPEC-1",
+          "files": [
+            "cas-cli/src/hooks/handlers/handlers_events/pre_tool.rs",
+            "cas-cli/src/hooks/handlers/handlers_tests/unscoped_test_guard.rs"
+          ],
+          "fix": "Limit worker PreToolUse cargo check exception to --tests and align guidance and tests"
+        },
+        "response": {
+          "commit": "1b996bb10468c6ad39f1f1e1f6585929d009a383",
+          "error": null,
+          "commit_execution": "simulated bridge"
+        }
+      }
+    ],
+    "targeted_test_status": "unknown"
+  },
+  {
+    "case_id": "c12",
+    "axis": "standards",
+    "commit": "eaf81b355cfc7131dabe5a7e75f06aa8843d16f2",
+    "subject": "review(standards): STD-001 Exercise the production abandonment operation in the relay escalation test",
+    "files": [
+      "crates/cas-store/src/prompt_queue_store.rs"
+    ],
+    "bridge_receipts": [
+      {
+        "request": {
+          "finding_id": "STD-001",
+          "files": [
+            "crates/cas-store/src/prompt_queue_store.rs"
+          ],
+          "fix": "Exercise the production abandonment operation in the relay escalation test"
+        },
+        "response": {
+          "commit": "eaf81b355cfc7131dabe5a7e75f06aa8843d16f2",
+          "error": null,
+          "commit_execution": "simulated bridge"
+        }
+      }
+    ],
+    "targeted_test_status": "unknown"
+  },
+  {
+    "case_id": "c13",
+    "axis": "spec",
+    "commit": "12f6e316bed1c88e2b38f90da2dc19830d46ba29",
+    "subject": "review(spec): SPEC-1 Invoke the proof helper from the epic worktree",
+    "files": [
+      "cas-cli/src/builtins/skills/cas-supervisor/references/workflow.md"
+    ],
+    "bridge_receipts": [
+      {
+        "request": {
+          "finding_id": "SPEC-1",
+          "files": [
+            "cas-cli/src/builtins/skills/cas-supervisor/references/workflow.md"
+          ],
+          "fix": "Invoke the proof helper from the epic worktree"
+        },
+        "response": {
+          "commit": "12f6e316bed1c88e2b38f90da2dc19830d46ba29",
+          "error": null,
+          "commit_execution": "simulated bridge"
+        }
+      }
+    ],
+    "targeted_test_status": "unknown"
+  },
+  {
+    "case_id": "c14",
+    "axis": "spec",
+    "commit": "fa164a462d4971671c218c99e9d096e94f84ed6c",
+    "subject": "review(spec): SPEC-01 Correct Violet setup guide to match current integration output and name manual registrations",
+    "files": [
+      "cas-cli/src/builtins/skills/violet/references/registration.md"
+    ],
+    "bridge_receipts": [
+      {
+        "request": {
+          "finding_id": "SPEC-01",
+          "files": [
+            "cas-cli/src/builtins/skills/violet/references/registration.md"
+          ],
+          "fix": "Correct Violet setup guide to match current integration output and name manual registrations"
+        },
+        "response": {
+          "commit": "fa164a462d4971671c218c99e9d096e94f84ed6c",
+          "error": null,
+          "commit_execution": "simulated bridge"
+        }
+      }
+    ],
+    "targeted_test_status": "unknown"
+  },
+  {
+    "case_id": "c15",
+    "axis": "spec",
+    "commit": "189e4724c46f5fb76204317ea346e1377edf537d",
+    "subject": "review(spec): SPEC-1 Restore the Violet issue number in the registration fallback guidance",
+    "files": [
+      "cas-cli/src/builtins/skills/violet/references/registration.md"
+    ],
+    "bridge_receipts": [
+      {
+        "request": {
+          "finding_id": "SPEC-1",
+          "files": [
+            "cas-cli/src/builtins/skills/violet/references/registration.md"
+          ],
+          "fix": "Restore the Violet issue number in the registration fallback guidance"
+        },
+        "response": {
+          "commit": "189e4724c46f5fb76204317ea346e1377edf537d",
+          "error": null,
+          "commit_execution": "simulated bridge"
+        }
+      }
+    ],
+    "targeted_test_status": "unknown"
+  },
+  {
+    "case_id": "c17",
+    "axis": "spec",
+    "commit": "634d0d4d25896b8c8370482ba57066202e0f8de4",
+    "subject": "review(spec): SPEC-001 Make member manifest and lock version changes invalidate the assembly receipt",
+    "files": [
+      "scripts/assembly-proof.py",
+      "scripts/test-assembly-proof.py"
+    ],
+    "bridge_receipts": [
+      {
+        "request": {
+          "finding_id": "SPEC-001",
+          "files": [
+            "scripts/assembly-proof.py",
+            "scripts/test-assembly-proof.py"
+          ],
+          "fix": "Make member manifest and lock version changes invalidate the assembly receipt"
+        },
+        "response": {
+          "commit": "634d0d4d25896b8c8370482ba57066202e0f8de4",
+          "error": null,
+          "commit_execution": "simulated bridge"
+        }
+      }
+    ],
+    "targeted_test_status": "unknown"
+  },
+  {
+    "case_id": "c17",
+    "axis": "spec",
+    "commit": "686e5782ec58f0d86fb0edee26ebacce86055400",
+    "subject": "review(spec): SPEC-002 Make embedded reference-history ledger changes invalidate the assembly receipt",
+    "files": [
+      "scripts/assembly-proof.py",
+      "scripts/test-assembly-proof.py"
+    ],
+    "bridge_receipts": [
+      {
+        "request": {
+          "finding_id": "SPEC-002",
+          "files": [
+            "scripts/assembly-proof.py",
+            "scripts/test-assembly-proof.py"
+          ],
+          "fix": "Make embedded reference-history ledger changes invalidate the assembly receipt"
+        },
+        "response": {
+          "commit": "686e5782ec58f0d86fb0edee26ebacce86055400",
+          "error": null,
+          "commit_execution": "simulated bridge"
+        }
+      }
+    ],
+    "targeted_test_status": "unknown"
+  },
+  {
+    "case_id": "c18",
+    "axis": "spec",
+    "commit": "1b5660f89b189668b9e01a20fad487abb4a974bb",
+    "subject": "review(spec): SPEC-1 remove impossible libtest completion-line assertion from atexit child check",
+    "files": [
+      "cas-cli/tests/hub_clean_home_test.rs"
+    ],
+    "bridge_receipts": [
+      {
+        "request": {
+          "finding_id": "SPEC-1",
+          "files": [
+            "cas-cli/tests/hub_clean_home_test.rs"
+          ],
+          "fix": "remove impossible libtest completion-line assertion from atexit child check"
+        },
+        "response": {
+          "commit": "1b5660f89b189668b9e01a20fad487abb4a974bb",
+          "error": null,
+          "commit_execution": "simulated bridge"
+        }
+      }
+    ],
+    "targeted_test_status": "unknown"
+  },
+  {
+    "case_id": "c19",
+    "axis": "standards",
+    "commit": "674ce9c1e034c81a32dc42b7f5be6e39a35a1d9b",
+    "subject": "review(standards): STD-1 Split workspace-contract denial into a focused test",
+    "files": [
+      "cas-cli/src/hooks/handlers/handlers_tests/unscoped_test_guard.rs"
+    ],
+    "bridge_receipts": [
+      {
+        "request": {
+          "finding_id": "STD-1",
+          "files": [
+            "cas-cli/src/hooks/handlers/handlers_tests/unscoped_test_guard.rs"
+          ],
+          "fix": "Split workspace-contract denial into a focused test"
+        },
+        "response": {
+          "commit": "674ce9c1e034c81a32dc42b7f5be6e39a35a1d9b",
+          "error": null,
+          "commit_execution": "simulated bridge"
+        }
+      }
+    ],
+    "targeted_test_status": "unknown"
+  }
+]

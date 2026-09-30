@@ -70,10 +70,16 @@ fn is_object_visibility_error(stderr: &str) -> bool {
 }
 
 fn commit_with_object_visibility_retry(repo: &Path, message: &str) {
+    let mut command = Command::new("git");
+    command.args(["commit", "-m", message]).current_dir(repo);
+    run_fixture_commit(&mut command, message);
+}
+
+// Keep retry decisions in the same loop the real history fixture uses. The
+// command seam lets regressions configure child-only Git tracing and identity.
+fn run_fixture_commit(command: &mut Command, message: &str) {
     for attempt in 1..=OBJECT_VISIBILITY_COMMIT_ATTEMPTS {
-        let out = Command::new("git")
-            .args(["commit", "-m", message])
-            .current_dir(repo)
+        let out = command
             .output()
             .unwrap_or_else(|e| panic!("git commit {message:?}: {e}"));
         if out.status.success() {
@@ -106,6 +112,170 @@ fn fixture_commit_retry_is_limited_to_git_object_visibility_errors() {
     assert!(!is_object_visibility_error(
         "Author identity unknown\n\nfatal: unable to auto-detect email address"
     ));
+}
+
+#[cfg(unix)]
+struct CommitRetryFixture {
+    temp: TempDir,
+    trace: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+impl CommitRetryFixture {
+    fn new() -> Self {
+        let temp = TempDir::new().unwrap();
+        let repo = temp.path();
+        git(repo, &["init", "-q", "-b", "main", "--object-format=sha1"]);
+        git(repo, &["config", "user.name", "Retry Fixture"]);
+        git(repo, &["config", "user.email", "retry@example.com"]);
+        git(repo, &["config", "user.useConfigOnly", "true"]);
+        git(repo, &["config", "commit.gpgsign", "false"]);
+        git(repo, &["config", "core.hooksPath", ".git/hooks"]);
+        std::fs::write(repo.join("probe.txt"), "real fixture object\n").unwrap();
+        git(repo, &["add", "probe.txt"]);
+        let trace = repo.join(".git/commit-trace.json");
+        Self { temp, trace }
+    }
+
+    fn command(&self, message: &str) -> Command {
+        let mut command = Command::new("git");
+        command
+            .args(["commit", "-m", message])
+            .current_dir(self.temp.path())
+            .env("GIT_TRACE2_EVENT", &self.trace)
+            .env("LC_ALL", "C")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1");
+        for key in [
+            "GIT_AUTHOR_NAME",
+            "GIT_AUTHOR_EMAIL",
+            "GIT_AUTHOR_DATE",
+            "GIT_COMMITTER_NAME",
+            "GIT_COMMITTER_EMAIL",
+            "GIT_COMMITTER_DATE",
+            "GIT_CONFIG_COUNT",
+        ] {
+            command.env_remove(key);
+        }
+        command
+    }
+
+    fn visibility_failure(&self, recover_after: Option<usize>) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fail = recover_after
+            .map(|count| format!("[ \"$count\" -le {count} ]"))
+            .unwrap_or_else(|| "true".into());
+        let hook = self.temp.path().join(".git/hooks/pre-commit");
+        // Make the index refer to an actually absent object. Git itself emits
+        // invalid-object/build-tree errors; the hook does not fake stderr.
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\n\
+                 count=0\n\
+                 if [ -f .git/commit-attempts ]; then read -r count < .git/commit-attempts; fi\n\
+                 count=$((count + 1))\n\
+                 printf '%s\\n' \"$count\" > .git/commit-attempts\n\
+                 if {fail}; then\n\
+                     git update-index --cacheinfo 100644,0000000000000000000000000000000000000001,probe.txt\n\
+                 else\n\
+                     git add -- probe.txt\n\
+                 fi\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn attempts(&self) -> usize {
+        // Count actual commit process starts, not helper constants or the hook
+        // counter. Trace2 also sees nested update-index/add processes.
+        std::fs::read_to_string(&self.trace)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|event| {
+                event["event"] == "start"
+                    && event["argv"]
+                        .as_array()
+                        .is_some_and(|args| args.get(1).is_some_and(|arg| arg == "commit"))
+            })
+            .count()
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn fixture_commit_retries_real_object_visibility_failure_then_commits() {
+    let fixture = CommitRetryFixture::new();
+    fixture.visibility_failure(Some(2));
+    run_fixture_commit(
+        &mut fixture.command("visible after retry"),
+        "visible after retry",
+    );
+    assert_eq!(fixture.attempts(), 3, "two failed commits must be retried");
+    let out = Command::new("git")
+        .args(["show", "HEAD:probe.txt"])
+        .current_dir(fixture.temp.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "recovery must create a real commit");
+    assert_eq!(out.stdout, b"real fixture object\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn fixture_commit_stops_after_bounded_real_object_visibility_failures() {
+    let fixture = CommitRetryFixture::new();
+    fixture.visibility_failure(None);
+    let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_fixture_commit(&mut fixture.command("never visible"), "never visible");
+    }));
+    let error = failure.expect_err("permanent missing object must not report success");
+    let message = error
+        .downcast_ref::<String>()
+        .expect("fixture panic contains Git error");
+    assert!(is_object_visibility_error(message));
+    assert_eq!(
+        fixture.attempts(),
+        3,
+        "permanent failure must stop retrying"
+    );
+    let out = Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(fixture.temp.path())
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "failed retries must not create a commit"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fixture_commit_does_not_retry_real_identity_failure() {
+    let fixture = CommitRetryFixture::new();
+    git(fixture.temp.path(), &["config", "--unset", "user.name"]);
+    git(fixture.temp.path(), &["config", "--unset", "user.email"]);
+    let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_fixture_commit(&mut fixture.command("missing identity"), "missing identity");
+    }));
+    let error = failure.expect_err("missing identity must fail immediately");
+    let message = error
+        .downcast_ref::<String>()
+        .expect("fixture panic contains Git error");
+    assert!(
+        message.contains("Author identity unknown"),
+        "unexpected error: {message}"
+    );
+    assert!(!is_object_visibility_error(message));
+    assert_eq!(
+        fixture.attempts(),
+        1,
+        "identity failure must not be retried"
+    );
 }
 
 impl Fixture {

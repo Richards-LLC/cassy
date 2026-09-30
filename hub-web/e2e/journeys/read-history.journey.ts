@@ -1,17 +1,9 @@
 import { test, expect } from "./journey";
+import { journeyDay } from "./clock";
 import { ATLAS, PELICAN } from "./world";
 
-const at = (hoursAgo: number) => new Date(Date.now() - hoursAgo * 3_600_000).toISOString();
-// Local noon yesterday, in hours ago: 12-36h, so the "Yesterday" divider holds
-// at any hour. A fixed 30h lands two days back before 06:00 local.
-const yesterdayNoon = (() => {
-  const noon = new Date();
-  noon.setDate(noon.getDate() - 1);
-  noon.setHours(12, 0, 0, 0);
-  return (Date.now() - noon.getTime()) / 3_600_000;
-})();
-const you = (id: number, text: string, hoursAgo: number) => ({ notification_id: id, target: PELICAN, text, state: "acknowledged", stamped: true, device_id: "journey-device", operator_label: "Daniel", at: at(hoursAgo) });
-const sup = (id: number, replyTo: number, message: string, hoursAgo: number, attachments: unknown[] = []) => ({ notification_id: id, reply_to: replyTo, message, summary: "", device_id: "journey-device", kind: "answer", attachments, at: at(hoursAgo) });
+const you = (id: number, text: string, at: string) => ({ notification_id: id, target: PELICAN, text, state: "acknowledged", stamped: true, device_id: "journey-device", operator_label: "Daniel", at });
+const sup = (id: number, replyTo: number, message: string, at: string, attachments: unknown[] = []) => ({ notification_id: id, reply_to: replyTo, message, summary: "", device_id: "journey-device", kind: "answer", attachments, at });
 const file = (artifact_id: string, name: string) => ({ artifact_id, name, mime: "application/pdf", size_bytes: 88_064, sha256: "9f".repeat(32) });
 
 test("HUB-J4 read the conversation history", async ({ page, journey }) => {
@@ -21,9 +13,9 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
     history: {
       [PELICAN]: [
         // Enough of today to fill the thread, as a real one is when it has an earlier page.
-        { has_earlier: true, next_before: 20, messages: [you(21, "Is the release ready to cut?", 2), you(23, "Post the notes when it's out.", 1.5), you(25, "And close the epic.", 1.2)], replies: [sup(22, 21, "Yes. The gate is green on the release branch.", 1.9, [file("art-report", "Release report card.pdf"), file("art-local-draft", "Draft notes.pdf"), file("art-cloud-down", "Gate log.pdf"), file("art-offline", "Bench results.pdf")]), sup(24, 23, "Will do once the tag is pushed.", 1.4), sup(26, 25, "Closing it after the notes go out.", 1.1)] },
-        { has_earlier: true, next_before: 10, messages: [you(11, "Start the QA epic tomorrow morning.", yesterdayNoon)], replies: [sup(12, 11, "Scheduled for 09:00 with three workers.", yesterdayNoon - 0.1)] },
-        { has_earlier: false, messages: [you(1, "Draft the QA epic plan.", 54), you(3, "Keep it to three lanes.", 53.5)], replies: [sup(2, 1, "Drafted: three lanes, one gate.", 53.9), sup(4, 3, "Three lanes it is.", 53.4)] },
+        { has_earlier: true, next_before: 20, messages: [you(21, "Is the release ready to cut?", journeyDay(0, 0, 1)), you(23, "Post the notes when it's out.", journeyDay(0, 0, 3)), you(25, "And close the epic.", journeyDay(0, 0, 5))], replies: [sup(22, 21, "Yes. The gate is green on the release branch.", journeyDay(0, 0, 2), [file("art-report", "Release report card.pdf"), file("art-local-draft", "Draft notes.pdf"), file("art-cloud-down", "Gate log.pdf"), file("art-offline", "Bench results.pdf")]), sup(24, 23, "Will do once the tag is pushed.", journeyDay(0, 0, 4)), sup(26, 25, "Closing it after the notes go out.", journeyDay(0, 0, 6))] },
+        { has_earlier: true, next_before: 10, messages: [you(11, "Start the QA epic tomorrow morning.", journeyDay(1))], replies: [sup(12, 11, "Scheduled for 09:00 with three workers.", journeyDay(1, 12, 6))] },
+        { has_earlier: false, messages: [you(1, "Draft the QA epic plan.", journeyDay(2, 6)), you(3, "Keep it to three lanes.", journeyDay(2, 6, 30))], replies: [sup(2, 1, "Drafted: three lanes, one gate.", journeyDay(2, 6, 6)), sup(4, 3, "Three lanes it is.", journeyDay(2, 6, 36))] },
       ],
     },
   });

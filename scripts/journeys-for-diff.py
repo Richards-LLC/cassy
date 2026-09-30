@@ -72,9 +72,9 @@ def parse(text: str) -> tuple[dict[str, list[str]], list[dict]]:
         if field and block is None:
             current["fields"][field.group(1)] = field.group(2).strip()
             continue
-        heading = re.match(r"^\*\*([A-Za-z ]+)\*\*\s*$", line)
+        heading = re.match(r"^(?:\*\*([A-Za-z ]+)\*\*|#### ([A-Za-z ]+))\s*$", line)
         if heading:
-            block = heading.group(1)
+            block = heading.group(1) or heading.group(2)
             current["blocks"][block] = []
             continue
         item = re.match(r"^\s*(?:[0-9]+\.|-)\s+(.*)$", line)

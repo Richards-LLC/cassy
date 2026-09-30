@@ -92,6 +92,12 @@ local audit host cannot build Darwin.
 
 ### Published report before announcement
 
+A publication latency overrun records `WITHIN_BUDGET=false` and warns; it must
+not block announcement, report, receipts or host update for an already-live
+release. Missing or incoherent timing evidence remains a blocker. The Dev
+reply's final publication timing trailer and the report's Tag to published row
+must state the measured time and whether it exceeded the recorded budget.
+
 1. Before announcements, require the published-asset and latency receipts and
    installation proof. Run `cas release report <version> --pdf` and require the
    Markdown, brief, standalone HTML, PDF and QA evidence under

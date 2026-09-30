@@ -15,6 +15,11 @@ INTEGRATE = TRAIN.with_name("release-integrate.py")
 
 class IntegrationAssembly(unittest.TestCase):
     def setUp(self):
+        inherited = {key: value for key, value in os.environ.items()
+                     if key.startswith("CAS_RELEASE_TRAIN_") or key == "CAS_RELEASE_RECEIPTS_RUN_DIR"}
+        for key in inherited:
+            os.environ.pop(key)
+        self.addCleanup(os.environ.update, inherited)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name) / "project"

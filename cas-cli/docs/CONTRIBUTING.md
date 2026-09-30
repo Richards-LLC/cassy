@@ -191,6 +191,13 @@ worktree, then the gate's archive-mode row in a plain clone outside every
 `.cas` ancestor. The archive consumer uses the queue's remapped environment
 and excludes component-output snapshots, already covered by the native run.
 
+The gate prints a reuse hit for both suite rows or a `MISS assembly key=…`
+reason. Environment misses from new receipts also name the first changed
+variable; receipts store only per-variable hashes. `CAS_RELEASE_ARTIFACTS_ROOT`
+and `CAS_RELEASE_RECEIPTS_RUN_DIR` are output locations and do not invalidate
+proof. Compiler flags, HOME, PATH, local environment/config files and the
+resolved Zig binary remain inputs.
+
 Set `CAS_RELEASE_GATE_HOME_DIR` to a scratch base on the checkout filesystem
 outside `/tmp`, `/var/tmp`, `/private/tmp`, `/private/var/tmp`, the configured
 `TMPDIR`, and every `.cas` ancestor (for example,

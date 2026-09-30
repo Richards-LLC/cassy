@@ -1,5 +1,5 @@
-//! Capped compile and targeted-test worker evidence. Admission is serialized and each Cargo child
-//! holds an OS slot lock, including when its supervising wrapper is killed.
+//! Capped compile and targeted-test evidence. The runner serializes admission
+//! and holds OS slot/lane locks until Cargo exits; descendants never inherit them.
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -170,12 +170,16 @@ fn validate_harness(repo: &Path, test: &TargetedTest) -> Result<()> {
 }
 
 fn lock_file(path: &Path) -> Result<File> {
-    Ok(OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)?)
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // A compiler-cache daemon may outlive Cargo. Keep all admission,
+        // lane and slot descriptors in this runner, never in descendants.
+        options.custom_flags(libc::O_CLOEXEC);
+    }
+    Ok(options.open(path)?)
 }
 
 fn acquire_slot(root: &Path, cap: usize) -> Result<File> {
@@ -189,30 +193,6 @@ fn acquire_slot(root: &Path, cap: usize) -> Result<File> {
         }
     }
     bail!("Worker check refused: max_concurrent_builders={cap} slots are occupied; retry later")
-}
-
-#[cfg(unix)]
-fn inherit_slot(slot: &File) -> Result<()> {
-    use std::os::fd::AsRawFd;
-    // Keep the slot live in Cargo/rustc descendants if this wrapper is killed.
-    // SAFETY: the file is live and fcntl only changes this owned descriptor.
-    let result = unsafe {
-        let flags = libc::fcntl(slot.as_raw_fd(), libc::F_GETFD);
-        if flags < 0 {
-            -1
-        } else {
-            libc::fcntl(slot.as_raw_fd(), libc::F_SETFD, flags & !libc::FD_CLOEXEC)
-        }
-    };
-    if result < 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn inherit_slot(_slot: &File) -> Result<()> {
-    bail!("Worker checks require inherited Unix slot locks on this platform")
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<String> {
@@ -371,8 +351,6 @@ fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Res
     // OS locks close the snapshot-to-spawn race, even when the soft guard's
     // environment override is set. No force/disable option bypasses the cap.
     let slot = acquire_slot(&slots, config.max_concurrent_builders)?;
-    inherit_slot(&slot)?;
-    inherit_slot(&lane)?;
     let count_file = slots.join(format!("count-{lane_key}"));
     let mut command = if test.is_some() {
         // Embed the shared zero-test guard so projects need no cas-src scripts.
@@ -402,11 +380,6 @@ fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Res
         .args(&cargo_args)
         .current_dir(&repo)
         .env("CARGO_TARGET_DIR", repo.join("target"))
-        // Compiler-cache daemons outlive Cargo and would retain inherited
-        // slot/lane FDs forever. Empty overrides also suppress Cargo config
-        // wrappers; use the private seeded/incremental target cache instead.
-        .env("RUSTC_WRAPPER", "")
-        .env("RUSTC_WORKSPACE_WRAPPER", "")
         .spawn()
         .context("start capped worker Cargo command")?;
     FileExt::unlock(&admission)?;
@@ -611,11 +584,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn targeted_runner_guards_counts_dirty_trees_and_failed_retries() {
-        let _env = crate::test_support::TestEnvGuard::with_vars(&[
-            ("CAS_FACTORY_BUILD_GUARD", "off"),
-            ("RUSTC_WRAPPER", "sccache"),
-            ("RUSTC_WORKSPACE_WRAPPER", "sccache"),
-        ]);
+        let _env =
+            crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join(".cas");
         let repo = root.join("worktrees/worker");
@@ -624,7 +594,6 @@ mod tests {
         fake_cargo(
             &fake,
             r#"[ "$CARGO_TARGET_DIR" = "$PWD/target" ] || exit 3
-[ -z "$RUSTC_WRAPPER" ] && [ -z "$RUSTC_WORKSPACE_WRAPPER" ] || exit 5
 [ "$1 $2 $3 $4 $5 $6" = 'nextest run -p cas --lib -E' ] || exit 4
 printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#,
         );
@@ -803,15 +772,50 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#,
 
     #[cfg(unix)]
     #[test]
-    fn child_keeps_slot_after_wrapper_drops_its_handle() {
+    fn daemon_grandchild_cannot_retain_slot_after_runner_exit() {
+        const FIXTURE: &str = "CAS_WORKER_SLOT_DAEMON_FIXTURE";
+        if let Some(root) = std::env::var_os(FIXTURE) {
+            let root = PathBuf::from(root);
+            let _slot = acquire_slot(&root, 1).unwrap();
+            let lane = lock_file(&root.join("lane.lock")).unwrap();
+            lane.lock_exclusive().unwrap();
+            // Model a compiler wrapper which starts a long-lived daemon.
+            let status = Command::new("sh")
+                .args([
+                    "-c",
+                    "sleep 2 >/dev/null 2>&1 & echo $! > \"$1/grandchild.pid\"",
+                    "fixture",
+                ])
+                .arg(&root)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
-        let slot = acquire_slot(dir.path(), 1).unwrap();
-        inherit_slot(&slot).unwrap();
-        let mut child = Command::new("sleep").arg("1").spawn().unwrap();
-        drop(slot);
-        assert!(acquire_slot(dir.path(), 1).is_err());
-        assert!(child.wait().unwrap().success());
-        assert!(acquire_slot(dir.path(), 1).is_ok());
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "factory_worker_check::tests::daemon_grandchild_cannot_retain_slot_after_runner_exit", "--nocapture"])
+            .env(FIXTURE, dir.path()).output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "zero-test child is not proof: {output:?}"
+        );
+        let pid: i32 = std::fs::read_to_string(dir.path().join("grandchild.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // SAFETY: signal zero only observes the fixture's captured child PID.
+        let live = unsafe { libc::kill(pid, 0) } == 0;
+        let slot_available = acquire_slot(dir.path(), 1).is_ok();
+        let lane = lock_file(&dir.path().join("lane.lock")).unwrap();
+        let lane_available = lane.try_lock_exclusive().is_ok();
+        // Stop only the grandchild PID captured by this fixture.
+        let _ = Command::new("kill").arg(pid.to_string()).status();
+        assert!(live, "daemon must still be live after the runner exits");
+        assert!(slot_available, "daemon must not retain the builder slot");
+        assert!(lane_available, "daemon must not retain the lane lock");
     }
 
     #[test]

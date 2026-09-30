@@ -167,14 +167,13 @@ Workers may type-check their committed change with exactly
 `--tests` when test files changed; choose one target flag. Include consumers of
 changed shared interfaces. The PreToolUse guard routes that command through
 `cas factory worker-check`, which holds an OS builder-slot lock until Cargo
-exits, checks the existing build guard, and enforces `max_concurrent_builders`
+exits. Lock descriptors are close-on-exec so compiler-cache daemons cannot
+retain slots after the runner exits. It checks the existing build guard, and enforces `max_concurrent_builders`
 even across simultaneous launches. A refusal requires retrying later. Run long
 checks in the background with a log. Compile checks execute no tests.
 
 The runner requires a clean committed worktree, forces its private seeded
-`target/`, disables compiler wrappers (`RUSTC_WRAPPER` and
-`RUSTC_WORKSPACE_WRAPPER`) so a cache daemon cannot retain the inherited
-lane/slot locks after Cargo exits, and records `check: PASS <sha>` with the selected packages. Task close
+`target/`, and records `check: PASS <sha>` with the selected packages. Task close
 copies matching exact-delivery receipts into worker evidence. Dirty trees,
 failed retries, other worktrees and other SHAs cannot supply this receipt.
 Check receipts are optional compile-only evidence and do not waive test proof.

@@ -11,17 +11,26 @@ use std::path::{Path, PathBuf};
 /// The two places a worker may publish from.
 #[derive(Debug, Clone)]
 pub struct PublishRoots {
-    /// `[factory] artifacts_root/<task-id>` — durable per-task evidence.
+    /// `[factory] artifacts_root/<project-key>/<task-id>` — new durable evidence.
     pub task_artifacts_dir: PathBuf,
+    /// Historical flat evidence is readable/publishable, never a new write root.
+    pub legacy_task_artifacts_dir: PathBuf,
     /// The project checkout: the parent of the `.cas` directory.
     pub project_root: PathBuf,
+    task_id_is_valid: bool,
 }
 
 impl PublishRoots {
     /// Derive both roots from the resolved `.cas` directory and the task.
     pub fn new(cas_root: &Path, artifacts_root: &Path, task_id: &str) -> Self {
         Self {
-            task_artifacts_dir: artifacts_root.join(task_id),
+            task_artifacts_dir: crate::config::project_factory_artifacts_root(cas_root, artifacts_root)
+                .join(task_id),
+            legacy_task_artifacts_dir: artifacts_root.join(task_id),
+            task_id_is_valid: !task_id.is_empty()
+                && task_id
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'),
             project_root: cas_root
                 .parent()
                 .map(Path::to_path_buf)
@@ -117,15 +126,17 @@ pub fn resolve_publishable_path(
     // would fail, so fall back to the lexical form, which then simply never
     // matches. That is the safe direction.
     let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let task_dir = canonical(&roots.task_artifacts_dir);
     let project_root = canonical(&roots.project_root);
-
-    let inside_task_dir = resolved.starts_with(&task_dir);
+    let base = roots.legacy_task_artifacts_dir.parent().unwrap_or(Path::new(""));
+    let inside_task_dir = roots.task_id_is_valid && [&roots.task_artifacts_dir, &roots.legacy_task_artifacts_dir]
+        .into_iter()
+        .filter_map(|dir| crate::config::canonical_factory_task_artifact_dir(base, dir))
+        .any(|dir| resolved.starts_with(dir));
     let inside_project = resolved.starts_with(&project_root);
     if !inside_task_dir && !inside_project {
         return Err(PathRefusal::OutsideRoots {
             resolved: resolved.display().to_string(),
-            task_artifacts_dir: task_dir.display().to_string(),
+            task_artifacts_dir: roots.task_artifacts_dir.display().to_string(),
             project_root: project_root.display().to_string(),
         });
     }
@@ -172,7 +183,7 @@ mod tests {
         let project_root = base.join("project");
         let cas_root = project_root.join(".cas");
         let artifacts_root = base.join("artifacts");
-        let task_dir = artifacts_root.join("cas-b72a");
+        let task_dir = crate::config::project_factory_artifacts_root(&cas_root, &artifacts_root).join("cas-b72a");
         let outside = base.join("outside");
         for path in [&project_root, &cas_root, &task_dir, &outside] {
             fs::create_dir_all(path).unwrap();
@@ -194,6 +205,61 @@ mod tests {
         }
         fs::write(path, body).unwrap();
         path.to_path_buf()
+    }
+
+    #[test]
+    fn projects_with_the_same_task_id_cannot_publish_each_others_evidence_cas_6ebf() {
+        let temp = TempDir::new().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let a = base.join("one/project/.cas");
+        let b = base.join("two/project/.cas");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        let artifact_base = base.join("artifacts");
+        let a_roots = PublishRoots::new(&a, &artifact_base, "cas-a4b1");
+        let b_roots = PublishRoots::new(&b, &artifact_base, "cas-a4b1");
+        assert_ne!(a_roots.task_artifacts_dir, b_roots.task_artifacts_dir);
+        let a_file = write(&a_roots.task_artifacts_dir.join("proof.md"), "project one");
+        let b_file = write(&b_roots.task_artifacts_dir.join("proof.md"), "project two");
+        assert_eq!(resolve_publishable_path(&a_file, &a_roots).unwrap(), a_file);
+        assert_eq!(resolve_publishable_path(&b_file, &b_roots).unwrap(), b_file);
+        assert!(resolve_publishable_path(&b_file, &a_roots).is_err());
+        assert!(resolve_publishable_path(&a_file, &b_roots).is_err());
+        let invalid = PublishRoots::new(
+            &a,
+            &artifact_base,
+            b_roots.task_artifacts_dir.to_str().unwrap(),
+        );
+        assert!(resolve_publishable_path(&b_file, &invalid).is_err());
+        let legacy = write(
+            &a_roots.legacy_task_artifacts_dir.join("historical.md"),
+            "old proof",
+        );
+        assert_eq!(resolve_publishable_path(&legacy, &a_roots).unwrap(), legacy);
+        // New layout cannot attribute old flat evidence; it stays explicit,
+        // readable, and outside automatic per-project cleanup.
+        assert_eq!(fs::read_to_string(&a_file).unwrap(), "project one");
+        assert_eq!(fs::read_to_string(&b_file).unwrap(), "project two");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_namespace_aliases_do_not_cross_project_boundaries_cas_6ebf() {
+        let f = fixture();
+        let other = f
+            .task_dir
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("foreign-project");
+        fs::create_dir_all(other.join("cas-b72a")).unwrap();
+        let file = write(&other.join("cas-b72a/proof.md"), "foreign");
+        fs::remove_dir_all(f.task_dir.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&other, f.task_dir.parent().unwrap()).unwrap();
+        let alias = f.task_dir.join("proof.md");
+        assert!(resolve_publishable_path(&alias, &f.roots).is_err());
+        assert!(resolve_publishable_path(&file, &f.roots).is_err());
     }
 
     #[test]

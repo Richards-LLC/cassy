@@ -190,11 +190,37 @@ The assembly command runs native full-workspace nextest in the factory
 worktree, then the gate's archive-mode row in a plain clone outside every
 `.cas` ancestor. The archive consumer uses the queue's remapped environment
 and excludes component-output snapshots, already covered by the native run.
+
+The gate prints a reuse hit for both suite rows or a `MISS assembly key=…`
+reason. Environment misses from new receipts also name the first changed
+variable; receipts store only per-variable hashes. `CAS_RELEASE_ARTIFACTS_ROOT`
+and `CAS_RELEASE_RECEIPTS_RUN_DIR` are output locations and do not invalidate
+proof. Compiler flags, HOME, PATH, local environment/config files and the
+resolved Zig binary remain inputs.
+
+Set `CAS_RELEASE_GATE_HOME_DIR` to a scratch base on the checkout filesystem
+outside `/tmp`, `/var/tmp`, `/private/tmp`, `/private/var/tmp`, the configured
+`TMPDIR`, and every `.cas` ancestor (for example,
+`CAS_RELEASE_GATE_HOME_DIR=/home/cas-release-gate/base` on Linux or
+`/Users/Shared/cas-release-gate/base` on macOS). The plain clone must be outside
+Cassy's disposable roots so discovery and update tests exercise durable
+projects. Assembly refuses an unsafe base before tool probing or either suite;
+its legacy `/var/tmp` default requires this explicit override.
+
 Both contexts must report nonzero passed tests before an atomic PASS is written
 under the shared `.cas/merge-sweeps/assembly-proofs/` directory. The receipt
 records the tested Git tree, each context's tree and pass count, toolchain,
 environment and archive size. Full Cassy integration sweeps and the train's
 assembly stage use this same command; retries cite the existing receipt.
+
+Before the pipeline lands, `--cut --resume` compares the integration tip/base
+with the input recorded by assemble. A changed integration input archives the
+old stage receipts and reruns assemble, prep, ledger and every later stage.
+Release prose, member-version bumps and the generated ledger are replayed onto
+the new tested tip; source edits block automatic replay. A rebase conflict
+restores the checkout and prints a named blocker with a recovery command.
+After a valid pipeline/publish receipt exists, resume finishes that landed
+release without adopting a newer integration tip.
 
 The first full release gate automatically reuses its nextest and archive-mode
 rows from a matching receipt. `--only` remains a fresh diagnostic. Receipts
@@ -452,3 +478,20 @@ An empty `execution_note` update may clear a constraint after approval when its
 exact repository proof is unchanged. Pending, skipped, unbound, and changed
 proofs remain locked; changing other scope fields or replacing the constraint
 still requires a fresh proof cycle.
+
+## Durable task artifacts
+
+`factory.artifacts_root` is the shared parent (default `~/.cas/artifacts`).
+New task evidence lives in `<base>/<project-key>/<task-id>/`; assignment briefs
+print the exact path. The key combines the project folder label with a SHA256
+of the canonical shared Cassy store path, so equal folder names and task IDs
+in different stores stay separate, while symlink aliases and factory workers
+using that shared store agree. Keep evidence paths in task notes or published
+artifact records when a project moves.
+
+Existing `<base>/<task-id>/` files remain readable and publishable. Completion
+receipts and QA citations accept those historical paths. They are excluded
+from automatic project cleanup: a flat directory can contain more than one
+project's evidence. New writes, issue attachments, QA rounds, message spills,
+search discovery and cleanup use the scoped namespace. No automatic file move
+or ownership guess is made for legacy directories.

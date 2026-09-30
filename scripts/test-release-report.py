@@ -22,6 +22,13 @@ class ReleaseRendererTests(unittest.TestCase):
         self.assertNotIn('break-before:page', output)
         self.assertNotIn('{{', output)
 
+    def test_publication_over_budget_row_survives_html_rendering(self):
+        source = EXEMPLAR.replace("| Green to published |",
+            "| Tag to published | 15m 8s — over budget (10m 0s budget) | First tag workflow to publication |\n| Green to published |")
+        output = renderer.render(source, project_root=ROOT)
+        self.assertIn("15m 8s — over budget (10m 0s budget)", output)
+        self.assertIn("Tag to published", output)
+
     def test_different_project_and_partial_tokens(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

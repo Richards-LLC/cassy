@@ -111,7 +111,7 @@ authority.
 
 ## Blockers
 
-- **Recover from workspace denials; never retry the denied target.** Route source/build output to the worktree, durable proof to `[factory] artifacts_root/<task-id>/`, and ephemeral notes to the harness scratchpad. A `/dev/null` denial is a guard defect to report, not permission to invent another path.
+- **Recover from workspace denials; never retry the denied target.** Route source/build output to the worktree, durable proof to `[factory] artifacts_root/<project-key>/<task-id>/`, and ephemeral notes to the harness scratchpad. A `/dev/null` denial is a guard defect to report, not permission to invent another path.
 
 Add a blocker note with the exact error, re-read the task, set `status=blocked`,
 and message the supervisor with `blocker=true` (what you tried goes in

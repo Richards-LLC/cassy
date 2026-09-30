@@ -18,7 +18,7 @@ short pages by shrinking the whole document or cropping text.
 
 ```bash
 python3 <skills-dir>/cas-release-report/scripts/check-pdf.py \
-  docs/release-reports/v<version>.pdf <artifacts_root>/<task-id>/pdf
+  docs/release-reports/v<version>.pdf <artifacts_root>/<project-key>/<task-id>/pdf
 ```
 
 The script needs PyMuPDF (`import pymupdf`). It writes one PNG per page and a

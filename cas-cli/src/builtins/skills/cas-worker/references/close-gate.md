@@ -72,8 +72,8 @@ The 6 checks below apply to every task type. These gates sit on top of them:
   - **Skip markers, on every delivery:** added `test.fixme`/`.skip`/`.only` markers are refused unless the marker or the line above it carries `cas-allow-skip: <reason>`.
 - **Epic** — closing an epic additionally walks its children and blocks on any child whose recorded work is not merged into the parent branch, not just on child status.
 - **Risk declaration** — read `Risk:` and `Proof Targets:` from `task show`.
-  Rust execution proof is an assembly duty; workers may carry compile-only
-  `check: PASS <sha>` evidence from the capped runner.
+  Full-suite Rust proof is an assembly duty; workers carry capped
+  `check: PASS <sha>` and targeted `test: PASS <sha> <package> <filter> <count>` receipts.
   Do not record a scoped `--proof` receipt, a `SCOPED_PROOF:` note,
   or a `loaded_proof` note. The supervisor's single build + test of the epic
   tip at assembly covers `risk=blast-radius` and `risk=concurrency` and is
@@ -125,7 +125,7 @@ rg 'changed_function' src/
 
 ### 4. Compile checks and tests
 
-For Rust changes, write or update tests and follow [discipline.md](discipline.md) for the capped package-scoped compile-only check. Record `check: PASS <sha>` or name why checking is deferred. Rust test execution remains the supervisor's one full assembly build and test, recorded as `ASSEMBLY_PROOF` on the epic. For non-Rust work, run the project's suite:
+For Rust changes, follow [discipline.md](discipline.md) for capped package-scoped checks and targeted nextest tests. Record the clean-commit check/test receipts or the exact runtime denial when deferred. The full build and suite remain the supervisor's `ASSEMBLY_PROOF` on the epic. For non-Rust work, run the project's suite:
 
 ```bash
 # Examples: pnpm test, npx vitest run, npx playwright test, pytest, npm test
@@ -159,7 +159,7 @@ Check for language-specific dead code markers on your new code:
 For every non-trivial change, trace **2 levels out** from the edited code — callers of the edited symbols, observers/middleware, hook subscribers, anything that imports the edited module. For each touched boundary:
 
 - Confirm integration tests exist for that boundary, with **real objects** (not mocks) at the crossing point.
-- **Run those integration tests** when they are non-Rust — not just the file you edited. Rust integration tests run at the supervisor's epic assembly; name the boundaries you traced in your close note. Presence of a test file is weak signal; an executed test is evidence.
+- **Run those integration tests** — not just the file you edited. Rust integration tests use one explicit harness and a named-test filter through the capped runner; the full suite runs at assembly. Name the boundaries you traced in your close note. Presence of a test file is weak signal; an executed test is evidence.
 
 "2 levels out" is LLM-judgment — do not over-engineer this into a call-graph analysis. Read the code, identify the obvious boundaries, test them.
 

@@ -14,8 +14,13 @@
 
 set -uo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="${VERIFIED_TEST_REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 CARGO="${CARGO:-cargo}"
+
+# A failed retry must not leave an earlier exported count.
+if [[ -n "${VERIFIED_TEST_COUNT_FILE:-}" ]]; then
+    rm -f -- "${VERIFIED_TEST_COUNT_FILE}" || exit 1
+fi
 
 if [[ $# -eq 0 ]]; then
     echo "error: pass a Cargo test command, e.g. nextest run -p cas --lib module" >&2
@@ -81,3 +86,8 @@ if [[ "${passed}" -eq 0 ]]; then
 fi
 
 echo "PASS: ${passed} test(s) passed across ${summaries} harness summary line(s)."
+
+# The capped worker runner consumes only this guarded, nonzero pass count.
+if [[ -n "${VERIFIED_TEST_COUNT_FILE:-}" ]]; then
+    printf '%s\n' "${passed}" >"${VERIFIED_TEST_COUNT_FILE}" || exit 1
+fi

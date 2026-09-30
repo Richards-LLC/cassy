@@ -53,6 +53,12 @@ EOF
 expect pass 'PASS: 2 test(s) passed' 'nextest green receipt passes' \
     env CARGO="${stub}" "${guard}" nextest run -p cas --lib module
 
+count_file="${tmpdir}/count"
+expect pass 'PASS: 2 test(s) passed' 'embedded guard exports count in supplied worktree' \
+    env CARGO="${stub}" VERIFIED_TEST_REPO_ROOT="${tmpdir}" VERIFIED_TEST_COUNT_FILE="${count_file}" \
+    bash -c "$(cat "${guard}")" worker-verified-tests nextest run -p cas --lib -E 'test(module)'
+expect pass '2' 'count export contains guarded nonzero count' cat "${count_file}"
+
 stub="$(make_stub zero-cargo 0 <<'EOF'
 running 0 tests
 
@@ -70,6 +76,11 @@ EOF
 )"
 expect fail '0 tests passed' 'zero-match nextest result fails loudly' \
     env CARGO="${stub}" "${guard}" nextest run -p cas --lib stale_filter
+
+echo 99 >"${count_file}"
+expect fail '0 tests passed' 'zero-match retry clears stale exported count' \
+    env CARGO="${stub}" VERIFIED_TEST_COUNT_FILE="${count_file}" "${guard}" nextest run -p cas --lib -E 'test(stale)'
+expect pass - 'failed guard leaves no exported count' test ! -e "${count_file}"
 
 stub="$(make_stub no-harness 0 <<'EOF'
 Finished `test` profile after a swallowed build failure

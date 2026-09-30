@@ -27,10 +27,12 @@ increase reproduction rate with repeated or stress runs.
 
 Completion requires one already-run command whose redacted output proves it is
 red-capable, deterministic (or has a stated high repro rate), fast, and
-unattended. A factory worker on a lane that forbids builds (cargo is denied on
-Rust lanes) cannot run a Rust loop: build it from non-Rust evidence (logs, a
-CLI binary already installed, a script), or write the failing test and hand the
-run to the supervisor with a blocker message. If no loop can be built, state
+unattended. A factory worker runs a targeted Rust loop under `cas-worker` discipline:
+commit the reproducer, select one package and a mandatory named-test `-E`
+filter, then use the capped nextest runner. Commit the fix and rerun that
+filter. The full suite stays at assembly. If the installed runtime denies
+this exception, use captured logs, an installed CLI or a script, or hand the
+committed reproducer to the supervisor with the exact denial. If no loop can be built, state
 what was tried and request the reproducing environment, a redacted capture, or approval for temporary
 instrumentation; do not hypothesize without a loop.
 

@@ -49,7 +49,7 @@ Prevention: below 20 % headroom, checkpoint (commit, push or park, handoff note,
 ln -s /path/to/main/repo/vendor/<submodule> vendor/<submodule>
 ```
 
-**Failures in code you didn't touch**: Triage before reporting to supervisor. Do not build or test Rust to triage; the supervisor's assembly build covers Rust.
+**Failures in code you didn't touch**: Triage before reporting to supervisor. Use capped targeted nextest for Rust triage under discipline.md; full builds and suites remain at assembly.
 
 1. **Merge conflict from another worker?** Checkpoint uncommitted work as a commit, then rebase onto the **local** branch the supervisor named at assignment (`main`, `master`, or `epic/<slug>`); see [details.md](details.md) "Syncing". Do **not** rebase onto `origin/<branch>`: the supervisor merges into the local branch, so `origin/main` is stale and `origin/epic/...` does not exist. If conflicts appear in files you own, resolve them; if in files you don't own, report to supervisor.
 

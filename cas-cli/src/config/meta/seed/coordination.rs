@@ -67,7 +67,7 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
         key: "factory.max_concurrent_builders",
         section: "factory",
         name: "Maximum Concurrent Builders",
-        description: "Builder cap for worker compile-only checks, enforced with OS slot locks. spawn_workers also refuses when a request would exceed this cap or one-minute load exceeds CPU count; force=true overrides only the spawn-time soft guard.",
+        description: "Builder cap for worker compile checks and targeted tests, enforced with OS slot locks. spawn_workers also refuses when a request would exceed this cap or one-minute load exceeds CPU count; force=true overrides only the spawn-time soft guard.",
         value_type: ConfigType::Int,
         default: "4",
         constraint: Constraint::Range(1, 256),

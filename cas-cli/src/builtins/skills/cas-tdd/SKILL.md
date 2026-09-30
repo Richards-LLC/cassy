@@ -17,7 +17,7 @@ Use a red → green loop to produce tests worth keeping. Test behavior through p
 - Work vertical tracer bullets: one test, the smallest implementation that makes it pass, then the next learned slice. Do not write a horizontal wall of imagined tests.
 - Expected values come from an independent source of truth: a worked example, specification, known-good literal, or external contract.
 - Use the project’s scoped test command and record the actual proof result in the task. Do not treat a zero-test success as proof.
-- Factory workers may run compile-only checks under `cas-worker` discipline; they never run Rust tests: commit the failing test and the fix as separate commits, and cite the supervisor's `ASSEMBLY_PROOF` from epic assembly as the Rust red/green proof (see `cas-worker`). Non-Rust suites still run in the worker.
+- Factory workers run targeted Rust tests under `cas-worker` discipline: one package, a mandatory named-test `-E` filter, through the capped runner. Commit and run the failing test, then commit the fix and run the same filter for green proof. The supervisor's `ASSEMBLY_PROOF` covers the full suite at epic assembly; an older runtime without this exception requires naming the deferred run. Non-Rust suites still run in the worker.
 
 When module shape or a seam is unclear, consult `cas-codebase-design` for module, interface, depth, seam, adapter, leverage, and locality vocabulary.
 For a test that passes without exercising behavior, use [principles.md](../cas-codebase-design/references/principles.md).

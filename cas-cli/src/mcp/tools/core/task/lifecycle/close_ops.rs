@@ -7929,6 +7929,14 @@ impl CasCore {
                 let ts = chrono::Utc::now().format("%Y-%m-%d %H:%M");
                 task.notes = format!("{}\n\n[{ts}] WORKER CHECK {receipt}", task.notes);
             }
+            if let Some(head) = delivered_tip.as_deref() {
+                for receipt in crate::factory_worker_check::passing_test_receipts(&self.cas_root, proof_repo, head) {
+                    if !task.notes.contains(&receipt) {
+                        let ts = chrono::Utc::now().format("%Y-%m-%d %H:%M");
+                        task.notes = format!("{}\n\n[{ts}] WORKER TEST {receipt}", task.notes);
+                    }
+                }
+            }
             let build_proofs = if is_factory_worker || assembly_proof.is_some() {
                 BuildProofs::DeferredToAssembly
             } else {
@@ -7948,7 +7956,7 @@ impl CasCore {
                 };
                 let ts = chrono::Utc::now().format("%Y-%m-%d %H:%M");
                 let note = format!(
-                    "[{ts}] BUILD PROOF deferred to epic assembly (cas-4cbb): worker checks are compile-only; {reference}."
+                    "[{ts}] BUILD PROOF deferred to epic assembly (cas-4cbb): targeted worker receipts complement full-suite proof; {reference}."
                 );
                 if !task.notes.contains("BUILD PROOF deferred to epic assembly") {
                     task.notes = if task.notes.is_empty() {

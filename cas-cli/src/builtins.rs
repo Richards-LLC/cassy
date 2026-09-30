@@ -4806,7 +4806,7 @@ This is the body content."#;
                     "{label} discipline.md duplicates spawn-contract marker: {forbidden:?}"
                 );
             }
-            // Worker checks are compile-only; execution proof is assembly.
+            // Targeted checks/tests complement full-suite assembly proof.
             for required in ["ASSEMBLY_PROOF"] {
                 assert!(
                     ref_content.contains(required),
@@ -4912,10 +4912,10 @@ This is the body content."#;
     /// cas-4cbb (operator directive 2026-09-24) supersedes cas-3627's worker
     /// test loop: five workers each compiling in their own target dir drove
     /// the host to load 190. Workers now check affected crates under the builder
-    /// cap; the supervisor builds and tests once at assembly. Detail is on
-    /// demand in references/discipline.md; all three flavors carry it.
+    /// cap and run named targeted tests; the supervisor runs the full suite at
+    /// assembly. Detail is on demand in references/discipline.md; all three flavors carry it.
     #[test]
-    fn test_worker_skills_teach_capped_compile_only_exception_cas_3efd() {
+    fn test_worker_skills_teach_capped_checks_and_targeted_tests() {
         for (label, skill_content, ref_content) in [
             (
                 "claude",
@@ -4955,7 +4955,7 @@ This is the body content."#;
             ] {
                 assert!(
                     ref_content.contains(required),
-                    "{label} cas-worker discipline.md missing compile-only rule: {required:?}"
+                    "{label} cas-worker discipline.md missing capped check/test rule: {required:?}"
                 );
             }
             for forbidden in ["Batch before you verify", "banked receipt", "--lib <module>"] {

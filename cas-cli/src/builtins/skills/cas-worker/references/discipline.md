@@ -18,7 +18,8 @@ cargo check -p affected-crate --tests > target/worker-check.log 2>&1 &
 ```
 
 The PreToolUse hook routes this command through the capped runner. It uses your
-private seeded target cache, holds a builder slot for the Cargo process lifetime,
+private seeded target cache, disables compiler wrappers so cache daemons cannot
+retain inherited locks after Cargo exits, holds a builder slot for the Cargo process lifetime,
 and refuses when the existing build guard or `max_concurrent_builders` cap is
 exceeded. Retry later after a refusal; do not bypass it with a toolchain,
 environment override, shell wrapper, broader flags, or another command.

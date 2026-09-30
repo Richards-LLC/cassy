@@ -402,6 +402,11 @@ fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Res
         .args(&cargo_args)
         .current_dir(&repo)
         .env("CARGO_TARGET_DIR", repo.join("target"))
+        // Compiler-cache daemons outlive Cargo and would retain inherited
+        // slot/lane FDs forever. Empty overrides also suppress Cargo config
+        // wrappers; use the private seeded/incremental target cache instead.
+        .env("RUSTC_WRAPPER", "")
+        .env("RUSTC_WORKSPACE_WRAPPER", "")
         .spawn()
         .context("start capped worker Cargo command")?;
     FileExt::unlock(&admission)?;
@@ -606,8 +611,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn targeted_runner_guards_counts_dirty_trees_and_failed_retries() {
-        let _env =
-            crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("CAS_FACTORY_BUILD_GUARD", "off"),
+            ("RUSTC_WRAPPER", "sccache"),
+            ("RUSTC_WORKSPACE_WRAPPER", "sccache"),
+        ]);
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join(".cas");
         let repo = root.join("worktrees/worker");
@@ -616,6 +624,7 @@ mod tests {
         fake_cargo(
             &fake,
             r#"[ "$CARGO_TARGET_DIR" = "$PWD/target" ] || exit 3
+[ -z "$RUSTC_WRAPPER" ] && [ -z "$RUSTC_WORKSPACE_WRAPPER" ] || exit 5
 [ "$1 $2 $3 $4 $5 $6" = 'nextest run -p cas --lib -E' ] || exit 4
 printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#,
         );

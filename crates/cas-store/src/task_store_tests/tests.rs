@@ -951,7 +951,7 @@ fn sync_update_checks_delivery_authority_before_task_projection() {
 }
 
 #[test]
-fn sync_update_protects_active_delivery_but_allows_completed_and_rework_cycles() {
+fn sync_update_protects_incomplete_delivery_and_preserves_local_rework() {
     use cas_types::WorkerDeliveryState::*;
     for (state, should_apply) in [
         (AwaitingVerification, false),
@@ -960,12 +960,12 @@ fn sync_update_protects_active_delivery_but_allows_completed_and_rework_cycles()
         (Merged, false),
         (CloseReady, false),
         (Delivered, true),
-        (VerificationFailed, true),
-        (ChangesRequested, true),
-        (Conflict, true),
-        (Stale, true),
-        (RepoMismatch, true),
-        (TipChanged, true),
+        (VerificationFailed, false),
+        (ChangesRequested, false),
+        (Conflict, false),
+        (Stale, false),
+        (RepoMismatch, false),
+        (TipChanged, false),
     ] {
         let (temp, store) = create_test_store();
         let mut local = Task::new("cas-86eb-states".into(), "parked delivery".into());
@@ -990,6 +990,12 @@ fn sync_update_protects_active_delivery_but_allows_completed_and_rework_cycles()
         } else {
             assert!(stored.lifecycle_matches(&expected), "{state}");
             assert_eq!(stored.updated_at, expected.updated_at, "{state}");
+            // Authorized lifecycle actions still use the ordinary write path;
+            // the cloud guard cannot disable local conflict rework.
+            store.update(&remote).unwrap();
+            let reworking = store.get(&local.id).unwrap();
+            assert_eq!(reworking.status, TaskStatus::InProgress, "{state}");
+            assert!(reworking.deliverables.factory_branch_anchor.is_none(), "{state}");
         }
     }
 }

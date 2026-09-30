@@ -525,7 +525,8 @@ pub fn get_worker_delivery_by_receipt(
 
 /// Read delivery authority on the task writer's connection and transaction,
 /// so a receipt created before its task projection cannot race a sync write.
-/// Failure/rework and completed cycles no longer own the active lifecycle.
+/// Every incomplete transaction retains ownership, including failed cycles
+/// awaiting fresh proof. Only Delivered releases it for an authorized reopen.
 /// No schema is created on this read path (old/non-factory stores are valid).
 pub(crate) fn delivery_owns_task_lifecycle(conn: &Connection, task_id: &str) -> Result<bool> {
     let exists: bool = conn.query_row(
@@ -550,7 +551,7 @@ pub(crate) fn delivery_owns_task_lifecycle(conn: &Connection, task_id: &str) -> 
     let state: WorkerDeliveryState = state.parse().map_err(|error| {
         StoreError::Parse(format!("invalid delivery state during sync: {error}"))
     })?;
-    Ok(state != WorkerDeliveryState::Delivered && !state.is_recoverable_failure())
+    Ok(state != WorkerDeliveryState::Delivered)
 }
 
 pub fn get_latest_worker_delivery(

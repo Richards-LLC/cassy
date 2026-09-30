@@ -134,9 +134,11 @@ fn lane_compile_requires_actual_tree_before_target_advance() {
         run(&["commit", "-m", "docs lane"]);
         if shared {
             run(&["checkout", "epic/compile"]);
-            git.merge_branch("epic/compile", "factory/docs", true).unwrap();
+            git.merge_branch("epic/compile", "factory/docs", true)
+                .unwrap();
         } else {
-            git.merge_branch_via_temp_worktree("epic/compile", "factory/docs", true).unwrap();
+            git.merge_branch_via_temp_worktree("epic/compile", "factory/docs", true)
+                .unwrap();
         }
     }
 }

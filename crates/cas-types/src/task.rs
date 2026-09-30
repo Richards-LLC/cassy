@@ -13,6 +13,62 @@ use std::str::FromStr;
 use crate::error::TypeError;
 use crate::scope::Scope;
 
+/// Parse JSON-array or comma-separated proof declarations, including the
+/// JSON prefix plus CSV tail produced by legacy proof-scope repairs.
+pub fn parse_proof_targets(value: Option<&str>) -> Vec<String> {
+    normalize_proof_targets(&proof_target_entries(value.unwrap_or_default()))
+}
+
+fn proof_target_entries(value: &str) -> Vec<String> {
+    let value = value.trim();
+    if value.starts_with('[') {
+        let mut stream = serde_json::Deserializer::from_str(value).into_iter::<Vec<String>>();
+        if let Some(Ok(mut entries)) = stream.next() {
+            let rest = value[stream.byte_offset()..].trim();
+            if rest.is_empty() {
+                return entries;
+            }
+            if let Some(tail) = rest.strip_prefix(',') {
+                entries.extend(tail.split(',').map(ToOwned::to_owned));
+                return entries;
+            }
+        }
+    }
+    value.split(',').map(ToOwned::to_owned).collect()
+}
+
+/// Repair old vectors containing comma-split JSON fragments. Plain vector
+/// entries stay intact, including embedded commas in an individual target.
+pub fn normalize_proof_targets(targets: &[String]) -> Vec<String> {
+    let repaired;
+    let entries = if targets
+        .first()
+        .is_some_and(|target| target.trim().starts_with('['))
+    {
+        repaired = proof_target_entries(&targets.join(","));
+        &repaired
+    } else {
+        targets
+    };
+    let mut normalized = Vec::new();
+    for entry in entries {
+        let target = entry.trim();
+        let unquoted = serde_json::from_str::<String>(target).ok();
+        let target = unquoted.as_deref().unwrap_or(target).trim();
+        if !target.is_empty() && !normalized.iter().any(|known| known == target) {
+            normalized.push(target.to_string());
+        }
+    }
+    normalized
+}
+
+/// Canonical storage preserves commas and escaped quotes in target names.
+pub fn proof_targets_to_string(targets: &[String]) -> Option<String> {
+    let targets = normalize_proof_targets(targets);
+    (!targets.is_empty())
+        .then(|| serde_json::to_string(&targets).expect("strings serialize to JSON"))
+}
+
 /// Status of a task in its lifecycle
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -1173,6 +1229,49 @@ impl Default for Task {
 #[cfg(test)]
 mod tests {
     use crate::task::*;
+
+    #[test]
+    fn proof_targets_accept_json_csv_and_legacy_repairs() {
+        for (input, expected) in [
+            (
+                r#"["cas --lib rules", "cas --lib maintenance_jobs"]"#,
+                vec!["cas --lib rules", "cas --lib maintenance_jobs"],
+            ),
+            (" rules, core, rules, , ", vec!["rules", "core"]),
+            (r#""rules", "core",rules"#, vec!["rules", "core"]),
+            (
+                r#"["rules", "core"], rules, updates"#,
+                vec!["rules", "core", "updates"],
+            ),
+            (
+                r#"[" target,with,commas ", "quoted\"target", "", "target,with,commas"]"#,
+                vec!["target,with,commas", "quoted\"target"],
+            ),
+            ("[]", vec![]),
+        ] {
+            assert_eq!(parse_proof_targets(Some(input)), expected, "{input}");
+        }
+        assert!(parse_proof_targets(None).is_empty());
+        // Malformed/non-string JSON cannot silently clear required coverage.
+        assert!(!parse_proof_targets(Some("[null]")).is_empty());
+        assert!(!parse_proof_targets(Some(r#"["rules""#)).is_empty());
+    }
+
+    #[test]
+    fn proof_targets_repair_fragmented_vectors_and_preserve_plain_entries() {
+        let fragmented = vec![r#"["rules""#.into(), r#""core"]"#.into(), "updates".into()];
+        assert_eq!(
+            normalize_proof_targets(&fragmented),
+            ["rules", "core", "updates"]
+        );
+        let canonical = vec!["with,commas".into(), "rules".into(), "rules".into()];
+        let encoded = proof_targets_to_string(&canonical).unwrap();
+        assert_eq!(
+            parse_proof_targets(Some(&encoded)),
+            ["with,commas", "rules"]
+        );
+        assert!(proof_targets_to_string(&[" ".into()]).is_none());
+    }
 
     #[test]
     fn legacy_deliverables_json_defaults_to_no_work_target() {

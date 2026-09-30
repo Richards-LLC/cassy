@@ -12,6 +12,29 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// Accepted proof-target wire forms. Internal requests retain their existing
+/// string field; arrays are serialized losslessly before domain parsing.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ProofTargetsParameter {
+    Text(String),
+    Targets(Vec<String>),
+}
+
+pub fn deserialize_proof_targets<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<ProofTargetsParameter>::deserialize(deserializer)?
+        .map(|value| match value {
+            ProofTargetsParameter::Text(text) => Ok(text),
+            ProofTargetsParameter::Targets(targets) => {
+                serde_json::to_string(&targets).map_err(serde::de::Error::custom)
+            }
+        })
+        .transpose()
+}
+
 /// Unified memory operations request
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct MemoryRequest {
@@ -241,9 +264,10 @@ pub struct TaskRequest {
 
     /// Test modules/targets required by blast-radius close proof.
     #[schemars(
-        description = "Comma-separated test modules or targets required to cover the task's complete delivery diff"
+        description = "JSON array, JSON-array string, or comma-separated test modules or targets required to cover the task's complete delivery diff"
     )]
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_proof_targets")]
+    #[schemars(with = "Option<ProofTargetsParameter>")]
     pub proof_targets: Option<String>,
 
     /// Labels (comma-separated)

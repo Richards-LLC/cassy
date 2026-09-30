@@ -178,6 +178,15 @@ copies matching exact-delivery receipts into worker evidence. Dirty trees,
 failed retries, other worktrees and other SHAs cannot supply this receipt.
 Check receipts are optional compile-only evidence and do not waive test proof.
 
+Rust-touching supervisor lane merges require separate combined-tree evidence.
+Run `python3 scripts/check-lane-compile.py . <target> <source> --prove` as a
+supervisor before merging, backgrounded with a log. It uses the same capped
+runner for package-scoped `--lib` and `--tests` checks in a private preview and
+records PASS only for the resulting tree. Lane-tip receipts do not qualify.
+The preview preflight, `release-train.sh --check-lane`, and the actual detached
+Git merge enforce this evidence before the epic ref advances. Docs/scripts-only
+merges need no compile receipt. Rust merges require clean linked target checkouts.
+
 Workers may also run exactly
 `cargo nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`.
 An omitted target selects `--lib`; `--test` must name one explicit harness from

@@ -336,6 +336,13 @@ check_lane() {
         printf 'lane %s: MISSING (branch tip not found locally)\n' "$branch"
         return 1
     }
+    # CI/scoped receipts prove a lane tip, not its composition with this epic.
+    # This check is mandatory before either admission path can return green.
+    local merge_target
+    merge_target="$(git -C "$worktree" rev-parse HEAD)"
+    if ! python3 "$script_dir/check-lane-compile.py" "$worktree" "$merge_target" "$sha"; then
+        return 1
+    fi
     if [[ -z "$proof_receipt" && -n "${CAS_RELEASE_TRAIN_SCOPED_PROOF_RECEIPT:-}" ]]; then
         proof_receipt="$CAS_RELEASE_TRAIN_SCOPED_PROOF_RECEIPT"
     fi

@@ -46,6 +46,90 @@ fn test_git_available() {
     assert!(GitOperations::is_git_available());
 }
 
+/// The receipt must cover the detached merge result before either target venue
+/// advances. These fixtures exercise admission; Cargo itself stays supervisor-owned.
+#[test]
+fn lane_compile_requires_actual_tree_before_target_advance() {
+    for shared in [false, true] {
+        let (_temp, repo) = create_test_repo();
+        let run = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        std::fs::create_dir_all(repo.join("scripts")).unwrap();
+        std::fs::write(
+            repo.join("scripts/check-lane-fast-rows.py"),
+            "# compile opt-in\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("scripts/check-lane-compile.py"),
+            include_str!("../../../../scripts/check-lane-compile.py"),
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("Cargo.toml"),
+            "[package]\nname=\"lane_fixture\"\nversion=\"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(repo.join("lib.rs"), "fn original() {}\n").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-m", "lane admission policy"]);
+        run(&["branch", "epic/compile"]);
+        run(&["checkout", "-b", "factory/compile"]);
+        std::fs::write(repo.join("lib.rs"), "fn changed() {}\n").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-m", "Rust lane"]);
+        let source = run(&["rev-parse", "HEAD"]);
+        let base = run(&["rev-parse", "epic/compile"]);
+        if shared {
+            run(&["checkout", "epic/compile"]);
+        }
+        let head = run(&["rev-parse", "HEAD"]);
+        let git = GitOperations::new(repo.clone());
+        let merge = || {
+            if shared {
+                git.merge_branch("epic/compile", "factory/compile", true)
+            } else {
+                git.merge_branch_via_temp_worktree("epic/compile", "factory/compile", true)
+            }
+        };
+        let error = merge().unwrap_err().to_string();
+        assert!(error.contains("LANE COMPILE REQUIRED"), "{error}");
+        assert!(
+            error.contains("cargo check -p lane_fixture --tests"),
+            "{error}"
+        );
+        assert_eq!(run(&["rev-parse", "epic/compile"]), base);
+        assert_eq!(run(&["rev-parse", "HEAD"]), head);
+        assert!(!git.merge_in_progress());
+        let output = run(&["merge-tree", "--write-tree", &base, &source]);
+        let tree = output.lines().next().unwrap();
+        let receipts = repo.join(".git/lane-compile");
+        std::fs::create_dir_all(&receipts).unwrap();
+        let proof = serde_json::json!({
+            "version": 1, "result": "PASS", "tree": tree,
+            "git_common_dir": repo.join(".git").canonicalize().unwrap(),
+            "packages": ["lane_fixture"], "targets": ["--lib", "--tests"],
+            "capped_runner": "cas factory worker-check",
+        });
+        std::fs::write(receipts.join(format!("{tree}.json")), proof.to_string()).unwrap();
+        let merged = merge().unwrap().unwrap();
+        assert_eq!(run(&["rev-parse", "epic/compile"]), merged);
+        assert_eq!(run(&["rev-parse", &format!("{merged}^{{tree}}")]), tree);
+        assert_eq!(run(&["rev-parse", "factory/compile"]), source);
+    }
+}
+
 #[test]
 fn test_detect_repo_root() {
     let (_temp, repo_path) = create_test_repo();

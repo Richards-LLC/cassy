@@ -8,3 +8,4 @@
 mod factory_e2e;
 mod factory_tui_headful;
 mod hook_e2e;
+mod cloud_sync;

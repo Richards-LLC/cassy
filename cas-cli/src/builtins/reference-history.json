@@ -558,6 +558,16 @@
     "skills/cas-retro/references/v3.38.0.md": [
       "7a9bff97e94fd3caf9cb0d56ad105991194743f0dcdaf0b0335b13b952adfb7d"
     ],
+    "skills/cas-shadow-review/LICENSE": [
+      "0e7ac423bf2c6e223b7c5b156f8cf72da49d748e56a1641402c31f22ad07dbb5",
+      "dcad88aea82f74872bcd5e715e7e6c933692324fd71303aa51a7af44cef52064"
+    ],
+    "skills/cas-shadow-review/references/spec.md": [
+      "5be8a3865bb39a59098304b669872823fa2c9f9b4db7a42042b08762c0147100"
+    ],
+    "skills/cas-shadow-review/references/standards.md": [
+      "87da94543db7167bba6f479d5175caa9fa978021b7cae456e74f8eee311905e4"
+    ],
     "skills/cas-supervisor/references/code-review-queue.md": [
       "09ea473a0b20854c50f26e82deb2299d3050510f9b03a8512935c97463f17183",
       "211e094a7bddfa2016226cc20137cc5fe536c02847189a5d6d9d5da94cb6ed78",
@@ -1067,6 +1077,7 @@
       "6e671c68def607b93e9af63172b398ec902c9c1b33615bc095df17d50775b7c6",
       "703eb9fa510bf912060f238ca3e2269949ef14287ad69d4d8e896d05f4149fa5",
       "70fcb61093b7fd573643d50cb1df3b7eca79fc27d9240a4b5d0556a0af0ec9b9",
+      "77c5533bb30f926b6ef65d7f57dd5502e3158f879e438433219306f1a637659a",
       "7a7adbe509b67a8b498371c261178ecf0bf0af193b56ffb7c9ade7f37f11bf76",
       "7af1a124a30af6cfc19600cd43eb149030abb6f3094908ee3a17b600e8f90718",
       "7ce93d65c789fed3a811deb4dfc6d8fa437e744439d30ede1b7d9393ed7efa11",

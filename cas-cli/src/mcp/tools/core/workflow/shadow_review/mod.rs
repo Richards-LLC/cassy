@@ -150,6 +150,7 @@ pub(super) struct Application {
     before: String,
     after: Option<String>,
     commits: Vec<String>,
+    landed_commits: Vec<String>,
     supervisor_agent_id: String,
     /// Persist intent before touching delivery Git, allowing safe recovery.
     state: ApplicationState,
@@ -724,6 +725,7 @@ fn apply(store: &persistence::Store, round: &mut Round, caller_id: &str) -> Revi
         before: round.proof.head_commit.clone(),
         after: None,
         commits: commits.clone(),
+        landed_commits: Vec::new(),
         supervisor_agent_id: caller_id.to_string(),
         state: ApplicationState::Intent,
     });
@@ -732,13 +734,21 @@ fn apply(store: &persistence::Store, round: &mut Round, caller_id: &str) -> Revi
         Ok(after) => {
             // The existing proof model keeps patch-id survival on the applied
             // anchors. A new legacy dispatch is still required for merge gates.
+            let landed = git::commits(root, &round.proof.head_commit, &after)?;
+            if landed.len() != commits.len() {
+                return Err(
+                    "application intent retained: landed commit count differs from accepted fixes"
+                        .into(),
+                );
+            }
             let proof = capture_repository_proof_with_anchors(
                 Path::new(&round.proof.repository_root),
                 root,
-                commits,
+                landed.clone(),
             )?;
             let application = round.application.as_mut().unwrap();
             application.repository = Some(proof);
+            application.landed_commits = landed;
             application.after = Some(after);
             application.state = ApplicationState::Applied;
             store.save(round)

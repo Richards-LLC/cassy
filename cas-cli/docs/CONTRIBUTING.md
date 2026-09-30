@@ -190,6 +190,16 @@ The assembly command runs native full-workspace nextest in the factory
 worktree, then the gate's archive-mode row in a plain clone outside every
 `.cas` ancestor. The archive consumer uses the queue's remapped environment
 and excludes component-output snapshots, already covered by the native run.
+
+Set `CAS_RELEASE_GATE_HOME_DIR` to a scratch base on the checkout filesystem
+outside `/tmp`, `/var/tmp`, `/private/tmp`, `/private/var/tmp`, the configured
+`TMPDIR`, and every `.cas` ancestor (for example,
+`CAS_RELEASE_GATE_HOME_DIR=/home/cas-release-gate/base` on Linux or
+`/Users/Shared/cas-release-gate/base` on macOS). The plain clone must be outside
+Cassy's disposable roots so discovery and update tests exercise durable
+projects. Assembly refuses an unsafe base before tool probing or either suite;
+its legacy `/var/tmp` default requires this explicit override.
+
 Both contexts must report nonzero passed tests before an atomic PASS is written
 under the shared `.cas/merge-sweeps/assembly-proofs/` directory. The receipt
 records the tested Git tree, each context's tree and pass count, toolchain,

@@ -1,5 +1,6 @@
 pub(crate) mod gate_text;
 mod task_attribution;
+mod delivery_evolution;
 mod snapshot_approval;
 
 use super::TaskLifecycleGateError;
@@ -10784,6 +10785,94 @@ fn reviewed_delivery_drop_reason(reason: Option<&str>) -> Option<&str> {
     (!review.is_empty()).then_some(review)
 }
 
+/// Narrative reviews alone cannot establish supersession. Resolve every named
+/// commit, prove its post-anchor target ancestry, and require path coverage.
+/// The caller supplies a reason only after live supervisor authentication.
+fn validated_delivery_drop_review(
+    repo: &std::path::Path,
+    anchor: &str,
+    parent: &str,
+    paths: &[String],
+    reason: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(review) = reviewed_delivery_drop_reason(reason) else {
+        return Ok(None);
+    };
+    let usage =
+        "reviewed-drop: <superseding SHA>[,<SHA>...] -- <why the named paths were superseded>";
+    let (commits, narrative) = review
+        .split_once(" -- ")
+        .filter(|(_, narrative)| !narrative.trim().is_empty())
+        .ok_or_else(|| {
+            format!("delivery review must name superseding commits: reason=\"{usage}\"")
+        })?;
+    let origin = format!("origin/{parent}");
+    let target = if git_ref_exists(repo, &origin) && git_commit_is_ancestor(repo, anchor, &origin) {
+        origin
+    } else {
+        parent.to_string()
+    };
+    let target =
+        resolve_branch_sha(repo, &target).ok_or("delivery review target does not resolve")?;
+    let anchor = resolve_branch_sha(repo, &format!("{anchor}^{{commit}}")).ok_or("delivery review anchor does not resolve to a commit")?;
+    if !git_commit_is_ancestor(repo, &anchor, &target) {
+        return Err("delivery review anchor is not reachable on the target".into());
+    }
+    let mut covered = std::collections::HashSet::new();
+    let mut resolved = Vec::new();
+    for named in commits.split(',') {
+        let sha = resolve_task_commit_receipt_sha(repo, named.trim())?;
+        if sha == anchor
+            || !git_commit_is_ancestor(repo, &anchor, &sha)
+            || !git_commit_is_ancestor(repo, &sha, &target)
+        {
+            return Err(format!(
+                "superseding commit `{sha}` must strictly descend from anchor `{anchor}` and be reachable on target `{target}`"
+            ));
+        }
+        let output = std::process::Command::new("git")
+            .args(["diff", "--name-only", "--no-renames", "-z", &format!("{sha}^1"), &sha, "--"])
+            .current_dir(repo)
+            .output()
+            .map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            return Err(format!("cannot inspect superseding commit `{sha}`"));
+        }
+        let touched =
+            String::from_utf8(output.stdout).map_err(|_| "superseding paths are not UTF-8")?;
+        let affected: Vec<_> = paths
+            .iter()
+            .filter(|path| touched.split('\0').any(|touched| touched == path.as_str()))
+            .collect();
+        if affected.is_empty() {
+            return Err(format!(
+                "superseding commit `{sha}` does not touch any dropped path"
+            ));
+        }
+        covered.extend(affected.into_iter().cloned());
+        if !resolved.contains(&sha) {
+            resolved.push(sha);
+        }
+    }
+    let uncovered: Vec<_> = paths
+        .iter()
+        .filter(|path| !covered.contains(*path))
+        .cloned()
+        .collect();
+    if !uncovered.is_empty() {
+        return Err(format!(
+            "superseding commits do not cover dropped path(s): {}",
+            uncovered.join(", ")
+        ));
+    }
+    Ok(Some(format!(
+        "anchor={anchor}; target={target}; dropped paths: {}; superseding commits: {}; supervisor review: {}",
+        paths.join(", "),
+        resolved.join(", "),
+        narrative.trim()
+    )))
+}
+
 fn anchored_delivery_content_gate(
     task: &Task,
     repo_path: &std::path::Path,
@@ -10851,38 +10940,51 @@ fn anchored_delivery_content_gate(
             ),
         })
     } else {
-        delivery_content_presence_in_parent(repo_path, anchor, parent_branch)
+        task_attribution::ordinary_anchor_content_presence(repo_path, parent_branch, anchor, content_identity)
     };
 
     match presence {
         DeliveryContentPresence::Present { .. } | DeliveryContentPresence::Superseded { .. } => {
             None
         }
-        DeliveryContentPresence::Dropped { paths }
-            if reviewed_delivery_drop_reason(supervisor_override_reason).is_some() =>
-        {
-            Some(MergeStateGateOutcome::ProceedWithNote(format!(
-                "DECISION: reviewed delivery content drop accepted for task {task_id}; anchor={anchor}; target={parent_branch}; dropped paths: {}; supervisor review: {}",
-                paths.join(", "),
-                reviewed_delivery_drop_reason(supervisor_override_reason).unwrap(),
-            )))
-        }
-        DeliveryContentPresence::Dropped { paths } => Some(MergeStateGateOutcome::Reject(format!(
-            "⚠️ DELIVERY CONTENT DROPPED\n\n\
+        DeliveryContentPresence::Dropped { paths } => {
+            match validated_delivery_drop_review(
+                repo_path,
+                anchor,
+                parent_branch,
+                &paths,
+                supervisor_override_reason,
+            ) {
+                Ok(Some(review)) => {
+                    return Some(MergeStateGateOutcome::ProceedWithNote(format!(
+                        "DECISION: reviewed delivery content supersession accepted for task {task_id}; {review}"
+                    )));
+                }
+                Err(reason) => {
+                    return Some(MergeStateGateOutcome::Reject(format!(
+                        "DELIVERY REVIEW REJECTED: {reason}"
+                    )));
+                }
+                Ok(None) => {}
+            }
+            Some(MergeStateGateOutcome::Reject(format!(
+                "⚠️ DELIVERY CONTENT DROPPED\n\n\
                  task close rejected: delivery anchor `{anchor}` is reachable from \
                  `{parent_branch}`, but its tree effect is absent from the current \
                  target tree. Reachability alone cannot prove delivery.\n\n\
                  Dropped path(s): {}{}\n\n\
-                 Cassy measured the missing tree effect; it cannot identify the \
-                 change that removed it. Restore the missing delivery content on \
-                 the assigned factory branch, commit it, and retry close; do not \
-                 re-merge the already-reachable anchor for task {task_id}. If the \
-                 drop is intentional, a live registered supervisor may close with \
-                 supervisor_override=true reason=\"reviewed-drop: <why the named content was intentionally superseded>\"; \
-                 the dropped paths and review are recorded.",
-            paths.join(", "),
-            dropped_line_samples(repo_path, anchor, parent_branch, &paths),
-        ))),
+                 Cassy measured the missing tree effect without a later replacement proof. \
+                 Restore the missing delivery content on the assigned factory branch, \
+                 commit it, and retry close. If the content was intentionally superseded, \
+                 a live registered supervisor may close with supervisor_override=true \
+                 reason=\"reviewed-drop: <superseding SHA>[,<SHA>...] -- <why>\". \
+                 Each named commit must descend from the anchor, be reachable on the \
+                 target, and touch the dropped paths. The resolved commits, paths, and \
+                 review are recorded.",
+                paths.join(", "),
+                dropped_line_samples(repo_path, anchor, parent_branch, &paths),
+            )))
+        }
         DeliveryContentPresence::Unknown { reason } => {
             Some(MergeStateGateOutcome::Reject(format!(
                 "⚠️ DELIVERY CONTENT UNVERIFIABLE\n\n\
@@ -14350,24 +14452,37 @@ pub(crate) fn validate_task_commit_receipt(
     // unmerged, historical, and empty receipts fail on their own predicates.
     // Content proof is the final delivery-authorization gate, not a
     // replacement for those topology/attribution diagnostics.
-    match delivery_content_presence_in_parent(repo_path, &full_receipt, parent_branch) {
-        DeliveryContentPresence::Present { .. } | DeliveryContentPresence::Superseded { .. } => {}
-        DeliveryContentPresence::Dropped { .. }
-            if reviewed_delivery_drop_reason(window.supervisor_override_reason.as_deref()).is_some() => {}
+    let drop_review = match delivery_content_presence_in_parent(
+        repo_path,
+        &full_receipt,
+        parent_branch,
+    ) {
+        DeliveryContentPresence::Present { .. } | DeliveryContentPresence::Superseded { .. } => {
+            None
+        }
         DeliveryContentPresence::Dropped { paths } => {
-            return Err(format!(
-                "the commit is reachable from {parent_branch} or origin/{parent_branch}, but its delivery content is absent from the current target tree; dropped path(s): {}",
-                paths.join(", ")
-            ));
+            let review = validated_delivery_drop_review(
+                repo_path,
+                &full_receipt,
+                parent_branch,
+                &paths,
+                window.supervisor_override_reason.as_deref(),
+            )?;
+            if review.is_none() {
+                return Err(format!(
+                    "the commit is reachable from {parent_branch} or origin/{parent_branch}, but its delivery content is absent from the current target tree; dropped path(s): {}",
+                    paths.join(", ")
+                ));
+            }
+            review
         }
         DeliveryContentPresence::Unknown { reason } => {
             return Err(format!(
                 "the commit's delivery content is not proven on {parent_branch} or origin/{parent_branch}: {reason}"
             ));
         }
-    }
-
-    let drop_review = reviewed_delivery_drop_reason(window.supervisor_override_reason.as_deref())
+    };
+    let drop_review = drop_review
         .map(|review| format!(" Explicit reviewed-drop authorization: {review}."))
         .unwrap_or_default();
     Ok(format!(
@@ -15543,13 +15658,21 @@ fn reanchored_delivery_content_in_parent(
     )
     .ok()?;
 
+    let delivery_parent = resolve_branch_sha(repo_path, &format!("{anchor}^1"))?;
     for integration in candidates {
         // The source anchor need not be an ancestor of its squash commit, so
-        // only a direct present-effect verdict is valid at this first step.
-        if !matches!(
-            delivery_content_presence_on_target(repo_path, anchor, &integration),
-            DeliveryContentPresence::Present { .. }
-        ) {
+        // require its complete exact patch to reverse-apply at the accepted
+        // integration. The ancestry tracer is valid only AFTER re-anchoring.
+        // No file-wide text/token containment fallback can authorize this.
+        if !reverse_delivery_patch_applies_to_tree(
+            repo_path,
+            &delivery_parent,
+            anchor,
+            &integration,
+            None,
+        )
+        .ok()?
+        {
             continue;
         }
         match delivery_content_presence_on_target(repo_path, &integration, &target) {
@@ -18677,13 +18800,11 @@ pub(crate) fn git_commit_is_ancestor(
 /// first-parent patch can be reverse-applied there. When nearby sibling work
 /// makes that context-sensitive proof fail, zero-context added hunks provide
 /// a second positive proof that the delivery's own lines survive. A failure
-/// is then classified at the first target
-/// first-parent commit where that proof stopped holding. An ordinary commit,
-/// or a merge whose contributing side already descends from and evolves the
-/// delivery, is explicit supersession. A merge whose changed side has no such
-/// post-delivery evolution is a conflict-
-/// resolution loss. This distinction prevents a later refactor from being
-/// misreported as dropped content while still detecting the #324 shape.
+/// is classified by carrying delivery-owned line ranges through descendant
+/// history. Ordinary replacements must survive to the current target; a
+/// merge must retain ownership from a proven parent. Pure deletions, reverts,
+/// unrelated duplicates, and stale-side resolutions cannot revive ownership.
+/// This preserves the #324 conflict-resolution loss fence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DeliveryContentPresence {
     Present {
@@ -18708,8 +18829,25 @@ fn reverse_delivery_path_applies_to_tree(
     target_tree: &str,
     path: &str,
 ) -> Result<bool, String> {
+    reverse_delivery_patch_applies_to_tree(
+        repo_path,
+        delivery_parent,
+        delivery_commit,
+        target_tree,
+        Some(path),
+    )
+}
+
+fn reverse_delivery_patch_applies_to_tree(
+    repo_path: &std::path::Path,
+    delivery_parent: &str,
+    delivery_commit: &str,
+    target_tree: &str,
+    selected_path: Option<&str>,
+) -> Result<bool, String> {
     use std::io::Write as _;
     use std::process::{Command, Stdio};
+    let path = selected_path.unwrap_or("all delivery paths");
 
     let temp = tempfile::tempdir()
         .map_err(|error| format!("failed to create isolated target index: {error}"))?;
@@ -18727,17 +18865,20 @@ fn reverse_delivery_path_applies_to_tree(
         ));
     }
 
-    let patch = Command::new("git")
-        .args([
-            "diff",
-            "--binary",
-            "--full-index",
-            "--no-renames",
-            delivery_parent,
-            delivery_commit,
-            "--",
-            path,
-        ])
+    let mut patch_command = Command::new("git");
+    patch_command.args([
+        "diff",
+        "--binary",
+        "--full-index",
+        "--no-renames",
+        delivery_parent,
+        delivery_commit,
+        "--",
+    ]);
+    if let Some(path) = selected_path {
+        patch_command.arg(path);
+    }
+    let patch = patch_command
         .current_dir(repo_path)
         .output()
         .map_err(|error| format!("failed to render delivery patch for `{path}`: {error}"))?;
@@ -18960,73 +19101,6 @@ fn delivery_path_effect_survives_on_tree(
     )
 }
 
-fn first_parent_delivery_lineage(
-    repo_path: &std::path::Path,
-    delivery_commit: &str,
-    target: &str,
-) -> Result<(String, Vec<String>), String> {
-    use std::process::Command;
-
-    if !git_commit_is_ancestor(repo_path, delivery_commit, target) {
-        return Err(format!(
-            "delivery commit `{delivery_commit}` is not reachable from target `{target}`"
-        ));
-    }
-
-    let first_parent = Command::new("git")
-        .args(["rev-list", "--first-parent", target])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|error| format!("failed to inspect target first-parent history: {error}"))?;
-    if !first_parent.status.success() {
-        return Err(format!(
-            "Git could not inspect target first-parent history (exit {})",
-            first_parent.status
-        ));
-    }
-    let delivery_on_first_parent = String::from_utf8_lossy(&first_parent.stdout)
-        .lines()
-        .any(|commit| commit == delivery_commit);
-
-    let after_delivery = Command::new("git")
-        .args([
-            "rev-list",
-            "--first-parent",
-            "--reverse",
-            &format!("{delivery_commit}..{target}"),
-        ])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|error| format!("failed to inspect post-delivery history: {error}"))?;
-    if !after_delivery.status.success() {
-        return Err(format!(
-            "Git could not inspect post-delivery history (exit {})",
-            after_delivery.status
-        ));
-    }
-    let commits = String::from_utf8_lossy(&after_delivery.stdout)
-        .lines()
-        .filter(|commit| !commit.is_empty())
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-
-    if delivery_on_first_parent {
-        return Ok((delivery_commit.to_string(), commits));
-    }
-    let Some(integration_index) = commits
-        .iter()
-        .position(|commit| git_commit_is_ancestor(repo_path, delivery_commit, commit))
-    else {
-        return Err(format!(
-            "target first-parent history has no integration point for `{delivery_commit}`"
-        ));
-    };
-    Ok((
-        commits[integration_index].clone(),
-        commits.into_iter().skip(integration_index + 1).collect(),
-    ))
-}
-
 fn commit_changes_path(
     repo_path: &std::path::Path,
     commit: &str,
@@ -19054,57 +19128,20 @@ fn commit_changes_path(
     }
 }
 
-fn merge_carries_explicit_delivery_evolution(
-    repo_path: &std::path::Path,
-    merge_commit: &str,
-    delivery_commit: &str,
-    delivery_parent: &str,
-    path: &str,
-) -> Result<bool, String> {
-    let output = std::process::Command::new("git")
-        .args(["rev-list", "--parents", "-n", "1", merge_commit])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|error| format!("failed to inspect merge `{merge_commit}`: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "Git could not inspect merge `{merge_commit}` (exit {})",
-            output.status
-        ));
-    }
-    let fields = String::from_utf8_lossy(&output.stdout)
-        .split_whitespace()
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    if fields.len() < 3 {
-        return Err(format!("`{merge_commit}` is not a merge commit"));
-    }
-    // fields[0] is the merge, fields[1] its first parent. A non-first parent
-    // that already contains AND has evolved the delivery is explicit
-    // superseding work. Merely containing the delivery is insufficient: an
-    // octopus merge could otherwise use one unchanged descendant side to hide
-    // a conflict-resolution loss from a different stale side.
-    for parent in fields.iter().skip(2) {
-        if !git_commit_is_ancestor(repo_path, delivery_commit, parent) {
-            continue;
-        }
-        if !reverse_delivery_path_applies_to_tree(
-            repo_path,
-            delivery_parent,
-            delivery_commit,
-            parent,
-            path,
-        )? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
 pub(crate) fn delivery_content_presence_on_target(
     repo_path: &std::path::Path,
     delivery_commit: &str,
     target_ref: &str,
+) -> DeliveryContentPresence {
+    delivery_content_presence_on_target_for_paths(repo_path, delivery_commit, target_ref, None, false)
+}
+
+fn delivery_content_presence_on_target_for_paths(
+    repo_path: &std::path::Path,
+    delivery_commit: &str,
+    target_ref: &str,
+    selected_paths: Option<&[String]>,
+    resolution_only: bool,
 ) -> DeliveryContentPresence {
     use std::process::Command;
 
@@ -19173,6 +19210,10 @@ pub(crate) fn delivery_content_presence_on_target(
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
         .map(|path| String::from_utf8(path.to_vec()))
+        .filter(|path| {
+            selected_paths
+                .is_none_or(|selected| path.as_ref().map_or(true, |path| selected.contains(path)))
+        })
         .collect::<Result<Vec<_>, _>>();
     let paths = match paths {
         Ok(paths) if !paths.is_empty() => paths,
@@ -19192,156 +19233,37 @@ pub(crate) fn delivery_content_presence_on_target(
     };
 
     let mut dropped = Vec::new();
+    let mut evolved = Vec::new();
+    let mut commits = Vec::new();
     for path in &paths {
-        match delivery_path_effect_survives_on_tree(
-            repo_path,
-            &delivery_parent,
-            delivery_commit,
-            &target,
-            path,
-        ) {
-            Ok(true) => {}
-            Ok(false) => dropped.push(path.clone()),
-            Err(reason) => return DeliveryContentPresence::Unknown { reason },
-        }
-    }
-
-    if dropped.is_empty() {
-        return DeliveryContentPresence::Present { paths };
-    }
-
-    let (integration, post_integration) =
-        match first_parent_delivery_lineage(repo_path, delivery_commit, &target) {
-            Ok(lineage) => lineage,
-            Err(reason) => return DeliveryContentPresence::Unknown { reason },
+        let measured = if resolution_only {
+            delivery_evolution::resolution_content_presence(repo_path, &delivery_parent, delivery_commit, &target, path)
+        } else {
+            delivery_evolution::line_content_presence(repo_path, &delivery_parent, delivery_commit, &target, path)
         };
-    let mut truly_dropped = Vec::new();
-    let mut superseded = Vec::new();
-    let mut superseding_commits = Vec::new();
-    for path in dropped {
-        let integration_present = match delivery_path_effect_survives_on_tree(
-            repo_path,
-            &delivery_parent,
-            delivery_commit,
-            &integration,
-            &path,
-        ) {
-            Ok(present) => present,
-            Err(reason) => return DeliveryContentPresence::Unknown { reason },
-        };
-        // A merge resolution may replace the original hunk at the accepted
-        // integration commit. In that shape, an ordinary first-parent edit
-        // to the same path is still durable evidence that the delivery was
-        // evolved along the target lineage. Do not stop at the first absent
-        // integration hunk; inspect the post-integration path history before
-        // declaring a real drop.
-        let mut first_path_touch = None;
-        let mut first_loss = None;
-        for commit in &post_integration {
-            match commit_changes_path(repo_path, commit, &path) {
-                Ok(false) => continue,
-                Ok(true) => {}
-                Err(reason) => return DeliveryContentPresence::Unknown { reason },
-            }
-            first_path_touch.get_or_insert_with(|| commit.clone());
-            if !integration_present {
-                break;
-            }
-            match delivery_path_effect_survives_on_tree(
-                repo_path,
-                &delivery_parent,
-                delivery_commit,
-                commit,
-                &path,
-            ) {
-                Ok(true) => continue,
-                Ok(false) => {
-                    first_loss = Some(commit.clone());
-                    break;
-                }
-                Err(reason) => return DeliveryContentPresence::Unknown { reason },
-            }
-        }
-
-        if !integration_present {
-            let Some(first_touch) = first_path_touch else {
-                truly_dropped.push(path);
-                continue;
-            };
-            let supersession = match git_commit_parent_count(repo_path, &first_touch) {
-                0 => {
-                    return DeliveryContentPresence::Unknown {
-                        reason: format!("Git could not inspect parents of `{first_touch}`"),
-                    };
-                }
-                1 => true,
-                _ => match merge_carries_explicit_delivery_evolution(
-                    repo_path,
-                    &first_touch,
-                    delivery_commit,
-                    &delivery_parent,
-                    &path,
-                ) {
-                    Ok(evolved) => evolved,
-                    Err(reason) => return DeliveryContentPresence::Unknown { reason },
-                },
-            };
-            if supersession {
-                superseded.push(path);
-                if !superseding_commits.contains(&first_touch) {
-                    superseding_commits.push(first_touch);
-                }
-            } else {
-                truly_dropped.push(path);
-            }
-            continue;
-        }
-
-        let Some(first_loss) = first_loss else {
-            return DeliveryContentPresence::Unknown {
-                reason: format!(
-                    "delivery proof for `{path}` is absent at `{target}`, but no first-parent transition explains the loss"
-                ),
-            };
-        };
-        let supersession = match git_commit_parent_count(repo_path, &first_loss) {
-            0 => {
-                return DeliveryContentPresence::Unknown {
-                    reason: format!("Git could not inspect parents of `{first_loss}`"),
-                };
-            }
-            1 => true,
-            _ => match merge_carries_explicit_delivery_evolution(
-                repo_path,
-                &first_loss,
-                delivery_commit,
-                &delivery_parent,
-                &path,
-            ) {
-                Ok(evolved) => evolved,
+        let proof = match measured {
+            Ok(Some(proof)) => proof,
+            Ok(None) => match reverse_delivery_path_applies_to_tree(repo_path, &delivery_parent, delivery_commit, &target, path) {
+                Ok(true) => DeliveryContentPresence::Present { paths: vec![path.clone()] },
+                Ok(false) => DeliveryContentPresence::Dropped { paths: vec![path.clone()] },
                 Err(reason) => return DeliveryContentPresence::Unknown { reason },
             },
+            Err(reason) => return DeliveryContentPresence::Unknown { reason },
         };
-        if !supersession {
-            truly_dropped.push(path);
-            continue;
-        }
-        superseded.push(path);
-        if !superseding_commits.contains(&first_loss) {
-            superseding_commits.push(first_loss);
+        match proof {
+            DeliveryContentPresence::Present { .. } => {},
+            DeliveryContentPresence::Dropped { .. } => dropped.push(path.clone()),
+            DeliveryContentPresence::Superseded { commits: owners, .. } => {
+                evolved.push(path.clone());
+                for owner in owners { if !commits.contains(&owner) { commits.push(owner); } }
+            },
+            DeliveryContentPresence::Unknown { reason } => return DeliveryContentPresence::Unknown { reason },
         }
     }
+    if !dropped.is_empty() { DeliveryContentPresence::Dropped { paths: dropped } }
+    else if !evolved.is_empty() { DeliveryContentPresence::Superseded { paths: evolved, commits } }
+    else { DeliveryContentPresence::Present { paths } }
 
-    if !truly_dropped.is_empty() {
-        DeliveryContentPresence::Dropped {
-            paths: truly_dropped,
-        }
-    } else {
-        DeliveryContentPresence::Superseded {
-            paths: superseded,
-            commits: superseding_commits,
-        }
-    }
 }
 
 /// Verify delivery content on the authoritative parent view. Prefer the
@@ -19353,6 +19275,16 @@ pub(crate) fn delivery_content_presence_in_parent(
     repo_path: &std::path::Path,
     delivery_commit: &str,
     parent_branch: &str,
+) -> DeliveryContentPresence {
+    delivery_content_presence_in_parent_for_paths(repo_path, delivery_commit, parent_branch, None, false)
+}
+
+fn delivery_content_presence_in_parent_for_paths(
+    repo_path: &std::path::Path,
+    delivery_commit: &str,
+    parent_branch: &str,
+    selected_paths: Option<&[String]>,
+    resolution_only: bool,
 ) -> DeliveryContentPresence {
     let origin_parent = format!("origin/{parent_branch}");
     let target = if git_ref_exists(repo_path, &origin_parent)
@@ -19370,7 +19302,13 @@ pub(crate) fn delivery_content_presence_in_parent(
             ),
         };
     };
-    delivery_content_presence_on_target(repo_path, delivery_commit, target)
+    delivery_content_presence_on_target_for_paths(
+        repo_path,
+        delivery_commit,
+        target,
+        selected_paths,
+        resolution_only,
+    )
 }
 
 fn git_branch_name(repo_path: &std::path::Path) -> Option<String> {
@@ -21835,9 +21773,9 @@ mod merge_state_gate_tests {
             run_factory_branch_merge_gate_with_attribution(&task, &req, "main", repo, attribution),
             MergeStateGateOutcome::Reject(_)
         ));
-        window.supervisor_override_reason = Some(
-            "reviewed-drop: original lines intentionally replaced by the approved sibling".into(),
-        );
+        window.supervisor_override_reason = Some(format!(
+            "reviewed-drop: {current} -- original lines intentionally replaced by the approved sibling"
+        ));
         let outcome = run_factory_branch_merge_gate_with_attribution(
             &task,
             &req,
@@ -21848,21 +21786,11 @@ mod merge_state_gate_tests {
                 window: Some(&window),
             },
         );
-        let MergeStateGateOutcome::ProceedWithNote(note) = outcome else {
-            panic!("explicit reviewed drop must be audited: {outcome:?}");
-        };
-        assert!(
-            note.contains(&original)
-                && note.contains("delivery.rs")
-                && note.contains("approved sibling"),
-            "{note}"
-        );
+        assert!(matches!(outcome, MergeStateGateOutcome::Reject(_)),
+            "a dropping merge is not a superseding first-parent edit: {outcome:?}");
         assert!(reviewed_delivery_drop_reason(Some("reviewed-drop: ")).is_none());
-        assert!(
-            validate_task_commit_receipt(repo, &original, "main", &window)
-                .unwrap()
-                .contains("reviewed-drop")
-        );
+        assert!(validate_task_commit_receipt(repo, &original, "main", &window)
+            .unwrap_err().contains("does not touch"));
         commit_file_at(
             repo,
             "unmerged.rs",
@@ -24249,8 +24177,9 @@ mod merge_state_gate_tests {
         assert!(git_commit_is_ancestor(p, &merged_branch_tip, "main"));
         assert_eq!(
             delivery_content_presence_on_target(p, &first_attempt_anchor, "main"),
-            DeliveryContentPresence::Dropped {
-                paths: vec!["viktor.rs".to_string()]
+            DeliveryContentPresence::Superseded {
+                paths: vec!["viktor.rs".to_string()],
+                commits: vec![merged_branch_tip.clone()],
             },
             "precondition: the old anchor's exact hunk was intentionally replaced"
         );
@@ -24878,6 +24807,179 @@ mod merge_state_gate_tests {
             matches!(outcome, MergeStateGateOutcome::Proceed),
             "a hunk the task rewrote itself must not read as dropped: {outcome:?}"
         );
+    }
+
+    #[test]
+    fn stale_merge_cannot_resurrect_lost_line_ownership_cas_0930() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        std::fs::write(p.join("work.rs"), "legacy();\nkeep();\n").unwrap();
+        git(p, &["add", "work.rs"]);
+        git(p, &["commit", "-qm", "cas-test1: delivery"]);
+        let delivery = head_sha(p);
+        git(p, &["checkout", "main"]);
+        git(p, &["merge", "--no-ff", "-s", "ours", "factory/worker", "-m", "stale integration"]);
+        // A stale side copies identical text without owning delivery.
+        // A later edit of that copy must not resurrect the dropped line.
+        git(p, &["checkout", "-b", "stale", &format!("{delivery}^1")]);
+        std::fs::write(p.join("work.rs"), "legacy();\nkeep();\nunrelated();\n").unwrap();
+        git(p, &["add", "work.rs"]);
+        git(p, &["commit", "-qm", "stale side"]);
+        git(p, &["checkout", "main"]);
+        git(p, &["merge", "--no-ff", "stale", "-m", "merge stale side"]);
+        std::fs::write(p.join("work.rs"), "modern();\nkeep();\nunrelated();\n").unwrap();
+        git(p, &["add", "work.rs"]);
+        git(p, &["commit", "-qm", "replace delivered line"]);
+        assert_eq!(delivery_content_presence_on_target(p, &delivery, "main"),
+            DeliveryContentPresence::Dropped { paths: vec!["work.rs".into()] });
+    }
+
+    #[test]
+    fn unrelated_edit_cannot_explain_a_missing_line_cas_0930() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        std::fs::write(p.join("work.rs"), "delivered();\n").unwrap();
+        git(p, &["add", "work.rs"]);
+        git(p, &["commit", "-qm", "cas-test1: delivery"]);
+        let delivery = head_sha(p);
+        git(p, &["checkout", "main"]);
+        git(p, &["merge", "--no-ff", "-s", "ours", "factory/worker", "-m", "drop delivery"]);
+        std::fs::write(p.join("work.rs"), "unrelated();\n").unwrap();
+        git(p, &["add", "work.rs"]);
+        git(p, &["commit", "-qm", "unrelated later path edit"]);
+        assert_eq!(delivery_content_presence_on_target(p, &delivery, "main"),
+            DeliveryContentPresence::Dropped { paths: vec!["work.rs".into()] });
+    }
+
+    #[test]
+    fn delivery_drop_review_requires_reachable_path_receipts_cas_0930() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        for path in ["work.rs", "other.rs"] {
+            std::fs::write(p.join(path), "delivered();\n").unwrap();
+        }
+        git(p, &["add", "."]);
+        git(p, &["commit", "-qm", "cas-test1: delivery"]);
+        let delivery = head_sha(p);
+        git(p, &["checkout", "main"]);
+        git(p, &["merge", "--no-ff", "-s", "ours", "factory/worker", "-m", "reviewed resolution"]);
+        let dropping = head_sha(p);
+        for path in ["work.rs", "other.rs"] {
+            std::fs::write(p.join(path), "reviewed_replacement();\n").unwrap();
+        }
+        git(p, &["add", "."]);
+        git(p, &["commit", "-qm", "replace both dropped paths"]);
+        let resolution = head_sha(p);
+        let paths = vec!["work.rs".into(), "other.rs".into()];
+        assert!(validated_delivery_drop_review(p, &delivery, "main", &paths,
+            Some(&format!("reviewed-drop: {dropping} -- invalid dropping merge"))).is_err());
+        let review = format!("reviewed-drop: {} -- reviewed replacement", &resolution[..10]);
+        let accepted = validated_delivery_drop_review(p, &delivery, "main", &paths, Some(&review))
+            .unwrap().unwrap();
+        assert!(accepted.contains(&resolution) && accepted.contains(&delivery) && accepted.contains("other.rs"));
+        for named in [&delivery, "--all", "deadbeef"] {
+            assert!(validated_delivery_drop_review(p, &delivery, "main", &paths,
+                Some(&format!("reviewed-drop: {named} -- rejected"))).is_err());
+        }
+        assert!(validated_delivery_drop_review(p, &delivery, "main", &paths,
+            Some("reviewed-drop: narrative without commits")).is_err());
+        std::fs::write(p.join("work.rs"), "only one path();\n").unwrap();
+        git(p, &["add", "work.rs"]);
+        git(p, &["commit", "-qm", "edit one dropped path"]);
+        let partial = head_sha(p);
+        assert!(validated_delivery_drop_review(p, &delivery, "main", &paths,
+            Some(&format!("reviewed-drop: {partial} -- incomplete coverage"))).unwrap_err().contains("other.rs"));
+        std::fs::write(p.join("unrelated.rs"), "unrelated();\n").unwrap();
+        git(p, &["add", "unrelated.rs"]);
+        git(p, &["commit", "-qm", "unrelated"]);
+        let unrelated = head_sha(p);
+        assert!(validated_delivery_drop_review(p, &delivery, "main", &paths,
+            Some(&format!("reviewed-drop: {unrelated} -- wrong path"))).unwrap_err().contains("does not touch"));
+        git(p, &["checkout", "-b", "unmerged"]);
+        std::fs::write(p.join("work.rs"), "not merged();\n").unwrap();
+        git(p, &["add", "work.rs"]);
+        git(p, &["commit", "-qm", "unmerged replacement"]);
+        let unmerged = head_sha(p);
+        assert!(validated_delivery_drop_review(p, &delivery, "main", &paths,
+            Some(&format!("reviewed-drop: {unmerged} -- not landed"))).is_err());
+    }
+
+    #[test]
+    fn editing_an_inserted_neighbor_is_not_line_evolution_cas_0930() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        git(p, &["checkout", "main"]);
+        std::fs::write(p.join("work.rs"), "base();\n").unwrap();
+        git(p, &["add", "work.rs"]);
+        git(p, &["commit", "-qm", "baseline"]);
+        git(p, &["checkout", "-B", "factory/worker", "main"]);
+        std::fs::write(p.join("work.rs"), "delivered();\n").unwrap();
+        git(p, &["add", "work.rs"]);
+        git(p, &["commit", "-qm", "cas-test1: delivery"]);
+        let delivery = head_sha(p);
+        git(p, &["checkout", "main"]);
+        git(p, &["merge", "--no-ff", "-s", "ours", "factory/worker", "-m", "drop delivery"]);
+        for content in ["base();\nneighbor();\n", "base();\nnew_neighbor();\n"] {
+            std::fs::write(p.join("work.rs"), content).unwrap();
+            git(p, &["add", "work.rs"]);
+            git(p, &["commit", "-qm", "edit neighbor"]);
+        }
+        assert_eq!(delivery_content_presence_on_target(p, &delivery, "main"),
+            DeliveryContentPresence::Dropped { paths: vec!["work.rs".into()] });
+    }
+
+    #[test]
+    fn deleting_a_delivered_line_still_rejects_cas_0930() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        std::fs::write(p.join("work.rs"), "delivered();\nkeep();\n").unwrap();
+        git(p, &["add", "work.rs"]);
+        git(p, &["commit", "-qm", "cas-test1: delivery"]);
+        let delivery = head_sha(p);
+        git(p, &["checkout", "main"]);
+        git(p, &["merge", "--no-ff", "factory/worker", "-m", "accept delivery"]);
+        std::fs::write(p.join("work.rs"), "keep();\n").unwrap();
+        git(p, &["add", "work.rs"]);
+        git(p, &["commit", "-qm", "delete delivered line"]);
+        assert_eq!(delivery_content_presence_on_target(p, &delivery, "main"),
+            DeliveryContentPresence::Dropped { paths: vec!["work.rs".into()] });
+    }
+
+    /// Replays immutable production delivery anchors. Run explicitly in a
+    /// checkout retaining the v34 history; normal shallow CI uses the fixtures.
+    #[test]
+    #[ignore = "requires the full v34 repository history"]
+    fn historical_delivery_replay_cas_0930() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let target = "c2f3b0fa736a3a462f5f917642623cdf26607558";
+        let mut failures = Vec::new();
+        for (id, anchor) in [("cas-3400", "df25d701"), ("cas-bf07", "3d004014"),
+            ("cas-d636", "92554045"), ("cas-598e", "04ba55c1")] {
+            let anchor = resolve_task_commit_receipt_sha(repo, anchor).expect("historical anchor");
+            let mut task = worker_task("historical");
+            task.id = id.into();
+            task.status = TaskStatus::AwaitingMerge;
+            task.deliverables.factory_branch_anchor = Some(anchor.clone());
+            let mut window = window_at(0, "historical delivery replay");
+            window.identity = TaskCommitIdentity { task_id: Some(id.into()), known_commits: vec![anchor.clone()] };
+            let outcome = anchored_delivery_content_gate(&task, repo, &anchor, target,
+                Some(&window), &window.identity, None, None);
+            eprintln!("historical replay {id} anchor={anchor} target={target}: {outcome:?}");
+            if id == "cas-d636" {
+                let reviewed = anchored_delivery_content_gate(&task, repo, &anchor, target,
+                    Some(&window), &window.identity, None,
+                    Some("reviewed-drop: d18d4a824e -- cas-a355's audited timeout resolution intentionally supersedes the delivered journey"));
+                eprintln!("historical replay {id} reviewed-drop=d18d4a824e: {reviewed:?}");
+                let only_journey = matches!(&outcome, Some(MergeStateGateOutcome::Reject(message))
+                    if message.lines().any(|line| line == "Dropped path(s): hub-web/e2e/journeys/network-switch.journey.ts"));
+                if !only_journey || !matches!(reviewed, Some(MergeStateGateOutcome::ProceedWithNote(_))) {
+                    failures.push(format!("{id}: without receipt={outcome:?}; reviewed={reviewed:?}"));
+                }
+            } else if outcome.is_some() {
+                failures.push(format!("{id}: {outcome:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "historical delivery failures:\n{}", failures.join("\n"));
     }
 
     /// cas-3f8c: a real drop still rejects, and the refusal now names the
@@ -25594,15 +25696,15 @@ mod merge_state_gate_tests {
         .unwrap();
         git(p, &["add", "credits.rs"]);
         git(p, &["commit", "-q", "-m", "refactor: modernize restore"]);
+        let refactor = rev_parse_local(p, "HEAD");
         git(p, &["checkout", "-q", "main"]);
         git(p, &["merge", "-q", "--no-ff", "factory/refactor"]);
-        let refactor_merge = rev_parse_local(p, "HEAD");
 
         assert_eq!(
             delivery_content_presence_on_target(p, &delivery, "main"),
             DeliveryContentPresence::Superseded {
                 paths: vec!["credits.rs".to_string()],
-                commits: vec![refactor_merge],
+                commits: vec![refactor],
             }
         );
         let mut task = worker_task("worker");
@@ -27698,13 +27800,11 @@ mod epic_status_gate_tests {
         );
     }
 
-    /// cas-9eae1: once an anchor is reachable from the target, a conflict
-    /// resolution may replace its exact hunk at integration and a later
-    /// first-parent edit may replace that evolved text again. The later path
-    /// touch is the only durable evidence that this is intentional lineage
-    /// evolution, not a dropped delivery.
+    /// A former path-touch shortcut accepted an edit of the retained base
+    /// after an ours merge discarded the delivery. That is now a drop fence:
+    /// post-integration activity cannot revive ownership lost at integration.
     #[test]
-    fn ancestor_anchor_with_later_same_lineage_evolution_is_not_stranded_cas_9eae1() {
+    fn ancestor_anchor_lost_at_integration_stays_dropped_after_base_edit_cas_9eae1() {
         let dir = init_epic_repo(&[]);
         let p = dir.path();
 
@@ -27753,25 +27853,8 @@ mod epic_status_gate_tests {
         task.deliverables.factory_branch_anchor = Some(anchor);
         let statuses = collect_epic_branch_statuses(std::slice::from_ref(&task), "main", p);
         let row = &statuses[0];
-        assert_eq!(
-            row.unmerged_count, 0,
-            "an ancestor branch tip must not receive the dropped-content sentinel: {row:?}"
-        );
-        assert!(
-            row.content_evolution_note.is_some(),
-            "later same-lineage path evolution must be recorded: {row:?}"
-        );
-        assert!(
-            row.dropped_paths.is_empty(),
-            "evolved content is not dropped: {row:?}"
-        );
-
-        let report = render_epic_status_report("cas-epic", "main", &statuses);
-        assert!(report.contains("merged (content evolved)"), "{report}");
-        assert!(
-            !report.contains("hard-blocked"),
-            "ancestor branch with evolved delivery must not hard-block: {report}"
-        );
+        assert_eq!(row.dropped_paths, vec!["shared.rs".to_string()]);
+        assert!(row.blocks_epic_close(), "later edits of the retained base cannot revive lost delivery: {row:?}");
     }
 
     /// cas-9eae1 fence: a reachable delivery with no later first-parent path

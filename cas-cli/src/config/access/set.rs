@@ -98,6 +98,12 @@ impl Config {
                 let cwd = value.trim();
                 factory.merge_sweep_cwd = (!cwd.is_empty()).then(|| cwd.to_string());
             }
+            "factory.release_gate_home_dir" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                let directory = value.trim();
+                factory.release_gate_home_dir =
+                    (!directory.is_empty()).then(|| directory.to_string());
+            }
             "factory.merge_sweep_timeout_secs" => {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
                 factory.merge_sweep_timeout_secs = value.parse().map_err(|_| {

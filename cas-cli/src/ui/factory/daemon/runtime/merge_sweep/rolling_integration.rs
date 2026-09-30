@@ -537,8 +537,14 @@ fn integrate(
     )?;
     receipt.tip = Some(tip.clone());
     write_receipt(&receipt_path, &receipt)?;
-    let guard = crate::factory_build_guard::inspect(cas_dir, &settings_to_config(settings), 1);
-    if !guard.violations().is_empty() {
+    // No builder is needed to report missing assembly configuration. Do not
+    // hide that actionable state behind a capacity deferral/retry loop.
+    let not_configured = settings.release_gate_home_dir.is_none()
+        && resolve_sweep_runner(&worktree, settings)
+            .is_ok_and(|runner| uses_assembly_proof(&worktree, settings, &runner));
+    let guard = (!not_configured)
+        .then(|| crate::factory_build_guard::inspect(cas_dir, &settings_to_config(settings), 1));
+    if let Some(guard) = guard.filter(|guard| !guard.violations().is_empty()) {
         receipt.status = "DEFERRED".to_owned();
         receipt.detail = guard.violations().join("; ");
         receipt.deferrals = prior_deferrals.saturating_add(1);
@@ -1248,10 +1254,10 @@ fn notify_owner(cas_dir: &Path, owner: &str, result: &SweepResult) -> Result<(),
         sweep_detail(result),
         result.log_path.display()
     );
-    let kind = if result.status == SweepStatus::Passed {
-        "sweep_passed"
-    } else {
-        "sweep_failed"
+    let kind = match result.status {
+        SweepStatus::Passed => "sweep_passed",
+        SweepStatus::NotConfigured => "sweep_not_configured",
+        _ => "sweep_failed",
     };
     let key = format!(
         "integration:{owner}:{}",
@@ -1387,6 +1393,161 @@ mod tests {
             tip: git(path, &["rev-parse", "HEAD"]),
             owner: None,
         }
+    }
+
+    #[test]
+    fn unconfigured_assembly_has_no_failure_or_attribution_cas_fab3() {
+        let repo = fixture();
+        // Any accidental assembly or attribution child leaves a marker.
+        let marker = repo.path().join("unexpected-child");
+        fs::write(
+            repo.path().join("scripts/assembly-proof.py"),
+            format!(
+                "import pathlib\npathlib.Path({:?}).touch()\nraise RuntimeError('must not run')\n",
+                marker.to_str().unwrap()
+            ),
+        )
+        .unwrap();
+        git(repo.path(), &["add", "scripts"]);
+        git(repo.path(), &["commit", "-m", "assembly fixture"]);
+        let only = epic(repo.path(), "cas-fab3", "feature", "one");
+        git(repo.path(), &["checkout", "--detach", "main"]);
+        git(
+            repo.path(),
+            &["remote", "add", "origin", repo.path().to_str().unwrap()],
+        );
+        let stub = repo.path().join("cargo-stub.sh");
+        crate::test_paths::warm_stub(
+            &stub,
+            &format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+        );
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("CARGO", stub.to_str().unwrap()),
+            // An inherited root must not mask the missing persisted key.
+            ("CAS_RELEASE_GATE_HOME_DIR", "/home/inherited/base"),
+        ]);
+        let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        let mut owner = cas_types::Agent::new("owner-fab3".to_owned(), "lead".to_owned());
+        owner.role = cas_types::AgentRole::Supervisor;
+        owner.factory_session = Some("session-fab3".to_owned());
+        agents.register(&owner).unwrap();
+        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut task = Task::new(only.id.clone(), only.id.clone());
+        task.task_type = TaskType::Epic;
+        task.branch = Some(only.branch.clone());
+        task.epic_verification_owner = Some(owner.id);
+        tasks.add(&task).unwrap();
+        let request = SweepRequest {
+            epic_id: only.id,
+            target_branch: only.branch,
+            commit: only.tip,
+        };
+        for directory in [None, Some("   ".to_owned())] {
+            let mut config = FactoryConfig::default();
+            config.nice_cargo = false;
+            config.max_concurrent_builders = 0;
+            config.release_gate_home_dir = directory;
+            let result = execute(
+                repo.path(),
+                &cas_dir,
+                request.clone(),
+                SweepSettings::from(&config),
+                Arc::new(AtomicBool::new(false)),
+                false,
+            );
+            assert_eq!(
+                result.status,
+                SweepStatus::NotConfigured,
+                "{}",
+                result.summary
+            );
+            assert!(result.summary.contains("factory.release_gate_home_dir"));
+            assert!(
+                !result.summary.contains("attribution"),
+                "{}",
+                result.summary
+            );
+            assert!(result.failures.is_empty());
+            assert!(result.base_failure.is_none());
+            assert!(!marker.exists(), "assembly/attribution child was invoked");
+            let receipt: IntegrationReceipt = serde_json::from_slice(
+                &fs::read(cas_dir.join(LOG_DIR).join("integration.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(receipt.status, "NOT CONFIGURED");
+            record_result(&cas_dir, &result);
+            let notes = tasks.get("cas-fab3").unwrap().notes;
+            assert!(notes.contains("Rolling integration NOT CONFIGURED"));
+            assert!(!notes.contains("FAILED"));
+            let report: crate::factory_sweep_tasks::SweepTaskReport = serde_json::from_slice(
+                &fs::read(
+                    cas_dir
+                        .join(LOG_DIR)
+                        .join(crate::factory_sweep_tasks::SWEEP_TASKS_FILE),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(report.status, "NOT CONFIGURED");
+            assert!(report.classes.is_empty());
+        }
+        let prompts = crate::store::open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .peek_all(20)
+            .unwrap();
+        assert_eq!(prompts.len(), 1, "configuration relay is idempotent");
+        assert!(prompts[0].prompt.contains("kind=\"sweep_not_configured\""));
+        assert!(!prompts[0].prompt.contains("FAILED"));
+        assert!(crate::prompt_revalidation::is_supervisor_wake_envelope(
+            &prompts[0].prompt
+        ));
+    }
+
+    #[test]
+    fn configured_assembly_receives_persisted_root_without_shell_env_cas_fab3() {
+        let _env = crate::test_support::TestEnvGuard::with_optional_vars(&[(
+            "CAS_RELEASE_GATE_HOME_DIR",
+            None,
+        )]);
+        let repo = fixture();
+        fs::write(
+            repo.path().join("scripts/assembly-proof.py"),
+            "import os, pathlib, sys\nassert sys.argv[1] == 'prove'\nassert pathlib.Path(sys.argv[2]) == pathlib.Path.cwd()\nassert os.environ['CAS_RELEASE_GATE_HOME_DIR'] == '/home/cas-release-gate/base'\nprint('PASS assembly receipt=fixture')\n",
+        ).unwrap();
+        git(repo.path(), &["add", "scripts"]);
+        git(repo.path(), &["commit", "-m", "assembly env fixture"]);
+        let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
+        let mut config = crate::config::Config::default();
+        config
+            .set(
+                "factory.release_gate_home_dir",
+                " /home/cas-release-gate/base ",
+            )
+            .unwrap();
+        config.save(&cas_dir).unwrap();
+        let mut factory = crate::config::Config::load(&cas_dir).unwrap().factory();
+        factory.nice_cargo = false;
+        // Generic sweep env cannot override the dedicated persisted key.
+        factory.merge_sweep_env = serde_json::from_value(serde_json::json!({
+            "CAS_RELEASE_GATE_HOME_DIR": "/wrong/generic/base"
+        }))
+        .unwrap();
+        let result = execute_sweep(
+            repo.path(),
+            &cas_dir,
+            SweepRequest {
+                epic_id: "cas-fab3".to_owned(),
+                target_branch: "epic/cas-fab3".to_owned(),
+                commit: git(repo.path(), &["rev-parse", "HEAD"]),
+            },
+            SweepSettings::from(&factory),
+            Arc::new(AtomicBool::new(false)),
+        );
+        assert_eq!(result.status, SweepStatus::Passed, "{}", result.summary);
+        assert_eq!(result.summary, "PASS assembly receipt=fixture");
+        assert!(result.failures.is_empty());
+        assert!(std::env::var_os("CAS_RELEASE_GATE_HOME_DIR").is_none());
     }
     #[test]
     fn conflicting_epics_report_pair_and_files_without_moving_sources() {

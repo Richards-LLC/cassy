@@ -323,7 +323,7 @@ pub struct TaskRequest {
     /// provide a non-empty close reason; the accepted decision is logged on
     /// the task.
     #[schemars(
-        description = "Supervisor override for close gates. Only honored when the caller is a registered supervisor and a non-empty reason is supplied; logs the accepted decision on the task."
+        description = "Supervisor override for close gates. Only honored when the caller is a registered supervisor and a non-empty reason is supplied; logs the accepted decision on the task. Content supersession requires reason=\"reviewed-drop: <SHA>[,<SHA>...] -- <why>\" naming target-reachable descendants covering every dropped path."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub supervisor_override: Option<bool>,

@@ -328,9 +328,6 @@ pub fn attach_cited_issues_with(
     }
     refs.into_iter()
         .map(|issue| {
-            let dir = if dir.join(format!("{}.md", issue.slug())).is_file()
-                || dir.join(format!("{}{UNAVAILABLE_SUFFIX}", issue.slug())).is_file()
-            { &dir } else { &legacy };
             let attached = dir.join(format!("{}.md", issue.slug()));
             let unavailable = dir.join(format!("{}{UNAVAILABLE_SUFFIX}", issue.slug()));
             match source.fetch(&issue) {
@@ -408,6 +405,13 @@ pub fn cited_issue_lines(cas_root: &Path, task: &Task) -> Vec<String> {
     let legacy = attachment_dir(&crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref()), &task.id);
     refs.iter()
         .map(|issue| {
+            let dir = if dir.join(format!("{}.md", issue.slug())).is_file()
+                || dir.join(format!("{}{UNAVAILABLE_SUFFIX}", issue.slug())).is_file()
+            {
+                &dir
+            } else {
+                &legacy
+            };
             let attached = dir.join(format!("{}.md", issue.slug()));
             let unavailable = dir.join(format!("{}{UNAVAILABLE_SUFFIX}", issue.slug()));
             if attached.is_file() {

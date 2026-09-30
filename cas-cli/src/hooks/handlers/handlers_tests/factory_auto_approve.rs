@@ -21,6 +21,7 @@
 use crate::hooks::handlers::handle_pre_tool_use;
 use crate::hooks::handlers::handlers_events::is_harness_session_scratchpad;
 use crate::store::open_agent_store;
+use crate::test_support::TestEnvGuard;
 use crate::types::{Agent, AgentRole};
 use cas_core::hooks::types::HookInput;
 
@@ -880,8 +881,10 @@ fn set_role_env(role: Option<&str>) -> RoleGuard {
 
 #[test]
 fn workspace_artifact_writes_are_project_scoped_and_legacy_is_read_only_cas_6ebf() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("worker"));
+    let _env = TestEnvGuard::with_optional_vars(&[
+        ("CAS_AGENT_ROLE", Some("worker")),
+        ("CAS_CLONE_PATH", None),
+    ]);
     let temp = tempfile::tempdir().unwrap();
     let base = temp.path().join("artifacts");
     let a = temp.path().join("one/project/.cas");

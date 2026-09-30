@@ -44,6 +44,10 @@ pub struct RuleUpdateRequest {
     #[serde(default)]
     pub tags: Option<String>,
 
+    /// Evidence source IDs; replaces existing IDs when supplied.
+    #[serde(default)]
+    pub source_ids: Option<String>,
+
     /// Auto-approve tools
     #[schemars(
         description = "Tools to auto-approve (comma-separated, e.g., 'Read,Glob,Grep'). Only safe tools allowed."

@@ -1,0 +1,73 @@
+{
+  "rules": [
+    {
+      "name": "e-mail",
+      "pattern": "[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)*\\.[A-Za-z]{2,}"
+    },
+    {
+      "name": "home-path",
+      "pattern": "/home/[a-z_][a-z0-9_-]*"
+    },
+    {
+      "name": "codex-account-dir",
+      "pattern": "~/\\.codex-"
+    },
+    {
+      "name": "task-id",
+      "pattern": "\\bcas-[0-9a-f]{4,5}\\b"
+    },
+    {
+      "name": "operator-org",
+      "pattern": "Richards-LLC"
+    },
+    {
+      "name": "operator-project",
+      "pattern": "(?i)gabber"
+    },
+    {
+      "name": "cas-src-test-command",
+      "pattern": "nextest -p cas\\b"
+    }
+  ],
+  "allowlist": [
+    {
+      "path": "skills/cas-retro/references/release-replay-example.md",
+      "rule": "task-id",
+      "reason": "Historical release replay: real task IDs are needed to verify deduplication against Cassy records."
+    },
+    {
+      "path": "skills/cas-cut-release/references/failure-log.md",
+      "rule": "task-id",
+      "reason": "cas-src release-train failure log; each entry cites the ticket that fixed the failure. The release trio is cas-src-only content that moves out of universal builtins (audit M51)."
+    },
+    {
+      "path": "skills/cas-release-report/references/exemplar.md",
+      "rule": "operator-org",
+      "reason": "Links to the Cassy repo's own release-report sources the exemplar was rendered from; cas-src-only release content (audit M51)."
+    },
+    {
+      "path": "skills/cas-qa-craft/references/matrix-builder.md",
+      "rule": "operator-org",
+      "reason": "Attribution for the Cassy issue the matrix guidance was adapted from; pinned by the builtins and agent_definition_contract_test markers."
+    },
+    {
+      "path": "skills/cas-supervisor/references/reference.md",
+      "rule": "task-id",
+      "reason": "Factory-core reference owned by the WP7 accuracy rewrite; ids tag the guards it documents."
+    },
+    {
+      "path": "skills/cas-supervisor/references/worker-recovery.md",
+      "rule": "task-id",
+      "reason": "Factory-core reference owned by the WP7 accuracy rewrite; ids tag the recovery incidents it documents."
+    },
+    {
+      "path": "skills/cas-supervisor/references/workflow.md",
+      "rule": "task-id",
+      "reason": "Factory-core reference owned by the WP7 accuracy rewrite; ids tag the guards it documents."
+    }
+  ],
+  "synthetic": {
+    "e-mail": "@(example\\.(com|org|net)|[a-z0-9.-]+\\.(test|example|invalid))$",
+    "task-id": "^cas-(1234|abcd|abc1|a1b2|0+|1+|2+|3+|4+|5+|6+|7+|8+|9+|a+|b+|c+|d+|e+|f+)$"
+  }
+}

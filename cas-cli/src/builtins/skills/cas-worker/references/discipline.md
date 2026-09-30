@@ -2,7 +2,7 @@
 
 The shared launch contract in `cas-pty` carries task startup, sequential
 ownership, no-foreground-blocking, context headroom and lifecycle rules. This file
-covers compile-only evidence and non-Rust suites without restating those rules.
+covers capped check/test evidence and non-Rust suites without restating those rules.
 
 ## Check the committed change before parking
 
@@ -28,11 +28,28 @@ Close copies that receipt into task notes when it matches the delivered SHA.
 A changed or dirty tree needs a new check. `--tests` also compiles test code;
 neither shape executes tests or replaces the supervisor's assembly proof.
 
+Run targeted Rust tests through the same capped runner:
+
+```bash
+cargo nextest run -p affected-crate --lib -E 'test(module::name)' > target/worker-tests.log 2>&1 &
+```
+
+Select exactly one package and a mandatory positive named-test filterset:
+`test(name)` or `test(=module::name)`, optionally joined by `|` or `&`.
+Select `--lib` or one `--test <harness>` from the project's explicit Cargo
+harness inventory (`scripts/cas-test-targets.py` in cas-src). An omitted target
+means `--lib`. Empty, `all()`, glob/regex and negated filters, repeated packages,
+broad flags, environment prefixes and compound commands are refused.
+Commit first; zero matched tests fail. Success records
+`test: PASS <sha> <package> <filter> <count>`; close imports exact-delivery
+receipts. Run the red test before fixing it, then commit and run the green test.
+
 Write or update Rust tests, read the diff, and trace callers, struct literals,
-and match arms across consumers. Workers still cannot build or run Rust tests,
-nextest, clippy, rustc, or scoped-test scripts. Do not record a scoped `--proof`,
+and match arms across consumers. Full Rust builds and suites, cargo test,
+clippy, rustc, and scoped-test scripts remain supervisor-owned. Do not record
+a scoped `--proof`,
 `SCOPED_PROOF:` or `loaded_proof` receipt. If the installed runtime predates the
-check exception, park and name the unverified crates for the supervisor.
+targeted-test exception, park and name the unverified crates for the supervisor.
 
 The supervisor runs the full build and tests once at epic assembly and records
 `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>` on

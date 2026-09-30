@@ -98,7 +98,11 @@ async fn assignment_attaches_the_cited_issue_and_the_worker_reads_it_from_disk_c
             .await,
     )
     .await;
-    let dir = cas::github_issue_attach::attachment_dir(&artifacts, &task.id);
+    // cas-6ebf: new attachments live under the project-scoped artifacts dir.
+    let dir = cas::github_issue_attach::attachment_dir(
+        &cas::config::project_factory_artifacts_root(&cas_dir, &artifacts),
+        &task.id,
+    );
     let attached = wait_for(&dir.join("acme__widgets__77.md"));
     assert!(attached.contains("Uploads above 4.5 MB fail with a 413."), "{assigned}\n{attached}");
     assert!(attached.contains("Real cause: the database caps a row at 64 MiB"), "{attached}");

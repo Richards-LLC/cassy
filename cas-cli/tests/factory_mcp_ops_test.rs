@@ -420,13 +420,7 @@ fn run_isolated_codex_test(child_test: &str, state: IsolatedCodexState) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains(&format!("test {child_filter} ..."))
-            && stdout.lines().any(|line| line == "running 1 test")
-            && stdout.contains("test result: ok"),
-        "isolated helper did not execute {child_filter}:\n{stdout}"
-    );
+    child_test_evidence::assert_passed(&String::from_utf8_lossy(&output.stdout), &child_filter);
 }
 
 fn factory_env_in_isolated_codex_child(child_test: &str) -> FactoryTestEnv {
@@ -7893,6 +7887,7 @@ async fn test_062d_lifecycle_start_and_blocked_push_session_isolated() {
             demo_statement: None,
             execution_note: None,
             risk: None,
+            door: None,
             proof_targets: None,
             external_ref: None,
             assignee: None,
@@ -8938,6 +8933,85 @@ async fn test_epic_status_omits_stack_lines_for_an_unstacked_epic_cas_aae6() {
         !text.contains("Stacked on"),
         "an epic cut straight from trunk must not claim a stack: {text}"
     );
+}
+
+/// cas-d4fc: a project-level encode chore is visible even without an epic link.
+/// Exercise unified rule dispatch -> live stores -> supervisor status rendering.
+#[tokio::test]
+async fn test_epic_status_surfaces_first_occurrence_encode_chore_cas_d4fc() {
+    let home = TempDir::new().expect("home tempdir");
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_FACTORY_MODE", Some("1")),
+        ("HOME", Some(home.path().to_str().unwrap())),
+    ]);
+    let env = FactoryTestEnv::new();
+    let project = env.cas_root.parent().unwrap();
+    for args in [
+        vec!["init", "-b", "main"],
+        vec!["config", "user.email", "test@cas"],
+        vec!["config", "user.name", "CAS Test"],
+        vec!["commit", "--allow-empty", "-m", "seed"],
+        vec!["branch", "epic/rules"],
+    ] {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(project)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    add_epic_with_id(&env, "cas-rules", TaskStatus::Open, "epic/rules");
+    env.service
+        .rule(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "action": "create", "content": "Parser must reject malformed tokens",
+                "source_ids": "incident-one"
+            }))
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
+    let rules = cas::store::open_rule_store(&env.cas_root).unwrap();
+    let rule = rules.list().unwrap().remove(0);
+    env.service.rule(Parameters(serde_json::from_value(serde_json::json!({
+        "action": "update", "id": rule.id, "tags": "enforceable:test",
+        "source_ids": "incident-one,incident-two", "change_note": "observed mechanical failure"
+    })).unwrap())).await.unwrap();
+    assert_eq!(
+        rules.get(&rule.id).unwrap().source_ids,
+        vec!["incident-one", "incident-two"]
+    );
+    assert_eq!(
+        rules.get(&rule.id).unwrap().status,
+        cas::types::RuleStatus::Draft
+    );
+    let tasks = open_task_store(&env.cas_root).unwrap();
+    let external_ref = format!("rule-encode:{}", rule.id);
+    let chore = tasks
+        .list(None)
+        .unwrap()
+        .into_iter()
+        .find(|task| task.external_ref.as_deref() == Some(external_ref.as_str()))
+        .expect("first occurrence files an encode chore");
+    let mut req = factory_req("epic_status");
+    req.id = Some("cas-rules".into());
+    let report = get_text(&env.service.factory_request(Parameters(req)).await.unwrap());
+    assert!(
+        report.contains("Pending rule encode chores (project backlog: 1)"),
+        "{report}"
+    );
+    assert!(report.contains(&chore.id), "{report}");
+    let mut closed = chore;
+    closed.status = TaskStatus::Closed;
+    tasks.update(&closed).unwrap();
+    let mut req = factory_req("epic_status");
+    req.id = Some("cas-rules".into());
+    let report = get_text(&env.service.factory_request(Parameters(req)).await.unwrap());
+    assert!(!report.contains("Pending rule encode chores"), "{report}");
 }
 
 /// cas-50fe: projects that land child work directly on their configured
@@ -10717,3 +10791,6 @@ async fn shared_clone_supervisors_cannot_mutate_each_others_fleet_cas_bebc() {
     assert_eq!(reset.status, TaskStatus::Open);
     assert_eq!(reset.assignee, None);
 }
+
+#[path = "../../crates/cas-core/src/test_child.rs"]
+mod child_test_evidence;

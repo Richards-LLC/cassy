@@ -236,6 +236,9 @@ mod m257_qa_passes;
 mod m258_unauthored_pulled_rows;
 mod m259_rules_add_operator_authority;
 mod m260_entries_rules_add_origin_project;
+mod m261_tasks_add_door;
+mod m262_tasks_normalize_proof_targets;
+pub(crate) use m262_tasks_normalize_proof_targets::normalize_legacy_proof_targets;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -508,6 +511,8 @@ pub const MIGRATIONS: &[Migration] = &[
     m258_unauthored_pulled_rows::MIGRATION,
     m259_rules_add_operator_authority::MIGRATION,
     m260_entries_rules_add_origin_project::MIGRATION,
+    m261_tasks_add_door::MIGRATION,
+    m262_tasks_normalize_proof_targets::MIGRATION,
 ];
 
 #[cfg(test)]
@@ -589,6 +594,7 @@ mod tests {
     /// registered is dead code that reads like shipped schema, so fail loudly
     /// the moment one appears.
     #[test]
+    // pin: An unregistered Rust migration file cannot appear in the runtime registry; inspect both disk files and declarations to detect dead migrations.
     fn test_every_migration_file_is_declared_and_registered() {
         let dir = crate::test_paths::crate_root().join("src/migration/migrations");
         let Ok(entries) = std::fs::read_dir(&dir) else {

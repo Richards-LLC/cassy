@@ -23,7 +23,7 @@ Run `task action=show id=<task-id>`. If the task has a non-empty `demo_statement
 
 ### Step 1: Check the close reason against the acceptance criteria
 
-Give each acceptance-criteria item one verdict: **VERIFIED** (proof pasted in the close reason or notes, or reproduced by you), **NOT VERIFIED** (not checked; say why), or **INCONCLUSIVE** (checked, evidence ambiguous). "Looks good" and "should work" are not proof. Do not reject on keywords. Accept roadmap notes, follow-ups outside the acceptance criteria, "pending X" where X belongs to another task or team, and NOT VERIFIED where the proof is owned elsewhere by design and the close says so (a factory worker's Rust tests go to the supervisor's `ASSEMBLY_PROOF`). Reject when an item was skipped, stubbed, deferred, only partly done, INCONCLUSIVE, or NOT VERIFIED with no named owner, or when the close gives vague "done enough" language with no mapping to the criteria.
+Give each acceptance-criteria item one verdict: **VERIFIED** (proof pasted in the close reason or notes, or reproduced by you), **NOT VERIFIED** (not checked; say why), or **INCONCLUSIVE** (checked, evidence ambiguous). "Looks good" and "should work" are not proof. Do not reject on keywords. Accept roadmap notes, follow-ups outside the acceptance criteria, "pending X" where X belongs to another task or team, and NOT VERIFIED where the proof is owned elsewhere by design and the close says so (a factory worker's full Rust suite goes to the supervisor's `ASSEMBLY_PROOF`; targeted tests have capped worker receipts). Reject when an item was skipped, stubbed, deferred, only partly done, INCONCLUSIVE, or NOT VERIFIED with no named owner, or when the close gives vague "done enough" language with no mapping to the criteria.
 
 ### Step 2: Check the parent epic
 
@@ -79,6 +79,11 @@ Back every finding with a command output or an exact line reference.
 - `additive-only`, `value-only`, `no-code`, or none: nothing to check here; the close gate enforces those.
 
 ## Phase 2: Quality (only when Phase 1 passes)
+
+Read the repository root `CODING_STANDARDS.md` when present for judgment-only
+Standards review; keep acceptance-criterion and scope findings on the Spec axis.
+Skip mechanically enforced rules and let documented repo decisions override
+smell heuristics.
 
 Compare the change with how neighbouring code solves the same problem (`rg '<pattern>' -l`). Then look for, and report only with evidence:
 

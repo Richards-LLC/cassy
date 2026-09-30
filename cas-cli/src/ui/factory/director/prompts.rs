@@ -1267,14 +1267,15 @@ fn merge_required_idle_prompt_text(
              Merge target: {target} (protected: pull requests through the merge queue only)\n\
              Next action — drain the merge queue before free-form user chat:\n\
              1. Confirm: {epic_status} and/or {list_awaiting}, and that {factory_branch} is on origin\n\
-             2. Open a pull request: `gh pr create --base {target} --head {factory_branch} --fill`, \
+             2. Generate the body: `cas worktree pr-body --task {} --base origin/{target} --head {factory_branch} --output pr-body.md`. Add observed --before/--after results and --evidence for the QA bundle or base-vs-change run. \
+             Open a pull request: `gh pr create --base {target} --head {factory_branch} --title \"Review {factory_branch}\" --body-file pr-body.md`, \
              then queue it with `gh pr merge <number> --auto`. Do not merge into or push {target} locally.\n\
              3. When the merge queue lands it, tell {worker} to re-close with {reclose} (or use the \
              supervisor escape-hatch close with commit_receipt=<merged sha> if the worker is unresponsive)\n\
              4. Then clear context / hand the worker their next task if more work is ready\n\
              Live task state: {show}\n\
              This is a push-based WorkerIdle close-rejected signal — do not poll or sleep.",
-            task.task_id, task.task_title, task.task_status
+            task.task_id, task.task_title, task.task_status, task.task_id
         );
     }
     let merge_step = if evidence.is_some_and(|e| e.push_required) {

@@ -279,7 +279,8 @@ mod tests {
 
     /// Close-gate sources whose runtime text suggests calls. Paths are
     /// relative to this file.
-    const GATE_SOURCES: [(&str, &str); 10] = [
+    // pin: Audit every close-gate source, including unexecuted refusal branches, for harness-prefixed fix commands.
+    const GATE_SOURCES: [(&str, &str); 11] = [
         ("close_ops.rs", include_str!("../close_ops.rs")),
         ("stale_close_guard.rs", include_str!("../stale_close_guard.rs")),
         ("proof_scope.rs", include_str!("../proof_scope.rs")),
@@ -296,6 +297,7 @@ mod tests {
             include_str!("../../../../../../hooks/handlers/handlers_events/neon_sql_guard.rs"),
         ),
         ("gate_text.rs", include_str!("gate_text.rs")),
+        ("snapshot_approval.rs", include_str!("snapshot_approval.rs")),
     ];
 
     /// Bare mentions that are not suggested calls: a matcher's marker list

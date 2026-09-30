@@ -57,7 +57,7 @@ Use the checklist for your harness: `cas-codex-supervisor-checklist` on Codex; `
 
 To force one model, pass complete `cli=`, `model=`, and `effort=` controls (never with `lane=`); account directories: [reference.md](references/reference.md).
 
-```
+```text
 factory action=spawn_workers count=1 isolate=true cli=codex model=gpt-6.1-sol effort=high
 ```
 

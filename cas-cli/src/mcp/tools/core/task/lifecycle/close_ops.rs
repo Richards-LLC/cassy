@@ -1,5 +1,6 @@
 pub(crate) mod gate_text;
 mod task_attribution;
+mod snapshot_approval;
 
 use super::TaskLifecycleGateError;
 use crate::harness_policy::{
@@ -1909,6 +1910,7 @@ pub(crate) fn uncovered_blast_radius_modules(
     changed_paths: &[String],
     proof_targets: &[String],
 ) -> Vec<String> {
+    let proof_targets = cas_types::normalize_proof_targets(proof_targets);
     changed_source_modules(changed_paths)
         .into_iter()
         .filter(|module| {
@@ -1920,7 +1922,7 @@ pub(crate) fn uncovered_blast_radius_modules(
 }
 
 fn proof_targets_scope_fix_command(task: &Task, uncovered: &[String]) -> String {
-    let mut targets = task.proof_targets.clone();
+    let mut targets = cas_types::normalize_proof_targets(&task.proof_targets);
     for module in uncovered {
         if !targets.iter().any(|target| target == module) {
             targets.push(module.clone());
@@ -2258,6 +2260,23 @@ mod risk_proof_tests {
             failed.len()
         ));
         log
+    }
+
+    #[test]
+    fn legacy_fragmented_proof_targets_cover_only_declared_modules() {
+        let changed = vec![
+            "cas-cli/src/rules.rs".into(),
+            "cas-cli/src/core.rs".into(),
+            "cas-cli/src/updates.rs".into(),
+        ];
+        let targets = vec![
+            r#"["cas --lib rules""#.into(),
+            r#""cas --lib core"]"#.into(),
+        ];
+        assert_eq!(
+            uncovered_blast_radius_modules(&changed, &targets),
+            ["updates"]
+        );
     }
 
     #[test]
@@ -4725,6 +4744,19 @@ impl CasCore {
             return Ok(Self::tool_error(
                 "DELIVERY RECEIPT REJECTED: merge_base_sha does not match the live source/target merge base.",
             ));
+        }
+        // Receipt acceptance is an alternate close entry: bind snapshot
+        // approval before the immutable proof cycle can be persisted.
+        if let Some(error) = snapshot_approval::rejection(
+            &context.repo_root,
+            Some(&input.merge_base_sha),
+            Some(&input.commit_sha),
+            &[],
+            &task.notes,
+            &task.id,
+            crate::mcp::tools::core::guidance::caller_prefix(),
+        ) {
+            return Ok(Self::tool_error(error));
         }
         let worker_path = match self.resolve_worker_worktree_path(task, Some(&context)) {
             Ok(Some(path)) => path,
@@ -7942,6 +7974,17 @@ impl CasCore {
                     None
                 },
             );
+            if let Some(error) = snapshot_approval::rejection(
+                proof_repo,
+                scoped_proof_base.as_deref(),
+                delivered_tip.as_deref(),
+                &changed_paths,
+                &task.notes,
+                &task.id,
+                crate::mcp::tools::core::guidance::caller_prefix(),
+            ) {
+                return Ok(Self::tool_error(error));
+            }
             // cas-3efd: compile-only checks do not replace the
             // supervisor's epic-assembly run. An ASSEMBLY_PROOF on the parent
             // epic whose tested head contains this delivery also stands for a
@@ -7956,6 +7999,14 @@ impl CasCore {
             {
                 let ts = chrono::Utc::now().format("%Y-%m-%d %H:%M");
                 task.notes = format!("{}\n\n[{ts}] WORKER CHECK {receipt}", task.notes);
+            }
+            if let Some(head) = delivered_tip.as_deref() {
+                for receipt in crate::factory_worker_check::passing_test_receipts(&self.cas_root, proof_repo, head) {
+                    if !task.notes.contains(&receipt) {
+                        let ts = chrono::Utc::now().format("%Y-%m-%d %H:%M");
+                        task.notes = format!("{}\n\n[{ts}] WORKER TEST {receipt}", task.notes);
+                    }
+                }
             }
             let build_proofs = if is_factory_worker || assembly_proof.is_some() {
                 BuildProofs::DeferredToAssembly
@@ -7976,7 +8027,7 @@ impl CasCore {
                 };
                 let ts = chrono::Utc::now().format("%Y-%m-%d %H:%M");
                 let note = format!(
-                    "[{ts}] BUILD PROOF deferred to epic assembly (cas-4cbb): worker checks are compile-only; {reference}."
+                    "[{ts}] BUILD PROOF deferred to epic assembly (cas-4cbb): targeted worker receipts complement full-suite proof; {reference}."
                 );
                 if !task.notes.contains("BUILD PROOF deferred to epic assembly") {
                     task.notes = if task.notes.is_empty() {
@@ -25077,6 +25128,7 @@ mod merge_state_gate_tests {
     /// gate and epic_status must inspect the current target tree, refuse the
     /// false all-clear, and name the dropped path.
     #[test]
+    // pin: Inspect actual Git-merged fixture content to distinguish a dropped delivery from a legitimate later source refactor.
     fn reachable_anchor_with_dropped_content_blocks_close_and_epic_status_cas_b278() {
         let dir = init_factory_repo("worker");
         let p = dir.path();
@@ -25448,6 +25500,7 @@ mod merge_state_gate_tests {
     /// and epic_status must name the superseding commit without asking a
     /// worker to resurrect the older implementation.
     #[test]
+    // pin: Inspect actual Git-merged fixture content to distinguish a dropped delivery from a legitimate later source refactor.
     fn reachable_anchor_with_later_refactor_proceeds_cas_b278() {
         let dir = init_factory_repo("worker");
         let p = dir.path();

@@ -118,10 +118,12 @@ const FLAVORS: &[Flavor] = &[
     },
 ];
 
+// pin: Extract the declared MCP action surface from handler/type source to validate every builtin call, including uninvoked actions.
 fn service_source() -> &'static str {
     include_str!("../src/mcp/tools/service/mod.rs")
 }
 
+// pin: Extract the declared MCP action surface from handler/type source to validate every builtin call, including uninvoked actions.
 fn memory_request_source() -> &'static str {
     include_str!("../../crates/cas-mcp/src/types.rs")
 }

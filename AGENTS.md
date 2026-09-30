@@ -12,39 +12,13 @@ Bug routing: `cas config get issues.repo` names this project's tracker, and `iss
 Release notes: when a merge reaches `staging` or `main` and docs/release-notes/RUBRIC.md exists, use the `cas-release-notes` skill and follow docs/release-notes/RUBRIC.md.
 <!-- CAS:END -->
 
-# Cassy source repository (cas-src)
+# Cassy source repository
 
-This file is canonical for every harness; `CLAUDE.md` imports it.
+`CLAUDE.md` imports this canonical file. Rust 1.88+, edition 2024.
 
-## Build and test
-
-Factory workers may type-check committed changes with exactly `cargo check -p <affected crate> [-p <crate> ...] --lib` for lib-only edits or `--tests` when test files changed. Choose one target flag, under the existing build guard and `max_concurrent_builders` cap, using the private seeded target cache. The PreToolUse hook routes that command through the capped runner and close records `check: PASS <sha>` evidence. Only the supervisor builds and runs Rust tests: once per epic, at assembly. Other compiling Cargo commands, `rustc`, `scripts/run-scoped-tests.sh` and `make test*` remain denied to workers. Build commands, the assembly proof, worker build caches, the CI-load policy and build profiles are in [cas-cli/docs/CONTRIBUTING.md](cas-cli/docs/CONTRIBUTING.md#build-assembly-and-ci-policy). Build profiles must keep `panic = "unwind"`; a compile-time guard in `cas-cli/src/lib.rs` enforces it.
-
-Minimum supported Rust version: **1.88** (edition 2024).
-
-## Architecture and contributing
-
-- Module layout, crate purposes, store traits, CasCore, hook scoring: [cas-cli/docs/ARCHITECTURE.md](cas-cli/docs/ARCHITECTURE.md).
-- Adding CLI commands, MCP tools, migrations, testing setup, skill/rule sync, releasing: [cas-cli/docs/CONTRIBUTING.md](cas-cli/docs/CONTRIBUTING.md).
-- Codebase navigation map: [.claude/CODEMAP.md](.claude/CODEMAP.md).
-
-## Hooks and verification
-
-CAS installs its hooks for Claude Code (`.claude/settings.json`) and Codex (`.codex/hooks.json`), including the PreToolUse guard that permits only capped package-scoped `cargo check --lib` or `--tests` compilation for factory workers. Follow the factory worker lifecycle and let the supervisor own verification and review.
-
-## Don't assume — always verify
-
-When diagnosing a bug or reasoning about behavior, verify the claim against the actual code or data before acting on it. Trace the real path, read the real handler, and confirm the symptom maps to the line you think it does. Do not propose, implement, or ship a fix on a plausible but unconfirmed theory. A diagnosis is done only when you can point at concrete evidence: the file:line, the test output, or the reproduced behavior. Environment details the user gives (OS, terminal, hardware) are clues to verify, not facts to wave away. This applies to root-cause analysis, "this already works", "that's the harness, not us", and every other confident assertion.
-
-## CAS system bugs are in-repo fixes
-
-This repository is the CAS source. When a bug is reported in the verifier, hooks, factory orchestration, MCP dispatch, the task-verifier agent, worker prompts, or built-in skills, whichever downstream project surfaced it, the fix lands here as a Rust or Markdown change through a task assigned to a worker. Do not file it with a team lead, do not report it upstream, and do not treat CAS as an external dependency: other projects consume CAS, they do not modify it. If you want to escalate a CAS bug, create the fix task in this repository instead.
-
-## Releases and harness diaries → Slack (mandatory)
-
-- A runtime release needs two separate top-level #cas-internal posts: one for users and one for developers.
-- A harness-diary update needs one top-level cross-harness summary with exactly three replies, in the order Grok, Claude, Codex.
-- When a merge contains both, publish both. A merge that only updates the diary must not be presented as a release.
-- Every message leads with impact and contains no ticket ids and no agent or factory narration.
-
-→ See [docs/RELEASE_SLACK_RUBRIC.md](docs/RELEASE_SLACK_RUBRIC.md)
+- Build/check/test work: read [CONTRIBUTING](cas-cli/docs/CONTRIBUTING.md#build-assembly-and-ci-policy). Workers use capped checks and named targeted tests on clean commits; the supervisor owns full assembly. Keep `panic = "unwind"`.
+- Module/store/hook work: [ARCHITECTURE](cas-cli/docs/ARCHITECTURE.md); navigation: [.claude/CODEMAP.md](.claude/CODEMAP.md).
+- CLI/MCP/migration/skill changes: [CONTRIBUTING](cas-cli/docs/CONTRIBUTING.md).
+- Bug diagnosis: trace the real handler or data and cite the confirming line or reproduced behavior before fixing; use `cas-diagnosing-bugs` for the loop.
+- CAS runtime, verifier, hook, factory or builtin-skill bugs belong here, including incidents in downstream projects. Create an in-repo fix task.
+- Releases and harness diaries: publication to Slack is mandatory; read [RELEASE_SLACK_RUBRIC](docs/RELEASE_SLACK_RUBRIC.md) before preparing either.

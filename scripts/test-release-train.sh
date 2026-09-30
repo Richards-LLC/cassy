@@ -23,6 +23,8 @@ bad() { printf 'FAIL %s\n' "$1"; fail=$((fail + 1)); }
 # Every fixture keeps its artifacts under the test's own temp dir: this suite
 # must never write to the operator's ~/.cas.
 export CAS_RELEASE_ARTIFACTS_ROOT="$tmp/artifacts"
+export COMPLETION_FIXTURE="$script_dir/tests/release_completion_fixture.py"
+export CAS_RELEASE_TRAIN_GH="$tmp/completion-gh"
 
 # Session discovery must not invoke the host's installed cas: CLI startup can
 # create .cas/logs in an otherwise clean fixture before the cut's preflight.
@@ -1892,6 +1894,8 @@ new_cut_fixture() {
       git init -q -b main .
       git config user.email test@test.invalid
       git config user.name 'Release Train Test'
+      git -c commit.gpgsign=false commit -q --allow-empty -m 'previous release'
+      git tag v0.0.0
       mkdir -p scripts cas-cli/src/builtins .context/zig .cas/merge-sweeps
       # Delivery-target locks are expected assembly bookkeeping; runtime logs
       # remain visible to the session-discovery dirty-tree regression.
@@ -1914,6 +1918,7 @@ new_cut_fixture() {
       } > "docs/release-notes/$(date -u +%F)-v${version}-slack.md"
       printf 'CAS_TEST_TOKEN=fixture-secret\nCAS_RELEASE_GATE_HOME_DIR=%s\n' "$tmp/$name-scratch" > release.env
       : > cas-cli/src/builtins/reference-history.json
+      printf '[package]\nversion = "%s"\n' "$version" > cas-cli/Cargo.toml
       printf '#!/usr/bin/env bash\nexit 0\n' > .context/zig/zig
       chmod +x .context/zig/zig
       cat > scripts/bump-release-version.sh <<'EOF'
@@ -1949,6 +1954,8 @@ new_combined_cut_fixture() {
       git init -q -b main .
       git config user.email test@test.invalid
       git config user.name 'Release Train Combined Fixture'
+      git -c commit.gpgsign=false commit -q --allow-empty -m 'previous release'
+      git tag v0.0.0
       git config core.hooksPath /dev/null
       mkdir -p scripts cas-cli/src/builtins .context/zig .cas/merge-sweeps docs/release-notes
       printf '.cas/\n' > .gitignore
@@ -1964,6 +1971,7 @@ set -euo pipefail
 EOF
       chmod +x scripts/bump-release-version.sh
       : > cas-cli/src/builtins/reference-history.json
+      printf '[package]\nversion = "%s"\n' "$version" > cas-cli/Cargo.toml
 cat > scripts/gen-builtin-reference-history.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -2032,6 +2040,7 @@ cat >"$cut_cmd" <<'EOF'
 set -euo pipefail
 printf '%s\n' "${CUT_STAGE:?}" >>"${CUT_LOG:?}"
 case "$CUT_STAGE" in
+    host-update) python3 "$COMPLETION_FIXTURE" "$CAS_RELEASE_TRAIN_VERSION" "$CAS_RELEASE_TRAIN_RUN_DIR" "$CAS_RELEASE_TRAIN_WORKTREE" "$CAS_RELEASE_TRAIN_CAS" ;;
     pipeline) printf '%s\n' "$(git rev-parse HEAD)" >"${CAS_RELEASE_TRAIN_RUN_DIR:?}/landed-main.sha"; printf 'MERGED\n' >"$CAS_RELEASE_TRAIN_RUN_DIR/pipeline.done" ;;
     publish) printf '0\n' >"${CAS_RELEASE_TRAIN_RUN_DIR:?}/release.done" ;;
     post-publication) : >"$CAS_RELEASE_TRAIN_RUN_DIR/release-workflow.json"; : >"$CAS_RELEASE_TRAIN_RUN_DIR/release-published.receipt"; : >"$CAS_RELEASE_TRAIN_RUN_DIR/release-latency.receipt" ;;
@@ -2098,6 +2107,7 @@ cat >"$published_cmd" <<'EOF'
 set -euo pipefail
 printf '%s\n' "$CUT_STAGE" >>"$CUT_LOG"
 case "$CUT_STAGE" in
+    host-update) python3 "$COMPLETION_FIXTURE" "$CAS_RELEASE_TRAIN_VERSION" "$CAS_RELEASE_TRAIN_RUN_DIR" "$CAS_RELEASE_TRAIN_WORKTREE" "$CAS_RELEASE_TRAIN_CAS" ;;
     pipeline)
         printf 'squashed release\n' | git commit-tree 'HEAD^{tree}' -p refs/remotes/origin/main >"$CAS_RELEASE_TRAIN_RUN_DIR/landed-main.sha"
         printf 'MERGED\n' >"$CAS_RELEASE_TRAIN_RUN_DIR/pipeline.done"
@@ -2304,6 +2314,7 @@ cat >"$combined_cmd" <<'EOF'
 set -euo pipefail
 printf '%s\n' "${CUT_STAGE:?}" >>"${CUT_LOG:?}"
 case "$CUT_STAGE" in
+    host-update) python3 "$COMPLETION_FIXTURE" "$CAS_RELEASE_TRAIN_VERSION" "$CAS_RELEASE_TRAIN_RUN_DIR" "$CAS_RELEASE_TRAIN_WORKTREE" "$CAS_RELEASE_TRAIN_CAS" ;;
     pipeline)
         date -u +%s >"$CAS_RELEASE_TRAIN_RUN_DIR/pipeline.start.epoch"
         git rev-parse HEAD >"$CAS_RELEASE_TRAIN_RUN_DIR/landed-main.sha"
@@ -2408,7 +2419,7 @@ run_combined_cut() {
 combined_clean_version=9.99.12
 combined_clean_wt="$(new_combined_cut_fixture combined-clean "$combined_clean_version")"
 combined_clean_dir="$($train "$combined_clean_version" "$combined_clean_wt" --print-run-dir)"
-combined_clean_out="$(run_combined_cut "$combined_clean_version" "$combined_clean_wt" --cut 2>&1)"
+combined_clean_out="$(run_combined_cut "$combined_clean_version" "$combined_clean_wt" --cut 2>&1 || true)"
 combined_expected='preflight assemble prep ledger gate pr-body pipeline publish post-publication announce report receipts host-update'
 combined_actual="$(printf '%s\n' "$combined_clean_out" | sed -n 's/^stage \([^:]*\): start$/\1/p' | paste -sd' ' -)"
 if [[ "$combined_clean_out" == *'cut complete'* ]] \
@@ -2594,6 +2605,12 @@ EOF
 chmod +x "$host_stub"
 host_version=9.99.20
 host_wt="$(new_worktree host-update-wt)"
+git -C "$host_wt" tag v0.0.0
+printf '[package]\nversion = "%s"\n' "$host_version" >"$host_wt/cas-cli/Cargo.toml"
+git -C "$host_wt" add cas-cli/Cargo.toml
+git -C "$host_wt" commit -qm 'versioned host release'
+git init -q --bare "$tmp/host-remote.git"
+git -C "$host_wt" remote add origin "$tmp/host-remote.git"
 git -C "$host_wt" tag "v$host_version"
 git -C "$host_wt" update-ref refs/remotes/origin/main HEAD
 mkdir -p "$host_wt/.context/zig"
@@ -2615,6 +2632,9 @@ printf 'Published worker target baseline: %s\n' "$snapshot"
 EOF
 chmod +x "$host_cache_stub"
 host_run_dir="$("$train" "$host_version" "$host_wt" --print-run-dir)"
+git -C "$host_wt" rev-parse HEAD >"$host_run_dir/landed-main.sha"
+COMPLETION_HOST_ENV_PROBE=1 CAS_RELEASE_TRAIN_CAS="$host_stub" python3 "$COMPLETION_FIXTURE" "$host_version" "$host_run_dir" "$host_wt" "$host_stub"
+
 run_host_update() {
     rm -f "$host_run_dir/host-update.json"
     rm -f "$tmp/host-cache.log"
@@ -2811,6 +2831,13 @@ else
     bad "cas-fed5: toolchain preflight did not name the missing tools: $portable_preflight"
 fi
 
+# Shared renderer + real stage behavior (including CHANGELOG/gate preservation).
+if python3 "$repo_root/scripts/test-review-pr-body.py"; then
+    ok 'review PR body fixtures and real release-stage boundary'
+else
+    bad 'review PR body fixtures and real release-stage boundary'
+fi
+
 # The PR body is cut from CHANGELOG with literal heading matches: dots are not
 # wildcards, and the next version heading ends the section in every awk.
 portable_changelog_wt="$portable_dir/changelog-wt"
@@ -2922,6 +2949,12 @@ elif [[ "$(wc -l <"$assembly_fixture/calls")" == 1 ]]; then
     ok 'failed integration cannot start or reuse assembly proof'
 else
     bad 'assembly proof ran after integration failed'
+fi
+
+if python3 "$script_dir/test-release-completion.py"; then
+    ok 'rule-175 completion, clean install, full merge coverage and embargo regressions'
+else
+    bad 'rule-175 completion regression suite'
 fi
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"

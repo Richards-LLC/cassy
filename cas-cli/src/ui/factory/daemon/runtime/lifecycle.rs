@@ -809,21 +809,6 @@ mod worker_attention_tests {
     use super::*;
     use cas_types::{Agent, AgentRole, AgentStatus};
 
-    #[test]
-    fn websocket_keyframe_requests_stay_before_pty_delta_drain() {
-        let source = include_str!("lifecycle.rs");
-        let request = source
-            .find("let ws_activity = self.process_ws_client_input().await;")
-            .expect("daemon loop must process WS keyframe requests");
-        let drain = source
-            .find("let (bytes_processed, events) = self.app.mux.poll_batch();")
-            .expect("daemon loop must drain PTY deltas");
-        assert!(
-            request < drain,
-            "WS keyframe capture must remain before PTY drain so queued bytes become ordered post-keyframe deltas"
-        );
-    }
-
     fn register_supervisor(cas_dir: &std::path::Path, session: &str) {
         let agents = crate::store::open_agent_store(cas_dir).unwrap();
         let mut supervisor = Agent::new("supervisor-id".to_string(), "supervisor".to_string());
@@ -1724,6 +1709,7 @@ impl FactoryDaemon {
             next_gui_client_id: 0,
             ws_listener,
             ws_clients: HashMap::new(),
+            terminal_exchange: Default::default(),
             next_ws_client_id: 0,
             tui_pane_sizes: HashMap::new(),
             web_pane_sizes: HashMap::new(),
@@ -1901,21 +1887,11 @@ impl FactoryDaemon {
             // Read and process input from GUI clients
             let gui_activity = self.process_gui_client_input().await;
 
-            // ORDERING INVARIANT: WS input MUST be processed before poll_batch.
-            // RequestPaneKeyframe captures Ghostty state and queues the frame
-            // under this loop's exclusive `&mut FactoryDaemon`; PTY bytes still
-            // queued in the backend are then drained and queued as later Output.
-            // Reordering or parallelizing these calls creates a snapshot/tap gap
-            // that can silently lose terminal output during attach.
+            // Keyframe requests join the terminal exchange, which owns capture,
+            // PTY drain and frame enqueue under this loop's exclusive borrow.
             let ws_activity = self.process_ws_client_input().await;
-
-            // Poll PTYs for output using coalesced batch drain (efficient for 6 Claudes generating)
-            loop_progress.enter(super::loop_watchdog::LoopPhase::PtyOutput);
-            let (bytes_processed, events) = self.app.mux.poll_batch();
+            let bytes_processed = self.exchange_terminal(&loop_progress).await;
             let had_output = bytes_processed > 0;
-            for event in events {
-                self.handle_mux_event(event).await;
-            }
 
             let summary_metadata = format!(
                 "session={} role=supervisor task={}",

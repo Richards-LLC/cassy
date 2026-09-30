@@ -70,7 +70,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     origin_project TEXT,
     delivery_mode TEXT,
     risk TEXT,
-    proof_targets TEXT
+    proof_targets TEXT,
+    door TEXT CHECK (door IS NULL OR door IN ('one-way', 'two-way'))
 );
 
 -- cas-4adb: sparse, bounded machine resume state. Keeping this separate from
@@ -204,6 +205,196 @@ impl SqliteTaskStore {
         })
     }
 
+    fn update_checked(
+        &self,
+        task: &Task,
+        receipt_id: &str,
+        expected: Option<&Task>,
+    ) -> Result<Option<DateTime<Utc>>> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+
+            if let Some(expected) = expected {
+                if expected.id != task.id {
+                    return Err(StoreError::Parse(
+                        "sync expectation names a different task".into(),
+                    ));
+                }
+                let clock: Option<String> = tx
+                    .query_row(
+                        "SELECT updated_at FROM tasks WHERE id = ?",
+                        params![task.id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                let Some(clock) = clock else {
+                    return Err(StoreError::TaskNotFound(task.id.clone()));
+                };
+                if Self::parse_datetime(&clock) != Some(expected.updated_at) {
+                    return Ok(None);
+                }
+                if !task.lifecycle_matches(expected)
+                    && crate::delivery_store::delivery_owns_task_lifecycle(&tx, &task.id)?
+                {
+                    return Ok(None);
+                }
+            }
+
+            // cas-ec74: read the clock ONCE and return that same instant. The
+            // caller's `task.updated_at` is deliberately ignored (updated_at is
+            // store-owned), but the value we persist has to be observable or
+            // callers are forced to guess it with a second `Utc::now()` — which
+            // is exactly how lifecycle occurrences became unmatchable.
+            let now = Utc::now();
+
+            // Combine the status read with the UPDATE: only SELECT the old status
+            // when the new status differs from what's in the DB, avoiding the
+            // pre-read on the common case where status hasn't changed.
+            let new_status_str = task.status.to_string();
+            let prev_status: Option<String> = tx
+                .query_row(
+                    "SELECT status FROM tasks WHERE id = ? AND status != ?",
+                    params![task.id, new_status_str],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let mut persisted_deliverables = task.deliverables.clone();
+            let mut persisted_terminal_outcome = task.terminal_outcome.clone();
+            let reopening_terminal = matches!(prev_status.as_deref(), Some("closed" | "cancelled"))
+                && !task.is_terminal();
+            let resuming_merge_conflict = prev_status.as_deref() == Some("awaiting_merge")
+                && task.status == TaskStatus::InProgress;
+            if reopening_terminal || resuming_merge_conflict {
+                // cas-ed9a: a close-cycle anchor is evidence for that completed
+                // cycle only. Enforce invalidation at the persistence choke point
+                // so every Closed -> non-Closed path (MCP update, reopen, UI,
+                // recovery, and future callers) gets the same protection.
+                // cas-5054 extends that invariant to conflict rework: the parked
+                // anchor must not satisfy or false-reject the eventual re-close.
+                persisted_deliverables.retain_factory_branch_anchor_as_history();
+                if reopening_terminal {
+                    persisted_deliverables.negative_result = None;
+                    persisted_terminal_outcome = None;
+                }
+            }
+            if resuming_merge_conflict {
+                // The decision note written by the lifecycle layer preserves the
+                // diagnostic branch identity. These fields describe the prior
+                // park cycle and must be rebuilt from the resolved branch on close.
+                persisted_deliverables.parked_branch = None;
+                persisted_deliverables.merge_conflicted = false;
+            }
+
+            // Updates preserve the row's provenance. Only creation supplies a
+            // default; an unattributed imported task must not become local on
+            // its next edit.
+            let persisted_origin_project = task.origin_project.as_ref();
+
+            let rows = tx.execute(
+            "UPDATE tasks SET title = ?1, description = ?2, design = ?3,
+             acceptance_criteria = ?4, notes = ?5, status = ?6, priority = ?7,
+             task_type = ?8, assignee = ?9, labels = ?10, updated_at = ?11,
+             closed_at = ?12, close_reason = ?13, external_ref = ?14, content_hash = ?15,
+             branch = ?16, worktree_id = ?17,
+             pending_verification = ?18, pending_worktree_merge = ?19, epic_verification_owner = ?20, team_id = ?21,
+             deliverables = ?22, demo_statement = ?23, execution_note = ?24, share = ?25, depth = ?26,
+             terminal_outcome = ?27, origin_project = COALESCE(?28, origin_project), delivery_mode = ?29,
+             risk = ?30, proof_targets = ?31, door = ?32
+             WHERE id = ?33",
+            params![
+                task.title,
+                task.description,
+                task.design,
+                task.acceptance_criteria,
+                task.notes,
+                new_status_str,
+                task.priority.0,
+                task.task_type.to_string(),
+                task.assignee,
+                Self::labels_to_string(&task.labels),
+                now.to_rfc3339(),
+                task.closed_at.map(|t| t.to_rfc3339()),
+                task.close_reason,
+                task.external_ref,
+                task.content_hash,
+                task.branch,
+                task.worktree_id,
+                if task.pending_verification { 1 } else { 0 },
+                if task.pending_worktree_merge { 1 } else { 0 },
+                task.epic_verification_owner,
+                task.team_id,
+                Self::deliverables_to_string(&persisted_deliverables),
+                task.demo_statement,
+                task.execution_note,
+                task.share.as_ref().map(|s| s.to_string()),
+                task.depth.to_string(),
+                Self::terminal_outcome_to_string(&persisted_terminal_outcome),
+                persisted_origin_project,
+                task.delivery_mode.to_string(),
+                Self::risks_to_string(&task.risk),
+                Self::proof_targets_to_string(&task.proof_targets),
+                task.door.map(|door| door.to_string()),
+                task.id,
+            ],
+        )?;
+            if rows == 0 {
+                return Err(StoreError::TaskNotFound(task.id.clone()));
+            }
+
+            // Emit status change events only when status actually changed
+            // (prev_status is Some only when old status differs from new)
+            if let Some(prev) = prev_status {
+                let prev_status: TaskStatus = prev.parse().unwrap_or(TaskStatus::Open);
+                if prev_status != task.status {
+                    let (event_type, summary, recording_event_type) = match task.status {
+                        TaskStatus::InProgress => (
+                            EventType::TaskStarted,
+                            format!("Task started: {}", task.title),
+                            RecordingEventType::TaskStarted,
+                        ),
+                        TaskStatus::Closed => (
+                            EventType::TaskCompleted,
+                            format!("Task completed: {}", task.title),
+                            RecordingEventType::TaskCompleted,
+                        ),
+                        TaskStatus::Cancelled => (
+                            EventType::TaskBlocked,
+                            format!("Task cancelled without delivery: {}", task.title),
+                            RecordingEventType::TaskBlocked,
+                        ),
+                        TaskStatus::Blocked => (
+                            EventType::TaskBlocked,
+                            format!("Task blocked: {}", task.title),
+                            RecordingEventType::TaskBlocked,
+                        ),
+                        TaskStatus::Open => (
+                            EventType::TaskCreated,
+                            format!("Task reopened: {}", task.title),
+                            RecordingEventType::TaskCreated,
+                        ),
+                        TaskStatus::AwaitingMerge => (
+                            EventType::TaskBlocked,
+                            format!("Task awaiting merge: {}", task.title),
+                            RecordingEventType::TaskBlocked,
+                        ),
+                    };
+                    let event = Event::new(event_type, EventEntityType::Task, &task.id, summary);
+                    let _ = record_event_with_conn(&tx, &event);
+
+                    // Capture event for recording playback
+                    let _ = capture_task_event(&tx, recording_event_type, &task.id, None);
+                }
+            }
+
+            if !receipt_id.is_empty() {
+                Self::record_mutation_receipt_with_conn(&tx, receipt_id, &task.id)?;
+            }
+            tx.commit()?;
+            Ok(Some(now))
+        }) // with_write_retry
+    }
+
     fn parse_datetime(s: &str) -> Option<DateTime<Utc>> {
         if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
             return Some(dt.with_timezone(&Utc));
@@ -259,17 +450,11 @@ impl SqliteTaskStore {
     }
 
     fn parse_proof_targets(value: Option<String>) -> Vec<String> {
-        value
-            .unwrap_or_default()
-            .split(',')
-            .map(str::trim)
-            .filter(|target| !target.is_empty())
-            .map(ToOwned::to_owned)
-            .collect()
+        cas_types::parse_proof_targets(value.as_deref())
     }
 
     fn proof_targets_to_string(targets: &[String]) -> Option<String> {
-        (!targets.is_empty()).then(|| targets.join(","))
+        cas_types::proof_targets_to_string(targets)
     }
 
     fn parse_terminal_outcome(value: Option<String>) -> Option<TaskTerminalOutcome> {
@@ -317,8 +502,8 @@ impl SqliteTaskStore {
              epic_verification_owner = ?20, team_id = ?21, deliverables = ?22,
              demo_statement = ?23, execution_note = ?24, share = ?25, depth = ?26,
              terminal_outcome = ?27, origin_project = COALESCE(?28, origin_project), delivery_mode = ?29,
-             risk = ?30, proof_targets = ?31
-             WHERE id = ?32 AND status = ?33 AND updated_at = ?34",
+             risk = ?30, proof_targets = ?31, door = ?32
+             WHERE id = ?33 AND status = ?34 AND updated_at = ?35",
             params![
                 task.title,
                 task.description,
@@ -351,6 +536,7 @@ impl SqliteTaskStore {
                 task.delivery_mode.to_string(),
                 Self::risks_to_string(&task.risk),
                 Self::proof_targets_to_string(&task.proof_targets),
+                task.door.map(|door| door.to_string()),
                 task.id,
                 expected_status.to_string(),
                 expected_updated_at.to_rfc3339(),
@@ -409,6 +595,9 @@ impl SqliteTaskStore {
             priority: Priority(row.get::<_, i32>(7)?),
             task_type: row.get::<_, String>(8)?.parse().unwrap_or(TaskType::Task),
             risk: Self::parse_risks(row.get(31)?),
+            door: row
+                .get::<_, Option<String>>(33)?
+                .and_then(|value| value.parse().ok()),
             proof_targets: Self::parse_proof_targets(row.get(32)?),
             assignee: row.get(9)?,
             labels: Self::parse_labels(&row.get::<_, String>(10)?),
@@ -575,8 +764,8 @@ impl SqliteTaskStore {
             "INSERT INTO tasks (id, title, description, design, acceptance_criteria, notes,
              status, priority, task_type, assignee, labels, created_at, updated_at,
              closed_at, close_reason, external_ref, content_hash, branch, worktree_id,
-             pending_verification, pending_worktree_merge, epic_verification_owner, team_id, deliverables, demo_statement, execution_note, share, depth, terminal_outcome, origin_project, delivery_mode, risk, proof_targets)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33)",
+             pending_verification, pending_worktree_merge, epic_verification_owner, team_id, deliverables, demo_statement, execution_note, share, depth, terminal_outcome, origin_project, delivery_mode, risk, proof_targets, door)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34)",
             params![
                 task.id,
                 task.title,
@@ -611,6 +800,7 @@ impl SqliteTaskStore {
                 task.delivery_mode.to_string(),
                 Self::risks_to_string(&task.risk),
                 Self::proof_targets_to_string(&task.proof_targets),
+                task.door.map(|door| door.to_string()),
             ],
         )?;
 
@@ -705,7 +895,7 @@ impl SqliteTaskStore {
                 "SELECT id, title, description, design, acceptance_criteria, notes,
                  status, priority, task_type, assignee, labels, created_at, updated_at,
                  closed_at, close_reason, external_ref, content_hash, branch, worktree_id,
-                 pending_verification, pending_worktree_merge, epic_verification_owner, team_id, deliverables, demo_statement, execution_note, share, depth, terminal_outcome, origin_project, delivery_mode, risk, proof_targets
+                 pending_verification, pending_worktree_merge, epic_verification_owner, team_id, deliverables, demo_statement, execution_note, share, depth, terminal_outcome, origin_project, delivery_mode, risk, proof_targets, door
                  FROM tasks ORDER BY priority, created_at DESC",
             )?;
             stmt.query_map([], Self::task_from_row)?
@@ -840,7 +1030,7 @@ impl TaskStore for SqliteTaskStore {
             "SELECT id, title, description, design, acceptance_criteria, notes,
              status, priority, task_type, assignee, labels, created_at, updated_at,
              closed_at, close_reason, external_ref, content_hash, branch, worktree_id,
-             pending_verification, pending_worktree_merge, epic_verification_owner, team_id, deliverables, demo_statement, execution_note, share, depth, terminal_outcome, origin_project, delivery_mode, risk, proof_targets
+             pending_verification, pending_worktree_merge, epic_verification_owner, team_id, deliverables, demo_statement, execution_note, share, depth, terminal_outcome, origin_project, delivery_mode, risk, proof_targets, door
              FROM tasks WHERE id = ?",
             params![id],
             Self::task_from_row,
@@ -910,161 +1100,12 @@ impl TaskStore for SqliteTaskStore {
     }
 
     fn update_with_mutation_receipt(&self, task: &Task, receipt_id: &str) -> Result<DateTime<Utc>> {
-        crate::shared_db::with_write_retry(|| {
-            let conn = crate::shared_db::lock_connection(&self.conn)?;
-            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+        self.update_checked(task, receipt_id, None)?
+            .ok_or_else(|| StoreError::Other("unconditional task update was refused".to_string()))
+    }
 
-            // cas-ec74: read the clock ONCE and return that same instant. The
-            // caller's `task.updated_at` is deliberately ignored (updated_at is
-            // store-owned), but the value we persist has to be observable or
-            // callers are forced to guess it with a second `Utc::now()` — which
-            // is exactly how lifecycle occurrences became unmatchable.
-            let now = Utc::now();
-
-            // Combine the status read with the UPDATE: only SELECT the old status
-            // when the new status differs from what's in the DB, avoiding the
-            // pre-read on the common case where status hasn't changed.
-            let new_status_str = task.status.to_string();
-            let prev_status: Option<String> = tx
-                .query_row(
-                    "SELECT status FROM tasks WHERE id = ? AND status != ?",
-                    params![task.id, new_status_str],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            let mut persisted_deliverables = task.deliverables.clone();
-            let mut persisted_terminal_outcome = task.terminal_outcome.clone();
-            let reopening_terminal = matches!(prev_status.as_deref(), Some("closed" | "cancelled"))
-                && !task.is_terminal();
-            let resuming_merge_conflict = prev_status.as_deref() == Some("awaiting_merge")
-                && task.status == TaskStatus::InProgress;
-            if reopening_terminal || resuming_merge_conflict {
-                // cas-ed9a: a close-cycle anchor is evidence for that completed
-                // cycle only. Enforce invalidation at the persistence choke point
-                // so every Closed -> non-Closed path (MCP update, reopen, UI,
-                // recovery, and future callers) gets the same protection.
-                // cas-5054 extends that invariant to conflict rework: the parked
-                // anchor must not satisfy or false-reject the eventual re-close.
-                persisted_deliverables.retain_factory_branch_anchor_as_history();
-                if reopening_terminal {
-                    persisted_deliverables.negative_result = None;
-                    persisted_terminal_outcome = None;
-                }
-            }
-            if resuming_merge_conflict {
-                // The decision note written by the lifecycle layer preserves the
-                // diagnostic branch identity. These fields describe the prior
-                // park cycle and must be rebuilt from the resolved branch on close.
-                persisted_deliverables.parked_branch = None;
-                persisted_deliverables.merge_conflicted = false;
-            }
-
-            // Updates preserve the row's provenance. Only creation supplies a
-            // default; an unattributed imported task must not become local on
-            // its next edit.
-            let persisted_origin_project = task.origin_project.as_ref();
-
-            let rows = tx.execute(
-            "UPDATE tasks SET title = ?1, description = ?2, design = ?3,
-             acceptance_criteria = ?4, notes = ?5, status = ?6, priority = ?7,
-             task_type = ?8, assignee = ?9, labels = ?10, updated_at = ?11,
-             closed_at = ?12, close_reason = ?13, external_ref = ?14, content_hash = ?15,
-             branch = ?16, worktree_id = ?17,
-             pending_verification = ?18, pending_worktree_merge = ?19, epic_verification_owner = ?20, team_id = ?21,
-             deliverables = ?22, demo_statement = ?23, execution_note = ?24, share = ?25, depth = ?26,
-             terminal_outcome = ?27, origin_project = COALESCE(?28, origin_project), delivery_mode = ?29,
-             risk = ?30, proof_targets = ?31
-             WHERE id = ?32",
-            params![
-                task.title,
-                task.description,
-                task.design,
-                task.acceptance_criteria,
-                task.notes,
-                new_status_str,
-                task.priority.0,
-                task.task_type.to_string(),
-                task.assignee,
-                Self::labels_to_string(&task.labels),
-                now.to_rfc3339(),
-                task.closed_at.map(|t| t.to_rfc3339()),
-                task.close_reason,
-                task.external_ref,
-                task.content_hash,
-                task.branch,
-                task.worktree_id,
-                if task.pending_verification { 1 } else { 0 },
-                if task.pending_worktree_merge { 1 } else { 0 },
-                task.epic_verification_owner,
-                task.team_id,
-                Self::deliverables_to_string(&persisted_deliverables),
-                task.demo_statement,
-                task.execution_note,
-                task.share.as_ref().map(|s| s.to_string()),
-                task.depth.to_string(),
-                Self::terminal_outcome_to_string(&persisted_terminal_outcome),
-                persisted_origin_project,
-                task.delivery_mode.to_string(),
-                Self::risks_to_string(&task.risk),
-                Self::proof_targets_to_string(&task.proof_targets),
-                task.id,
-            ],
-        )?;
-            if rows == 0 {
-                return Err(StoreError::TaskNotFound(task.id.clone()));
-            }
-
-            // Emit status change events only when status actually changed
-            // (prev_status is Some only when old status differs from new)
-            if let Some(prev) = prev_status {
-                let prev_status: TaskStatus = prev.parse().unwrap_or(TaskStatus::Open);
-                if prev_status != task.status {
-                    let (event_type, summary, recording_event_type) = match task.status {
-                        TaskStatus::InProgress => (
-                            EventType::TaskStarted,
-                            format!("Task started: {}", task.title),
-                            RecordingEventType::TaskStarted,
-                        ),
-                        TaskStatus::Closed => (
-                            EventType::TaskCompleted,
-                            format!("Task completed: {}", task.title),
-                            RecordingEventType::TaskCompleted,
-                        ),
-                        TaskStatus::Cancelled => (
-                            EventType::TaskBlocked,
-                            format!("Task cancelled without delivery: {}", task.title),
-                            RecordingEventType::TaskBlocked,
-                        ),
-                        TaskStatus::Blocked => (
-                            EventType::TaskBlocked,
-                            format!("Task blocked: {}", task.title),
-                            RecordingEventType::TaskBlocked,
-                        ),
-                        TaskStatus::Open => (
-                            EventType::TaskCreated,
-                            format!("Task reopened: {}", task.title),
-                            RecordingEventType::TaskCreated,
-                        ),
-                        TaskStatus::AwaitingMerge => (
-                            EventType::TaskBlocked,
-                            format!("Task awaiting merge: {}", task.title),
-                            RecordingEventType::TaskBlocked,
-                        ),
-                    };
-                    let event = Event::new(event_type, EventEntityType::Task, &task.id, summary);
-                    let _ = record_event_with_conn(&tx, &event);
-
-                    // Capture event for recording playback
-                    let _ = capture_task_event(&tx, recording_event_type, &task.id, None);
-                }
-            }
-
-            if !receipt_id.is_empty() {
-                Self::record_mutation_receipt_with_conn(&tx, receipt_id, &task.id)?;
-            }
-            tx.commit()?;
-            Ok(now)
-        }) // with_write_retry
+    fn update_from_sync(&self, task: &Task, expected: &Task) -> Result<Option<DateTime<Utc>>> {
+        self.update_checked(task, "", Some(expected))
     }
 
     fn append_note(&self, task_id: &str, formatted_note: &str) -> Result<DateTime<Utc>> {
@@ -1158,7 +1199,7 @@ impl TaskStore for SqliteTaskStore {
                 "SELECT id, title, description, design, acceptance_criteria, notes,
                  status, priority, task_type, assignee, labels, created_at, updated_at,
                  closed_at, close_reason, external_ref, content_hash, branch, worktree_id,
-                 pending_verification, pending_worktree_merge, epic_verification_owner, team_id, deliverables, demo_statement, execution_note, share, depth, terminal_outcome, origin_project, delivery_mode, risk, proof_targets
+                 pending_verification, pending_worktree_merge, epic_verification_owner, team_id, deliverables, demo_statement, execution_note, share, depth, terminal_outcome, origin_project, delivery_mode, risk, proof_targets, door
                  FROM tasks WHERE status = ? ORDER BY priority, created_at DESC",
                 vec![s.to_string()],
             ),
@@ -1166,7 +1207,7 @@ impl TaskStore for SqliteTaskStore {
                 "SELECT id, title, description, design, acceptance_criteria, notes,
                  status, priority, task_type, assignee, labels, created_at, updated_at,
                  closed_at, close_reason, external_ref, content_hash, branch, worktree_id,
-                 pending_verification, pending_worktree_merge, epic_verification_owner, team_id, deliverables, demo_statement, execution_note, share, depth, terminal_outcome, origin_project, delivery_mode, risk, proof_targets
+                 pending_verification, pending_worktree_merge, epic_verification_owner, team_id, deliverables, demo_statement, execution_note, share, depth, terminal_outcome, origin_project, delivery_mode, risk, proof_targets, door
                  FROM tasks ORDER BY priority, created_at DESC",
                 vec![],
             ),
@@ -1194,7 +1235,7 @@ impl TaskStore for SqliteTaskStore {
             "SELECT t.id, t.title, t.description, t.design, t.acceptance_criteria, t.notes,
              t.status, t.priority, t.task_type, t.assignee, t.labels, t.created_at, t.updated_at,
              t.closed_at, t.close_reason, t.external_ref, t.content_hash, t.branch, t.worktree_id,
-             t.pending_verification, t.pending_worktree_merge, t.epic_verification_owner, t.team_id, t.deliverables, t.demo_statement, t.execution_note, t.share, t.depth, t.terminal_outcome, t.origin_project, t.delivery_mode, t.risk, t.proof_targets
+             t.pending_verification, t.pending_worktree_merge, t.epic_verification_owner, t.team_id, t.deliverables, t.demo_statement, t.execution_note, t.share, t.depth, t.terminal_outcome, t.origin_project, t.delivery_mode, t.risk, t.proof_targets, t.door
              FROM tasks t
              WHERE (t.status = 'open' OR (t.status = 'blocked' AND EXISTS (
                  SELECT 1 FROM dependencies d
@@ -1234,7 +1275,7 @@ impl TaskStore for SqliteTaskStore {
             "SELECT DISTINCT t.id, t.title, t.description, t.design, t.acceptance_criteria, t.notes,
              t.status, t.priority, t.task_type, t.assignee, t.labels, t.created_at, t.updated_at,
              t.closed_at, t.close_reason, t.external_ref, t.content_hash, t.branch, t.worktree_id,
-             t.pending_verification, t.pending_worktree_merge, t.epic_verification_owner, t.team_id, t.deliverables, t.demo_statement, t.execution_note, t.share, t.depth, t.terminal_outcome, t.origin_project, t.delivery_mode, t.risk, t.proof_targets
+             t.pending_verification, t.pending_worktree_merge, t.epic_verification_owner, t.team_id, t.deliverables, t.demo_statement, t.execution_note, t.share, t.depth, t.terminal_outcome, t.origin_project, t.delivery_mode, t.risk, t.proof_targets, t.door
              FROM tasks t
              WHERE t.status NOT IN ('closed', 'cancelled')
              AND (
@@ -1270,7 +1311,7 @@ impl TaskStore for SqliteTaskStore {
              t.id, t.title, t.description, t.design, t.acceptance_criteria, t.notes,
              t.status, t.priority, t.task_type, t.assignee, t.labels, t.created_at, t.updated_at,
              t.closed_at, t.close_reason, t.external_ref, t.content_hash, t.branch, t.worktree_id,
-             t.pending_verification, t.pending_worktree_merge, t.epic_verification_owner, t.team_id, t.deliverables, t.demo_statement, t.execution_note, t.share, t.depth, t.terminal_outcome, t.origin_project, t.delivery_mode, t.risk, t.proof_targets
+             t.pending_verification, t.pending_worktree_merge, t.epic_verification_owner, t.team_id, t.deliverables, t.demo_statement, t.execution_note, t.share, t.depth, t.terminal_outcome, t.origin_project, t.delivery_mode, t.risk, t.proof_targets, t.door
              FROM dependencies d
              JOIN tasks t ON d.to_id = t.id
              WHERE d.from_id IN ({placeholders})
@@ -1298,6 +1339,9 @@ impl TaskStore for SqliteTaskStore {
                 priority: Priority(row.get::<_, i32>(8)?),
                 task_type: row.get::<_, String>(9)?.parse().unwrap_or(TaskType::Task),
                 risk: Self::parse_risks(row.get(32)?),
+                door: row
+                    .get::<_, Option<String>>(34)?
+                    .and_then(|value| value.parse().ok()),
                 proof_targets: Self::parse_proof_targets(row.get(33)?),
                 assignee: row.get(10)?,
                 labels: Self::parse_labels(&row.get::<_, String>(11)?),
@@ -1365,7 +1409,7 @@ impl TaskStore for SqliteTaskStore {
             "SELECT id, title, description, design, acceptance_criteria, notes,
              status, priority, task_type, assignee, labels, created_at, updated_at,
              closed_at, close_reason, external_ref, content_hash, branch, worktree_id,
-             pending_verification, pending_worktree_merge, epic_verification_owner, team_id, deliverables, demo_statement, execution_note, share, depth, terminal_outcome, origin_project, delivery_mode, risk, proof_targets
+             pending_verification, pending_worktree_merge, epic_verification_owner, team_id, deliverables, demo_statement, execution_note, share, depth, terminal_outcome, origin_project, delivery_mode, risk, proof_targets, door
              FROM tasks WHERE pending_verification = 1",
         )?;
         let tasks = stmt
@@ -1380,7 +1424,7 @@ impl TaskStore for SqliteTaskStore {
             "SELECT id, title, description, design, acceptance_criteria, notes,
              status, priority, task_type, assignee, labels, created_at, updated_at,
              closed_at, close_reason, external_ref, content_hash, branch, worktree_id,
-             pending_verification, pending_worktree_merge, epic_verification_owner, team_id, deliverables, demo_statement, execution_note, share, depth, terminal_outcome, origin_project, delivery_mode, risk, proof_targets
+             pending_verification, pending_worktree_merge, epic_verification_owner, team_id, deliverables, demo_statement, execution_note, share, depth, terminal_outcome, origin_project, delivery_mode, risk, proof_targets, door
              FROM tasks WHERE pending_worktree_merge = 1",
         )?;
         let tasks = stmt
@@ -1467,7 +1511,7 @@ impl TaskStore for SqliteTaskStore {
             "SELECT t.id, t.title, t.description, t.design, t.acceptance_criteria, t.notes,
              t.status, t.priority, t.task_type, t.assignee, t.labels, t.created_at, t.updated_at,
              t.closed_at, t.close_reason, t.external_ref, t.content_hash, t.branch, t.worktree_id,
-             t.pending_verification, t.pending_worktree_merge, t.epic_verification_owner, t.team_id, t.deliverables, t.demo_statement, t.execution_note, t.share, t.depth, t.terminal_outcome, t.origin_project, t.delivery_mode, t.risk, t.proof_targets
+             t.pending_verification, t.pending_worktree_merge, t.epic_verification_owner, t.team_id, t.deliverables, t.demo_statement, t.execution_note, t.share, t.depth, t.terminal_outcome, t.origin_project, t.delivery_mode, t.risk, t.proof_targets, t.door
              FROM tasks t
              JOIN dependencies d ON d.to_id = t.id
              WHERE d.from_id = ? AND d.dep_type = 'blocks' AND t.status NOT IN ('closed', 'cancelled')",
@@ -1542,7 +1586,7 @@ impl TaskStore for SqliteTaskStore {
              SELECT t.id, t.title, t.description, t.design, t.acceptance_criteria, t.notes,
              t.status, t.priority, t.task_type, t.assignee, t.labels, t.created_at, t.updated_at,
              t.closed_at, t.close_reason, t.external_ref, t.content_hash, t.branch, t.worktree_id,
-             t.pending_verification, t.pending_worktree_merge, t.epic_verification_owner, t.team_id, t.deliverables, t.demo_statement, t.execution_note, t.share, t.depth, t.terminal_outcome, t.origin_project, t.delivery_mode, t.risk, t.proof_targets
+             t.pending_verification, t.pending_worktree_merge, t.epic_verification_owner, t.team_id, t.deliverables, t.demo_statement, t.execution_note, t.share, t.depth, t.terminal_outcome, t.origin_project, t.delivery_mode, t.risk, t.proof_targets, t.door
              FROM tasks t
              JOIN subtree s ON t.id = s.task_id",
         )?;
@@ -1595,7 +1639,7 @@ impl TaskStore for SqliteTaskStore {
             "SELECT t.id, t.title, t.description, t.design, t.acceptance_criteria, t.notes,
              t.status, t.priority, t.task_type, t.assignee, t.labels, t.created_at, t.updated_at,
              t.closed_at, t.close_reason, t.external_ref, t.content_hash, t.branch, t.worktree_id,
-             t.pending_verification, t.pending_worktree_merge, t.epic_verification_owner, t.team_id, t.deliverables, t.demo_statement, t.execution_note, t.share, t.depth, t.terminal_outcome, t.origin_project, t.delivery_mode, t.risk, t.proof_targets
+             t.pending_verification, t.pending_worktree_merge, t.epic_verification_owner, t.team_id, t.deliverables, t.demo_statement, t.execution_note, t.share, t.depth, t.terminal_outcome, t.origin_project, t.delivery_mode, t.risk, t.proof_targets, t.door
              FROM tasks t
              JOIN dependencies d ON d.to_id = t.id
              WHERE d.from_id = ? AND d.dep_type = 'parent-child' AND t.task_type = 'epic'

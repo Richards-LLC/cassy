@@ -44,7 +44,7 @@ Run one pass per epic when any child has a non-empty `demo_statement`:
    If the assembled tip changes, the receipt is stale: reject it and report the
    mismatch and owed work; do not silently rerun this once-per-epic pass.
 
-### Example epic note
+## Example epic note
 
 Illustrative receipt, not proof of an actual run:
 

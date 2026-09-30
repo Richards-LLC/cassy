@@ -2048,6 +2048,7 @@ impl CasService {
                     priority: 1,
                     task_type: "bug".to_owned(),
                     risk: Some("none".to_owned()),
+                    door: None,
                     proof_targets: None,
                     supervisor_override: None,
                     reason: None,
@@ -6391,6 +6392,14 @@ impl CasService {
             &self.inner.cas_root,
             &subtasks,
         ));
+
+        let project_tasks = task_store.list(None).map_err(|error| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to list encode chores: {error}"),
+            )
+        })?;
+        report.push_str(&crate::mcp::tools::core::rules::render_pending_encode_chores(&project_tasks));
 
         Ok(Self::success(report))
     }
@@ -13149,11 +13158,7 @@ effort = "high"
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         );
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            stdout.contains(CHILD_TEST) && stdout.contains("test result: ok"),
-            "isolated helper did not execute the real probe assertions:\n{stdout}"
-        );
+        crate::test_child::assert_passed(&String::from_utf8_lossy(&output.stdout), CHILD_TEST);
     }
 
     #[test]
@@ -13231,6 +13236,7 @@ effort = "high"
     /// daemon heartbeat tick is tuned against it, so a silent change here
     /// would desync the prune window from the UX text.
     #[test]
+    // pin: Heartbeat stale/dead windows are the scheduler and displayed heartbeat-age compatibility policy.
     fn worker_stale_secs_is_pinned_at_30() {
         assert_eq!(WORKER_STALE_SECS, 30);
     }
@@ -13240,6 +13246,7 @@ effort = "high"
     /// jitter and missed ticks do not produce false-positive [DEAD] labels.
     /// Bumping this silently would regress the cas-8240 fix.
     #[test]
+    // pin: Heartbeat stale/dead windows are the scheduler and displayed heartbeat-age compatibility policy.
     fn worker_dead_secs_is_pinned_at_75() {
         assert_eq!(WORKER_DEAD_SECS, 75);
     }

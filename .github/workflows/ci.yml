@@ -103,6 +103,19 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
+      - name: Run no-build release gate rows
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/factory/')
+        env:
+          BASE_SHA: ${{ github.event.before }}
+          ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
+        run: |
+          npm install --global markdownlint-cli2@0.18.1 --no-audit --no-fund
+          comparison_base="$BASE_SHA"
+          if [[ -z "$comparison_base" || "$comparison_base" =~ ^0+$ ]]; then
+            comparison_base="$ZERO_BASE_REF"
+          fi
+          ./scripts/release-gate.sh --fast-rows --base "$comparison_base"
+
       - name: Markdown lint
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
@@ -307,6 +320,19 @@ jobs:
           base-sha: ${{ github.event.before }}
           zero-base-ref: origin/${{ github.event.repository.default_branch }}
 
+      # This cheap step runs even when builds route to the full tier or a PR.
+      - name: Run no-build release gate rows
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
+        run: |
+          npm install --global markdownlint-cli2@0.18.1 --no-audit --no-fund
+          comparison_base="$BASE_SHA"
+          if [[ -z "$comparison_base" || "$comparison_base" =~ ^0+$ ]]; then
+            comparison_base="$ZERO_BASE_REF"
+          fi
+          ./scripts/release-gate.sh --fast-rows --base "$comparison_base"
+
       - name: Report full-tier routing
         if: steps.classify-diff.outputs.fast-admission != 'true'
         env:
@@ -448,6 +474,21 @@ jobs:
           # main. Compare the complete branch diff against the protected base;
           # tags and every other uncertain event still fail closed.
           zero-base-ref: origin/${{ github.event.repository.default_branch }}
+
+      # Every factory push is already admitted in the fast job, independently
+      # of build routing and PR deduplication. This copy serves scoped PRs.
+      - name: Run no-build release gate rows
+        if: github.event_name != 'push'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
+        run: |
+          npm install --global markdownlint-cli2@0.18.1 --no-audit --no-fund
+          comparison_base="$BASE_SHA"
+          if [[ -z "$comparison_base" || "$comparison_base" =~ ^0+$ ]]; then
+            comparison_base="$ZERO_BASE_REF"
+          fi
+          ./scripts/release-gate.sh --fast-rows --base "$comparison_base"
 
       - name: Test portable installer fixtures
         if: >-

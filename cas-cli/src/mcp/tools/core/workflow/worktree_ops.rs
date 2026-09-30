@@ -846,6 +846,7 @@ fn protected_default_branch_pr_error(
     source_branch: &str,
     target_branch: &str,
     outcome: &crate::worktree::git::TargetPushOutcome,
+    task_id: Option<&str>,
 ) -> Option<String> {
     use crate::worktree::git::TargetPushOutcome;
 
@@ -858,6 +859,7 @@ fn protected_default_branch_pr_error(
         return None;
     };
     let remote = remote_sha.as_deref().map(short_sha).unwrap_or("unresolved");
+    let task_flag = task_id.map(|id| format!(" --task {id}")).unwrap_or_default();
 
     Some(format!(
         "PROTECTED_DEFAULT_BRANCH_REQUIRES_PR\n\n\
@@ -867,11 +869,12 @@ fn protected_default_branch_pr_error(
          cannot satisfy this ruleset. Use the source branch for the PR route.\n\n\
          Run these commands from the repository root:\n\
          1. `git push -u origin {source_branch}`\n\
-         2. `PR_URL=$(gh pr create --base {target_branch} --head {source_branch} --fill)`\n\
-         3. `gh pr view \"$PR_URL\" --json url,number,statusCheckRollup`\n\
-         4. Surface that PR URL and required-check status to the supervisor.\n\
-         5. After the required checks are green: `gh pr merge \"$PR_URL\" --merge`\n\
-         6. `git fetch origin {target_branch}`, then retry this `worktree_merge` so Cassy \
+         2. `cas worktree pr-body{task_flag} --base origin/{target_branch} --head {source_branch} --output pr-body.md`\n\
+         3. `PR_URL=$(gh pr create --base {target_branch} --head {source_branch} --title \"Review {source_branch}\" --body-file pr-body.md)`\n\
+         4. `gh pr view \"$PR_URL\" --json url,number,statusCheckRollup`\n\
+         5. Surface that PR URL and required-check status to the supervisor.\n\
+         6. After the required checks are green: `gh pr merge \"$PR_URL\" --merge`\n\
+         7. `git fetch origin {target_branch}`, then retry this `worktree_merge` so Cassy \
          can reconcile and close the delivery.\n\n\
          GitHub evidence:\n{reason}",
         short_sha(sha)
@@ -3444,6 +3447,7 @@ impl CasCore {
                 &receipt.source_branch,
                 &receipt.target_branch,
                 &push_outcome,
+                task_id,
             ) {
                 return Ok(Self::tool_error(format!("{ci_prefix}{error}")));
             }
@@ -3572,9 +3576,12 @@ impl CasCore {
             let outcome = manager.git().publish_branch_to_origin(&branch);
             (branch, outcome)
         });
-        if let Some(error) =
-            protected_default_branch_pr_error(&worktree.branch, &push_branch, &push_outcome)
-        {
+        if let Some(error) = protected_default_branch_pr_error(
+            &worktree.branch,
+            &push_branch,
+            &push_outcome,
+            task_id,
+        ) {
             return Ok(Self::tool_error(format!("{ci_prefix}{error}")));
         }
         let push_note = describe_target_push_state(&push_branch, &push_outcome);
@@ -4273,6 +4280,7 @@ mod tests {
                     "remote: error: GH013: Repository rule violations found for refs/heads/main."
                         .to_string(),
             },
+            Some("cas-fixture"),
         )
         .expect("protected branch must produce a typed PR handoff");
 
@@ -4285,7 +4293,8 @@ mod tests {
             "{error}"
         );
         assert!(
-            error.contains("gh pr create --base main --head factory/warm-cheetah-6 --fill"),
+            error.contains("--body-file pr-body.md")
+                && error.contains("cas worktree pr-body --task cas-fixture --base origin/main"),
             "{error}"
         );
         assert!(error.contains("statusCheckRollup"), "{error}");

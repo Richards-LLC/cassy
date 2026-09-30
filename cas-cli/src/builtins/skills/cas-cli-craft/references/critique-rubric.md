@@ -51,6 +51,6 @@ Any of these sets the whole score to 0 until fixed; the gate detects each one:
 - One paragraph per warning, repeated per instance → fit 2, craft 2.
 - Every healthy check on its own row → fit 3.
 - Whole-line status colour → theme safety 1 (and usually a contrast zero on light).
-- Right-aligned labels with left-aligned values (`        Project: …`) → craft 2.
+- Right-aligned labels with left-aligned values (padded like `Project: …` under longer labels) → craft 2.
 - Sentence that describes a command instead of printing it → hierarchy 3.
 - Banner or progress on stdout under `--json` → machine contract 1 (zero).

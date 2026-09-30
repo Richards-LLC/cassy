@@ -62,6 +62,10 @@ path.write_text(path.read_text().replace("scratch = clone_scratch(os.environ)",
     "scratch = Path(os.environ['CAS_RELEASE_GATE_HOME_DIR']).resolve()"))
 PY_SCRATCH
     cp "$script_dir/release-portable.sh" "$repo/scripts/release-portable.sh"
+    # Real defects in the new rows are covered by test-fast-release-rows.py.
+    for helper in cas-test-targets check-changed-markdown check-test-shape check-test-env check-builtin-doc-hygiene check-builtin-contract-phrases; do
+        printf '#!/usr/bin/env python3\n' >"$repo/scripts/$helper.py"
+    done
     cp "$script_dir/check-workflow-run-interpolation.py" "$repo/scripts/check-workflow-run-interpolation.py"
     cat > "$repo/.github/workflows/release.yml" <<'EOF'
 jobs:
@@ -284,7 +288,7 @@ assert_all_pass() {
     local output="$1"
     for name in scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config assemble-stale-base \
         version-literals fixture-paths workspace-tests macos-check nextest doctests archive-mode snapshot-portability \
-        builtin-projections changelog-and-versions release-script release-notes-shell-injection procedure-guardrails working-tree \
+        builtin-projections changelog-and-versions release-script release-notes-shell-injection procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene \
         hub-web-dist-drift hub-web-visual-qa; do
         if ! grep -qF "PASS $name" <<<"$output"; then
             bad "passing fixture omitted PASS $name"
@@ -1066,7 +1070,8 @@ repo="$(new_fixture row-cache)"
 export CAS_RELEASE_GATE_CACHE_DIR="$tmp/pass-cache"
 export CAS_RELEASE_GATE_LOG_DIR="$tmp/row-logs"
 run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 >"$tmp/cache-first.log" 2>&1 || { cat "$tmp/cache-first.log"; exit 1; }
-if [[ "$(wc -l <"$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 23 ]] \
+expected_timing_rows=$(( $(grep -c '^PASS ' "$tmp/cache-first.log") + 1 ))
+if [[ "$(wc -l <"$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == "$expected_timing_rows" ]] \
     && [[ -s "$CAS_RELEASE_GATE_LOG_DIR/archive-mode.log" ]] \
     && grep -qE '^  timing: wall=[0-9]+\.[0-9]+s user=' "$tmp/cache-first.log"; then
     ok 'every row retains wall/CPU timing and successful raw logs'

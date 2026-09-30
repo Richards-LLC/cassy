@@ -400,6 +400,7 @@ mod tests {
             demo_statement: None,
             execution_note: None,
             risk: None,
+            door: None,
             proof_targets: None,
             external_ref: None,
             assignee: None,

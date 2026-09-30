@@ -1719,8 +1719,37 @@ impl CasService {
                             ) {
                                 message = format!("{hold}\n\n{message}");
                             }
+                            let review = crate::review_body::delivery_body(
+                                &repo.repo_root,
+                                Some(&task),
+                                &target_tip,
+                                &branch_tip,
+                                None,
+                                None,
+                                None,
+                            )
+                            .unwrap_or_else(|error| {
+                                // A missing merge base does not disable the existing
+                                // typed request: still show authoritative task metadata.
+                                crate::review_body::ReviewBody {
+                                    summary: &format!(
+                                        "```text\n{} -> {}\n```",
+                                        target_tip, branch_tip
+                                    ),
+                                    before: "Baseline behavior run not supplied.",
+                                    after: "Changed behavior run not supplied.",
+                                    evidence: &crate::review_body::task_evidence(&task),
+                                    details: &format!("\nGit comparison unavailable: {error}\n"),
+                                    risk: &crate::review_body::task_risk(&task),
+                                    door: &task
+                                        .door
+                                        .map(|door| door.to_string())
+                                        .unwrap_or_else(|| "not declared".into()),
+                                }
+                                .render()
+                            });
                             message = attach_merge_request_envelope(
-                                &message,
+                                &format!("{message}\n\n{review}"),
                                 &MergeRequestEnvelope {
                                     task_id: task.id,
                                     // Live tip; the anchor rides along only
@@ -3901,6 +3930,7 @@ mod cas99d2_redelivery_tests {
     /// The marker must match the token the daemon's teams-inbox writer already
     /// recognises as an intentional redelivery, so the two channels agree.
     #[test]
+    // pin: The inbox producer and teams redelivery consumer exchange this exact wire token.
     fn the_marker_matches_the_teams_inbox_redelivery_token() {
         assert_eq!(INBOX_REDELIVERY_MARKER, "[redelivery]");
     }
@@ -4134,6 +4164,31 @@ mod cas_89e1_post_merge_message_type_tests {
             implicit_response.contains("No merge request was queued"),
             "implicit request must not target parked A: {implicit_response}"
         );
+
+        // Real MCP -> Git/store -> queue boundary: recorded review metadata
+        // is human text beside the unchanged immutable merge envelope.
+        task_b.status = TaskStatus::AwaitingMerge;
+        task_b.risk = vec![cas_types::TaskRisk::Concurrency];
+        task_b.door = Some(cas_types::TaskDoor::TwoWay);
+        task_b.notes = "qa-bundle: /proof/task-b/qa/bundle.json".into();
+        task_b.deliverables.work_target = task.deliverables.work_target.clone();
+        task_b.deliverables.parked_branch = Some("factory/worker-a".into());
+        tasks.update(&task_b).expect("park B with metadata");
+        let mut request = message_request(true);
+        request.task_id = Some(task_b.id.clone());
+        let response = response_text(service.message_send(request).await.expect("fresh B request"));
+        assert!(response.contains("Message queued"), "{response}");
+        let rows = crate::store::open_prompt_queue_store(&cas_root).unwrap().poll_all(10).unwrap();
+        let (row, envelope) = rows.iter().find_map(|row| {
+            let envelope = crate::prompt_revalidation::parse_merge_request_envelope(&row.prompt)?;
+            (envelope.task_id == task_b.id).then_some((row, envelope))
+        }).expect("B's typed request reaches queue");
+        assert_eq!(envelope.target_branch, "main");
+        assert!(row.prompt.contains("Fresh worker delivery; please merge the branch."));
+        assert!(row.prompt.contains("**Risk:** concurrency"));
+        assert!(row.prompt.contains("**Door:** two-way"));
+        assert!(row.prompt.contains("/proof/task-b/qa/bundle.json"));
+        assert!(row.prompt.contains("A\ttask-b.txt"));
     }
 
     /// GH #734: a worker in one factory session must not inherit the newest
@@ -4272,7 +4327,7 @@ mod cas_89e1_post_merge_message_type_tests {
         assert!(
             error
                 .message
-                .contains("[factory] artifacts_root/cas-449b/<name>.md"),
+                .contains("[factory] artifacts_root/<project-key>/cas-449b/<name>.md"),
             "{error:?}"
         );
 
@@ -4333,8 +4388,10 @@ mod cas_89e1_post_merge_message_type_tests {
             .await
             .expect("an over-cap supervisor message is delivered, not refused");
 
-        let spilled: Vec<_> = std::fs::read_dir(artifacts.join("cas-6ee6"))
-            .expect("spill directory under artifacts_root/<task>")
+        let spilled: Vec<_> = std::fs::read_dir(
+            crate::config::project_factory_artifacts_root(&cas_root, &artifacts).join("cas-6ee6"),
+        )
+        .expect("spill directory under artifacts_root/<project-key>/<task>")
             .map(|entry| entry.unwrap().path())
             .collect();
         assert_eq!(spilled.len(), 1, "{spilled:?}");

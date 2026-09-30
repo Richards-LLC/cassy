@@ -20,6 +20,7 @@ async fn create_task(service: &cas::mcp::CasCore, title: &str) -> String {
         priority: 2,
         task_type: "task".to_string(),
         risk: Some("none".to_string()),
+        door: None,
         proof_targets: None,
         supervisor_override: None,
         reason: None,

@@ -193,6 +193,19 @@ for job in scoped-validation-fast scoped-validation fast-validation-runner-route
         "$job skips docs-only diffs before allocating its full-tier work"
 done
 
+require_text "$(<"$makefile")" 'python3 scripts/test-fast-release-rows.py' 'Fast Validation exercises lane admission defects and preview cleanup'
+
+# Cheap deterministic release checks ride existing jobs, including docs-only
+# factory pushes; operator-owned required contexts remain unchanged.
+for job in scoped-validation-fast scoped-validation docs-lint; do
+    step="$(named_step_block "$(job_block "$job")" 'Run no-build release gate rows')"
+    require_text "$step" './scripts/release-gate.sh --fast-rows --base "$comparison_base"' "$job admits the no-build gate rows"
+    require_text "$step" 'npm install --global markdownlint-cli2@0.18.1 --no-audit --no-fund' "$job provisions the pinned docs linter before admission"
+    require_text "$step" 'BASE_SHA:' "$job compares committed lane docs with its base"
+    require_absent "$step" 'cargo ' "$job fast gate adds no Cargo work"
+    require_absent "$step" 'continue-on-error' "$job fast gate fails closed"
+done
+
 # Self-hosted pilot security contract (cas-f5638). This repo is public, so
 # fork/untrusted PR code must be unable to request the persistent runner. The
 # old push-only pilot remains advisory; the merge-queue route below is the only

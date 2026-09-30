@@ -17,7 +17,7 @@ Spawn workers based on independent file groups, not task count.
 2. Group tasks touching the same files into one lane (prevents conflicts)
 3. Workers needed = number of parallel lanes
 
-```
+```text
 # 8 tasks, but only 2 independent file groups → 2 workers, not 8
 workers = min(tasks_without_file_overlap, tasks_at_same_dependency_level)
 ```
@@ -27,7 +27,8 @@ In shared mode, file-overlap analysis is even more critical — two workers edit
 ## Phase 1: Plan
 
 1. Search before planning — check all three sources for prior art:
-   ```
+
+   ```text
    # Similar past EPICs (patterns, sizing, what worked)
    task action=list task_type=epic status=closed
 
@@ -37,6 +38,7 @@ In shared mode, file-overlap analysis is even more critical — two workers edit
    # Codebase for existing implementations you might duplicate or conflict with
    Grep pattern="<feature-name>" or search action=search query="<keywords>" doc_type=code
    ```
+
 2. Create EPIC: `task action=create task_type=epic title="..." description="..."`
 3. Gather the EPIC specification and task breakdown through the supervisor's task/spec workflow.
 4. Review task scope and dependencies
@@ -46,7 +48,7 @@ tasks. When an epic has closed and one loose task turns up — a follow-up, a la
 one-off — do NOT create a single-child epic to satisfy the spawn gate. Create the task and
 spawn straight onto it:
 
-```
+```text
 task action=create title="..." description="..." risk=none
 factory action=spawn_workers count=1 isolate=true cli=codex model=gpt-6.1-sol effort=high task_id=<task-id>
 ```
@@ -78,7 +80,8 @@ goes through the [retry policy](worker-recovery.md#retry-policy-by-failure-mode)
 ## Phase 2: Coordinate
 
 1. Spawn workers:
-   ```
+
+   ```text
    factory action=spawn_workers count=N isolate=true cli=codex model=gpt-6.1-sol effort=high
    ```
 
@@ -99,6 +102,8 @@ goes through the [retry policy](worker-recovery.md#retry-policy-by-failure-mode)
 
    **Tiered mix example** — the explicit recipe for each active registry lane:
 
+<!-- Generated recipes retain their generator-owned fence formatting. -->
+<!-- markdownlint-disable MD031 MD040 -->
 <!-- BEGIN GENERATED SPAWN RECIPES: cas-factory lane registry -->
 Copy-paste commands generated from the registry; every recipe pins `cli`, `model`, and `effort`:
 
@@ -120,6 +125,7 @@ factory action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5
 
 ```
 <!-- END GENERATED SPAWN RECIPES -->
+<!-- markdownlint-enable MD031 MD040 -->
    Spawn the tier mix the ready backlog needs — one `spawn_workers` call per tier.
    Full parameter table in [reference.md](reference.md).
    **Build-load guard:** `spawn_workers` measures the one-minute host load and
@@ -134,11 +140,14 @@ factory action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5
 3. Assign tasks: `task action=update id=<id> assignee=<worker>`
 4. Pin epic focus so the TUI shows it immediately: `factory action=focus_epic id=<epic-id>`. Without this, the TASKS/FACTORY panels stay empty until a worker's first `task action=start` on a subtask lets the panel infer the epic — and inference only fires once that subtask's `assignee` matches a live session agent (workers now get this for free: `task action=start` sets `assignee` automatically when unset, cas-6945). Clear with `action=focus_epic clear=true` when the epic wraps.
 5. Search for relevant context and send assignment message:
-   ```
+
+   ```text
    coordination action=message target=<worker> \
      summary="Task <id> assignment" \
      message="Task <id>: <description>. Context: <findings>. Run task action=mine to see your tasks."
    ```
+
+<!-- markdownlint-disable-next-line MD029 -->
 6. **Own the next exit rung.** If a worker owns it, use inbox updates on the next turn; only authenticated typed blocker, merge, verification, or lifecycle events may wake an idle supervisor. If you own a time-based follow-up, schedule one `coordination remind` that names the exact check and when it fires. Do not spin-poll.
 
 ### Resuming an Existing EPIC
@@ -154,7 +163,7 @@ Workers from previous sessions are gone. Stale DB records are not live processes
 
 When workers have isolated worktrees, merge their work into the epic branch after each completion, then tell other workers to sync.
 
-```
+```text
 base branch ────────────────────► (stays clean)
           \                    /
            └─ epic/feature ───►
@@ -171,9 +180,27 @@ leases, and cleanup consistent.
 
 Run the canonical merge-time diff review ([Required merge-review discipline](#required-merge-review-discipline)) before landing each lane.
 
-```
+```text
 factory action=worktree_merge id=<worker> task_id=<task-id>
 ```
+
+Projects shipping `scripts/check-lane-fast-rows.py` run the deterministic
+`release-gate.sh --fast-rows` checks on a detached preview of the combined tree
+before either merge path moves the target. A failed receipt names the row and
+refuses the merge, including with `force=true`. Install
+`markdownlint-cli2@0.18.1` on the supervisor host before merging changed docs;
+the gate downloads no tools and invokes no Cargo commands.
+
+A documented manual Git merge in a project that permits it uses the same
+preflight, from the target checkout immediately before the merge:
+
+```bash
+python3 scripts/check-lane-fast-rows.py . <target-branch> factory/<worker> &&
+  git merge --no-ff factory/<worker>
+```
+
+Run the second command only after the first exits zero. When tracked delivery
+requires `worktree_merge`, use that path so receipts and leases stay consistent.
 
 The default merge preserves the worker checkout for continued work. A later
 `shutdown_workers` may remove that checkout once it is clean and the worker
@@ -234,6 +261,7 @@ merge does not delete a live worker's cwd out from under it. Pass `cleanup=true`
 end-of-lane, once the worker is done with that worktree.
 
 **Worker hits MERGE REQUIRED / `awaiting_merge` (cas-c145):**
+
 1. This is a **push signal**, not optional chat. Drain the merge queue before free-form user replies.
 2. Confirm: `factory action=epic_status id=<focused-epic>` and/or `task action=list status=awaiting_merge`.
    **Implementer evidence gates the park (cas-0cd5).** A user-facing delivery parks
@@ -258,9 +286,11 @@ end-of-lane, once the worker is done with that worktree.
    commit_receipt=<merged sha>`; the waiver is recorded against that commit. A no-code task is
    never gated by independent QA.
 3. Merge into the epic branch:
-   ```
+
+   ```text
    factory action=worktree_merge id=<worker> task_id=<task-id>
    ```
+
    The resolved task and target branch are echoed back — read them before moving on. Push if remote tracking applies.
 4. Message the worker to re-close (`task action=close id=<task-id>`). After merge, normal close/review flow resumes.
 5. Then clear context / hand the worker their next task. Do **not** poll for merge state.
@@ -273,7 +303,7 @@ task with the assignee preserved, so the same worker resumes the rework.
 
 After the epic branch advances, rebase idle or stale worktrees with one call:
 
-```
+```text
 factory action=sync_all_workers branch=epic/<slug>
 ```
 
@@ -315,6 +345,7 @@ gate still run. A green CI run is not a review verdict.
 When workers share the main directory, there's no branch merging — workers commit directly.
 
 **Worker completes a task:**
+
 1. Worker closes their own task
 2. Review their commits
 3. Clear worker context and assign next task
@@ -327,6 +358,7 @@ When workers share the main directory, there's no branch merging — workers com
 - **Stale outbox replays:** Workers may send duplicate stale messages due to outbox replay. Before acting on a blocker notification or status change, check the task's current state with `task action=show` — the message may be outdated.
 
 **Multiple workers complete simultaneously:**
+
 - Merge each parked lane (`worktree_merge`) in one response turn
 - Message each worker to re-close its own task
 - Reassign workers immediately
@@ -353,16 +385,20 @@ When workers share the main directory, there's no branch merging — workers com
    the coordination message only points at the task ID.
 5. After the fix lands, rerun the final assembled-tree gate yourself on the new
    tip, capture the real exit code, and record a fresh `ASSEMBLY_PROOF` for it:
+
    ```bash
    <assembly gate command> > <artifacts_root>/<epic-id>/assembly-gate.log 2>&1; echo $?
    ```
+
    Never pipe the test run to `tail`; that captures the pipe status, not the
    test status.
 6. **Isolated mode only**: every lane already landed on the epic branch in Phase 3, before the gate ran. Once the review loop is clean and the gate exits 0, reclaim each lane's worktree (can be 10GB+ each); this end-of-lane consume is where `cleanup=true` is correct:
-   ```
+
+   ```text
    # One per worker lane — removes the worktree and deletes factory/<worker>
    factory action=worktree_merge id=<worker> task_id=<task-id> cleanup=true
    ```
+
    Then merge the epic branch to base. A standalone task with a declared WorkTarget
    needs no trunk flag. Only a missing-target fallback to trunk needs `allow_trunk=true`;
    its refusal names the destination and its success receipt carries a loud trunk-push warning.

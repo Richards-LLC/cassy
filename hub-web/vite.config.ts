@@ -19,7 +19,8 @@ export default defineConfig({
   define: { __HUB_BUILD__: JSON.stringify(hubBuild) },
   base: "/commander/",
   // Playwright specs live under e2e/ and must not be collected by vitest.
-  test: { exclude: [...configDefaults.exclude, "e2e/**"] },
+  // check-journey-clock.test.mjs uses node:test and runs via `npm run check:journey-clock`.
+  test: { exclude: [...configDefaults.exclude, "e2e/**", "scripts/check-journey-clock.test.mjs"] },
   build: {
     assetsInlineLimit: 0,
     sourcemap: false,

@@ -99,11 +99,21 @@ fn tokens(line: &str) -> Vec<&str> {
         .collect()
 }
 
-// Extensions may retain a line's symbols in the same changed hunk. Never
-// look elsewhere in the file, where a duplicate has different ownership.
-fn retains_line(old: &str, new: &str) -> bool {
+// Only ordinary edits may extend a line's symbols within its changed hunk.
+// A merge must transport exact content, never revive a stale superset.
+fn retains_line(old: &str, new: &str, ordinary: bool) -> bool {
     if old == new {
         return true;
+    }
+    if !ordinary {
+        return false;
+    }
+    // Commenting out executable content is replacement, not retention.
+    if ["//", "/*", "#", "--", "<!--"]
+        .iter()
+        .any(|prefix| new.starts_with(*prefix) && !old.starts_with(*prefix))
+    {
+        return false;
     }
     let old = tokens(old);
     let new = tokens(new);
@@ -166,10 +176,13 @@ fn advance(
                     .added
                     .iter()
                     .enumerate()
-                    .filter(|(_, new)| retains_line(old, new))
+                    .filter(|(_, new)| retains_line(old, new, ordinary))
                     .collect();
-                if let Some((index, _)) = retained.get(occurrence) {
+                if let Some((index, new)) = retained.get(occurrence) {
                     next.positions.push(hunk.new_start + *index);
+                    if old != *new && !next.commits.iter().any(|known| known == commit) {
+                        next.commits.push(commit.to_string());
+                    }
                 } else {
                     // A merge may only transport content from a proven
                     // parent. Its resolution cannot invent ownership.
@@ -178,9 +191,16 @@ fn advance(
                         hunk.added
                             .iter()
                             .any(|line| meaningful(line) && !parents.contains(line))
+                            && !hunk
+                                .added
+                                .iter()
+                                .any(|line| parents.contains(line) && retains_line(old, line, true))
                     });
                     if (!ordinary && !novel_resolution)
-                        || hunk.added.iter().any(|new| retains_line(old, new))
+                        || hunk
+                            .added
+                            .iter()
+                            .any(|new| retains_line(old, new, ordinary))
                     {
                         return None;
                     }
@@ -232,18 +252,18 @@ pub(super) fn line_content_presence(
     target: &str,
     path: &str,
 ) -> Result<Option<super::DeliveryContentPresence>, String> {
-    line_content_presence_with_resolution(repo, parent, delivery, target, path, None)
+    line_content_presence_with_resolutions(repo, parent, delivery, target, path, &[])
 }
 
 /// Only a caller that independently measured a task-owned remerge resolution
-/// may authorize that one merge's novel replacement hunks on this path.
-pub(super) fn line_content_presence_with_resolution(
+/// may authorize those merges' novel replacement hunks on this path.
+pub(super) fn line_content_presence_with_resolutions(
     repo: &Path,
     parent: &str,
     delivery: &str,
     target: &str,
     path: &str,
-    resolution: Option<&str>,
+    resolutions: &[String],
 ) -> Result<Option<super::DeliveryContentPresence>, String> {
     let delivery_commit = super::resolve_branch_sha(repo, &format!("{delivery}^{{commit}}"))
         .ok_or("delivery line anchor does not resolve to a commit")?;
@@ -301,7 +321,7 @@ pub(super) fn line_content_presence_with_resolution(
         let commit = fields[0];
         let ordinary = fields.len() == 2;
         let reverted = is_revert_message(&text(repo, &["show", "-s", "--format=%B", commit])?);
-        let resolution_parent_lines = if resolution == Some(commit) {
+        let resolution_parent_lines = if resolutions.iter().any(|resolution| resolution == commit) {
             let mut lines = std::collections::HashSet::new();
             for prior in fields.iter().skip(1) {
                 let output = Command::new("git")

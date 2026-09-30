@@ -15658,13 +15658,21 @@ fn reanchored_delivery_content_in_parent(
     )
     .ok()?;
 
+    let delivery_parent = resolve_branch_sha(repo_path, &format!("{anchor}^1"))?;
     for integration in candidates {
         // The source anchor need not be an ancestor of its squash commit, so
-        // only a direct present-effect verdict is valid at this first step.
-        if !matches!(
-            delivery_content_presence_on_target(repo_path, anchor, &integration),
-            DeliveryContentPresence::Present { .. }
-        ) {
+        // require its complete exact patch to reverse-apply at the accepted
+        // integration. The ancestry tracer is valid only AFTER re-anchoring.
+        // No file-wide text/token containment fallback can authorize this.
+        if !reverse_delivery_patch_applies_to_tree(
+            repo_path,
+            &delivery_parent,
+            anchor,
+            &integration,
+            None,
+        )
+        .ok()?
+        {
             continue;
         }
         match delivery_content_presence_on_target(repo_path, &integration, &target) {
@@ -18821,8 +18829,25 @@ fn reverse_delivery_path_applies_to_tree(
     target_tree: &str,
     path: &str,
 ) -> Result<bool, String> {
+    reverse_delivery_patch_applies_to_tree(
+        repo_path,
+        delivery_parent,
+        delivery_commit,
+        target_tree,
+        Some(path),
+    )
+}
+
+fn reverse_delivery_patch_applies_to_tree(
+    repo_path: &std::path::Path,
+    delivery_parent: &str,
+    delivery_commit: &str,
+    target_tree: &str,
+    selected_path: Option<&str>,
+) -> Result<bool, String> {
     use std::io::Write as _;
     use std::process::{Command, Stdio};
+    let path = selected_path.unwrap_or("all delivery paths");
 
     let temp = tempfile::tempdir()
         .map_err(|error| format!("failed to create isolated target index: {error}"))?;
@@ -18840,17 +18865,20 @@ fn reverse_delivery_path_applies_to_tree(
         ));
     }
 
-    let patch = Command::new("git")
-        .args([
-            "diff",
-            "--binary",
-            "--full-index",
-            "--no-renames",
-            delivery_parent,
-            delivery_commit,
-            "--",
-            path,
-        ])
+    let mut patch_command = Command::new("git");
+    patch_command.args([
+        "diff",
+        "--binary",
+        "--full-index",
+        "--no-renames",
+        delivery_parent,
+        delivery_commit,
+        "--",
+    ]);
+    if let Some(path) = selected_path {
+        patch_command.arg(path);
+    }
+    let patch = patch_command
         .current_dir(repo_path)
         .output()
         .map_err(|error| format!("failed to render delivery patch for `{path}`: {error}"))?;

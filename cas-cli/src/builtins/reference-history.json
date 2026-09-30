@@ -538,6 +538,9 @@
     "skills/cas-retro/agents/openai.yaml": [
       "ae22908b4640c3106728e0e781930294ebb6f90f3b0897add3ec90f40e0abf79"
     ],
+    "skills/cas-retro/references/release-replay-example.md": [
+      "7a9bff97e94fd3caf9cb0d56ad105991194743f0dcdaf0b0335b13b952adfb7d"
+    ],
     "skills/cas-retro/references/v3.38.0.md": [
       "7a9bff97e94fd3caf9cb0d56ad105991194743f0dcdaf0b0335b13b952adfb7d"
     ],
@@ -1004,6 +1007,7 @@
       "24a5007acb5b5bf6333c6b2772cb50a01f55cbf3a714994d66554c09c1516b1c",
       "25be85c59f68172faf4120f838be15b71962e78e11719ac775ed810465ce1a3a",
       "275e14af4231998b8f6b5dd90e70be240b4cb6f44709c54fe035598bcf1298e3",
+      "282322cdb4f6a62c44ad8a830f8f8e1d19a1f881eaf63655ded07f212bcab22c",
       "28b679167693138f29c872b7f7ad0fac5ffdcae38660330b1ddd84c8e435d6d4",
       "29539dc3001e4210fcd04bc8579a873d5c300384d6075eae347a3cdcc655f4d3",
       "29a4fbd2ae1f25ddfba899738c32687129a644041dad8880372ee23d06107b26",

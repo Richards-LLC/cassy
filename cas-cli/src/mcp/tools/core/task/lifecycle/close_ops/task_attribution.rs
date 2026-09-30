@@ -480,6 +480,10 @@ pub(super) fn merge_tip_content_presence(
         }
     }
 
+    let order = git_text(repo, &["rev-list", "--topo-order", "--reverse", merge_tip])?;
+    let selected: HashSet<_> = commits.into_iter().collect();
+    let mut commits: Vec<String> = order.lines().filter(|commit| selected.contains(*commit)).map(str::to_owned).collect();
+
     let resolution_paths = merge_resolution_paths(repo, merge_tip, identity)?;
     if !resolution_paths.is_empty() {
         commits.push(merge_tip.to_string());

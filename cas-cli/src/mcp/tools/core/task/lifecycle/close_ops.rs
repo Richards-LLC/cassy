@@ -10807,7 +10807,7 @@ fn validated_delivery_drop_review(
             format!("delivery review must name superseding commits: reason=\"{usage}\"")
         })?;
     let origin = format!("origin/{parent}");
-    let target = if git_commit_is_ancestor(repo, anchor, &origin) {
+    let target = if git_ref_exists(repo, &origin) && git_commit_is_ancestor(repo, anchor, &origin) {
         origin
     } else {
         parent.to_string()
@@ -24978,6 +24978,30 @@ mod merge_state_gate_tests {
         let unmerged = head_sha(p);
         assert!(validated_delivery_drop_review(p, &delivery, "main", &paths,
             Some(&format!("reviewed-drop: {unmerged} -- not landed"))).is_err());
+    }
+
+    #[test]
+    fn editing_an_inserted_neighbor_is_not_line_evolution_cas_0930() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        git(p, &["checkout", "main"]);
+        std::fs::write(p.join("work.rs"), "base();\n").unwrap();
+        git(p, &["add", "work.rs"]);
+        git(p, &["commit", "-qm", "baseline"]);
+        git(p, &["checkout", "-B", "factory/worker", "main"]);
+        std::fs::write(p.join("work.rs"), "delivered();\n").unwrap();
+        git(p, &["add", "work.rs"]);
+        git(p, &["commit", "-qm", "cas-test1: delivery"]);
+        let delivery = head_sha(p);
+        git(p, &["checkout", "main"]);
+        git(p, &["merge", "--no-ff", "-s", "ours", "factory/worker", "-m", "drop delivery"]);
+        for content in ["base();\nneighbor();\n", "base();\nnew_neighbor();\n"] {
+            std::fs::write(p.join("work.rs"), content).unwrap();
+            git(p, &["add", "work.rs"]);
+            git(p, &["commit", "-qm", "edit neighbor"]);
+        }
+        assert_eq!(delivery_content_presence_on_target(p, &delivery, "main"),
+            DeliveryContentPresence::Dropped { paths: vec!["work.rs".into()] });
     }
 
     #[test]

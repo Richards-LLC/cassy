@@ -84,7 +84,14 @@ fn project(line: usize, hunks: &[Hunk]) -> Option<usize> {
                 hunk.new_start + (line - hunk.old_start).min(hunk.new_count.saturating_sub(1))
             });
         }
-        if hunk.old_start + hunk.old_count <= line {
+        let precedes_line = if hunk.old_count == 0 {
+            // Zero-length old ranges name the preceding line. An insertion
+            // immediately after this line must not move this line's owner.
+            hunk.old_start < line
+        } else {
+            hunk.old_start + hunk.old_count <= line
+        };
+        if precedes_line {
             offset += hunk.new_count as isize - hunk.old_count as isize;
         }
     }

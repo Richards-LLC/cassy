@@ -24,7 +24,7 @@ the project root, with Playwright available:
 
 ```bash
 npm exec --yes --package=playwright -- node <skills-dir>/cas-ui-craft/scripts/visual-qa.mjs \
-  --strict --artifact-dir <artifacts_root>/<task-id>/visual-qa <artifact-or-url>
+  --strict --artifact-dir <artifacts_root>/<project-key>/<task-id>/visual-qa <artifact-or-url>
 ```
 
 It renders the page headless at 1280×800 and 390×800 in light and dark (add

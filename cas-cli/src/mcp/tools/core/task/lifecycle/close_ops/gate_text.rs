@@ -143,7 +143,7 @@ pub(crate) fn merge_gate_exits_paragraph(task_id: &str, supervisor_prefix: &str)
         "If this is a completed, measured negative result whose delivery must not \
          land, a registered supervisor may close with `{supervisor_prefix}task \
          action=close id={task_id} negative_result=true \
-         negative_result_artifact_path=<absolute-path-under-artifacts_root/{task_id}> \
+         negative_result_artifact_path=<absolute-path-under-artifacts_root/<project-key>/{task_id}> \
          negative_result_reference=<closed-PR-URL-or-branch> reason=\"...\"`. If the \
          supervisor declines the delivery for rework, it runs `{supervisor_prefix}task \
          action=request_changes id={task_id} reason=\"...\"`; only after that verdict \
@@ -482,7 +482,7 @@ mod tests {
 
         let exits = merge_gate_exits_paragraph("cas-m1", "mcp__cs__");
         assert!(exits.contains("`mcp__cs__task action=close id=cas-m1 negative_result=true"));
-        assert!(exits.contains("negative_result_artifact_path=<absolute-path-under-artifacts_root/cas-m1>"));
+        assert!(exits.contains("negative_result_artifact_path=<absolute-path-under-artifacts_root/<project-key>/cas-m1>"));
         assert!(exits.contains("negative_result_reference="));
         assert!(exits.contains("`mcp__cs__task action=request_changes id=cas-m1 reason=\"...\"`"));
     }

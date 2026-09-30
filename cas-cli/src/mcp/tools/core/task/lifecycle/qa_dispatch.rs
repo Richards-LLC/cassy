@@ -794,7 +794,7 @@ impl CasCore {
         location: QaDeliveryLocation<'_>,
     ) -> String {
         let artifacts_root =
-            crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
+            crate::config::project_factory_artifacts_root(&self.cas_root, &crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref()));
         let ledger_dir = round_dir(&artifacts_root, &pass);
         let qa_task_id = match self.create_qa_task(task, &pass, reasons, &ledger_dir, parent_branch) {
             Ok(id) => id,

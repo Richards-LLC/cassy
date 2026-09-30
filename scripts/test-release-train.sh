@@ -1245,6 +1245,8 @@ case "$1 $2" in
   "run list")
     printf '%s\n' '[{"databaseId":4242,"status":"completed","conclusion":"success","headBranch":"v9.99.8","headSha":"'"$(cat "$POST_PUBLICATION_LANDED")"'","createdAt":"2099-01-02T00:00:00Z"}]'
     ;;
+  "release view") printf '2099-01-02T00:15:08Z\n' ;;
+  "api repos"*) printf '{"workflow_runs":[{"id":4242,"created_at":"2099-01-02T00:00:00Z"}]}\n' ;;
   *) exit 2 ;;
 esac
 EOF
@@ -1252,15 +1254,10 @@ chmod +x "$post_publication_gh"
 post_publication_published="$tmp/post-publication-published.sh"
 cat >"$post_publication_published" <<'EOF'
 #!/usr/bin/env bash
-printf 'TAG=%s\nPUBLISHED_AT=2099-01-02T00:01:00Z\n' "$1"
+printf 'TAG=%s\nPUBLISHED_AT=2099-01-02T00:15:08Z\n' "$1"
 EOF
 chmod +x "$post_publication_published"
-post_publication_latency="$tmp/post-publication-latency.sh"
-cat >"$post_publication_latency" <<'EOF'
-#!/usr/bin/env bash
-printf 'TAG=%s\nPUBLISH_LATENCY_SECONDS=60\n' "$1"
-EOF
-chmod +x "$post_publication_latency"
+post_publication_latency="$repo_root/scripts/release-latency-receipt.sh"
 post_publication_landed="$(git -C "$stage_wt" rev-parse HEAD)"
 printf '%s\n' "$post_publication_landed" >"$post_publication_run/landed-main.sha"
 post_publication_stderr="$tmp/post-publication.stderr"
@@ -1268,6 +1265,7 @@ if (
     source "$repo_root/scripts/release-train.d/post-publication.sh"
     cut_has_external_stage() { return 1; }
     version=9.99.8
+    CAS_RELEASE_TRAIN_DATE="$stage_date"
     worktree="$stage_wt"
     run_dir="$post_publication_run"
     script_dir="$repo_root/scripts"
@@ -1281,10 +1279,27 @@ if (
 ) 2>"$post_publication_stderr" && [[ -s "$post_publication_run/release-workflow.json" ]] \
     && [[ -s "$post_publication_run/release-published.receipt" ]] \
     && [[ -s "$post_publication_run/release-latency.receipt" ]] \
+    && grep -qx 'WITHIN_BUDGET=false' "$post_publication_run/release-latency.receipt" \
+    && grep -q '908s; over budget (600s)' "$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md" \
     && ! grep -q 'command not found' "$post_publication_stderr"; then
-    ok 'gap 7: post-publication waits for Release, records both receipts, and has no missing helper'
+    ok 'gap 7: post-publication records an overrun and Dev trailer without blocking'
 else
     bad "gap 7: post-publication did not produce clean workflow/receipt output: $(cat "$post_publication_stderr" 2>/dev/null || true)"
+fi
+
+# Plant old evidence even when the preceding red run emitted no latency.
+[[ -s "$post_publication_run/release-latency.receipt" ]] || \
+    printf 'old measurement\n' >"$post_publication_run/release-latency.receipt"
+if (
+    source "$repo_root/scripts/release-train.d/post-publication.sh"
+    cut_has_external_stage() { return 1; }
+    release_train_post_publication() { return 1; }
+    run_dir="$post_publication_run"
+    cut_stage_post_publication
+); then
+    bad 'post-publication accepted failed measurement with stale nonempty receipts'
+else
+    ok 'post-publication measurement failure remains hard despite stale nonempty receipts'
 fi
 
 # ---------------------------------------------------------------------------
@@ -1882,6 +1897,9 @@ new_cut_fixture() {
       git -c commit.gpgsign=false commit -q --allow-empty -m 'previous release'
       git tag v0.0.0
       mkdir -p scripts cas-cli/src/builtins .context/zig .cas/merge-sweeps
+      # Delivery-target locks are expected assembly bookkeeping; runtime logs
+      # remain visible to the session-discovery dirty-tree regression.
+      printf '.cas/locks/\n' > .gitignore
       printf '# release fixture\n\n## [Unreleased]\n\n- pending\n' > CHANGELOG.md
       if [[ "$include_heading" == 1 ]]; then
           printf '\n## [%s] - %s\n\n- fixture release\n' "$version" "$(date -u +%F)" >> CHANGELOG.md
@@ -2326,6 +2344,9 @@ cat >"$combined_gate" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' gate >>"${CUT_LOG:?}"
+if [[ -n "${COMBINED_GATE_REQUIRE_FILE:-}" && ! -f "$COMBINED_GATE_REQUIRE_FILE" ]]; then
+    exit 18
+fi
 if [[ -n "${COMBINED_GATE_FAIL_MARKER:-}" && ! -e "$COMBINED_GATE_FAIL_MARKER" ]]; then
     : >"$COMBINED_GATE_FAIL_MARKER"
     exit 17
@@ -2468,12 +2489,71 @@ else
         bad "announce blocker receipt contract failed: $announce_blocker_out"
     fi
 fi
+# Another sweep may be pending while this already-published cut announces.
+# Its assembly suffix must stay frozen at the landed release.
+python3 - "$combined_resume_wt/.cas/merge-sweeps/integration.json" <<'PYFIX'
+import json
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+data.update(status='RUNNING', tip='1' * 40)
+path.write_text(json.dumps(data))
+PYFIX
 if run_combined_cut "$combined_resume_version" "$combined_resume_wt" --cut --resume >/dev/null 2>&1 \
     && [[ -s "$combined_resume_dir/stage.host-update.done" ]] \
     && [[ "$(grep -c '^gate$' "$combined_log")" == 3 ]]; then
-    ok '--cut --resume is idempotent after gate and announce blockers'
+    ok '--cut --resume is idempotent after gate and announce blockers despite a newer pending union'
 else
     bad 'final --cut --resume did not finish or reran the gate'
+fi
+
+# A fixed epic advances integration after the first gate fails. Resume must
+# consume it and prepare the release again, retaining its draft.
+refresh_version=9.99.27
+rm -f "$combined_resume_dir/receipts.commit"
+refresh_wt="$(new_combined_cut_fixture integration-refresh "$refresh_version")"
+refresh_dir="$($train "$refresh_version" "$refresh_wt" --print-run-dir)"
+combined_gate_fail_marker=""
+combined_announce_fail_marker=""
+if COMBINED_GATE_REQUIRE_FILE=integration-fixed.txt run_combined_cut "$refresh_version" "$refresh_wt" --cut \
+    >"$tmp/refresh-first.out" 2>&1; then
+    bad 'integration refresh fixture missed its first gate failure'
+elif ! grep -qF 'BLOCKER gate' "$tmp/refresh-first.out"; then
+    bad "integration refresh fixture failed before the gate: $(cat "$tmp/refresh-first.out")"
+fi
+refresh_project="$(basename "$refresh_wt")"
+old_refresh_tip="$(git -C "$refresh_wt" rev-parse "integration/$refresh_project")"
+git -C "$refresh_wt" checkout -qb epic/gate-fix "$old_refresh_tip"
+printf 'fixed gate input\n' >"$refresh_wt/integration-fixed.txt"
+git -C "$refresh_wt" add integration-fixed.txt
+git -C "$refresh_wt" commit -qm 'fix gate on epic'
+new_refresh_tip="$(git -C "$refresh_wt" rev-parse HEAD)"
+git -C "$refresh_wt" update-ref "refs/heads/integration/$refresh_project" "$new_refresh_tip"
+python3 - "$refresh_wt/.cas/merge-sweeps/integration.json" "$new_refresh_tip" <<'PYFIX'
+import json
+from pathlib import Path
+import sys
+path, tip = Path(sys.argv[1]), sys.argv[2]
+data = json.loads(path.read_text())
+data.update(status='PASSED', tip=tip, epics=[{'branch': 'epic/gate-fix', 'tip': tip}])
+path.write_text(json.dumps(data))
+PYFIX
+git -C "$refresh_wt" checkout -q "release/$refresh_version"
+refresh_draft="$refresh_wt/docs/release-notes/2099-01-02-v${refresh_version}-slack.md"
+printf '\nPreserve this release draft edit.\n' >>"$refresh_draft"
+git -C "$refresh_wt" add docs/release-notes
+git -C "$refresh_wt" commit -qm 'keep release docs after gate failure'
+COMBINED_GATE_REQUIRE_FILE=integration-fixed.txt CAS_RELEASE_TRAIN_CUT_STOP_AFTER=gate \
+    run_combined_cut "$refresh_version" "$refresh_wt" --cut --resume >"$tmp/refresh-resume.out" 2>&1 || true
+if grep -qF 'stopped after stage gate' "$tmp/refresh-resume.out" \
+    && git -C "$refresh_wt" merge-base --is-ancestor "$new_refresh_tip" HEAD \
+    && grep -qF 'Preserve this release draft edit.' "$refresh_draft" \
+    && grep -qF 'stage prep: start' "$tmp/refresh-resume.out" \
+    && grep -qF 'stage ledger: start' "$tmp/refresh-resume.out"; then
+    ok 'gate failure resume consumes advanced integration, retains draft and reruns prep/ledger before gating'
+else
+    bad "gate failure resume tested the stale integration tip: $(cat "$tmp/refresh-resume.out")"
 fi
 
 combined_lint_version=9.99.14
@@ -2533,10 +2613,15 @@ git init -q --bare "$tmp/host-remote.git"
 git -C "$host_wt" remote add origin "$tmp/host-remote.git"
 git -C "$host_wt" tag "v$host_version"
 git -C "$host_wt" update-ref refs/remotes/origin/main HEAD
+mkdir -p "$host_wt/.context/zig"
+printf '#!/bin/sh\nexit 0\n' >"$host_wt/.context/zig/zig"
+chmod +x "$host_wt/.context/zig/zig"
 host_cache_stub="$tmp/host-cache"
 cat >"$host_cache_stub" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+[[ "${ZIG:-}" == /* && -x "$ZIG" ]] || { echo 'ZIG missing in refresh env' >&2; exit 13; }
+[[ ! -e .context/zig/zig ]] || { echo 'checkout unexpectedly contains Zig' >&2; exit 14; }
 printf 'head=%s root=%s\n' "$(git rev-parse HEAD)" "$CAS_ROOT" >>"${HOST_CACHE_LOG:?}"
 [[ "${HOST_CACHE_FAIL:-0}" == 0 ]] || { echo 'fixture refresh failed' >&2; exit 12; }
 snapshot=target-fixture-complete
@@ -2555,7 +2640,7 @@ run_host_update() {
     rm -f "$tmp/host-cache.log"
     env CAS_RELEASE_TRAIN_CAS="$host_stub" HOST_STUB_LOG="$tmp/host-stub.log" \
         CAS_RELEASE_TRAIN_WORKER_CACHE_CMD="$host_cache_stub" HOST_CACHE_LOG="$tmp/host-cache.log" \
-        HOST_STUB_EXPECT_VERSION="$host_version" HOST_STUB_BINARY="$host_version" \
+        ZIG= HOST_STUB_EXPECT_VERSION="$host_version" HOST_STUB_BINARY="$host_version" \
         HOST_STUB_HUB="$host_version" HOST_STUB_REFRESH="$host_version" "$@" \
         "$train" "$host_version" "$host_wt" --host-update
 }
@@ -2592,7 +2677,7 @@ if out="$(run_host_update 2>&1)" && [[ "$(host_status)" == PASS ]] \
     && grep -q '"cas_version": "9.99.20"' "$host_run_dir/host-update.json" \
     && grep -q '"snapshot": "target-fixture-complete"' "$host_run_dir/host-update.json" \
     && [[ "$(wc -l <"$tmp/host-cache.log" | tr -d ' ')" == 1 ]]; then
-    ok 'host-update: matching cas, hub and refresh versions pass with host-update.json evidence'
+    ok 'test_release_worker_build_cache: matching versions pass and detached refresh receives resolved ZIG'
 else
     bad "host-update did not pass on a converged host: $out"
 fi
@@ -2622,6 +2707,12 @@ elif [[ "$out" == *'BLOCKER host-update: cas update refresh failed: /srv/broken 
     ok 'host-update: any non-cloud_sync refresh failure blocks'
 else
     bad "host-update migration failure was not named: $out"
+fi
+
+if python3 "$script_dir/test-release-host-update.py" && python3 "$script_dir/test-release-publication-timing.py"; then
+    ok 'publication recovery: detached refresh Zig and receipt-backed Dev trailer fixtures'
+else
+    bad 'publication recovery Zig/trailer fixture suite'
 fi
 
 if python3 "$script_dir/test-release-integration.py"; then

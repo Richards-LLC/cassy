@@ -5987,9 +5987,9 @@ impl CasService {
             .map(|task| task.id)
             .collect();
         let artifact_report = factory_artifact_inventory(
-            crate::config::resolved_factory_artifacts_root(
+            crate::config::project_factory_artifacts_root(&self.inner.cas_root, &crate::config::resolved_factory_artifacts_root(
                 config.factory().artifacts_root.as_deref(),
-            ),
+            )),
             &closed_task_ids,
         );
         let target_cache_report = {
@@ -6733,9 +6733,9 @@ impl CasService {
             .into_iter()
             .map(|task| task.id)
             .collect();
-        let artifact_root = crate::config::resolved_factory_artifacts_root(
+        let artifact_root = crate::config::project_factory_artifacts_root(&self.inner.cas_root, &crate::config::resolved_factory_artifacts_root(
             config.factory().artifacts_root.as_deref(),
-        );
+        ));
         // Durable receipts are deleted only after their task is closed, and
         // only through the same explicit destructive gate as cache reclamation.
         // Unknown directories are inventory-only: an operator must review them.
@@ -7006,6 +7006,10 @@ fn factory_artifact_inventory(
         dry_run: true,
         ..Default::default()
     };
+    if std::fs::symlink_metadata(&inventory.root).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        inventory.error = Some("project artifact namespace must not be a symlink".into());
+        return inventory;
+    }
     let entries = match std::fs::read_dir(&inventory.root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return inventory,
@@ -7016,7 +7020,7 @@ fn factory_artifact_inventory(
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.is_dir() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -17787,5 +17791,36 @@ mod sync_safety_tests {
             line.contains("abc123def456"),
             "the stash ref must ride along: {line}"
         );
+    }
+}
+
+#[cfg(test)]
+mod artifact_project_scope_tests {
+    use super::*;
+
+    #[test]
+    fn cleanup_never_claims_another_projects_same_task_or_legacy_evidence_cas_6ebf() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().join("artifacts");
+        let a = temp.path().join("one/project/.cas");
+        let b = temp.path().join("two/project/.cas");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let a_root = crate::config::project_factory_artifacts_root(&a, &base);
+        let b_root = crate::config::project_factory_artifacts_root(&b, &base);
+        for dir in [
+            a_root.join("cas-a4b1"),
+            b_root.join("cas-a4b1"),
+            base.join("cas-a4b1"),
+        ] {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("proof.md"), "evidence").unwrap();
+        }
+        let closed = ["cas-a4b1".to_string()].into_iter().collect();
+        let report = factory_artifact_cleanup(&a_root, &closed, true);
+        assert_eq!(report.removed, 1);
+        assert!(!a_root.join("cas-a4b1").exists());
+        assert!(b_root.join("cas-a4b1/proof.md").is_file());
+        assert!(base.join("cas-a4b1/proof.md").is_file());
     }
 }

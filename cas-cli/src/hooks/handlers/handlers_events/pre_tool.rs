@@ -343,16 +343,19 @@ pub fn handle_pre_tool_use(
     // a root for the hook invocation, but it must not bypass the workspace
     // contract. The normal guard below can read the registered checkout and
     // configured roots from Cassy's stores; this fallback uses the bootstrap
-    // `CAS_CLONE_PATH` binding and the default artifacts root so an isolated
+    // `CAS_CLONE_PATH` binding without granting a shared artifact base, so an isolated
     // worker cannot write into the primary checkout on the cas_root=None path.
     // ========================================================================
     if cas_root.is_none() && is_factory_agent {
         let worktree_root = std::env::var_os("CAS_CLONE_PATH")
             .filter(|value| !value.is_empty())
             .map(std::path::PathBuf::from);
+        // Without a store identity, sanction only the bound worktree and
+        // harness scratchpad; the shared artifact base is not a write root.
+        let artifacts_root = Some(worktree_root.as_deref().unwrap_or(Path::new(&input.cwd)).display().to_string());
         if let Some(violation) = factory_write_violation(
             input,
-            &None,
+            &artifacts_root,
             None,
             crate::harness_policy::is_supervisor(input),
             worktree_root.as_deref(),
@@ -362,7 +365,7 @@ pub fn handle_pre_tool_use(
                 &factory_workspace_contract_denial(
                     input,
                     &violation,
-                    None,
+                    artifacts_root.as_deref(),
                     None,
                     worktree_root.as_deref(),
                 ),
@@ -436,6 +439,16 @@ pub fn handle_pre_tool_use(
                     .and_then(|staging| staging.scratch_root.clone()),
             )
         };
+        let mut artifacts_root = Some(crate::config::project_factory_artifacts_root(
+            cas_root, &crate::config::resolved_factory_artifacts_root(artifacts_root.as_deref())
+        ).display().to_string());
+        if artifacts_root.as_deref().is_some_and(|root| {
+            std::fs::symlink_metadata(root).is_ok_and(|metadata| metadata.file_type().is_symlink())
+        }) {
+            // An aliased namespace must not authorize writes to its target.
+            // Leave worktree operations and historical reads available.
+            artifacts_root = Some(registered_worktree.as_deref().unwrap_or(Path::new(&input.cwd)).display().to_string());
+        }
         if let Some(violation) = factory_write_violation(
             input,
             &artifacts_root,

@@ -1893,7 +1893,7 @@
       ],
       "contains": [
         {
-          "text": "~/.cas/artifacts/<task-id>/qa/",
+          "text": "~/.cas/artifacts/<project-key>/<task-id>/qa/",
           "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas qa craft."
         },
         {

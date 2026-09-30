@@ -342,7 +342,7 @@ run_check() {
     if [[ -z "$only_rows" && "$name" =~ ^(nextest|archive-mode)$ \
         && -f "$repo_root/scripts/assembly-proof.py" ]]; then
         local assembly_pass=''
-        if assembly_pass="$(python3 "$repo_root/scripts/assembly-proof.py" check "$repo_root")"; then
+        if assembly_pass="$(python3 "$repo_root/scripts/assembly-proof.py" check "$repo_root" 2>&1)"; then
             source_sha="$(sed -n 's/.*source_sha=\([0-9a-f]*\).*/\1/p' <<<"$assembly_pass")"
             print_result PASS "$name" "$command"
             printf '  reused %s\n' "$assembly_pass"
@@ -354,6 +354,9 @@ run_check() {
             fi
             return 0
         fi
+        printf '  %s\n' "$assembly_pass"
+    elif [[ -z "$only_rows" && "$name" =~ ^(nextest|archive-mode)$ ]]; then
+        printf '  MISS assembly key=implementation reason=helper_missing\n'
     fi
     key="$(row_cache_key "$name" || true)"
     env_fingerprint="$(cache_environment)"

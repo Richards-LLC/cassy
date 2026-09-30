@@ -33,7 +33,7 @@ from the close verifier or substitute the children's ledgers for the epic walk.
 
 ### Step 0A: Apply the QA evidence gate before any judgment
 
-1. Locate `~/.cas/artifacts/<task-id>/LEDGER.md`. The task notes and eventual
+1. Locate `~/.cas/artifacts/<project-key>/<task-id>/LEDGER.md`. The task notes and eventual
    close reason should cite this same path; do not use a close reason as a
    substitute for the ledger. If the file is absent, reject with this exact
    summary: `QA evidence required: task has a demo_statement but no LEDGER.md`.
@@ -92,7 +92,7 @@ count, rate), with or without a demo:
 1. Restate it as a check that could fail: metric, command, threshold.
 2. Require a baseline run on the delivery base and a treatment run on the
    delivery, from the same command with the same inputs, both pasted in task
-   notes or saved under `~/.cas/artifacts/<task-id>/`. Different commands, a
+   notes or saved under `~/.cas/artifacts/<project-key>/<task-id>/`. Different commands, a
    missing baseline, or a remembered one make the delta unattributable.
 3. Record one line per claim in the verification summary: `VERIFIED` (the
    pair shows the claimed delta), `NOT VERIFIED` (no pair; name what is

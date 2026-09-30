@@ -15,6 +15,11 @@ storage; it competes with every session on the host. For live inspection use a
 read-only URI such as `file:/abs/path/to/.cas/cas.db?mode=ro`, never unrestricted
 SQLite access. Workers do not edit the shared database directly.
 
+The task artifacts directory is `[factory] artifacts_root/<project-key>/<task-id>/`;
+the assignment brief prints the exact path. Leave historical flat
+`<base>/<task-id>/` evidence in place: it stays readable, and its project
+ownership may be ambiguous.
+
 ## Requested sync
 
 Checkpoint dirty work as a commit, then `git rebase <branch>` onto the exact

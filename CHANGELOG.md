@@ -7,6 +7,64 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.39.0] - 2026-09-30
+
+### Added
+
+- Factory workers can run targeted Rust tests for their change:
+  `cargo nextest run -p <crate> [--lib|--test <harness>] -E 'test(name)'`,
+  one package with a named filter, through the same capped runner as
+  `cargo check`. Zero matched tests fail, and a clean-commit receipt records
+  the result. The full suite stays with epic assembly.
+- Two-axis review in shadow mode: separate Spec and Standards reviewers each
+  commit their own fixes on side refs and cross-check the other axis. Only the
+  supervisor can start, show or apply a review round, and no merge gate reads
+  its verdicts yet.
+- `CODING_STANDARDS.md`, read only by review: judgement calls, test standards
+  and a code-smell baseline.
+- The `cas-retro` skill runs an environment retrospective after a release and
+  files tasks. The `cas-improve-architecture` skill reports module-deepening
+  candidates.
+- Pull-request and merge-request bodies carry a Summary visual, before/after
+  Evidence and a Merge Danger section that shows the task's risk and an
+  optional recorded `door` (one-way or two-way). No merge policy reads `door`.
+- The no-build release-gate rows run at every lane merge and in Scoped
+  Validation, including a test-shape lint for tests that restate constants or
+  read source as text, and a builtin hygiene check shared with the Rust tests.
+- A release is complete only after the published binary and a clean install
+  prove it contains every change merged to main since the previous release.
+  An explicit announcement embargo holds Slack posts without holding
+  publication.
+
+### Changed
+
+- The worker prompt, worker skill and `AGENTS.md` are roughly half their
+  previous length; branch-only material moved behind pointers and every
+  protected guardrail stays.
+- A mechanical rule files its "encode as check" task on first occurrence;
+  judgement rules still need two sources.
+- Skill-text tests assert one registry of reasoned contract phrases instead of
+  scattered wording pins, so skills can be reworded without breaking tests.
+- The TDD, codebase-design, writing-for-agents and diagnosing-bugs skills
+  gain material from mattpocock/skills v1.3 (MIT), including design-it-twice
+  and a human-in-the-loop repro template.
+
+### Fixed
+
+- The release gate reuses a matching assembly proof, and a miss names the
+  first differing input.
+- A publication that exceeds the latency budget is recorded, not blocked, and
+  the worker build-cache refresh receives Zig.
+- `--cut --resume` after a gate failure fixed on the epic re-assembles instead
+  of re-gating the stale tip.
+- The assembly proof refuses a scratch root under a disposable directory.
+- Durable task artifacts are namespaced per project.
+- `proof_targets` given as a JSON array are parsed correctly, and stored
+  legacy fragments are normalised once.
+- A cloud team pull no longer moves a parked task backwards in its lifecycle.
+- Worker-check locks no longer leak into a compiler-cache daemon.
+- Re-launched child tests and the web test runners fail when zero tests ran.
+
 ## [3.38.0] - 2026-09-29
 
 ### Changed

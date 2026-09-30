@@ -625,6 +625,12 @@ pub(super) fn merge_tip_content_presence(
             cycle.push(commit.to_string());
         }
     }
+    #[cfg(test)]
+    if identity.task_id.as_deref() == Some("cas-3400") {
+        eprintln!(
+            "[DEBUG-cas-0930] cycle tip={merge_tip} window={window:?} selected={commits:?} cycle={cycle:?}"
+        );
+    }
     if commits.is_empty() && resolutions.is_empty() {
         return None;
     }
@@ -738,6 +744,13 @@ pub(super) fn merge_tip_content_presence(
                     } else {
                         Ok(None)
                     };
+                    #[cfg(test)]
+                    if identity.task_id.as_deref() == Some("cas-3400") || path == "copy.txt" {
+                        eprintln!(
+                            "[DEBUG-cas-0930] draft owner={commit} path={path} final_resolution={final_resolution_proven} final_ordinary={final_ordinary_proven} in_cycle={} authorized={authorized:?} proof={proof:?}",
+                            cycle.contains(commit)
+                        );
+                    }
                     match proof {
                         Ok(Some(DeliveryContentPresence::Superseded { paths, commits })) => {
                             append_unique(&mut superseded_paths, paths);
@@ -1208,10 +1221,18 @@ mod tests {
         let mut window = window();
         window.identity.known_commits.push(handoff.clone());
         let retirement = git(dir.path(), &["rev-parse", &format!("{handoff}^1^1")]);
+        let observed = merge_tip_content_presence(
+            dir.path(),
+            "main",
+            &handoff,
+            Some(&window),
+            &window.identity,
+            None,
+        );
         assert!(
-            matches!(merge_tip_content_presence(dir.path(), "main", &handoff,
-            Some(&window), &window.identity, None), Some(DeliveryContentPresence::Superseded { commits, .. })
-            if commits.contains(&retirement) && commits.contains(&handoff))
+            matches!(&observed, Some(DeliveryContentPresence::Superseded { commits, .. })
+            if commits.contains(&retirement) && commits.contains(&handoff)),
+            "retirement={retirement} handoff={handoff} observed={observed:?}"
         );
     }
 

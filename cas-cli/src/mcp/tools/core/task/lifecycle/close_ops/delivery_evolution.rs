@@ -4,6 +4,7 @@ use std::path::Path;
 use std::process::Command;
 
 #[derive(Default)]
+#[cfg_attr(test, derive(Debug))]
 struct Hunk {
     old_start: usize,
     old_count: usize,
@@ -978,7 +979,7 @@ fn line_content_presence_impl(
                 .iter()
                 .map(|owner| {
                     owner.as_ref().and_then(|owner| {
-                        advance(
+                        let advanced = advance(
                             owner,
                             &changes,
                             ordinary,
@@ -991,7 +992,16 @@ fn line_content_presence_impl(
                                 && cycle.iter().any(|owned| owned == commit),
                             reverted,
                             commit,
-                        )
+                        );
+                        #[cfg(test)]
+                        if !cycle.is_empty() && advanced.is_none()
+                            && (path == "hub-web/src/styles.css"
+                                || path == "hub-web/e2e/journeys/switch-machines.journey.ts"
+                                || path == "copy.txt")
+                        {
+                            eprintln!("[DEBUG-cas-0930] edge owner={delivery} path={path} at={commit} parent={prior} ordinary={ordinary} retire={} internal={} reverted={reverted} positions={:?} baseline={:?} changes={changes:?}", cycle.iter().any(|owned| owned == commit), !ordinary && resolution_parent_lines.is_some() && cycle.iter().any(|owned| owned == commit), owner.positions, owner.baseline);
+                        }
+                        advanced
                     })
                 })
                 .collect();

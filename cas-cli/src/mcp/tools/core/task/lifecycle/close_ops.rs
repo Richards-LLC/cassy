@@ -19250,6 +19250,10 @@ fn delivery_content_presence_on_target_for_paths(
             },
             Err(reason) => return DeliveryContentPresence::Unknown { reason },
         };
+        #[cfg(test)]
+        if Some(repo_path) == std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent() {
+            eprintln!("delivery path result: anchor={delivery_commit} path={path} resolution_only={resolution_only} proof={proof:?}");
+        }
         match proof {
             DeliveryContentPresence::Present { .. } => {},
             DeliveryContentPresence::Dropped { .. } => dropped.push(path.clone()),

@@ -597,6 +597,12 @@ pub(super) fn merge_tip_content_presence(
             }
         }
         let paths = merge_resolution_paths(repo, resolution, &resolution_identity)?;
+        #[cfg(test)]
+        if Some(repo) == Path::new(env!("CARGO_MANIFEST_DIR")).parent() {
+            eprintln!(
+                "resolution selection: anchor={merge_tip} resolution={resolution} paths={paths:?}"
+            );
+        }
         if !paths.is_empty() {
             resolutions.push((resolution.to_string(), paths));
         }

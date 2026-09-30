@@ -599,3 +599,8 @@ fn test_loop_with_empty_prompt() {
         Some("active")
     );
 }
+
+#[path = "../src/test_env_guard.rs"]
+mod test_env_guard;
+#[path = "loop_test_cases/current.rs"]
+mod current;

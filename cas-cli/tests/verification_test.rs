@@ -562,3 +562,8 @@ fn test_verification_workflow_e2e() {
         .success()
         .stdout(predicate::str::contains("closed"));
 }
+
+#[path = "../src/test_env_guard.rs"]
+mod test_env_guard;
+#[path = "verification_test_cases/current.rs"]
+mod current;

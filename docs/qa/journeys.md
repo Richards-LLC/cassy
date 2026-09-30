@@ -15,11 +15,18 @@ In **Steps**, the text before ` — ` must match the suite's stage
 Cassy Commander, the browser app that `cas hub` serves at `/commander/`.
 Suite: `hub-web/e2e/journeys/`. Run it with `npm run journeys` in
 `hub-web/`, or with `scripts/journey-eval.sh <dir>` to collect receipts.
+The journeys project uses UTC and an advancing browser clock starting at
+`2026-09-30T12:00:00Z`. Node protocol fixtures share that injected clock;
+calendar-day fixtures use `journeyDay()` rather than subtracting hours.
+`npm run journeys` checks for ambient `Date.now()`/`new Date()` in journey
+sources before running the suite. Use `performance.now()` for elapsed time.
+To exercise early-morning boundaries, run with
+`HUB_JOURNEY_NOW=2026-09-30T00:30:00Z` or `2026-09-30T05:59:00Z`.
 Every journey also watches each animation frame and fails if an open
 conversation shows the terminal canvas or sits on a bare panel for more than
 250 ms (`frame_defects` in `result.json`).
 
-- **Surface-wide:** `hub-web/src/main.ts`, `hub-web/src/styles.css`, `hub-web/src/types.ts`, `hub-web/src/terminal*`, `hub-web/src/terminal/*`, `hub-web/index.html`, `hub-web/package-lock.json`, `hub-web/vite.config.ts`, `hub-web/dist/*`, `hub-web/e2e/journeys/hub-double.ts`, `hub-web/e2e/journeys/journey.ts`, `hub-web/e2e/journeys/world.ts`, `hub-web/playwright.config.ts`
+- **Surface-wide:** `hub-web/src/main.ts`, `hub-web/src/styles.css`, `hub-web/src/types.ts`, `hub-web/src/terminal*`, `hub-web/src/terminal/*`, `hub-web/index.html`, `hub-web/package-lock.json`, `hub-web/vite.config.ts`, `hub-web/dist/*`, `hub-web/e2e/journeys/hub-double.ts`, `hub-web/e2e/journeys/journey.ts`, `hub-web/e2e/journeys/clock.ts`, `hub-web/e2e/journeys/world.ts`, `hub-web/playwright.config.ts`
 
 ### HUB-J1 · First open and pair a machine with a code
 

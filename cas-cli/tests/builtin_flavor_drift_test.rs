@@ -103,6 +103,12 @@ const ALLOWED_MISSING_TWIN: &[(&str, &str, &str)] = &[(
 const ALLOWED_FLAVOR_ONLY: &[(&str, &str, &str, &str)] = &[
     (
         "codex",
+        "skills/cas-improve-architecture/agents/openai.yaml",
+        "codex/skills/cas-improve-architecture/agents/openai.yaml",
+        "Codex explicit-invocation policy; this architecture scan is user-invoked.",
+    ),
+    (
+        "codex",
         "skills/cas-retro/agents/openai.yaml",
         "codex/skills/cas-retro/agents/openai.yaml",
         "Codex's explicit-invocation policy for the retrospective skill.",

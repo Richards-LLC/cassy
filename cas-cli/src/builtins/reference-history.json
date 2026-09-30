@@ -371,6 +371,13 @@
       "e43e7b657f8df559c5cd4e647d2f62fa5d842340db063bf5d5cbcf628f2c83f3",
       "fbb0d0cefee7e49de86d14267a718e0fedf6b17a5adee13a3c755bacb44749cf"
     ],
+    "skills/cas-improve-architecture/LICENSE": [
+      "0e7ac423bf2c6e223b7c5b156f8cf72da49d748e56a1641402c31f22ad07dbb5",
+      "dcad88aea82f74872bcd5e715e7e6c933692324fd71303aa51a7af44cef52064"
+    ],
+    "skills/cas-improve-architecture/agents/openai.yaml": [
+      "a1499d95abd8447558c535fe5554adcc3c9b988a0a39264a6283d430effe1e94"
+    ],
     "skills/cas-memory-management/references/body-templates.md": [
       "1f4e4f8739271932bf6e89400ffde8d38b63da093571b39df1e3bc0e5a76f8a8",
       "26c880a2e172c7c1846b817ea4b844e6476b26d694a7de3f812b678b256fdfd4",

@@ -863,34 +863,57 @@ fn ai_vocabulary_word_list_matches_case_insensitively_and_at_word_boundaries() {
     assert!(!catches("subrealm", "realm"));
 }
 
-/// One shared registry owns contract-bearing text; ordinary prose is free to change.
+#[path = "support/builtin_contract_phrases.rs"]
+mod builtin_contract_phrases;
+
+/// One registry owns contract-bearing text; ordinary prose is free to change.
 #[test]
 fn builtin_contract_phrase_registry_holds_in_every_embedded_catalog() {
-    let policy: serde_json::Value = serde_json::from_str(include_str!(
-        "../../scripts/builtin-contract-phrases.json"
-    )).expect("valid builtin contract registry");
-    assert_eq!(policy["version"], 1);
-    let documents = policy["documents"].as_object().expect("documents object");
-    assert!(!documents.is_empty(), "contract registry must not be empty");
-    for (flavor, label) in builtin_catalog::FLAVORS {
-        for (path, document) in documents {
-            let text = builtin_catalog::find(*flavor, path);
-            let mut count = 0;
-            for kind in ["contains", "absent", "any_of"] {
-                for rule in document[kind].as_array().expect("contract rule array") {
-                    let reason = rule["reason"].as_str().expect("contract reason");
-                    assert!(!reason.trim().is_empty(), "{path}: missing reason");
-                    let matches = match kind {
-                        "contains" => text.contains(rule["text"].as_str().expect("phrase")),
-                        "absent" => !text.contains(rule["text"].as_str().expect("phrase")),
-                        _ => rule["texts"].as_array().expect("alternative phrases").iter()
-                            .any(|phrase| text.contains(phrase.as_str().expect("phrase"))),
-                    };
-                    assert!(matches, "{label} {path}: {kind} {rule}: {reason}");
-                    count += 1;
-                }
-            }
-            assert!(count > 0, "{path}: empty contract");
-        }
+    use builtin_contract_phrases::Policy;
+    let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+        "../../scripts/builtin-contract-schema-fixtures.json"
+    ))
+    .unwrap();
+    for fixture in fixtures.as_array().unwrap() {
+        assert_eq!(
+            Policy::parse(&fixture["policy"].to_string()).is_ok(),
+            fixture["valid"].as_bool().unwrap(),
+            "schema fixture: {}",
+            fixture["name"]
+        );
     }
+    let policy = Policy::parse(include_str!("../../scripts/builtin-contract-phrases.json"))
+        .expect("valid reasoned builtin contract registry");
+    let failures = policy.failures(|label, path| {
+        if let Some(name) = path
+            .strip_prefix("jobs/")
+            .and_then(|p| p.strip_suffix(".md"))
+        {
+            return MAINTENANCE_JOBS
+                .iter()
+                .find(|job| job.name == name)
+                .unwrap_or_else(|| panic!("missing maintenance job {name}"))
+                .body
+                .to_owned();
+        }
+        let harness = match label {
+            "claude" => cas_mux::SupervisorCli::Claude,
+            "codex" => cas_mux::SupervisorCli::Codex,
+            "grok" => cas_mux::SupervisorCli::Grok,
+            "opencode" => cas_mux::SupervisorCli::OpenCode,
+            _ => panic!("unknown catalog {label}"),
+        };
+        cas::builtins::skill_catalog_for_harness(harness)
+            .iter()
+            .chain(cas::builtins::agent_catalog_for_harness(harness))
+            .find(|file| file.path == path)
+            .unwrap_or_else(|| panic!("missing {label} contract document {path}"))
+            .content
+            .to_owned()
+    });
+    assert!(
+        failures.is_empty(),
+        "builtin text contracts failed:\n{}",
+        failures.join("\n")
+    );
 }

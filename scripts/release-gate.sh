@@ -1190,7 +1190,8 @@ check_test_shape() {
 }
 
 check_builtin_doc_hygiene() {
-    python3 scripts/check-builtin-doc-hygiene.py
+    python3 scripts/check-builtin-doc-hygiene.py || return $?
+    python3 scripts/check-builtin-contract-phrases.py
 }
 
 check_working_tree() {

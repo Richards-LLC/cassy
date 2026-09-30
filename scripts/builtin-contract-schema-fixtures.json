@@ -1,0 +1,1106 @@
+[
+  {
+    "name": "valid",
+    "policy": {
+      "version": 2,
+      "documents": {
+        "skills/example/SKILL.md": {
+          "source": "example.md",
+          "catalogs": [
+            "claude",
+            "codex",
+            "grok"
+          ],
+          "contains": [
+            {
+              "text": "task",
+              "reason": "Named lifecycle entry point."
+            }
+          ],
+          "absent": [
+            {
+              "text": "unsafe",
+              "reason": "Forbidden instruction."
+            }
+          ],
+          "any_of": [
+            {
+              "texts": [
+                "receipt",
+                "proof"
+              ],
+              "reason": "Supported evidence formats."
+            }
+          ]
+        }
+      },
+      "alternatives": []
+    },
+    "valid": true
+  },
+  {
+    "name": "version boolean",
+    "policy": {
+      "version": true,
+      "documents": {
+        "skills/example/SKILL.md": {
+          "source": "example.md",
+          "catalogs": [
+            "claude",
+            "codex",
+            "grok"
+          ],
+          "contains": [
+            {
+              "text": "task",
+              "reason": "Named lifecycle entry point."
+            }
+          ],
+          "absent": [
+            {
+              "text": "unsafe",
+              "reason": "Forbidden instruction."
+            }
+          ],
+          "any_of": [
+            {
+              "texts": [
+                "receipt",
+                "proof"
+              ],
+              "reason": "Supported evidence formats."
+            }
+          ]
+        }
+      },
+      "alternatives": []
+    },
+    "valid": false
+  },
+  {
+    "name": "wrong version",
+    "policy": {
+      "version": 1,
+      "documents": {
+        "skills/example/SKILL.md": {
+          "source": "example.md",
+          "catalogs": [
+            "claude",
+            "codex",
+            "grok"
+          ],
+          "contains": [
+            {
+              "text": "task",
+              "reason": "Named lifecycle entry point."
+            }
+          ],
+          "absent": [
+            {
+              "text": "unsafe",
+              "reason": "Forbidden instruction."
+            }
+          ],
+          "any_of": [
+            {
+              "texts": [
+                "receipt",
+                "proof"
+              ],
+              "reason": "Supported evidence formats."
+            }
+          ]
+        }
+      },
+      "alternatives": []
+    },
+    "valid": false
+  },
+  {
+    "name": "missing alternatives",
+    "policy": {
+      "version": 2,
+      "documents": {
+        "skills/example/SKILL.md": {
+          "source": "example.md",
+          "catalogs": [
+            "claude",
+            "codex",
+            "grok"
+          ],
+          "contains": [
+            {
+              "text": "task",
+              "reason": "Named lifecycle entry point."
+            }
+          ],
+          "absent": [
+            {
+              "text": "unsafe",
+              "reason": "Forbidden instruction."
+            }
+          ],
+          "any_of": [
+            {
+              "texts": [
+                "receipt",
+                "proof"
+              ],
+              "reason": "Supported evidence formats."
+            }
+          ]
+        }
+      }
+    },
+    "valid": false
+  },
+  {
+    "name": "unknown root field",
+    "policy": {
+      "version": 2,
+      "documents": {
+        "skills/example/SKILL.md": {
+          "source": "example.md",
+          "catalogs": [
+            "claude",
+            "codex",
+            "grok"
+          ],
+          "contains": [
+            {
+              "text": "task",
+              "reason": "Named lifecycle entry point."
+            }
+          ],
+          "absent": [
+            {
+              "text": "unsafe",
+              "reason": "Forbidden instruction."
+            }
+          ],
+          "any_of": [
+            {
+              "texts": [
+                "receipt",
+                "proof"
+              ],
+              "reason": "Supported evidence formats."
+            }
+          ]
+        }
+      },
+      "alternatives": [],
+      "extra": 1
+    },
+    "valid": false
+  },
+  {
+    "name": "empty documents",
+    "policy": {
+      "version": 2,
+      "documents": {},
+      "alternatives": []
+    },
+    "valid": false
+  },
+  {
+    "name": "unknown document field",
+    "policy": {
+      "version": 2,
+      "documents": {
+        "skills/example/SKILL.md": {
+          "source": "example.md",
+          "catalogs": [
+            "claude",
+            "codex",
+            "grok"
+          ],
+          "contains": [
+            {
+              "text": "task",
+              "reason": "Named lifecycle entry point."
+            }
+          ],
+          "absent": [
+            {
+              "text": "unsafe",
+              "reason": "Forbidden instruction."
+            }
+          ],
+          "any_of": [
+            {
+              "texts": [
+                "receipt",
+                "proof"
+              ],
+              "reason": "Supported evidence formats."
+            }
+          ],
+          "extra": 1
+        }
+      },
+      "alternatives": []
+    },
+    "valid": false
+  },
+  {
+    "name": "missing source",
+    "policy": {
+      "version": 2,
+      "documents": {
+        "skills/example/SKILL.md": {
+          "catalogs": [
+            "claude",
+            "codex",
+            "grok"
+          ],
+          "contains": [
+            {
+              "text": "task",
+              "reason": "Named lifecycle entry point."
+            }
+          ],
+          "absent": [
+            {
+              "text": "unsafe",
+              "reason": "Forbidden instruction."
+            }
+          ],
+          "any_of": [
+            {
+              "texts": [
+                "receipt",
+                "proof"
+              ],
+              "reason": "Supported evidence formats."
+            }
+          ]
+        }
+      },
+      "alternatives": []
+    },
+    "valid": false
+  },
+  {
+    "name": "path escape",
+    "policy": {
+      "version": 2,
+      "documents": {
+        "skills/example/SKILL.md": {
+          "source": "../foreign.md",
+          "catalogs": [
+            "claude",
+            "codex",
+            "grok"
+          ],
+          "contains": [
+            {
+              "text": "task",
+              "reason": "Named lifecycle entry point."
+            }
+          ],
+          "absent": [
+            {
+              "text": "unsafe",
+              "reason": "Forbidden instruction."
+            }
+          ],
+          "any_of": [
+            {
+              "texts": [
+                "receipt",
+                "proof"
+              ],
+              "reason": "Supported evidence formats."
+            }
+          ]
+        }
+      },
+      "alternatives": []
+    },
+    "valid": false
+  },
+  {
+    "name": "absolute path",
+    "policy": {
+      "version": 2,
+      "documents": {
+        "skills/example/SKILL.md": {
+          "source": "/foreign.md",
+          "catalogs": [
+            "claude",
+            "codex",
+            "grok"
+          ],
+          "contains": [
+            {
+              "text": "task",
+              "reason": "Named lifecycle entry point."
+            }
+          ],
+          "absent": [
+            {
+              "text": "unsafe",
+              "reason": "Forbidden instruction."
+            }
+          ],
+          "any_of": [
+            {
+              "texts": [
+                "receipt",
+                "proof"
+              ],
+              "reason": "Supported evidence formats."
+            }
+          ]
+        }
+      },
+      "alternatives": []
+    },
+    "valid": false
+  },
+  {
+    "name": "wrong source type",
+    "policy": {
+      "version": 2,
+      "documents": {
+        "skills/example/SKILL.md": {
+          "source": 5,
+          "catalogs": [
+            "claude",
+            "codex",
+            "grok"
+          ],
+          "contains": [
+            {
+              "text": "task",
+              "reason": "Named lifecycle entry point."
+            }
+          ],
+          "absent": [
+            {
+              "text": "unsafe",
+              "reason": "Forbidden instruction."
+            }
+          ],
+          "any_of": [
+            {
+              "texts": [
+                "receipt",
+                "proof"
+              ],
+              "reason": "Supported evidence formats."
+            }
+          ]
+        }
+      },
+      "alternatives": []
+    },
+    "valid": false
+  },
+  {
+    "name": "unknown catalog",
+    "policy": {
+      "version": 2,
+      "documents": {
+        "skills/example/SKILL.md": {
+          "source": "example.md",
+          "catalogs": [
+            "unsupported"
+          ],
+          "contains": [
+            {
+              "text": "task",
+              "reason": "Named lifecycle entry point."
+            }
+          ],
+          "absent": [
+            {
+              "text": "unsafe",
+              "reason": "Forbidden instruction."
+            }
+          ],
+          "any_of": [
+            {
+              "texts": [
+                "receipt",
+                "proof"
+              ],
+              "reason": "Supported evidence formats."
+            }
+          ]
+        }
+      },
+      "alternatives": []
+    },
+    "valid": false
+  },
+  {
+    "name": "duplicate catalog",
+    "policy": {
+      "version": 2,
+      "documents": {
+        "skills/example/SKILL.md": {
+          "source": "example.md",
+          "catalogs": [
+            "claude",
+            "claude"
+          ],
+          "contains": [
+            {
+              "text": "task",
+              "reason": "Named lifecycle entry point."
+            }
+          ],
+          "absent": [
+            {
+              "text": "unsafe",
+              "reason": "Forbidden instruction."
+            }
+          ],
+          "any_of": [
+            {
+              "texts": [
+                "receipt",
+                "proof"
+              ],
+              "reason": "Supported evidence formats."
+            }
+          ]
+        }
+      },
+      "alternatives": []
+    },
+    "valid": false
+  },
+  {
+    "name": "empty catalogs",
+    "policy": {
+      "version": 2,
+      "documents": {
+        "skills/example/SKILL.md": {
+          "source": "example.md",
+          "catalogs": [],
+          "contains": [
+            {
+              "text": "task",
+              "reason": "Named lifecycle entry point."
+            }
+          ],
+          "absent": [
+            {
+              "text": "unsafe",
+              "reason": "Forbidden instruction."
+            }
+          ],
+          "any_of": [
+            {
+              "texts": [
+                "receipt",
+                "proof"
+              ],
+              "reason": "Supported evidence formats."
+            }
+          ]
+        }
+      },
+      "alternatives": []
+    },
+    "valid": false
+  },
+  {
+    "name": "missing reason",
+    "policy": {
+      "version": 2,
+      "documents": {
+        "skills/example/SKILL.md": {
+          "source": "example.md",
+          "catalogs": [
+            "claude",
+            "codex",
+            "grok"
+          ],
+          "contains": [
+            {
+              "text": "task"
+            }
+          ],
+          "absent": [
+            {
+              "text": "unsafe",
+              "reason": "Forbidden instruction."
+            }
+          ],
+          "any_of": [
+            {
+              "texts": [
+                "receipt",
+                "proof"
+              ],
+              "reason": "Supported evidence formats."
+            }
+          ]
+        }
+      },
+      "alternatives": []
+    },
+    "valid": false
+  },
+  {
+    "name": "blank reason",
+    "policy": {
+      "version": 2,
+      "documents": {
+        "skills/example/SKILL.md": {
+          "source": "example.md",
+          "catalogs": [
+            "claude",
+            "codex",
+            "grok"
+          ],
+          "contains": [
+            {
+              "text": "task",
+              "reason": "  "
+            }
+          ],
+          "absent": [
+            {
+              "text": "unsafe",
+              "reason": "Forbidden instruction."
+            }
+          ],
+          "any_of": [
+            {
+              "texts": [
+                "receipt",
+                "proof"
+              ],
+              "reason": "Supported evidence formats."
+            }
+          ]
+        }
+      },
+      "alternatives": []
+    },
+    "valid": false
+  },
+  {
+    "name": "blank phrase",
+    "policy": {
+      "version": 2,
+      "documents": {
+        "skills/example/SKILL.md": {
+          "source": "example.md",
+          "catalogs": [
+            "claude",
+            "codex",
+            "grok"
+          ],
+          "contains": [
+            {
+              "text": "  ",
+              "reason": "Named lifecycle entry point."
+            }
+          ],
+          "absent": [
+            {
+              "text": "unsafe",
+              "reason": "Forbidden instruction."
+            }
+          ],
+          "any_of": [
+            {
+              "texts": [
+                "receipt",
+                "proof"
+              ],
+              "reason": "Supported evidence formats."
+            }
+          ]
+        }
+      },
+      "alternatives": []
+    },
+    "valid": false
+  },
+  {
+    "name": "wrong case flag",
+    "policy": {
+      "version": 2,
+      "documents": {
+        "skills/example/SKILL.md": {
+          "source": "example.md",
+          "catalogs": [
+            "claude",
+            "codex",
+            "grok"
+          ],
+          "contains": [
+            {
+              "text": "task",
+              "reason": "Named lifecycle entry point.",
+              "case_sensitive": "false"
+            }
+          ],
+          "absent": [
+            {
+              "text": "unsafe",
+              "reason": "Forbidden instruction."
+            }
+          ],
+          "any_of": [
+            {
+              "texts": [
+                "receipt",
+                "proof"
+              ],
+              "reason": "Supported evidence formats."
+            }
+          ]
+        }
+      },
+      "alternatives": []
+    },
+    "valid": false
+  },
+  {
+    "name": "unknown rule field",
+    "policy": {
+      "version": 2,
+      "documents": {
+        "skills/example/SKILL.md": {
+          "source": "example.md",
+          "catalogs": [
+            "claude",
+            "codex",
+            "grok"
+          ],
+          "contains": [
+            {
+              "text": "task",
+              "reason": "Named lifecycle entry point.",
+              "extra": true
+            }
+          ],
+          "absent": [
+            {
+              "text": "unsafe",
+              "reason": "Forbidden instruction."
+            }
+          ],
+          "any_of": [
+            {
+              "texts": [
+                "receipt",
+                "proof"
+              ],
+              "reason": "Supported evidence formats."
+            }
+          ]
+        }
+      },
+      "alternatives": []
+    },
+    "valid": false
+  },
+  {
+    "name": "empty alternative strings",
+    "policy": {
+      "version": 2,
+      "documents": {
+        "skills/example/SKILL.md": {
+          "source": "example.md",
+          "catalogs": [
+            "claude",
+            "codex",
+            "grok"
+          ],
+          "contains": [
+            {
+              "text": "task",
+              "reason": "Named lifecycle entry point."
+            }
+          ],
+          "absent": [
+            {
+              "text": "unsafe",
+              "reason": "Forbidden instruction."
+            }
+          ],
+          "any_of": [
+            {
+              "texts": [],
+              "reason": "Supported evidence formats."
+            }
+          ]
+        }
+      },
+      "alternatives": []
+    },
+    "valid": false
+  },
+  {
+    "name": "wrong alternative strings type",
+    "policy": {
+      "version": 2,
+      "documents": {
+        "skills/example/SKILL.md": {
+          "source": "example.md",
+          "catalogs": [
+            "claude",
+            "codex",
+            "grok"
+          ],
+          "contains": [
+            {
+              "text": "task",
+              "reason": "Named lifecycle entry point."
+            }
+          ],
+          "absent": [
+            {
+              "text": "unsafe",
+              "reason": "Forbidden instruction."
+            }
+          ],
+          "any_of": [
+            {
+              "texts": "receipt",
+              "reason": "Supported evidence formats."
+            }
+          ]
+        }
+      },
+      "alternatives": []
+    },
+    "valid": false
+  },
+  {
+    "name": "empty contract",
+    "policy": {
+      "version": 2,
+      "documents": {
+        "skills/example/SKILL.md": {
+          "source": "example.md",
+          "catalogs": [
+            "claude",
+            "codex",
+            "grok"
+          ],
+          "contains": [],
+          "absent": [],
+          "any_of": []
+        }
+      },
+      "alternatives": []
+    },
+    "valid": false
+  },
+  {
+    "name": "empty alternative choices",
+    "policy": {
+      "version": 2,
+      "documents": {
+        "skills/example/SKILL.md": {
+          "source": "example.md",
+          "catalogs": [
+            "claude",
+            "codex",
+            "grok"
+          ],
+          "contains": [
+            {
+              "text": "task",
+              "reason": "Named lifecycle entry point."
+            }
+          ],
+          "absent": [
+            {
+              "text": "unsafe",
+              "reason": "Forbidden instruction."
+            }
+          ],
+          "any_of": [
+            {
+              "texts": [
+                "receipt",
+                "proof"
+              ],
+              "reason": "Supported evidence formats."
+            }
+          ]
+        }
+      },
+      "alternatives": [
+        {
+          "choices": [],
+          "reason": "Either route."
+        }
+      ]
+    },
+    "valid": false
+  },
+  {
+    "name": "unknown alternative document",
+    "policy": {
+      "version": 2,
+      "documents": {
+        "skills/example/SKILL.md": {
+          "source": "example.md",
+          "catalogs": [
+            "claude",
+            "codex",
+            "grok"
+          ],
+          "contains": [
+            {
+              "text": "task",
+              "reason": "Named lifecycle entry point."
+            }
+          ],
+          "absent": [
+            {
+              "text": "unsafe",
+              "reason": "Forbidden instruction."
+            }
+          ],
+          "any_of": [
+            {
+              "texts": [
+                "receipt",
+                "proof"
+              ],
+              "reason": "Supported evidence formats."
+            }
+          ]
+        }
+      },
+      "alternatives": [
+        {
+          "choices": [
+            {
+              "document": "unknown",
+              "text": "task",
+              "absent": false,
+              "case_sensitive": true
+            }
+          ],
+          "reason": "Either route."
+        }
+      ]
+    },
+    "valid": false
+  },
+  {
+    "name": "missing choice case flag",
+    "policy": {
+      "version": 2,
+      "documents": {
+        "skills/example/SKILL.md": {
+          "source": "example.md",
+          "catalogs": [
+            "claude",
+            "codex",
+            "grok"
+          ],
+          "contains": [
+            {
+              "text": "task",
+              "reason": "Named lifecycle entry point."
+            }
+          ],
+          "absent": [
+            {
+              "text": "unsafe",
+              "reason": "Forbidden instruction."
+            }
+          ],
+          "any_of": [
+            {
+              "texts": [
+                "receipt",
+                "proof"
+              ],
+              "reason": "Supported evidence formats."
+            }
+          ]
+        }
+      },
+      "alternatives": [
+        {
+          "choices": [
+            {
+              "document": "skills/example/SKILL.md",
+              "text": "task",
+              "absent": false
+            }
+          ],
+          "reason": "Either route."
+        }
+      ]
+    },
+    "valid": false
+  },
+  {
+    "name": "ascii folding",
+    "policy": {
+      "version": 2,
+      "documents": {
+        "skills/example/SKILL.md": {
+          "source": "example.md",
+          "catalogs": [
+            "claude",
+            "codex",
+            "grok"
+          ],
+          "contains": [
+            {
+              "text": "task",
+              "reason": "Named lifecycle entry point.",
+              "case_sensitive": false
+            }
+          ],
+          "absent": [
+            {
+              "text": "unsafe",
+              "reason": "Forbidden instruction."
+            }
+          ],
+          "any_of": [
+            {
+              "texts": [
+                "receipt",
+                "proof"
+              ],
+              "reason": "Supported evidence formats."
+            }
+          ]
+        }
+      },
+      "alternatives": []
+    },
+    "valid": true
+  },
+  {
+    "name": "unicode folding",
+    "policy": {
+      "version": 2,
+      "documents": {
+        "skills/example/SKILL.md": {
+          "source": "example.md",
+          "catalogs": [
+            "claude",
+            "codex",
+            "grok"
+          ],
+          "contains": [
+            {
+              "text": "task",
+              "reason": "Named lifecycle entry point.",
+              "case_sensitive": false,
+              "unicode_case": true
+            }
+          ],
+          "absent": [
+            {
+              "text": "unsafe",
+              "reason": "Forbidden instruction."
+            }
+          ],
+          "any_of": [
+            {
+              "texts": [
+                "receipt",
+                "proof"
+              ],
+              "reason": "Supported evidence formats."
+            }
+          ]
+        }
+      },
+      "alternatives": []
+    },
+    "valid": true
+  },
+  {
+    "name": "invalid unicode flag",
+    "policy": {
+      "version": 2,
+      "documents": {
+        "skills/example/SKILL.md": {
+          "source": "example.md",
+          "catalogs": [
+            "claude",
+            "codex",
+            "grok"
+          ],
+          "contains": [
+            {
+              "text": "task",
+              "reason": "Named lifecycle entry point.",
+              "unicode_case": "true"
+            }
+          ],
+          "absent": [
+            {
+              "text": "unsafe",
+              "reason": "Forbidden instruction."
+            }
+          ],
+          "any_of": [
+            {
+              "texts": [
+                "receipt",
+                "proof"
+              ],
+              "reason": "Supported evidence formats."
+            }
+          ]
+        }
+      },
+      "alternatives": []
+    },
+    "valid": false
+  },
+  {
+    "name": "conflicting case flags",
+    "policy": {
+      "version": 2,
+      "documents": {
+        "skills/example/SKILL.md": {
+          "source": "example.md",
+          "catalogs": [
+            "claude",
+            "codex",
+            "grok"
+          ],
+          "contains": [
+            {
+              "text": "task",
+              "reason": "Named lifecycle entry point.",
+              "unicode_case": true
+            }
+          ],
+          "absent": [
+            {
+              "text": "unsafe",
+              "reason": "Forbidden instruction."
+            }
+          ],
+          "any_of": [
+            {
+              "texts": [
+                "receipt",
+                "proof"
+              ],
+              "reason": "Supported evidence formats."
+            }
+          ]
+        }
+      },
+      "alternatives": []
+    },
+    "valid": false
+  }
+]

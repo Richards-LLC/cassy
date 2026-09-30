@@ -1,24 +1,4740 @@
 {
-  "version": 1,
+  "version": 2,
   "documents": {
     "skills/cas-supervisor/SKILL.md": {
       "source": "cas-cli/src/builtins/skills/cas-supervisor.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
       "contains": [
         {
+          "text": "blocker=true",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by role entrypoints share authoritative acceptance and wake policy."
+        },
+        {
+          "text": "merge_request=true",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by role entrypoints share authoritative acceptance and wake policy."
+        },
+        {
+          "text": "`cas-codex-supervisor-checklist` on Codex",
+          "reason": "Retain the load-bearing policy term from role entrypoints share authoritative acceptance and wake policy."
+        },
+        {
+          "text": "model-selection.md",
+          "reason": "Keep the installed workflow/reference route reachable; codex supervisor guidance mirrors tiering rule."
+        },
+        {
+          "text": "cli=",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by supervisor bodies normalized consistent across harnesses."
+        },
+        {
+          "text": "model=",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by supervisor bodies normalized consistent across harnesses."
+        },
+        {
+          "text": "effort=",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by supervisor bodies normalized consistent across harnesses."
+        },
+        {
+          "text": "references/model-selection.md",
+          "reason": "Keep the installed workflow/reference route reachable; supervisor model selection reference registered and mirrored."
+        },
+        {
+          "text": "Codex/GPT-6 Luna/xhigh",
+          "reason": "Retain the load-bearing policy term from grok supervisor skill carries model tiering rule."
+        },
+        {
+          "text": "Codex/GPT-6.1 Sol/high",
+          "reason": "Retain the load-bearing policy term from grok supervisor skill carries model tiering rule."
+        },
+        {
+          "text": "Claude/Opus 5.5/high",
+          "reason": "Retain the load-bearing policy term from grok supervisor skill carries model tiering rule."
+        },
+        {
+          "text": "spawn_workers",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by codex builtin supervisor guide includes core workflow."
+        },
+        {
+          "text": "reminders.md",
+          "reason": "Keep the installed workflow/reference route reachable; reminder discipline reference is complete and flavor normalized."
+        },
+        {
+          "text": "epic-driving.md",
+          "reason": "Keep the installed workflow/reference route reachable; supervisor epic driving reference is compact and three way mirrored."
+        },
+        {
+          "text": "](references/reference.md#supervisor-override)",
+          "reason": "Keep the installed workflow/reference route reachable; supervisor reference tree uses current lifecycle contract."
+        },
+        {
           "text": "AskUserQuestion",
-          "reason": "Keep the named operator-question surface available in the supervisor's briefing."
+          "reason": "Keep the named operator-question surface in the supervisor briefing."
         },
         {
           "text": "SendMessage",
-          "reason": "Keep the named agent-message surface available in the supervisor's briefing."
+          "reason": "Keep the named agent-message surface in the supervisor briefing."
         },
         {
           "text": "coordination",
-          "reason": "Supervisor lifecycle and typed wake messages must route through Cassy's coordination tool."
+          "reason": "Route supervisor lifecycle and typed wake messages through Cassy's coordination tool."
+        },
+        {
+          "text": "](references/epic-flow-walk.md)",
+          "reason": "Route epic verification from the installed supervisor entry point to the combined evidence procedure."
+        },
+        {
+          "text": "Tier every spawn",
+          "reason": "Keep the operational, evidence, accessibility or review safeguard from grok supervisor skill carries model tiering rule."
+        },
+        {
+          "text": "never fleet-default",
+          "reason": "Keep the operational, evidence, accessibility or review safeguard from grok supervisor skill carries model tiering rule."
+        },
+        {
+          "text": "standing suspension",
+          "reason": "Keep the operational, evidence, accessibility or review safeguard from grok supervisor skill carries model tiering rule."
+        }
+      ],
+      "absent": [
+        {
+          "text": "model=gpt-5.5",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor model selection reference registered and mirrored."
+        },
+        {
+          "text": "codex/gpt-5.5",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor model selection reference registered and mirrored."
+        },
+        {
+          "text": "pending_supervisor_review",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "bypass_code_review",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "/epic-spec",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "/epic-breakdown",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "code-review-queue",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-worker/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/cas-worker.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "blocker=true",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by role entrypoints share authoritative acceptance and wake policy."
+        },
+        {
+          "text": "merge_request=true",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by role entrypoints share authoritative acceptance and wake policy."
+        },
+        {
+          "text": "references/discipline.md",
+          "reason": "Keep the installed workflow/reference route reachable; worker discipline reference is linked and assembly proof is named."
+        },
+        {
+          "text": "close-gate.md",
+          "reason": "Keep the installed workflow/reference route reachable; worker skills require cas src surface checklist."
+        },
+        {
+          "text": "git rebase <target>",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by worker skills require cas src surface checklist."
+        },
+        {
+          "text": "## Return contract",
+          "reason": "Retain the load-bearing policy term from worker return contract fields and runtime close call."
+        },
+        {
+          "text": "status: <in_progress|ready|blocked|partial>",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by worker return contract fields and runtime close call."
+        },
+        {
+          "text": "tip: <sha> on factory/<name>; worktree: <clean|dirty>",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by worker return contract fields and runtime close call."
+        },
+        {
+          "text": "ci: <run id + result | not started>",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by worker return contract fields and runtime close call."
+        },
+        {
+          "text": "proof: <tests run with pass count | artifact path>",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by worker return contract fields and runtime close call."
+        },
+        {
+          "text": "deferred: <one line or none>",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by worker return contract fields and runtime close call."
+        },
+        {
+          "text": "need: <what the supervisor must do, one line, or none>",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by worker return contract fields and runtime close call."
+        },
+        {
+          "text": "`blocker: <cause>`",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by worker return contract fields and runtime close call."
+        },
+        {
+          "text": "discipline.md",
+          "reason": "Keep the installed workflow/reference route reachable; worker skills teach capped checks and targeted tests."
+        },
+        {
+          "text": "MERGE REQUIRED",
+          "reason": "Retain the load-bearing policy term from worker merge state guidance present and mirrored."
+        },
+        {
+          "text": "literal string `supervisor`",
+          "reason": "Retain the load-bearing policy term from worker merge state guidance present and mirrored."
+        },
+        {
+          "text": "inbox_poll",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by worker merge state guidance present and mirrored."
+        },
+        {
+          "text": "unread supervisor messages",
+          "reason": "Retain the load-bearing policy term from worker merge state guidance present and mirrored."
+        },
+        {
+          "text": "current factory-branch tip SHA",
+          "reason": "Retain the load-bearing policy term from worker merge state guidance present and mirrored."
+        },
+        {
+          "text": "Tool loading is two steps, not one",
+          "reason": "Retain the load-bearing policy term from worker toolsearch two step guidance present and mirrored."
+        },
+        {
+          "text": "does **not** execute the tool",
+          "reason": "Retain the load-bearing policy term from worker toolsearch two step guidance present and mirrored."
+        },
+        {
+          "text": "not another ToolSearch",
+          "reason": "Retain the load-bearing policy term from worker toolsearch two step guidance present and mirrored."
+        },
+        {
+          "text": "Never self-dispatch",
+          "reason": "Preserve the operational safety boundary documented by worker never self dispatch guidance present and mirrored."
+        },
+        {
+          "text": "every time you go idle",
+          "reason": "Retain the load-bearing policy term from worker never self dispatch guidance present and mirrored."
+        },
+        {
+          "text": "backlog\n  visibility, not authorization",
+          "reason": "Retain the load-bearing policy term from worker never self dispatch guidance present and mirrored."
+        },
+        {
+          "text": "Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, `memory`, `search`, `verification`). Call them with your harness's prefix: `mcp__cas__` in Claude Code, `mcp__cs__` in Codex, `cas__` in Grok, `cas_` in OpenCode.",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by grok worker skill references cas prefixed tools."
+        },
+        {
+          "text": "`cas__` in Grok",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by grok worker skill references cas prefixed tools."
+        },
+        {
+          "text": "`task action=",
+          "reason": "Name the supported tool/action contract used by grok worker skill references cas prefixed tools."
+        },
+        {
+          "text": "coordination action=",
+          "reason": "Name the supported tool/action contract used by grok worker skill references cas prefixed tools."
+        },
+        {
+          "text": "verify-before-claim",
+          "reason": "Retain the load-bearing policy term from cas worker guide mentions verify before claim in pre close."
+        },
+        {
+          "text": "reminders.md",
+          "reason": "Keep the installed workflow/reference route reachable; reminder discipline reference is complete and flavor normalized."
+        },
+        {
+          "text": "references/recovery.md",
+          "reason": "Keep the installed workflow/reference route reachable; worker failure recovery reference and merge check are linked."
+        }
+      ],
+      "absent": [
+        {
+          "text": "disallowed-tools:",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin cas worker does not pose disallowed tools as a guard."
+        },
+        {
+          "text": "## cas-src surface checklist",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by worker skills require cas src surface checklist."
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-supervisor/references/worker-recovery.md": {
+      "source": "cas-cli/src/builtins/skills/cas-supervisor/references/worker-recovery.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "processed_at",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by role entrypoints share authoritative acceptance and wake policy."
+        },
+        {
+          "text": "acked_at",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by role entrypoints share authoritative acceptance and wake policy."
+        },
+        {
+          "text": "queue_ack",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by role entrypoints share authoritative acceptance and wake policy."
+        },
+        {
+          "text": "message_ack",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by role entrypoints share authoritative acceptance and wake policy."
+        },
+        {
+          "text": "task action=start",
+          "reason": "Name the supported tool/action contract used by role entrypoints share authoritative acceptance and wake policy."
+        },
+        {
+          "text": "urgent=true",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by supervisor fix round recovery guidance present and mirrored."
+        },
+        {
+          "text": "Do not kill or respawn",
+          "reason": "Preserve the operational safety boundary documented by supervisor fix round recovery guidance present and mirrored."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-worker/references/details.md": {
+      "source": "cas-cli/src/builtins/skills/cas-worker/references/details.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": ".cas/cas.db?mode=ro",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by report evidence guidance prefers safe sources."
+        },
+        {
+          "text": "sqlite3 <db> \".backup <path>\"",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by report evidence guidance prefers safe sources."
+        },
+        {
+          "text": "read-only backlog visibility — not self-dispatch",
+          "reason": "Preserve the operational safety boundary documented by worker never self dispatch guidance present and mirrored."
+        },
+        {
+          "text": "task action=start",
+          "reason": "Name the supported tool/action contract used by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "task action=close",
+          "reason": "Name the supported tool/action contract used by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "task action=notes",
+          "reason": "Name the supported tool/action contract used by supervisor reference tree uses current lifecycle contract."
+        }
+      ],
+      "absent": [
+        {
+          "text": "pending_supervisor_review",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "bypass_code_review",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "/epic-spec",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "/epic-breakdown",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "code-review-queue",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-supervisor/references/planning.md": {
+      "source": "cas-cli/src/builtins/skills/cas-supervisor/references/planning.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": ".cas/cas.db",
+          "reason": "Retain the load-bearing policy term from report evidence guidance prefers safe sources."
+        },
+        {
+          "text": "## Implementation Unit Template",
+          "reason": "Retain the load-bearing policy term from supervisor skill mirrors include implementation unit template."
+        },
+        {
+          "text": "**Unit N: [Name]**",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by supervisor skill mirrors include implementation unit template."
+        },
+        {
+          "text": "**Goal:**",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by supervisor skill mirrors include implementation unit template."
+        },
+        {
+          "text": "**Requirements:**",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by supervisor skill mirrors include implementation unit template."
+        },
+        {
+          "text": "**Dependencies:**",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by supervisor skill mirrors include implementation unit template."
+        },
+        {
+          "text": "**Files:**",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by supervisor skill mirrors include implementation unit template."
+        },
+        {
+          "text": "**Approach:**",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by supervisor skill mirrors include implementation unit template."
+        },
+        {
+          "text": "**Execution note:**",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by supervisor skill mirrors include implementation unit template."
+        },
+        {
+          "text": "**Patterns to follow:**",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by supervisor skill mirrors include implementation unit template."
+        },
+        {
+          "text": "**Test scenarios:**",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by supervisor skill mirrors include implementation unit template."
+        },
+        {
+          "text": "**Verification:**",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by supervisor skill mirrors include implementation unit template."
+        },
+        {
+          "text": "| Template field | Maps to |",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by supervisor skill mirrors include implementation unit template."
+        },
+        {
+          "text": "Every worker merge receives the canonical merge-time diff review",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from supervisor fix round recovery guidance present and mirrored."
+        },
+        {
+          "text": "Phase 4 runs the project's full final-tree assembly gate",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from supervisor fix round recovery guidance present and mirrored."
+        },
+        {
+          "text": "Do not dispatch a separate review workflow",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from supervisor fix round recovery guidance present and mirrored."
+        }
+      ],
+      "absent": [
+        {
+          "text": "awaiting review",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract.",
+          "case_sensitive": false
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-brainstorm/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/cas-brainstorm/SKILL.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "search action=search",
+          "reason": "Name the supported tool/action contract used by grok search brainstorm ideate use cas prefix."
+        }
+      ],
+      "absent": [
+        {
+          "text": "disallowed-tools:",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin cas brainstorm allows artifact writes."
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-ideate/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/cas-ideate/SKILL.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "action=",
+          "reason": "Name the supported tool/action contract used by grok search brainstorm ideate use cas prefix."
+        }
+      ],
+      "absent": [
+        {
+          "text": "disallowed-tools:",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin cas ideate allows artifact writes."
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-worker/references/discipline.md": {
+      "source": "cas-cli/src/builtins/skills/cas-worker/references/discipline.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "ASSEMBLY_PROOF",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by worker discipline reference is linked and assembly proof is named."
+        },
+        {
+          "text": "loaded_proof",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by worker skills teach capped checks and targeted tests."
+        },
+        {
+          "text": "cargo check -p <crate>",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by worker skills teach capped checks and targeted tests."
+        },
+        {
+          "text": "--lib",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by worker skills teach capped checks and targeted tests."
+        },
+        {
+          "text": "--tests",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by worker skills teach capped checks and targeted tests."
+        },
+        {
+          "text": "lib-only edits",
+          "reason": "Retain the load-bearing policy term from worker skills teach capped checks and targeted tests."
+        },
+        {
+          "text": "test files changed",
+          "reason": "Retain the load-bearing policy term from worker skills teach capped checks and targeted tests."
+        },
+        {
+          "text": "max_concurrent_builders",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by worker skills teach capped checks and targeted tests."
+        },
+        {
+          "text": "check: PASS <sha>",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by worker skills teach capped checks and targeted tests."
+        }
+      ],
+      "absent": [
+        {
+          "text": "## Part 1",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by worker discipline reference is linked and assembly proof is named."
+        },
+        {
+          "text": "## Part 2",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by worker discipline reference is linked and assembly proof is named."
+        },
+        {
+          "text": "gh run watch",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by worker discipline reference is linked and assembly proof is named."
+        },
+        {
+          "text": "action=server_start",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by worker discipline reference is linked and assembly proof is named."
+        },
+        {
+          "text": "Checkpoint before compaction",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by worker discipline reference is linked and assembly proof is named."
+        },
+        {
+          "text": "Context: ~",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by worker discipline reference is linked and assembly proof is named."
+        },
+        {
+          "text": "auto-compaction",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by worker discipline reference is linked and assembly proof is named."
+        },
+        {
+          "text": "cargo check -p <crate> --lib --tests",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by worker discipline reference is linked and assembly proof is named."
+        },
+        {
+          "text": "scripts/run-scoped-tests.sh --proof",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by worker discipline reference is linked and assembly proof is named."
+        },
+        {
+          "text": "Batch before you verify",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by worker skills teach capped checks and targeted tests."
+        },
+        {
+          "text": "banked receipt",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by worker skills teach capped checks and targeted tests."
+        },
+        {
+          "text": "--lib <module>",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by worker skills teach capped checks and targeted tests."
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-worker/references/close-gate.md": {
+      "source": "cas-cli/src/builtins/skills/cas-worker/references/close-gate.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": ".codex/hooks.json",
+          "reason": "Retain the load-bearing policy term from worker skills require cas src surface checklist."
+        },
+        {
+          "text": "config_gen",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by worker skills require cas src surface checklist."
+        },
+        {
+          "text": "doctor_snapshot",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by worker skills require cas src surface checklist."
+        },
+        {
+          "text": "# Close Gate",
+          "reason": "Retain the load-bearing policy term from cas worker skill documents close gate."
+        },
+        {
+          "text": "Clean-tree receipt",
+          "reason": "Retain the load-bearing policy term from cas worker skill documents close gate."
+        },
+        {
+          "text": "git status --porcelain",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by cas worker skill documents close gate."
+        },
+        {
+          "text": "MERGE REQUIRED",
+          "reason": "Retain the load-bearing policy term from worker merge state guidance present and mirrored."
+        },
+        {
+          "text": "gh pr create",
+          "reason": "Retain the load-bearing policy term from worker merge state guidance present and mirrored."
+        },
+        {
+          "text": "status=closed",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by worker merge state guidance present and mirrored."
+        },
+        {
+          "text": "inbox_poll",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by worker merge state guidance present and mirrored."
+        },
+        {
+          "text": "unread supervisor messages",
+          "reason": "Retain the load-bearing policy term from worker merge state guidance present and mirrored."
+        },
+        {
+          "text": "git rev-parse factory/<name>",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by worker merge state guidance present and mirrored."
+        },
+        {
+          "text": "git merge-base --is-ancestor <delivered-tip> <target-tip>",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by worker failure recovery reference and merge check are linked."
+        }
+      ],
+      "absent": [
+        {
+          "text": "pending_supervisor_review",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "bypass_code_review",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "/epic-spec",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "/epic-breakdown",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "code-review-queue",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-codebase-design/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/cas-codebase-design/SKILL.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "principles.md",
+          "reason": "Keep the installed workflow/reference route reachable; codebase design principles are installed and linked."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-tdd/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/cas-tdd/SKILL.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "principles.md",
+          "reason": "Keep the installed workflow/reference route reachable; codebase design principles are installed and linked."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-diagnosing-bugs/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/cas-diagnosing-bugs/SKILL.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "principles.md",
+          "reason": "Keep the installed workflow/reference route reachable; codebase design principles are installed and linked."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-why/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/cas-why/SKILL.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "name: cas-why",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by cas why is installed and routed from search."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-search/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/cas-search.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "`cas-why`",
+          "reason": "Retain the load-bearing policy term from cas why is installed and routed from search."
+        },
+        {
+          "text": "`search action=search",
+          "reason": "Name the supported tool/action contract used by grok search brainstorm ideate use cas prefix."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-qa-craft/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/cas-qa-craft/SKILL.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "references/verify-harness.md",
+          "reason": "Keep the installed workflow/reference route reachable; qa craft verification kit is installed and linked."
+        },
+        {
+          "text": "references/maintain.md",
+          "reason": "Keep the installed workflow/reference route reachable; qa craft verification kit is installed and linked."
+        },
+        {
+          "text": "name: cas-qa-craft",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas qa craft."
+        },
+        {
+          "text": "demo_statement",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas qa craft."
+        },
+        {
+          "text": "Cap the matrix at **8 cells**",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "MIN_",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas qa craft."
+        },
+        {
+          "text": "evidence-ledger.md",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains cas qa craft."
+        },
+        {
+          "text": "exemplar.md",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains cas qa craft."
+        },
+        {
+          "text": "evidence-bundle.md",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains cas qa craft."
+        },
+        {
+          "text": "references/journeys.md",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains cas qa craft."
+        },
+        {
+          "text": "](../cas-supervisor/references/epic-flow-walk.md)",
+          "reason": "Retain the load-bearing policy term from epic walk route and verdict shape exist in every harness."
+        },
+        {
+          "text": "at least three unmentioned",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "no replay cells",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "real build",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "30 minutes",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "source-inferred",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "real-build",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "sweep: not configured",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "NOT EXERCISED",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "contradictory claims",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "one task per defect",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "adjacent surface",
+          "reason": "Keep the operational, evidence, accessibility or review safeguard from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "fixture",
+          "reason": "Keep the operational, evidence, accessibility or review safeguard from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "eyewitness",
+          "reason": "Keep the operational, evidence, accessibility or review safeguard from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "telemetry_sweep",
+          "reason": "Keep the operational, evidence, accessibility or review safeguard from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "eyewitness/telemetry",
+          "reason": "Keep the operational, evidence, accessibility or review safeguard from builtin skills contains cas qa craft."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-servers/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/cas-servers/SKILL.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "name: cas-servers",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas servers."
+        },
+        {
+          "text": "action=server_start",
+          "reason": "Name the supported tool/action contract used by builtin skills contains cas servers."
+        },
+        {
+          "text": "action=server_stop",
+          "reason": "Name the supported tool/action contract used by builtin skills contains cas servers."
+        },
+        {
+          "text": "action=server_list",
+          "reason": "Name the supported tool/action contract used by builtin skills contains cas servers."
+        },
+        {
+          "text": "npm run dev &",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas servers."
+        },
+        {
+          "text": "Never background a server yourself",
+          "reason": "Preserve the operational safety boundary documented by builtin skills contains cas servers."
+        },
+        {
+          "text": "Registered servers are the only ones that survive worker teardown",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas servers."
+        },
+        {
+          "text": "task_id",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas servers."
+        },
+        {
+          "text": "shared=true",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas servers."
+        },
+        {
+          "text": "you are responsible for stopping it",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas servers."
+        },
+        {
+          "text": "One-shot commands do not belong here",
+          "reason": "Preserve the operational safety boundary documented by builtin skills contains cas servers."
+        }
+      ],
+      "absent": [],
+      "any_of": [
+        {
+          "texts": [
+            "`factory action=server_start",
+            "\nfactory action=server_start"
+          ],
+          "reason": "Name the supported tool/action contract used by builtin skills contains cas servers."
+        }
+      ]
+    },
+    "skills/mcp-integration/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/mcp-integration/SKILL.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "name: mcp-integration",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains mcp integration."
+        },
+        {
+          "text": "[references/diagnosis.md](references/diagnosis.md)",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains mcp integration."
+        },
+        {
+          "text": "cas mcp add",
+          "reason": "Retain the load-bearing policy term from mcp and viktor guidance use the cassy surface."
+        },
+        {
+          "text": "cas mcp list --json",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by mcp and viktor guidance use the cassy surface."
+        },
+        {
+          "text": "cas mcp import",
+          "reason": "Retain the load-bearing policy term from mcp and viktor guidance use the cassy surface."
+        },
+        {
+          "text": ".cas/proxy.toml",
+          "reason": "Retain the load-bearing policy term from mcp and viktor guidance use the cassy surface."
+        },
+        {
+          "text": "proxy_add",
+          "reason": "Name the supported tool/action contract used by mcp and viktor guidance use the cassy surface."
+        },
+        {
+          "text": "proxy_remove",
+          "reason": "Name the supported tool/action contract used by mcp and viktor guidance use the cassy surface."
+        },
+        {
+          "text": "proxy_list",
+          "reason": "Name the supported tool/action contract used by mcp and viktor guidance use the cassy surface."
+        },
+        {
+          "text": "proxy_health",
+          "reason": "Name the supported tool/action contract used by mcp and viktor guidance use the cassy surface."
+        },
+        {
+          "text": "system action=proxy_add",
+          "reason": "Name the supported tool/action contract used by mcp and viktor guidance use the cassy surface."
+        },
+        {
+          "text": "system action=proxy_remove",
+          "reason": "Name the supported tool/action contract used by mcp and viktor guidance use the cassy surface."
+        },
+        {
+          "text": "system action=proxy_list",
+          "reason": "Name the supported tool/action contract used by mcp and viktor guidance use the cassy surface."
+        },
+        {
+          "text": "system action=proxy_health",
+          "reason": "Name the supported tool/action contract used by mcp and viktor guidance use the cassy surface."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/mcp-integration/references/diagnosis.md": {
+      "source": "cas-cli/src/builtins/skills/mcp-integration/references/diagnosis.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "# MCP diagnosis reference",
+          "reason": "Retain the load-bearing policy term from builtin skills contains mcp integration."
+        },
+        {
+          "text": "## Symptom → cause",
+          "reason": "Retain the load-bearing policy term from mcp and viktor guidance use the cassy surface."
+        }
+      ],
+      "absent": [
+        {
+          "text": "cas mcp add",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by mcp and viktor guidance use the cassy surface."
+        },
+        {
+          "text": "mcp__cas__system",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by mcp and viktor guidance use the cassy surface."
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-html-reports/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/cas-html-reports/SKILL.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "name: cas-html-reports",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas html reports."
+        },
+        {
+          "text": "No CDN",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas html reports."
+        },
+        {
+          "text": "progressive enhancement",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas html reports."
+        },
+        {
+          "text": "cas-ui-craft",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas html reports."
+        },
+        {
+          "text": "DESIGN.md",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains cas html reports."
+        },
+        {
+          "text": "investigation-annotated-timeline.html",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains cas html reports."
+        },
+        {
+          "text": "executive-variance-brief.html",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains cas html reports."
+        },
+        {
+          "text": "benchmark-small-multiples.html",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains cas html reports."
+        },
+        {
+          "text": "cas-ui-craft/references/exemplars/before-after.html",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains cas html reports."
+        },
+        {
+          "text": "form-vocabulary.md",
+          "reason": "Keep the installed workflow/reference route reachable; one form table lives in the ui craft form vocabulary."
+        },
+        {
+          "text": "Provenance per figure",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas html reports."
+        },
+        {
+          "text": "Print-ready",
+          "reason": "Keep the operational, evidence, accessibility or review safeguard from builtin skills contains cas html reports."
+        }
+      ],
+      "absent": [
+        {
+          "text": "rubric-review",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cas html reports."
+        },
+        {
+          "text": "| Reader task |",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by one form table lives in the ui craft form vocabulary."
+        },
+        {
+          "text": "| Reader's task |",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by one form table lives in the ui craft form vocabulary."
+        },
+        {
+          "text": "| Message | Use |",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by one form table lives in the ui craft form vocabulary."
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-html-reports/references/examples/investigation-annotated-timeline.html": {
+      "source": "cas-cli/src/builtins/skills/cas-html-reports/references/examples/investigation-annotated-timeline.html",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "<!DOCTYPE html>",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas html reports."
+        },
+        {
+          "text": "@media print",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas html reports."
+        },
+        {
+          "text": "role=\"img\"",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas html reports."
+        },
+        {
+          "text": "<table",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas html reports."
+        }
+      ],
+      "absent": [
+        {
+          "text": "src=",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cas html reports.",
+          "case_sensitive": false,
+          "unicode_case": true
+        },
+        {
+          "text": "@import",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cas html reports.",
+          "case_sensitive": false,
+          "unicode_case": true
+        },
+        {
+          "text": "<img",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cas html reports.",
+          "case_sensitive": false,
+          "unicode_case": true
+        },
+        {
+          "text": "<link",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cas html reports.",
+          "case_sensitive": false,
+          "unicode_case": true
+        },
+        {
+          "text": "cdn.",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cas html reports.",
+          "case_sensitive": false,
+          "unicode_case": true
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-html-reports/references/examples/executive-variance-brief.html": {
+      "source": "cas-cli/src/builtins/skills/cas-html-reports/references/examples/executive-variance-brief.html",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "<!DOCTYPE html>",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas html reports."
+        },
+        {
+          "text": "@media print",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas html reports."
+        },
+        {
+          "text": "role=\"img\"",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas html reports."
+        },
+        {
+          "text": "<table",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas html reports."
+        }
+      ],
+      "absent": [
+        {
+          "text": "src=",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cas html reports.",
+          "case_sensitive": false,
+          "unicode_case": true
+        },
+        {
+          "text": "@import",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cas html reports.",
+          "case_sensitive": false,
+          "unicode_case": true
+        },
+        {
+          "text": "<img",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cas html reports.",
+          "case_sensitive": false,
+          "unicode_case": true
+        },
+        {
+          "text": "<link",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cas html reports.",
+          "case_sensitive": false,
+          "unicode_case": true
+        },
+        {
+          "text": "cdn.",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cas html reports.",
+          "case_sensitive": false,
+          "unicode_case": true
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-html-reports/references/examples/benchmark-small-multiples.html": {
+      "source": "cas-cli/src/builtins/skills/cas-html-reports/references/examples/benchmark-small-multiples.html",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "<!DOCTYPE html>",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas html reports."
+        },
+        {
+          "text": "@media print",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas html reports."
+        },
+        {
+          "text": "role=\"img\"",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas html reports."
+        },
+        {
+          "text": "<table",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas html reports."
+        }
+      ],
+      "absent": [
+        {
+          "text": "src=",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cas html reports.",
+          "case_sensitive": false,
+          "unicode_case": true
+        },
+        {
+          "text": "@import",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cas html reports.",
+          "case_sensitive": false,
+          "unicode_case": true
+        },
+        {
+          "text": "<img",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cas html reports.",
+          "case_sensitive": false,
+          "unicode_case": true
+        },
+        {
+          "text": "<link",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cas html reports.",
+          "case_sensitive": false,
+          "unicode_case": true
+        },
+        {
+          "text": "cdn.",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cas html reports.",
+          "case_sensitive": false,
+          "unicode_case": true
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-dataviz/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/cas-dataviz/SKILL.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "@media print",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas dataviz."
+        },
+        {
+          "text": "cas-html-reports",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas dataviz."
+        },
+        {
+          "text": "cas-ui-craft",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas dataviz."
+        },
+        {
+          "text": "DESIGN.md",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains cas dataviz."
+        },
+        {
+          "text": "form-vocabulary.md",
+          "reason": "Keep the installed workflow/reference route reachable; one form table lives in the ui craft form vocabulary."
+        }
+      ],
+      "absent": [
+        {
+          "text": "| Reader task |",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by one form table lives in the ui craft form vocabulary."
+        },
+        {
+          "text": "| Reader's task |",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by one form table lives in the ui craft form vocabulary."
+        },
+        {
+          "text": "| Message | Use |",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by one form table lives in the ui craft form vocabulary."
+        },
+        {
+          "text": "KPI cards",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by one form table lives in the ui craft form vocabulary."
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-dataviz/examples/send-backs-dot-strip.html": {
+      "source": "cas-cli/src/builtins/skills/cas-dataviz/examples/send-backs-dot-strip.html",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "<!DOCTYPE html>",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas dataviz."
+        },
+        {
+          "text": "@media print",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas dataviz."
+        },
+        {
+          "text": "role=\"img\"",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas dataviz."
+        },
+        {
+          "text": "<table",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas dataviz."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-ui-craft/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/cas-ui-craft/SKILL.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "name: cas-ui-craft",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": ".brief.md",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "form-vocabulary.md",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "critique-rubric.md",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "each ≥ 4",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "petrastella-design-language.md",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "exemplars/report.html",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "exemplars/dashboard.html",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "exemplars/product-page.html",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "exemplars/before-after.html",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "cas-html-reports",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "cas-dataviz",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas ui craft and design language."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-ui-craft/references/critique-rubric.md": {
+      "source": "cas-cli/src/builtins/skills/cas-ui-craft/references/critique-rubric.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "each ≥ 4",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "<skills-dir>/cas-ui-craft/scripts/visual-qa.mjs",
+          "reason": "Keep the installed workflow/reference route reachable; design qa scripts ship with their skills and run skill relative."
+        },
+        {
+          "text": "--artifact-dir",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by design qa scripts ship with their skills and run skill relative."
+        },
+        {
+          "text": "Distinctiveness",
+          "reason": "Keep the operational, evidence, accessibility or review safeguard from builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "Fit to argument",
+          "reason": "Keep the operational, evidence, accessibility or review safeguard from builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "Hierarchy",
+          "reason": "Keep the operational, evidence, accessibility or review safeguard from builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "Craft",
+          "reason": "Keep the operational, evidence, accessibility or review safeguard from builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "Accessibility",
+          "reason": "Keep the operational, evidence, accessibility or review safeguard from builtin skills contains cas ui craft and design language."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-ui-craft/references/exemplars/report.html": {
+      "source": "cas-cli/src/builtins/skills/cas-ui-craft/references/exemplars/report.html",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "<!DOCTYPE html>",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "lang=\"en\"",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "@media print",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "prefers-reduced-motion",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "prefers-color-scheme: dark",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "role=\"img\"",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "<caption>",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "class=\"note\"",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "--verdict",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "--surface-hero",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas ui craft and design language."
+        }
+      ],
+      "absent": [
+        {
+          "text": "<script src",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "<link rel=\"stylesheet\"",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "@import",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "fonts.googleapis",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cas ui craft and design language."
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-ui-craft/references/exemplars/dashboard.html": {
+      "source": "cas-cli/src/builtins/skills/cas-ui-craft/references/exemplars/dashboard.html",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "<!DOCTYPE html>",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "lang=\"en\"",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "@media print",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "prefers-reduced-motion",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "prefers-color-scheme: dark",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "role=\"img\"",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "<caption>",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "class=\"note\"",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "--verdict",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "--surface-hero",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas ui craft and design language."
+        }
+      ],
+      "absent": [
+        {
+          "text": "<script src",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "<link rel=\"stylesheet\"",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "@import",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "fonts.googleapis",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cas ui craft and design language."
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-ui-craft/references/exemplars/product-page.html": {
+      "source": "cas-cli/src/builtins/skills/cas-ui-craft/references/exemplars/product-page.html",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "<!DOCTYPE html>",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "lang=\"en\"",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "@media print",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "prefers-reduced-motion",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "prefers-color-scheme: dark",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "role=\"img\"",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "<caption>",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "class=\"note\"",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "--verdict",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "--surface-hero",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas ui craft and design language."
+        }
+      ],
+      "absent": [
+        {
+          "text": "<script src",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "<link rel=\"stylesheet\"",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "@import",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "fonts.googleapis",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cas ui craft and design language."
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-ui-craft/references/exemplars/before-after.html": {
+      "source": "cas-cli/src/builtins/skills/cas-ui-craft/references/exemplars/before-after.html",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "<!DOCTYPE html>",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "lang=\"en\"",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "@media print",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "prefers-reduced-motion",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "prefers-color-scheme: dark",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "role=\"img\"",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "<caption>",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "class=\"note\"",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "--verdict",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "--surface-hero",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas ui craft and design language."
+        }
+      ],
+      "absent": [
+        {
+          "text": "<script src",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "<link rel=\"stylesheet\"",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "@import",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cas ui craft and design language."
+        },
+        {
+          "text": "fonts.googleapis",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cas ui craft and design language."
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-qa-craft/references/matrix-builder.md": {
+      "source": "cas-cli/src/builtins/skills/cas-qa-craft/references/matrix-builder.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "cap the matrix at eight",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "at least three conditions",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "zero replay cells",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "expected result",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "adjacent surface",
+          "reason": "Keep the operational, evidence, accessibility or review safeguard from builtin skills contains cas qa craft."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-qa-craft/references/evidence-ledger.md": {
+      "source": "cas-cli/src/builtins/skills/cas-qa-craft/references/evidence-ledger.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "id | cell | expected | observed | verdict | label | evidence path | defect task",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas qa craft."
+        },
+        {
+          "text": "source-inferred",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "real-build",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "NOT EXERCISED",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "Constants vs expectation",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "Contradictions",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "Honesty",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "fixture",
+          "reason": "Keep the operational, evidence, accessibility or review safeguard from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "eyewitness",
+          "reason": "Keep the operational, evidence, accessibility or review safeguard from builtin skills contains cas qa craft."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-qa-craft/references/telemetry-sweep.md": {
+      "source": "cas-cli/src/builtins/skills/cas-qa-craft/references/telemetry-sweep.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "qa.telemetry_sweep",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas qa craft."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-qa-craft/references/evidence-bundle.md": {
+      "source": "cas-cli/src/builtins/skills/cas-qa-craft/references/evidence-bundle.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "~/.cas/artifacts/<task-id>/qa/",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas qa craft."
+        },
+        {
+          "text": "bundle.json",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "snapshots: { dom: true, aria: true, screen: true }",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas qa craft."
+        },
+        {
+          "text": "screenshots: false",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas qa craft."
+        },
+        {
+          "text": "page.screencast.start",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "showActions",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "showChapter",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "toMatchAriaSnapshot",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "ariaSnapshotJSON",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "forcedColors",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "reducedMotion",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "contrast",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "visual-qa.mjs --strict",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas qa craft."
+        },
+        {
+          "text": "critique_score",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas qa craft."
+        },
+        {
+          "text": "note_type=platform_proof",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas qa craft."
+        },
+        {
+          "text": "npx playwright trace actions --errors-only",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas qa craft."
+        },
+        {
+          "text": "trace snapshot <N> --phase after",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas qa craft."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-qa-craft/references/journeys.md": {
+      "source": "cas-cli/src/builtins/skills/cas-qa-craft/references/journeys.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "docs/qa/journeys.md",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains cas qa craft."
+        },
+        {
+          "text": "journeys-for-diff.py",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains cas qa craft."
+        },
+        {
+          "text": "dead end",
+          "reason": "Keep the operational, evidence, accessibility or review safeguard from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "cannot reach its goal",
+          "reason": "Keep the operational, evidence, accessibility or review safeguard from builtin skills contains cas qa craft."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-github-issues/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/cas-github-issues/SKILL.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "name: cas-github-issues",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas github issues."
+        },
+        {
+          "text": "gh issue list --state open",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas github issues."
+        },
+        {
+          "text": "Duplicate of #",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas github issues."
+        },
+        {
+          "text": "action=create",
+          "reason": "Name the supported tool/action contract used by builtin skills contains cas github issues."
+        },
+        {
+          "text": "external_ref",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas github issues."
+        },
+        {
+          "text": "gh issue comment",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas github issues."
+        },
+        {
+          "text": "action=blocked",
+          "reason": "Name the supported tool/action contract used by builtin skills contains cas github issues."
+        },
+        {
+          "text": "action=dep_remove",
+          "reason": "Name the supported tool/action contract used by builtin skills contains cas github issues."
+        },
+        {
+          "text": "gh issue create",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas github issues."
+        },
+        {
+          "text": "**Environment**",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas github issues."
+        },
+        {
+          "text": "**Repro**",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas github issues."
+        },
+        {
+          "text": "**Actual**",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas github issues."
+        },
+        {
+          "text": "**Expected**",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas github issues."
+        },
+        {
+          "text": "**Impact**",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas github issues."
+        },
+        {
+          "text": "**Suggested fix**",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas github issues."
+        },
+        {
+          "text": ".claude/scheduled_tasks.json",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas github issues."
+        },
+        {
+          "text": "\ntask action=",
+          "reason": "Name the supported tool/action contract used by builtin skills contains cas github issues."
+        },
+        {
+          "text": "Dedupe double-filings",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas github issues."
+        },
+        {
+          "text": "Verify-and-close fixed claims",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas github issues."
+        },
+        {
+          "text": "Verify against the code",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas github issues."
+        },
+        {
+          "text": "auto-promoted to `in_progress`",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas github issues."
+        },
+        {
+          "text": "7-day auto-expiry",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas github issues."
+        }
+      ],
+      "absent": [
+        {
+          "text": "pending_supervisor_review",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "bypass_code_review",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "/epic-spec",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "/epic-breakdown",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "code-review-queue",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-cli-craft/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/cas-cli-craft/SKILL.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "name: cas-cli-craft",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas cli craft."
+        },
+        {
+          "text": "description:",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas cli craft."
+        },
+        {
+          "text": "references/concept-brief.md",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains cas cli craft."
+        },
+        {
+          "text": "references/output-contract.md",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains cas cli craft."
+        },
+        {
+          "text": "references/critique-rubric.md",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains cas cli craft."
+        },
+        {
+          "text": "scripts/terminal-qa.mjs",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains cas cli craft."
+        },
+        {
+          "text": "NO_COLOR",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas cli craft."
+        },
+        {
+          "text": "`--json`",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas cli craft."
+        },
+        {
+          "text": "80 columns",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas cli craft."
+        },
+        {
+          "text": "exemplars/status-screen.md",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains cas cli craft."
+        },
+        {
+          "text": "exemplars/doctor-report.md",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains cas cli craft."
+        },
+        {
+          "text": "exemplars/long-running.md",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains cas cli craft."
+        },
+        {
+          "text": "exemplars/before-after.md",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains cas cli craft."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-cli-craft/references/critique-rubric.md": {
+      "source": "cas-cli/src/builtins/skills/cas-cli-craft/references/critique-rubric.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "overflow",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas cli craft."
+        },
+        {
+          "text": "word-split",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas cli craft."
+        },
+        {
+          "text": "contrast",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas cli craft."
+        },
+        {
+          "text": "truncation-without-escape",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas cli craft."
+        },
+        {
+          "text": "unicode-without-fallback",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas cli craft."
+        },
+        {
+          "text": "color-under-no-color",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas cli craft."
+        },
+        {
+          "text": "control-when-piped",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas cli craft."
+        },
+        {
+          "text": "json-contract",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas cli craft."
+        },
+        {
+          "text": "terminal-qa.mjs",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains cas cli craft."
+        },
+        {
+          "text": "<skills-dir>/cas-cli-craft/scripts/terminal-qa.mjs",
+          "reason": "Keep the installed workflow/reference route reachable; design qa scripts ship with their skills and run skill relative."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-release-notes/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/cas-release-notes/SKILL.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "name: cas-release-notes",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains release notes rubric."
+        },
+        {
+          "text": "docs/release-notes/RUBRIC.md",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains release notes rubric."
+        },
+        {
+          "text": "references/RUBRIC-template.md",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains release notes rubric."
+        },
+        {
+          "text": "docs/release-notes/rubric.md",
+          "reason": "Keep the installed workflow/reference route reachable; release notes are generic procedure and rubric driven.",
+          "case_sensitive": false
+        },
+        {
+          "text": "Was → Now",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains release notes rubric."
+        },
+        {
+          "text": "Ensure the rubric exists",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains release notes rubric."
+        },
+        {
+          "text": "Gather the merge",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains release notes rubric."
+        },
+        {
+          "text": "Draft the messages from the rubric",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains release notes rubric."
+        },
+        {
+          "text": "Save the draft",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains release notes rubric."
+        },
+        {
+          "text": "Post in rubric order",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains release notes rubric."
+        },
+        {
+          "text": "Record the receipt",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains release notes rubric."
+        },
+        {
+          "text": "ensure the rubric exists",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from release notes are generic procedure and rubric driven.",
+          "case_sensitive": false
+        },
+        {
+          "text": "gather the merge",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from release notes are generic procedure and rubric driven.",
+          "case_sensitive": false
+        },
+        {
+          "text": "save the draft",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from release notes are generic procedure and rubric driven.",
+          "case_sensitive": false
+        },
+        {
+          "text": "post",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from release notes are generic procedure and rubric driven.",
+          "case_sensitive": false
+        },
+        {
+          "text": "receipt",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from release notes are generic procedure and rubric driven.",
+          "case_sensitive": false
+        }
+      ],
+      "absent": [
+        {
+          "text": "docs/SLACK_POSTING_RUNBOOK.md",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by release notes are generic procedure and rubric driven."
+        },
+        {
+          "text": "pippenz@gmail.com",
+          "reason": "Prevent embedded credentials or personal account identifiers from reaching installed guidance."
+        },
+        {
+          "text": "claude.ai",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by release notes are generic procedure and rubric driven."
+        },
+        {
+          "text": "transport",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by release notes are generic procedure and rubric driven."
+        },
+        {
+          "text": "profile",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by release notes are generic procedure and rubric driven."
+        },
+        {
+          "text": "exactly one threaded reply",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by release notes are generic procedure and rubric driven."
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-release-notes/references/RUBRIC-template.md": {
+      "source": "cas-cli/src/builtins/skills/cas-release-notes/references/RUBRIC-template.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "was → now",
+          "reason": "Retain the load-bearing policy term from builtin skills contains release notes rubric.",
+          "case_sensitive": false,
+          "unicode_case": true
+        },
+        {
+          "text": "no internal ticket labels",
+          "reason": "Preserve the operational safety boundary documented by builtin skills contains release notes rubric.",
+          "case_sensitive": false,
+          "unicode_case": true
+        },
+        {
+          "text": "docs/release-notes/<date>-<topic>-slack.md",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains release notes rubric.",
+          "case_sensitive": false,
+          "unicode_case": true
+        },
+        {
+          "text": "## posted",
+          "reason": "Retain the load-bearing policy term from builtin skills contains release notes rubric.",
+          "case_sensitive": false,
+          "unicode_case": true
+        },
+        {
+          "text": "utc timestamp",
+          "reason": "Retain the load-bearing policy term from builtin skills contains release notes rubric.",
+          "case_sensitive": false,
+          "unicode_case": true
+        },
+        {
+          "text": "default: one threaded reply per thread",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains release notes rubric.",
+          "case_sensitive": false,
+          "unicode_case": true
+        },
+        {
+          "text": "Default: one threaded reply per thread",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by release notes are generic procedure and rubric driven."
+        },
+        {
+          "text": "live on production",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains release notes rubric.",
+          "case_sensitive": false,
+          "unicode_case": true
+        },
+        {
+          "text": "staging",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains release notes rubric.",
+          "case_sensitive": false,
+          "unicode_case": true
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/violet/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/violet/SKILL.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "name: violet",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains violet transport."
+        },
+        {
+          "text": "violet.violet_read",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains violet transport."
+        },
+        {
+          "text": "violet.violet_post",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains violet transport."
+        },
+        {
+          "text": "anyOf",
+          "reason": "Retain the load-bearing policy term from builtin skills contains violet transport."
+        },
+        {
+          "text": "GH #1051",
+          "reason": "Retain the load-bearing policy term from builtin skills contains violet transport."
+        },
+        {
+          "text": "https://mecha-cassy.vercel.app/mcp/slack",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains violet transport."
+        },
+        {
+          "text": "^[a-z0-9-]+-internal$",
+          "reason": "Retain the load-bearing policy term from builtin skills contains violet transport."
+        },
+        {
+          "text": "docs/release-notes/<date>-<topic>-slack.md",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains violet transport."
+        },
+        {
+          "text": "pagination_exhausted",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains violet transport."
+        },
+        {
+          "text": "max_messages",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains violet transport."
+        },
+        {
+          "text": "upstream_unavailable",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains violet transport."
+        },
+        {
+          "text": "slack_error",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains violet transport."
+        },
+        {
+          "text": "user_thread_id",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains violet transport."
+        },
+        {
+          "text": "dev_thread_id",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains violet transport."
+        },
+        {
+          "text": "reply_to",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains violet transport."
+        },
+        {
+          "text": "content_encoding",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains violet transport."
+        },
+        {
+          "text": "## POSTED",
+          "reason": "Retain the load-bearing policy term from builtin skills contains violet transport."
+        },
+        {
+          "text": "message_id",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains violet transport."
+        },
+        {
+          "text": "permalink",
+          "reason": "Retain the load-bearing policy term from builtin skills contains violet transport."
+        },
+        {
+          "text": "invalid_token",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains violet transport."
+        },
+        {
+          "text": "not_member",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains violet transport."
+        },
+        {
+          "text": "size_cap_exceeded",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains violet transport."
+        },
+        {
+          "text": "Retry-After",
+          "reason": "Retain the load-bearing policy term from builtin skills contains violet transport."
+        },
+        {
+          "text": "`printenv`",
+          "reason": "Keep credentials in environment references and forbid diagnostic disclosure; builtin skills contains violet transport."
+        },
+        {
+          "text": "`curl -v`",
+          "reason": "Keep credentials in environment references and forbid diagnostic disclosure; builtin skills contains violet transport."
+        },
+        {
+          "text": "never values",
+          "reason": "Keep credentials in environment references and forbid diagnostic disclosure; builtin skills contains violet transport."
+        },
+        {
+          "text": "programmatic file path",
+          "reason": "Retain the load-bearing policy term from builtin violet file upload integrity contract."
+        },
+        {
+          "text": "reads bytes from disk",
+          "reason": "Retain the load-bearing policy term from builtin violet file upload integrity contract."
+        },
+        {
+          "text": "never paste base64 through the model",
+          "reason": "Preserve the authenticated file transport and verification safeguard; builtin violet file upload integrity contract."
+        },
+        {
+          "text": "Download the provider's explicit file endpoint",
+          "reason": "Preserve the authenticated file transport and verification safeguard; builtin violet file upload integrity contract."
+        },
+        {
+          "text": "message permalink",
+          "reason": "Retain the load-bearing policy term from builtin violet file upload integrity contract."
+        },
+        {
+          "text": "authenticated `violet_read`",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin violet file upload integrity contract."
+        },
+        {
+          "text": "hub-packed bytes",
+          "reason": "Retain the load-bearing policy term from builtin violet file upload integrity contract."
+        },
+        {
+          "text": "external signed or private-provider URLs receive no hub credentials",
+          "reason": "Preserve the authenticated file transport and verification safeguard; builtin violet file upload integrity contract."
+        },
+        {
+          "text": "configured MCP origin",
+          "reason": "Retain the load-bearing policy term from builtin violet file upload integrity contract."
+        },
+        {
+          "text": "neither verified path is available",
+          "reason": "Retain the load-bearing policy term from builtin violet file upload integrity contract."
+        },
+        {
+          "text": "SHA-256 (`sha256sum`) equality",
+          "reason": "Preserve the authenticated file transport and verification safeguard; builtin violet file upload integrity contract."
+        },
+        {
+          "text": "successful decode",
+          "reason": "Preserve the authenticated file transport and verification safeguard; builtin violet file upload integrity contract."
+        },
+        {
+          "text": "python3 -c 'from PIL import Image; im=Image.open(\"download\"); im.verify()'",
+          "reason": "Preserve the authenticated file transport and verification safeguard; builtin violet file upload integrity contract."
+        },
+        {
+          "text": "im.verify()",
+          "reason": "Preserve the authenticated file transport and verification safeguard; builtin violet file upload integrity contract."
+        },
+        {
+          "text": "visible preview",
+          "reason": "Retain the load-bearing policy term from builtin violet file upload integrity contract."
+        },
+        {
+          "text": "Never split, resize, or shrink",
+          "reason": "Preserve the operational safety boundary documented by builtin violet file upload integrity contract."
+        },
+        {
+          "text": "Byte count, `ok: true`, or permalink alone never prove upload integrity",
+          "reason": "Preserve the authenticated file transport and verification safeguard; builtin violet file upload integrity contract."
+        },
+        {
+          "text": "escalate to the supervisor on the first weak receipt",
+          "reason": "Preserve the authenticated file transport and verification safeguard; builtin violet file upload integrity contract."
+        }
+      ],
+      "absent": [
+        {
+          "text": "slack_post_message",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains violet transport."
+        },
+        {
+          "text": "slack_upload_file",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains violet transport."
+        },
+        {
+          "text": "slack_read_channel",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains violet transport."
+        },
+        {
+          "text": "slack_list_channels",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains violet transport."
+        },
+        {
+          "text": "mecha_read",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains violet transport."
+        },
+        {
+          "text": "mecha_post",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains violet transport."
+        },
+        {
+          "text": "xoxb-",
+          "reason": "Prevent embedded credentials or personal account identifiers from reaching installed guidance."
+        },
+        {
+          "text": "xoxp-",
+          "reason": "Prevent embedded credentials or personal account identifiers from reaching installed guidance."
+        },
+        {
+          "text": "xapp-",
+          "reason": "Prevent embedded credentials or personal account identifiers from reaching installed guidance."
+        },
+        {
+          "text": "Bearer sk-",
+          "reason": "Prevent embedded credentials or personal account identifiers from reaching installed guidance."
+        },
+        {
+          "text": "MECHA_CLIENT_TOKENS=",
+          "reason": "Prevent embedded credentials or personal account identifiers from reaching installed guidance."
+        },
+        {
+          "text": "VIOLET_CLIENT_TOKENS=",
+          "reason": "Prevent embedded credentials or personal account identifiers from reaching installed guidance."
+        }
+      ],
+      "any_of": []
+    },
+    "skills/violet/references/registration.md": {
+      "source": "cas-cli/src/builtins/skills/violet/references/registration.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "[servers.violet]",
+          "reason": "Retain the load-bearing policy term from builtin skills contains violet transport."
+        },
+        {
+          "text": "auth = \"env:VIOLET_SLACK_TOKEN_<LABEL>\"",
+          "reason": "Keep credentials in environment references and forbid diagnostic disclosure; builtin skills contains violet transport."
+        },
+        {
+          "text": "violet.violet_read",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains violet transport."
+        },
+        {
+          "text": "violet.violet_post",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains violet transport."
+        },
+        {
+          "text": "x-vercel-protection-bypass = \"env:VIOLET_VERCEL_BYPASS\"",
+          "reason": "Keep credentials in environment references and forbid diagnostic disclosure; builtin skills contains violet transport."
+        },
+        {
+          "text": "[mcp_servers.violet]",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains violet transport."
+        },
+        {
+          "text": "bearer_token_env_var",
+          "reason": "Keep credentials in environment references and forbid diagnostic disclosure; builtin skills contains violet transport."
+        },
+        {
+          "text": "env_http_headers",
+          "reason": "Keep credentials in environment references and forbid diagnostic disclosure; builtin skills contains violet transport."
+        },
+        {
+          "text": "\"type\": \"http\"",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains violet transport."
+        },
+        {
+          "text": "${VIOLET_VERCEL_BYPASS}",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains violet transport."
+        }
+      ],
+      "absent": [
+        {
+          "text": "xoxb-",
+          "reason": "Prevent embedded credentials or personal account identifiers from reaching installed guidance."
+        },
+        {
+          "text": "xoxp-",
+          "reason": "Prevent embedded credentials or personal account identifiers from reaching installed guidance."
+        },
+        {
+          "text": "xapp-",
+          "reason": "Prevent embedded credentials or personal account identifiers from reaching installed guidance."
+        },
+        {
+          "text": "Bearer sk-",
+          "reason": "Prevent embedded credentials or personal account identifiers from reaching installed guidance."
+        },
+        {
+          "text": "MECHA_CLIENT_TOKENS=",
+          "reason": "Prevent embedded credentials or personal account identifiers from reaching installed guidance."
+        },
+        {
+          "text": "VIOLET_CLIENT_TOKENS=",
+          "reason": "Prevent embedded credentials or personal account identifiers from reaching installed guidance."
+        }
+      ],
+      "any_of": []
+    },
+    "skills/project-overview/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/project-overview/SKILL.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "name: project-overview",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains project overview."
+        },
+        {
+          "text": "managed_by: cas",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains project overview."
+        },
+        {
+          "text": "docs/PRODUCT_OVERVIEW.md",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains project overview."
+        },
+        {
+          "text": "doc-hygiene.md",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains project overview."
+        },
+        {
+          "text": "git add docs/PRODUCT_OVERVIEW.md",
+          "reason": "Keep the installed workflow/reference route reachable; builtin skills contains project overview."
+        },
+        {
+          "text": "cas project-overview clear",
+          "reason": "Retain the load-bearing policy term from builtin skills contains project overview."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/fallow/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/fallow/SKILL.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "name: fallow",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains fallow."
+        },
+        {
+          "text": "managed_by: cas",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains fallow."
+        },
+        {
+          "text": "license: MIT",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains fallow."
+        },
+        {
+          "text": "author: Bart Waardenburg",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains fallow."
+        },
+        {
+          "text": "upstream: https://github.com/fallow-rs/fallow-skills",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains fallow."
+        },
+        {
+          "text": "## Procedure",
+          "reason": "Retain the load-bearing policy term from fallow examples honor machine output rule."
+        },
+        {
+          "text": "Preserve and read the exit status",
+          "reason": "Retain the load-bearing policy term from fallow examples honor machine output rule."
+        },
+        {
+          "text": "fallow schema",
+          "reason": "Retain the load-bearing policy term from fallow examples honor machine output rule."
+        }
+      ],
+      "absent": [
+        {
+          "text": "91 framework plugins",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by fallow examples honor machine output rule."
+        },
+        {
+          "text": "90 auto-detecting",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by fallow examples honor machine output rule."
+        },
+        {
+          "text": "## Node.js Bindings",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by fallow examples honor machine output rule."
+        },
+        {
+          "text": "| `trace_clone` |",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by fallow examples honor machine output rule."
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-codex-exec/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/cas-codex-exec/SKILL.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "name: cas-codex-exec",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas codex exec."
+        },
+        {
+          "text": "managed_by: cas",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas codex exec."
+        },
+        {
+          "text": "token-heavy READ-ONLY investigation",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas codex exec."
+        },
+        {
+          "text": "codex exec -s read-only -C",
+          "reason": "Preserve the operational safety boundary documented by builtin skills contains cas codex exec."
+        },
+        {
+          "text": "If `codex` is not installed",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas codex exec."
+        },
+        {
+          "text": "If you find nothing, say so explicitly and name what you inspected.",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas codex exec."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cli-routing/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/cli-routing/SKILL.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "name: cli-routing",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cli routing."
+        },
+        {
+          "text": "codex exec",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cli routing."
+        },
+        {
+          "text": "claude auth status --json",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cli routing."
+        },
+        {
+          "text": "release.claude_account_allowlist",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cli routing."
+        },
+        {
+          "text": "unapproved account",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cli routing."
+        },
+        {
+          "text": "release-notes",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cli routing."
+        }
+      ],
+      "absent": [
+        {
+          "text": "@gmail.com",
+          "reason": "Prevent embedded credentials or personal account identifiers from reaching installed guidance."
+        },
+        {
+          "text": "@petrastella.io",
+          "reason": "Prevent embedded credentials or personal account identifiers from reaching installed guidance."
+        },
+        {
+          "text": "docs/SLACK_POSTING_RUNBOOK.md",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cli routing."
+        }
+      ],
+      "any_of": []
+    },
+    "skills/session-learn/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/session-learn/SKILL.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "**Concept**",
+          "reason": "Retain the load-bearing policy term from session learn skill covers seven signal taxonomy."
+        },
+        {
+          "text": "**Entity**",
+          "reason": "Retain the load-bearing policy term from session learn skill covers seven signal taxonomy."
+        },
+        {
+          "text": "**Correction**",
+          "reason": "Retain the load-bearing policy term from session learn skill covers seven signal taxonomy."
+        },
+        {
+          "text": "**Pattern**",
+          "reason": "Retain the load-bearing policy term from session learn skill covers seven signal taxonomy."
+        },
+        {
+          "text": "**Idea**",
+          "reason": "Retain the load-bearing policy term from session learn skill covers seven signal taxonomy."
+        },
+        {
+          "text": "**Decision**",
+          "reason": "Retain the load-bearing policy term from session learn skill covers seven signal taxonomy."
+        },
+        {
+          "text": "**Gap**",
+          "reason": "Retain the load-bearing policy term from session learn skill covers seven signal taxonomy."
+        },
+        {
+          "text": "session_learn_auto",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by session learn skill covers seven signal taxonomy."
+        },
+        {
+          "text": "in-process",
+          "reason": "Retain the load-bearing policy term from session learn skill covers seven signal taxonomy."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-nuxt-playwright/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/cas-nuxt-playwright/SKILL.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "name: cas-nuxt-playwright",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas nuxt playwright."
+        },
+        {
+          "text": "managed_by: cas",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas nuxt playwright."
+        },
+        {
+          "text": "disable-model-invocation: true",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by cas nuxt playwright is not model invocable."
+        }
+      ],
+      "absent": [
+        {
+          "text": "user-invocable:",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by cas nuxt playwright is not model invocable."
+        },
+        {
+          "text": "Trigger when editing files under tests/",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by cas nuxt playwright is not model invocable."
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-codex-supervisor-checklist/SKILL.md": {
+      "source": "cas-cli/src/builtins/codex/skills/cas-codex-supervisor-checklist.md",
+      "catalogs": [
+        "codex"
+      ],
+      "contains": [
+        {
+          "text": "../cas-supervisor/references/workflow.md",
+          "reason": "Keep the installed workflow/reference route reachable; taste routes match registry in all supervisor readers."
+        },
+        {
+          "text": "do not kill or restart `cas serve` from this active MCP session",
+          "reason": "Preserve the operational safety boundary documented by supervisor checklists delegate stale serve recovery to operator."
+        },
+        {
+          "text": "ask the operator",
+          "reason": "Retain the load-bearing policy term from supervisor checklists delegate stale serve recovery to operator."
+        },
+        {
+          "text": "MCP reconnect/restart control",
+          "reason": "Retain the load-bearing policy term from supervisor checklists delegate stale serve recovery to operator."
+        },
+        {
+          "text": "Do not use `pkill`",
+          "reason": "Preserve the operational safety boundary documented by supervisor checklists delegate stale serve recovery to operator."
+        },
+        {
+          "text": "Cassy tool list is restored",
+          "reason": "Retain the load-bearing policy term from supervisor checklists delegate stale serve recovery to operator."
+        },
+        {
+          "text": "rerun this checklist from step 0",
+          "reason": "Retain the load-bearing policy term from supervisor checklists delegate stale serve recovery to operator."
+        },
+        {
+          "text": "## Codex constraints",
+          "reason": "Retain the load-bearing policy term from codex ships no md agents and the checklist keeps its constraints."
+        },
+        {
+          "text": "loads no `.md` agents",
+          "reason": "Preserve the operational safety boundary documented by codex ships no md agents and the checklist keeps its constraints."
+        },
+        {
+          "text": "](../cas-supervisor/references/reference.md#supervisor-override)",
+          "reason": "Keep the installed workflow/reference route reachable; supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "no session hooks",
+          "reason": "Preserve the operational safety boundary documented by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "never implement a worker's task yourself",
+          "reason": "Preserve the operational safety boundary documented by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "`cli=`, `model=`, and `effort=`",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "cas-supervisor/references/workflow.md",
+          "reason": "Keep the installed workflow/reference route reachable; supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "](../cas-supervisor/references/epic-flow-walk.md)",
+          "reason": "Keep the installed checklist route to combined epic verification."
+        },
+        {
+          "text": "verification_type=epic",
+          "reason": "Use the supported epic verdict type when verifying the assembled result."
+        }
+      ],
+      "absent": [
+        {
+          "text": "restart any live `cas serve` processes before continuing",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor checklists delegate stale serve recovery to operator."
+        },
+        {
+          "text": "pending_supervisor_review",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "bypass_code_review",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "/epic-spec",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "/epic-breakdown",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "code-review-queue",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-supervisor/references/model-selection.md": {
+      "source": "cas-cli/src/builtins/skills/cas-supervisor/references/model-selection.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "Claude Opus 5.5 at high",
+          "reason": "Retain the load-bearing policy term from supervisor model selection reference registered and mirrored."
+        },
+        {
+          "text": "Codex GPT-6 Luna",
+          "reason": "Retain the load-bearing policy term from supervisor model selection reference registered and mirrored."
+        }
+      ],
+      "absent": [
+        {
+          "text": "claude_haiku",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor model selection reference registered and mirrored."
+        },
+        {
+          "text": "operator decision pending",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor model selection reference registered and mirrored."
+        },
+        {
+          "text": "exceptional-only",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor model selection reference registered and mirrored."
+        },
+        {
+          "text": "model=gpt-5.5",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor model selection reference registered and mirrored."
+        },
+        {
+          "text": "codex/gpt-5.5",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor model selection reference registered and mirrored."
+        },
+        {
+          "text": "BEGIN GENERATED SPAWN RECIPES",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-supervisor/references/workflow.md": {
+      "source": "cas-cli/src/builtins/skills/cas-supervisor/references/workflow.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "worktree_merge id=<worker> task_id=<task-id>",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by supervisor fix round recovery guidance present and mirrored."
+        },
+        {
+          "text": "python3 scripts/assembly-proof.py prove <epic-worktree>",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by supervisor fix round recovery guidance present and mirrored."
+        },
+        {
+          "text": "bounded epic-child fix-round task",
+          "reason": "Retain the load-bearing policy term from supervisor fix round recovery guidance present and mirrored."
+        },
+        {
+          "text": "Never pipe the test run to `tail`",
+          "reason": "Preserve the operational safety boundary documented by supervisor fix round recovery guidance present and mirrored."
+        },
+        {
+          "text": "factory action=worktree_merge",
+          "reason": "Name the supported tool/action contract used by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "Run the canonical merge-time diff review",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from supervisor fix round recovery guidance present and mirrored."
+        },
+        {
+          "text": "Contract changes first",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from supervisor fix round recovery guidance present and mirrored."
+        },
+        {
+          "text": "Read the lane CI signal",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from supervisor fix round recovery guidance present and mirrored."
+        },
+        {
+          "text": "Hold the main merge",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from supervisor fix round recovery guidance present and mirrored."
+        },
+        {
+          "text": "Run the final assembled-tree gate",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from supervisor fix round recovery guidance present and mirrored."
+        },
+        {
+          "text": "one full assembly gate run",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from supervisor fix round recovery guidance present and mirrored."
+        }
+      ],
+      "absent": [
+        {
+          "text": "model=gpt-5.5",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor model selection reference registered and mirrored."
+        },
+        {
+          "text": "codex/gpt-5.5",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor model selection reference registered and mirrored."
+        },
+        {
+          "text": "pending_supervisor_review",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "bypass_code_review",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "/epic-spec",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "/epic-breakdown",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "code-review-queue",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "git cherry-pick",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "git checkout <base-branch>",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "awaiting review",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract.",
+          "case_sensitive": false
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-supervisor/references/reference.md": {
+      "source": "cas-cli/src/builtins/skills/cas-supervisor/references/reference.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [],
+      "absent": [
+        {
+          "text": "model=gpt-5.5",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor model selection reference registered and mirrored."
+        },
+        {
+          "text": "codex/gpt-5.5",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor model selection reference registered and mirrored."
+        },
+        {
+          "text": "pending_supervisor_review",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "bypass_code_review",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "/epic-spec",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "/epic-breakdown",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "code-review-queue",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "awaiting review",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract.",
+          "case_sensitive": false
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-worker/references/recovery.md": {
+      "source": "cas-cli/src/builtins/skills/cas-worker/references/recovery.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "MERGE REQUIRED",
+          "reason": "Retain the load-bearing policy term from worker merge state guidance present and mirrored."
+        },
+        {
+          "text": "gh pr create",
+          "reason": "Retain the load-bearing policy term from worker merge state guidance present and mirrored."
+        },
+        {
+          "text": "status=closed",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by worker merge state guidance present and mirrored."
+        },
+        {
+          "text": "inbox_poll",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by worker merge state guidance present and mirrored."
+        },
+        {
+          "text": "unread supervisor messages",
+          "reason": "Retain the load-bearing policy term from worker merge state guidance present and mirrored."
+        },
+        {
+          "text": "git rev-parse factory/<name>",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by worker merge state guidance present and mirrored."
+        },
+        {
+          "text": "coordination action=message target=supervisor",
+          "reason": "Name the supported tool/action contract used by worker merge state guidance present and mirrored."
+        },
+        {
+          "text": "`coordination action=inbox_poll",
+          "reason": "Name the supported tool/action contract used by worker merge state guidance present and mirrored."
+        },
+        {
+          "text": "ToolSearch resolved the tool but you still can't call it",
+          "reason": "Retain the load-bearing policy term from worker toolsearch two step guidance present and mirrored."
+        },
+        {
+          "text": "Do not re-run ToolSearch for a tool it already resolved",
+          "reason": "Preserve the operational safety boundary documented by worker toolsearch two step guidance present and mirrored."
+        },
+        {
+          "text": "a *separate* call to that tool by its full prefixed name",
+          "reason": "Retain the load-bearing policy term from worker toolsearch two step guidance present and mirrored."
+        }
+      ],
+      "absent": [
+        {
+          "text": "pending_supervisor_review",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "bypass_code_review",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "/epic-spec",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "/epic-breakdown",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "code-review-queue",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "UPDATE tasks SET",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-supervisor-checklist/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/cas-supervisor-checklist.md",
+      "catalogs": [
+        "claude",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "do not kill or restart `cas serve` from this active MCP session",
+          "reason": "Preserve the operational safety boundary documented by supervisor checklists delegate stale serve recovery to operator."
+        },
+        {
+          "text": "ask the operator",
+          "reason": "Retain the load-bearing policy term from supervisor checklists delegate stale serve recovery to operator."
+        },
+        {
+          "text": "MCP reconnect/restart control",
+          "reason": "Retain the load-bearing policy term from supervisor checklists delegate stale serve recovery to operator."
+        },
+        {
+          "text": "Do not use `pkill`",
+          "reason": "Preserve the operational safety boundary documented by supervisor checklists delegate stale serve recovery to operator."
+        },
+        {
+          "text": "Cassy tool list is restored",
+          "reason": "Retain the load-bearing policy term from supervisor checklists delegate stale serve recovery to operator."
+        },
+        {
+          "text": "rerun this checklist from step 0",
+          "reason": "Retain the load-bearing policy term from supervisor checklists delegate stale serve recovery to operator."
+        },
+        {
+          "text": "](../cas-supervisor/references/reference.md#supervisor-override)",
+          "reason": "Keep the installed workflow/reference route reachable; supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "](../cas-supervisor/references/epic-flow-walk.md)",
+          "reason": "Keep the installed checklist route to combined epic verification."
+        },
+        {
+          "text": "verification_type=epic",
+          "reason": "Use the supported epic verdict type when verifying the assembled result."
+        }
+      ],
+      "absent": [
+        {
+          "text": "no hooks",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by grok supervisor checklist is not the no hooks variant.",
+          "case_sensitive": false,
+          "unicode_case": true
+        },
+        {
+          "text": "Compensates for missing hooks",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by grok supervisor checklist is not the no hooks variant."
+        },
+        {
+          "text": "restart any live `cas serve` processes before continuing",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor checklists delegate stale serve recovery to operator."
+        },
+        {
+          "text": "pending_supervisor_review",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "bypass_code_review",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "/epic-spec",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "/epic-breakdown",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        },
+        {
+          "text": "code-review-queue",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-cut-release/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/cas-cut-release/SKILL.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "description:",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas cut release."
+        },
+        {
+          "text": "`manual:*` entries in `references/failure-log.md`",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas cut release."
+        },
+        {
+          "text": "release-gate.sh --learn",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas cut release."
+        },
+        {
+          "text": "`memory action=remember",
+          "reason": "Name the supported tool/action contract used by builtin skills contains cas cut release."
+        },
+        {
+          "text": "--check-lane",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas cut release."
+        },
+        {
+          "text": "Scoped Validation",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
+        },
+        {
+          "text": "workers never poll CI",
+          "reason": "Preserve the operational safety boundary documented by builtin skills contains cas cut release."
+        },
+        {
+          "text": "ledger is the last prep step",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
+        },
+        {
+          "text": "scratch-base",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
+        },
+        {
+          "text": "detached process group",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
+        },
+        {
+          "text": "--only <row,row>",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas cut release."
+        },
+        {
+          "text": "runtime_fixture_parent",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas cut release."
+        },
+        {
+          "text": "reviewed snapshot update",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
+        },
+        {
+          "text": "9.99.x",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
+        },
+        {
+          "text": "cause class",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
+        },
+        {
+          "text": "green-to-published latency",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
+        },
+        {
+          "text": "competing release",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
+        },
+        {
+          "text": "merge-queue GraphQL query",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
+        },
+        {
+          "text": "CAS_RELEASE_ENV_FILE",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas cut release."
+        },
+        {
+          "text": "annotated tag peels",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
+        },
+        {
+          "text": "four Slack POSTED",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
+        },
+        {
+          "text": "refresh_binary_version",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas cut release."
+        },
+        {
+          "text": "stranded_branch_override",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas cut release."
+        },
+        {
+          "text": "release.tag-complete.epoch",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
+        },
+        {
+          "text": "release-published.receipt",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
+        }
+      ],
+      "absent": [
+        {
+          "text": "failure-log.md in full",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains cas cut release."
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-cut-release/references/failure-log.md": {
+      "source": "cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "manual:lane-ci",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas cut release."
+        },
+        {
+          "text": "last prep step",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
+        },
+        {
+          "text": "scratch-base",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
+        },
+        {
+          "text": "process group",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
+        },
+        {
+          "text": "fixture-paths",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
+        },
+        {
+          "text": "reviewed doctor-row",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
+        },
+        {
+          "text": "9.99.x range",
+          "reason": "Retain the load-bearing policy term from builtin skills contains cas cut release."
+        },
+        {
+          "text": "manual:operator-timeline",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas cut release."
+        },
+        {
+          "text": "manual:worker-handling",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains cas cut release."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-ui-craft/references/form-vocabulary.md": {
+      "source": "cas-cli/src/builtins/skills/cas-ui-craft/references/form-vocabulary.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "the one form table",
+          "reason": "Retain the load-bearing policy term from one form table lives in the ui craft form vocabulary."
+        },
+        {
+          "text": "**Heatmap**",
+          "reason": "Retain the load-bearing policy term from one form table lives in the ui craft form vocabulary."
+        },
+        {
+          "text": "**Scatter**",
+          "reason": "Retain the load-bearing policy term from one form table lives in the ui craft form vocabulary."
+        },
+        {
+          "text": "**Distribution**",
+          "reason": "Retain the load-bearing policy term from one form table lives in the ui craft form vocabulary."
+        },
+        {
+          "text": "**Stat strip**",
+          "reason": "Retain the load-bearing policy term from one form table lives in the ui craft form vocabulary."
+        },
+        {
+          "text": "Pie, donut",
+          "reason": "Retain the load-bearing policy term from one form table lives in the ui craft form vocabulary."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-html-reports/references/presentation-rules.md": {
+      "source": "cas-cli/src/builtins/skills/cas-html-reports/references/presentation-rules.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "form-vocabulary.md",
+          "reason": "Keep the installed workflow/reference route reachable; one form table lives in the ui craft form vocabulary."
+        }
+      ],
+      "absent": [
+        {
+          "text": "| Reader task |",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by one form table lives in the ui craft form vocabulary."
+        },
+        {
+          "text": "| Reader's task |",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by one form table lives in the ui craft form vocabulary."
+        },
+        {
+          "text": "| Message | Use |",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by one form table lives in the ui craft form vocabulary."
+        },
+        {
+          "text": "KPI cards",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by one form table lives in the ui craft form vocabulary."
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-html-reports/references/report-types.md": {
+      "source": "cas-cli/src/builtins/skills/cas-html-reports/references/report-types.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "uses `cas-release-report`",
+          "reason": "Retain the load-bearing policy term from release report is cli first and owns published releases."
+        },
+        {
+          "text": "Actual** = solid fill",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas html reports."
+        },
+        {
+          "text": "outlined",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas html reports."
+        },
+        {
+          "text": "hatched",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas html reports."
+        },
+        {
+          "text": "methodology is present but LAST",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas html reports."
+        }
+      ],
+      "absent": [
+        {
+          "text": "KPI cards",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by one form table lives in the ui craft form vocabulary."
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-html-reports/references/review-checklist.md": {
+      "source": "cas-cli/src/builtins/skills/cas-html-reports/references/review-checklist.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [],
+      "absent": [
+        {
+          "text": "KPI cards",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by one form table lives in the ui craft form vocabulary."
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-release-report/references/pdf.md": {
+      "source": "cas-cli/src/builtins/skills/cas-release-report/references/pdf.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "check-pdf.py",
+          "reason": "Keep the installed workflow/reference route reachable; release report is cli first and owns published releases."
+        }
+      ],
+      "absent": [
+        {
+          "text": "import fitz",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by release report is cli first and owns published releases."
+        },
+        {
+          "text": "chromium.launch",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by release report is cli first and owns published releases."
+        }
+      ],
+      "any_of": []
+    },
+    "skills/design-spec/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/design-spec/SKILL.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "google-labs-code/design.md",
+          "reason": "Keep the installed workflow/reference route reachable; design spec adopts the design md spec and its linter."
+        },
+        {
+          "text": "`rounded`",
+          "reason": "Retain the load-bearing policy term from design spec adopts the design md spec and its linter."
+        },
+        {
+          "text": "`maps`",
+          "reason": "Retain the load-bearing policy term from design spec adopts the design md spec and its linter."
+        },
+        {
+          "text": "`omitted`",
+          "reason": "Retain the load-bearing policy term from design spec adopts the design md spec and its linter."
+        },
+        {
+          "text": "npx @google/design.md lint DESIGN.md",
+          "reason": "Keep the installed workflow/reference route reachable; design spec adopts the design md spec and its linter."
+        },
+        {
+          "text": "references/tokens.css",
+          "reason": "Keep the installed workflow/reference route reachable; design spec adopts the design md spec and its linter."
+        }
+      ],
+      "absent": [
+        {
+          "text": "IMPORTANT:",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by design spec adopts the design md spec and its linter."
+        },
+        {
+          "text": "`radius` —",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by design spec adopts the design md spec and its linter."
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-viktor/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/cas-viktor/SKILL.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "mcp_execute",
+          "reason": "Name the supported tool/action contract used by mcp and viktor guidance use the cassy surface."
+        },
+        {
+          "text": "\\\"server\\\":\\\"viktor\\\"",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by mcp and viktor guidance use the cassy surface."
+        },
+        {
+          "text": "\\\"tool\\\":\\\"whoami\\\"",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by mcp and viktor guidance use the cassy surface."
+        },
+        {
+          "text": "\\\"args\\\":{}",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by mcp and viktor guidance use the cassy surface."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-playwright-debug/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/cas-playwright-debug/SKILL.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "npx playwright trace open ",
+          "reason": "Retain the load-bearing policy term from playwright debug teaches trace cli and agent debugger."
+        },
+        {
+          "text": "npx playwright trace actions --errors-only",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by playwright debug teaches trace cli and agent debugger."
+        },
+        {
+          "text": "npx playwright trace action <id>",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by playwright debug teaches trace cli and agent debugger."
+        },
+        {
+          "text": "npx playwright trace snapshot <id> --phase before",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by playwright debug teaches trace cli and agent debugger."
+        },
+        {
+          "text": "npx playwright trace requests --failed",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by playwright debug teaches trace cli and agent debugger."
+        },
+        {
+          "text": "--debug=cli",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by playwright debug teaches trace cli and agent debugger."
+        },
+        {
+          "text": "npx playwright cli attach tw-",
+          "reason": "Retain the load-bearing policy term from playwright debug teaches trace cli and agent debugger."
+        },
+        {
+          "text": "-s=tw-XXXXXX step-over",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by playwright debug teaches trace cli and agent debugger."
+        },
+        {
+          "text": "pause-at",
+          "reason": "Retain the load-bearing policy term from playwright debug teaches trace cli and agent debugger."
+        },
+        {
+          "text": "retryStrategy: 'isolated'",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by playwright debug teaches trace cli and agent debugger."
+        },
+        {
+          "text": "failOnFlakyTests",
+          "reason": "Retain the load-bearing policy term from playwright debug teaches trace cli and agent debugger."
+        },
+        {
+          "text": "{ lock: '",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by playwright debug teaches trace cli and agent debugger."
+        },
+        {
+          "text": "snapshots: { dom: true, aria: true, screen: true }",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by playwright debug teaches trace cli and agent debugger."
+        },
+        {
+          "text": ".visible()",
+          "reason": "Retain the load-bearing policy term from playwright debug teaches trace cli and agent debugger."
+        },
+        {
+          "text": "page.frameLocator()",
+          "reason": "Retain the load-bearing policy term from playwright debug teaches trace cli and agent debugger."
+        },
+        {
+          "text": "| Instead of | Write |",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by playwright debug teaches trace cli and agent debugger."
+        }
+      ],
+      "absent": [
+        {
+          "text": "--name before",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by playwright debug teaches trace cli and agent debugger."
+        }
+      ],
+      "any_of": []
+    },
+    "skills/verify-before-claim/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/verify-before-claim/SKILL.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "managed_by: cas",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by claude builtin skill exists and is managed by cas."
+        },
+        {
+          "text": "name: verify-before-claim",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by claude builtin skill exists and is managed by cas."
+        },
+        {
+          "text": "### 1. Name the proof command",
+          "reason": "Preserve the operational safety boundary documented by skill body carries the four step protocol."
+        },
+        {
+          "text": "### 2. Run it FRESH",
+          "reason": "Preserve the operational safety boundary documented by skill body carries the four step protocol."
+        },
+        {
+          "text": "### 3. Capture exit code",
+          "reason": "Preserve the operational safety boundary documented by skill body carries the four step protocol."
+        },
+        {
+          "text": "### 4. Only then, close",
+          "reason": "Preserve the operational safety boundary documented by skill body carries the four step protocol."
+        },
+        {
+          "text": "Advisory vs Required-Paste",
+          "reason": "Preserve the operational safety boundary documented by skill body carries the four step protocol."
+        },
+        {
+          "text": "[cas-worker/references/close-gate.md](../cas-worker/references/close-gate.md)",
+          "reason": "Keep the installed workflow/reference route reachable; tests pass link resolves to worker close gate in all flavors."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cli-routing/references/routing.md": {
+      "source": "cas-cli/src/builtins/skills/cli-routing/references/routing.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "release.claude_account_allowlist",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by cli routing expresses the account gate as a config key."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-image-generate/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/cas-image-generate/SKILL.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "name: cas-image-generate",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by skill mirrors are managed and cover the asset workflow."
+        },
+        {
+          "text": "managed_by: cas",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by skill mirrors are managed and cover the asset workflow."
+        },
+        {
+          "text": "gemini_api_key",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by skill mirrors are managed and cover the asset workflow.",
+          "case_sensitive": false
+        },
+        {
+          "text": "cas-image-generate/scripts/generate-image.sh",
+          "reason": "Keep the installed workflow/reference route reachable; skill mirrors are managed and cover the asset workflow.",
+          "case_sensitive": false
+        },
+        {
+          "text": "svg-web-assets.md",
+          "reason": "Keep the installed workflow/reference route reachable; skill mirrors are managed and cover the asset workflow.",
+          "case_sensitive": false
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-image-generate/references/svg-web-assets.md": {
+      "source": "cas-cli/src/builtins/skills/cas-image-generate/references/svg-web-assets.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "output-checklist.md",
+          "reason": "Keep the installed workflow/reference route reachable; svg web assets reference is mirrored and covers the pipeline.",
+          "case_sensitive": false
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-image-generate/references/providers.md": {
+      "source": "cas-cli/src/builtins/skills/cas-image-generate/references/providers.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-image-generate/references/asset-playbook.md": {
+      "source": "cas-cli/src/builtins/skills/cas-image-generate/references/asset-playbook.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "svg-web-assets.md",
+          "reason": "Keep the installed workflow/reference route reachable; references document research and unwired provider boundaries.",
+          "case_sensitive": false
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-image-generate/references/style-harvest.md": {
+      "source": "cas-cli/src/builtins/skills/cas-image-generate/references/style-harvest.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "DESIGN.md",
+          "reason": "Keep the installed workflow/reference route reachable; references document research and unwired provider boundaries."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-technical-drawing/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/cas-technical-drawing/SKILL.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "name: cas-technical-drawing",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by skill body is managed and covers the workflow."
+        },
+        {
+          "text": "managed_by: cas",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by skill body is managed and covers the workflow."
+        },
+        {
+          "text": "description: Use when",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by skill body is managed and covers the workflow."
+        },
+        {
+          "text": "draft.mjs check",
+          "reason": "Retain the load-bearing policy term from skill body is managed and covers the workflow.",
+          "case_sensitive": false
+        },
+        {
+          "text": "draft.mjs render",
+          "reason": "Retain the load-bearing policy term from skill body is managed and covers the workflow.",
+          "case_sensitive": false
+        },
+        {
+          "text": "--plain",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by skill body is managed and covers the workflow.",
+          "case_sensitive": false
+        },
+        {
+          "text": "never draw geometry by hand",
+          "reason": "Preserve the operational safety boundary documented by skill body is managed and covers the workflow.",
+          "case_sensitive": false
+        },
+        {
+          "text": "model-schema.md",
+          "reason": "Keep the installed workflow/reference route reachable; skill body is managed and covers the workflow.",
+          "case_sensitive": false
+        },
+        {
+          "text": "drafting-conventions.md",
+          "reason": "Keep the installed workflow/reference route reachable; skill body is managed and covers the workflow.",
+          "case_sensitive": false
+        },
+        {
+          "text": "likeness-critique.md",
+          "reason": "Keep the installed workflow/reference route reachable; skill body is managed and covers the workflow.",
+          "case_sensitive": false
+        },
+        {
+          "text": "--print-width-mm",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by skill body is managed and covers the workflow.",
+          "case_sensitive": false
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-technical-drawing/references/drafting-conventions.md": {
+      "source": "cas-cli/src/builtins/skills/cas-technical-drawing/references/drafting-conventions.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "`projection`",
+          "reason": "Retain the load-bearing policy term from skill body is managed and covers the workflow."
+        },
+        {
+          "text": "`axis-scale`",
+          "reason": "Retain the load-bearing policy term from skill body is managed and covers the workflow."
+        },
+        {
+          "text": "`proportion`",
+          "reason": "Retain the load-bearing policy term from skill body is managed and covers the workflow."
+        },
+        {
+          "text": "`collision`",
+          "reason": "Retain the load-bearing policy term from skill body is managed and covers the workflow."
+        },
+        {
+          "text": "`dimensions`",
+          "reason": "Retain the load-bearing policy term from skill body is managed and covers the workflow."
+        },
+        {
+          "text": "`text-size`",
+          "reason": "Retain the load-bearing policy term from skill body is managed and covers the workflow."
+        },
+        {
+          "text": "`cut-list`",
+          "reason": "Retain the load-bearing policy term from skill body is managed and covers the workflow."
+        },
+        {
+          "text": "0.7",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from skill body is managed and covers the workflow."
+        },
+        {
+          "text": "0.35",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from skill body is managed and covers the workflow."
+        },
+        {
+          "text": "0.25",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from skill body is managed and covers the workflow."
+        },
+        {
+          "text": "Third-angle",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from skill body is managed and covers the workflow."
+        },
+        {
+          "text": "30°",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from skill body is managed and covers the workflow."
+        },
+        {
+          "text": "150°",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from skill body is managed and covers the workflow."
+        },
+        {
+          "text": "chain",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from skill body is managed and covers the workflow."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-supervisor/references/reminders.md": {
+      "source": "cas-cli/src/builtins/skills/cas-supervisor/references/reminders.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "remind_delay_secs",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by reminder discipline reference is complete and flavor normalized."
+        },
+        {
+          "text": "remind_event=task_completed",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by reminder discipline reference is complete and flavor normalized."
+        },
+        {
+          "text": "remind_ttl_secs",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by reminder discipline reference is complete and flavor normalized."
+        },
+        {
+          "text": "remind_cancel",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by reminder discipline reference is complete and flavor normalized."
+        },
+        {
+          "text": "MERGE REQUIRED",
+          "reason": "Retain the load-bearing policy term from reminder discipline reference is complete and flavor normalized."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-supervisor/references/epic-driving.md": {
+      "source": "cas-cli/src/builtins/skills/cas-supervisor/references/epic-driving.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "target_branch",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by supervisor epic driving reference is compact and three way mirrored."
+        },
+        {
+          "text": "WorkTarget",
+          "reason": "Retain the load-bearing policy term from supervisor epic driving reference is compact and three way mirrored."
+        },
+        {
+          "text": "awaiting_merge",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by supervisor epic driving reference is compact and three way mirrored."
+        },
+        {
+          "text": "task_id",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by supervisor epic driving reference is compact and three way mirrored."
+        },
+        {
+          "text": "confirm_warning=true",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by supervisor epic driving reference is compact and three way mirrored."
+        },
+        {
+          "text": "proof_scope_fix=true",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by supervisor epic driving reference is compact and three way mirrored."
+        },
+        {
+          "text": "known-repos",
+          "reason": "Retain the load-bearing policy term from supervisor epic driving reference is compact and three way mirrored."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-supervisor/references/intake.md": {
+      "source": "cas-cli/src/builtins/skills/cas-supervisor/references/intake.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [],
+      "absent": [
+        {
+          "text": "AskUserQuestion",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by supervisor reference tree uses current lifecycle contract."
+        }
+      ],
+      "any_of": []
+    },
+    "agents/task-verifier.md": {
+      "source": "cas-cli/src/builtins/agents/task-verifier.body.md",
+      "catalogs": [
+        "claude",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "git diff --name-status \"$BASE\" HEAD | grep -E ",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by verifier mirrors document the current close contract."
+        },
+        {
+          "text": "git merge-base HEAD <target-branch>",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by verifier mirrors document the current close contract."
+        },
+        {
+          "text": "ast-grep",
+          "reason": "Retain the load-bearing policy term from verifier mirrors document the current close contract."
+        },
+        {
+          "text": "stranded_branch_override",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by verifier mirrors document the current close contract."
+        },
+        {
+          "text": "epic_verification_owner",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by verifier mirrors document the current close contract."
+        },
+        {
+          "text": "verifier-evidence-gate.md",
+          "reason": "Keep the installed workflow/reference route reachable; verifier mirrors document the current close contract."
+        },
+        {
+          "text": "files=\"",
+          "reason": "Retain the verifier verdict parameter and named lifecycle guards used in the close contract."
+        },
+        {
+          "text": "Verifier handoff rejected",
+          "reason": "Retain the verifier verdict parameter and named lifecycle guards used in the close contract."
+        },
+        {
+          "text": "Stranded-branch gate",
+          "reason": "Retain the verifier verdict parameter and named lifecycle guards used in the close contract."
+        },
+        {
+          "text": "Epic verification owner gate",
+          "reason": "Retain the verifier verdict parameter and named lifecycle guards used in the close contract."
+        }
+      ],
+      "absent": [
+        {
+          "text": "files_reviewed",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by verifier mirrors document the current close contract."
+        },
+        {
+          "text": "HEAD~10",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by verifier mirrors document the current close contract."
+        },
+        {
+          "text": "| rg -e ",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by verifier mirrors document the current close contract."
+        },
+        {
+          "text": "| rg -E ",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by verifier mirrors document the current close contract."
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-qa-craft/references/verifier-evidence-gate.md": {
+      "source": "cas-cli/src/builtins/skills/cas-qa-craft/references/verifier-evidence-gate.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "task action=dep_list id=<epic-id>",
+          "reason": "Name the supported tool/action contract used by epic child demos require evidence before close reason."
+        },
+        {
+          "text": "verification_type=epic",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by epic child demos require evidence before close reason."
+        },
+        {
+          "text": "LEDGER.md",
+          "reason": "Keep the installed workflow/reference route reachable; epic child demos require evidence before close reason."
+        },
+        {
+          "text": "status=error",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by epic child demos require evidence before close reason."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-supervisor/references/epic-flow-walk.md": {
+      "source": "cas-cli/src/builtins/skills/cas-supervisor/references/epic-flow-walk.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "verification_type=epic",
+          "reason": "Preserve a command, schema, receipt or markup token consumed by epic walk route and verdict shape exist in every harness."
+        },
+        {
+          "text": "LEDGER.md",
+          "reason": "Keep the installed workflow/reference route reachable; epic walk route and verdict shape exist in every harness."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "jobs/rule-reviewer.md": {
+      "source": "cas-cli/src/builtins/jobs/rule-reviewer.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "rule action=promote id=<id> change_note=",
+          "reason": "Name the supported tool/action contract used by maintenance jobs call tools the way the tools accept."
+        },
+        {
+          "text": "rule action=show id=<id>",
+          "reason": "Name the supported tool/action contract used by maintenance jobs call tools the way the tools accept."
+        },
+        {
+          "text": "rule action=delete",
+          "reason": "Name the supported tool/action contract used by agent hygiene instructions match available actions and runtime context."
+        }
+      ],
+      "absent": [
+        {
+          "text": "rule action=helpful",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by maintenance jobs call tools the way the tools accept."
+        }
+      ],
+      "any_of": []
+    },
+    "jobs/session-summarizer.md": {
+      "source": "cas-cli/src/builtins/jobs/session-summarizer.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "task action=list status=in_progress",
+          "reason": "Name the supported tool/action contract used by maintenance jobs call tools the way the tools accept."
+        }
+      ],
+      "absent": [
+        {
+          "text": "task action=mine",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by maintenance jobs call tools the way the tools accept."
+        }
+      ],
+      "any_of": []
+    },
+    "jobs/duplicate-detector.md": {
+      "source": "cas-cli/src/builtins/jobs/duplicate-detector.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [],
+      "absent": [
+        {
+          "text": "action=recent",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by maintenance jobs call tools the way the tools accept."
+        },
+        {
+          "text": "task action=notes",
+          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by agent hygiene instructions match available actions and runtime context."
+        }
+      ],
+      "any_of": []
+    },
+    "skills/cas-html-reports/references/sources.md": {
+      "source": "cas-cli/src/builtins/skills/cas-html-reports/references/sources.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "attribution only",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas html reports."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-html-reports/references/examples/investigation-annotated-timeline.why.md": {
+      "source": "cas-cli/src/builtins/skills/cas-html-reports/references/examples/investigation-annotated-timeline.why.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "Critique",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas html reports."
+        },
+        {
+          "text": "Distinctiveness",
+          "reason": "Keep the operational, evidence, accessibility or review safeguard from builtin skills contains cas html reports."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-html-reports/references/examples/executive-variance-brief.why.md": {
+      "source": "cas-cli/src/builtins/skills/cas-html-reports/references/examples/executive-variance-brief.why.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "Critique",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas html reports."
+        },
+        {
+          "text": "Distinctiveness",
+          "reason": "Keep the operational, evidence, accessibility or review safeguard from builtin skills contains cas html reports."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-html-reports/references/examples/benchmark-small-multiples.why.md": {
+      "source": "cas-cli/src/builtins/skills/cas-html-reports/references/examples/benchmark-small-multiples.why.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "Critique",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas html reports."
+        },
+        {
+          "text": "Distinctiveness",
+          "reason": "Keep the operational, evidence, accessibility or review safeguard from builtin skills contains cas html reports."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-dataviz/examples/send-backs-dot-strip.why.md": {
+      "source": "cas-cli/src/builtins/skills/cas-dataviz/examples/send-backs-dot-strip.why.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "Critique",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas dataviz."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-qa-craft/references/exemplar.md": {
+      "source": "cas-cli/src/builtins/skills/cas-qa-craft/references/exemplar.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "real-build",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas qa craft."
+        },
+        {
+          "text": "Honesty",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from builtin skills contains cas qa craft."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-technical-drawing/references/likeness-critique.md": {
+      "source": "cas-cli/src/builtins/skills/cas-technical-drawing/references/likeness-critique.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "Floor to ship",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from skill body is managed and covers the workflow."
+        },
+        {
+          "text": "24 / 30",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from skill body is managed and covers the workflow."
+        },
+        {
+          "text": "200 px",
+          "reason": "Preserve the workflow, evidence or quantitative safeguard from skill body is managed and covers the workflow."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "jobs/learning-reviewer.md": {
+      "source": "cas-cli/src/builtins/jobs/learning-reviewer.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "complete list of unreviewed learning IDs",
+          "reason": "Consume every supplied unreviewed ID so maintenance does not silently skip learning records."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    },
+    "skills/cas-dataviz/references/design-review.md": {
+      "source": "cas-cli/src/builtins/skills/cas-dataviz/references/design-review.md",
+      "catalogs": [
+        "claude",
+        "codex",
+        "grok",
+        "opencode"
+      ],
+      "contains": [
+        {
+          "text": "computable palette validator",
+          "reason": "Keep the operational, evidence, accessibility or review safeguard from builtin skills contains cas dataviz."
+        },
+        {
+          "text": "print/PDF",
+          "reason": "Keep the operational, evidence, accessibility or review safeguard from builtin skills contains cas dataviz."
         }
       ],
       "absent": [],
       "any_of": []
     }
-  }
+  },
+  "alternatives": [
+    {
+      "choices": [
+        {
+          "document": "skills/cas-worker/SKILL.md",
+          "text": ".cas/logs",
+          "absent": false,
+          "case_sensitive": true
+        },
+        {
+          "document": "skills/cas-worker/references/details.md",
+          "text": ".cas/logs",
+          "absent": false,
+          "case_sensitive": true
+        }
+      ],
+      "reason": "Allow the original alternative documents/formats in test report evidence guidance prefers safe sources."
+    },
+    {
+      "choices": [
+        {
+          "document": "skills/cas-worker/SKILL.md",
+          "text": "task/search/coordination",
+          "absent": false,
+          "case_sensitive": true
+        },
+        {
+          "document": "skills/cas-worker/references/details.md",
+          "text": "task/search/coordination",
+          "absent": false,
+          "case_sensitive": true
+        }
+      ],
+      "reason": "Allow the original alternative documents/formats in test report evidence guidance prefers safe sources."
+    },
+    {
+      "choices": [
+        {
+          "document": "skills/cas-image-generate/references/providers.md",
+          "text": "unwired",
+          "absent": false,
+          "case_sensitive": true
+        },
+        {
+          "document": "skills/cas-image-generate/references/asset-playbook.md",
+          "text": "unwired",
+          "absent": false,
+          "case_sensitive": true
+        }
+      ],
+      "reason": "Allow the original alternative documents/formats in references document research and unwired provider boundaries."
+    }
+  ]
 }

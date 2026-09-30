@@ -260,17 +260,11 @@ impl SqliteTaskStore {
     }
 
     fn parse_proof_targets(value: Option<String>) -> Vec<String> {
-        value
-            .unwrap_or_default()
-            .split(',')
-            .map(str::trim)
-            .filter(|target| !target.is_empty())
-            .map(ToOwned::to_owned)
-            .collect()
+        cas_types::parse_proof_targets(value.as_deref())
     }
 
     fn proof_targets_to_string(targets: &[String]) -> Option<String> {
-        (!targets.is_empty()).then(|| targets.join(","))
+        cas_types::proof_targets_to_string(targets)
     }
 
     fn parse_terminal_outcome(value: Option<String>) -> Option<TaskTerminalOutcome> {

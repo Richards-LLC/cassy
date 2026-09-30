@@ -79,11 +79,11 @@ pub use lease::{ClaimResult, LeaseStatus, TaskLease, WorktreeClaimResult, Worktr
 pub use loop_state::{Loop, LoopStatus};
 pub use prompt::{AgentInfo, Message, MessageRole, Prompt};
 pub use provenance::merge_source_ids;
-pub use qa_pass::{QA_PASS_WITHDRAWN_PREFIX, QaPass, QaPassState, QaVerdict};
 pub use public_identifier::{
     PublicUpstreamIdResolution, is_generated_public_upstream_id, public_tool_id, public_tool_ids,
     public_upstream_id, public_upstream_ids, resolve_public_upstream_id,
 };
+pub use qa_pass::{QA_PASS_WITHDRAWN_PREFIX, QaPass, QaPassState, QaVerdict};
 pub use recording::{
     Recording, RecordingAgent, RecordingEvent, RecordingEventType, RecordingQuery,
 };
@@ -104,6 +104,7 @@ pub use task::{
     DeliveryMode, NegativeResultEvidence, PreCloseHookEvidence, Priority,
     TASK_EXECUTION_STATE_MAX_BYTES, Task, TaskDeliverables, TaskDepth, TaskDoor, TaskRisk,
     TaskStatus, TaskTerminalOutcome, TaskType, WorkTarget, merge_task_execution_state_patch,
+    normalize_proof_targets, parse_proof_targets, proof_targets_to_string,
     validate_task_execution_state,
 };
 pub use verification::{

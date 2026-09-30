@@ -709,6 +709,10 @@ fn apply_migration(conn: &Connection, migration: &Migration) -> Result<()> {
         apply_migration_statement(conn, sql)?;
     }
 
+    if migration.id == 262 {
+        migrations::normalize_legacy_proof_targets(conn)?;
+    }
+
     // Record that migration was applied
     conn.execute(
         "INSERT INTO cas_migrations (id, name, subsystem, applied_at)

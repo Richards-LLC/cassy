@@ -1912,6 +1912,7 @@ pub(crate) fn uncovered_blast_radius_modules(
     changed_paths: &[String],
     proof_targets: &[String],
 ) -> Vec<String> {
+    let proof_targets = cas_types::normalize_proof_targets(proof_targets);
     changed_source_modules(changed_paths)
         .into_iter()
         .filter(|module| {
@@ -1923,7 +1924,7 @@ pub(crate) fn uncovered_blast_radius_modules(
 }
 
 fn proof_targets_scope_fix_command(task: &Task, uncovered: &[String]) -> String {
-    let mut targets = task.proof_targets.clone();
+    let mut targets = cas_types::normalize_proof_targets(&task.proof_targets);
     for module in uncovered {
         if !targets.iter().any(|target| target == module) {
             targets.push(module.clone());
@@ -2261,6 +2262,23 @@ mod risk_proof_tests {
             failed.len()
         ));
         log
+    }
+
+    #[test]
+    fn legacy_fragmented_proof_targets_cover_only_declared_modules() {
+        let changed = vec![
+            "cas-cli/src/rules.rs".into(),
+            "cas-cli/src/core.rs".into(),
+            "cas-cli/src/updates.rs".into(),
+        ];
+        let targets = vec![
+            r#"["cas --lib rules""#.into(),
+            r#""cas --lib core"]"#.into(),
+        ];
+        assert_eq!(
+            uncovered_blast_radius_modules(&changed, &targets),
+            ["updates"]
+        );
     }
 
     #[test]

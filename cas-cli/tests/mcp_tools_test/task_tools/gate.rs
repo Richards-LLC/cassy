@@ -594,7 +594,7 @@ async fn casd86d_supervisor_widens_targets_on_merged_delivery_without_review_fai
         serde_json::json!({
             "action": "create",
             "risk": "blast-radius",
-            "proof_targets": "protocol",
+            "proof_targets": ["protocol"],
             "depth": "light",
             "title": "Widen merged delivery proof"
         }),
@@ -656,13 +656,34 @@ async fn casd86d_supervisor_widens_targets_on_merged_delivery_without_review_fai
     )
     .unwrap();
 
+    // Reproduce a legacy serialized array, including duplicate fragments.
+    // This predates the store's JSON normalization and must not block widening.
+    let db = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+    db.execute(
+        "UPDATE tasks SET proof_targets=?1 WHERE id=?2",
+        rusqlite::params![r#"["protocol", "protocol"]"#, task_id],
+    )
+    .unwrap();
     set_test_agent_role(&cas_dir, AgentRole::Supervisor);
+    for targets in [
+        serde_json::json!(["protocol"]),
+        serde_json::json!(["queue_and_events", "other"]),
+    ] {
+        let request: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+            "action":"update", "id":task_id, "proof_targets":targets,
+            "proof_scope_fix":true, "reason":"Regression rejection probe"
+        }))
+        .unwrap();
+        let error = service.task(Parameters(request)).await.unwrap_err();
+        assert!(error.message.contains("strictly widen"), "{error}");
+        assert_eq!(store.get(&task_id).unwrap().proof_targets, ["protocol"]);
+    }
     let fixed = unified_task(
         &service,
         serde_json::json!({
             "action": "update",
             "id": task_id,
-            "proof_targets": "protocol,queue_and_events",
+            "proof_targets": ["protocol", "queue_and_events"],
             "proof_scope_fix": true,
             "reason": "The merged delivery changed queue_and_events but the original proof declaration omitted it."
         }),
@@ -1057,4 +1078,38 @@ async fn start_moves_a_branch_parked_for_another_target_and_keeps_its_tip_gh_100
         "factory/test-agent",
         "the worker stays on its own branch"
     );
+}
+
+#[tokio::test]
+async fn cas7a69_unified_create_and_update_accept_all_proof_target_wire_forms() {
+    let (temp, core) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    let service = CasService::new(core, None);
+    let store = open_task_store(&cas_dir).unwrap();
+    for input in [
+        serde_json::json!(["cas --lib rules", "cas --lib maintenance_jobs"]),
+        serde_json::json!(r#"["cas --lib rules", "cas --lib maintenance_jobs"]"#),
+        serde_json::json!("cas --lib rules, cas --lib maintenance_jobs"),
+    ] {
+        let created = unified_task(&service, serde_json::json!({
+            "action":"create", "title":"Proof forms regression", "risk":"blast-radius", "proof_targets":input
+        })).await;
+        let id = extract_task_id(&created).unwrap().to_string();
+        assert_eq!(
+            store.get(&id).unwrap().proof_targets,
+            ["cas --lib rules", "cas --lib maintenance_jobs"]
+        );
+        unified_task(
+            &service,
+            serde_json::json!({
+                "action":"update", "id":id, "proof_targets":["rules", "maintenance_jobs", "rules"]
+            }),
+        )
+        .await;
+        assert_eq!(
+            store.get(&id).unwrap().proof_targets,
+            ["rules", "maintenance_jobs"]
+        );
+    }
 }

@@ -459,6 +459,10 @@ pub(super) fn merge_tip_content_presence(
         }
     }
 
+    let resolution_paths = merge_resolution_paths(repo, merge_tip, identity)?;
+    if !resolution_paths.is_empty() {
+        commits.push(merge_tip.to_string());
+    }
     if commits.is_empty() {
         return None;
     }
@@ -474,7 +478,17 @@ pub(super) fn merge_tip_content_presence(
     let mut dropped_paths = Vec::new();
     let mut unknown_reason = None;
     for (index, commit) in commits.iter().enumerate() {
-        match super::delivery_content_presence_in_parent(repo, commit, target) {
+        let presence = if commit == merge_tip {
+            super::delivery_content_presence_in_parent_for_paths(
+                repo,
+                commit,
+                target,
+                Some(&resolution_paths),
+            )
+        } else {
+            super::delivery_content_presence_in_parent(repo, commit, target)
+        };
+        match presence {
             DeliveryContentPresence::Present { paths } => {
                 append_unique(&mut present_paths, paths);
             }
@@ -546,6 +560,70 @@ fn rewritten_by_later_task_commit(
         super::delivery_path_effect_survives_on_tree(repo, &parent, commit, last_touch, path)
             .ok()?;
     (!survives).then(|| last_touch.clone())
+}
+
+/// A task-owned merge may introduce a QA fix in its resolution itself.
+/// Restrict its first-parent effect to paths changed on a contributing side,
+/// and require a difference from that side too: merely importing the target
+/// is not a resolution delivery. NUL paths preserve unusual filenames.
+fn merge_resolution_paths(
+    repo: &Path,
+    merge_tip: &str,
+    identity: &TaskCommitIdentity,
+) -> Option<Vec<String>> {
+    let message = git_text(repo, &["show", "-s", "--format=%B", merge_tip])?;
+    let owned = identity.matches_known_commit(merge_tip)
+        || identity
+            .task_id
+            .as_deref()
+            .is_some_and(|id| message_references_task(&message, id));
+    if !owned {
+        return Some(vec![]);
+    }
+    let parents = git_text(repo, &["rev-list", "--parents", "-n", "1", merge_tip])?;
+    let parents: Vec<_> = parents.split_whitespace().collect();
+    let first = *parents.get(1)?;
+    let first_effect = git_text(
+        repo,
+        &[
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            first,
+            merge_tip,
+            "--",
+        ],
+    )?;
+    let first_effect: HashSet<_> = first_effect
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .collect();
+    let mut paths = Vec::new();
+    for second in parents.iter().skip(2) {
+        let base = git_text(repo, &["merge-base", first, second])?;
+        let side_effect = git_text(
+            repo,
+            &[
+                "diff",
+                "--name-only",
+                "--no-renames",
+                "-z",
+                &base,
+                second,
+                "--",
+            ],
+        )?;
+        for path in side_effect.split('\0').filter(|path| !path.is_empty()) {
+            if first_effect.contains(path)
+                && !git_diff_is_empty(repo, second, merge_tip, path)?
+                && !paths.iter().any(|known| known == path)
+            {
+                paths.push(path.to_string());
+            }
+        }
+    }
+    Some(paths)
 }
 
 fn is_merge_commit(repo: &Path, commit: &str) -> bool {
@@ -684,7 +762,9 @@ mod tests {
         window.identity.known_commits.push(merge.clone());
         assert_eq!(
             merge_tip_content_presence(repo, "main", &merge, Some(&window), &window.identity, None),
-            Some(DeliveryContentPresence::Present { paths: vec!["work.rs".into()] })
+            Some(DeliveryContentPresence::Present {
+                paths: vec!["work.rs".into()]
+            })
         );
     }
 
@@ -751,20 +831,40 @@ mod tests {
         let repo = dir.path();
         assert_eq!(qa_paths(repo, "main", &window(), None), None);
         git(repo, &["checkout", "-q", "main"]);
-        commit(repo, "incoming.vue", "<template><p>Incoming</p></template>\n", "staging UI");
+        commit(
+            repo,
+            "incoming.vue",
+            "<template><p>Incoming</p></template>\n",
+            "staging UI",
+        );
         git(repo, &["checkout", "-q", "factory/worker"]);
-        git(repo, &["merge", "-q", "--no-ff", "-m", "sync staging", "main"]);
+        git(
+            repo,
+            &["merge", "-q", "--no-ff", "-m", "sync staging", "main"],
+        );
         let merge_tip = git(repo, &["rev-parse", "HEAD"]);
         assert!(
             paths(repo, "main", &window(), Some(&merge_tip))
                 .unwrap()
                 .contains(&"incoming.vue".into())
         );
-        assert_eq!(qa_paths(repo, "main", &window(), Some(&merge_tip)), Some(vec![]));
+        assert_eq!(
+            qa_paths(repo, "main", &window(), Some(&merge_tip)),
+            Some(vec![])
+        );
 
-        commit(repo, "app.vue", "<template><p>Hello</p></template>\n", "initial UI");
+        commit(
+            repo,
+            "app.vue",
+            "<template><p>Hello</p></template>\n",
+            "initial UI",
+        );
         let base = git(repo, &["rev-parse", "HEAD"]);
-        std::fs::write(repo.join("app.vue"), "<template> <p>Hello</p> </template>\n").unwrap();
+        std::fs::write(
+            repo.join("app.vue"),
+            "<template> <p>Hello</p> </template>\n",
+        )
+        .unwrap();
         git(repo, &["add", "app.vue"]);
         git(repo, &["commit", "-qm", "format only"]);
         let formatted = git(repo, &["rev-parse", "HEAD"]);

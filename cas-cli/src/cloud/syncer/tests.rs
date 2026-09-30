@@ -1635,6 +1635,40 @@ async fn heal_local_task_dependency_is_idempotent_across_pulls() {
     );
 }
 
+/// cas-86eb: real team-pull/SQLite replay of the cas-2c41 park followed
+/// by a stale owner row. Default RemoteWins must not hide a merge request.
+#[tokio::test]
+async fn team_pull_stale_active_row_preserves_local_park_cas_86eb() {
+    let project = "park-owner";
+    let parked_at = chrono::DateTime::parse_from_rfc3339("2026-09-30T01:04:30Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let mut local = Task::new("cas-2c41-replay".into(), "parked delivery".into());
+    local.status = TaskStatus::AwaitingMerge;
+    local.updated_at = parked_at;
+    local.deliverables.parked_branch = Some("factory/replay".into());
+    local.notes = "[2026-09-30 01:04] Close rejected: MERGE REQUIRED".into();
+    let remote = team_task_fixture(
+        &local.id,
+        TaskStatus::InProgress,
+        project,
+        project,
+        parked_at - chrono::Duration::seconds(30),
+    );
+
+    let (_temp, result, store, queue) =
+        pull_team_task_fixtures(project, vec![remote], Some(local)).await;
+
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    let retained = store.get("cas-2c41-replay").unwrap();
+    assert_eq!(retained.status, TaskStatus::AwaitingMerge);
+    assert_eq!(retained.deliverables.parked_branch.as_deref(), Some("factory/replay"));
+    assert_eq!(retained.updated_at, parked_at, "rejection must not advance local clock");
+    assert!(result.task_status_transitions.is_empty());
+    assert_eq!(result.pulled_tasks, 0);
+    assert_eq!(queue.list_conflicts(10).unwrap().len(), 1);
+}
+
 #[tokio::test]
 async fn team_pull_duplicate_task_id_prefers_owner_closed_row() {
     let now = chrono::Utc::now();

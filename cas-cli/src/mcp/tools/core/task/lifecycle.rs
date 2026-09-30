@@ -808,6 +808,10 @@ impl CasCore {
             .unwrap_or_default();
 
         let supervisor_override = req.supervisor_override.unwrap_or(false);
+        let door = req.door.as_deref().map(str::parse::<cas_types::TaskDoor>)
+            .transpose().map_err(|error| McpError {
+                code: ErrorCode::INVALID_PARAMS, message: Cow::from(error.to_string()), data: None,
+            })?;
         let (risk, proof_targets) = crate::mcp::tools::types::validate_task_risk_declaration(
             task_type,
             req.risk.as_deref(),
@@ -1109,6 +1113,7 @@ impl CasCore {
             priority: Priority(req.priority.min(4) as i32),
             task_type,
             risk,
+            door,
             proof_targets,
             assignee: req.assignee,
             labels,
@@ -2748,6 +2753,7 @@ mod related_recall_response_tests {
             priority: 2,
             task_type: "epic".to_string(),
             risk: Some("none".to_string()),
+            door: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -2772,6 +2778,7 @@ mod related_recall_response_tests {
             priority: 2,
             task_type: "task".to_string(),
             risk: Some("none".to_string()),
+            door: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -2796,6 +2803,7 @@ mod related_recall_response_tests {
             priority: 2,
             task_type: "task".to_string(),
             risk: Some("none".to_string()),
+            door: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,

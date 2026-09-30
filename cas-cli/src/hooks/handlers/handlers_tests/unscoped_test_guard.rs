@@ -28,6 +28,25 @@ fn deny_reason(out: &HookOutput) -> Option<String> {
 #[test]
 fn worker_rust_builds_are_denied_naming_the_assembly_rule() {
     for command in [
+        "cargo nextest run -p cas -E 'all()'",
+        "cargo nextest run -p cas -E ''",
+        "cargo nextest run -p cas -E 'test()'",
+        "cargo nextest run -p cas -E 'test(one) | all()'",
+        "cargo nextest run -p cas -p cas --lib -E 'test(one)'",
+        "cargo nextest run --workspace -E 'test(one)'",
+        "cargo nextest run -p cas --release -E 'test(one)'",
+        "cargo nextest run -p cas --test one --test two -E 'test(one)'",
+        "cargo nextest run -p cas --lib --test one -E 'test(one)'",
+        "cargo nextest run -p cas --no-fail-fast",
+        "cargo nextest run -p cas --no-fail-fast -E 'test(one)'",
+        "cargo nextest run -p cas -E test(one)",
+        "cargo nextest run -p cas -E \"test($NAME)\"",
+        "CARGO_BUILD_JOBS=64 cargo nextest run -p cas -E 'test(one)'",
+        "cargo nextest run -p cas -E 'test(one)' && cargo build",
+        "cargo nextest run -p cas -E 'test(one)'; cargo build",
+        "cargo nextest run -p cas -E 'test(one)' | tee check.log",
+        "cargo nextest run\n-p cas -E 'test(one)'",
+        "cargo nextest run -p cas -E 'test(one)'\ncargo build",
         "cargo test",
         "cargo test -p cas --no-fail-fast",
         "cargo check -p cas --lib --tests",
@@ -87,10 +106,8 @@ fn literal_worker_check_is_rewritten_to_the_capped_runner_for_both_harnesses() {
     for harness in ["claude", "codex"] {
         let dir = tempfile::tempdir().unwrap();
         let worktree = dir.path().to_str().unwrap();
-        let _env = TestEnvGuard::with_vars(&[
-            ("CAS_HOOK_HARNESS", harness),
-            ("CAS_CLONE_PATH", worktree),
-        ]);
+        let _env =
+            TestEnvGuard::with_vars(&[("CAS_HOOK_HARNESS", harness), ("CAS_CLONE_PATH", worktree)]);
         let root = dir.path().join(".cas");
         std::fs::create_dir(&root).unwrap();
         for command in [
@@ -141,6 +158,61 @@ fn literal_worker_check_is_rewritten_to_the_capped_runner_for_both_harnesses() {
             assert!(reason.contains("/tmp/worker-check.log"), "{reason}");
         }
     }
+}
+
+#[test]
+fn targeted_nextest_rewrite_preserves_filter_literals_and_workspace_guard() {
+    use crate::test_support::TestEnvGuard;
+    for harness in ["claude", "codex"] {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_str().unwrap();
+        let _env =
+            TestEnvGuard::with_vars(&[("CAS_HOOK_HARNESS", harness), ("CAS_CLONE_PATH", cwd)]);
+        let root = dir.path().join(".cas");
+        std::fs::create_dir(&root).unwrap();
+        for command in [
+            "cargo nextest run -p cas -E 'test(hooks::handlers)'",
+            "cargo nextest run -p cas --lib -E 'test(=module::name)'",
+            "cargo nextest run -p cas --test integration_factory -E 'test(worker)'",
+            "cargo nextest run -p cas --lib -E 'test(one) | test(two)' > target/tests.log 2>&1 &",
+            "cargo nextest run -p cas --lib -E 'test(one) & test(two)' > target/tests.log 2>&1 &",
+        ] {
+            let mut request = input(command, "worker");
+            request.cwd = cwd.into();
+            let out = handle_pre_tool_use(&request, Some(&root)).unwrap();
+            assert!(deny_reason(&out).is_none(), "{command}: {out:?}");
+            let value = serde_json::to_value(&out).unwrap();
+            let rewritten = value
+                .pointer("/hookSpecificOutput/updatedInput/command")
+                .and_then(|v| v.as_str())
+                .expect("updated command");
+            assert!(
+                rewritten.contains("factory worker-check --cas-root"),
+                "{rewritten}"
+            );
+            assert!(
+                rewritten.contains(command.strip_prefix("cargo ").unwrap()),
+                "{rewritten}"
+            );
+        }
+        let mut request = input(
+            "cargo nextest run -p cas --lib -E 'test(worker)' > /tmp/tests.log 2>&1 &",
+            "worker",
+        );
+        request.cwd = cwd.into();
+        let out = handle_pre_tool_use(&request, Some(&root)).unwrap();
+        assert!(
+            deny_reason(&out)
+                .unwrap()
+                .contains("FACTORY WORKSPACE CONTRACT")
+        );
+    }
+    let out = handle_pre_tool_use(
+        &input("cargo nextest run -p cas -E 'test(worker)'", "worker"),
+        None,
+    )
+    .unwrap();
+    assert!(deny_reason(&out).unwrap().contains("Cassy root"));
 }
 
 #[test]

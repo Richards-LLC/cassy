@@ -2,15 +2,132 @@
 """Consume the daemon's tested integration tip under its delivery-target lock."""
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
+import time
 
 
 STALE_BASE_ERROR = "Main changed since integration; rerun the merge sweep"
 DEFAULT_RECOVERY_TIMEOUT_SECS = 4 * 60 * 60
+
+
+def integration_receipt(root):
+    common = Path(git(root, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
+    return common, json.loads((common.parent / ".cas/merge-sweeps/integration.json").read_text())
+
+
+def assembly_input_path():
+    run = os.environ.get("CAS_RELEASE_TRAIN_RUN_DIR")
+    return Path(run) / "assemble.integration.json" if run else None
+
+
+def assembly_input(root):
+    path = assembly_input_path()
+    if path and path.exists():
+        value = json.loads(path.read_text())
+        if not isinstance(value, dict) or any(
+                not isinstance(value.get(key), str) or len(value[key]) != 40
+                or any(c not in "0123456789abcdef" for c in value[key]) for key in ("tip", "base")):
+            raise RuntimeError("Assembly input receipt is malformed")
+        common = Path(git(root, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
+        if value.get("repository") != str(common):
+            raise RuntimeError("Assembly input belongs to another repository")
+        return value
+    return None
+
+
+def record_assembly_input(root):
+    path = assembly_input_path()
+    if path is None:
+        return
+    common, receipt = integration_receipt(root)
+    tip = receipt["tip"]
+    if receipt.get("status") != "PASSED" or not is_ancestor(root, tip, "HEAD"):
+        raise RuntimeError("Assembly did not consume the current passing integration tip")
+    write_assembly_input(path, {"repository": str(common), "tip": tip, "base": receipt["base"]})
+
+
+def write_assembly_input(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(".tmp")
+    temp.write_text(json.dumps(value) + "\n")
+    temp.replace(path)
+
+
+def metadata_input(root, revision):
+    # Reuse the exact prep/ledger projection, without probing or running Cargo.
+    spec = importlib.util.spec_from_file_location("assembly_proof", Path(__file__).with_name("assembly-proof.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.code_input(root, revision)
+
+
+def legacy_assembly_base(root, head):
+    # Old stage receipts record the assembled checkout, possibly with rebased
+    # release prose. Strip only the release-metadata tail to find its code tip.
+    value = metadata_input(root, head)
+    while True:
+        parent = subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", head + "^"],
+                                capture_output=True, text=True)
+        if parent.returncode or metadata_input(root, parent.stdout.strip()) != value:
+            return head
+        head = parent.stdout.strip()
+
+
+def refresh_resume(root):
+    path = assembly_input_path()
+    if path is None or not (path.parent / "stage.assemble.done").exists():
+        return
+    _, receipt = integration_receipt(root)
+    if receipt.get("status") != "PASSED":
+        raise RuntimeError("Integration has no passing sweep; resolve the epic sweep report")
+    old = assembly_input(root)
+    if old is None:
+        head = (path.parent / "stage.assemble.done").read_text().strip()
+        old = {"tip": legacy_assembly_base(root, head), "base": receipt["base"],
+               "repository": str(integration_receipt(root)[0])}
+    if old["tip"] == receipt["tip"] and old["base"] == receipt["base"]:
+        return
+    if git(root, "status", "--porcelain"):
+        raise RuntimeError("Release checkout has changes; commit or move them before refreshing integration")
+    replay_base = receipt["tip"] if is_ancestor(root, receipt["tip"], "HEAD") else old["tip"]
+    validate_release_metadata(root, replay_base, receipt["tip"])
+    # Preserve evidence, but invalidate every downstream completion receipt.
+    archive = path.parent / "superseded" / (str(time.time_ns()) + "-" + old["tip"][:12])
+    archive.mkdir(parents=True)
+    stages = "assemble prep ledger gate pr-body pipeline publish post-publication announce report receipts host-update".split()
+    names = ["stage." + stage + ".done" for stage in stages]
+    names += ["gate.done", "gate.green.epoch", "gate.full.sha", "pipeline.done", "landed-main.sha"]
+    for name in names:
+        file = path.parent / name
+        if file.exists():
+            file.replace(archive / name)
+    # The old consumed tip remains available for the assemble body's rebase.
+    write_assembly_input(path, old)
+    print(f"Integration input changed {old['tip']} -> {receipt['tip']}; rerun assemble and later stages; evidence: {archive}")
+
+
+def validate_release_metadata(root, old_tip, new_tip):
+    current = git(root, "rev-parse", "HEAD")
+    if (not git(root, "branch", "--show-current").startswith("release/")
+            or not is_ancestor(root, old_tip, current)
+            or metadata_input(root, old_tip) != metadata_input(root, current)):
+        raise RuntimeError(
+            "BLOCKER integration-release-metadata: checkout has changes beyond release prose, "
+            "member versions or the generated ledger; preserve/review them before replay. "
+            "Recovery: " + resume_rebase_command(root, old_tip, new_tip))
+
+
+def resume_rebase_command(root, old_tip, new_tip):
+    version = recorded_run_fields().get("version") or git(root, "branch", "--show-current").removeprefix("release/")
+    rebase = ["git", "-C", str(root), "-c", "core.hooksPath=/dev/null", "rebase", "--onto", new_tip, old_tip]
+    resume = [str(Path(__file__).with_name("release-train.sh")), version, str(root), "--cut", "--resume"]
+    return shlex.join(rebase) + " && " + shlex.join(resume)
 
 
 def git(root, *args):
@@ -93,7 +210,21 @@ def is_ancestor(root, older, newer):
 def rebase_docs_only_release(root, main_tip, integration_tip):
     """Move release metadata commits from main onto the tested union tip."""
     current = git(root, "rev-parse", "HEAD")
-    if is_ancestor(root, current, integration_tip):
+    if is_ancestor(root, current, integration_tip) or is_ancestor(root, integration_tip, current):
+        return
+    previous = assembly_input(root)
+    if previous and previous["tip"] != integration_tip:
+        old_tip = previous["tip"]
+        validate_release_metadata(root, old_tip, integration_tip)
+        result = subprocess.run(
+            ["git", "-C", str(root), "-c", "core.hooksPath=/dev/null", "rebase", "--onto", integration_tip, old_tip],
+            capture_output=True, text=True)
+        if result.returncode:
+            git(root, "-c", "core.hooksPath=/dev/null", "rebase", "--abort")
+            raise RuntimeError(
+                "BLOCKER integration-release-metadata: release metadata conflicts with the new integration tip; "
+                "checkout restored. Recovery: " + resume_rebase_command(root, old_tip, integration_tip))
+        print("Rebased release metadata onto updated integration tip", file=sys.stderr)
         return
     branch = git(root, "branch", "--show-current")
     if not branch.startswith("release/") or not is_ancestor(root, main_tip, current):
@@ -275,7 +406,15 @@ def assemble(root):
 
 def main():
     try:
-        tip = assemble(Path(sys.argv[1]))
+        root = Path(sys.argv[1])
+        action = sys.argv[2] if len(sys.argv) > 2 else "assemble"
+        if action == "--record-input":
+            _under_delivery_lock(root, record_assembly_input)
+            return 0
+        if action == "--resume-check":
+            _under_delivery_lock(root, refresh_resume)
+            return 0
+        tip = assemble(root)
     except (OSError, ValueError, KeyError, IndexError, RuntimeError) as exc:
         print("FAIL release assembly", file=sys.stderr)
         print(str(exc), file=sys.stderr)

@@ -28,7 +28,7 @@ Projects that keep a catalog describe the contract in
 ## Run them and keep the receipts
 
 Run the project's journey suite, for example
-`scripts/journey-eval.sh <artifacts_root>/<task-id> --grep <ID>`. Each
+`scripts/journey-eval.sh <artifacts_root>/<project-key>/<task-id> --grep <ID>`. Each
 journey leaves an evidence bundle in `<task-id>/journeys/<ID>/`, with the
 `producer` field of its `bundle.json` set to `journey`.
 

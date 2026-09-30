@@ -9,6 +9,9 @@ pub const MAX_ARTIFACT_BYTES: u64 = 1_048_576;
 
 /// Find supported text artifacts beneath every direct task directory.
 pub fn discover_all_task_artifacts(artifacts_root: &Path) -> Vec<ArtifactDocument> {
+    if std::fs::symlink_metadata(artifacts_root).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Vec::new();
+    }
     let Ok(entries) = std::fs::read_dir(artifacts_root) else {
         return Vec::new();
     };
@@ -27,6 +30,9 @@ pub fn discover_all_task_artifacts(artifacts_root: &Path) -> Vec<ArtifactDocumen
 
 /// Find supported text artifacts beneath one task's durable directory.
 pub fn discover_task_artifacts(artifacts_root: &Path, task_id: &str) -> Vec<ArtifactDocument> {
+    if std::fs::symlink_metadata(artifacts_root).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Vec::new();
+    }
     let task_root = artifacts_root.join(task_id);
     let mut paths = vec![task_root];
     let mut artifacts = Vec::new();

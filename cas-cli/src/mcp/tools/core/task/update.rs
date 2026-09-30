@@ -31,6 +31,7 @@ fn requested_update_fields(
     supplied!(execution_note);
     supplied!(risk);
     supplied!(proof_targets);
+    supplied!(door);
     supplied!(external_ref);
     supplied!(assignee);
     supplied!(origin_project);
@@ -402,6 +403,11 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+        let door_update = req.door.as_deref().map(|value| {
+            if value.trim().is_empty() { Ok(None) } else { value.parse::<cas_types::TaskDoor>().map(Some) }
+        }).transpose().map_err(|error| McpError {
+            code: ErrorCode::INVALID_PARAMS, message: Cow::from(error.to_string()), data: None,
+        })?;
         let requested_risk = req.risk.as_deref().map(str::trim);
         let effective_risk = match requested_risk {
             Some(value) if !value.is_empty() => cas_types::TaskRisk::parse_csv(value).map_err(|error| {
@@ -420,7 +426,7 @@ impl CasCore {
             .proof_targets
             .as_deref()
             .map(|targets| crate::mcp::tools::types::parse_proof_targets(Some(targets)))
-            .unwrap_or_else(|| task.proof_targets.clone());
+            .unwrap_or_else(|| cas_types::normalize_proof_targets(&task.proof_targets));
         if effective_risk.contains(&cas_types::TaskRisk::BlastRadius)
             && effective_proof_targets.is_empty()
         {
@@ -530,11 +536,11 @@ impl CasCore {
             }
             if proof_targets_fix {
                 let widened = &effective_proof_targets;
-                let preserves_existing = task
-                    .proof_targets
+                let existing = cas_types::normalize_proof_targets(&task.proof_targets);
+                let preserves_existing = existing
                     .iter()
                     .all(|target| widened.iter().any(|candidate| candidate == target));
-                if widened.len() <= task.proof_targets.len() || !preserves_existing {
+                if widened.len() <= existing.len() || !preserves_existing {
                     return Err(McpError {
                         code: ErrorCode::INVALID_PARAMS,
                         message: Cow::from(
@@ -567,6 +573,7 @@ impl CasCore {
                     "proof_targets",
                     req.proof_targets.is_some() && !proof_targets_fix,
                 ),
+                ("door", req.door.is_some()),
                 ("external_ref", req.external_ref.is_some()),
                 ("assignee", req.assignee.is_some()),
                 ("status", req.status.is_some()),
@@ -1055,6 +1062,10 @@ impl CasCore {
             changes.push("execution_note");
         }
 
+        if let Some(door) = door_update {
+            task.door = door;
+            changes.push("door");
+        }
         if req.risk.is_some() {
             task.risk = effective_risk;
             changes.push("risk");

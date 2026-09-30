@@ -11,6 +11,9 @@ metadata:
 
 # Codebase design
 
+Imported and adapted from mattpocock/skills `codebase-design`, MIT © 2026 Matt Pocock.
+See [LICENSE](LICENSE) for the upstream permission notice.
+
 Design deep modules: substantial behavior behind a small, clear interface at a
 well-chosen seam. This vocabulary improves leverage for callers, locality for
 maintainers, and tests that exercise real behavior.
@@ -18,13 +21,19 @@ maintainers, and tests that exercise real behavior.
 ## Vocabulary
 
 - **Module**: anything with an interface and implementation, from a function
-  to a package or vertical slice.
+  to a package or vertical slice. Avoid unit, component and service as
+  substitutes for this design term.
 - **Interface**: every fact a caller must know: types, invariants, ordering,
-  error modes, configuration, and performance characteristics.
+  error modes, configuration, and performance characteristics. Avoid API or
+  signature as substitutes: both can omit facts callers must know.
 - **Depth**: behavior a caller can exercise per unit of interface it must
   learn. A shallow module exposes nearly as much complexity as it hides.
 - **Seam**: where behavior can vary without editing the caller; its placement
-  is a design choice distinct from the implementation behind it.
+  is a design choice distinct from the implementation behind it (Michael
+  Feathers). Avoid boundary as a substitute; it also names DDD bounded contexts.
+- **Implementation**: the code inside a module. Distinct from adapter: an
+  adapter names a role at a seam, and may have a large or small implementation.
+  Avoid treating the words as synonyms.
 - **Adapter**: a concrete implementation filling a seam. Use it when the
   varying slot matters; otherwise say implementation.
 - **Leverage** and **locality**: the caller and maintainer benefits of depth.
@@ -68,9 +77,10 @@ to reassess the premise, scope, tests, and types.
 
 Before committing to a consequential interface, frame constraints, dependency
 categories, and an illustrative sketch.
-Explore at least three materially different interfaces:
-minimum surface, maximum flexibility, and the common caller.
-Compare depth, locality, seam placement, hidden complexity, and trade-offs.
+Explore at least three materially different interfaces using the parallel
+briefs and output specification in
+[design-it-twice.md](references/design-it-twice.md), then recommend one design
+or a coherent hybrid.
 
 ## Deepening an existing shallow module
 

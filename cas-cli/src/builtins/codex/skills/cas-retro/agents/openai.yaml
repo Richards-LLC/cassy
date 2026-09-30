@@ -1,0 +1,3 @@
+# Codex's explicit-invocation policy for cas-retro.
+policy:
+  allow_implicit_invocation: false

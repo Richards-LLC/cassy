@@ -351,7 +351,7 @@ fn writing_for_agents_meets_the_bar_it_sets_for_other_skills() {
             "is the one copy",
             "no `codex/` or `grok/` twin tree",
             "Name Cassy tools by bare name",
-            "three Codex-only ones under `builtins/codex/`",
+            "Codex-only files under `builtins/codex/`",
         ] {
             assert!(
                 body.contains(marker),
@@ -467,79 +467,55 @@ fn wizard_template_shows_the_safe_confirm_form_under_set_e() {
 /// Patterns that mark operator-private or cas-src-only data. Every builtin
 /// ships into every downstream project, so none of these may appear unless
 /// the file is allowlisted below with a reason.
-const OPERATOR_DATA_RULES: &[(&str, &str)] = &[
-    (
-        "e-mail",
-        r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}",
-    ),
-    ("home-path", r"/home/[a-z_][a-z0-9_-]*"),
-    ("codex-account-dir", r"~/\.codex-"),
-    ("task-id", r"\bcas-[0-9a-f]{4,5}\b"),
-    ("operator-org", r"Richards-LLC"),
-    ("operator-project", r"(?i)gabber"),
-    ("cas-src-test-command", r"nextest -p cas\b"),
-];
+// Shared with the no-build release row: lane admission and the shipped
+// catalog test read the same patterns, synthetic values and exemptions.
+static OPERATOR_DATA_POLICY: std::sync::LazyLock<serde_json::Value> =
+    std::sync::LazyLock::new(|| {
+        serde_json::from_str(include_str!("../../scripts/builtin-doc-hygiene.json"))
+            .expect("valid builtin-doc-hygiene policy")
+    });
+
+static OPERATOR_DATA_RULES: std::sync::LazyLock<Vec<(&'static str, &'static str)>> =
+    std::sync::LazyLock::new(|| {
+        OPERATOR_DATA_POLICY["rules"]
+            .as_array()
+            .expect("hygiene rules")
+            .iter()
+            .map(|rule| {
+                (
+                    rule["name"].as_str().unwrap(),
+                    rule["pattern"].as_str().unwrap(),
+                )
+            })
+            .collect()
+    });
 
 /// Obvious placeholders are not operator data: documentation e-mail domains
 /// (RFC 2606 / RFC 6761) and synthetic task ids used in worked examples.
 fn is_synthetic(rule: &str, value: &str) -> bool {
-    match rule {
-        "e-mail" => {
-            regex::Regex::new(r"@(example\.(com|org|net)|[a-z0-9.-]+\.(test|example|invalid))$")
-                .unwrap()
-                .is_match(value)
-        }
-        "task-id" => {
-            let id = &value["cas-".len()..];
-            matches!(id, "1234" | "abcd" | "abc1" | "a1b2")
-                || id.chars().all(|c| Some(c) == id.chars().next())
-        }
-        _ => false,
-    }
+    OPERATOR_DATA_POLICY["synthetic"][rule]
+        .as_str()
+        .is_some_and(|pattern| regex::Regex::new(pattern).unwrap().is_match(value))
 }
 
 /// `(catalog path, rule, reason)`. The path is flavour-agnostic: an entry
 /// covers the Claude, Codex and Grok copies of that file.
-const OPERATOR_DATA_ALLOWLIST: &[(&str, &str, &str)] = &[
-    (
-        "skills/cas-cut-release/references/failure-log.md",
-        "task-id",
-        "cas-src release-train failure log; each entry cites the ticket that fixed the failure. \
-         The release trio is cas-src-only content that moves out of universal builtins (audit M51).",
-    ),
-    (
-        "skills/cas-release-report/references/exemplar.md",
-        "operator-org",
-        "Links to the Cassy repo's own release-report sources the exemplar was rendered from; \
-         cas-src-only release content (audit M51).",
-    ),
-    (
-        "skills/cas-qa-craft/references/matrix-builder.md",
-        "operator-org",
-        "Attribution for the Cassy issue the matrix guidance was adapted from; pinned by the \
-         builtins and agent_definition_contract_test markers.",
-    ),
-    (
-        "skills/cas-worker/references/close-gate.md",
-        "task-id",
-        "Factory-core reference owned by the WP7 accuracy rewrite; ids tag the close gates it documents.",
-    ),
-    (
-        "skills/cas-supervisor/references/reference.md",
-        "task-id",
-        "Factory-core reference owned by the WP7 accuracy rewrite; ids tag the guards it documents.",
-    ),
-    (
-        "skills/cas-supervisor/references/worker-recovery.md",
-        "task-id",
-        "Factory-core reference owned by the WP7 accuracy rewrite; ids tag the recovery incidents it documents.",
-    ),
-    (
-        "skills/cas-supervisor/references/workflow.md",
-        "task-id",
-        "Factory-core reference owned by the WP7 accuracy rewrite; ids tag the guards it documents.",
-    ),
-];
+static OPERATOR_DATA_ALLOWLIST: std::sync::LazyLock<
+    Vec<(&'static str, &'static str, &'static str)>,
+> = std::sync::LazyLock::new(|| {
+    OPERATOR_DATA_POLICY["allowlist"]
+        .as_array()
+        .expect("hygiene allowlist")
+        .iter()
+        .map(|entry| {
+            (
+                entry["path"].as_str().unwrap(),
+                entry["rule"].as_str().unwrap(),
+                entry["reason"].as_str().unwrap(),
+            )
+        })
+        .collect()
+});
 
 fn shipped_catalogs() -> [(&'static str, &'static [BuiltinFile]); 7] {
     [
@@ -601,7 +577,7 @@ fn shipped_builtins_carry_no_operator_data() {
         stale.is_empty(),
         "operator-data allowlist entries no longer match anything; delete them: {stale:?}"
     );
-    for (path, rule, reason) in OPERATOR_DATA_ALLOWLIST {
+    for (path, rule, reason) in OPERATOR_DATA_ALLOWLIST.iter() {
         assert!(
             reason.len() >= 40,
             "allowlist entry {path} ({rule}) needs a stated reason"
@@ -681,6 +657,11 @@ const AI_VOCABULARY_RULES: &[(&str, &str)] = &[
 /// art. A file-level exception is intentionally visible and checked for drift.
 const AI_VOCABULARY_ALLOWLIST: &[(&str, &str, &str)] = &[
     (
+        "skills/cas-codebase-design/references/design-it-twice.md",
+        "leverage",
+        "Architecture term for caller benefit used to compare the proposed interfaces.",
+    ),
+    (
         "skills/cas-codebase-design/SKILL.md",
         "leverage",
         "Architecture term for caller benefit from a deeper module interface.",
@@ -734,11 +715,6 @@ const AI_VOCABULARY_ALLOWLIST: &[(&str, &str, &str)] = &[
         "skills/cas-qa-craft/references/journeys.md",
         "journey",
         "Defines the project's end-to-end user-flow terminology and file names.",
-    ),
-    (
-        "skills/cas-worker/SKILL.md",
-        "journey",
-        "Refers to the catalog journey QA trigger in the worker contract.",
     ),
     (
         "skills/cas-worker/references/close-gate.md",
@@ -880,4 +856,59 @@ fn ai_vocabulary_word_list_matches_case_insensitively_and_at_word_boundaries() {
     assert!(catches("It's worth noting", "it's worth noting"));
     assert!(!catches("unleveraged", "leverage"));
     assert!(!catches("subrealm", "realm"));
+}
+
+#[path = "support/builtin_contract_phrases.rs"]
+mod builtin_contract_phrases;
+
+/// One registry owns contract-bearing text; ordinary prose is free to change.
+#[test]
+fn builtin_contract_phrase_registry_holds_in_every_embedded_catalog() {
+    use builtin_contract_phrases::Policy;
+    let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+        "../../scripts/builtin-contract-schema-fixtures.json"
+    ))
+    .unwrap();
+    for fixture in fixtures.as_array().unwrap() {
+        assert_eq!(
+            Policy::parse(&fixture["policy"].to_string()).is_ok(),
+            fixture["valid"].as_bool().unwrap(),
+            "schema fixture: {}",
+            fixture["name"]
+        );
+    }
+    let policy = Policy::parse(include_str!("../../scripts/builtin-contract-phrases.json"))
+        .expect("valid reasoned builtin contract registry");
+    let failures = policy.failures(|label, path| {
+        if let Some(name) = path
+            .strip_prefix("jobs/")
+            .and_then(|p| p.strip_suffix(".md"))
+        {
+            return MAINTENANCE_JOBS
+                .iter()
+                .find(|job| job.name == name)
+                .unwrap_or_else(|| panic!("missing maintenance job {name}"))
+                .body
+                .to_owned();
+        }
+        let harness = match label {
+            "claude" => cas_mux::SupervisorCli::Claude,
+            "codex" => cas_mux::SupervisorCli::Codex,
+            "grok" => cas_mux::SupervisorCli::Grok,
+            "opencode" => cas_mux::SupervisorCli::OpenCode,
+            _ => panic!("unknown catalog {label}"),
+        };
+        cas::builtins::skill_catalog_for_harness(harness)
+            .iter()
+            .chain(cas::builtins::agent_catalog_for_harness(harness))
+            .find(|file| file.path == path)
+            .unwrap_or_else(|| panic!("missing {label} contract document {path}"))
+            .content
+            .to_owned()
+    });
+    assert!(
+        failures.is_empty(),
+        "builtin text contracts failed:\n{}",
+        failures.join("\n")
+    );
 }

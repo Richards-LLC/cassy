@@ -43,7 +43,7 @@ const POLISH_RENDERS: [&str; 4] = [
 #[derive(Debug, Clone)]
 pub struct EvidenceContext<'a> {
     pub task_id: &'a str,
-    /// `<artifacts_root>/<task-id>`.
+    /// `<artifacts_root>/<project-key>/<task-id>`.
     pub task_artifacts_dir: &'a Path,
     /// Repository holding the delivered head (for committer time/ancestry).
     pub repo: &'a Path,
@@ -1745,6 +1745,18 @@ pub fn run_close_gate(
     reasons: &[String],
     skip_markers: &[SkipMarker],
 ) -> Result<GatePass, String> {
+    run_close_gate_with_write_dir(ctx, tier, reasons, skip_markers, ctx.task_artifacts_dir)
+}
+
+/// Read historical evidence from `ctx`, but direct replacement evidence to
+/// the current project namespace. The problem retains the historical path.
+pub fn run_close_gate_with_write_dir(
+    ctx: &EvidenceContext<'_>,
+    tier: EvidenceTier,
+    reasons: &[String],
+    skip_markers: &[SkipMarker],
+    write_dir: &Path,
+) -> Result<GatePass, String> {
     let mut pass = GatePass::default();
     let blocked: Vec<&SkipMarker> = skip_markers
         .iter()
@@ -1788,7 +1800,10 @@ pub fn run_close_gate(
              Next: {command}. Then retry close. Contract: {CONTRACT_REFERENCE}.",
             task = ctx.task_id,
             problem = refusal.problem,
-            command = refusal.command,
+            command = refusal.command.replace(
+                ctx.task_artifacts_dir.to_string_lossy().as_ref(),
+                write_dir.to_string_lossy().as_ref(),
+            ),
         )
     };
     match tier {

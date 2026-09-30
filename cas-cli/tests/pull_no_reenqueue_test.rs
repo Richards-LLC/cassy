@@ -290,6 +290,7 @@ async fn wrapping_open_store_would_reenqueue_on_pull_apply() {
 
 /// Source guard: production pull apply sites must use *_local openers.
 #[test]
+// pin: Structural backstop enumerates pull opener call sites beyond the exercised database fixtures, preventing outbound sync echoes.
 fn pull_apply_sites_use_local_openers() {
     let cloud_rs = production_source_root().join("cli/cloud.rs");
     let daemon_rs = production_source_root().join("mcp/daemon.rs");

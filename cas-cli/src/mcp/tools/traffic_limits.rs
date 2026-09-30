@@ -38,7 +38,7 @@ fn artifact_guidance(task_id: &str) -> String {
         task_id
     };
     format!(
-        "Write the evidence to `[factory] artifacts_root/{task_id}/<name>.md` and send the path plus a one-paragraph summary."
+        "Write the evidence to `[factory] artifacts_root/<project-key>/{task_id}/<name>.md` and send the path plus a one-paragraph summary."
     )
 }
 
@@ -73,7 +73,7 @@ pub(crate) fn validate_message_body(
 /// Where an over-cap supervisor message is spilled: the configured
 /// `[factory] artifacts_root`, else the documented real-disk fallback
 /// `~/.cas/artifacts`. `None` when neither is available.
-pub(crate) fn message_spill_root(config: &Config) -> Option<std::path::PathBuf> {
+pub(crate) fn message_spill_root(cas_root: &std::path::Path, config: &Config) -> Option<std::path::PathBuf> {
     let configured = config
         .factory()
         .artifacts_root
@@ -81,9 +81,9 @@ pub(crate) fn message_spill_root(config: &Config) -> Option<std::path::PathBuf> 
     if configured.is_none() && std::env::var_os("HOME").is_none_or(|home| home.is_empty()) {
         return None;
     }
-    Some(crate::config::resolved_factory_artifacts_root(
+    Some(crate::config::project_factory_artifacts_root(cas_root, &crate::config::resolved_factory_artifacts_root(
         configured.as_deref(),
-    ))
+    )))
 }
 
 /// A task id is used as a directory name only when it cannot escape the
@@ -241,7 +241,7 @@ mod tests {
         assert!(error.contains("limit is 5 characters"), "{error}");
         assert!(error.contains("actual length is 6"), "{error}");
         assert!(
-            error.contains("[factory] artifacts_root/cas-449b/<name>.md"),
+            error.contains("[factory] artifacts_root/<project-key>/cas-449b/<name>.md"),
             "{error}"
         );
         assert!(error.contains("one-paragraph summary"), "{error}");
@@ -284,7 +284,7 @@ mod tests {
         assert!(error.contains("limit is 7 characters"), "{error}");
         assert!(error.contains("actual length is 8"), "{error}");
         assert!(
-            error.contains("[factory] artifacts_root/cas-449b/<name>.md"),
+            error.contains("[factory] artifacts_root/<project-key>/cas-449b/<name>.md"),
             "{error}"
         );
     }

@@ -143,7 +143,7 @@ pub(crate) fn merge_gate_exits_paragraph(task_id: &str, supervisor_prefix: &str)
         "If this is a completed, measured negative result whose delivery must not \
          land, a registered supervisor may close with `{supervisor_prefix}task \
          action=close id={task_id} negative_result=true \
-         negative_result_artifact_path=<absolute-path-under-artifacts_root/{task_id}> \
+         negative_result_artifact_path=<absolute-path-under-artifacts_root/<project-key>/{task_id}> \
          negative_result_reference=<closed-PR-URL-or-branch> reason=\"...\"`. If the \
          supervisor declines the delivery for rework, it runs `{supervisor_prefix}task \
          action=request_changes id={task_id} reason=\"...\"`; only after that verdict \
@@ -279,7 +279,8 @@ mod tests {
 
     /// Close-gate sources whose runtime text suggests calls. Paths are
     /// relative to this file.
-    const GATE_SOURCES: [(&str, &str); 10] = [
+    // pin: Audit every close-gate source, including unexecuted refusal branches, for harness-prefixed fix commands.
+    const GATE_SOURCES: [(&str, &str); 11] = [
         ("close_ops.rs", include_str!("../close_ops.rs")),
         ("stale_close_guard.rs", include_str!("../stale_close_guard.rs")),
         ("proof_scope.rs", include_str!("../proof_scope.rs")),
@@ -296,6 +297,7 @@ mod tests {
             include_str!("../../../../../../hooks/handlers/handlers_events/neon_sql_guard.rs"),
         ),
         ("gate_text.rs", include_str!("gate_text.rs")),
+        ("snapshot_approval.rs", include_str!("snapshot_approval.rs")),
     ];
 
     /// Bare mentions that are not suggested calls: a matcher's marker list
@@ -480,7 +482,7 @@ mod tests {
 
         let exits = merge_gate_exits_paragraph("cas-m1", "mcp__cs__");
         assert!(exits.contains("`mcp__cs__task action=close id=cas-m1 negative_result=true"));
-        assert!(exits.contains("negative_result_artifact_path=<absolute-path-under-artifacts_root/cas-m1>"));
+        assert!(exits.contains("negative_result_artifact_path=<absolute-path-under-artifacts_root/<project-key>/cas-m1>"));
         assert!(exits.contains("negative_result_reference="));
         assert!(exits.contains("`mcp__cs__task action=request_changes id=cas-m1 reason=\"...\"`"));
     }

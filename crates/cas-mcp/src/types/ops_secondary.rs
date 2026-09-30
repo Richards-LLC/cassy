@@ -355,6 +355,12 @@ pub struct SystemRequest {
 /// Unified verification operations request
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct VerificationRequest {
+    /// Typed shadow-review operation, encoded as bounded JSON. These records
+    /// never contribute verification verdicts to task or merge gates.
+    #[schemars(description = "shadow: JSON operation (start, context, report, cross_check, show, apply); see cas-shadow-review. Requires separate registered Spec/Standards children; apply requires supervisor opt-in.")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<String>,
+
     /// Action to perform
     #[schemars(
         schema_with = "crate::actions::verification_action_schema",

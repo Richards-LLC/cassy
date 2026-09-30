@@ -160,16 +160,17 @@ Install the standard local runner once with `cargo install cargo-nextest` (or
 `make -C cas-cli install-tools`). `scripts/run-scoped-tests.sh` defaults to
 nextest and rejects a silent zero-test success.
 
-### Worker checks and supervisor assembly
+### Worker checks, targeted tests and supervisor assembly
 
 Workers may type-check their committed change with exactly
 `cargo check -p <affected crate> [-p <crate> ...] --lib` for lib-only edits or
 `--tests` when test files changed; choose one target flag. Include consumers of
 changed shared interfaces. The PreToolUse guard routes that command through
 `cas factory worker-check`, which holds an OS builder-slot lock until Cargo
-exits, checks the existing build guard, and enforces `max_concurrent_builders`
+exits. Lock descriptors are close-on-exec so compiler-cache daemons cannot
+retain slots after the runner exits. It checks the existing build guard, and enforces `max_concurrent_builders`
 even across simultaneous launches. A refusal requires retrying later. Run long
-checks in the background with a log; no test code executes.
+checks in the background with a log. Compile checks execute no tests.
 
 The runner requires a clean committed worktree, forces its private seeded
 `target/`, and records `check: PASS <sha>` with the selected packages. Task close
@@ -177,24 +178,63 @@ copies matching exact-delivery receipts into worker evidence. Dirty trees,
 failed retries, other worktrees and other SHAs cannot supply this receipt.
 Check receipts are optional compile-only evidence and do not waive test proof.
 
-Only the supervisor builds and runs Rust tests: once per release candidate at
+Workers may also run exactly
+`cargo nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`.
+An omitted target selects `--lib`; `--test` must name one explicit harness from
+`scripts/cas-test-targets.py`. Select exactly one package and a mandatory
+positive named-test filter (`test(name)` or `test(=name)`, joined by `|`/`&`).
+Empty/all(), regex/glob, negated and binary-wide selectors are refused, as are
+environment prefixes, compound commands, repeated packages and broader flags.
+The same capped runner invokes the shared `run-verified-tests.sh` zero-test
+guard, forces the private target, and records only successful nonzero counts
+against an unchanged clean commit: `test: PASS <sha> <package> <filter> <count>`.
+Failed retries invalidate that scope's receipt; close imports all matching
+exact-delivery receipts. Targeted receipts complement full-suite assembly proof.
+
+The supervisor runs the full build and Rust suite once per release candidate at
 assembly it runs `python3 scripts/assembly-proof.py prove <epic-worktree>` and
 records `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd>
-log=<path>` on the epic. Workers still cannot run build/test/nextest/clippy/run,
+log=<path>` on the epic. Workers still cannot run build/test/clippy/run or unfiltered nextest,
 `rustc`, scoped-test scripts, or `make test*`. Child closes reference assembly
 proof rather than scoped `--proof` or `loaded_proof` notes. Non-Rust suites are
 unaffected. An older runtime that denies the check exception requires parking
-with the unverified crates named for assembly.
+with the unverified crates and test filters named for assembly.
 
 The assembly command runs native full-workspace nextest in the factory
 worktree, then the gate's archive-mode row in a plain clone outside every
 `.cas` ancestor. The archive consumer uses the queue's remapped environment
 and excludes component-output snapshots, already covered by the native run.
+
+The gate prints a reuse hit for both suite rows or a `MISS assembly key=…`
+reason. Environment misses from new receipts also name the first changed
+variable; receipts store only per-variable hashes. `CAS_RELEASE_ARTIFACTS_ROOT`
+and `CAS_RELEASE_RECEIPTS_RUN_DIR` are output locations and do not invalidate
+proof. Compiler flags, HOME, PATH, local environment/config files and the
+resolved Zig binary remain inputs.
+
+Set `CAS_RELEASE_GATE_HOME_DIR` to a scratch base on the checkout filesystem
+outside `/tmp`, `/var/tmp`, `/private/tmp`, `/private/var/tmp`, the configured
+`TMPDIR`, and every `.cas` ancestor (for example,
+`CAS_RELEASE_GATE_HOME_DIR=/home/cas-release-gate/base` on Linux or
+`/Users/Shared/cas-release-gate/base` on macOS). The plain clone must be outside
+Cassy's disposable roots so discovery and update tests exercise durable
+projects. Assembly refuses an unsafe base before tool probing or either suite;
+its legacy `/var/tmp` default requires this explicit override.
+
 Both contexts must report nonzero passed tests before an atomic PASS is written
 under the shared `.cas/merge-sweeps/assembly-proofs/` directory. The receipt
 records the tested Git tree, each context's tree and pass count, toolchain,
 environment and archive size. Full Cassy integration sweeps and the train's
 assembly stage use this same command; retries cite the existing receipt.
+
+Before the pipeline lands, `--cut --resume` compares the integration tip/base
+with the input recorded by assemble. A changed integration input archives the
+old stage receipts and reruns assemble, prep, ledger and every later stage.
+Release prose, member-version bumps and the generated ledger are replayed onto
+the new tested tip; source edits block automatic replay. A rebase conflict
+restores the checkout and prints a named blocker with a recovery command.
+After a valid pipeline/publish receipt exists, resume finishes that landed
+release without adopting a newer integration tip.
 
 The first full release gate automatically reuses its nextest and archive-mode
 rows from a matching receipt. `--only` remains a fresh diagnostic. Receipts
@@ -210,6 +250,32 @@ including dependency and non-member versions, still requires a new proof.
 The helper uses Python 3.11's standard-library TOML parser.
 
 Gate evidence: PR #655/run 33430464567; PR #657/run 33435093275.
+
+### Release delivery completion
+
+After user-facing changes reach `main`, a source merge is not the delivery
+completion receipt. The existing release train's `--host-update` stage also
+runs `scripts/release-completion.py`; `--cut` requires its PASS before finishing,
+including when an external host-update stage is used or a previous stage-done
+marker exists. No additional CI lane is involved.
+
+`delivery-completion.json` binds the bumped runtime manifest/version, previous
+release tag, complete commit interval through the landed SHA, refreshed
+`origin/main`, exact successful publication workflow, and published asset
+digests. The gate downloads the host's release archive, installs its binary into
+an empty temporary home, checks its version and clean build commit, and compares
+its bytes with the updated host binary. Existing host, hub and refresh convergence
+proof is also required. A later merge on `main`, a stale same-version build,
+missing publication, or a deferred update fails completion. The main ref is
+checked again after installation. Failure replaces any earlier PASS receipt.
+
+Set `CAS_RELEASE_TRAIN_ANNOUNCEMENT_EMBARGO` to the operator's explicit reason to
+hold announcements. The cut records it in `announcement-embargo.txt`, keeps
+announce/report/receipts pending, and continues runtime publication and install
+proof. Standalone announce/report also honor it. Omission on resume preserves
+the embargo; explicitly setting it to an empty string lifts it. Resume then
+finishes the pending announcement evidence without republishing the runtime.
+An embargo never waives the publication or install requirement.
 
 ### Worker build caches
 
@@ -271,7 +337,7 @@ Build profiles must use `panic = "unwind"`. The MCP tool-dispatch panic catcher 
 
 ## Skill & Rule Sync
 
-Cassy auto-syncs rules to `.claude/rules/` and skills to `.claude/skills/` as SKILL.md files with YAML frontmatter. The sync logic lives in `cas-cli/src/sync/`. Rule promotion uses configurable outcome evidence: `sync.promotion_threshold` defaults to 2 and `sync.promotion_evidence` accepts `helpful` and/or `retrieval`; one `mcp__cas__rule action=helpful` call never promotes. A reviewer's explicit decision uses `mcp__cas__rule action=promote id=<id> change_note="<why>"` instead of voting. Retrieval promotion requires useful outcomes across at least two distinct privacy-preserving sessions. Harmful feedback and negative retrieval outcomes require `sync.demotion_threshold` (default 2) before demoting Proven rules to Stale and removing their synced files. Existing Proven rules are grandfathered until new evidence crosses the configured threshold.
+Cassy auto-syncs rules to `.claude/rules/` and skills to `.claude/skills/` as SKILL.md files with YAML frontmatter. The sync logic lives in `cas-cli/src/sync/`. Rule promotion uses configurable outcome evidence: `sync.promotion_threshold` defaults to 2 and `sync.promotion_evidence` accepts `helpful` and/or `retrieval`; one `mcp__cas__rule action=helpful` call never promotes. A reviewer's explicit decision uses `mcp__cas__rule action=promote id=<id> change_note="<why>"` instead of voting. Judgement-call decisions require two distinct `source_ids`; `rule action=update source_ids="<all contributing IDs>"` preserves merged evidence. An observed mechanical constraint tagged `enforceable:lint`, `enforceable:test`, `enforceable:hook`, `enforceable:gate`, or `enforceable:type` files one idempotent encode chore on creation or tagging, even while draft, and can be promoted after its first verified occurrence. Retired or harmful rules do not file chores. `factory action=epic_status` includes pending encode chores from the project backlog. Retrieval promotion requires useful outcomes across at least two distinct privacy-preserving sessions. Harmful feedback and negative retrieval outcomes require `sync.demotion_threshold` (default 2) before demoting Proven rules to Stale and removing their synced files. Existing Proven rules are grandfathered until new evidence crosses the configured threshold.
 
 Built-in skills ship to every project, so they carry no cas-src-only procedure. This repository's own factory guidance (release prebuild, worker build-cache refresh, the assembly gate command, cargo triage) lives in [docs/factory/cas-src-factory-notes.md](../../docs/factory/cas-src-factory-notes.md) and [docs/factory/cas-src-worker-notes.md](../../docs/factory/cas-src-worker-notes.md).
 
@@ -452,3 +518,44 @@ An empty `execution_note` update may clear a constraint after approval when its
 exact repository proof is unchanged. Pending, skipped, unbound, and changed
 proofs remain locked; changing other scope fields or replacing the constraint
 still requires a fresh proof cycle.
+
+### Test shape and runner evidence
+
+`python3 scripts/check-test-shape.py` checks tracked Rust tests and test-only
+helpers for constant/literal equality and reads of Rust source as text.
+`--changed-since <ref>` checks the merge-base diff, including working changes;
+the release fast rows and Scoped Validation run this form. Intentional external
+wire or structural contracts carry `// pin: <reason>` immediately above the
+statement or test/helper declaration, or on the assertion line. A reason does
+not convert a source-order assertion into behavior coverage.
+
+Use `npm test` and `npm run journeys -- <args>` in `hub-web`, or
+`scripts/journey-eval.sh` for journey bundles. These runners refuse successful
+zero-test summaries and export the passing count to `VERIFIED_TEST_COUNT_FILE`
+when requested. Rust re-exec helpers require the exact child name, one selected
+test, and one passing result; intentional signal/atexit children instead prove
+entry into the test body before their early exit.
+
+Closing a task that changes a committed `*.snap` or
+`opencode_projection.snapshot.json` requires a task decision note:
+`snapshot-approved: <relative file> — <actual +added or -removed line> — <why>`.
+The close gate checks the task-attributed Git diff, even after merge, and names
+the exact `task action=notes` command when approval is missing. Approval for a
+different file or a line absent from that diff does not satisfy the gate.
+
+## Durable task artifacts
+
+`factory.artifacts_root` is the shared parent (default `~/.cas/artifacts`).
+New task evidence lives in `<base>/<project-key>/<task-id>/`; assignment briefs
+print the exact path. The key combines the project folder label with a SHA256
+of the canonical shared Cassy store path, so equal folder names and task IDs
+in different stores stay separate, while symlink aliases and factory workers
+using that shared store agree. Keep evidence paths in task notes or published
+artifact records when a project moves.
+
+Existing `<base>/<task-id>/` files remain readable and publishable. Completion
+receipts and QA citations accept those historical paths. They are excluded
+from automatic project cleanup: a flat directory can contain more than one
+project's evidence. New writes, issue attachments, QA rounds, message spills,
+search discovery and cleanup use the scoped namespace. No automatic file move
+or ownership guess is made for legacy directories.

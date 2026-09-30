@@ -272,7 +272,10 @@ async fn artifact_fixture_content_is_searchable_after_backfill() {
     let (temp, service) = setup_cas();
     let artifacts_root = temp.path().join("durable-artifacts");
     let task_id = "cas-artifact-fixture";
-    let artifact = artifacts_root.join(task_id).join("SEND-LOG.md");
+    // cas-6ebf: search discovers the project-scoped artifact namespace.
+    let artifact = cas::config::project_factory_artifacts_root(&temp.path().join(".cas"), &artifacts_root)
+        .join(task_id)
+        .join("SEND-LOG.md");
     std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
     std::fs::write(
         &artifact,
@@ -383,6 +386,7 @@ async fn test_search_filter_by_type() {
         priority: 2,
         task_type: "task".to_string(),
             risk: Some("none".to_string()),
+            door: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -538,6 +542,7 @@ async fn test_versioned_provenance_feedback_and_offline_metrics_flow() {
         priority: 2,
         task_type: "task".to_string(),
             risk: Some("none".to_string()),
+            door: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -573,6 +578,7 @@ async fn test_versioned_provenance_feedback_and_offline_metrics_flow() {
         demo_statement: None,
         execution_note: None,
             risk: None,
+            door: None,
             proof_targets: None,
         external_ref: None,
         assignee: None,

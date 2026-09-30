@@ -8,6 +8,7 @@
 # close note without relying on supervisor memory.
 #
 # Usage: scripts/release-gate.sh <version> [--reuse | --only <row,row>]
+#        scripts/release-gate.sh --fast-rows [--base <ref>]
 
 set -euo pipefail
 
@@ -19,11 +20,12 @@ readonly -a gate_check_ids=(
     scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config assemble-stale-base
     version-literals fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
     snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
-    procedure-guardrails working-tree
+    procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene
 )
 
 usage() {
     printf 'Usage: %s <version> [--reuse | --only <row,row>]\n' "$0"
+    printf '       %s --fast-rows [--base <ref>]\n' "$0"
     printf '       %s --learn "<symptom>" "<cause>" "<check-id>"\n' "$0"
 }
 
@@ -70,6 +72,28 @@ if [[ "${1:-}" == '--learn' ]]; then
     }
     learn "$2" "$3" "$4"
     exit $?
+fi
+
+# Lane admission uses the current checked-in version, before release prep.
+# An explicit base limits docs lint to this lane's merged delta. Without it,
+# HEAD^ is the push delta; a root commit compares against the empty tree.
+fast_rows=false
+fast_base=''
+if [[ "${1:-}" == --fast-rows ]]; then
+    if [[ "$#" -ne 1 && ! ( "$#" -eq 3 && "$2" == --base && -n "$3" ) ]]; then
+        usage >&2
+        exit 2
+    fi
+    fast_rows=true
+    fast_base="${3:-}"
+    version="$(sed -n 's/^version = "\([^" ]*\)".*/\1/p' cas-cli/Cargo.toml | head -n1)"
+    [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+        printf 'error: cannot read current release version from cas-cli/Cargo.toml\n' >&2
+        exit 2
+    }
+    # Keep an explicit allowlist: adding a costly full-gate row cannot silently
+    # add a build or a host-dependent release precondition to lane admission.
+    set -- "$version" --only failure-log,version-literals,changelog-and-versions,release-script,release-notes-shell-injection,procedure-guardrails,test-targets,markdown-lint,test-shape,test-env,builtin-doc-hygiene
 fi
 
 if [[ "$#" -ne 1 && "$#" -ne 2 && "$#" -ne 3 ]] || [[ ! "${1:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -182,6 +206,9 @@ failures=()
 
 row_selected() {
     local name="$1"
+    if [[ "$fast_rows" == true && "$name" == test-shape && ! -f scripts/check-test-shape.py ]]; then
+        return 1
+    fi
     [[ -z "$only_rows" || ",$only_rows," == *",$name,"* ]]
 }
 
@@ -315,7 +342,7 @@ run_check() {
     if [[ -z "$only_rows" && "$name" =~ ^(nextest|archive-mode)$ \
         && -f "$repo_root/scripts/assembly-proof.py" ]]; then
         local assembly_pass=''
-        if assembly_pass="$(python3 "$repo_root/scripts/assembly-proof.py" check "$repo_root")"; then
+        if assembly_pass="$(python3 "$repo_root/scripts/assembly-proof.py" check "$repo_root" 2>&1)"; then
             source_sha="$(sed -n 's/.*source_sha=\([0-9a-f]*\).*/\1/p' <<<"$assembly_pass")"
             print_result PASS "$name" "$command"
             printf '  reused %s\n' "$assembly_pass"
@@ -327,6 +354,9 @@ run_check() {
             fi
             return 0
         fi
+        printf '  %s\n' "$assembly_pass"
+    elif [[ -z "$only_rows" && "$name" =~ ^(nextest|archive-mode)$ ]]; then
+        printf '  MISS assembly key=implementation reason=helper_missing\n'
     fi
     key="$(row_cache_key "$name" || true)"
     env_fingerprint="$(cache_environment)"
@@ -1139,6 +1169,49 @@ check_procedure_guardrails() {
     grep -qF 'release-published.receipt' "$skill"
 }
 
+check_test_targets() {
+    python3 scripts/cas-test-targets.py cas-cli --check
+}
+
+check_markdown_lint() {
+    python3 scripts/check-changed-markdown.py "${fast_base:-HEAD^}"
+}
+
+check_test_env() {
+    [[ -f scripts/check-test-env.py ]] || {
+        printf 'test-env: scripts/check-test-env.py is missing\n'
+        return 1
+    }
+    if [[ "$fast_rows" == true ]]; then
+        python3 scripts/check-test-env.py --changed-since "${fast_base:-HEAD^}" || return $?
+    else
+        python3 scripts/check-test-env.py || return $?
+    fi
+    if [[ -f scripts/test-check-test-env.py ]]; then
+        python3 scripts/test-check-test-env.py
+    fi
+}
+
+check_test_shape() {
+    [[ -f scripts/check-test-shape.py ]] || {
+        printf 'test-shape: scripts/check-test-shape.py is missing\n'
+        return 1
+    }
+    if [[ "$fast_rows" == true ]]; then
+        python3 scripts/check-test-shape.py --changed-since "${fast_base:-HEAD^}" || return $?
+    else
+        python3 scripts/check-test-shape.py || return $?
+    fi
+    if [[ -f scripts/test-check-test-shape.py ]]; then
+        python3 scripts/test-check-test-shape.py
+    fi
+}
+
+check_builtin_doc_hygiene() {
+    python3 scripts/check-builtin-doc-hygiene.py || return $?
+    python3 scripts/check-builtin-contract-phrases.py
+}
+
 check_working_tree() {
     local untracked
     if ! git diff --quiet; then
@@ -1167,7 +1240,9 @@ printf 'archive size receipts: prior=%s per-run=%s\n' "$scratch_archive_history_
     "${archive_size_file:-not-configured}"
 printf 'init watchdog budget: %ss (from %s; cas init clamps at 3600s)\n' \
     "$CAS_INIT_TIMEOUT_SECS" "$init_timeout_origin"
-neutralize_ancestor_proxy_config
+if [[ "$fast_rows" == false ]]; then
+    neutralize_ancestor_proxy_config
+fi
 
 run_check scratch-base \
     'parent writable; same mount as checkout; no .cas ancestor; free bytes >= 2x last archive' \
@@ -1236,6 +1311,17 @@ run_check release-notes-shell-injection \
 run_check procedure-guardrails \
     'cas-cut-release reconciliation, queue, PID, receipt, and host guardrails' \
     check_procedure_guardrails
+run_check test-targets 'python3 scripts/cas-test-targets.py cas-cli --check' check_test_targets
+run_check markdown-lint 'markdownlint-cli2 on changed Markdown (repository policy)' check_markdown_lint
+if [[ "$fast_rows" == true && ! -f scripts/check-test-shape.py ]]; then
+    # Either sibling lane may merge first. A missing checker is visible rather
+    # than manufactured green evidence; the full gate always requires it.
+    print_result SKIP test-shape 'checker not installed yet (sibling lint lane)'
+else
+    run_check test-shape 'python3 scripts/check-test-shape.py (changed lane in fast mode)' check_test_shape
+fi
+run_check test-env 'whole-workspace process-state test lint and strict baseline ratchet' check_test_env
+run_check builtin-doc-hygiene 'shared operator-data policy on builtin sources' check_builtin_doc_hygiene
 run_check working-tree \
     'git diff --quiet; git diff --cached --quiet; git ls-files --others --exclude-standard' \
     check_working_tree

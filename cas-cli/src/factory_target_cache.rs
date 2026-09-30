@@ -982,6 +982,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    // pin: Read the sentinel fixture to prove cleanup never removed or rewrote source outside the target cache.
     fn symlink_target_escape_is_reported_and_never_removed() {
         use std::os::unix::fs::symlink;
         let temp = tempfile::tempdir().unwrap();

@@ -474,7 +474,7 @@ impl Default for OrchestrationConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FactoryConfig {
     /// Durable, per-task proof/artifact directory. Factory workers may write
-    /// under this root in addition to their worktree. If unset, the hook
+    /// under this root/project-key in addition to their worktree. If unset, the hook
     /// resolves a real-disk fallback under `~/.cas/artifacts`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifacts_root: Option<String>,
@@ -535,7 +535,7 @@ pub struct FactoryConfig {
     pub nice_cargo: bool,
 
     /// Maximum number of workers allowed to build concurrently on this host.
-    /// Compile-only worker checks hold OS slot locks under this hard cap.
+    /// Worker compile checks and targeted tests hold OS slot locks under this hard cap.
     /// `spawn_workers` additionally applies a soft load/concurrency guard;
     /// `force=true` overrides only that spawn-time check.
     #[serde(default = "default_max_concurrent_builders")]
@@ -873,6 +873,69 @@ pub fn resolved_factory_artifacts_root(configured: Option<&str>) -> std::path::P
             .map(|base| base.join(".cas/artifacts"))
             .unwrap_or_else(|| std::path::PathBuf::from(".cas/artifacts")),
     }
+}
+
+/// Project-local namespace under the configured artifact base. The store path
+/// identifies a local project even when unrelated projects share a folder name.
+/// Workers must pass their shared Cassy store, never their clone or ambient cwd.
+pub fn project_factory_artifacts_root(
+    cas_root: &std::path::Path,
+    artifacts_base: &std::path::Path,
+) -> std::path::PathBuf {
+    use sha2::{Digest, Sha256};
+    let store = cas_root
+        .canonicalize()
+        .unwrap_or_else(|_| cas_root.to_path_buf());
+    let label = store
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("project")
+        .chars()
+        .take(48)
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let hash = Sha256::digest(store.as_os_str().as_encoded_bytes());
+    artifacts_base.join(format!("{label}-{hash:x}"))
+}
+
+/// Scoped directory first, historical flat directory second. Legacy evidence
+/// remains readable; new writers and cleanup use only the scoped directory.
+pub fn factory_task_artifact_dirs(
+    cas_root: &std::path::Path,
+    artifacts_base: &std::path::Path,
+    task_id: &str,
+) -> [std::path::PathBuf; 2] {
+    [
+        project_factory_artifacts_root(cas_root, artifacts_base).join(task_id),
+        artifacts_base.join(task_id),
+    ]
+}
+
+/// A task directory must resolve to exactly its expected location beneath the
+/// base. Symlinks within evidence are allowed, but aliases of another project's
+/// namespace or task directory must not widen read/close/publish boundaries.
+pub fn canonical_factory_task_artifact_dir(
+    artifacts_base: &std::path::Path,
+    task_dir: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    use std::path::Component;
+    let relative = task_dir.strip_prefix(artifacts_base).ok()?;
+    if relative
+        .components()
+        .any(|part| !matches!(part, Component::Normal(_)))
+    {
+        return None;
+    }
+    let expected = artifacts_base.canonicalize().ok()?.join(relative);
+    let actual = task_dir.canonicalize().ok()?;
+    (actual == expected && actual.is_dir()).then_some(actual)
 }
 
 /// Code indexing configuration for background code indexing
@@ -2297,6 +2360,7 @@ harness = "codex"
     /// The whole point of cas-05e3/cas-fbac is that brand-new installs work
     /// without editing `.cas/config.toml`.
     #[test]
+    // pin: Stock worker routing is a shipped compatibility policy; empty config must retain this harness, model and effort.
     fn worker_stock_default_kicks_in_when_nothing_configured() {
         let llm = LlmConfig::default();
         assert_eq!(

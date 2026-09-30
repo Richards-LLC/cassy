@@ -2094,3 +2094,51 @@ fn test_create_epic_branch_keeps_trunk_when_active_epic_branch_has_diverged() {
         "a diverged epic branch must not become the base — the trunk-only commit would be lost"
     );
 }
+
+/// Admission failure cannot advance either target venue, even with force.
+#[test]
+fn lane_fast_rows_refuse_before_target_moves() {
+    for shared_checkout in [false, true] {
+        let (_temp, repo_path) = create_test_repo();
+        let config = WorktreeConfig {
+            auto_merge: true,
+            ..Default::default()
+        };
+        let mut manager = WorktreeManager::new(&repo_path, config).unwrap();
+        let epic = manager.create_epic_branch("Fast rows").unwrap();
+        let mut worktree = manager.create_for_worker("fast-row-worker").unwrap();
+        worktree.parent_branch = epic.clone();
+        let scripts = worktree.path.join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(
+            scripts.join("check-lane-fast-rows.py"),
+            "import sys\nprint('FAIL test-targets: unwired suite')\nsys.exit(1)\n",
+        )
+        .unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&worktree.path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "invalid lane"])
+            .current_dir(&worktree.path)
+            .output()
+            .unwrap();
+        if shared_checkout {
+            manager.git.checkout(&epic).unwrap();
+        }
+        let before = manager.git.resolve_commit(&epic).unwrap();
+        let head_before = manager.git.resolve_commit("HEAD").unwrap();
+        let error = manager
+            .merge_and_cleanup(&mut worktree, true, false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("LANE FAST ROWS FAILED"), "{error}");
+        assert!(error.contains("test-targets"), "{error}");
+        assert_eq!(manager.git.resolve_commit(&epic).unwrap(), before);
+        assert_eq!(manager.git.resolve_commit("HEAD").unwrap(), head_before);
+        assert!(worktree.path.exists());
+        assert!(!manager.git.merge_in_progress());
+    }
+}

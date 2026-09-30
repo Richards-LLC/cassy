@@ -441,7 +441,7 @@ mod tests {
         let project_root = base.join("project");
         let cas_root = project_root.join(".cas");
         let artifacts_root = base.join("artifacts");
-        let task_dir = artifacts_root.join("cas-b72a");
+        let task_dir = crate::config::project_factory_artifacts_root(&cas_root, &artifacts_root).join("cas-b72a");
         fs::create_dir_all(&cas_root).unwrap();
         fs::create_dir_all(&task_dir).unwrap();
         let store = SqliteArtifactStore::open(&cas_root).unwrap();
@@ -647,7 +647,7 @@ mod cloud_double_tests {
         let base = dir.path().canonicalize().unwrap();
         let cas_root = base.join("project").join(".cas");
         let artifacts_root = base.join("artifacts");
-        let task_dir = artifacts_root.join("cas-29624");
+        let task_dir = crate::config::project_factory_artifacts_root(&cas_root, &artifacts_root).join("cas-29624");
         fs::create_dir_all(&cas_root).unwrap();
         fs::create_dir_all(&task_dir).unwrap();
         let file = task_dir.join("report.pdf");

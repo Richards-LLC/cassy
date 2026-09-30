@@ -6,7 +6,7 @@ mod knowledge;
 mod maintenance;
 mod memory;
 mod opinion;
-mod rules;
+pub(crate) mod rules;
 mod search;
 mod skills;
 mod system;

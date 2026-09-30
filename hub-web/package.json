@@ -5,11 +5,11 @@
   "type": "module",
   "scripts": {
     "build": "npm run tokens && vite build",
-    "test": "node scripts/generate-tokens.mjs --check && npm run tokens && vitest run",
+    "test": "node scripts/generate-tokens.mjs --check && npm run tokens && node scripts/run-verified-tests.mjs vitest",
     "typecheck": "tsc --noEmit && tsc --noEmit -p e2e",
     "tokens": "node scripts/generate-tokens.mjs",
     "visual-qa": "npm exec --yes --package=playwright -- node scripts/visual-qa.mjs",
-    "journeys": "playwright test --project=journeys"
+    "journeys": "node scripts/run-verified-tests.mjs playwright --project=journeys"
   },
   "devDependencies": {
     "@playwright/test": "1.63.0",

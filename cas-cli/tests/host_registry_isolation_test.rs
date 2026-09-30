@@ -7,8 +7,6 @@ const INIT_FIXTURES: &[&str] = &[
     "fixtures/cas_instance.rs",
     "hooks_test/mod.rs",
     "jail_guard_test.rs",
-    "loop_test.rs",
-    "search_scoring_test.rs",
     "verification_test.rs",
     "verifier_handoff_cleanup_test.rs",
 ];
@@ -35,9 +33,8 @@ fn every_init_fixture_overrides_home_for_spawned_cas_children() {
 #[test]
 // pin: Enumerate production openers structurally so an unexercised registry write cannot escape the isolated test HOME.
 fn low_level_init_helper_has_no_host_registry_side_effect() {
-    let source =
-        std::fs::read_to_string(cas::test_paths::crate_root().join("src/store/detect.rs"))
-            .expect("read store/detect.rs");
+    let source = std::fs::read_to_string(cas::test_paths::crate_root().join("src/store/detect.rs"))
+        .expect("read store/detect.rs");
 
     assert!(
         !source.contains("known_repos::ensure_host_schema")

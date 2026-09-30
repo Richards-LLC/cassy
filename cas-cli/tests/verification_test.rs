@@ -20,6 +20,7 @@ fn test_verification_config_toggle() {
     env.set("XDG_CONFIG_HOME", env.home().join(".config"));
     let command = || {
         let mut command = Command::new(cas::test_paths::cas_binary());
+        command.env("HOME", env.home());
         command.current_dir(&project);
         command
     };

@@ -632,6 +632,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-writing-for-agents/SKILL.md",
         content: include_str!("builtins/skills/cas-writing-for-agents/SKILL.md"),
     },
+    BuiltinFile {
+        path: "skills/cas-writing-for-agents/LICENSE",
+        content: include_str!("builtins/skills/cas-writing-for-agents/LICENSE"),
+    },
     // cas-cli-craft: terminal and text design craft (cas-4df0). No CAS tool
     // calls, so the codex and grok twins are byte-identical to this source.
     BuiltinFile {
@@ -674,6 +678,14 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-diagnosing-bugs/SKILL.md",
         content: include_str!("builtins/skills/cas-diagnosing-bugs/SKILL.md"),
     },
+    BuiltinFile {
+        path: "skills/cas-diagnosing-bugs/LICENSE",
+        content: include_str!("builtins/skills/cas-diagnosing-bugs/LICENSE"),
+    },
+    BuiltinFile {
+        path: "skills/cas-diagnosing-bugs/scripts/hitl-loop.template.sh",
+        content: include_str!("builtins/skills/cas-diagnosing-bugs/scripts/hitl-loop.template.sh"),
+    },
     BuiltinFile { path: "skills/cas-codebase-design/SKILL.md", content: include_str!("builtins/skills/cas-codebase-design/SKILL.md") },
     BuiltinFile { path: "skills/cas-codebase-design/LICENSE", content: include_str!("builtins/skills/cas-codebase-design/LICENSE") },
     BuiltinFile { path: "skills/cas-codebase-design/references/design-it-twice.md", content: include_str!("builtins/skills/cas-codebase-design/references/design-it-twice.md") },
@@ -682,6 +694,8 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-tdd/LICENSE", content: include_str!("builtins/skills/cas-tdd/LICENSE") },
     BuiltinFile { path: "skills/cas-tdd/references/tests.md", content: include_str!("builtins/skills/cas-tdd/references/tests.md") },
     BuiltinFile { path: "skills/cas-tdd/references/mocking.md", content: include_str!("builtins/skills/cas-tdd/references/mocking.md") },
+    BuiltinFile { path: "skills/cas-improve-architecture/SKILL.md", content: include_str!("builtins/skills/cas-improve-architecture/SKILL.md") },
+    BuiltinFile { path: "skills/cas-improve-architecture/LICENSE", content: include_str!("builtins/skills/cas-improve-architecture/LICENSE") },
     BuiltinFile { path: "skills/cas-retro/SKILL.md", content: include_str!("builtins/skills/cas-retro/SKILL.md") },
     BuiltinFile { path: "skills/cas-retro/LICENSE", content: include_str!("builtins/skills/cas-retro/LICENSE") },
     BuiltinFile { path: "skills/cas-retro/references/release-replay-example.md", content: include_str!("builtins/skills/cas-retro/references/release-replay-example.md") },
@@ -1242,6 +1256,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-writing-for-agents/SKILL.md",
         content: include_str!("builtins/skills/cas-writing-for-agents/SKILL.md"),
     },
+    BuiltinFile {
+        path: "skills/cas-writing-for-agents/LICENSE",
+        content: include_str!("builtins/skills/cas-writing-for-agents/LICENSE"),
+    },
     // cas-cli-craft: terminal and text design craft (cas-4df0). No CAS tool
     // calls, so the codex and grok twins are byte-identical to this source.
     BuiltinFile {
@@ -1284,6 +1302,14 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-diagnosing-bugs/SKILL.md",
         content: include_str!("builtins/skills/cas-diagnosing-bugs/SKILL.md"),
     },
+    BuiltinFile {
+        path: "skills/cas-diagnosing-bugs/LICENSE",
+        content: include_str!("builtins/skills/cas-diagnosing-bugs/LICENSE"),
+    },
+    BuiltinFile {
+        path: "skills/cas-diagnosing-bugs/scripts/hitl-loop.template.sh",
+        content: include_str!("builtins/skills/cas-diagnosing-bugs/scripts/hitl-loop.template.sh"),
+    },
     BuiltinFile { path: "skills/cas-codebase-design/SKILL.md", content: include_str!("builtins/skills/cas-codebase-design/SKILL.md") },
     BuiltinFile { path: "skills/cas-codebase-design/LICENSE", content: include_str!("builtins/skills/cas-codebase-design/LICENSE") },
     BuiltinFile { path: "skills/cas-codebase-design/references/design-it-twice.md", content: include_str!("builtins/skills/cas-codebase-design/references/design-it-twice.md") },
@@ -1292,10 +1318,13 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-tdd/LICENSE", content: include_str!("builtins/skills/cas-tdd/LICENSE") },
     BuiltinFile { path: "skills/cas-tdd/references/tests.md", content: include_str!("builtins/skills/cas-tdd/references/tests.md") },
     BuiltinFile { path: "skills/cas-tdd/references/mocking.md", content: include_str!("builtins/skills/cas-tdd/references/mocking.md") },
+    BuiltinFile { path: "skills/cas-improve-architecture/SKILL.md", content: include_str!("builtins/skills/cas-improve-architecture/SKILL.md") },
+    BuiltinFile { path: "skills/cas-improve-architecture/LICENSE", content: include_str!("builtins/skills/cas-improve-architecture/LICENSE") },
     BuiltinFile { path: "skills/cas-retro/SKILL.md", content: include_str!("builtins/skills/cas-retro/SKILL.md") },
     BuiltinFile { path: "skills/cas-retro/LICENSE", content: include_str!("builtins/skills/cas-retro/LICENSE") },
     BuiltinFile { path: "skills/cas-retro/references/release-replay-example.md", content: include_str!("builtins/skills/cas-retro/references/release-replay-example.md") },
     BuiltinFile { path: "skills/cas-retro/agents/openai.yaml", content: include_str!("builtins/codex/skills/cas-retro/agents/openai.yaml") },
+    BuiltinFile { path: "skills/cas-improve-architecture/agents/openai.yaml", content: include_str!("builtins/codex/skills/cas-improve-architecture/agents/openai.yaml") },
     BuiltinFile { path: "skills/cas-wizard/SKILL.md", content: include_str!("builtins/skills/cas-wizard/SKILL.md") },
     BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/skills/cas-wizard/template.sh") },
     BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/skills/cas-resolving-merge-conflicts/SKILL.md") },
@@ -1861,6 +1890,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-writing-for-agents/SKILL.md",
         content: include_str!("builtins/skills/cas-writing-for-agents/SKILL.md"),
     },
+    BuiltinFile {
+        path: "skills/cas-writing-for-agents/LICENSE",
+        content: include_str!("builtins/skills/cas-writing-for-agents/LICENSE"),
+    },
     // cas-cli-craft: terminal and text design craft (cas-4df0). No CAS tool
     // calls, so the codex and grok twins are byte-identical to this source.
     BuiltinFile {
@@ -1903,6 +1936,14 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-diagnosing-bugs/SKILL.md",
         content: include_str!("builtins/skills/cas-diagnosing-bugs/SKILL.md"),
     },
+    BuiltinFile {
+        path: "skills/cas-diagnosing-bugs/LICENSE",
+        content: include_str!("builtins/skills/cas-diagnosing-bugs/LICENSE"),
+    },
+    BuiltinFile {
+        path: "skills/cas-diagnosing-bugs/scripts/hitl-loop.template.sh",
+        content: include_str!("builtins/skills/cas-diagnosing-bugs/scripts/hitl-loop.template.sh"),
+    },
     BuiltinFile { path: "skills/cas-codebase-design/SKILL.md", content: include_str!("builtins/skills/cas-codebase-design/SKILL.md") },
     BuiltinFile { path: "skills/cas-codebase-design/LICENSE", content: include_str!("builtins/skills/cas-codebase-design/LICENSE") },
     BuiltinFile { path: "skills/cas-codebase-design/references/design-it-twice.md", content: include_str!("builtins/skills/cas-codebase-design/references/design-it-twice.md") },
@@ -1911,6 +1952,8 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-tdd/LICENSE", content: include_str!("builtins/skills/cas-tdd/LICENSE") },
     BuiltinFile { path: "skills/cas-tdd/references/tests.md", content: include_str!("builtins/skills/cas-tdd/references/tests.md") },
     BuiltinFile { path: "skills/cas-tdd/references/mocking.md", content: include_str!("builtins/skills/cas-tdd/references/mocking.md") },
+    BuiltinFile { path: "skills/cas-improve-architecture/SKILL.md", content: include_str!("builtins/skills/cas-improve-architecture/SKILL.md") },
+    BuiltinFile { path: "skills/cas-improve-architecture/LICENSE", content: include_str!("builtins/skills/cas-improve-architecture/LICENSE") },
     BuiltinFile { path: "skills/cas-retro/SKILL.md", content: include_str!("builtins/skills/cas-retro/SKILL.md") },
     BuiltinFile { path: "skills/cas-retro/LICENSE", content: include_str!("builtins/skills/cas-retro/LICENSE") },
     BuiltinFile { path: "skills/cas-retro/references/release-replay-example.md", content: include_str!("builtins/skills/cas-retro/references/release-replay-example.md") },

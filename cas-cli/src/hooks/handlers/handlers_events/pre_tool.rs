@@ -105,7 +105,7 @@ pub fn handle_pre_tool_use(
                      Use exactly `cargo check -p <crate> [-p <crate> ...] --lib` for lib-only edits or `--tests` when test files changed, optionally with log redirection and backgrounding. Choose one target flag. \
                      The hook runs it under max_concurrent_builders using your private seeded target cache. \
                      Commit first so a successful check records `check: PASS <sha>`. \
-                     Targeted tests use exactly `cargo nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`; an omitted target selects --lib. Empty/all() filters, repeated packages, broad flags and compound commands are refused. Full builds and suites remain supervisor-only at epic assembly."
+                     Targeted tests use exactly `cargo nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`; an omitted target selects --lib. Empty/all() filters, repeated packages, broad flags and compound commands are refused. Full builds and suites remain supervisor-only at epic assembly (cas-4cbb)."
                 ),
             ));
         }
@@ -1108,7 +1108,7 @@ fn worker_check_command(command: &str) -> Option<(Vec<String>, String)> {
             if suffix.trim().is_empty() {
                 String::new()
             } else {
-                format!(" {suffix}")
+                format!(" {}", suffix.trim_start())
             },
         ));
     }

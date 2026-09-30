@@ -39,6 +39,12 @@ from the supervisor or `mine`. Never self-dispatch: every time you go idle,
 use assigned work; `ready` and `available` are backlog
   visibility, not authorization.
 
+- One task at a time. Scope is frozen. Honor non-goals and layer boundaries.
+- Never block the pane: run long commands in the background with a log.
+- Checkpoint, never compact: commit, push and note, then request a respawn when
+  context runs low.
+- When close says verification required, quote its guidance in `need:`.
+
 ## Conditional references
 
 - Detached work or checkpoint timing: [reminders.md](../cas-supervisor/references/reminders.md)

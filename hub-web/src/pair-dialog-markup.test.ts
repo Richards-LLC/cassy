@@ -3,6 +3,30 @@ import { describe, expect, it } from "vitest";
 import { firstEmptyField, pairDialogMarkup } from "./pair-dialog-markup";
 import { createPairingDraft } from "./pairing-draft";
 
+describe("invitation scope ceiling in the actual pairing form", () => {
+  it("disables and excludes ungranted control scopes even when the draft selects them", () => {
+    const origin = "https://commander.example";
+    const html = pairDialogMarkup({
+      cleanupFailed: false, cleanupContext: { cause: "cancel", storeOpen: false, rollbackPending: false },
+      pendingPairing: { kind: "invitation", token: "A".repeat(43), hubId: "studio", scopes: ["machine-read", "session-read", "pane-read"] },
+      draft: createPairingDraft(origin), status: "", createInFlight: false, exchangeInFlight: false,
+      relayOrigin: origin, pageOrigin: origin,
+    });
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const inputs = [...doc.querySelectorAll<HTMLInputElement>('input[name="scope"]')];
+    expect(inputs).toHaveLength(6);
+    for (const input of inputs) {
+      const granted = ["machine-read", "session-read", "pane-read"].includes(input.value);
+      expect(input.disabled, input.value).toBe(!granted);
+      expect(input.checked, input.value).toBe(granted);
+      if (!granted) expect(input.closest("label")?.textContent).toContain("not granted by this invitation");
+    }
+    expect(new FormData(doc.querySelector("form")!).getAll("scope")).toEqual(["machine-read", "session-read", "pane-read"]);
+    const command = doc.querySelector<HTMLButtonElement>("#pair-copy")?.dataset.pairCommand;
+    expect(command).toBe("cas hub pair --origin https://commander.example --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt");
+  });
+});
+
 describe("pairing dialog for a `cas hub pair` link (HUB-J2)", () => {
   it("opens a prefilled link on the operator's name, with the address help behind a disclosure", () => {
     const origin = "https://commander.example";

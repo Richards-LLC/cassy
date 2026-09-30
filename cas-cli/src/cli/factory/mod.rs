@@ -1074,7 +1074,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                     anyhow::bail!("shadow review request exceeds 512 KiB");
                 }
                 let payload = std::fs::read_to_string(request)?;
-                let core = crate::mcp::server::CasCore::with_daemon(root.to_path_buf(), None, None);
+                let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
                 let result = core.shadow_review_inner(Some(&payload)).map_err(anyhow::Error::msg)?;
                 println!("{result}");
                 Ok(())

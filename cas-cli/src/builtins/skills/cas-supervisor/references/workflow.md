@@ -161,6 +161,12 @@ Workers from previous sessions are gone. Stale DB records are not live processes
 
 ## Phase 3: Merge and Sync (Isolated Mode)
 
+For independent advisory Spec/Standards reviews alongside the task-verifier,
+use [cas-shadow-review](../../cas-shadow-review/SKILL.md). It binds two separate
+registered children to one dispatch, keeps fixes on side refs until explicit
+supervisor opt-in, and records old/new verdicts without changing merge gates.
+
+
 When workers have isolated worktrees, merge their work into the epic branch after each completion, then tell other workers to sync.
 
 ```text

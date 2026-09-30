@@ -717,11 +717,6 @@ const AI_VOCABULARY_ALLOWLIST: &[(&str, &str, &str)] = &[
         "Defines the project's end-to-end user-flow terminology and file names.",
     ),
     (
-        "skills/cas-worker/SKILL.md",
-        "journey",
-        "Refers to the catalog journey QA trigger in the worker contract.",
-    ),
-    (
         "skills/cas-worker/references/close-gate.md",
         "journey",
         "Names a catalog journey as a user-facing QA evidence trigger.",

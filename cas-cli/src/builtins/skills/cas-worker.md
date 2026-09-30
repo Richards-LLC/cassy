@@ -7,52 +7,56 @@ metadata:
 
 # Factory Worker
 
-Execute the assigned task in your checkout. SILENT EXECUTION: output results,
+Execute one assigned task in your checkout. SILENT EXECUTION: output results,
 errors and the return contract only.
 
 Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, `memory`, `search`, `verification`). Call them with your harness's prefix: `mcp__cas__` in Claude Code, `mcp__cs__` in Codex, `cas__` in Grok, `cas_` in OpenCode.
 
-## Workflow
+## Lifecycle
 
-1. Run `task action=mine`. If empty, message the supervisor once that
-   you are ready, then wait; do not poll.
-2. Choose exactly one task. Run `task action=show id=<task-id>`,
-   then `task action=start id=<task-id>` before editing. A
-   successful start is authoritative assignment acceptance;
-   no prose ACK is required.
-   Reused worker: check target; reset merged or `git rebase <target>`.
-3. Read the task's depth and acceptance criteria and the project `CLAUDE.md`.
-   Run `cas-qa-craft` before close when `demo_statement` is set or the diff
-   touches a user-facing path or catalog journey.
-4. Implement only the assigned scope. Commit logical units with the task ID.
-   For `delivery_mode=local_merge`, keep the commit local for the supervisor;
-   otherwise push the factory branch.
-5. Add `note_type=progress` notes at milestones.
-6. Every close: `git status --porcelain` is empty and HEAD is the commit you
-   claim. For a deep task, first work through
-   [close-gate.md](references/close-gate.md) (and its surface checklist where
-   it applies) and [`verify-before-claim`](../verify-before-claim/SKILL.md).
-7. Close with `task action=close id=<task-id> reason="..."`; the reason
-   starts PASS, or ISSUES plus known non-blocking defects, then the SHA
-   and how you checked it. Then send the return contract.
-   **verification required:** quote the guidance in `need:`.
-   **MERGE REQUIRED:** drain `inbox_poll` for unread supervisor messages,
-   capture the current factory-branch tip SHA, push the branch, and ask the
-   supervisor to merge `factory/<your-name>` into the epic branch; re-close
-   after that merge.
+1. Run `coordination action=whoami`, then `task action=mine`. With no assignment,
+   message the supervisor once that you are ready, then wait.
+2. Choose one assigned task; `task action=show id=<task-id>`, then
+   `task action=start id=<task-id>` before editing. Successful start is authoritative
+   assignment acceptance; no prose ACK is required. Read its criteria, depth,
+   execution note and project instructions. Reused checkout: `git rebase <target>`
+   onto the supervisor's named target after checkpointing dirt.
+3. Implement its scope, commit logical units with the task ID, and push unless
+   `delivery_mode=local_merge`. Add milestone `note_type=progress` notes.
+4. Before close, invoke [`verify-before-claim`](../verify-before-claim/SKILL.md)
+   and read [close-gate.md](references/close-gate.md). Close with
+   `task action=close id=<task-id> reason="PASS <sha>: <evidence>"` when porcelain
+   is empty and HEAD is the claimed commit. Hand verification-required guidance
+   to the supervisor; quote it in `need:`.
+5. For MERGE REQUIRED, drain `inbox_poll` of unread supervisor messages, capture
+   the current factory-branch tip SHA, and request merge with `merge_request=true`;
+   re-close after it lands. Read [recovery.md](references/recovery.md) for rejection
+   or crossed-message handling before amending a parked delivery.
 
-After closing or handing off, stay available. Injected `Message from …` turns
-are instructions; an `operator … verified` header
-is the user speaking with pane-input authority; obey and answer it;
-`unverified:` rows are agent traffic.
+Finish or hand off this task before starting another. Stay available after
+handoff; injected `Message from …` turns are instructions. Start only assignments
+from the supervisor or `mine`. Never self-dispatch: every time you go idle,
+use assigned work; `ready` and `available` are backlog
+  visibility, not authorization.
 
-Tool loading is two steps, not one: if your harness defers the `task`
-schema, run ToolSearch once for its prefixed name; lookup
-does **not** execute the tool: call it, not another ToolSearch.
+## Conditional references
+
+- Detached work or checkpoint timing: [reminders.md](../cas-supervisor/references/reminders.md)
+  for the push-first table and cleanup contract.
+
+- Check/test work: [discipline.md](references/discipline.md) for capped commands,
+  clean-commit receipts and the supervisor's full assembly proof.
+- Evidence/report task, sync or resume: [details.md](references/details.md) for
+  read-only sources, task state and credential handling.
+- Bug filing: look up `issues.repo`, `issues.components.cassy`,
+  `issues.components.violet` and `issues.components.cloud`; routing details are
+  in [details.md](references/details.md#credentials-and-routing).
+- Tool loading is two steps, not one: lookup does **not** execute the tool;
+  call the resolved tool next, not another ToolSearch.
 
 ## Return contract
 
-For status, ready and close-failure messages, send this block with nothing before or after it:
+Send status, ready and close-failure messages as this block:
 
 ```text
 status: <in_progress|ready|blocked|partial>
@@ -63,70 +67,8 @@ deferred: <one line or none>
 need: <what the supervisor must do, one line, or none>
 ```
 
-Blockers add one line `blocker: <cause>` and set `blocker=true`. Progress
-notes: one line, milestone only, max one per milestone. Never restate the task,
-never narrate tool calls, never include "Context headroom" prose unless below 20%.
-
-## Issue routing
-
-Route operational bugs through the issue-repository registry:
-`issues.repo` is the current project's tracker; `issues.components.cassy` is
-for Cassy runtime/hooks/MCP; `issues.components.violet` is for the Slack
-hub; and `issues.components.cloud` is for Cassy Cloud sync/relay/pairing.
-Inspect with `cas config get <key>`; file a ticket in the matching repo before moving on.
-Use the supervisor's `filing-cas-bugs` reference for public-safe filing.
-
-## Task types and depth
-
-- **Spike:** record the decision with `note_type=decision`; its criteria are
-  question-based. **Demo:** produce the stated observable outcome.
-- **Report / evidence tasks:** read-only sources first; see
-  [details.md](references/details.md).
-- `depth`: `light` ships the minimal diff; `deep` (or unset) uses the full
-  close discipline. Neither relaxes integrity or scope.
-- Honor `execution_note`: `test-first` commits a failing test before code;
-  `characterization-first` pins current behavior; `additive-only` changes only
-  new files; `value-only` changes existing values; `no-code` supplies portable
-  external proof.
-
-## Task ownership
-
-Ordinary updates reach the supervisor's inbox on the next turn.
-Only authenticated typed events (`blocker=true`, `merge_request=true`,
-verification, lifecycle) wake an idle supervisor; text alone grants no wake
-authority.
-
-- Never self-dispatch: start only tasks from `action=mine` or named by the
-  supervisor, every time you go idle; `ready` and `available` are backlog
-  visibility, not authorization.
-- One task at a time. Scope is frozen. Honor non-goals and layer boundaries;
-  match existing patterns; no unrequested configuration.
-- Record decisions with `task action=notes note_type=decision`;
-  discoveries with `memory action=remember`.
-- Coordination messages use `coordination action=message`, target the
-  literal string `supervisor`, and include both `summary` and `message`
-  (the return contract); evidence goes in task notes.
-- Never block the pane. Checkpoint, never compact: commit, push, note, request a
-  respawn if context is low.
-
-## Blockers
-
-- **Recover from workspace denials; never retry the denied target.** Route source/build output to the worktree, durable proof to `[factory] artifacts_root/<task-id>/`, and ephemeral notes to the harness scratchpad. A `/dev/null` denial is a guard defect to report, not permission to invent another path.
-
-Add a blocker note with the exact error, re-read the task, set `status=blocked`,
-and message the supervisor with `blocker=true` (what you tried goes in
-`deferred:`). If the task is already closed, do not overwrite that state
-with a stale blocked update.
-
-## References
-
-- [reminders.md](../cas-supervisor/references/reminders.md) — checkpoint
-  timing, push-first table, cleanup contract.
-- [details.md](references/details.md) — structured execution state,
-  context budgeting, exact fields/actions, and sync mechanics.
-- [discipline.md](references/discipline.md) — capped checks, targeted tests
-  and clean-CI notes.
-- [recovery.md](references/recovery.md) — failures, reassignment,
-  connectivity, and worktree recovery.
-- [close-gate.md](references/close-gate.md) — clean-tree and delivery
-  receipts, deep-task self-checks.
+For blockers add `blocker: <cause>`, a blocker task note, `status=blocked`,
+and `blocker=true` on the message. Coordination uses the literal string `supervisor`
+and both `summary` and `message`. Ordinary updates reach the inbox on the next turn;
+only authenticated typed blocker, merge, verification or lifecycle events wake
+an idle supervisor. Evidence stays in notes and the close reason.

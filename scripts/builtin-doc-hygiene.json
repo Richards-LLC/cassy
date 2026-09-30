@@ -51,11 +51,6 @@
       "reason": "Attribution for the Cassy issue the matrix guidance was adapted from; pinned by the builtins and agent_definition_contract_test markers."
     },
     {
-      "path": "skills/cas-worker/references/close-gate.md",
-      "rule": "task-id",
-      "reason": "Factory-core reference owned by the WP7 accuracy rewrite; ids tag the close gates it documents."
-    },
-    {
       "path": "skills/cas-supervisor/references/reference.md",
       "rule": "task-id",
       "reason": "Factory-core reference owned by the WP7 accuracy rewrite; ids tag the guards it documents."

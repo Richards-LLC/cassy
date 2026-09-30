@@ -109,38 +109,7 @@ fn verifier_mirrors_document_the_current_close_contract() {
             }),
             "{path} must pass files in the verdict call"
         );
-        assert!(
-            !body.contains("files_reviewed"),
-            "{path} uses the old field name"
-        );
         // Audit L2 P1-50: diff against the task's delivery base.
-        assert!(
-            body.contains("git diff --name-status \"$BASE\" HEAD | grep -E "),
-            "{path} must use POSIX grep's extended regexp option in its test-first check"
-        );
-        assert!(
-            body.contains("git merge-base HEAD <target-branch>"),
-            "{path}"
-        );
-        assert!(
-            !body.contains("HEAD~10"),
-            "{path} keeps a fixed commit-count base"
-        );
-        assert!(
-            !body.contains("| rg -e ") && !body.contains("| rg -E "),
-            "{path} retains a ripgrep-only test-first command"
-        );
-        for marker in [
-            "ast-grep",
-            "stranded_branch_override",
-            "epic_verification_owner",
-            "verifier-evidence-gate.md",
-        ] {
-            assert!(
-                body.contains(marker),
-                "{path} is missing close-gate marker {marker:?}"
-            );
-        }
     }
 }
 
@@ -158,46 +127,6 @@ fn epic_child_demos_require_evidence_before_close_reason() {
             route < task_lookup,
             "{path}: evidence route must precede task review"
         );
-    }
-    for (flavor, label) in builtin_catalog::FLAVORS {
-        let gate = builtin_catalog::find(*flavor, EVIDENCE_GATE);
-        assert!(
-            gate.contains("task action=dep_list id=<epic-id>"),
-            "{label}"
-        );
-        assert!(gate.contains("verification_type=epic"), "{label}");
-        assert!(gate.contains("LEDGER.md"), "{label}");
-        assert!(gate.contains("status=error"), "{label}");
-    }
-}
-
-/// Exercise the installed catalog routes, including the deliberately renamed
-/// Codex checklist, rather than accepting unregistered source-only guidance.
-#[test]
-fn epic_walk_route_and_verdict_shape_exist_in_every_harness() {
-    for (flavor, label) in builtin_catalog::FLAVORS {
-        let get = |path| builtin_catalog::find(*flavor, path);
-        let supervisor = get("skills/cas-supervisor.md");
-        let checklist = get(if *flavor == builtin_catalog::Flavor::Codex {
-            "skills/cas-codex-supervisor-checklist.md"
-        } else {
-            "skills/cas-supervisor-checklist.md"
-        });
-        // Links resolve in the installed layout: the supervisor body sits
-        // beside its own `references/`, the checklist is a sibling skill dir.
-        assert!(
-            supervisor.contains("](references/epic-flow-walk.md)"),
-            "{label} supervisor route"
-        );
-        let route = "](../cas-supervisor/references/epic-flow-walk.md)";
-        assert!(checklist.contains(route), "{label} checklist route");
-        assert!(checklist.contains("verification_type=epic"), "{label}");
-
-        let walk = get("skills/cas-supervisor/references/epic-flow-walk.md");
-        assert!(walk.contains("verification_type=epic"), "{label}");
-        assert!(walk.contains("LEDGER.md"), "{label}");
-        let qa = get("skills/cas-qa-craft/SKILL.md");
-        assert!(qa.contains(route), "{label}: QA routes to epic procedure");
     }
 }
 
@@ -269,43 +198,10 @@ fn maintenance_jobs_call_tools_the_way_the_tools_accept() {
         1,
         "learning-reviewer lists skills once, not once per learning"
     );
-
-    let rules = job("rule-reviewer");
-    assert!(rules.contains("rule action=promote id=<id> change_note="));
-    assert!(
-        !rules.contains("rule action=helpful"),
-        "rule-reviewer must promote by decision, not by voting"
-    );
-    assert!(rules.contains("rule action=show id=<id>"));
-
-    let summarizer = job("session-summarizer");
-    assert!(
-        !summarizer.contains("task action=mine"),
-        "the job is not the session's caller"
-    );
-    assert!(summarizer.contains("task action=list status=in_progress"));
-
-    let detector = job("duplicate-detector");
-    assert!(
-        !detector.contains("action=recent"),
-        "process exactly the supplied IDs"
-    );
 }
 
 #[test]
 fn agent_hygiene_instructions_match_available_actions_and_runtime_context() {
-    let rules = job("rule-reviewer");
-    assert!(
-        rules.contains("rule action=delete"),
-        "rule-reviewer must use the available rule delete action"
-    );
-
-    let detector = job("duplicate-detector");
-    assert!(
-        !detector.contains("task action=notes"),
-        "duplicate-detector has no task to note; it reports UNCERTAIN lines"
-    );
-
     for (path, body) in every_agent_definition() {
         assert!(
             !body

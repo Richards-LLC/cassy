@@ -7,8 +7,8 @@
 # announced as fast: a receipt that only reports digests cannot tell a
 # 3-minute prebuilt publication from a 26-minute cold one.
 #
-# Exits non-zero when the measured latency exceeds the budget, so the number is
-# a gate an operator can run rather than a figure to eyeball.
+# An overrun is evidence, not a reason to strand an already-published release.
+# Missing or incoherent measurements still fail; overruns warn and record false.
 set -euo pipefail
 
 usage() {
@@ -189,6 +189,5 @@ printf 'GREEN_TO_PIPELINE_SECS=%s\n' "$(epoch_delta "${run_dir:-}/gate.green.epo
 printf 'MERGED_TO_PUBLISHER_SECS=%s\n' "$(epoch_delta "${run_dir:-}/pipeline.merged.epoch" "${run_dir:-}/publisher.start.epoch")"
 
 if ! "$within"; then
-    echo "error: $tag took ${latency}s from tag push to publication, over the ${budget}s budget" >&2
-    exit 1
+    echo "WARN: $tag took ${latency}s from tag push to publication, over the ${budget}s budget" >&2
 fi

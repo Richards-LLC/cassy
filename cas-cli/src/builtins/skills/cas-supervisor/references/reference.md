@@ -27,7 +27,7 @@ Two of those are supervisor-specific and easy to confuse:
 
 When an inbound Commander message is stamped `operator … verified` and includes `notification_id=N`, answer it with:
 
-```
+```text
 coordination action=message target=operator in_reply_to=N summary="..." message="..."
 ```
 
@@ -41,6 +41,7 @@ For phone-sized replies, follow the [phone reply contract](operator-reply.md).
 **Valid `coordination` actions** (agent identity, messaging, reminders; an unknown action is rejected with the current list): `register`, `unregister`, `whoami`, `heartbeat`, `session_start`, `session_end`, `inbox_poll` (alias `inbox`), `message`, `interrupt`, `message_ack`, `message_status`, `remind`, `remind_list`, `remind_cancel`, `my_context`.
 
 **Valid `factory` actions** (supervisor fleet control; `coordination` still accepts these for one release with a deprecation note):
+
 - *Fleet*: `spawn_workers`, `shutdown_workers`, `recycle_worker`, `restart_spawn_queue`, `hold_worker`, `release_worker`, `worker_status`, `worker_activity`, `sweep_tasks`, `clear_context`, `sync_all_workers`, `gc_report`, `gc_cleanup`, `epic_status`, `focus_epic`, `agent_list`, `agent_cleanup`, `lease_history`
 - *Servers*: `server_start`, `server_stop`, `server_list`
 - *Database branches (supervisor only)*: `db_branch_create`, `db_branch_show`, `db_branch_delete`
@@ -53,7 +54,7 @@ For phone-sized replies, follow the [phone reply contract](operator-reply.md).
 
 **`server_start` / `server_stop` / `server_list` — the sanctioned way to run a long-lived server.** A raw `npm run dev &` from a worker dies with the worker and leaves no record of what is listening. Register it instead:
 
-```
+```text
 factory action=server_start command="npm run dev" cwd=<path> port=3000 shared=true
 factory action=server_list
 factory action=server_stop ...
@@ -63,7 +64,7 @@ factory action=server_stop ...
 
 **`db_branch_create` / `db_branch_show` / `db_branch_delete` — a disposable database for one task (supervisor only).** When a worker needs a database to reproduce a bug, it asks with a blocker message; it cannot create a Neon branch itself and never sees a credential. Provision one:
 
-```
+```text
 factory action=db_branch_create task_id=<task> [branch=<dev|staging|branch id>] [target=<worker>]
 factory action=db_branch_show [task_id=<task>]
 factory action=db_branch_delete task_id=<task> [id=<branch id>]
@@ -93,7 +94,7 @@ Pass `lane=` or a complete `cli=`/`model=`/`effort=` recipe on every `spawn_work
 
 **Initial assignment uses `update`, NOT `transfer`:**
 
-```
+```text
 # CORRECT — initial assignment of an unclaimed task
 task action=update id=cas-abc1 assignee=<worker-name>
 
@@ -109,7 +110,7 @@ The `transfer` action's target field is `to_agent` (not `assignee`). The `update
 
 When a task is claimed by a live worker and you need to reassign it without shutting the worker down, use `supervisor_override=true` on `transfer` as described in [Supervisor override](#supervisor-override):
 
-```
+```text
 # Force-transfer from a live worker to another agent (single atomic step)
 task action=transfer id=cas-abc1 to_agent=<new-worker> supervisor_override=true \
   notes="Reassigned due to <reason>"
@@ -119,7 +120,7 @@ This force-releases the live worker's lease, updates the assignee, attempts to p
 
 Two-step alternative (if the atomic path errors):
 
-```
+```text
 # Step 1: Drop the live lease and reset the task to Open
 task action=reset id=cas-abc1
 
@@ -134,7 +135,7 @@ coordination action=message target=<new-worker> summary="..." message="..."
 
 **Dispatching tasks is a two-step operation.** Sending a coordination message telling a worker to "claim tasks X and Y" does not actually dispatch work — workers react to `assignee` changes on the task, not to message content. Full pattern:
 
-```
+```text
 # 1. Create
 task action=create title="Fix login bug" priority=high risk=none \
   description="..." acceptance_criteria="..."
@@ -152,7 +153,7 @@ Skipping step 2 leaves the task unassigned — the worker will go idle regardles
 
 **Coordination messages require BOTH `message` and `summary`:**
 
-```
+```text
 coordination action=message target=worker-1 \
   summary="c29a ready for review" \
   message="Please verify cas-c29a. Commit dfe824b on main."
@@ -160,13 +161,13 @@ coordination action=message target=worker-1 \
 
 Missing either field is a rejection. `summary` is the one-line UI preview; `message` is the full body.
 
-Factory traffic is hard-capped: ordinary message bodies default to 1,200 characters, blocker/merge-request bodies to 2,500, and appended task notes to 1,500; put longer evidence in `[factory] artifacts_root/<task-id>/<name>.md` and send its path with a one-paragraph summary. Your own over-cap message to a worker is not refused: Cassy writes the full text to `artifacts_root/<task-id or _messages>/message-<time>-<hash>.md` and delivers its head with that path.
+Factory traffic is hard-capped: ordinary message bodies default to 1,200 characters, blocker/merge-request bodies to 2,500, and appended task notes to 1,500; put longer evidence in `[factory] artifacts_root/<project-key>/<task-id>/<name>.md` and send its path with a one-paragraph summary. Your own over-cap message to a worker is not refused: Cassy writes the full text to `artifacts_root/<task-id or _messages>/message-<time>-<hash>.md` and delivers its head with that path.
 
 **Urgent / interrupt delivery — course-correct a worker mid-turn (cas-c931):**
 
 Normal messages land only *between* turns: a worker that is mid-turn going down the wrong path finishes the wrong turn before it ever reads "stop, do X instead." For those cases, send an **urgent** message — it breaks the worker's in-flight turn and injects your correction as its next prompt:
 
-```
+```text
 # Urgent flag on the normal message action
 coordination action=message target=<worker> urgent=true \
   summary="..." message="Stop — you're editing the wrong file. Switch to ..."
@@ -182,7 +183,7 @@ When urgent, the message: breaks the target's in-flight turn (Esc), waits a boun
 
 **Task notes** parameter is `notes` (plural), not `note`:
 
-```
+```text
 task action=notes id=cas-abc1 notes="Progress update" note_type=progress
 ```
 

@@ -11,7 +11,7 @@ class Token:
     string: bool = False
 
 
-def tokens(source):
+def tokens(source, comment_spans=None):
     # Consume comments and literals before punctuation: braces/keywords inside
     # raw strings, escaped strings and nested block comments never become code.
     out = []
@@ -22,7 +22,10 @@ def tokens(source):
             continue
         if source.startswith('//', i):
             end = source.find('\n', i)
-            i = len(source) if end < 0 else end
+            end = len(source) if end < 0 else end
+            if comment_spans is not None:
+                comment_spans.append((i, end))
+            i = end
             continue
         if source.startswith('/*', i):
             depth = 1
@@ -85,3 +88,4 @@ def pairs(ts):
     if stack:
         raise ValueError('unbalanced Rust delimiters')
     return result
+

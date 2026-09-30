@@ -112,6 +112,10 @@ impl TaskStore for QuarantineFilteringTaskStore {
         self.inner.update(task)
     }
 
+    fn update_from_sync(&self, task: &Task, expected: &Task) -> Result<Option<DateTime<Utc>>> {
+        self.inner.update_from_sync(task, expected)
+    }
+
     fn append_note(&self, task_id: &str, formatted_note: &str) -> Result<DateTime<Utc>> {
         self.inner.append_note(task_id, formatted_note)
     }

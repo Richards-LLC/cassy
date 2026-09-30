@@ -542,6 +542,7 @@ fn append_workspace_contract_brief(
             )
         })
         .unwrap_or_else(|| crate::config::resolved_factory_artifacts_root(None));
+    let artifacts_root = crate::config::project_factory_artifacts_root(cas_dir, &artifacts_root);
     let task_artifacts = artifacts_root.join(task_id);
     message.push_str(&format!(
         "\n\nDurable artifacts for this task belong under `{}/`. Source and build output belong in the worktree.",
@@ -2963,9 +2964,8 @@ impl FactoryDaemon {
                 self.session_summarizer.note_output(data.len());
                 // Forward to any active web viewers
                 self.forward_pane_output(&pane_id, &data);
-                // Forward to GUI and WebSocket clients
+                // The terminal exchange enqueues WS output after these observers.
                 self.forward_pane_output_to_gui(&pane_id, &data);
-                self.forward_pane_output_to_ws(&pane_id, &data);
             }
             cas_mux::MuxEvent::PaneExited {
                 pane_id,
@@ -12783,9 +12783,9 @@ mod tests {
             .iter()
             .find(|prompt| prompt.prompt.contains("cas-mentioned-path"))
             .expect("mentioned-path task brief");
-        let resolved_stale_root = crate::config::resolved_factory_artifacts_root(
+        let resolved_stale_root = crate::config::project_factory_artifacts_root(&cas_dir, &crate::config::resolved_factory_artifacts_root(
             Some(artifacts_root.to_str().expect("artifacts root utf8")),
-        )
+        ))
         .join("cas-stale-path");
         assert!(
             stale_prompt.prompt.contains("Workspace-contract warning"),

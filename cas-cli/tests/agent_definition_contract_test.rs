@@ -12,6 +12,7 @@ use std::process::Command;
 #[path = "support/builtin_catalog.rs"]
 mod builtin_catalog;
 
+// pin: Compare source registration and hook consumers with the embedded catalog so missing mirrors and unregistered files remain observable.
 fn load(relative: &str) -> &'static str {
     match relative {
         "cas-cli/src/hooks/handlers/handlers_session.rs" => {

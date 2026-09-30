@@ -114,6 +114,49 @@ def validate(draft_arg: str, body_dir_arg: str) -> None:
     print(f"announce lint PASS · bodies=4 · draft={draft}")
 
 
+def record_latency(tag: str, receipt_arg: str, draft_arg: str) -> None:
+    """Put the measured budget result in the Dev trailer before announcement."""
+    values = {}
+    for line in Path(receipt_arg).read_text(encoding="utf-8").splitlines():
+        key, separator, value = line.partition("=")
+        if not separator or key in values:
+            fail("missing or incoherent latency measurement")
+        values[key] = value
+    seconds = values.get("PUBLISH_LATENCY_SECONDS", "")
+    budget = values.get("BUDGET_SECONDS", "")
+    within = values.get("WITHIN_BUDGET", "")
+    if (values.get("TAG") != tag or not seconds.isascii() or not seconds.isdecimal()
+            or not budget.isascii() or not budget.isdecimal() or within not in {"true", "false"}):
+        fail("missing or incoherent latency measurement")
+    try:
+        start = datetime.fromisoformat(values["TAG_PUSHED_AT"].replace("Z", "+00:00"))
+        end = datetime.fromisoformat(values["PUBLISHED_AT"].replace("Z", "+00:00"))
+    except (KeyError, ValueError):
+        fail("missing or incoherent latency measurement")
+    if (start.tzinfo is None or end.tzinfo is None or (end - start).total_seconds() != int(seconds)
+            or (within == "true") != (int(seconds) <= int(budget))):
+        fail("missing or incoherent latency measurement")
+    draft = Path(draft_arg)
+    if not draft.is_file():
+        return  # Standalone receipt collection may have no announcement draft.
+    bodies = extract_bodies(draft)
+    state = "within budget" if within == "true" else "over budget"
+    line = (f"• *Publication timing* — Tag to published: {seconds}s; {state} ({budget}s); "
+            f"WITHIN_BUDGET={within}.")
+    dev = re.sub(r"(?m)^• \*Publication timing\* — .*\n?", "", bodies[3]).rstrip()
+    dev = dev + "\n\n" + line
+    lint_body(3, dev)
+    source = draft.read_text(encoding="utf-8")
+    fences = list(re.finditer(r"\x60\x60\x60(?:text)?\r?\n(.*?)\r?\n\x60\x60\x60", source, re.DOTALL))
+    match = fences[3]
+    updated = source[:match.start(1)] + dev + source[match.end(1):]
+    if updated != source:
+        temporary = draft.with_name(f".{draft.name}.latency")
+        temporary.write_text(updated, encoding="utf-8")
+        temporary.chmod(draft.stat().st_mode & 0o777)
+        temporary.replace(draft)
+
+
 def load_report_adapter() -> Any:
     spec = importlib.util.spec_from_file_location("release_report_post", REPORT_ADAPTER)
     if spec is None or spec.loader is None:
@@ -263,6 +306,9 @@ def post(version: str, draft_arg: str, receipt_arg: str, body_dir_arg: str) -> N
 
 def main(argv: list[str]) -> int:
     try:
+        if len(argv) == 5 and argv[1] == "--record-latency":
+            record_latency(argv[2], argv[3], argv[4])
+            return 0
         if len(argv) == 4 and argv[1] == "--validate":
             validate(argv[2], argv[3])
             return 0
@@ -271,7 +317,7 @@ def main(argv: list[str]) -> int:
             return 0
         print(
             "usage: release-train-announce.py --validate DRAFT BODY_DIR | "
-            "--post VERSION DRAFT RECEIPT BODY_DIR",
+            "--post VERSION DRAFT RECEIPT BODY_DIR | --record-latency TAG RECEIPT DRAFT",
             file=sys.stderr,
         )
         return 2

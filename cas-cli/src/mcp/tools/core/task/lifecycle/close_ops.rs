@@ -1,5 +1,6 @@
 pub(crate) mod gate_text;
 mod task_attribution;
+mod snapshot_approval;
 
 use super::TaskLifecycleGateError;
 use crate::harness_policy::{
@@ -387,6 +388,12 @@ fn validate_completion_artifact_path(
     artifact_path: &str,
 ) -> Result<(), TaskLifecycleGateError> {
     let reject = |message: String| TaskLifecycleGateError::ArtifactPath { message };
+    let mut task_components = std::path::Path::new(task_id).components();
+    if !matches!(task_components.next(), Some(std::path::Component::Normal(_)))
+        || task_components.next().is_some()
+    {
+        return Err(reject("artifact task id must be one directory name, not an absolute path or traversal".into()));
+    }
     if artifact_path.trim().is_empty() || artifact_path.len() > 4096 {
         return Err(reject(
             "artifact_path must be a non-empty path no longer than 4096 bytes.".to_string(),
@@ -395,7 +402,7 @@ fn validate_completion_artifact_path(
     let artifact_path = std::path::Path::new(artifact_path);
     if !artifact_path.is_absolute() {
         return Err(reject(
-            "artifact_path must be an absolute path under the configured [factory] artifacts_root/<task-id>/."
+            "artifact_path must be an absolute path under the configured [factory] artifacts_root/<project-key>/<task-id>/."
                 .to_string(),
         ));
     }
@@ -404,29 +411,20 @@ fn validate_completion_artifact_path(
         .map_err(|error| reject(format!("could not load [factory] artifacts_root: {error}")))?;
     let configured_root =
         crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
-    let canonical_root = configured_root.canonicalize().map_err(|_| reject(
-        "configured [factory] artifacts_root must exist before a completion artifact can be recorded."
-            .to_string()
-    ))?;
-    let canonical_task_root = canonical_root.join(task_id).canonicalize().map_err(|_| reject(
-        "artifact_path requires an existing per-task directory at configured [factory] artifacts_root/<task-id>/."
-            .to_string()
-    ))?;
-    if !canonical_task_root.is_dir() || !canonical_task_root.starts_with(&canonical_root) {
-        return Err(reject(
-            "artifact_path task directory must be a real directory directly beneath the configured [factory] artifacts_root."
-                .to_string(),
-        ));
-    }
     let canonical_artifact = artifact_path.canonicalize().map_err(|_| reject(
-        "artifact_path must name an existing durable file or directory under configured [factory] artifacts_root/<task-id>/."
-            .to_string()
+        "artifact_path must name an existing durable file or directory under configured [factory] artifacts_root/<project-key>/<task-id>/.".to_string()
     ))?;
-    if !canonical_artifact.starts_with(&canonical_task_root) {
-        return Err(reject(
-            "artifact_path must resolve beneath configured [factory] artifacts_root/<task-id>/."
-                .to_string(),
-        ));
+    let dirs = crate::config::factory_task_artifact_dirs(cas_root, &configured_root, task_id);
+    let permitted = dirs
+        .iter()
+        .filter_map(|dir| crate::config::canonical_factory_task_artifact_dir(&configured_root, dir))
+        .any(|dir| canonical_artifact.starts_with(dir));
+    if !permitted {
+        return Err(reject(format!(
+            "artifact_path must resolve beneath this project's [factory] artifacts_root/<project-key>/<task-id>/ ({}), or its legacy artifacts_root/<task-id>/ ({}).",
+            dirs[0].display(),
+            dirs[1].display()
+        )));
     }
     Ok(())
 }
@@ -3942,6 +3940,37 @@ mod delivery_audit_text_tests {
     }
 
     #[test]
+    fn completion_evidence_is_project_scoped_and_legacy_stays_readable_cas_6ebf() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().join("artifacts");
+        let a = temp.path().join("one/project/.cas");
+        let b = temp.path().join("two/project/.cas");
+        for root in [&a, &b] {
+            std::fs::create_dir_all(root).unwrap();
+            std::fs::write(
+                root.join("config.toml"),
+                format!(
+                    "[factory]\nartifacts_root = {:?}\n",
+                    base.display().to_string()
+                ),
+            )
+            .unwrap();
+        }
+        let a_dirs = crate::config::factory_task_artifact_dirs(&a, &base, "cas-a4b1");
+        let b_dirs = crate::config::factory_task_artifact_dirs(&b, &base, "cas-a4b1");
+        for dir in [&a_dirs[0], &b_dirs[0], &a_dirs[1]] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("proof.md"), "proof").unwrap();
+        }
+        let path = |dir: &std::path::Path| dir.join("proof.md").display().to_string();
+        validate_completion_artifact_path(&a, "cas-a4b1", &path(&a_dirs[0])).unwrap();
+        validate_completion_artifact_path(&b, "cas-a4b1", &path(&b_dirs[0])).unwrap();
+        assert!(validate_completion_artifact_path(&a, "cas-a4b1", &path(&b_dirs[0])).is_err());
+        assert!(validate_completion_artifact_path(&b, "cas-a4b1", &path(&a_dirs[0])).is_err());
+        validate_completion_artifact_path(&a, "cas-a4b1", &path(&a_dirs[1])).unwrap();
+    }
+
+    #[test]
     fn negative_result_receipts_name_every_missing_field() {
         let req = crate::mcp::tools::TaskCloseRequest {
             stranded_branch_override: None,
@@ -4270,7 +4299,7 @@ impl CasCore {
         let missing = negative_result_missing_receipts(req, negative_result);
         if !missing.is_empty() {
             return Err(format!(
-                "NEGATIVE RESULT CLOSE REJECTED: negative_result=true is missing required receipt field(s): {}. Supply durable evidence under configured [factory] artifacts_root/<task-id>/, a closed-unmerged PR/branch reference, and a non-empty supervisor decision rationale.",
+                "NEGATIVE RESULT CLOSE REJECTED: negative_result=true is missing required receipt field(s): {}. Supply durable evidence under configured [factory] artifacts_root/<project-key>/<task-id>/, a closed-unmerged PR/branch reference, and a non-empty supervisor decision rationale.",
                 missing.join(", ")
             ));
         }
@@ -4715,6 +4744,19 @@ impl CasCore {
             return Ok(Self::tool_error(
                 "DELIVERY RECEIPT REJECTED: merge_base_sha does not match the live source/target merge base.",
             ));
+        }
+        // Receipt acceptance is an alternate close entry: bind snapshot
+        // approval before the immutable proof cycle can be persisted.
+        if let Some(error) = snapshot_approval::rejection(
+            &context.repo_root,
+            Some(&input.merge_base_sha),
+            Some(&input.commit_sha),
+            &[],
+            &task.notes,
+            &task.id,
+            crate::mcp::tools::core::guidance::caller_prefix(),
+        ) {
+            return Ok(Self::tool_error(error));
         }
         let worker_path = match self.resolve_worker_worktree_path(task, Some(&context)) {
             Ok(Some(path)) => path,
@@ -5652,7 +5694,7 @@ impl CasCore {
             )
         {
             return Ok(Self::tool_error(format!(
-                "TMPFS PROOF RECEIPT REJECTED: close reason cites `{path}` as evidence. Durable proof must not live on tmpfs. Store it under the configured [factory] artifacts_root/<task-id>/ (or another sanctioned durable artifacts root) and retry; harness scratchpads under /tmp are ephemeral and cannot be close evidence. If that path is discussion rather than a cited receipt, cite your durable artifact under artifacts_root/<task-id>/ in the same reason and the mention will pass. A supervisor may use supervisor_override=true only for a legitimate historical reference."
+                "TMPFS PROOF RECEIPT REJECTED: close reason cites `{path}` as evidence. Durable proof must not live on tmpfs. Store it under the configured [factory] artifacts_root/<project-key>/<task-id>/ (or another sanctioned durable artifacts root) and retry; harness scratchpads under /tmp are ephemeral and cannot be close evidence. If that path is discussion rather than a cited receipt, cite your durable artifact under artifacts_root/<project-key>/<task-id>/ in the same reason and the mention will pass. A supervisor may use supervisor_override=true only for a legitimate historical reference."
             )));
         }
 
@@ -7932,6 +7974,17 @@ impl CasCore {
                     None
                 },
             );
+            if let Some(error) = snapshot_approval::rejection(
+                proof_repo,
+                scoped_proof_base.as_deref(),
+                delivered_tip.as_deref(),
+                &changed_paths,
+                &task.notes,
+                &task.id,
+                crate::mcp::tools::core::guidance::caller_prefix(),
+            ) {
+                return Ok(Self::tool_error(error));
+            }
             // cas-3efd: compile-only checks do not replace the
             // supervisor's epic-assembly run. An ASSEMBLY_PROOF on the parent
             // epic whose tested head contains this delivery also stands for a
@@ -8370,8 +8423,8 @@ impl CasCore {
         let configured_artifacts_root = artifact_config
             .as_ref()
             .and_then(|config| config.factory().artifacts_root);
-        let artifacts_root =
-            crate::config::resolved_factory_artifacts_root(configured_artifacts_root.as_deref());
+        let artifacts_root = crate::config::project_factory_artifacts_root(
+            &self.cas_root, &crate::config::resolved_factory_artifacts_root(configured_artifacts_root.as_deref()));
         let artifacts =
             crate::hybrid_search::artifacts::discover_task_artifacts(&artifacts_root, &task.id);
         if let Ok(search) = self.open_search_index()
@@ -25075,6 +25128,7 @@ mod merge_state_gate_tests {
     /// gate and epic_status must inspect the current target tree, refuse the
     /// false all-clear, and name the dropped path.
     #[test]
+    // pin: Inspect actual Git-merged fixture content to distinguish a dropped delivery from a legitimate later source refactor.
     fn reachable_anchor_with_dropped_content_blocks_close_and_epic_status_cas_b278() {
         let dir = init_factory_repo("worker");
         let p = dir.path();
@@ -25446,6 +25500,7 @@ mod merge_state_gate_tests {
     /// and epic_status must name the superseding commit without asking a
     /// worker to resurrect the older implementation.
     #[test]
+    // pin: Inspect actual Git-merged fixture content to distinguish a dropped delivery from a legitimate later source refactor.
     fn reachable_anchor_with_later_refactor_proceeds_cas_b278() {
         let dir = init_factory_repo("worker");
         let p = dir.path();

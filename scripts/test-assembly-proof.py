@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Receipt invalidation tests; no Rust process is invoked."""
 import copy
+import contextlib
+import io
 import importlib.util
 from pathlib import Path
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 spec = importlib.util.spec_from_file_location("assembly_proof", Path(__file__).with_name("assembly-proof.py"))
 proof = importlib.util.module_from_spec(spec)
@@ -65,6 +68,46 @@ class ReceiptTests(unittest.TestCase):
         changed = dict(self.expected, code_input=proof.code_input(self.root))
         self.assertNotEqual(self.expected["code_input"], changed["code_input"])
         self.assertIsNone(proof.matching(self.root, changed))
+
+    def test_train_output_locations_do_not_change_environment_fingerprint(self):
+        base = {"RUSTFLAGS": "-C debuginfo=1", "HOME": "/home/fixture", "PATH": "/bin"}
+        output = dict(base, CAS_RELEASE_ARTIFACTS_ROOT="/output/train",
+                      CAS_RELEASE_RECEIPTS_RUN_DIR="/output/receipts")
+        self.assertEqual(proof.environment_material(self.root, base),
+                         proof.environment_material(self.root, output))
+        changed = dict(output, RUSTFLAGS="-C debuginfo=2")
+        self.assertNotEqual(proof.environment_material(self.root, base),
+                            proof.environment_material(self.root, changed))
+
+    def test_miss_reports_first_differing_input_without_environment_values(self):
+        self.record["inputs"]["environment"] = "old"
+        self.save()
+        expected = dict(self.expected, environment="new")
+        stream = io.StringIO()
+        with contextlib.redirect_stderr(stream):
+            self.assertIsNone(proof.matching(self.root, expected, diagnostic=True))
+        self.assertIn("key=environment reason=different", stream.getvalue())
+
+    def test_environment_detail_uses_names_and_hashes_only(self):
+        self.record["inputs"]["environment"] = "old"
+        self.record["environment_keys"] = {
+            key: proof.digest(value.encode())
+            for key, value in proof.environment_material(self.root, proof.test_environment(self.root)).items()}
+        self.record["environment_keys"]["RUSTFLAGS"] = proof.digest(b"secret-compiler-flag")
+        self.save()
+        stream = io.StringIO()
+        with contextlib.redirect_stderr(stream):
+            self.assertIsNone(proof.matching(self.root, dict(self.expected, environment="new"), diagnostic=True))
+        self.assertIn("environment_key=RUSTFLAGS", stream.getvalue())
+        self.assertNotIn("secret-compiler-flag", stream.getvalue())
+
+    def test_invalid_receipt_names_its_validation_key(self):
+        self.record["completed_epoch"] = 0
+        self.save()
+        stream = io.StringIO()
+        with contextlib.redirect_stderr(stream):
+            self.assertIsNone(proof.matching(self.root, self.expected, diagnostic=True))
+        self.assertIn("key=completed_epoch reason=future_or_expired", stream.getvalue())
 
     def test_prep_member_versions_lock_and_ledger_reuse_proof(self):
         for name in ("member-one", "member-two"):
@@ -186,6 +229,44 @@ class ReceiptTests(unittest.TestCase):
         child.mkdir()
         with self.assertRaises(ValueError):
             proof.no_cas_ancestor(child)
+
+    def test_prove_refuses_disposable_clone_scratch_before_any_tool_or_suite(self):
+        cases = [{}, {"CAS_RELEASE_GATE_HOME_DIR": ""}] + [
+            {"CAS_RELEASE_GATE_HOME_DIR": root + "/cas-release-gate/base"}
+            for root in ("/tmp", "/var/tmp", "/private/tmp", "/private/var/tmp")]
+        cases.append({"TMPDIR": str(self.root),
+                      "CAS_RELEASE_GATE_HOME_DIR": str(self.root / "gate/base")})
+        for env in cases:
+            with self.subTest(env=env), mock.patch.dict(proof.os.environ, env, clear=True), \
+                    mock.patch.object(proof, "inputs", side_effect=AssertionError("tools must not run")):
+                with self.assertRaisesRegex(ValueError, "CAS_RELEASE_GATE_HOME_DIR"):
+                    proof.prove(self.root)
+
+    def test_prove_refuses_a_symlink_into_disposable_clone_scratch(self):
+        alias = self.root / "scratch-link"
+        alias.symlink_to("/var/tmp", target_is_directory=True)
+        with mock.patch.dict(proof.os.environ, {"CAS_RELEASE_GATE_HOME_DIR": str(alias / "base")}, clear=True), \
+                mock.patch.object(proof, "inputs", side_effect=AssertionError("tools must not run")):
+            with self.assertRaisesRegex(ValueError, "CAS_RELEASE_GATE_HOME_DIR"):
+                proof.prove(self.root)
+
+    def test_non_disposable_override_reaches_inputs_and_retains_ancestry_guard(self):
+        for base in ("/home/cas-release-gate/base", "/Users/Shared/cas-release-gate/base",
+                     "/var/tmp-neighbour/cas-release-gate/base"):
+            with self.subTest(base=base), \
+                    mock.patch.dict(proof.os.environ, {"CAS_RELEASE_GATE_HOME_DIR": base}, clear=True), \
+                    mock.patch.object(proof, "no_cas_ancestor") as ancestry, \
+                    mock.patch.object(proof, "inputs", side_effect=RuntimeError("guard accepted")):
+                with self.assertRaisesRegex(RuntimeError, "guard accepted"):
+                    proof.prove(self.root)
+                ancestry.assert_called_once_with(Path(base).resolve().parent)
+
+    def test_prove_preserves_cas_ancestor_refusal_before_inputs(self):
+        with mock.patch.dict(proof.os.environ, {"CAS_RELEASE_GATE_HOME_DIR": "/home/cas-release-gate/base"}, clear=True), \
+                mock.patch.object(proof, "no_cas_ancestor", side_effect=ValueError(".cas ancestor")), \
+                mock.patch.object(proof, "inputs", side_effect=AssertionError("tools must not run")):
+            with self.assertRaisesRegex(ValueError, r"\.cas ancestor"):
+                proof.prove(self.root)
 
 
 if __name__ == "__main__":

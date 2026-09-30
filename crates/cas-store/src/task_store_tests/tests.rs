@@ -862,6 +862,145 @@ fn test_task_door_roundtrips_and_clears_without_changing_status() {
 }
 
 #[test]
+fn sync_update_rejects_a_local_park_after_the_pull_snapshot() {
+    let (temp, store) = create_test_store();
+    let mut task = Task::new("cas-86eb-race".into(), "local delivery".into());
+    task.status = TaskStatus::InProgress;
+    store.add(&task).unwrap();
+    let expected = store.get(&task.id).unwrap();
+    let mut pulled = expected.clone();
+    pulled.title = "stale remote body".into();
+    // A second writer parks after the syncer's read but before its write.
+    let second_writer = SqliteTaskStore::open(temp.path()).unwrap();
+    task.status = TaskStatus::AwaitingMerge;
+    task.pending_worktree_merge = true;
+    task.deliverables.parked_branch = Some("factory/replay".into());
+    task.deliverables.factory_branch_anchor = Some("a".repeat(40));
+    let parked_at = second_writer.update(&task).unwrap();
+    assert_eq!(store.update_from_sync(&pulled, &expected).unwrap(), None);
+    let retained = store.get(&task.id).unwrap();
+    assert!(retained.lifecycle_matches(&task));
+    assert_eq!(retained.title, task.title);
+    assert_eq!(retained.updated_at, parked_at);
+    assert_eq!(
+        store.list(Some(TaskStatus::AwaitingMerge)).unwrap().len(),
+        1
+    );
+}
+
+fn add_sync_test_delivery(
+    root: &std::path::Path,
+    task_id: &str,
+    state: cas_types::WorkerDeliveryState,
+) {
+    let input = cas_types::WorkerCompletionReceiptInput {
+        task_id: task_id.into(),
+        worker_agent_id: "worker-replay".into(),
+        repo_selector: "remote:github.com/org/replay".into(),
+        source_branch: "factory/replay".into(),
+        commit_sha: "a".repeat(40),
+        merge_base_sha: "b".repeat(40),
+        target_branch: "epic/replay".into(),
+        target_sha: "c".repeat(40),
+        proof_reference: "proof:replay".into(),
+        scope_summary: "delivery projection race".into(),
+        artifact_path: None,
+    };
+    let receipt = crate::build_worker_completion_receipt(&input, "replay", chrono::Utc::now());
+    crate::create_worker_delivery(root, &receipt, state, "worker-replay").unwrap();
+}
+
+#[test]
+fn sync_update_checks_delivery_authority_before_task_projection() {
+    let (temp, store) = create_test_store();
+    let task = Task::new(
+        "cas-86eb-projection".into(),
+        "before close projection".into(),
+    );
+    store.add(&task).unwrap();
+    let expected = store.get(&task.id).unwrap();
+    // Close persists durable intent before setting pending_verification.
+    // The task clock is still unchanged when this separate writer commits.
+    add_sync_test_delivery(
+        temp.path(),
+        &task.id,
+        cas_types::WorkerDeliveryState::AwaitingVerification,
+    );
+    let mut remote = expected.clone();
+    remote.status = TaskStatus::InProgress;
+    assert_eq!(store.update_from_sync(&remote, &expected).unwrap(), None);
+    assert!(store.get(&task.id).unwrap().lifecycle_matches(&expected));
+    // Ordinary body updates retain the intent and remain permitted.
+    remote.status = expected.status;
+    remote.description = "new teammate context".into();
+    assert!(
+        store
+            .update_from_sync(&remote, &expected)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(store.get(&task.id).unwrap().description, remote.description);
+    assert_eq!(
+        crate::get_latest_worker_delivery(temp.path(), &task.id)
+            .unwrap()
+            .unwrap()
+            .1
+            .state,
+        cas_types::WorkerDeliveryState::AwaitingVerification
+    );
+}
+
+#[test]
+fn sync_update_protects_incomplete_delivery_and_preserves_local_rework() {
+    use cas_types::WorkerDeliveryState::*;
+    for (state, should_apply) in [
+        (AwaitingVerification, false),
+        (AwaitingMerge, false),
+        (MergeAuthorized, false),
+        (Merged, false),
+        (CloseReady, false),
+        (Delivered, true),
+        (VerificationFailed, false),
+        (ChangesRequested, false),
+        (Conflict, false),
+        (Stale, false),
+        (RepoMismatch, false),
+        (TipChanged, false),
+    ] {
+        let (temp, store) = create_test_store();
+        let mut local = Task::new("cas-86eb-states".into(), "parked delivery".into());
+        local.status = TaskStatus::AwaitingMerge;
+        local.deliverables.parked_branch = Some("factory/replay".into());
+        local.deliverables.factory_branch_anchor = Some("a".repeat(40));
+        store.add(&local).unwrap();
+        let expected = store.get(&local.id).unwrap();
+        add_sync_test_delivery(temp.path(), &local.id, state);
+        let mut remote = expected.clone();
+        remote.status = TaskStatus::InProgress;
+        let result = store.update_from_sync(&remote, &expected).unwrap();
+        assert_eq!(result.is_some(), should_apply, "{state}");
+        let stored = store.get(&local.id).unwrap();
+        if should_apply {
+            assert_eq!(stored.status, TaskStatus::InProgress, "{state}");
+            assert!(stored.deliverables.parked_branch.is_none(), "{state}");
+            assert!(
+                stored.deliverables.factory_branch_anchor.is_none(),
+                "{state}"
+            );
+        } else {
+            assert!(stored.lifecycle_matches(&expected), "{state}");
+            assert_eq!(stored.updated_at, expected.updated_at, "{state}");
+            // Authorized lifecycle actions still use the ordinary write path;
+            // the cloud guard cannot disable local conflict rework.
+            store.update(&remote).unwrap();
+            let reworking = store.get(&local.id).unwrap();
+            assert_eq!(reworking.status, TaskStatus::InProgress, "{state}");
+            assert!(reworking.deliverables.factory_branch_anchor.is_none(), "{state}");
+        }
+    }
+}
+
+#[test]
 fn proof_targets_roundtrip_json_and_read_legacy_fragments() {
     let (_temp, store) = create_test_store();
     let mut task = Task::new("proof-targets".into(), "Proof normalization".into());

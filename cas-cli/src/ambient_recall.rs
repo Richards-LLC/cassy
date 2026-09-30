@@ -3954,6 +3954,7 @@ mod tests {
     }
 
     #[test]
+    // pin: CAS_INTERNAL_LLM is the cross-process privacy marker consumed by hooks and model retrievers.
     fn nested_internal_model_identity_never_reaches_retrievers() {
         let retriever = FixedRetriever {
             calls: Cell::new(0),

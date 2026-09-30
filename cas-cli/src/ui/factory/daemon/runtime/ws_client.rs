@@ -10,7 +10,7 @@ const COMMANDER_KEYFRAME_HARD_BYTES: usize = 1024 * 1024;
 const COMMANDER_SCROLLBACK_PAGE_HARD_BYTES: usize = 256 * 1024;
 const COMMANDER_SCROLLBACK_MAX_ROWS: u16 = 200;
 
-fn commander_epoch() -> u64 {
+pub(super) fn commander_epoch() -> u64 {
     static EPOCH: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *EPOCH.get_or_init(|| {
         std::time::SystemTime::now()
@@ -24,7 +24,7 @@ fn commander_epoch() -> u64 {
 }
 
 /// Encode a DaemonMessage as a WebSocket Binary frame (raw JSON, no length prefix).
-fn ws_encode(msg: &DaemonMessage) -> Option<WsMessage> {
+pub(super) fn ws_encode(msg: &DaemonMessage) -> Option<WsMessage> {
     let bytes = serde_json::to_vec(msg).ok()?;
     if matches!(msg, DaemonMessage::Welcome { .. }) && bytes.len() > COMMANDER_WELCOME_WARN_BYTES {
         tracing::warn!(
@@ -274,18 +274,6 @@ impl FactoryDaemon {
         }
     }
 
-    /// Forward per-pane PTY output to all connected WebSocket clients.
-    pub(super) fn forward_pane_output_to_ws(&mut self, pane_id: &str, data: &[u8]) {
-        if self.ws_clients.is_empty() || data.is_empty() {
-            return;
-        }
-        let msg = DaemonMessage::Output {
-            pane_id: pane_id.to_string(),
-            data: data.to_vec(),
-        };
-        self.ws_broadcast(&msg);
-    }
-
     /// Handle a single ClientMessage from a WebSocket client.
     /// Reuses handle_gui_message logic but routes responses to the WS client.
     async fn handle_ws_message(&mut self, client_id: usize, msg: ClientMessage) {
@@ -374,25 +362,7 @@ impl FactoryDaemon {
             }
             ClientMessage::RequestPaneKeyframe { pane_id } => {
                 let actual = self.resolve_pane_name(&pane_id);
-                // The daemon event loop owns the pane and all WS sinks. Snapshot
-                // capture and frame enqueue therefore occur in one serialized
-                // turn; raw PTY Output can only be enqueued after this returns.
-                let keyframe = self.app.mux.get(&actual).and_then(|pane| {
-                    let snapshot = pane.get_full_snapshot().ok()?;
-                    Some(DaemonMessage::PaneKeyframe {
-                        pane_id: actual.clone(),
-                        epoch: commander_epoch(),
-                        seq: 0,
-                        cols: snapshot.cols,
-                        rows: snapshot.rows,
-                        ansi: super::relay::snapshot_to_ansi(&snapshot, pane.is_in_alt_screen()),
-                    })
-                });
-                if let Some(frame) = keyframe.as_ref().and_then(ws_encode)
-                    && let Some(client) = self.ws_clients.get_mut(&client_id)
-                {
-                    let _ = client.sink.feed(frame).now_or_never();
-                }
+                self.terminal_exchange.request(client_id, actual);
             }
             ClientMessage::ScrollbackRequest {
                 pane_id,

@@ -31,7 +31,7 @@ Any of these sets the whole score to 0 until fixed; the gate detects each one:
 ## Procedure
 
 1. Run the gate, which ships with this skill (Node 18+ and the `script` pty utility):
-   `node <skills-dir>/cas-cli-craft/scripts/terminal-qa.mjs --label <command> --out <artifacts_root>/<task-id>/terminal-qa/<command> [--json-flag --json] -- <command …>`.
+   `node <skills-dir>/cas-cli-craft/scripts/terminal-qa.mjs --label <command> --out <artifacts_root>/<project-key>/<task-id>/terminal-qa/<command> [--json-flag --json] -- <command …>`.
    Read `report.md`; fix every finding or allowlist it with a reason a reviewer would accept.
    **Fallback, stated once:** where the script cannot run, capture the command yourself at 80
    and 120 columns, piped, with `NO_COLOR=1`, and with `LC_ALL=C`, check each mechanical zero by
@@ -51,6 +51,6 @@ Any of these sets the whole score to 0 until fixed; the gate detects each one:
 - One paragraph per warning, repeated per instance → fit 2, craft 2.
 - Every healthy check on its own row → fit 3.
 - Whole-line status colour → theme safety 1 (and usually a contrast zero on light).
-- Right-aligned labels with left-aligned values (`        Project: …`) → craft 2.
+- Right-aligned labels with left-aligned values (padded like `Project: …` under longer labels) → craft 2.
 - Sentence that describes a command instead of printing it → hierarchy 3.
 - Banner or progress on stdout under `--json` → machine contract 1 (zero).

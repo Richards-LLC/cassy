@@ -715,7 +715,7 @@ impl CasService {
                 .map(|agent| agent.name.clone())
                 .unwrap_or_else(|| source.clone());
             message = crate::mcp::tools::traffic_limits::spill_message_to_artifact(
-                crate::mcp::tools::traffic_limits::message_spill_root(&config).as_deref(),
+                crate::mcp::tools::traffic_limits::message_spill_root(&self.inner.cas_root, &config).as_deref(),
                 req.task_id.as_deref(),
                 &sender,
                 &target,
@@ -3930,6 +3930,7 @@ mod cas99d2_redelivery_tests {
     /// The marker must match the token the daemon's teams-inbox writer already
     /// recognises as an intentional redelivery, so the two channels agree.
     #[test]
+    // pin: The inbox producer and teams redelivery consumer exchange this exact wire token.
     fn the_marker_matches_the_teams_inbox_redelivery_token() {
         assert_eq!(INBOX_REDELIVERY_MARKER, "[redelivery]");
     }

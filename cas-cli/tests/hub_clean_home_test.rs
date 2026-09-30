@@ -736,12 +736,7 @@ fn atexit_backstop_reaps_forgotten_fixture_home() {
     );
     // The helper exits before libtest's final summary so atexit can run. A
     // zero-match invocation also exits successfully but never writes a receipt.
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.lines().any(|line| line == "running 1 test")
-            && stdout.contains(&format!("test {child_test} ...")),
-        "atexit helper did not execute {child_test}:\n{stdout}"
-    );
+    child_test_evidence::assert_started(&String::from_utf8_lossy(&output.stdout), &child_test);
     let receipt: Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
     let pid = receipt["pid"].as_u64().unwrap() as u32;
     for _ in 0..50 {
@@ -1771,3 +1766,6 @@ fn concurrent_start_and_restart_leave_exactly_one_lock_owner() {
             .is_ok()
     );
 }
+
+#[path = "../../crates/cas-core/src/test_child.rs"]
+mod child_test_evidence;

@@ -10,6 +10,7 @@
 #[path = "support/builtin_catalog.rs"]
 mod builtin_catalog;
 
+// pin: Registration completeness includes checked-in source entries, so omitted skills cannot pass by reading only the installed catalog.
 fn load(rel: &str) -> &'static str {
     match rel {
         "cas-cli/src/builtins.rs" => include_str!("../src/builtins.rs"),

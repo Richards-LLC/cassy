@@ -94,6 +94,10 @@ pub mod worktree;
 #[cfg(test)]
 mod test_env_guard;
 
+#[cfg(test)]
+#[path = "../../crates/cas-core/src/test_child.rs"]
+pub(crate) mod test_child;
+
 /// Shared test-only utilities. Kept in one place so cross-module statics
 /// (like the HOME env-var mutex used by known_repos + discovery tests)
 /// refer to a single instance; otherwise each test module's own static
@@ -127,8 +131,8 @@ pub(crate) mod test_support {
                 "test_support::nested_test_env_guard_panics_with_clear_message",
                 "--ignored",
             ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .expect("spawn nested TestEnvGuard regression test");
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -148,6 +152,11 @@ pub(crate) mod test_support {
         assert!(
             status.success(),
             "nested TestEnvGuard did not panic with the expected diagnostic"
+        );
+        let output = child.wait_with_output().expect("capture nested guard child");
+        crate::test_child::assert_passed(
+            &String::from_utf8_lossy(&output.stdout),
+            "test_support::nested_test_env_guard_panics_with_clear_message",
         );
     }
 

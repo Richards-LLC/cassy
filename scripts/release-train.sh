@@ -54,6 +54,8 @@
 #   CAS_RELEASE_TRAIN_CAS         default cas (assemble heal and --host-update)
 #   CAS_RELEASE_TRAIN_WORKER_CACHE_CMD  default refresh-worker-build-cache.sh (host-update)
 #   CAS_RELEASE_TRAIN_WORKER_CACHE_TIMEOUT_SECS  default 1800 (warn-only cache refresh)
+#   CAS_RELEASE_TRAIN_ANNOUNCEMENT_EMBARGO  explicit reason; persists across resumes;
+#       skips announce/report/receipts, never publication/update. Empty lifts it.
 set -euo pipefail
 
 usage() {
@@ -984,6 +986,10 @@ print_publication_status() {
 }
 
 run_report() {
+    if release_train_announcement_embargo_active; then
+        printf 'BLOCKER report: explicit announcement embargo; runtime publication and install proof remain required\n' >&2
+        return 1
+    fi
     mkdir -p "$run_dir"
     print_publication_status
     if [[ "$publication_verified" != true ]]; then

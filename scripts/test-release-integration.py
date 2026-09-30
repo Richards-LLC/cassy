@@ -10,10 +10,16 @@ import tempfile
 import unittest
 
 TRAIN = Path(__file__).resolve().with_name("release-train.sh")
+INTEGRATE = TRAIN.with_name("release-integrate.py")
 
 
 class IntegrationAssembly(unittest.TestCase):
     def setUp(self):
+        inherited = {key: value for key, value in os.environ.items()
+                     if key.startswith("CAS_RELEASE_TRAIN_") or key == "CAS_RELEASE_RECEIPTS_RUN_DIR"}
+        for key in inherited:
+            os.environ.pop(key)
+        self.addCleanup(os.environ.update, inherited)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name) / "project"
@@ -50,6 +56,162 @@ class IntegrationAssembly(unittest.TestCase):
     def assemble(self):
         return subprocess.run([str(TRAIN), "0.0.0", str(self.root), "--assemble"],
                               capture_output=True, text=True)
+
+    def resume_action(self, action, run_dir):
+        return subprocess.run(["python3", str(INTEGRATE), str(self.root), action],
+                              env={**os.environ, "CAS_RELEASE_TRAIN_RUN_DIR": str(run_dir)},
+                              capture_output=True, text=True)
+
+    def advance_integration(self):
+        self.git("checkout", "epic/one")
+        (self.root / "feature").write_text("gate fixed\n")
+        self.git("add", "feature")
+        self.git("commit", "-m", "fix gate")
+        self.tip = self.git("rev-parse", "HEAD")
+        self.git("update-ref", "refs/heads/integration/project", self.tip)
+        self.receipt.update(tip=self.tip, epics=[{"branch": "epic/one", "tip": self.tip}])
+        self.save()
+        self.git("checkout", "release/test")
+
+    def prepare_resume(self):
+        result = self.assemble()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        run_dir = self.root / ".cas/release-run"
+        run_dir.mkdir()
+        (run_dir / "stage.assemble.done").write_text(self.git("rev-parse", "HEAD"))
+        (run_dir / "stage.prep.done").write_text(self.git("rev-parse", "HEAD"))
+        (run_dir / "stage.gate.done").write_text(self.git("rev-parse", "HEAD"))
+        (run_dir / "gate.done").write_text("0\n")
+        result = self.resume_action("--record-input", run_dir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        (self.root / "CHANGELOG.md").write_text("release draft preserved\n")
+        self.git("add", "CHANGELOG.md")
+        self.git("commit", "-m", "release prose")
+        return run_dir
+
+    def test_resume_invalidates_suffix_and_rebases_release_prose(self):
+        run_dir = self.prepare_resume()
+        self.advance_integration()
+        result = self.resume_action("--resume-check", run_dir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Integration input changed", result.stdout)
+        self.assertFalse((run_dir / "stage.assemble.done").exists())
+        self.assertFalse((run_dir / "stage.prep.done").exists())
+        self.assertFalse((run_dir / "stage.gate.done").exists())
+        self.assertFalse((run_dir / "gate.done").exists())
+        self.assertTrue(list((run_dir / "superseded").glob("*/stage.assemble.done")))
+        result = self.resume_action("assemble", run_dir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD^"), self.tip)
+        self.assertEqual((self.root / "CHANGELOG.md").read_text(), "release draft preserved\n")
+        self.assertEqual((self.root / "feature").read_text(), "gate fixed\n")
+
+    def test_legacy_resume_infers_consumed_code_tip(self):
+        run_dir = self.prepare_resume()
+        (run_dir / "assemble.integration.json").unlink()
+        # An old assemble stage might already have rebased release prose.
+        (run_dir / "stage.assemble.done").write_text(self.git("rev-parse", "HEAD"))
+        self.advance_integration()
+        result = self.resume_action("--resume-check", run_dir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.resume_action("assemble", run_dir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD^"), self.tip)
+        self.assertEqual((self.root / "CHANGELOG.md").read_text(), "release draft preserved\n")
+
+    def test_resume_rejects_source_changes_without_mutating_checkout_or_receipts(self):
+        run_dir = self.prepare_resume()
+        (self.root / "unreviewed-source").write_text("not release metadata\n")
+        self.git("add", "unreviewed-source")
+        self.git("commit", "-m", "source edit")
+        original = self.git("rev-parse", "HEAD")
+        self.advance_integration()
+        result = self.resume_action("--resume-check", run_dir)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("BLOCKER integration-release-metadata", result.stderr)
+        self.assertIn(" && ", result.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD"), original)
+        self.assertTrue((run_dir / "stage.assemble.done").exists())
+
+    def test_unchanged_input_keeps_receipts_and_pending_input_refuses(self):
+        run_dir = self.prepare_resume()
+        result = self.resume_action("--resume-check", run_dir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((run_dir / "stage.gate.done").exists())
+        self.receipt["status"] = "RUNNING"
+        self.save()
+        result = self.resume_action("--resume-check", run_dir)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no passing sweep", result.stderr)
+        self.assertTrue((run_dir / "stage.gate.done").exists())
+
+    def test_conflicting_metadata_rebase_restores_original_checkout(self):
+        self.git("checkout", "epic/one")
+        (self.root / "CHANGELOG.md").write_text("baseline\n")
+        self.git("add", "CHANGELOG.md")
+        self.git("commit", "-m", "baseline prose")
+        self.tip = self.git("rev-parse", "HEAD")
+        self.git("update-ref", "refs/heads/integration/project", self.tip)
+        self.receipt.update(tip=self.tip, epics=[{"branch": "epic/one", "tip": self.tip}])
+        self.save()
+        self.git("checkout", "release/test")
+        run_dir = self.prepare_resume()
+        original = self.git("rev-parse", "HEAD")
+        self.git("checkout", "epic/one")
+        (self.root / "CHANGELOG.md").write_text("conflicting epic prose\n")
+        self.git("add", "CHANGELOG.md")
+        self.git("commit", "-m", "change same prose")
+        self.tip = self.git("rev-parse", "HEAD")
+        self.git("update-ref", "refs/heads/integration/project", self.tip)
+        self.receipt.update(tip=self.tip, epics=[{"branch": "epic/one", "tip": self.tip}])
+        self.save()
+        self.git("checkout", "release/test")
+        self.assertEqual(self.resume_action("--resume-check", run_dir).returncode, 0)
+        result = self.resume_action("assemble", run_dir)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr + self.git("log", "--all", "--oneline", "--graph"))
+        self.assertIn("checkout restored. Recovery:", result.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD"), original)
+        self.assertEqual(self.git("status", "--porcelain"), "")
+        self.assertFalse((self.root / ".git/rebase-merge").exists())
+
+    def test_prep_versions_and_ledger_replay_without_replaying_source(self):
+        self.git("checkout", "epic/one")
+        (self.root / "Cargo.toml").write_text('[workspace]\nmembers = ["member"]\n')
+        (self.root / "member").mkdir()
+        manifest = self.root / "member/Cargo.toml"
+        manifest.write_text('[package]\nname = "member"\nversion = "1.0.0"\n')
+        lock = self.root / "Cargo.lock"
+        lock.write_text('version = 4\n[[package]]\nname = "member"\nversion = "1.0.0"\n')
+        ledger = self.root / "cas-cli/src/builtins/reference-history.json"
+        ledger.parent.mkdir(parents=True)
+        ledger.write_text('{}\n')
+        self.git("add", ".")
+        self.git("commit", "-m", "workspace source")
+        self.tip = self.git("rev-parse", "HEAD")
+        self.git("update-ref", "refs/heads/integration/project", self.tip)
+        self.receipt.update(tip=self.tip, epics=[{"branch": "epic/one", "tip": self.tip}])
+        self.save()
+        self.git("checkout", "release/test")
+        run_dir = self.root / ".cas/release-run"
+        run_dir.mkdir()
+        # Call the Git consumer directly; no proof/Cargo subprocess is allowed.
+        self.assertEqual(self.resume_action("assemble", run_dir).returncode, 0)
+        self.assertEqual(self.resume_action("--record-input", run_dir).returncode, 0)
+        (run_dir / "stage.assemble.done").write_text(self.git("rev-parse", "HEAD"))
+        for path in (manifest, lock):
+            path.write_text(path.read_text().replace('"1.0.0"', '"2.0.0"'))
+        ledger.write_text('{"release": true}\n')
+        self.git("add", ".")
+        self.git("commit", "-m", "release prep and ledger")
+        self.advance_integration()
+        self.assertEqual(self.resume_action("--resume-check", run_dir).returncode, 0)
+        result = self.resume_action("assemble", run_dir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD^"), self.tip)
+        self.assertIn('"2.0.0"', manifest.read_text())
+        self.assertIn('"2.0.0"', lock.read_text())
+        self.assertEqual(ledger.read_text(), '{"release": true}\n')
+        self.assertEqual((self.root / "feature").read_text(), "gate fixed\n")
 
     def delivery_lock_path(self):
         common = (self.root / ".git").resolve()

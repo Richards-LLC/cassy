@@ -420,13 +420,7 @@ fn run_isolated_codex_test(child_test: &str, state: IsolatedCodexState) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains(&format!("test {child_filter} ..."))
-            && stdout.lines().any(|line| line == "running 1 test")
-            && stdout.contains("test result: ok"),
-        "isolated helper did not execute {child_filter}:\n{stdout}"
-    );
+    child_test_evidence::assert_passed(&String::from_utf8_lossy(&output.stdout), &child_filter);
 }
 
 fn factory_env_in_isolated_codex_child(child_test: &str) -> FactoryTestEnv {
@@ -5438,7 +5432,8 @@ async fn test_gc_report_lists_stale_temp_roots_without_deleting_them() {
 #[tokio::test]
 async fn test_gc_artifacts_are_lifecycle_keyed_and_strays_are_review_only() {
     let env = FactoryTestEnv::new();
-    let root = env.cas_root.join("durable-artifacts");
+    let base = env.cas_root.join("durable-artifacts");
+    let root = cas::config::project_factory_artifacts_root(&env.cas_root, &base);
     let task_store = env.task_store();
     let closed_id = task_store.generate_id().expect("generate closed task id");
     let mut closed = Task::new(closed_id.clone(), "closed artifact owner".to_string());
@@ -5459,11 +5454,14 @@ async fn test_gc_artifacts_are_lifecycle_keyed_and_strays_are_review_only() {
         env.cas_root.join("config.toml"),
         format!(
             "[factory]\nartifacts_root = {:?}\n",
-            root.display().to_string()
+            base.display().to_string()
         ),
     )
     .unwrap();
 
+    let legacy = base.join(&closed_id);
+    std::fs::create_dir_all(&legacy).unwrap();
+    std::fs::write(legacy.join("historical-proof.txt"), "possibly shared evidence").unwrap();
     let report = env
         .service
         .factory_request(Parameters(factory_req("gc_report")))
@@ -5509,6 +5507,8 @@ async fn test_gc_artifacts_are_lifecycle_keyed_and_strays_are_review_only() {
         root.join("operator-review-stray").exists(),
         "stray inventory must never delete"
     );
+    assert!(legacy.join("historical-proof.txt").is_file(), "ambiguous legacy proof must never be cleaned by a project");
+
 }
 
 // Target-cache process liveness is implemented with Linux `/proc`; other
@@ -10791,3 +10791,6 @@ async fn shared_clone_supervisors_cannot_mutate_each_others_fleet_cas_bebc() {
     assert_eq!(reset.status, TaskStatus::Open);
     assert_eq!(reset.assignee, None);
 }
+
+#[path = "../../crates/cas-core/src/test_child.rs"]
+mod child_test_evidence;

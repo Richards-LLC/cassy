@@ -17,7 +17,7 @@ use std::process::Command;
 use crate::mcp::tools::core::imports::*;
 use crate::qa_evidence::{
     EvidenceContext, EvidenceTier, SkipMarker, added_skip_markers, delivery_range,
-    delivery_test_diff, range_paths, run_close_gate,
+    delivery_test_diff, range_paths, run_close_gate_with_write_dir,
 };
 use crate::qa_pass::{
     catalog_journeys_for, first_user_facing_path, is_non_surface_path, user_facing_reasons,
@@ -105,6 +105,27 @@ pub(crate) fn qa_evidence_close_gate(
     qa_evidence_close_gate_for_paths(cas_root, task, repo, target_branch, commit_receipt, None)
 }
 
+fn task_qa_artifacts_dir(cas_root: &Path, base: &Path, task: &Task) -> PathBuf {
+    let [scoped, legacy] = crate::config::factory_task_artifact_dirs(cas_root, base, &task.id);
+    let cited = crate::qa_evidence::cited_bundle_path(&task.notes);
+    // Explicit historical citations remain valid. Otherwise prefer new QA
+    // evidence; a namespace created only for issue attachments must not hide
+    // an existing legacy ledger or terminal receipt.
+    let legacy_cited = cited
+        .as_deref()
+        .is_some_and(|path| Path::new(path).starts_with(&legacy));
+    let scoped_evidence = scoped.join("LEDGER.md").exists()
+        || scoped.join("qa").exists()
+        || scoped.join("terminal-qa").exists();
+    if (legacy_cited || (cited.is_none() && !scoped_evidence))
+        && crate::config::canonical_factory_task_artifact_dir(base, &legacy).is_some()
+    {
+        legacy
+    } else {
+        scoped
+    }
+}
+
 /// The target a delivery is diffed against: `origin/<target>` when that ref
 /// exists, since a worker's local target is routinely stale after a PR merge,
 /// otherwise the local branch (cas-bde8, GH #978).
@@ -181,9 +202,11 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
             .unwrap_or_default(),
         _ => Vec::new(),
     };
-    let artifacts_dir: PathBuf =
-        crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref())
-            .join(&task.id);
+    let base = crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
+    let artifacts_dir = task_qa_artifacts_dir(cas_root, &base, task);
+    if artifacts_dir.exists() && crate::config::canonical_factory_task_artifact_dir(&base, &artifacts_dir).is_none() {
+        return Err("QA EVIDENCE REJECTED: task artifact directory aliases another project's namespace or escapes its configured base".into());
+    }
     let ctx = EvidenceContext {
         task_id: &task.id,
         task_artifacts_dir: &artifacts_dir,
@@ -192,11 +215,12 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
         notes: &task.notes,
         deployed_origins: &qa.deployed_origins,
     };
-    run_close_gate(
+    run_close_gate_with_write_dir(
         &ctx,
         evidence_tier(&reasons, terminal_render),
         &reasons,
         &markers,
+        &crate::config::project_factory_artifacts_root(cas_root, &base).join(&task.id),
     )
     .map(|pass| pass.notes)
 }
@@ -228,6 +252,41 @@ mod tests {
     /// cas-e4d2: the worker's branch holds a later hub-web commit from its
     /// next task. A close that names its Rust-only commit is judged on that
     /// commit, not refused as user-facing because of the branch tip.
+    #[test]
+    fn qa_prefers_scoped_evidence_and_honors_explicit_legacy_citations_cas_6ebf() {
+        let temp = tempfile::tempdir().unwrap();
+        let cas_root = temp.path().join("project/.cas");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        let base = temp.path().join("artifacts");
+        let [scoped, legacy] = crate::config::factory_task_artifact_dirs(&cas_root, &base, "cas-a4b1");
+        let mut task = Task::new("cas-a4b1".into(), "QA evidence".into());
+        std::fs::create_dir_all(scoped.join("github-issues")).unwrap();
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("LEDGER.md"), "historical evidence").unwrap();
+        assert_eq!(task_qa_artifacts_dir(&cas_root, &base, &task), legacy);
+        std::fs::write(scoped.join("LEDGER.md"), "new evidence").unwrap();
+        assert_eq!(task_qa_artifacts_dir(&cas_root, &base, &task), scoped);
+        task.notes = format!("qa-bundle: {}", legacy.join("qa/bundle.json").display());
+        assert_eq!(task_qa_artifacts_dir(&cas_root, &base, &task), legacy);
+        task.notes = format!("qa-bundle: {}", scoped.join("qa/bundle.json").display());
+        assert_eq!(task_qa_artifacts_dir(&cas_root, &base, &task), scoped);
+        std::fs::write(legacy.join("LEDGER.md"), "").unwrap();
+        let ctx = EvidenceContext {
+            task_id: &task.id,
+            task_artifacts_dir: &legacy,
+            repo: temp.path(),
+            delivered_head: "",
+            notes: &task.notes,
+            deployed_origins: &[],
+        };
+        let error = run_close_gate_with_write_dir(&ctx, EvidenceTier::Ledger { terminal_qa: false }, &["demo".into()], &[], &scoped).unwrap_err();
+        let (problem, next) = error.split_once("Next: ").unwrap();
+        assert!(problem.contains(legacy.to_str().unwrap()), "{error}");
+        assert!(next.contains(scoped.to_str().unwrap()), "{error}");
+        assert!(!next.contains(legacy.to_str().unwrap()), "{error}");
+
+    }
+
     #[test]
     fn commit_receipt_is_judged_instead_of_the_live_factory_tip() {
         let temp = tempfile::tempdir().unwrap();

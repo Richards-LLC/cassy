@@ -440,6 +440,10 @@ impl TaskStore for SyncingTaskStore {
         Ok(persisted_at)
     }
 
+    fn update_from_sync(&self, task: &Task, expected: &Task) -> Result<Option<DateTime<Utc>>> {
+        self.inner.update_from_sync(task, expected)
+    }
+
     fn append_note(&self, task_id: &str, formatted_note: &str) -> Result<DateTime<Utc>> {
         let _sync_guard = self
             .queue
@@ -1211,6 +1215,32 @@ mod tests {
         let payload = pending[0].payload.as_deref().unwrap();
         assert!(payload.contains("validated canonical body"));
         assert!(!payload.contains("interleaving direct body"));
+    }
+
+    #[test]
+    fn conditional_sync_update_never_queues_an_echo_or_overwrites_a_later_edit() {
+        let (temp, store) = create_test_store();
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        let task = Task::new("cas-86eb-wrapper".into(), "local".into());
+        store.add(&task).unwrap();
+        queue.clear().unwrap();
+        let expected = store.get(&task.id).unwrap();
+        let mut remote = expected.clone();
+        remote.description = "remote context".into();
+        assert!(
+            store
+                .update_from_sync(&remote, &expected)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(store.get(&task.id).unwrap().description, remote.description);
+        assert!(queue.pending(10, 5).unwrap().is_empty());
+        let mut edited = store.get(&task.id).unwrap();
+        edited.description = "later local edit".into();
+        store.update(&edited).unwrap();
+        assert_eq!(store.update_from_sync(&remote, &expected).unwrap(), None);
+        assert_eq!(store.get(&task.id).unwrap().description, edited.description);
+        assert_eq!(queue.pending(10, 5).unwrap().len(), 1);
     }
 
     #[test]

@@ -16,6 +16,7 @@ pub(super) mod relay;
 pub(crate) mod send_dedupe;
 pub(super) mod session_summarizer;
 pub(crate) mod teams;
+pub(super) mod terminal_exchange;
 mod ws_client;
 
 /// cas-ac7e (GH #130): the daemon struct holds outstanding urgent wake probes,

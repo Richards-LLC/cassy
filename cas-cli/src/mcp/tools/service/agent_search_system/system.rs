@@ -540,9 +540,9 @@ impl CasService {
             Err(error) => {
                 let failure_reason =
                     filing_failure_reason(&error, task_identity_warning.as_deref());
-                let artifacts_root = crate::config::resolved_factory_artifacts_root(
+                let artifacts_root = crate::config::project_factory_artifacts_root(&self.inner.cas_root, &crate::config::resolved_factory_artifacts_root(
                     self.inner.load_config().factory().artifacts_root.as_deref(),
-                );
+                ));
                 let path = stage_unfiled_bug_report(
                     &artifacts_root,
                     &task_id,

@@ -4,6 +4,7 @@ import copy
 import contextlib
 import io
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import time
@@ -49,6 +50,7 @@ class ReceiptTests(unittest.TestCase):
         self.tree = self.git("rev-parse", "HEAD^{tree}")
         self.record = {"inputs": self.expected, "status": "PASS", "head": self.git("rev-parse", "HEAD"),
                        "tree": self.tree, "completed_epoch": int(time.time()), "archive_size_bytes": 123,
+                       "script_tests": {"status": "PASS", "row": "ci-script-tests", "tree": self.tree},
                        "contexts": {name: {"status": "PASS", "tree": self.tree, "passed": 10}
                                     for name in ("worktree", "clone")}}
         self.save()
@@ -192,9 +194,56 @@ class ReceiptTests(unittest.TestCase):
                     self.save()
                     self.assertIsNone(proof.matching(self.root, self.expected))
 
+    def test_script_tier_must_pass_the_same_tree(self):
+        baseline = copy.deepcopy(self.record)
+        for field, value in (("status", "FAIL"), ("tree", "0" * 40), ("row", "nextest")):
+            with self.subTest(field=field):
+                self.record = copy.deepcopy(baseline)
+                self.record["script_tests"][field] = value
+                self.save()
+                self.assertIsNone(proof.matching(self.root, self.expected))
+
+    def run_producer(self, fail_script=False):
+        self.path.unlink()
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        rows = []
+
+        def run(root, row, env, logs):
+            rows.append(row)
+            self.assertFalse(proof.IDENTITY & env.keys())
+            if row == "ci-script-tests" and fail_script:
+                raise ValueError("test_seeded_ci_script_failure")
+            if row == "archive-mode":
+                (logs / "archive-size-bytes").write_text("123")
+            return {"status": "PASS", "row": row, "tree": self.tree, "passed": 10}
+
+        with mock.patch.object(proof, "clone_scratch", return_value=Path(scratch.name) / "base"), \
+                mock.patch.object(proof, "inputs", return_value=(self.expected, proof.test_environment(self.root))), \
+                mock.patch.object(proof, "run_row", side_effect=run):
+            if fail_script:
+                with self.assertRaisesRegex(ValueError, "test_seeded_ci_script_failure"):
+                    proof.prove(self.root)
+                self.assertEqual(rows, ["ci-script-tests"])
+                self.assertIsNone(proof.matching(self.root, self.expected))
+                self.assertEqual(json.loads(self.path.read_text())["status"], "RUNNING")
+            else:
+                record, _ = proof.prove(self.root)
+                self.assertEqual(rows, ["ci-script-tests", "nextest", "archive-mode"])
+                self.assertEqual(record["script_tests"]["status"], "PASS")
+                self.assertIsNotNone(proof.matching(self.root, self.expected))
+                proof.prove(self.root)
+                self.assertEqual(rows, ["ci-script-tests", "nextest", "archive-mode"])
+
+    def test_script_failure_blocks_rust_suites_and_pass_publication(self):
+        self.run_producer(fail_script=True)
+
+    def test_script_pass_precedes_both_contexts_and_receipt_reuse(self):
+        self.run_producer()
+
     def test_incomplete_corrupt_and_running_receipts_miss(self):
         baseline = copy.deepcopy(self.record)
-        for key in ("contexts", "tree", "archive_size_bytes", "inputs"):
+        for key in ("contexts", "tree", "archive_size_bytes", "inputs", "script_tests"):
             self.record = copy.deepcopy(baseline)
             del self.record[key]
             self.save()

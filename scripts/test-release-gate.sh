@@ -66,6 +66,25 @@ PY_SCRATCH
     for helper in cas-test-targets check-changed-markdown check-test-shape check-test-env check-builtin-doc-hygiene check-builtin-contract-phrases; do
         printf '#!/usr/bin/env python3\n' >"$repo/scripts/$helper.py"
     done
+    cat >"$repo/cas-cli/Makefile" <<'EOF'
+.PHONY: test-ci-tiers
+test-ci-tiers:
+	cd .. && python3 scripts/ci-script-fixture.py
+EOF
+    cat >"$repo/scripts/ci-script-fixture.py" <<'EOF'
+import os
+import unittest
+
+class ScriptTier(unittest.TestCase):
+    def test_seeded_ci_script_failure(self):
+        for key in ("CAS_FACTORY_SESSION", "CAS_AGENT_ROLE", "CAS_AGENT_NAME",
+                    "CAS_SUPERVISOR_NAME", "CAS_AGENT_ID", "CAS_SESSION_ID", "CAS_ROOT"):
+            self.assertNotIn(key, os.environ)
+        self.assertNotEqual(os.environ.get("GATE_FIXTURE_CI_SCRIPT_FAIL"), "1",
+                            "seeded script failure before queue admission")
+
+unittest.main()
+EOF
     cp "$script_dir/check-workflow-run-interpolation.py" "$repo/scripts/check-workflow-run-interpolation.py"
     cat > "$repo/.github/workflows/release.yml" <<'EOF'
 jobs:
@@ -288,7 +307,7 @@ assert_all_pass() {
     local output="$1"
     for name in scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config assemble-stale-base \
         version-literals fixture-paths workspace-tests macos-check nextest doctests archive-mode snapshot-portability \
-        builtin-projections changelog-and-versions release-script release-notes-shell-injection procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene \
+        builtin-projections changelog-and-versions release-script release-notes-shell-injection procedure-guardrails working-tree test-targets markdown-lint test-shape test-env ci-script-tests builtin-doc-hygiene \
         hub-web-dist-drift hub-web-visual-qa; do
         if ! grep -qF "PASS $name" <<<"$output"; then
             bad "passing fixture omitted PASS $name"
@@ -356,6 +375,29 @@ if grep -qF 'PASS version-literals' <<<"$output"; then
 else
     bad "version-literals scanned a gitignored cache (output: $output)"
 fi
+
+# Real make must retain a failing Python test name and stop before Cargo.
+# Inherited dry-run/ignore-error/touch modes cannot manufacture a PASS.
+repo="$(new_fixture ci-script-tier)"
+output="$(CAS_FACTORY_SESSION=fixture CAS_AGENT_ROLE=supervisor CAS_AGENT_NAME=fixture \
+    CAS_SUPERVISOR_NAME=fixture CAS_AGENT_ID=fixture CAS_SESSION_ID=fixture CAS_ROOT=fixture \
+    run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only ci-script-tests 2>&1 || true)"
+if grep -qF 'PASS ci-script-tests' <<<"$output"; then
+    ok 'CI script row runs real make with every factory identity key scrubbed'
+else
+    bad "CI script identity scrub failed: $output"
+fi
+for make_mode in -n -i -t; do
+    : >"$tmp/cargo.log"
+    output="$(MAKEFLAGS="$make_mode" GNUMAKEFLAGS="$make_mode" MFLAGS="$make_mode" \
+        run_gate "$repo" GATE_FIXTURE_CI_SCRIPT_FAIL "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
+    assert_named_failure ci-script-tests "$output"
+    if grep -qF 'test_seeded_ci_script_failure' <<<"$output" && [[ ! -s "$tmp/cargo.log" ]]; then
+        ok "CI script failure keeps its test name and stops before Cargo despite make $make_mode"
+    else
+        bad "CI script failure was hidden or reached Cargo: $output"
+    fi
+done
 
 run_scenario workspace-check GATE_FIXTURE_CHECK_FAIL workspace-tests
 run_scenario macos-check-run GATE_FIXTURE_MACOS_FAIL macos-check

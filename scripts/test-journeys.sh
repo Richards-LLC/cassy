@@ -16,6 +16,15 @@ bad() { printf 'FAIL %s\n' "$1"; fails=$((fails + 1)); }
 
 # --- the real catalog -------------------------------------------------------
 if out="$(cd "$repo" && python3 "$helper" --check 2>&1)"; then ok "real catalog validates: $out"; else bad "real catalog: $out"; fi
+if python3 - "$helper" <<'PY'
+import runpy, sys
+parse = runpy.run_path(sys.argv[1])["parse"]
+legacy = "## hub-web\n### HUB-J1 · Reply\n**Steps**\n1. Send — it lands\n**Expected experience**\n- Delivered\n**Edge paths**\n- Offline\n"
+headings = legacy.replace("**Steps**", "#### Steps").replace("**Expected experience**", "#### Expected experience").replace("**Edge paths**", "#### Edge paths")
+assert parse(legacy) == parse(headings)
+assert parse(headings)[1][0]["blocks"]["Steps"] == ["Send — it lands"]
+PY
+then ok "Markdown subheadings preserve legacy catalog blocks"; else bad "catalog subheading parser"; fi
 grep -q 'check-journey-evaluation.sh' "$repo/scripts/release-train.d/prep.sh" \
     && ok "release-train prep calls the journey gate" || bad "prep.sh no longer calls check-journey-evaluation.sh"
 

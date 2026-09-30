@@ -1,6 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 import { fileURLToPath } from "node:url";
 import { checkoutPorts } from "./e2e/checkout-ports.mjs";
+import { JOURNEY_TIMEZONE } from "./e2e/journeys/clock";
 
 // One Playwright config for hub-web, two projects:
 // - fixtures (cas-d7b7 Test Agents spike): specs under e2e/ against the Vite
@@ -45,6 +46,7 @@ export default defineConfig({
         ...devices["Desktop Chrome"],
         baseURL: `${journeyOrigin}/commander/`,
         colorScheme: "light",
+        timezoneId: JOURNEY_TIMEZONE,
         // chromium-headless-shell crashes the renderer when a conversation mounts
         // its terminal surface; the full Chromium build does not.
         channel: "chromium",

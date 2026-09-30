@@ -41,7 +41,7 @@ mkdir -p "$artifacts/journeys"
 
 status=0
 (cd "$hub" && JOURNEY_RECEIPTS="$artifacts/journeys" JOURNEY_OUTPUT="$artifacts/playwright" \
-    node scripts/run-verified-tests.mjs playwright --project=journeys "$@") || status=$?
+    npm run journeys -- "$@") || status=$?
 
 pw_version="$(cd "$hub" && node -p 'require("@playwright/test/package.json").version')"
 python3 "$repo/scripts/journey-bundles.py" "$artifacts" "$tree" "$commit" "$status" "$hub" "$pw_version"

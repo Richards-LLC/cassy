@@ -10,7 +10,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ErrorCode};
 use serde_json::{Value, json};
 
-use super::test_env_guard::TestEnvGuard;
+use crate::test_env_guard::TestEnvGuard;
 
 struct Fixture {
     root: PathBuf,
@@ -23,6 +23,7 @@ impl Fixture {
         std::fs::create_dir_all(&project).unwrap();
         let root = init_cas_dir(&project).unwrap();
         env.set("CAS_ROOT", &root);
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
         let core = CasCore::with_daemon(root.clone(), None, None);
         #[cfg(feature = "mcp-proxy")]
         let service = CasService::new(core, None);

@@ -1792,3 +1792,28 @@ async fn qa_preflight_blocks_an_unready_reviewer_and_reports_a_ready_one_cas_d5c
         );
     }
 }
+
+#[test]
+fn gh_and_supervisor_scopes_restore_values_on_panic_cas_6651() {
+    let mut test_env = TestEnvGuard::temp_home();
+    test_env.set("CAS_QA_GH", "original-gh");
+    test_env.remove("CAS_TEST_GH_LOG");
+    test_env.remove("CAS_TEST_GH_HEAD");
+    test_env.set("CAS_AGENT_ROLE", "worker");
+    let stub_dir = test_env.home().join("stub-bin");
+    std::fs::create_dir_all(&stub_dir).unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let (mut gh, log) = GhStub::install(&mut test_env, &stub_dir, "fixture-head");
+        let _role = SupervisorRole::enter(gh._env.guard());
+        assert_eq!(std::env::var_os("CAS_QA_GH"), Some(stub_dir.join("gh").into_os_string()));
+        assert_eq!(std::env::var_os("CAS_TEST_GH_LOG"), Some(log.into_os_string()));
+        assert_eq!(std::env::var("CAS_TEST_GH_HEAD").as_deref(), Ok("fixture-head"));
+        assert_eq!(std::env::var("CAS_AGENT_ROLE").as_deref(), Ok("supervisor"));
+        panic!("exercise QA scope restoration");
+    }));
+    assert!(result.is_err());
+    assert_eq!(std::env::var("CAS_QA_GH").as_deref(), Ok("original-gh"));
+    assert!(std::env::var_os("CAS_TEST_GH_LOG").is_none());
+    assert!(std::env::var_os("CAS_TEST_GH_HEAD").is_none());
+    assert_eq!(std::env::var("CAS_AGENT_ROLE").as_deref(), Ok("worker"));
+}

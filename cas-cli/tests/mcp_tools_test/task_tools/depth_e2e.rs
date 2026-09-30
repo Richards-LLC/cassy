@@ -296,3 +296,19 @@ async fn test_e2e_unset_depth_reads_as_deep_then_closes() {
         "unset-depth task must close without the retired supervisor-review queue"
     );
 }
+
+#[test]
+fn factory_worker_scope_restores_prior_values_on_panic_cas_6651() {
+    let mut test_env = TestEnvGuard::temp_home();
+    test_env.set("CAS_AGENT_ROLE", "supervisor");
+    test_env.set("CAS_FACTORY_MODE", "0");
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _worker = FactoryWorkerGuard::enter(&mut test_env);
+        assert_eq!(std::env::var("CAS_AGENT_ROLE").as_deref(), Ok("worker"));
+        assert_eq!(std::env::var("CAS_FACTORY_MODE").as_deref(), Ok("1"));
+        panic!("exercise worker scope restoration");
+    }));
+    assert!(result.is_err());
+    assert_eq!(std::env::var("CAS_AGENT_ROLE").as_deref(), Ok("supervisor"));
+    assert_eq!(std::env::var("CAS_FACTORY_MODE").as_deref(), Ok("0"));
+}

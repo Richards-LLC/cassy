@@ -320,8 +320,8 @@ jobs:
           base-sha: ${{ github.event.before }}
           zero-base-ref: origin/${{ github.event.repository.default_branch }}
 
+      # This cheap step runs even when builds route to the full tier or a PR.
       - name: Run no-build release gate rows
-        if: steps.classify-diff.outputs.fast-admission == 'true'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
@@ -475,8 +475,10 @@ jobs:
           # tags and every other uncertain event still fail closed.
           zero-base-ref: origin/${{ github.event.repository.default_branch }}
 
+      # Every factory push is already admitted in the fast job, independently
+      # of build routing and PR deduplication. This copy serves scoped PRs.
       - name: Run no-build release gate rows
-        if: steps.pr-dedupe.outputs.covered != 'true' && (github.event_name != 'push' || steps.classify-diff.outputs.fast-admission != 'true')
+        if: github.event_name != 'push'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}

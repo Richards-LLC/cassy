@@ -206,6 +206,10 @@ for job in scoped-validation-fast scoped-validation docs-lint; do
     require_absent "$step" 'continue-on-error' "$job fast gate fails closed"
 done
 
+fast_gate_step="$(named_step_block "$(job_block scoped-validation-fast)" 'Run no-build release gate rows')"
+require_absent "$fast_gate_step" 'fast-admission' 'every non-docs factory push gets cheap rows regardless of build tier'
+require_absent "$fast_gate_step" 'pr-dedupe' 'PR build deduplication cannot skip the factory fast rows'
+
 # Self-hosted pilot security contract (cas-f5638). This repo is public, so
 # fork/untrusted PR code must be unable to request the persistent runner. The
 # old push-only pilot remains advisory; the merge-queue route below is the only

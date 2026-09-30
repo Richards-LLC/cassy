@@ -206,6 +206,9 @@ failures=()
 
 row_selected() {
     local name="$1"
+    if [[ "$fast_rows" == true && "$name" == test-shape && ! -f scripts/check-test-shape.py ]]; then
+        return 1
+    fi
     [[ -z "$only_rows" || ",$only_rows," == *",$name,"* ]]
 }
 

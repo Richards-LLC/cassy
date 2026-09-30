@@ -16,7 +16,7 @@
 //!     `tools:` frontmatter builtins.rs generates around the one shared body.
 //!   - `ALLOWED_FLAVOR_ONLY` lists files with no canonical counterpart, which
 //!     are the only files left under `builtins/codex/`: the Codex no-hooks
-//!     checklist and two `agents/openai.yaml` policies.
+//!     checklist and three `agents/openai.yaml` policies.
 //!
 //! This test asserts:
 //!   1. every other twin-catalog entry is byte-identical to the canonical one;
@@ -101,6 +101,12 @@ const ALLOWED_MISSING_TWIN: &[(&str, &str, &str)] = &[(
 
 /// Files only a twin catalog ships: (flavor, catalog path, source path, rationale).
 const ALLOWED_FLAVOR_ONLY: &[(&str, &str, &str, &str)] = &[
+    (
+        "codex",
+        "skills/cas-retro/agents/openai.yaml",
+        "codex/skills/cas-retro/agents/openai.yaml",
+        "Codex's explicit-invocation policy for the retrospective skill.",
+    ),
     (
         "codex",
         "skills/cas-codex-supervisor-checklist/SKILL.md",
@@ -352,7 +358,7 @@ fn twin_source_trees_hold_only_sanctioned_files() {
         );
     }
     assert!(
-        on_disk.len() <= 3,
+        on_disk.len() <= ALLOWED_FLAVOR_ONLY.len(),
         "the per-harness source trees must stay small; found {} files",
         on_disk.len()
     );

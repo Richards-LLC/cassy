@@ -351,7 +351,7 @@ fn writing_for_agents_meets_the_bar_it_sets_for_other_skills() {
             "is the one copy",
             "no `codex/` or `grok/` twin tree",
             "Name Cassy tools by bare name",
-            "three Codex-only ones under `builtins/codex/`",
+            "Codex-only files under `builtins/codex/`",
         ] {
             assert!(
                 body.contains(marker),
@@ -501,6 +501,11 @@ fn is_synthetic(rule: &str, value: &str) -> bool {
 /// `(catalog path, rule, reason)`. The path is flavour-agnostic: an entry
 /// covers the Claude, Codex and Grok copies of that file.
 const OPERATOR_DATA_ALLOWLIST: &[(&str, &str, &str)] = &[
+    (
+        "skills/cas-retro/references/v3.38.0.md",
+        "task-id",
+        "Historical release replay: real task IDs are needed to verify deduplication against Cassy records.",
+    ),
     (
         "skills/cas-cut-release/references/failure-log.md",
         "task-id",

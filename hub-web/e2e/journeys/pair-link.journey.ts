@@ -18,6 +18,20 @@ test("HUB-J2 pair a machine from a cas hub pair link", async ({ page, journey })
     // drawing the standard focus ring whole rather than two bars (cas-b2e4 F03).
     await expectWholeFocusRing(dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }));
     await expect(dialog.getByRole("heading", { name: "Pair a machine" })).toBeInViewport({ ratio: 1 });
+    // A read-only invitation cannot offer a control grant in the real bundle.
+    await dialog.getByText("Technical details").click();
+    for (const scope of ["machine:read", "session:read", "pane:read"]) {
+      const checkbox = dialog.getByRole("checkbox", { name: scope, exact: true });
+      await expect(checkbox).toBeEnabled();
+      await expect(checkbox).toBeChecked();
+    }
+    for (const scope of ["pane:input", "message:send", "pane:interrupt"]) {
+      const checkbox = dialog.getByRole("checkbox", { name: `${scope} not granted by this invitation`, exact: true });
+      await expect(checkbox).toBeDisabled();
+      await expect(checkbox).not.toBeChecked();
+    }
+    await expect(dialog.locator("#pair-copy")).toHaveAttribute("data-pair-command", /--scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt$/);
+    await dialog.getByText("Technical details").click();
     await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Daniel");
     // The link carries the machine's hub address and name, as `cas hub pair`
     // prints it, and arrives in the tab that is already open (hashchange).

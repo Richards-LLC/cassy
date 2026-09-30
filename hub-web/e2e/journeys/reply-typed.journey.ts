@@ -35,6 +35,40 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
     await expect(send).toBeVisible();
   });
 
+  await journey.stage("Keep a half-written reply and its focus through a heartbeat", async () => {
+    await composer.fill("Please verify the gate first.\nKeep this half-written reply.");
+    await composer.evaluate((field: HTMLTextAreaElement) => {
+      field.setSelectionRange(7, 7);
+      (window as unknown as { __draftField: HTMLTextAreaElement }).__draftField = field;
+    });
+    // Observe a real background request, rather than waiting for a string in
+    // main.ts to claim that a render happened.
+    await Promise.all([
+      page.waitForResponse((response) => new URL(response.url()).pathname === "/v1/sessions"),
+      page.clock.runFor(5_500),
+    ]);
+    await expect(composer).toHaveValue("Please verify the gate first.\nKeep this half-written reply.");
+    await expect(composer).toBeFocused();
+    expect(await composer.evaluate((field: HTMLTextAreaElement) => ({
+      sameNode: field === (window as unknown as { __draftField: HTMLTextAreaElement }).__draftField,
+      start: field.selectionStart, end: field.selectionEnd, direction: field.selectionDirection,
+    }))).toEqual({ sameNode: true, start: 7, end: 7, direction: "forward" });
+  });
+
+  await journey.stage("Restore the draft and focus after switching conversations rebuilds the shell", async () => {
+    await list.getByRole("button", { name: /gabber-studio/ }).click();
+    await expect(composer).toHaveValue("");
+    await expect(composer).toBeFocused();
+    // Prove a shell replacement, distinct from the steady heartbeat above.
+    expect(await page.evaluate(() =>
+      (window as unknown as { __draftField: HTMLTextAreaElement }).__draftField.isConnected,
+    )).toBe(false);
+    await list.getByRole("button", { name: /cas-src/ }).click();
+    await expect(composer).toHaveValue("Please verify the gate first.\nKeep this half-written reply.");
+    await expect(composer).toBeFocused();
+    expect(await composer.evaluate((field: HTMLTextAreaElement) => field.selectionStart)).toBe(7);
+  });
+
   await journey.stage("Write and send", async () => {
     await composer.fill("Please keep the release notes short this time.");
     const sent = hub.nextSend();

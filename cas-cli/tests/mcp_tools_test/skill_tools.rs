@@ -36,7 +36,8 @@ fn commit(root: &std::path::Path, message: &str) {
 
 #[tokio::test]
 async fn test_skill_create() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let req = SkillCreateRequest {
         scope: "global".to_string(),
@@ -72,7 +73,8 @@ async fn test_skill_create() {
 
 #[tokio::test]
 async fn test_skill_show() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create skill
     let req = SkillCreateRequest {
@@ -122,7 +124,8 @@ async fn test_skill_show() {
 
 #[tokio::test]
 async fn project_skill_show_serves_current_disk_file_even_when_branch_is_behind_cas_0efb() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let root = temp.path();
     git(root, &["init", "--initial-branch=main"]);
     std::fs::create_dir_all(root.join(".claude/skills/stale-skill")).unwrap();
@@ -159,7 +162,8 @@ async fn project_skill_show_serves_current_disk_file_even_when_branch_is_behind_
 
 #[tokio::test]
 async fn project_skill_show_is_quiet_when_checkout_is_current() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let root = temp.path();
     git(root, &["init", "--initial-branch=main"]);
     std::fs::create_dir_all(root.join(".claude/skills/current-skill")).unwrap();
@@ -184,7 +188,8 @@ async fn project_skill_show_is_quiet_when_checkout_is_current() {
 
 #[tokio::test]
 async fn test_skill_list() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create skills
     for i in 0..3 {
@@ -235,7 +240,8 @@ async fn test_skill_list() {
 
 #[tokio::test]
 async fn test_skill_update() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create skill
     let req = SkillCreateRequest {
@@ -336,7 +342,8 @@ async fn test_skill_update() {
 
 #[tokio::test]
 async fn test_skill_enable_disable() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create skill
     let req = SkillCreateRequest {
@@ -393,7 +400,8 @@ async fn test_skill_enable_disable() {
 
 #[tokio::test]
 async fn test_skill_delete() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create skill
     let req = SkillCreateRequest {
@@ -440,7 +448,8 @@ async fn test_skill_delete() {
 
 #[tokio::test]
 async fn test_skill_use() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create skill
     let req = SkillCreateRequest {
@@ -487,7 +496,8 @@ async fn test_skill_use() {
 
 #[tokio::test]
 async fn test_skill_create_validation_failure_is_reported_without_writing() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
 
     let result = service
         .cas_skill_create(Parameters(SkillCreateRequest {
@@ -524,7 +534,8 @@ async fn test_skill_create_validation_failure_is_reported_without_writing() {
 
 #[tokio::test]
 async fn test_skill_update_validation_failure_is_atomic() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
 
     let result = service
         .cas_skill_create(Parameters(SkillCreateRequest {
@@ -608,7 +619,8 @@ async fn test_skill_update_validation_failure_is_atomic() {
 
 #[tokio::test]
 async fn release_report_builtin_is_discoverable_after_project_sync() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     cas::builtins::sync_all_builtins_for_project(cas_mux::SupervisorCli::Claude, temp.path())
         .unwrap();
     let shown = service

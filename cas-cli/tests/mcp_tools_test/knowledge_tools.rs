@@ -47,7 +47,8 @@ fn page_id_of(text: &str) -> String {
 
 #[tokio::test]
 async fn write_then_search_then_read_round_trips() {
-    let (temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
 
     let created = extract_text(
         core.knowledge_write(Parameters(write_req(
@@ -112,7 +113,8 @@ async fn write_then_search_then_read_round_trips() {
 
 #[tokio::test]
 async fn a_hand_written_page_is_locked_so_distillation_cannot_overwrite_it() {
-    let (temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
 
     let created = extract_text(
         core.knowledge_write(Parameters(write_req(
@@ -142,7 +144,8 @@ async fn a_hand_written_page_is_locked_so_distillation_cannot_overwrite_it() {
 
 #[tokio::test]
 async fn rewriting_a_locked_page_keeps_it_locked_and_keeps_its_id() {
-    let (temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
 
     let first = extract_text(
         core.knowledge_write(Parameters(write_req(
@@ -200,7 +203,8 @@ async fn rewriting_a_locked_page_keeps_it_locked_and_keeps_its_id() {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_failed_write_restores_the_lock_it_took() {
-    let (temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     core.knowledge_write(Parameters(write_req(
@@ -250,7 +254,8 @@ async fn a_failed_write_restores_the_lock_it_took() {
 
 #[tokio::test]
 async fn list_and_status_report_an_empty_store_without_erroring() {
-    let (_temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, core) = setup_cas(&mut test_env);
 
     let list = extract_text(
         core.knowledge_list(Parameters(req("list")))
@@ -279,7 +284,8 @@ async fn list_and_status_report_an_empty_store_without_erroring() {
 
 #[tokio::test]
 async fn write_rejects_a_missing_body_and_a_missing_title() {
-    let (_temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, core) = setup_cas(&mut test_env);
 
     let no_body = core
         .knowledge_write(Parameters(KnowledgeRequest {
@@ -300,7 +306,8 @@ async fn write_rejects_a_missing_body_and_a_missing_title() {
 
 #[tokio::test]
 async fn read_of_an_unknown_page_is_an_error_not_an_empty_success() {
-    let (_temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, core) = setup_cas(&mut test_env);
 
     assert!(
         core.knowledge_read(Parameters(KnowledgeRequest {
@@ -320,7 +327,8 @@ async fn read_of_an_unknown_page_is_an_error_not_an_empty_success() {
 
 #[tokio::test]
 async fn a_snippet_is_derived_from_the_body_when_the_caller_omits_one() {
-    let (temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
 
     core.knowledge_write(Parameters(write_req(
         "Task Leases",
@@ -359,7 +367,8 @@ async fn a_snippet_is_derived_from_the_body_when_the_caller_omits_one() {
 /// exactly the bug this is meant to catch.
 #[tokio::test]
 async fn the_injected_pull_instruction_names_an_action_the_router_accepts() {
-    let (temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
 
     // Parse `action: <name>` out of the constant rather than hardcoding it, so
     // renaming the instruction's action forces the rename to be a real one.
@@ -415,7 +424,8 @@ async fn the_injected_pull_instruction_names_an_action_the_router_accepts() {
 /// refused, unless a `project:<slug>` source declares the scope.
 #[tokio::test]
 async fn knowledge_write_refuses_page_naming_another_registered_project_cas_caae() {
-    let (_temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, core) = setup_cas(&mut test_env);
     register_host_project("/nonexistent/yonder-marmot");
 
     let refusal = core

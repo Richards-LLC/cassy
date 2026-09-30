@@ -105,8 +105,13 @@ fn init_git_repo_with_staged_changes(project_root: &std::path::Path) {
 
 /// Session-1 create: returns the new task id. Built on its own core/service so
 /// the close runs on a freshly-opened one (session 2).
-async fn create_task(cas_dir: &std::path::Path, title: &str, depth: Option<&str>) -> String {
-    let core = core_with_test_agent(cas_dir);
+async fn create_task(
+    test_env: &mut TestEnvGuard,
+    cas_dir: &std::path::Path,
+    title: &str,
+    depth: Option<&str>,
+) -> String {
+    let core = core_with_test_agent(test_env, cas_dir);
     let service = CasService::new(core, None);
     let mut body = serde_json::json!({
         "action": "create",
@@ -128,10 +133,14 @@ async fn create_task(cas_dir: &std::path::Path, title: &str, depth: Option<&str>
 }
 
 /// Session-2 start+close on a fresh core/service; returns the close output text.
-async fn start_and_close(cas_dir: &std::path::Path, id: &str) -> String {
+async fn start_and_close(
+    test_env: &mut TestEnvGuard,
+    cas_dir: &std::path::Path,
+    id: &str,
+) -> String {
     // Fresh session (second worker process) — must seed agent identity itself
     // (cas-48e6); bare with_daemon has no SessionStart mapping / agent_id.
-    let core = core_with_test_agent(cas_dir);
+    let core = core_with_test_agent(test_env, cas_dir);
     let service = CasService::new(core, None);
     service
         .task(Parameters(task_req(
@@ -156,15 +165,15 @@ async fn start_and_close(cas_dir: &std::path::Path, id: &str) -> String {
 /// with the auditable decision note.
 #[tokio::test]
 async fn test_e2e_light_depth_persists_then_closes_without_gates() {
-    let (temp, _core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, _core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     write_supervisor_review_config(&cas_dir);
     init_git_repo_with_staged_changes(temp.path());
 
     // Session 1 — create the light task.
-    let id = create_task(&cas_dir, "feel-driven UI tweak", Some("light")).await;
+    let id = create_task(&mut test_env, &cas_dir, "feel-driven UI tweak", Some("light")).await;
 
     // Persistence boundary — a fresh store read must see depth=Light.
     let reloaded = open_task_store(&cas_dir)
@@ -179,7 +188,7 @@ async fn test_e2e_light_depth_persists_then_closes_without_gates() {
 
     // Session 2 — a separate worker process closes it.
     let _worker = FactoryWorkerGuard::enter();
-    let close_text = start_and_close(&cas_dir, &id).await;
+    let close_text = start_and_close(&mut test_env, &cas_dir, &id).await;
     assert!(
         close_text.contains("Closed task"),
         "deep task close should report a terminal close: {close_text}"
@@ -217,14 +226,14 @@ async fn test_e2e_light_depth_persists_then_closes_without_gates() {
 /// closes without the retired supervisor-review queue.
 #[tokio::test]
 async fn test_e2e_deep_depth_persists_then_closes() {
-    let (temp, _core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, _core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     write_supervisor_review_config(&cas_dir);
     init_git_repo_with_staged_changes(temp.path());
 
-    let id = create_task(&cas_dir, "auth refactor", Some("deep")).await;
+    let id = create_task(&mut test_env, &cas_dir, "auth refactor", Some("deep")).await;
 
     let reloaded = open_task_store(&cas_dir).unwrap().get(&id).unwrap();
     assert_eq!(
@@ -234,7 +243,7 @@ async fn test_e2e_deep_depth_persists_then_closes() {
     );
 
     let _worker = FactoryWorkerGuard::enter();
-    let close_text = start_and_close(&cas_dir, &id).await;
+    let close_text = start_and_close(&mut test_env, &cas_dir, &id).await;
     assert!(
         close_text.contains("Closed task"),
         "deep task close should report a terminal close: {close_text}"
@@ -258,14 +267,14 @@ async fn test_e2e_deep_depth_persists_then_closes() {
 /// (NULL→Deep) across the persistence boundary and still closes normally.
 #[tokio::test]
 async fn test_e2e_unset_depth_reads_as_deep_then_closes() {
-    let (temp, _core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, _core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     write_supervisor_review_config(&cas_dir);
     init_git_repo_with_staged_changes(temp.path());
 
-    let id = create_task(&cas_dir, "legacy task — no depth set", None).await;
+    let id = create_task(&mut test_env, &cas_dir, "legacy task — no depth set", None).await;
 
     let reloaded = open_task_store(&cas_dir).unwrap().get(&id).unwrap();
     assert_eq!(
@@ -275,7 +284,7 @@ async fn test_e2e_unset_depth_reads_as_deep_then_closes() {
     );
 
     let _worker = FactoryWorkerGuard::enter();
-    let close_text = start_and_close(&cas_dir, &id).await;
+    let close_text = start_and_close(&mut test_env, &cas_dir, &id).await;
     assert!(
         close_text.contains("Closed task"),
         "unset-depth task close should report a terminal close: {close_text}"

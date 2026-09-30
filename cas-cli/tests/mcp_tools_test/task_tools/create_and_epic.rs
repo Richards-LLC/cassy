@@ -5,7 +5,8 @@ use rusqlite::Connection;
 
 #[tokio::test]
 async fn test_task_create_basic() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let req = TaskCreateRequest {
         depth: None,
@@ -42,7 +43,8 @@ async fn test_task_create_basic() {
 
 #[tokio::test]
 async fn test_task_create_and_start() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create task
     let req = TaskCreateRequest {
@@ -105,7 +107,8 @@ async fn test_task_create_and_start() {
 
 #[tokio::test]
 async fn no_code_create_and_start_warn_that_external_ref_is_required_at_close() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
     let created = service
         .cas_task_create(Parameters(TaskCreateRequest {
             depth: Some("light".to_string()),
@@ -151,9 +154,10 @@ async fn no_code_create_and_start_warn_that_external_ref_is_required_at_close() 
 /// worktrees when creating epics. Epics should only get branches.
 #[tokio::test]
 async fn test_epic_creates_branch_not_worktree() {
+    let mut test_env = TestEnvGuard::temp_home();
     use std::process::Command;
 
-    let (temp, service) = setup_cas();
+    let (temp, service) = setup_cas(&mut test_env);
 
     // Initialize git repo (required for branch creation)
     Command::new("git")
@@ -275,7 +279,8 @@ async fn test_epic_creates_branch_not_worktree() {
 
 #[tokio::test]
 async fn test_task_create_invalid_epic_does_not_persist_task() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let req = TaskCreateRequest {
         depth: None,
@@ -328,7 +333,8 @@ async fn test_task_create_invalid_epic_does_not_persist_task() {
 
 #[tokio::test]
 async fn test_task_create_surfaces_dependency_write_failure() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
 
     let blocker = service
         .cas_task_create(Parameters(TaskCreateRequest {
@@ -454,7 +460,8 @@ fn depth_create_req(title: &str, depth: Option<&str>) -> TaskCreateRequest {
 
 #[tokio::test]
 async fn test_task_create_with_light_depth_shows_light() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let text = extract_text(
         service
@@ -481,7 +488,8 @@ async fn test_task_create_with_light_depth_shows_light() {
 
 #[tokio::test]
 async fn test_task_create_without_depth_defaults_to_deep() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let text = extract_text(
         service
@@ -508,7 +516,8 @@ async fn test_task_create_without_depth_defaults_to_deep() {
 
 #[tokio::test]
 async fn test_task_create_invalid_depth_is_rejected() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let result = service
         .cas_task_create(Parameters(depth_create_req("bad depth", Some("medium"))))
@@ -523,7 +532,8 @@ async fn test_task_create_invalid_depth_is_rejected() {
 
 #[tokio::test]
 async fn test_task_update_depth_to_light() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let text = extract_text(
         service
@@ -677,7 +687,8 @@ fn epic_create_request(title: &str) -> TaskCreateRequest {
 
 #[tokio::test]
 async fn test_follow_on_epic_continues_active_epic_branch_and_says_so() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let repo = temp.path();
     init_repo_with_commit(repo);
 
@@ -721,7 +732,8 @@ async fn test_follow_on_epic_continues_active_epic_branch_and_says_so() {
 
 #[tokio::test]
 async fn test_epic_create_states_the_gap_when_head_is_ahead_but_not_an_epic() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let repo = temp.path();
     init_repo_with_commit(repo);
     let trunk = git_in(repo, &["rev-parse", "--abbrev-ref", "HEAD"]);
@@ -755,7 +767,8 @@ async fn test_epic_create_states_the_gap_when_head_is_ahead_but_not_an_epic() {
 
 #[tokio::test]
 async fn test_epic_create_keeps_trunk_and_warns_when_active_epic_has_diverged() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let repo = temp.path();
     init_repo_with_commit(repo);
     let trunk = git_in(repo, &["rev-parse", "--abbrev-ref", "HEAD"]);
@@ -793,7 +806,8 @@ async fn test_epic_create_keeps_trunk_and_warns_when_active_epic_has_diverged() 
 
 #[tokio::test]
 async fn test_epic_create_uses_fetched_origin_tip_when_local_trunk_is_stale_cas_201e() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let repo = temp.path();
     init_repo_with_commit(repo);
     let remote_tip = remote_advance_without_local_fetch(repo);
@@ -827,7 +841,8 @@ async fn test_epic_create_uses_fetched_origin_tip_when_local_trunk_is_stale_cas_
 
 #[tokio::test]
 async fn test_epic_create_keeps_equal_local_and_remote_behavior_quiet_cas_201e() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let repo = temp.path();
     init_repo_with_commit(repo);
     let origin = repo.join("origin.git");
@@ -863,7 +878,8 @@ async fn test_epic_create_keeps_equal_local_and_remote_behavior_quiet_cas_201e()
 
 #[tokio::test]
 async fn test_epic_create_reports_divergent_local_and_remote_base_cas_201e() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let repo = temp.path();
     init_repo_with_commit(repo);
     let _remote_tip = remote_advance_without_local_fetch(repo);

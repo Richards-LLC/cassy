@@ -19,8 +19,8 @@ fn req(action: &str) -> ArtifactRequest {
     }
 }
 
-fn setup_cas_service() -> (TempDir, CasService) {
-    let (temp, core) = setup_cas();
+fn setup_cas_service(test_env: &mut TestEnvGuard) -> (TempDir, CasService) {
+    let (temp, core) = setup_cas(test_env);
     (temp, CasService::new(core, None))
 }
 
@@ -36,7 +36,8 @@ fn write_in_checkout(temp: &TempDir, name: &str, bytes: &[u8]) -> String {
 
 #[tokio::test]
 async fn publish_returns_a_citable_id_digest_and_size() {
-    let (temp, service) = setup_cas_service();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas_service(&mut test_env);
     let path = write_in_checkout(&temp, "brief.pdf", b"hello world");
 
     let mut request = req("publish");
@@ -65,7 +66,8 @@ async fn publish_returns_a_citable_id_digest_and_size() {
 
 #[tokio::test]
 async fn a_published_artifact_is_readable_through_show_and_list() {
-    let (temp, service) = setup_cas_service();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas_service(&mut test_env);
     let path = write_in_checkout(&temp, "report.html", b"<html>report</html>");
 
     let mut publish = req("publish");
@@ -94,7 +96,8 @@ async fn a_published_artifact_is_readable_through_show_and_list() {
 
 #[tokio::test]
 async fn listing_a_task_with_no_artifacts_is_a_plain_answer_not_an_error() {
-    let (_temp, service) = setup_cas_service();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas_service(&mut test_env);
     let mut list = req("list");
     list.task_id = Some("cas-nothing".to_string());
     let text = extract_text(service.artifact(Parameters(list)).await.unwrap());
@@ -106,7 +109,8 @@ async fn listing_a_task_with_no_artifacts_is_a_plain_answer_not_an_error() {
 
 #[tokio::test]
 async fn a_path_outside_the_publishable_roots_is_refused_with_a_usable_message() {
-    let (_temp, service) = setup_cas_service();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas_service(&mut test_env);
     let outside = TempDir::new().unwrap();
     let stray = outside.path().join("stray.pdf");
     std::fs::write(&stray, b"not yours").unwrap();
@@ -135,7 +139,8 @@ async fn a_path_outside_the_publishable_roots_is_refused_with_a_usable_message()
 
 #[tokio::test]
 async fn a_missing_file_is_refused_rather_than_recorded() {
-    let (temp, service) = setup_cas_service();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas_service(&mut test_env);
     let mut request = req("publish");
     request.task_id = Some("cas-b72a".to_string());
     request.path = Some(temp.path().join("absent.pdf").display().to_string());
@@ -154,7 +159,8 @@ async fn a_missing_file_is_refused_rather_than_recorded() {
 
 #[tokio::test]
 async fn required_fields_are_named_when_missing() {
-    let (_temp, service) = setup_cas_service();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas_service(&mut test_env);
 
     let error = service
         .artifact(Parameters(req("publish")))
@@ -179,7 +185,8 @@ async fn required_fields_are_named_when_missing() {
 
 #[tokio::test]
 async fn an_unknown_action_lists_the_valid_ones() {
-    let (_temp, service) = setup_cas_service();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas_service(&mut test_env);
     let error = service
         .artifact(Parameters(req("upload")))
         .await
@@ -195,7 +202,8 @@ async fn an_unknown_action_lists_the_valid_ones() {
 
 #[tokio::test]
 async fn showing_an_unknown_artifact_names_the_id() {
-    let (_temp, service) = setup_cas_service();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas_service(&mut test_env);
     let mut show = req("show");
     show.id = Some("art-nope".to_string());
     let error = service.artifact(Parameters(show)).await.unwrap_err();
@@ -204,7 +212,8 @@ async fn showing_an_unknown_artifact_names_the_id() {
 
 #[tokio::test]
 async fn the_credential_cache_is_not_publishable_through_the_tool_either() {
-    let (temp, service) = setup_cas_service();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas_service(&mut test_env);
     let cloud_json = temp.path().join(".cas").join("cloud.json");
     std::fs::create_dir_all(cloud_json.parent().unwrap()).unwrap();
     std::fs::write(&cloud_json, "{\"token\":\"real-secret\"}").unwrap();

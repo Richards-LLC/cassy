@@ -82,8 +82,10 @@ fn reviewer_core(cas_dir: &Path, name: &str) -> CasCore {
 
 /// Repo with a user-facing delivery on `factory/test-agent` (the fixture
 /// agent's registered name, so the fixture core IS the implementer).
-fn fixture() -> (tempfile::TempDir, CasCore, std::path::PathBuf, String) {
-    let (temp, core) = setup_cas();
+fn fixture(
+    test_env: &mut TestEnvGuard,
+) -> (tempfile::TempDir, CasCore, std::path::PathBuf, String) {
+    let (temp, core) = setup_cas(test_env);
     let repo = temp.path().to_path_buf();
     let cas_dir = repo.join(".cas");
     std::fs::write(
@@ -139,8 +141,8 @@ fn qa_task_id(cas_dir: &Path, delivery: &str) -> String {
 
 #[tokio::test]
 async fn user_facing_park_dispatches_an_independent_round_and_refuses_self_review() {
-    let (temp, core, repo, task_id) = fixture();
-    let _env = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core, repo, task_id) = fixture(&mut test_env);
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
 
@@ -222,8 +224,8 @@ async fn user_facing_park_dispatches_an_independent_round_and_refuses_self_revie
 
 #[tokio::test]
 async fn resetting_a_qa_work_item_lets_a_replacement_start_the_same_round_cas_1aef3() {
-    let (temp, core, repo, task_id) = fixture();
-    let _env = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core, repo, task_id) = fixture(&mut test_env);
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
 
@@ -270,8 +272,8 @@ async fn resetting_a_qa_work_item_lets_a_replacement_start_the_same_round_cas_1a
 
 #[tokio::test]
 async fn rejection_returns_the_delivery_and_approval_unlocks_merge_and_close() {
-    let (temp, core, repo, task_id) = fixture();
-    let _env = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core, repo, task_id) = fixture(&mut test_env);
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
     let tasks = open_task_store(&cas_dir).unwrap();
@@ -415,8 +417,8 @@ async fn rejection_returns_the_delivery_and_approval_unlocks_merge_and_close() {
 /// rejection on its own.
 #[tokio::test]
 async fn pre_existing_defects_become_linked_follow_ups_and_never_reject_alone() {
-    let (temp, core, repo, task_id) = fixture();
-    let _env = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core, repo, task_id) = fixture(&mut test_env);
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
     let tasks = open_task_store(&cas_dir).unwrap();
@@ -500,8 +502,8 @@ async fn pre_existing_defects_become_linked_follow_ups_and_never_reject_alone() 
 
 #[tokio::test]
 async fn pending_round_refuses_both_merge_paths_in_progress_and_awaiting_merge() {
-    let (temp, core, repo, task_id) = fixture();
-    let _env = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core, repo, task_id) = fixture(&mut test_env);
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
     let parked = close_text(&core, &task_id).await;
@@ -566,8 +568,8 @@ async fn pending_round_refuses_both_merge_paths_in_progress_and_awaiting_merge()
 /// reports target ancestry, without assuming it never parked (GH #1026).
 #[tokio::test]
 async fn merged_into_an_epic_without_a_verdict_is_refused_at_close_and_dispatched() {
-    let (temp, core, repo, task_id) = fixture();
-    let _env = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core, repo, task_id) = fixture(&mut test_env);
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
     let tasks = open_task_store(&cas_dir).unwrap();
@@ -647,7 +649,7 @@ struct SupervisorRole(Option<String>);
 impl SupervisorRole {
     fn enter() -> Self {
         let previous = std::env::var("CAS_AGENT_ROLE").ok();
-        // SAFETY: callers hold env_test_lock for the whole test body.
+        // SAFETY: callers hold TestEnvGuard for the whole test body.
         unsafe { std::env::set_var("CAS_AGENT_ROLE", "supervisor") };
         Self(previous)
     }
@@ -673,8 +675,8 @@ impl Drop for SupervisorRole {
 /// the waiver recorded against that commit.
 #[tokio::test]
 async fn merged_to_trunk_before_close_is_not_dispatched_and_closes_by_override_cas_5c38() {
-    let (temp, core, repo, task_id) = fixture();
-    let _env = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core, repo, task_id) = fixture(&mut test_env);
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
     let tasks = open_task_store(&cas_dir).unwrap();
@@ -752,8 +754,8 @@ async fn merged_to_trunk_before_close_is_not_dispatched_and_closes_by_override_c
 /// user-facing.
 #[tokio::test]
 async fn clearing_the_demo_statement_withdraws_a_pending_round_cas_5c38() {
-    let (temp, core, repo, task_id) = fixture();
-    let _env = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core, repo, task_id) = fixture(&mut test_env);
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
     // A backend-only delivery that is user-facing only through its demo.
@@ -799,8 +801,8 @@ async fn clearing_the_demo_statement_withdraws_a_pending_round_cas_5c38() {
 /// branch is not rebuilt.
 #[tokio::test]
 async fn no_code_tasks_without_code_are_never_gated_by_independent_qa_cas_5c38() {
-    let (temp, core, repo, task_id) = fixture();
-    let _env = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core, repo, task_id) = fixture(&mut test_env);
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
     // No commits: the worker's branch is its base.
@@ -863,8 +865,8 @@ async fn no_code_tasks_without_code_are_never_gated_by_independent_qa_cas_5c38()
 /// and a raw merge stays blocked until the verdict.
 #[tokio::test]
 async fn no_code_task_carrying_user_facing_code_is_still_reviewed_cas_2387() {
-    let (temp, core, repo, task_id) = fixture();
-    let _env = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core, repo, task_id) = fixture(&mut test_env);
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
     let tasks = open_task_store(&cas_dir).unwrap();
@@ -891,8 +893,8 @@ async fn no_code_task_carrying_user_facing_code_is_still_reviewed_cas_2387() {
 
 #[tokio::test]
 async fn backend_only_deliveries_are_untouched_and_qa_type_on_add_is_refused() {
-    let (temp, core, repo, _) = fixture();
-    let _env = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core, repo, _) = fixture(&mut test_env);
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
     git(&repo, &["checkout", "-q", "-b", "factory/backend-agent", "main"]);
@@ -947,8 +949,8 @@ fn reopened_to_in_progress(cas_dir: &Path, task_id: &str) {
 
 #[tokio::test]
 async fn docs_and_test_only_deliveries_are_never_gated_even_with_a_demo() {
-    let (temp, core, repo, _) = fixture();
-    let _env = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core, repo, _) = fixture(&mut test_env);
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
     git(&repo, &["checkout", "-q", "-b", "factory/docs-agent", "main"]);
@@ -974,15 +976,15 @@ async fn docs_and_test_only_deliveries_are_never_gated_even_with_a_demo() {
 
 #[tokio::test]
 async fn supervisor_waiver_needs_a_reason_logs_a_decision_and_shows_in_epic_status() {
-    let (temp, core, repo, task_id) = fixture();
-    let _env = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core, repo, task_id) = fixture(&mut test_env);
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
     close_text(&core, &task_id).await;
     let service = CasService::new(core.clone(), None);
 
     let previous_role = std::env::var("CAS_AGENT_ROLE").ok();
-    // SAFETY: env_test_lock is held for the whole test body.
+    // SAFETY: TestEnvGuard is held for the whole test body.
     unsafe { std::env::set_var("CAS_AGENT_ROLE", "supervisor") };
     let without_reason = service
         .verification(Parameters(verification(serde_json::json!({
@@ -1079,8 +1081,8 @@ async fn reject_round_one(core: &CasCore, repo: &Path, task_id: &str) -> CasCore
 /// reviewer's qa_record failed with "not found: open independent QA pass".
 #[tokio::test]
 async fn rejected_round_reopens_after_a_target_change_and_a_test_only_fix() {
-    let (temp, core, repo, task_id) = fixture();
-    let _env = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core, repo, task_id) = fixture(&mut test_env);
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
     // `task update target_branch=` needs a canonical project identity; use
@@ -1160,8 +1162,8 @@ async fn rejected_round_reopens_after_a_target_change_and_a_test_only_fix() {
 /// at the new one, the reviewer is told to stop, and the park says so.
 #[tokio::test]
 async fn a_new_tip_supersedes_a_claimed_round_and_tells_its_reviewer_cas_ce39() {
-    let (temp, core, repo, task_id) = fixture();
-    let _env = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core, repo, task_id) = fixture(&mut test_env);
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
 
@@ -1229,8 +1231,8 @@ async fn a_new_tip_supersedes_a_claimed_round_and_tells_its_reviewer_cas_ce39() 
 /// messaged, because nobody had started it.
 #[tokio::test]
 async fn a_new_tip_supersedes_a_pending_round_without_messaging_anyone_cas_ce39() {
-    let (temp, core, repo, task_id) = fixture();
-    let _env = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core, repo, task_id) = fixture(&mut test_env);
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
 
@@ -1263,7 +1265,7 @@ async fn a_new_tip_supersedes_a_pending_round_without_messaging_anyone_cas_ce39(
 }
 
 /// Points `gh` at a test double for the scope of a test holding
-/// `env_test_lock`, and restores the previous value on drop.
+/// `TestEnvGuard`, and restores the previous value on drop.
 struct GhStub {
     previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
 }
@@ -1297,7 +1299,7 @@ exit 1
             ("CAS_TEST_GH_HEAD", head_sha.into()),
         ] {
             previous.push((key, std::env::var_os(key)));
-            // SAFETY: callers hold env_test_lock for the whole test body.
+            // SAFETY: callers hold TestEnvGuard for the whole test body.
             unsafe { std::env::set_var(key, value) };
         }
         (Self { previous }, log)
@@ -1345,8 +1347,8 @@ fn wait_for_gh_call(log: &Path, needles: &[&str]) -> String {
 /// round (pending → success on waiver).
 #[tokio::test]
 async fn raw_github_merges_wait_for_the_independent_verdict_cas_2ee2() {
-    let (temp, core, repo, task_id) = fixture();
-    let _env = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core, repo, task_id) = fixture(&mut test_env);
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
     let config = cas_dir.join("config.toml");
@@ -1472,8 +1474,8 @@ async fn raw_github_merges_wait_for_the_independent_verdict_cas_2ee2() {
 /// the per-task branch's own diff.
 #[tokio::test]
 async fn per_task_branch_park_without_a_demo_dispatches_from_its_own_diff_cas_74284() {
-    let (temp, core, repo, task_id) = fixture();
-    let _env = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core, repo, task_id) = fixture(&mut test_env);
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
     git(&repo, &["checkout", "-q", "main"]);
@@ -1519,8 +1521,8 @@ async fn per_task_branch_park_without_a_demo_dispatches_from_its_own_diff_cas_74
 /// demo_statement.
 #[tokio::test]
 async fn hub_web_labelled_task_needs_a_demo_statement_at_create_cas_74284() {
-    let (temp, core, _repo, _task_id) = fixture();
-    let _env = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core, _repo, _task_id) = fixture(&mut test_env);
     let _keep = &temp;
     let service = CasService::new(core.clone(), None);
     let create = |demo: Option<&str>| {
@@ -1558,8 +1560,8 @@ async fn hub_web_labelled_task_needs_a_demo_statement_at_create_cas_74284() {
 /// no route to a review before merge.
 #[tokio::test]
 async fn supervisor_can_request_independent_qa_for_a_parked_delivery_cas_74284() {
-    let (temp, core, repo, task_id) = fixture();
-    let _env = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core, repo, task_id) = fixture(&mut test_env);
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
     git(&repo, &["checkout", "-q", "main"]);
@@ -1689,15 +1691,15 @@ async fn supervisor_can_request_independent_qa_for_a_parked_delivery_cas_74284()
 /// the response or the recorded note.
 #[tokio::test]
 async fn qa_preflight_blocks_an_unready_reviewer_and_reports_a_ready_one_cas_d5c1() {
-    let (temp, core, repo, task_id) = fixture();
-    let _env = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core, repo, task_id) = fixture(&mut test_env);
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
     const VAR: &str = "CAS_TEST_QA_BACKEND_ENV_FILE";
     struct Unset;
     impl Drop for Unset {
         fn drop(&mut self) {
-            // SAFETY: the test holds env_test_lock for its whole body.
+            // SAFETY: the test holds TestEnvGuard for its whole body.
             unsafe { std::env::remove_var(VAR) };
         }
     }

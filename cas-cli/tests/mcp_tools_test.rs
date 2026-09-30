@@ -1,3 +1,6 @@
+#[path = "../src/test_env_guard.rs"]
+mod test_env_guard;
+
 #[path = "mcp_tools_test/support.rs"]
 pub(crate) mod support;
 

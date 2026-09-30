@@ -180,6 +180,13 @@ pub struct TaskCreateRequest {
     #[serde(default)]
     pub risk: Option<String>,
 
+    /// Optional recorded-only reversibility declaration; no merge policy reads it.
+    #[serde(default)]
+    #[schemars(
+        description = "Recorded only: one-way or two-way; pass an empty string on update to clear. Does not affect merge policy."
+    )]
+    pub door: Option<String>,
+
     /// Test modules/targets that must be covered by close-time proof for a
     /// blast-radius task.
     #[schemars(
@@ -461,6 +468,13 @@ pub struct TaskUpdateRequest {
     )]
     #[serde(default)]
     pub risk: Option<String>,
+
+    /// Optional recorded-only reversibility declaration; no merge policy reads it.
+    #[serde(default)]
+    #[schemars(
+        description = "Recorded only: one-way or two-way; pass an empty string on update to clear. Does not affect merge policy."
+    )]
+    pub door: Option<String>,
 
     /// Update the test modules/targets required by blast-radius proof.
     #[schemars(

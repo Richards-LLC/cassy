@@ -7887,6 +7887,7 @@ async fn test_062d_lifecycle_start_and_blocked_push_session_isolated() {
             demo_statement: None,
             execution_note: None,
             risk: None,
+            door: None,
             proof_targets: None,
             external_ref: None,
             assignee: None,

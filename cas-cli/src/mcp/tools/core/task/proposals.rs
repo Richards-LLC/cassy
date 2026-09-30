@@ -173,6 +173,8 @@ impl CasCore {
             &self.load_config().qa().user_facing_labels,
         )
         .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+        let door = req.door.as_deref().map(str::parse::<cas_types::TaskDoor>)
+            .transpose().map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
         let client = self.proposal_client_after_authority()?;
         let delivery_mode = crate::mcp::tools::types::validate_delivery_mode(delivery_mode)
             .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?
@@ -202,6 +204,7 @@ impl CasCore {
             "external_ref": req.external_ref.unwrap_or_default(),
             "delivery_mode": delivery_mode,
             "risk": risk,
+            "door": door,
             "proof_targets": proof_targets,
         });
         let client_request_id = validate_proposal_attempt_id(proposal_attempt_id)?;
@@ -636,6 +639,7 @@ mod tests {
             priority: 2,
             task_type: "task".into(),
             risk: Some("none".to_string()),
+            door: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,
@@ -785,7 +789,7 @@ mod tests {
             "proposal_id": "proposal-1",
             "target_task_id": "cas-0123456789abcdef",
             "state": "accepted",
-            "task": {"title": "Accepted work", "description": "Do it"},
+            "task": {"title": "Accepted work", "description": "Do it", "door": "two-way"},
             "provenance": {
                 "server_attested": {
                     "proposal_id": "proposal-1",
@@ -806,6 +810,7 @@ mod tests {
         assert_eq!(task.id, "cas-0123456789abcdef");
         assert_eq!(task.title, "Accepted work");
         assert_eq!(task.status, TaskStatus::Open);
+        assert_eq!(task.door, Some(cas_types::TaskDoor::TwoWay));
         assert_eq!(task.origin_project.as_deref(), Some("origin-project"));
         assert!(task.notes.contains("proposal_id: \"proposal-1\""));
 
@@ -813,6 +818,8 @@ mod tests {
         let cas_root = crate::store::init_cas_dir(temp.path()).unwrap();
         let store = crate::store::open_task_store_local(&cas_root).unwrap();
         store.add(&task).unwrap();
-        assert_eq!(store.get(&task.id).unwrap().title, "Accepted work");
+        let stored = store.get(&task.id).unwrap();
+        assert_eq!(stored.title, "Accepted work");
+        assert_eq!(stored.door, Some(cas_types::TaskDoor::TwoWay));
     }
 }

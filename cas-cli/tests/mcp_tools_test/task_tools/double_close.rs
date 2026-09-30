@@ -23,6 +23,7 @@ fn create_req(title: &str, depth: Option<&str>) -> TaskCreateRequest {
         priority: 2,
         task_type: "task".to_string(),
             risk: Some("none".to_string()),
+            door: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,

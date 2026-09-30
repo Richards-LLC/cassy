@@ -47,10 +47,7 @@ impl TaskStatus {
     /// here?" — not "is this the same write?" — is the right currency test for
     /// a notification about it.
     pub fn is_parked_awaiting_supervisor(self) -> bool {
-        matches!(
-            self,
-            TaskStatus::AwaitingMerge | TaskStatus::Blocked
-        )
+        matches!(self, TaskStatus::AwaitingMerge | TaskStatus::Blocked)
     }
 }
 
@@ -180,6 +177,37 @@ impl FromStr for TaskType {
             Ok(TaskType::Gate)
         } else {
             Err(TypeError::Parse(format!("invalid task type: {s}")))
+        }
+    }
+}
+
+/// Recorded reversibility declaration. This is metadata, never a merge gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TaskDoor {
+    OneWay,
+    TwoWay,
+}
+
+impl fmt::Display for TaskDoor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::OneWay => "one-way",
+            Self::TwoWay => "two-way",
+        })
+    }
+}
+
+impl FromStr for TaskDoor {
+    type Err = TypeError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim() {
+            "one-way" => Ok(Self::OneWay),
+            "two-way" => Ok(Self::TwoWay),
+            other => Err(TypeError::Parse(format!(
+                "invalid task door: {other}; expected one-way or two-way"
+            ))),
         }
     }
 }
@@ -853,6 +881,10 @@ pub struct Task {
     #[serde(default)]
     pub risk: Vec<TaskRisk>,
 
+    /// Optional reversibility declaration; recorded and displayed only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub door: Option<TaskDoor>,
+
     /// Test modules/targets that must be covered by close-time proof for a
     /// blast-radius task.
     #[serde(default)]
@@ -972,6 +1004,7 @@ impl Task {
             priority: Priority::MEDIUM,
             task_type: TaskType::Task,
             risk: Vec::new(),
+            door: None,
             proof_targets: Vec::new(),
             assignee: None,
             labels: Vec::new(),
@@ -1088,6 +1121,7 @@ impl Default for Task {
             priority: Priority::MEDIUM,
             task_type: TaskType::Task,
             risk: Vec::new(),
+            door: None,
             proof_targets: Vec::new(),
             assignee: None,
             labels: Vec::new(),
@@ -1203,7 +1237,9 @@ mod tests {
         let legacy: TaskDeliverables = serde_json::from_str("{}").unwrap();
         assert!(legacy.handoff_branches.is_empty());
         assert!(
-            !serde_json::to_string(&legacy).unwrap().contains("handoff_branches"),
+            !serde_json::to_string(&legacy)
+                .unwrap()
+                .contains("handoff_branches"),
             "empty list stays out of stored JSON"
         );
     }

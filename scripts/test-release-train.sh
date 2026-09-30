@@ -2720,6 +2720,13 @@ else
     bad "cas-fed5: toolchain preflight did not name the missing tools: $portable_preflight"
 fi
 
+# Shared renderer + real stage behavior (including CHANGELOG/gate preservation).
+if python3 "$repo_root/scripts/test-review-pr-body.py"; then
+    ok 'review PR body fixtures and real release-stage boundary'
+else
+    bad 'review PR body fixtures and real release-stage boundary'
+fi
+
 # The PR body is cut from CHANGELOG with literal heading matches: dots are not
 # wildcards, and the next version heading ends the section in every awk.
 portable_changelog_wt="$portable_dir/changelog-wt"

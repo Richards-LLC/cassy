@@ -1528,3 +1528,48 @@ fn cas_root_matching_the_cwd_root_produces_no_notice() {
         "no conflict means no notice.\nstderr: {stderr}"
     );
 }
+
+#[test]
+fn worktree_pr_body_reads_task_metadata_and_writes_review_file() {
+    use cas_store::TaskStore;
+    let temp = TempDir::new().unwrap();
+    let repo = temp.path().join("repository with spaces");
+    std::fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let result = std::process::Command::new("git").current_dir(&repo).args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output().unwrap();
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+        String::from_utf8(result.stdout).unwrap().trim().to_owned()
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "fixture@example.test"]);
+    git(&["config", "user.name", "Fixture"]);
+    cas_cmd(temp.path()).current_dir(&repo).args(["init", "--yes"]).assert().success();
+    std::fs::write(repo.join("input.txt"), "before\n").unwrap();
+    git(&["add", "input.txt"]);
+    git(&["commit", "-qm", "base"]);
+    let base = git(&["rev-parse", "HEAD"]);
+    std::fs::write(repo.join("input.txt"), "after\n").unwrap();
+    git(&["commit", "-qam", "change"]);
+    let mut task = cas_types::Task::new("cas-review-fixture".into(), "Review fixture".into());
+    task.risk = vec![cas_types::TaskRisk::Platform];
+    task.door = Some(cas_types::TaskDoor::TwoWay);
+    cas_store::SqliteTaskStore::open(&repo.join(".cas")).unwrap().add(&task).unwrap();
+    let output = repo.join("review body.md");
+    cas_cmd(temp.path()).current_dir(&repo).args([
+        "worktree", "pr-body", "--task", &task.id, "--base", &base, "--head", "HEAD",
+        "--before", "command: fails", "--after", "command: passes",
+        "--evidence", "/proof/qa/bundle.json", "--output", output.to_str().unwrap(),
+    ]).assert().success();
+    let body = std::fs::read_to_string(output).unwrap();
+    assert!(body.contains("M\tinput.txt"));
+    assert!(body.contains("**Before:** command: fails"));
+    assert!(body.contains("**After:** command: passes"));
+    assert!(body.contains("/proof/qa/bundle.json"));
+    assert!(body.contains("**Risk:** platform"));
+    assert!(body.contains("**Door:** two-way"));
+    cas_cmd(temp.path()).current_dir(&repo).args([
+        "worktree", "pr-body", "--base", "missing-ref", "--head", "HEAD",
+    ]).assert().failure();
+}

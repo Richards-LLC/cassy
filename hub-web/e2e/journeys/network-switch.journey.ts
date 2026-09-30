@@ -303,6 +303,9 @@ test("HUB-J12 network switch: stale proofs retry with no re-pair request", async
     await hub.waitFor(() => hub.refusedProofs.length >= 2);
     await clock.advance(2_000);
     await hub.waitFor(() => hub.proofRefusalsLeft("atlas") === 0);
+    // Exercising the final refusal is not recovery: the machine may still
+    // owe its own retry. Advance its ceiling, with IO settled at every tick.
+    await clock.advance(10_000);
     await expect(header).toHaveText(" · Live");
     expect(hub.refusedProofs.map(refusal => refusal.reason)).toEqual(["stale_proof", "stale_proof", "stale_proof"]);
     await expect(page.getByText(/re-pair|needs pairing|no longer paired|was revoked/i)).toHaveCount(0);

@@ -48,6 +48,10 @@ export class ProtocolClock implements ProtocolTime {
         await wire.__protocolMoment(performance.now());
         return fetch(...args);
       })());
+      // fetch resolves at headers; await body decoding too, including cloned
+      // reasoned 401s, before advancing the next authentication deadline.
+      const json = Response.prototype.json;
+      Response.prototype.json = function () { return observe(json.call(this)); };
       const sign = crypto.subtle.sign.bind(crypto.subtle);
       crypto.subtle.sign = (...args) => observe(sign(...args));
       const Socket = window.WebSocket;

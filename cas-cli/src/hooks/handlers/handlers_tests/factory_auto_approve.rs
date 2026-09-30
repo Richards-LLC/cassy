@@ -82,8 +82,8 @@ fn deny_reason(out: &cas_core::hooks::types::HookOutput) -> Option<String> {
 
 #[test]
 fn supervisor_write_is_auto_approved() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("supervisor"));
+    let mut env = TestEnvGuard::new();
+    set_role_env(&mut env, Some("supervisor"));
     let input = input_for("Write", Some("/test/foo.txt"));
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
@@ -96,12 +96,15 @@ fn supervisor_write_is_auto_approved() {
 
 #[test]
 fn worker_write_is_auto_approved() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("worker"));
+    let mut env = TestEnvGuard::new();
+    set_role_env(&mut env, Some("worker"));
     let input = input_for("Write", Some("/test/foo.txt"));
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
-    assert!(allow_reason(&out).is_some(), "worker Write must auto-approve");
+    assert!(
+        allow_reason(&out).is_some(),
+        "worker Write must auto-approve"
+    );
 }
 
 /// cas-4143: the heredoc shape that Claude Code re-escalates to a nonexistent
@@ -109,15 +112,18 @@ fn worker_write_is_auto_approved() {
 /// call, so the factory daemon can answer the parked permission request.
 #[test]
 fn worker_heredoc_bash_is_allowed_and_recorded_for_the_permission_relay() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("worker"));
+    let mut env = TestEnvGuard::new();
+    set_role_env(&mut env, Some("worker"));
     let mut input = bash_input(
         "cd /test/hub-web && python3 - <<'EOF'\nfrom pathlib import Path\nPath('e2e/journeys/qa-evidence.journey.ts').write_text('x')\nEOF",
     );
     input.tool_use_id = Some("toolu_01HeredocAllow".into());
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
-    assert!(allow_reason(&out).is_some(), "worker heredoc must be allowed: {out:?}");
+    assert!(
+        allow_reason(&out).is_some(),
+        "worker heredoc must be allowed: {out:?}"
+    );
     assert!(
         crate::factory_permission_relay::hook_allowed(tmp.path(), "toolu_01HeredocAllow", "Bash"),
         "the allow must be recorded for the permission relay"
@@ -130,18 +136,21 @@ fn worker_heredoc_bash_is_allowed_and_recorded_for_the_permission_relay() {
 
 #[test]
 fn worker_edit_is_auto_approved() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("worker"));
+    let mut env = TestEnvGuard::new();
+    set_role_env(&mut env, Some("worker"));
     let input = input_for("Edit", Some("/test/foo.txt"));
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
-    assert!(allow_reason(&out).is_some(), "worker Edit must auto-approve");
+    assert!(
+        allow_reason(&out).is_some(),
+        "worker Edit must auto-approve"
+    );
 }
 
 #[test]
 fn supervisor_bash_is_auto_approved() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("supervisor"));
+    let mut env = TestEnvGuard::new();
+    set_role_env(&mut env, Some("supervisor"));
     let input = input_for("Bash", None);
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
@@ -153,8 +162,8 @@ fn supervisor_bash_is_auto_approved() {
 
 #[test]
 fn supervisor_read_is_auto_approved() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("supervisor"));
+    let mut env = TestEnvGuard::new();
+    set_role_env(&mut env, Some("supervisor"));
     let input = input_for("Read", Some("/tmp/foo.txt"));
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
@@ -163,8 +172,8 @@ fn supervisor_read_is_auto_approved() {
 
 #[test]
 fn supervisor_notebook_edit_is_auto_approved() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("supervisor"));
+    let mut env = TestEnvGuard::new();
+    set_role_env(&mut env, Some("supervisor"));
     let input = input_for("NotebookEdit", Some("/test/n.ipynb"));
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
@@ -173,8 +182,8 @@ fn supervisor_notebook_edit_is_auto_approved() {
 
 #[test]
 fn factory_write_to_bare_tmp_is_denied_with_durable_remediation() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("worker"));
+    let mut env = TestEnvGuard::new();
+    set_role_env(&mut env, Some("worker"));
     let input = input_for("Write", Some("/tmp/cas-4060-proof.txt"));
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
@@ -185,8 +194,8 @@ fn factory_write_to_bare_tmp_is_denied_with_durable_remediation() {
 
 #[test]
 fn factory_write_under_worktree_is_allowed() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("worker"));
+    let mut env = TestEnvGuard::new();
+    set_role_env(&mut env, Some("worker"));
     let input = input_for("Write", Some("/test/under-worktree.txt"));
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
@@ -198,8 +207,8 @@ fn factory_write_under_worktree_is_allowed() {
 
 #[test]
 fn factory_write_under_configured_artifacts_root_is_allowed() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("worker"));
+    let mut env = TestEnvGuard::new();
+    set_role_env(&mut env, Some("worker"));
     let tmp = tempfile::tempdir().expect("tempdir");
     let artifacts_root = tmp.path().join("durable-artifacts");
     std::fs::create_dir_all(&artifacts_root).expect("artifacts root");
@@ -213,7 +222,8 @@ fn factory_write_under_configured_artifacts_root_is_allowed() {
     .expect("factory config");
 
     let artifact_path = crate::config::project_factory_artifacts_root(tmp.path(), &artifacts_root)
-        .join("cas-4060").join("proof.txt");
+        .join("cas-4060")
+        .join("proof.txt");
     let input = input_for("Write", artifact_path.to_str());
     let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
     assert!(
@@ -224,11 +234,11 @@ fn factory_write_under_configured_artifacts_root_is_allowed() {
 
 #[test]
 fn factory_write_under_declared_scratchpad_is_allowed() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("worker"));
+    let mut env = TestEnvGuard::new();
+    set_role_env(&mut env, Some("worker"));
     let tmp = tempfile::tempdir().expect("tempdir");
     let scratchpad = tmp.path().join("harness-scratchpad");
-    let _scratchpad = set_env_var("CAS_SCRATCHPAD", scratchpad.as_os_str());
+    env.set("CAS_SCRATCHPAD", scratchpad.as_os_str());
 
     let scratchpad_path = scratchpad.join("ephemeral-note.txt");
     let input = input_for("Write", scratchpad_path.to_str());
@@ -241,15 +251,13 @@ fn factory_write_under_declared_scratchpad_is_allowed() {
 
 #[test]
 fn supervisor_write_under_harness_file_memory_is_allowed_for_default_and_account_configs() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("supervisor"));
-    let home = tempfile::tempdir().expect("home");
-    let _home = set_env_var("HOME", home.path().as_os_str());
+    let mut env = TestEnvGuard::temp_home();
+    set_role_env(&mut env, Some("supervisor"));
     let tmp = tempfile::tempdir().expect("tempdir");
 
     for config_dir in [".claude", ".claude-work"] {
-        let path = home
-            .path()
+        let path = env
+            .home()
             .join(config_dir)
             .join("projects")
             .join("-home-pippenz-Petrastella-cas-src")
@@ -267,12 +275,10 @@ fn supervisor_write_under_harness_file_memory_is_allowed_for_default_and_account
 
 #[test]
 fn worker_write_under_harness_file_memory_remains_denied() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("worker"));
-    let home = tempfile::tempdir().expect("home");
-    let _home = set_env_var("HOME", home.path().as_os_str());
-    let path = home
-        .path()
+    let mut env = TestEnvGuard::temp_home();
+    set_role_env(&mut env, Some("worker"));
+    let path = env
+        .home()
         .join(".claude-work/projects/-home-pippenz-Petrastella-cas-src/memory/task-context.md");
     let input = input_for("Write", path.to_str());
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -285,8 +291,8 @@ fn worker_write_under_harness_file_memory_remains_denied() {
 
 #[test]
 fn factory_write_under_harness_session_scratchpad_is_allowed() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("worker"));
+    let mut env = TestEnvGuard::new();
+    set_role_env(&mut env, Some("worker"));
     let path = "/tmp/claude-1000/-home-pippenz-Petrastella-cas-src/f54c4e08-831c-4cb6-ae05-5bd663ec1fed/scratchpad/issue-ambient-recall.md";
     let mut input = input_for("Write", Some(path));
     input.session_id = "f54c4e08-831c-4cb6-ae05-5bd663ec1fed".into();
@@ -307,10 +313,7 @@ fn harness_session_scratchpad_accepts_macos_private_tmp_alias() {
         path,
         "f54c4e08-831c-4cb6-ae05-5bd663ec1fed"
     ));
-    assert!(!is_harness_session_scratchpad(
-        path,
-        "another-session"
-    ));
+    assert!(!is_harness_session_scratchpad(path, "another-session"));
     assert!(!is_harness_session_scratchpad(
         std::path::Path::new("/private/tmp/claude-501/project/session/scratchpad"),
         "session"
@@ -319,8 +322,8 @@ fn harness_session_scratchpad_accepts_macos_private_tmp_alias() {
 
 #[test]
 fn factory_write_under_another_session_scratchpad_is_denied() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("worker"));
+    let mut env = TestEnvGuard::new();
+    set_role_env(&mut env, Some("worker"));
     let path = "/tmp/claude-1000/-home-pippenz-Petrastella-cas-src/f54c4e08-831c-4cb6-ae05-5bd663ec1fed/scratchpad/issue-ambient-recall.md";
     let input = input_for("Write", Some(path));
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -331,11 +334,11 @@ fn factory_write_under_another_session_scratchpad_is_denied() {
 
 #[test]
 fn factory_bash_commit_message_with_slash_leading_token_is_allowed() {
-    let _g = super::env_lock();
+    let mut env = TestEnvGuard::new();
     // The live false positive was a supervisor merge. Workers have a separate
     // branch-protection gate which deliberately refuses merge commands before
     // the workspace contract is reached.
-    let _role = set_role_env(Some("supervisor"));
+    set_role_env(&mut env, Some("supervisor"));
     let input = bash_input(
         "git merge --no-ff factory/auth -m 'Merge auth redirects (> /api/me), without file creation'",
     );
@@ -349,8 +352,8 @@ fn factory_bash_commit_message_with_slash_leading_token_is_allowed() {
 
 #[test]
 fn factory_bash_redirect_to_bare_tmp_is_denied() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("worker"));
+    let mut env = TestEnvGuard::new();
+    set_role_env(&mut env, Some("worker"));
     let input = bash_input("printf '%s\\n' proof > /tmp/cas-b76f-proof.txt");
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
@@ -360,8 +363,8 @@ fn factory_bash_redirect_to_bare_tmp_is_denied() {
 
 #[test]
 fn factory_bash_stream_device_redirects_are_allowed() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("worker"));
+    let mut env = TestEnvGuard::new();
+    set_role_env(&mut env, Some("worker"));
     let tmp = tempfile::tempdir().expect("tempdir");
 
     for command in [
@@ -383,35 +386,13 @@ fn factory_bash_stream_device_redirects_are_allowed() {
 
 #[test]
 fn factory_bash_touch_under_home_is_denied() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("worker"));
+    let mut env = TestEnvGuard::new();
+    set_role_env(&mut env, Some("worker"));
     let input = bash_input("touch $HOME/cas-b76f-stray.txt");
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
     let reason = deny_reason(&out).expect("stray $HOME write must remain denied");
     assert!(reason.contains("cas-b76f-stray.txt"), "{reason}");
-}
-
-struct EnvVarGuard {
-    key: &'static str,
-    previous: Option<std::ffi::OsString>,
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match &self.previous {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-}
-
-fn set_env_var(key: &'static str, value: &std::ffi::OsStr) -> EnvVarGuard {
-    let previous = std::env::var_os(key);
-    unsafe { std::env::set_var(key, value) };
-    EnvVarGuard { key, previous }
 }
 
 // ============================================================================
@@ -426,13 +407,12 @@ fn set_env_var(key: &'static str, value: &std::ffi::OsStr) -> EnvVarGuard {
 
 #[test]
 fn supervisor_write_is_auto_approved_without_cas_root() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("supervisor"));
+    let mut env = TestEnvGuard::new();
+    set_role_env(&mut env, Some("supervisor"));
     let input = input_for("Write", Some("/test/foo.txt"));
     let out = handle_pre_tool_use(&input, None).expect("handler ok");
-    let reason = allow_reason(&out).expect(
-        "supervisor Write must auto-approve even when cas_root is None (deadlock case)",
-    );
+    let reason = allow_reason(&out)
+        .expect("supervisor Write must auto-approve even when cas_root is None (deadlock case)");
     assert!(
         reason.contains("Factory agent auto-approve"),
         "allow reason should identify the factory bypass: {reason}"
@@ -441,8 +421,8 @@ fn supervisor_write_is_auto_approved_without_cas_root() {
 
 #[test]
 fn worker_edit_is_auto_approved_without_cas_root() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("worker"));
+    let mut env = TestEnvGuard::new();
+    set_role_env(&mut env, Some("worker"));
     let input = input_for("Edit", Some("/test/foo.txt"));
     let out = handle_pre_tool_use(&input, None).expect("handler ok");
     assert!(
@@ -453,13 +433,10 @@ fn worker_edit_is_auto_approved_without_cas_root() {
 
 #[test]
 fn worker_edit_on_primary_checkout_is_denied_with_resolved_cas_root() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("worker"));
-    let _factory = set_env_var("CAS_FACTORY_MODE", std::ffi::OsStr::new("1"));
-    let _session = set_env_var(
-        "CAS_SESSION_ID",
-        std::ffi::OsStr::new("registered-worker-session"),
-    );
+    let mut env = TestEnvGuard::new();
+    set_role_env(&mut env, Some("worker"));
+    env.set("CAS_FACTORY_MODE", "1");
+    env.set("CAS_SESSION_ID", "registered-worker-session");
     let cas_root = tempfile::tempdir().expect("cas root");
     let worktree = tempfile::tempdir().expect("worker worktree");
     let primary = tempfile::tempdir().expect("primary checkout");
@@ -505,14 +482,11 @@ fn worker_edit_on_primary_checkout_is_denied_with_resolved_cas_root() {
 
 #[test]
 fn worker_cd_primary_checkout_git_add_commit_is_denied_with_resolved_cas_root() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("worker"));
-    let _factory = set_env_var("CAS_FACTORY_MODE", std::ffi::OsStr::new("1"));
-    let _name = set_env_var("CAS_AGENT_NAME", std::ffi::OsStr::new("registered-git-worker"));
-    let _session = set_env_var(
-        "CAS_SESSION_ID",
-        std::ffi::OsStr::new("registered-git-worker-session"),
-    );
+    let mut env = TestEnvGuard::new();
+    set_role_env(&mut env, Some("worker"));
+    env.set("CAS_FACTORY_MODE", "1");
+    env.set("CAS_AGENT_NAME", "registered-git-worker");
+    env.set("CAS_SESSION_ID", "registered-git-worker-session");
     let cas_root = tempfile::tempdir().expect("cas root");
     let worktree = tempfile::tempdir().expect("worker worktree");
     let primary = tempfile::tempdir().expect("primary checkout");
@@ -562,11 +536,8 @@ fn worker_cd_primary_checkout_git_add_commit_is_denied_with_resolved_cas_root() 
     );
 }
 
-fn resolved_primary_checkout_git_fixture() -> (
-    tempfile::TempDir,
-    tempfile::TempDir,
-    tempfile::TempDir,
-) {
+fn resolved_primary_checkout_git_fixture()
+-> (tempfile::TempDir, tempfile::TempDir, tempfile::TempDir) {
     let cas_root = tempfile::tempdir().expect("cas root");
     let worktree = tempfile::tempdir().expect("worker worktree");
     let primary = tempfile::tempdir().expect("primary checkout");
@@ -637,16 +608,13 @@ fn assert_resolved_primary_git_write_denied(
 
 #[test]
 fn worker_cd_primary_checkout_git_reset_hard_is_denied_with_resolved_cas_root() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("worker"));
-    let _factory = set_env_var("CAS_FACTORY_MODE", std::ffi::OsStr::new("1"));
-    let _name = set_env_var("CAS_AGENT_NAME", std::ffi::OsStr::new("registered-git-worker"));
-    let _session = set_env_var(
-        "CAS_SESSION_ID",
-        std::ffi::OsStr::new("registered-git-worker-session"),
-    );
-    let _clone = set_env_var("CAS_CLONE_PATH", std::ffi::OsStr::new(""));
-    let _factory_session = set_env_var("CAS_FACTORY_SESSION", std::ffi::OsStr::new(""));
+    let mut env = TestEnvGuard::new();
+    set_role_env(&mut env, Some("worker"));
+    env.set("CAS_FACTORY_MODE", "1");
+    env.set("CAS_AGENT_NAME", "registered-git-worker");
+    env.set("CAS_SESSION_ID", "registered-git-worker-session");
+    env.set("CAS_CLONE_PATH", "");
+    env.set("CAS_FACTORY_SESSION", "");
     let (cas_root, worktree, primary) = resolved_primary_checkout_git_fixture();
     let command = format!(
         "cd '{}' && git reset --hard origin/main",
@@ -657,16 +625,13 @@ fn worker_cd_primary_checkout_git_reset_hard_is_denied_with_resolved_cas_root() 
 
 #[test]
 fn worker_cd_primary_checkout_git_push_refspec_is_denied_with_resolved_cas_root() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("worker"));
-    let _factory = set_env_var("CAS_FACTORY_MODE", std::ffi::OsStr::new("1"));
-    let _name = set_env_var("CAS_AGENT_NAME", std::ffi::OsStr::new("registered-git-worker"));
-    let _session = set_env_var(
-        "CAS_SESSION_ID",
-        std::ffi::OsStr::new("registered-git-worker-session"),
-    );
-    let _clone = set_env_var("CAS_CLONE_PATH", std::ffi::OsStr::new(""));
-    let _factory_session = set_env_var("CAS_FACTORY_SESSION", std::ffi::OsStr::new(""));
+    let mut env = TestEnvGuard::new();
+    set_role_env(&mut env, Some("worker"));
+    env.set("CAS_FACTORY_MODE", "1");
+    env.set("CAS_AGENT_NAME", "registered-git-worker");
+    env.set("CAS_SESSION_ID", "registered-git-worker-session");
+    env.set("CAS_CLONE_PATH", "");
+    env.set("CAS_FACTORY_SESSION", "");
     let (cas_root, worktree, primary) = resolved_primary_checkout_git_fixture();
     let command = format!(
         "cd '{}' && git push origin deadbeef:refs/heads/factory/x",
@@ -677,11 +642,11 @@ fn worker_cd_primary_checkout_git_push_refspec_is_denied_with_resolved_cas_root(
 
 #[test]
 fn worker_write_outside_registered_worktree_is_denied_without_cas_root() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("worker"));
+    let mut env = TestEnvGuard::new();
+    set_role_env(&mut env, Some("worker"));
     let worktree = tempfile::tempdir().expect("worktree");
     let primary = tempfile::tempdir().expect("primary checkout");
-    let _clone = set_env_var("CAS_CLONE_PATH", worktree.path().as_os_str());
+    env.set("CAS_CLONE_PATH", worktree.path().as_os_str());
     let target = primary.path().join("scripts/draft.sh");
     let input = HookInput {
         session_id: "test-session".into(),
@@ -706,12 +671,12 @@ fn worker_write_outside_registered_worktree_is_denied_without_cas_root() {
 
 #[test]
 fn worker_shell_writes_outside_registered_worktree_are_denied_without_cas_root() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("worker"));
-    let _factory = set_env_var("CAS_FACTORY_MODE", std::ffi::OsStr::new("1"));
+    let mut env = TestEnvGuard::new();
+    set_role_env(&mut env, Some("worker"));
+    env.set("CAS_FACTORY_MODE", "1");
     let worktree = tempfile::tempdir().expect("worktree");
     let primary = tempfile::tempdir().expect("primary checkout");
-    let _clone = set_env_var("CAS_CLONE_PATH", worktree.path().as_os_str());
+    env.set("CAS_CLONE_PATH", worktree.path().as_os_str());
 
     for (command, filename) in [
         ("echo draft >", "redirect.sh"),
@@ -748,8 +713,8 @@ fn solo_user_write_without_cas_root_is_not_auto_approved() {
     // When CAS_AGENT_ROLE is unset AND cas_root is None, we must still
     // fall through to Claude Code's normal flow — the bypass is strictly
     // scoped to factory agents.
-    let _g = super::env_lock();
-    let _role = set_role_env(None);
+    let mut env = TestEnvGuard::new();
+    set_role_env(&mut env, None);
     let input = input_for("Write", Some("/test/foo.txt"));
     let out = handle_pre_tool_use(&input, None).expect("handler ok");
     assert!(
@@ -766,8 +731,8 @@ fn solo_user_write_without_cas_root_is_not_auto_approved() {
 fn solo_user_write_is_not_auto_approved() {
     // CAS_AGENT_ROLE unset — the handler must leave the permission decision
     // to Claude Code's normal flow so user-facing approvals keep working.
-    let _g = super::env_lock();
-    let _role = set_role_env(None);
+    let mut env = TestEnvGuard::new();
+    set_role_env(&mut env, None);
     let input = input_for("Write", Some("/test/foo.txt"));
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
@@ -781,8 +746,8 @@ fn solo_user_write_is_not_auto_approved() {
 fn factory_agent_unknown_tool_is_not_auto_approved() {
     // Tools outside the filesystem allowlist (e.g., Agent, Task, MCP) must
     // fall through so their specialized handling still runs.
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("worker"));
+    let mut env = TestEnvGuard::new();
+    set_role_env(&mut env, Some("worker"));
     let input = input_for("WebFetch", None);
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
@@ -798,8 +763,8 @@ fn factory_agent_unknown_tool_without_cas_root_is_not_auto_approved() {
     // hoisted `cas_root=None` path. Locks in the allowlist guard on the
     // rescue branch so a future refactor that drops the `contains()`
     // check fails the suite instead of silently broadening the bypass.
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("worker"));
+    let mut env = TestEnvGuard::new();
+    set_role_env(&mut env, Some("worker"));
     let input = input_for("WebFetch", None);
     let out = handle_pre_tool_use(&input, None).expect("handler ok");
     assert!(
@@ -841,42 +806,11 @@ fn factory_agent_unknown_tool_without_cas_root_is_not_auto_approved() {
 // section. All of those short-circuit with deny, so the auto-approve
 // never overrides them either.
 
-// ----------------------------------------------------------------------------
-// Env helpers — use the shared process-wide mutex from mod.rs so that
-// concurrent tests across sibling modules don't race on CAS_AGENT_ROLE.
-// ----------------------------------------------------------------------------
-
-struct RoleGuard {
-    role: Option<String>,
-    clone_path: Option<std::ffi::OsString>,
-}
-
-impl Drop for RoleGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match &self.role {
-                Some(v) => std::env::set_var("CAS_AGENT_ROLE", v),
-                None => std::env::remove_var("CAS_AGENT_ROLE"),
-            }
-            match &self.clone_path {
-                Some(v) => std::env::set_var("CAS_CLONE_PATH", v),
-                None => std::env::remove_var("CAS_CLONE_PATH"),
-            }
-        }
-    }
-}
-
-fn set_role_env(role: Option<&str>) -> RoleGuard {
-    let prev = std::env::var("CAS_AGENT_ROLE").ok();
-    let clone_path = std::env::var_os("CAS_CLONE_PATH");
-    unsafe {
-        match role {
-            Some(v) => std::env::set_var("CAS_AGENT_ROLE", v),
-            None => std::env::remove_var("CAS_AGENT_ROLE"),
-        }
-        std::env::remove_var("CAS_CLONE_PATH");
-    }
-    RoleGuard { role: prev, clone_path }
+// Role-only fixtures also clear the worker clone path. Workspace tests below
+// explicitly set it through the same guard when they need a real worktree.
+fn set_role_env(env: &mut TestEnvGuard, role: Option<&str>) {
+    super::set_role_env(env, role);
+    env.remove("CAS_CLONE_PATH");
 }
 
 #[test]

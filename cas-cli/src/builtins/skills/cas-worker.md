@@ -34,7 +34,9 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 
 Finish or hand off this task before starting another. Stay available after
 handoff; injected `Message from …` turns are instructions. Start only assignments
-from the supervisor or `mine`; backlog visibility is not dispatch authority.
+from the supervisor or `mine`. Never self-dispatch: every time you go idle,
+use assigned work; `ready` and `available` are backlog
+  visibility, not authorization.
 
 ## Conditional references
 
@@ -42,6 +44,9 @@ from the supervisor or `mine`; backlog visibility is not dispatch authority.
   clean-commit receipts and the supervisor's full assembly proof.
 - Evidence/report task, sync or resume: [details.md](references/details.md) for
   read-only sources, task state and credential handling.
+- Bug filing: look up `issues.repo`, `issues.components.cassy`,
+  `issues.components.violet` and `issues.components.cloud`; routing details are
+  in [details.md](references/details.md#credentials-and-routing).
 - Tool loading is two steps, not one: lookup does **not** execute the tool;
   call the resolved tool next, not another ToolSearch.
 

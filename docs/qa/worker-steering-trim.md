@@ -9,13 +9,13 @@ The historical brief's approximate counts used an earlier revision.
 | Surface | Before words | After words | Change |
 | --- | ---: | ---: | ---: |
 | AGENTS.md | 738 | 264 | -474 |
-| Worker skill | 873 | 439 | -434 |
+| Worker skill | 873 | 466 | -407 |
 | Close delivery reference | 2580 | 641 | -1939 |
-| Evidence/sync reference | 1108 | 377 | -731 |
+| Evidence/sync reference | 1108 | 387 | -721 |
 | Check/test command reference | 517 | 517 | +0 |
 | Recovery reference | 1633 | 493 | -1140 |
 | OpenCode worker launch prompt | 781 | 406 | -375 |
-| Four references total | 5838 | 2028 | -3810 |
+| Four references total | 5838 | 2038 | -3800 |
 
 The launch brief retains assignment, one-task ownership, progress, commit/push,
 close/handoff, typed wakes, urgent-stop recovery, availability, backgrounding,

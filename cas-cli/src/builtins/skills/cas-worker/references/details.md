@@ -1,6 +1,7 @@
 # Details — Evidence, Sync and Resume
 
 Read for a report/evidence task, a requested sync or a context-resume handoff.
+`ready` and `available` provide read-only backlog visibility — not self-dispatch.
 The task/coordination schemas supply exact fields and valid actions; use
 `cas-search` for exploratory retrieval and `rg` for exact code matches.
 

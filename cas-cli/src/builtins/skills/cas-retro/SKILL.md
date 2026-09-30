@@ -20,6 +20,7 @@ release and for a weekly review; this skill installs no schedule. Improve the
 agent's environment by filing work, rather than patching it during the review.
 
 ## Procedure
+
 1. Read `cas-writing-for-agents`. Bind the review to a project, epic and release
    run directory, or the requested weekly interval. If unspecified, use the
    current project's latest completed release; record its version, tested SHA,
@@ -61,6 +62,7 @@ agent's environment by filing work, rather than patching it during the review.
    epic note are the output; write no prose report file.
 
 ## Categories and mechanisms
+
 | Category | Evidence to seek | Proposed mechanism |
 | --- | --- | --- |
 | Navigation | Repeated searches, hidden cross-file dependencies | Repair an existing map or add a navigation pointer. |

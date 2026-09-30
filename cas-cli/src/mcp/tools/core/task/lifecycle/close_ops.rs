@@ -4717,6 +4717,19 @@ impl CasCore {
                 "DELIVERY RECEIPT REJECTED: merge_base_sha does not match the live source/target merge base.",
             ));
         }
+        // Receipt acceptance is an alternate close entry: bind snapshot
+        // approval before the immutable proof cycle can be persisted.
+        if let Some(error) = snapshot_approval::rejection(
+            &context.repo_root,
+            Some(&input.merge_base_sha),
+            Some(&input.commit_sha),
+            &[],
+            &task.notes,
+            &task.id,
+            crate::mcp::tools::core::guidance::caller_prefix(),
+        ) {
+            return Ok(Self::tool_error(error));
+        }
         let worker_path = match self.resolve_worker_worktree_path(task, Some(&context)) {
             Ok(Some(path)) => path,
             Ok(None) => {

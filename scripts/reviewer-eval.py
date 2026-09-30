@@ -73,7 +73,7 @@ def context(case, axis, sources):
     return public
 
 
-def schema(axis, cross=False):
+def schema(axis, cross=False, public=None):
     def obj(properties):
         return {'type': 'object', 'properties': properties,
                 'required': list(properties), 'additionalProperties': False}
@@ -83,7 +83,16 @@ def schema(axis, cross=False):
     if cross:
         return obj({'decisions': array(obj({'commit': string,
                     'decision': {'enum': ['accept', 'revert']}, 'reason': string}))})
-    finding = obj({'id': string, 'rank': {'type': 'integer'}, 'source': string,
+    source = string
+    if public and axis == 'spec':
+        source = {'enum': public['criteria']}
+    elif public and axis == 'standards':
+        allowed = [rule['id'] for rule in public['promoted_rules']]
+        if public['coding_standards'] is not None:
+            allowed.append('CODING_STANDARDS.md')
+        if allowed:
+            source = {'enum': allowed}
+    finding = obj({'id': string, 'rank': {'type': 'integer'}, 'source': source,
                    'evidence': string, 'uncertain': {'type': 'boolean'},
                    'judgement': {'type': 'boolean'}, 'commit': {'type': ['string', 'null']}})
     return obj({'axis': {'enum': [axis]},
@@ -230,10 +239,10 @@ def clone(case, axis, out):
     return checkout
 
 
-def invoke(checkout, directory, text, axis, timeout, cross=False):
+def invoke(checkout, directory, text, axis, timeout, cross=False, public=None):
     directory.mkdir(parents=True, exist_ok=True)
     (directory / 'prompt.txt').write_text(text)
-    write(directory / 'schema.json', schema(axis, cross))
+    write(directory / 'schema.json', schema(axis, cross, public))
     config_path = Path(os.environ.get('CODEX_HOME', str(Path.home()/'.codex')))/'config.toml'
     config = tomllib.loads(config_path.read_text()) if config_path.exists() else {}
     argv = ['codex', 'exec', '--ephemeral', '--json', '-s',
@@ -302,6 +311,11 @@ def validate_report(report, case, axis, checkout):
         raise ValueError('Standards report contains Spec material')
     if axis == 'spec' and [v['criterion'] for v in report['criteria']] != task_context(case)['criteria']:
         raise ValueError('Spec criteria must quote every exact source line in order')
+    if axis == 'spec' and any(f['source'] not in task_context(case)['criteria'] for f in findings(report)):
+        raise ValueError('Spec finding must quote its exact source criterion')
+    ids = [f['id'] for f in findings(report)]
+    if len(ids) != len(set(ids)):
+        raise ValueError('Finding identifiers must be unique')
     if report['status'] == 'approved' and any(v['status'] != 'approved' for v in report['criteria']):
         raise ValueError('Approved report with unapproved criterion')
     commits = git('rev-list', '--reverse', f'{case["head_sha"]}..HEAD', cwd=checkout).splitlines()
@@ -329,11 +343,12 @@ def review(case, axis, sources, out, timeout, fix_transport='native'):
         return json.loads((directory / 'result.json').read_text())
     checkout = clone(case, axis, out)
     text = prompt(case, axis, sources, fix_transport)
+    public = context(case, axis, sources)
     if fix_transport == 'bridge' and axis != 'baseline':
         with CommitBridge(checkout, axis, directory):
-            report, telemetry = invoke(checkout, directory, text, axis, timeout)
+            report, telemetry = invoke(checkout, directory, text, axis, timeout, public=public)
     else:
-        report, telemetry = invoke(checkout, directory, text, axis, timeout)
+        report, telemetry = invoke(checkout, directory, text, axis, timeout, public=public)
     telemetry['commit_execution'] = fix_transport if axis != 'baseline' else 'none'
     error, commits = None, []
     try:

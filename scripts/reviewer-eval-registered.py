@@ -88,7 +88,7 @@ def main():
             validate_context(axis, context, request, binding)
             result = call(binding, axis, 'model', {'operation': 'review', 'axis': axis,
                           'context': context, 'reference': request['sources'][axis],
-                          'schema': evaluation.schema(axis),
+                          'schema': evaluation.schema(axis, public=request['contexts'][axis]),
                           'no_rust_compilation': True, 'apply': False}, out)
             report, telemetry = result['report'], result['telemetry']
             replay_case = {'head_sha': binding['head_sha'], 'task_context': {
@@ -104,7 +104,9 @@ def main():
                  'head_after': seal['reported_tip']})
         baseline = call(binding, 'baseline', 'model', {'operation': 'baseline',
                        'dispatch_id': dispatch, 'body': request['sources']['baseline'],
-                       'context': request['contexts']['baseline'], 'no_rust_compilation': True}, out)
+                       'context': dict(request['contexts']['baseline'],
+                                       base_commit=binding['base_sha'], head_commit=binding['head_sha']),
+                       'schema': evaluation.schema('baseline'), 'no_rust_compilation': True}, out)
         if not baseline.get('verification_receipt'):
             raise ValueError('Registered baseline requires a real bound verification receipt')
         evaluation.write(out/'baseline'/'result.json', {'case_id': request['case_id'], 'axis': 'baseline',
@@ -126,6 +128,11 @@ def main():
             for decision in result['decisions']:
                 receipt = shadow(binding, axis, dict(op='cross_check', round_id=round_id, **decision), out)
                 evaluation.write(out/axis/'cross-check'/f'{decision["commit"]}.receipt.json', receipt)
+                matching = [r for r in receipt if r['commit'] == decision['commit'] and r['axis'] == axis]
+                if len(matching) != 1 or matching[0]['state'] != 'complete':
+                    raise ValueError('Registered cross-check lacks a complete authenticated receipt')
+                if matching[0].get('revert_commit'):
+                    reverts.append({'fix': decision['commit'], 'revert': matching[0]['revert_commit']})
             evaluation.write(out/axis/'cross-check'/'result.json', dict(result, reverts=reverts,
                                                                        authority='registered', error=None))
     comparison = shadow(binding, 'supervisor', {'op': 'show', 'round_id': round_id}, out)

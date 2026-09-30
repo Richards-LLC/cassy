@@ -92,7 +92,7 @@ class ReplayBoundaries(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Every actual fix'):
             evaluation.validate_report(report, self.case, 'spec', checkout)
         commit = self.git('rev-parse', 'HEAD', cwd=checkout)
-        report['findings'] = [{'id': 'f1', 'commit': commit, 'uncertain': False}]
+        report['findings'] = [{'id': 'f1', 'source': 'The caller receives its result.', 'commit': commit, 'uncertain': False}]
         self.assertEqual(evaluation.validate_report(report, self.case, 'spec', checkout), [commit])
         report['findings'][0]['uncertain'] = True
         with self.assertRaisesRegex(ValueError, 'Uncertain'):

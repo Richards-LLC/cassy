@@ -24950,7 +24950,8 @@ mod merge_state_gate_tests {
     #[test]
     #[ignore = "requires the full v34 repository history"]
     fn historical_delivery_replay_cas_0930() {
-        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let root = crate::test_paths::workspace_root();
+        let repo = root.as_path();
         let target = "c2f3b0fa736a3a462f5f917642623cdf26607558";
         let mut failures = Vec::new();
         for (id, anchor) in [("cas-3400", "df25d701"), ("cas-bf07", "3d004014"),

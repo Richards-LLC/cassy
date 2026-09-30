@@ -45,6 +45,8 @@ fn worker_rust_builds_are_denied_naming_the_assembly_rule() {
         "cargo nextest run -p cas -E 'test(one)' && cargo build",
         "cargo nextest run -p cas -E 'test(one)'; cargo build",
         "cargo nextest run -p cas -E 'test(one)' | tee check.log",
+        "cargo nextest run\n-p cas -E 'test(one)'",
+        "cargo nextest run -p cas -E 'test(one)'\ncargo build",
         "cargo test",
         "cargo test -p cas --no-fail-fast",
         "cargo check -p cas --lib --tests",

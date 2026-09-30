@@ -1078,6 +1078,9 @@ pub fn handle_pre_tool_use(
 /// commands, shell substitutions, toolchains, environment overrides or wrappers.
 fn worker_check_command(command: &str) -> Option<(Vec<String>, String)> {
     let command = command.trim();
+    if command.contains(['\n', '\r']) {
+        return None;
+    }
     // Single quotes make the mandatory filter a literal shell argument. Match
     // the suffix after the filter so '&' within a filter is not backgrounding.
     if command.starts_with("cargo nextest ") {

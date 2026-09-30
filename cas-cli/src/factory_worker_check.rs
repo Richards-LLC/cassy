@@ -67,7 +67,7 @@ pub(crate) fn check_packages(args: &[String]) -> Option<Vec<String>> {
 /// Only positive named-test selectors may be joined by union/intersection.
 /// Exclude all(), negation, regex/globs and predicates that select a whole binary.
 fn named_filter(filter: &str) -> bool {
-    regex::Regex::new(r"^\s*test\(=?[A-Za-z0-9_][A-Za-z0-9_:.-]*\)(?:\s*[|&]\s*test\(=?[A-Za-z0-9_][A-Za-z0-9_:.-]*\))*\s*$")
+    regex::Regex::new(r"^[ \t]*test\(=?[A-Za-z0-9_][A-Za-z0-9_:.-]*\)(?:[ \t]*[|&][ \t]*test\(=?[A-Za-z0-9_][A-Za-z0-9_:.-]*\))*[ \t]*$")
         .is_ok_and(|pattern| pattern.is_match(filter))
 }
 
@@ -541,6 +541,7 @@ mod tests {
             "test(one) | all()",
             "test(one) & !test(two)",
             "test(one); echo bad",
+            "test(one)\n",
         ] {
             let mut args = words("nextest run -p cas -E");
             args.push(filter.into());

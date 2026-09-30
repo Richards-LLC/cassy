@@ -1087,13 +1087,18 @@ async fn cas7a69_unified_create_and_update_accept_all_proof_target_wire_forms() 
     let cas_dir = temp.path().join(".cas");
     let service = CasService::new(core, None);
     let store = open_task_store(&cas_dir).unwrap();
-    for input in [
+    for (form, input) in [
         serde_json::json!(["cas --lib rules", "cas --lib maintenance_jobs"]),
         serde_json::json!(r#"["cas --lib rules", "cas --lib maintenance_jobs"]"#),
         serde_json::json!("cas --lib rules, cas --lib maintenance_jobs"),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // Distinct titles: the duplicate-task guard rejects a repeated title.
+        let title = format!("Proof forms regression, wire form {form}");
         let created = unified_task(&service, serde_json::json!({
-            "action":"create", "title":"Proof forms regression", "risk":"blast-radius", "proof_targets":input
+            "action":"create", "title":title, "risk":"blast-radius", "proof_targets":input
         })).await;
         let id = extract_task_id(&created).unwrap().to_string();
         assert_eq!(

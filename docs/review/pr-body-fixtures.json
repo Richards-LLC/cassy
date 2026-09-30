@@ -10,7 +10,7 @@
       "risk": "blast-radius",
       "door": "two-way"
     },
-    "expected": "## Summary\n\n```text\nbase -> change\nM\tinput.txt\n```\n\n## Evidence\n\n- **Before:** same command: fails at base\n- **After:** same command: passes at change\n\n[QA bundle](https://example.test/qa/bundle.json)\n\n## Merge Danger\n\n**Risk:** blast-radius\n\n**Door:** two-way\n"
+    "expected": "## Summary\n\n```text\nbase -> change\nM\tinput.txt\n```\n\n## Evidence\n\n- **Before:** same command: fails at base\n- **After:** same command: passes at change\n\n[QA bundle](https://example.test/qa/bundle.json)\n\n\n## Merge Danger\n\n**Risk:** blast-radius\n\n**Door:** two-way\n"
   },
   {
     "name": "release",
@@ -23,7 +23,7 @@
       "risk": "platform, concurrency",
       "door": "one-way"
     },
-    "expected": "## Summary\n\n```diff\n- v1\n+ v2\n```\n\n## Evidence\n\n- **Before:** v1 output\n- **After:** v2 output\n\nbase-vs-change: /proof/results.log\n\n### CHANGELOG\n\n## [2.0.0]\n\n- Change\n\n### Gate rows\n\n```text\nPASS workspace-tests\nFAIL macos-check\n```\n\n## Merge Danger\n\n**Risk:** platform, concurrency\n\n**Door:** one-way\n"
+    "expected": "## Summary\n\n```diff\n- v1\n+ v2\n```\n\n## Evidence\n\n- **Before:** v1 output\n- **After:** v2 output\n\nbase-vs-change: /proof/results.log\n\n### CHANGELOG\n\n## [2.0.0]\n\n- Change\n\n### Gate rows\n\n```text\nPASS workspace-tests\nFAIL macos-check\n```\n\n\n## Merge Danger\n\n**Risk:** platform, concurrency\n\n**Door:** one-way\n"
   },
   {
     "name": "literal-evidence",
@@ -36,6 +36,6 @@
       "risk": "not declared",
       "door": "not declared"
     },
-    "expected": "## Summary\n\n```text\nchange\n```\n\n## Evidence\n\n- **Before:** {{after}}\n- **After:** literal $() and `cmd`\n\nqa-bundle: /proof/{{risk}}.json\n\n## Merge Danger\n\n**Risk:** not declared\n\n**Door:** not declared\n"
+    "expected": "## Summary\n\n```text\nchange\n```\n\n## Evidence\n\n- **Before:** {{after}}\n- **After:** literal $() and `cmd`\n\nqa-bundle: /proof/{{risk}}.json\n\n\n## Merge Danger\n\n**Risk:** not declared\n\n**Door:** not declared\n"
   }
 ]

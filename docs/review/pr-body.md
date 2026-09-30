@@ -9,6 +9,7 @@
 
 {{evidence}}
 {{details}}
+
 ## Merge Danger
 
 **Risk:** {{risk}}

@@ -2963,9 +2963,8 @@ impl FactoryDaemon {
                 self.session_summarizer.note_output(data.len());
                 // Forward to any active web viewers
                 self.forward_pane_output(&pane_id, &data);
-                // Forward to GUI and WebSocket clients
+                // The terminal exchange enqueues WS output after these observers.
                 self.forward_pane_output_to_gui(&pane_id, &data);
-                self.forward_pane_output_to_ws(&pane_id, &data);
             }
             cas_mux::MuxEvent::PaneExited {
                 pane_id,

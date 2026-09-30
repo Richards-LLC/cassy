@@ -38,7 +38,9 @@ function transport(multiplex = false) {
     requests.push({ path, authorization });
     if (path === "/v1/health") return new Response("{}");
     if (authorization?.includes("opaque-needs-pairing")) {
-      return Response.json({ error: "credential_revoked" }, { status: 403 });
+      // A removed pairing withholds CORS on authenticated reads while its
+      // credential-free health endpoint remains reachable.
+      throw new TypeError("Failed to fetch");
     }
     if (path === "/v1/machine") {
       clock += 24;
@@ -98,7 +100,7 @@ describe("Commander live connection lifecycle", () => {
     const old = supervisor(prior, (state) => states.set(prior.id, state));
     const connections = new Map([[prior.id, old]]);
     old.start();
-    await vi.waitFor(() => expect(old.snapshot()).toMatchObject({ phase: "failed", stage: "auth" }));
+    await vi.waitFor(() => expect(old.snapshot()).toMatchObject({ phase: "failed", stage: "auth", authFailure: "needs-pairing" }));
 
     const replacement = await storedMachine("replacement");
     const installed = replaceMachineConnection(replacement, connections, states, (machine) => supervisor(machine));

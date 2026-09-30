@@ -43,10 +43,7 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
     });
     // Observe a real background request, rather than waiting for a string in
     // main.ts to claim that a render happened.
-    await Promise.all([
-      page.waitForResponse((response) => new URL(response.url()).pathname === "/v1/sessions"),
-      page.clock.runFor(5_500),
-    ]);
+    await page.waitForResponse((response) => new URL(response.url()).pathname === "/v1/sessions");
     await expect(composer).toHaveValue("Please verify the gate first.\nKeep this half-written reply.");
     await expect(composer).toBeFocused();
     expect(await composer.evaluate((field: HTMLTextAreaElement) => ({

@@ -261,35 +261,46 @@ async fn recorded_delivery_refuses_epic_update_with_exact_supervisor_command_cas
     store.add(&epic).unwrap();
     let service = CasService::new(CasCore::with_daemon(cas_root.clone(), None, None), None);
     for state in [
-        WorkerDeliveryState::AwaitingMerge,
-        WorkerDeliveryState::ChangesRequested,
+        Some(WorkerDeliveryState::AwaitingMerge),
+        Some(WorkerDeliveryState::ChangesRequested),
+        None,
     ] {
-        let mut task = Task::new(format!("cas-e258-{state}"), "recorded delivery".into());
-        task.status = TaskStatus::InProgress;
+        let suffix = state
+            .map(|state| state.to_string())
+            .unwrap_or_else(|| "parked-projection".into());
+        let mut task = Task::new(format!("cas-e258-{suffix}"), "recorded delivery".into());
+        task.status = if state.is_some() {
+            TaskStatus::InProgress
+        } else {
+            TaskStatus::AwaitingMerge
+        };
         task.deliverables.work_target = Some(WorkTarget {
             repo_selector: "remote:github.com/org/updated-target".into(),
             target_branch: "main".into(),
         });
         store.add(&task).unwrap();
-        let sha = git_stdout(&repo.root, &["rev-parse", "HEAD"]);
-        let receipt = cas_store::build_worker_completion_receipt(
-            &WorkerCompletionReceiptInput {
-                task_id: task.id.clone(),
-                worker_agent_id: "worker-session".into(),
-                repo_selector: "remote:github.com/org/updated-target".into(),
-                source_branch: "factory/alice".into(),
-                commit_sha: sha.clone(),
-                merge_base_sha: sha.clone(),
-                target_branch: "main".into(),
-                target_sha: sha,
-                proof_reference: "fixture".into(),
-                scope_summary: "recorded scope".into(),
-                artifact_path: None,
-            },
-            "alice",
-            chrono::Utc::now(),
-        );
-        cas_store::create_worker_delivery(&cas_root, &receipt, state, "worker-session").unwrap();
+        if let Some(state) = state {
+            let sha = git_stdout(&repo.root, &["rev-parse", "HEAD"]);
+            let receipt = cas_store::build_worker_completion_receipt(
+                &WorkerCompletionReceiptInput {
+                    task_id: task.id.clone(),
+                    worker_agent_id: "worker-session".into(),
+                    repo_selector: "remote:github.com/org/updated-target".into(),
+                    source_branch: "factory/alice".into(),
+                    commit_sha: sha.clone(),
+                    merge_base_sha: sha.clone(),
+                    target_branch: "main".into(),
+                    target_sha: sha,
+                    proof_reference: "fixture".into(),
+                    scope_summary: "recorded scope".into(),
+                    artifact_path: None,
+                },
+                "alice",
+                chrono::Utc::now(),
+            );
+            cas_store::create_worker_delivery(&cas_root, &receipt, state, "worker-session")
+                .unwrap();
+        }
         let before = durable_snapshot(&cas_root);
         let error = service
             .task(Parameters(task_request(serde_json::json!({
@@ -310,6 +321,80 @@ async fn recorded_delivery_refuses_epic_update_with_exact_supervisor_command_cas
             "rejection must be read-only"
         );
         assert!(store.get_dependencies(&task.id).unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn configured_standalone_target_and_repo_alias_follow_epic_but_pins_stay_cas_e258() {
+    use cas::types::TaskType;
+
+    let _env = TestEnvGuard::temp_home();
+    let repo = GitRepo::new();
+    run_git(&repo.root, &["branch", "integration"]);
+    run_git(&repo.root, &["branch", "epic/lane"]);
+    let cas_root = init_cas_dir(&repo.root).unwrap();
+    std::fs::write(
+        cas_root.join("config.toml"),
+        "[project]\ncanonical_id = \"fixture/cas-e258\"\n[factory]\nepic_base_branch = \"integration\"\n[worktrees]\nenabled = false\n",
+    )
+    .unwrap();
+    let store = open_task_store(&cas_root).unwrap();
+    let mut epic = Task::new("cas-e258-alias-epic".into(), "epic".into());
+    epic.task_type = TaskType::Epic;
+    epic.branch = Some("epic/lane".into());
+    epic.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "project:fixture/cas-e258".into(),
+        target_branch: "epic/lane".into(),
+    });
+    store.add(&epic).unwrap();
+    let service = CasService::new(CasCore::with_daemon(cas_root, None, None), None);
+    for (id, selector, branch, expected) in [
+        (
+            "default",
+            "remote:github.com/org/updated-target",
+            "integration",
+            "epic/lane",
+        ),
+        (
+            "pin",
+            "remote:github.com/org/updated-target",
+            "release/operator",
+            "release/operator",
+        ),
+        (
+            "foreign",
+            "remote:github.com/other/repo",
+            "integration",
+            "integration",
+        ),
+    ] {
+        let mut task = Task::new(format!("cas-e258-{id}"), id.into());
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: selector.into(),
+            target_branch: branch.into(),
+        });
+        store.add(&task).unwrap();
+        service
+            .task(Parameters(task_request(serde_json::json!({
+                "action": "update", "id": task.id, "epic": epic.id
+            }))))
+            .await
+            .unwrap();
+        let target = store
+            .get(&task.id)
+            .unwrap()
+            .deliverables
+            .work_target
+            .unwrap();
+        assert_eq!(target.target_branch, expected, "{id}");
+        assert_eq!(
+            target.repo_selector,
+            if id == "default" {
+                "project:fixture/cas-e258"
+            } else {
+                selector
+            }
+        );
     }
 }
 

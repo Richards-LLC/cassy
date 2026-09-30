@@ -532,6 +532,14 @@ reason to waive additive-only/value-only posture checks and the receipt epoch
 check for a retroactive record task. Close records the decision. Repository
 binding, ancestry, non-empty delivery, and target-content checks still apply.
 
+A deliberately superseded delivery that still fails automatic content attribution
+can close with `supervisor_override=true` and
+`reason="reviewed-drop: <superseding SHA>[,<SHA>...] -- <why>"`. Each named commit
+must strictly descend from the delivery anchor, be reachable on the authoritative
+target, and touch a dropped path. Together they must cover every dropped path.
+Cassy records the full resolved commit IDs, anchor, measured target, paths and
+review. A narrative without commit receipts cannot waive the content gate.
+
 An empty `execution_note` update may clear a constraint after approval when its
 exact repository proof is unchanged. Pending, skipped, unbound, and changed
 proofs remain locked; changing other scope fields or replacing the constraint

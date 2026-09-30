@@ -10814,7 +10814,7 @@ fn validated_delivery_drop_review(
     };
     let target =
         resolve_branch_sha(repo, &target).ok_or("delivery review target does not resolve")?;
-    let anchor = resolve_task_commit_receipt_sha(repo, anchor)?;
+    let anchor = resolve_branch_sha(repo, &format!("{anchor}^{{commit}}")).ok_or("delivery review anchor does not resolve to a commit")?;
     if !git_commit_is_ancestor(repo, &anchor, &target) {
         return Err("delivery review anchor is not reachable on the target".into());
     }
@@ -10983,6 +10983,7 @@ fn anchored_delivery_content_gate(
                  `{parent_branch}`, but its tree effect is absent from the current \
                  target tree. Reachability alone cannot prove delivery.\n\n\
                  Dropped path(s): {}{}\n\n\
+                 Cassy measured the missing tree effect without a later replacement proof. \
                  Restore the missing delivery content on the assigned factory branch, \
                  commit it, and retry close. If the content was intentionally superseded, \
                  a live registered supervisor may close with supervisor_override=true \
@@ -18801,13 +18802,10 @@ pub(crate) fn git_commit_is_ancestor(
 /// first-parent patch can be reverse-applied there. When nearby sibling work
 /// makes that context-sensitive proof fail, zero-context added hunks provide
 /// a second positive proof that the delivery's own lines survive. A failure
-/// is then classified at the first target
-/// first-parent commit where that proof stopped holding. An ordinary commit,
-/// or a merge whose contributing side already descends from and evolves the
-/// delivery, is explicit supersession. A merge whose changed side has no such
-/// post-delivery evolution is a conflict-
-/// resolution loss. This distinction prevents a later refactor from being
-/// misreported as dropped content while still detecting the #324 shape.
+/// is classified using the missing lines' actual descendant replacement
+/// commits and their mapped first-parent line ranges. Pure deletions and
+/// unrelated edits remain dropped; an integration merge alone never proves
+/// supersession. This preserves the #324 conflict-resolution loss fence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DeliveryContentPresence {
     Present {
@@ -19261,7 +19259,7 @@ fn delivery_content_presence_on_target_for_paths(
         .map(|path| String::from_utf8(path.to_vec()))
         .filter(|path| {
             selected_paths
-                .is_none_or(|selected| path.as_ref().is_ok_and(|path| selected.contains(path)))
+                .is_none_or(|selected| path.as_ref().map_or(true, |path| selected.contains(path)))
         })
         .collect::<Result<Vec<_>, _>>();
     let paths = match paths {
@@ -24262,8 +24260,9 @@ mod merge_state_gate_tests {
         assert!(git_commit_is_ancestor(p, &merged_branch_tip, "main"));
         assert_eq!(
             delivery_content_presence_on_target(p, &first_attempt_anchor, "main"),
-            DeliveryContentPresence::Dropped {
-                paths: vec!["viktor.rs".to_string()]
+            DeliveryContentPresence::Superseded {
+                paths: vec!["viktor.rs".to_string()],
+                commits: vec![merged_branch_tip.clone()],
             },
             "precondition: the old anchor's exact hunk was intentionally replaced"
         );
@@ -24934,6 +24933,91 @@ mod merge_state_gate_tests {
         git(p, &["commit", "-qm", "unrelated later path edit"]);
         assert_eq!(delivery_content_presence_on_target(p, &delivery, "main"),
             DeliveryContentPresence::Dropped { paths: vec!["work.rs".into()] });
+    }
+
+    #[test]
+    fn delivery_drop_review_requires_reachable_path_receipts_cas_0930() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        for path in ["work.rs", "other.rs"] {
+            std::fs::write(p.join(path), "delivered();\n").unwrap();
+        }
+        git(p, &["add", "."]);
+        git(p, &["commit", "-qm", "cas-test1: delivery"]);
+        let delivery = head_sha(p);
+        git(p, &["checkout", "main"]);
+        git(p, &["merge", "--no-ff", "-s", "ours", "factory/worker", "-m", "reviewed resolution"]);
+        let resolution = head_sha(p);
+        let paths = vec!["work.rs".into(), "other.rs".into()];
+        let review = format!("reviewed-drop: {} -- reviewed replacement", &resolution[..10]);
+        let accepted = validated_delivery_drop_review(p, &delivery, "main", &paths, Some(&review))
+            .unwrap().unwrap();
+        assert!(accepted.contains(&resolution) && accepted.contains(&delivery) && accepted.contains("other.rs"));
+        for named in [&delivery, "--all", "deadbeef"] {
+            assert!(validated_delivery_drop_review(p, &delivery, "main", &paths,
+                Some(&format!("reviewed-drop: {named} -- rejected"))).is_err());
+        }
+        assert!(validated_delivery_drop_review(p, &delivery, "main", &paths,
+            Some("reviewed-drop: narrative without commits")).is_err());
+        std::fs::write(p.join("work.rs"), "only one path();\n").unwrap();
+        git(p, &["add", "work.rs"]);
+        git(p, &["commit", "-qm", "edit one dropped path"]);
+        let partial = head_sha(p);
+        assert!(validated_delivery_drop_review(p, &delivery, "main", &paths,
+            Some(&format!("reviewed-drop: {partial} -- incomplete coverage"))).unwrap_err().contains("other.rs"));
+        std::fs::write(p.join("unrelated.rs"), "unrelated();\n").unwrap();
+        git(p, &["add", "unrelated.rs"]);
+        git(p, &["commit", "-qm", "unrelated"]);
+        let unrelated = head_sha(p);
+        assert!(validated_delivery_drop_review(p, &delivery, "main", &paths,
+            Some(&format!("reviewed-drop: {unrelated} -- wrong path"))).unwrap_err().contains("does not touch"));
+        git(p, &["checkout", "-b", "unmerged"]);
+        std::fs::write(p.join("work.rs"), "not merged();\n").unwrap();
+        git(p, &["add", "work.rs"]);
+        git(p, &["commit", "-qm", "unmerged replacement"]);
+        let unmerged = head_sha(p);
+        assert!(validated_delivery_drop_review(p, &delivery, "main", &paths,
+            Some(&format!("reviewed-drop: {unmerged} -- not landed"))).is_err());
+    }
+
+    #[test]
+    fn deleting_a_delivered_line_still_rejects_cas_0930() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        std::fs::write(p.join("work.rs"), "delivered();\nkeep();\n").unwrap();
+        git(p, &["add", "work.rs"]);
+        git(p, &["commit", "-qm", "cas-test1: delivery"]);
+        let delivery = head_sha(p);
+        git(p, &["checkout", "main"]);
+        git(p, &["merge", "--no-ff", "factory/worker", "-m", "accept delivery"]);
+        std::fs::write(p.join("work.rs"), "keep();\n").unwrap();
+        git(p, &["add", "work.rs"]);
+        git(p, &["commit", "-qm", "delete delivered line"]);
+        assert_eq!(delivery_content_presence_on_target(p, &delivery, "main"),
+            DeliveryContentPresence::Dropped { paths: vec!["work.rs".into()] });
+    }
+
+    /// Replays immutable production delivery anchors. Run explicitly in a
+    /// checkout retaining the v34 history; normal shallow CI uses the fixtures.
+    #[test]
+    #[ignore = "requires the full v34 repository history"]
+    fn historical_delivery_replay_cas_0930() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let target = "c2f3b0fa736a3a462f5f917642623cdf26607558";
+        for (id, anchor) in [("cas-3400", "df25d701"), ("cas-bf07", "3d004014"),
+            ("cas-d636", "92554045"), ("cas-598e", "04ba55c1")] {
+            let anchor = resolve_task_commit_receipt_sha(repo, anchor).expect("historical anchor");
+            let mut task = worker_task("historical");
+            task.id = id.into();
+            task.status = TaskStatus::AwaitingMerge;
+            task.deliverables.factory_branch_anchor = Some(anchor.clone());
+            let mut window = window_at(0, "historical delivery replay");
+            window.identity = TaskCommitIdentity { task_id: Some(id.into()), known_commits: vec![anchor.clone()] };
+            let outcome = anchored_delivery_content_gate(&task, repo, &anchor, target,
+                Some(&window), &window.identity, None, None);
+            eprintln!("historical replay {id} anchor={anchor} target={target}: {outcome:?}");
+            assert!(outcome.is_none(), "{id}: {outcome:?}");
+        }
     }
 
     /// cas-3f8c: a real drop still rejects, and the refusal now names the
@@ -25650,15 +25734,15 @@ mod merge_state_gate_tests {
         .unwrap();
         git(p, &["add", "credits.rs"]);
         git(p, &["commit", "-q", "-m", "refactor: modernize restore"]);
+        let refactor = rev_parse_local(p, "HEAD");
         git(p, &["checkout", "-q", "main"]);
         git(p, &["merge", "-q", "--no-ff", "factory/refactor"]);
-        let refactor_merge = rev_parse_local(p, "HEAD");
 
         assert_eq!(
             delivery_content_presence_on_target(p, &delivery, "main"),
             DeliveryContentPresence::Superseded {
                 paths: vec!["credits.rs".to_string()],
-                commits: vec![refactor_merge],
+                commits: vec![refactor],
             }
         );
         let mut task = worker_task("worker");

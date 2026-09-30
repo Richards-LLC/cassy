@@ -386,6 +386,27 @@ pub(super) fn merge_tip_content_presence(
         }
     }
 
+    // A supervisor can put the task lane on the merge's second-parent
+    // side. Its identified content still belongs to the task; restricting
+    // attribution to first-parent history would silently omit that delivery.
+    if let Some(id) = identity.task_id.as_deref() {
+        let mut args = vec!["log".to_string(), "--no-merges".into(), "--reverse".into(),
+            "--format=%H%x1f%ct%x1f%B%x1e".into(), "--fixed-strings".into(), format!("--grep={id}")];
+        if let Some(since) = task_commit_receipt_since(window.task_floor) {
+            args.push(format!("--since-as-filter={since}"));
+        }
+        args.push(merge_tip.into());
+        let history = git_text(repo, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
+        for record in history.split('\u{1e}') {
+            let fields: Vec<_> = record.trim().splitn(3, '\u{1f}').collect();
+            if fields.len() != 3 || !message_references_task(fields[2], id) { continue; }
+            let Ok(epoch) = fields[1].parse::<i64>() else { continue; };
+            if in_work_window(window, epoch, true) && !commits.iter().any(|known| known == fields[0]) {
+                commits.push(fields[0].to_string());
+            }
+        }
+    }
+
     if let Some(receipt) = validated_receipt
         .and_then(|receipt| super::resolve_task_commit_receipt_sha(repo, receipt).ok())
         .filter(|receipt| {

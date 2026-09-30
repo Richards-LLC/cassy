@@ -228,7 +228,16 @@ and `CAS_RELEASE_RECEIPTS_RUN_DIR` are output locations and do not invalidate
 proof. Compiler flags, HOME, PATH, local environment/config files and the
 resolved Zig binary remain inputs.
 
-Set `CAS_RELEASE_GATE_HOME_DIR` to a scratch base on the checkout filesystem
+For daemon-initiated sweeps, persist the scratch base with
+`cas config set factory.release_gate_home_dir /home/cas-release-gate/base`
+in the project's `.cas/config.toml`. The daemon passes this key to assembly
+as `CAS_RELEASE_GATE_HOME_DIR`, overriding inherited shell and sweep env values.
+An unset or blank key reports `NOT CONFIGURED`, names the key, and skips
+the suite and failure attribution. Other projects and configured sweep commands
+retain their detected or configured runner without requiring this key.
+
+For manual assembly commands, set `CAS_RELEASE_GATE_HOME_DIR` to a scratch
+base on the checkout filesystem
 outside `/tmp`, `/var/tmp`, `/private/tmp`, `/private/var/tmp`, the configured
 `TMPDIR`, and every `.cas` ancestor (for example,
 `CAS_RELEASE_GATE_HOME_DIR=/home/cas-release-gate/base` on Linux or

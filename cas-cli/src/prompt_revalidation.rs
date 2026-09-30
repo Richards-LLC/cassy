@@ -797,6 +797,7 @@ pub(crate) fn parse_worker_attention_envelope(prompt: &str) -> bool {
                     // GH #1006: the one report a deferred rolling
                     // integration sends when it finally runs green.
                     | "sweep_passed"
+                    | "sweep_not_configured"
             )
         )
         && xml_attribute(tag, "worker").is_some_and(|value| !value.is_empty())

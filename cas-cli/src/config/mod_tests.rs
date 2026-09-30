@@ -972,6 +972,7 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         ("factory.merge_sweep", "false", "false"),
         ("factory.merge_sweep_command", "pnpm test:ci", "pnpm test:ci"),
         ("factory.epic_base_branch", "staging", "staging"),
+        ("factory.release_gate_home_dir", " /home/cas-release-gate/base ", "/home/cas-release-gate/base"),
         ("factory.merge_sweep_cwd", "web", "web"),
         ("factory.merge_sweep_timeout_secs", "900", "900"),
         ("factory.ai_enrichment.enabled", "true", "true"),
@@ -1030,7 +1031,7 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
     assert_eq!(loaded.get("factory.worker_build_jobs").as_deref(), Some("5"));
 
     // Optional keys clear back to unset with an empty value.
-    for key in ["factory.merge_sweep_command", "factory.merge_sweep_cwd", "factory.epic_base_branch"] {
+    for key in ["factory.merge_sweep_command", "factory.merge_sweep_cwd", "factory.epic_base_branch", "factory.release_gate_home_dir"] {
         config.set(key, "").unwrap();
         assert_eq!(config.get(key).as_deref(), Some(""), "{key} cleared");
     }

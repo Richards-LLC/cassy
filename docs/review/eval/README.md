@@ -181,3 +181,13 @@ REVIEW_EVAL_TEST_DIR=/home/pippenz/.cas/artifacts/cas-b622/python-test \
 These Python checks verify truth isolation, absence of future repair objects,
 exact diff bounds, commit ownership, missing-run denominators and the combined
 revert/test-failure bad-commit denominator. They are not review-accuracy proof.
+
+## Measured2026-09-30 delivery
+
+[Report](2026-09-30-reviewer-accuracy.md) · [HTML](2026-09-30-reviewer-accuracy.html) · [Exact metrics](metrics.json).
+
+Corpus revision3 retains20 slices:14 defects,4 eligible negatives (c15/c16/c17/c20),2 independently discovered contaminated negatives (c18/c19). Supplement selection/correlation and live-skill source-boundary violations are disclosed. All60 independent reports and26 bridge commit receipts are committed as results.json/bridge-commits.json. Explicit grading includes unresolved judgments rather than forcing labels.
+
+Generic `score` remains rerunnable. `report-reviewer-eval.py --out <measured-dir>` exports measured evidence and renders this dated narrative from Markdown; it refuses changed headline metrics instead of silently recycling interpretations. Future reviewer changes need fresh output, independent grading and a new dated conclusion. Tokens are pinned in report-tokens.css; HTML has no network/assets dependency.
+
+The headline uses protocol-valid recall. Invalid reports retain content-only detection evidence and all actual fix commits in precision/safety denominators; they cannot supply valid coverage. Quarantined external skill reads must be eliminated in the registered rerun before any enforcement decision. The bad-commit rate is an observed lower bound while targeted tests remain unknown.

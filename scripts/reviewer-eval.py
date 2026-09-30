@@ -423,7 +423,7 @@ def score(corpus, out, labels):
             result = json.loads(path.read_text()) if path.exists() else {'validation_error': 'Missing run'}
             result.update(case_id=case['id'], axis=axis)
             results.append(result)
-    rows, pending, all_detected = [], [], set()
+    rows, pending, all_detected, content_detected = [], [], set(), set()
     for axis in AXES:
         selected = [r for r in results if r['axis'] == axis]
         expected = [c for c in corpus['cases'] if c['kind'] == 'defect' and
@@ -450,9 +450,12 @@ def score(corpus, out, labels):
                 if label['correct']:
                     tp += 1
                     if label['seed_match']:
-                        detected.add(result['case_id'])
                         if axis != 'baseline':
-                            all_detected.add(result['case_id'])
+                            content_detected.add(result['case_id'])
+                        if not result.get('validation_error'):
+                            detected.add(result['case_id'])
+                            if axis != 'baseline':
+                                all_detected.add(result['case_id'])
                 else:
                     fp += 1
                     if result['case_id'] in clean_ids:
@@ -515,6 +518,8 @@ def score(corpus, out, labels):
     combined_hits = all_detected & all_seeds
     return {'rows': rows, 'pending_adjudication': pending,
             'combined_seed_hits': len(combined_hits), 'combined_seed_total': len(all_seeds),
+            'content_combined_seed_hits': len(content_detected & all_seeds),
+            'content_combined_recall': len(content_detected & all_seeds)/len(all_seeds) if all_seeds else None,
             'combined_recall': len(combined_hits)/len(all_seeds) if all_seeds else None,
             'policy_ready': False, 'authority': 'simulated unless registered receipts independently verified',
             'mandatory_preconditions': ['Operator approves thresholds',

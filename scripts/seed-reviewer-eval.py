@@ -78,7 +78,8 @@ for ident,task,head,axis,paths,criteria in [
  ('c16','cas-3253','b00a53e85','standards',['.github/workflows/ci.yml'],['The impact base SHA reaches the shard through an environment variable rather than shell-source interpolation.']),
  ('c17','cas-4245','cc5c5350d','spec',['scripts/assembly-proof.py','scripts/test-assembly-proof.py'],['Preparation member-version bumps and generated ledger changes reuse the assembly proof.','Dependency, third-party lock and code changes still invalidate proof.']),
  ('c18','cas-d0fb','0a93e428c','spec',['scripts/cas-test-targets.py','cas-cli/tests/integration/contracts.rs','cas-cli/tests/factory_mcp_ops_test.rs','cas-cli/tests/worktree_surface_test.rs','cas-cli/tests/hub_clean_home_test.rs'],['Directory-main integration suites stay wired.','Isolated child-test reexecs assert actual execution after grouping.']),
- ('c19','cas-3efd','9ee399dd7','standards',['cas-cli/src/hooks/handlers/handlers_tests/unscoped_test_guard.rs'],['The allowed-check fixture binds its own clone/cwd and permitted log paths; explicit bare-/tmp denials remain.'])
+ ('c19','cas-3efd','9ee399dd7','standards',['cas-cli/src/hooks/handlers/handlers_tests/unscoped_test_guard.rs'],['The allowed-check fixture binds its own clone/cwd and permitted log paths; explicit bare-/tmp denials remain.']),
+ ('c20','cas-d0fb','0a93e428c','spec',['cas-cli/tests/factory_mcp_ops_test.rs'],['The corrected isolated factory child executes its qualified selector and asserts a nonzero test count.'])
 ]:
     add(ident,task,head,head,axis,paths,'No seeded defect; corrected real delivery used as clean negative.','No fix is expected.',criteria,'clean')
 for case in cases:
@@ -86,8 +87,12 @@ for case in cases:
         case['negative_contaminated']=True
         case['contamination_evidence']='Independent baseline found dropped hooks in CI impact inventory; reproduced and filed cas-045f. Preserved and excluded from clean-negative denominator; supplementary c19 is retained.'
     if case['id']=='c19':
+        case['negative_contaminated']=True
+        case['contamination_evidence']='Independent baseline found accepted unignored log redirection dirties the checkout before clean_head; source cross-check confirms, filed cas-c0ec. Preserved and excluded from clean-negative denominator.'
         case['addition_provenance']='Supplemental real corrected fixture after independent discovery of c18 contamination.'
-manifest=dict(version=2,task_snapshot_provenance='Read-only CAS database export; current stored task text, not a historical criteria snapshot.',reviewer_source_sha=git('rev-parse',args.reviewer_sha),transport_policy='Isolated model replay measures behaviour; API authority/protocol is simulated. A real registered shadow rerun on installed 3.39.0 is required before operator approval of any merge policy.',
+    if case['id']=='c20':
+        case['addition_provenance']='Supplemental corrected factory self-reexec slice after c19 contamination. Same historical fix as c18, narrower real file scope; report selection bias and correlation.'
+manifest=dict(version=3,task_snapshot_provenance='Read-only CAS database export; current stored task text, not a historical criteria snapshot.',reviewer_source_sha=git('rev-parse',args.reviewer_sha),transport_policy='Isolated model replay measures behaviour; API authority/protocol is simulated. A real registered shadow rerun on installed 3.39.0 is required before operator approval of any merge policy.',
               source_notes='Cases c04-c06 are correlated instances of one self-reexec regression; report grouped as well as per-instance metrics. Historical assembly fixture failures are fixture defects, not production-defect claims. Holdout truth must never be given to reviewers.',cases=cases)
 Path('docs/review/eval/corpus.json').write_text(json.dumps(manifest,indent=2)+'\n')
 print(f'PASS {len(cases)} pinned cases: {sum(c["kind"]=="defect" for c in cases)} defects and {sum(c["kind"]=="clean" for c in cases)} negatives; all scope paths exist at authentic heads')

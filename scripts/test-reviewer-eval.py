@@ -141,6 +141,19 @@ class ReplayBoundaries(unittest.TestCase):
         row = evaluation.score(corpus, self.out, labels)['rows'][0]
         self.assertEqual(row['recall'], 0.5)
 
+    def test_invalid_report_keeps_content_and_fix_denominators_but_cannot_supply_recall(self):
+        report = self.report()
+        report['findings'] = [{'id': 'f1', 'source': 'criterion', 'evidence': 'contract.txt:1'}]
+        evaluation.write(self.out/'opaque/spec/result.json', {'report': report,
+                         'commits': ['actual-fix'], 'validation_error': 'invalid ownership'})
+        labels = {'findings': {'opaque/spec/f1': {'correct': True, 'seed_match': True}}}
+        result = evaluation.score({'cases': [self.case]}, self.out, labels)
+        self.assertEqual(result['combined_seed_hits'], 0)
+        self.assertEqual(result['content_combined_seed_hits'], 1)
+        self.assertEqual(result['rows'][0]['seed_hits'], 0)
+        self.assertEqual(result['rows'][0]['fix_commits'], 1)
+        self.assertEqual(result['rows'][0]['true_findings'], 1)
+
     def test_quoted_criteria_remain_exact_without_unsupported_strict_enum(self):
         public = {'criteria': ['The message drops "parse error".']}
         value = evaluation.schema('spec', public=public)

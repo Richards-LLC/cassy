@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "task_snapshot_provenance": "Read-only CAS database export; current stored task text, not a historical criteria snapshot.",
   "reviewer_source_sha": "175f78c55d32c20a1b67b1b61901a30004175973",
   "transport_policy": "Isolated model replay measures behaviour; API authority/protocol is simulated. A real registered shadow rerun on installed 3.39.0 is required before operator approval of any merge policy.",
@@ -474,9 +474,16 @@
         "Isolated child-test reexecs assert actual execution after grouping."
       ],
       "negative_contaminated": true,
-      "contamination_evidence": "Independent baseline found CI impact inventory drops the restored hooks suite; reproduced on current3186bb37e and filed cas-045f. Preserve case/result, exclude from clean-negative denominator. Supplementalc19 added before its model runs."
+      "contamination_evidence": "Independent baseline found dropped hooks in CI impact inventory; reproduced and filed cas-045f. Preserved and excluded from clean-negative denominator; supplementary c19 is retained."
     },
     {
+      "task_context": {
+        "id": "cas-3efd",
+        "title": "Workers may type-check their change (cargo check on affected crates) before parking, under the builder cap",
+        "description": "Needs the operator's go: it reverses the 2026-09-25 decision that workers never run cargo. Allow factory workers `cargo check -p <affected crates> --tests` (compile only, no test runs), using their seeded hardlinked target cache, gated by the existing max_concurrent_builders cap and build guard. Relax the PreToolUse cargo guard for exactly that command shape. The close gate records \"check: PASS <sha>\" as worker evidence. Measure: compile errors found at assembly per epic should drop to 0 (2026-09-29 had 2).",
+        "acceptance_criteria": "A worker can run the allowed check and nothing else; the guard still denies test/build/nextest; concurrency stays capped; an epic of at least 4 lanes reaches assembly with zero compile errors."
+      },
+      "defect_group": "c19",
       "id": "c19",
       "kind": "clean",
       "source_task": "cas-3efd",
@@ -487,19 +494,39 @@
       "scope": [
         "cas-cli/src/hooks/handlers/handlers_tests/unscoped_test_guard.rs"
       ],
-      "defect": "No seeded defect: real corrected fixture scope after assembly failure.",
-      "expected_fix": "No fix expected.",
+      "defect": "No seeded defect; corrected real delivery used as clean negative.",
+      "expected_fix": "No fix is expected.",
       "criteria": [
-        "Allowed-check fixture binds its clone/cwd and permitted log paths, retaining bare-/tmp denials."
+        "The allowed-check fixture binds its own clone/cwd and permitted log paths; explicit bare-/tmp denials remain."
       ],
-      "defect_group": "c19",
+      "negative_contaminated": true,
+      "contamination_evidence": "Independent baseline found accepted unignored log redirection dirties the checkout before clean_head; source cross-check confirms, filed cas-c0ec. Preserved and excluded from clean-negative denominator.",
+      "addition_provenance": "Supplemental real corrected fixture after independent discovery of c18 contamination."
+    },
+    {
       "task_context": {
-        "id": "cas-3efd",
-        "title": "Workers may type-check their change (cargo check on affected crates) before parking, under the builder cap",
-        "description": "Needs the operator's go: it reverses the 2026-09-25 decision that workers never run cargo. Allow factory workers `cargo check -p <affected crates> --tests` (compile only, no test runs), using their seeded hardlinked target cache, gated by the existing max_concurrent_builders cap and build guard. Relax the PreToolUse cargo guard for exactly that command shape. The close gate records \"check: PASS <sha>\" as worker evidence. Measure: compile errors found at assembly per epic should drop to 0 (2026-09-29 had 2).",
-        "acceptance_criteria": "A worker can run the allowed check and nothing else; the guard still denies test/build/nextest; concurrency stays capped; an epic of at least 4 lanes reaches assembly with zero compile errors."
+        "id": "cas-d0fb",
+        "title": "Consolidate cas-cli's 107 integration test binaries into a few test harnesses to cut test build and link time",
+        "description": "Measured 2026-09-29: cas-cli/tests has 107 top-level *.rs files (plus 13 support dirs). Each compiles to its own executable linking the whole cas library (cas-cli/src is about 493k lines, dev profile debug=1). The assembly target holds 703 executables. Move them under one or a few harness crates (e.g. tests/it/main.rs with `mod foo;` per current file, grouped by domain if isolation needs it). Keep per-test process isolation where tests mutate process-global state (env, cwd): nextest already runs each test in its own process, so a shared binary is safe. Keep CI's shard partitioning, archive mode and test-name filters working, and update scripts/test-ci-test-tiers.sh pins and any `--test <name>` references (release gate rows, run-scoped-tests, docs). Measure before and after: cold and warm `cargo nextest run --workspace --no-run` wall time, and the number of executables.",
+        "acceptance_criteria": "Integration test executables drop from 107 to at most 10; the full suite passes with the same test count; release-gate and CI references are updated; measured build-time improvement is recorded in the task."
       },
-      "addition_provenance": "Supplemental clean case after independently discovering c18 contamination; c18 remains preserved."
+      "defect_group": "c20",
+      "id": "c20",
+      "kind": "clean",
+      "source_task": "cas-d0fb",
+      "base_sha": "7c40187139edef5552195b2f53d29de150897a69",
+      "head_sha": "0a93e428c6389904cc8da67fc18a4accf7047a38",
+      "expected_fix_sha": "0a93e428c6389904cc8da67fc18a4accf7047a38",
+      "expected_axis": "spec",
+      "scope": [
+        "cas-cli/tests/factory_mcp_ops_test.rs"
+      ],
+      "defect": "No seeded defect; corrected real delivery used as clean negative.",
+      "expected_fix": "No fix is expected.",
+      "criteria": [
+        "The corrected isolated factory child executes its qualified selector and asserts a nonzero test count."
+      ],
+      "addition_provenance": "Supplemental corrected factory self-reexec slice after c19 contamination. Same historical fix as c18, narrower real file scope; report selection bias and correlation."
     }
   ]
 }

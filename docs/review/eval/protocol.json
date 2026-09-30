@@ -42,7 +42,20 @@
   },
   "corpus_revision": {
     "original_cases": 18,
-    "supplemental_case": "c19",
-    "reason": "c18 nominal negative revealed a real latent CI inventory defect; preserved as contaminated, excluded from clean denominator. Four eligible clean negatives remain."
+    "supplemental_cases": [
+      "c19",
+      "c20"
+    ],
+    "contaminated_negatives": [
+      "c18",
+      "c19"
+    ],
+    "eligible_clean_negatives": [
+      "c15",
+      "c16",
+      "c17",
+      "c20"
+    ],
+    "reason": "Two genuine latent defects found in nominal negatives are preserved; c20 authentic corrected factory-only slice restores four eligible clean negatives. Same-fix correlation and post-discovery selection bias are disclosed."
   }
 }

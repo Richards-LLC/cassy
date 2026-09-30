@@ -27,8 +27,11 @@ class FastRows(unittest.TestCase):
         self.write(".gitignore", "/cargo-called\n")
         for helper in ("release-gate.sh", "release-portable.sh", "cas-test-targets.py",
                        "check-workflow-run-interpolation.py", "check-changed-markdown.py",
-                       "check-lane-fast-rows.py", "check-builtin-doc-hygiene.py", "builtin-doc-hygiene.json"):
+                       "check-lane-fast-rows.py", "check-builtin-doc-hygiene.py", "builtin-doc-hygiene.json",
+                       "check-builtin-contract-phrases.py"):
             self.write("scripts/" + helper, (ROOT / "scripts" / helper).read_text())
+        self.write("scripts/builtin-contract-phrases.json", '{"version":2,"documents":{"skills/example/SKILL.md":{"source":"cas-cli/src/builtins/skills/example/SKILL.md","catalogs":["claude","codex","grok"],"contains":[{"text":"fixture contract","reason":"Named fixture contract."}],"absent":[],"any_of":[]}},"alternatives":[]}\n')
+        self.write("cas-cli/src/builtins/skills/example/SKILL.md", "fixture contract\n")
         self.write(".markdownlint-cli2.jsonc", (ROOT / ".markdownlint-cli2.jsonc").read_text())
         for crate in ("cas-cli", "crates/cas-types", "crates/cas-search", "crates/cas-store", "crates/cas-core", "crates/cas-mcp"):
             self.write(crate + "/Cargo.toml", '[package]\nname = "fixture"\nversion = "9.99.7"\nautotests = false\n')
@@ -90,6 +93,7 @@ class FastRows(unittest.TestCase):
             ("changelog-and-versions", "crates/cas-core/Cargo.toml", '[package]\nversion = "9.99.8"\n'),
             ("procedure-guardrails", "cas-cli/src/builtins/skills/cas-cut-release/SKILL.md", "missing procedure\n"),
             ("builtin-doc-hygiene", "cas-cli/src/builtins/skills/example/SKILL.md", "Repository Richards-LLC/private-project\n"),
+            ("builtin-doc-hygiene", "cas-cli/src/builtins/skills/example/SKILL.md", "removed contract\n"),
         ]
         for row, path, body in cases:
             with self.subTest(row=row):

@@ -860,3 +860,49 @@ fn test_task_door_roundtrips_and_clears_without_changing_status() {
     assert_eq!(retrieved.door, None);
     assert_eq!(retrieved.status, TaskStatus::Open);
 }
+
+#[test]
+fn proof_targets_roundtrip_json_and_read_legacy_fragments() {
+    let (_temp, store) = create_test_store();
+    let mut task = Task::new("proof-targets".into(), "Proof normalization".into());
+    task.proof_targets = vec!["with,commas".into(), "rules".into()];
+    store.add(&task).unwrap();
+    assert_eq!(
+        store.get(&task.id).unwrap().proof_targets,
+        task.proof_targets
+    );
+    {
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE tasks SET proof_targets=?1 WHERE id=?2",
+            rusqlite::params![
+                r#"["cas --lib rules", "cas --lib maintenance_jobs"], core"#,
+                task.id
+            ],
+        )
+        .unwrap();
+    }
+    let mut read = store.get(&task.id).unwrap();
+    assert_eq!(
+        read.proof_targets,
+        ["cas --lib rules", "cas --lib maintenance_jobs", "core"]
+    );
+    read.proof_targets.push("updates".into());
+    store.update(&read).unwrap();
+    assert_eq!(
+        store.get(&task.id).unwrap().proof_targets,
+        read.proof_targets
+    );
+    let conn = store.conn.lock().unwrap();
+    let encoded: String = conn
+        .query_row(
+            "SELECT proof_targets FROM tasks WHERE id=?1",
+            [&task.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Vec<String>>(&encoded).unwrap(),
+        read.proof_targets
+    );
+}

@@ -717,11 +717,6 @@ const AI_VOCABULARY_ALLOWLIST: &[(&str, &str, &str)] = &[
         "Defines the project's end-to-end user-flow terminology and file names.",
     ),
     (
-        "skills/cas-worker/SKILL.md",
-        "journey",
-        "Refers to the catalog journey QA trigger in the worker contract.",
-    ),
-    (
         "skills/cas-worker/references/close-gate.md",
         "journey",
         "Names a catalog journey as a user-facing QA evidence trigger.",
@@ -861,4 +856,59 @@ fn ai_vocabulary_word_list_matches_case_insensitively_and_at_word_boundaries() {
     assert!(catches("It's worth noting", "it's worth noting"));
     assert!(!catches("unleveraged", "leverage"));
     assert!(!catches("subrealm", "realm"));
+}
+
+#[path = "support/builtin_contract_phrases.rs"]
+mod builtin_contract_phrases;
+
+/// One registry owns contract-bearing text; ordinary prose is free to change.
+#[test]
+fn builtin_contract_phrase_registry_holds_in_every_embedded_catalog() {
+    use builtin_contract_phrases::Policy;
+    let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+        "../../scripts/builtin-contract-schema-fixtures.json"
+    ))
+    .unwrap();
+    for fixture in fixtures.as_array().unwrap() {
+        assert_eq!(
+            Policy::parse(&fixture["policy"].to_string()).is_ok(),
+            fixture["valid"].as_bool().unwrap(),
+            "schema fixture: {}",
+            fixture["name"]
+        );
+    }
+    let policy = Policy::parse(include_str!("../../scripts/builtin-contract-phrases.json"))
+        .expect("valid reasoned builtin contract registry");
+    let failures = policy.failures(|label, path| {
+        if let Some(name) = path
+            .strip_prefix("jobs/")
+            .and_then(|p| p.strip_suffix(".md"))
+        {
+            return MAINTENANCE_JOBS
+                .iter()
+                .find(|job| job.name == name)
+                .unwrap_or_else(|| panic!("missing maintenance job {name}"))
+                .body
+                .to_owned();
+        }
+        let harness = match label {
+            "claude" => cas_mux::SupervisorCli::Claude,
+            "codex" => cas_mux::SupervisorCli::Codex,
+            "grok" => cas_mux::SupervisorCli::Grok,
+            "opencode" => cas_mux::SupervisorCli::OpenCode,
+            _ => panic!("unknown catalog {label}"),
+        };
+        cas::builtins::skill_catalog_for_harness(harness)
+            .iter()
+            .chain(cas::builtins::agent_catalog_for_harness(harness))
+            .find(|file| file.path == path)
+            .unwrap_or_else(|| panic!("missing {label} contract document {path}"))
+            .content
+            .to_owned()
+    });
+    assert!(
+        failures.is_empty(),
+        "builtin text contracts failed:\n{}",
+        failures.join("\n")
+    );
 }

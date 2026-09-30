@@ -1882,11 +1882,7 @@ fn correct_parked_delivery_proof_scope_inner(
                     "failed to serialize corrected deliverables: {error}"
                 ))
             })?,
-            if corrected_task.proof_targets.is_empty() {
-                None
-            } else {
-                Some(corrected_task.proof_targets.join(","))
-            },
+            cas_types::proof_targets_to_string(&corrected_task.proof_targets),
             if corrected_task.risk.is_empty() {
                 None
             } else {

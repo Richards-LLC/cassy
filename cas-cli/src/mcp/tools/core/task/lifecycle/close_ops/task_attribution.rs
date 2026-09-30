@@ -355,6 +355,8 @@ pub(super) fn merge_tip_content_presence(
     identity: &TaskCommitIdentity,
     validated_receipt: Option<&str>,
 ) -> Option<DeliveryContentPresence> {
+    let full_tip = git_text(repo, &["rev-parse", &format!("{merge_tip}^{{commit}}")])?;
+    let merge_tip = full_tip.as_str();
     let has_work_window = window.is_some();
     let fallback_window = TaskCommitReceiptWindow {
         supervisor_override_reason: None,
@@ -390,8 +392,14 @@ pub(super) fn merge_tip_content_presence(
     // side. Its identified content still belongs to the task; restricting
     // attribution to first-parent history would silently omit that delivery.
     if let Some(id) = identity.task_id.as_deref() {
-        let mut args = vec!["log".to_string(), "--no-merges".into(), "--reverse".into(),
-            "--format=%H%x1f%ct%x1f%B%x1e".into(), "--fixed-strings".into(), format!("--grep={id}")];
+        let mut args = vec![
+            "log".to_string(),
+            "--no-merges".into(),
+            "--reverse".into(),
+            "--format=%H%x1f%ct%x1f%B%x1e".into(),
+            "--fixed-strings".into(),
+            format!("--grep={id}"),
+        ];
         if let Some(since) = task_commit_receipt_since(window.task_floor) {
             args.push(format!("--since-as-filter={since}"));
         }
@@ -399,9 +407,18 @@ pub(super) fn merge_tip_content_presence(
         let history = git_text(repo, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
         for record in history.split('\u{1e}') {
             let fields: Vec<_> = record.trim().splitn(3, '\u{1f}').collect();
-            if fields.len() != 3 || !message_references_task(fields[2], id) { continue; }
-            let Ok(epoch) = fields[1].parse::<i64>() else { continue; };
-            if in_work_window(window, epoch, true) && !commits.iter().any(|known| known == fields[0]) {
+            if fields.len() != 3
+                || !message_references_task(fields[2], id)
+                || delivery_evolution::is_revert_message(fields[2])
+            {
+                continue;
+            }
+            let Ok(epoch) = fields[1].parse::<i64>() else {
+                continue;
+            };
+            if in_work_window(window, epoch, true)
+                && !commits.iter().any(|known| known == fields[0])
+            {
                 commits.push(fields[0].to_string());
             }
         }
@@ -482,62 +499,98 @@ pub(super) fn merge_tip_content_presence(
 
     let order = git_text(repo, &["rev-list", "--topo-order", "--reverse", merge_tip])?;
     let selected: HashSet<_> = commits.into_iter().collect();
-    let mut commits: Vec<String> = order.lines().filter(|commit| selected.contains(*commit)).map(str::to_owned).collect();
+    let mut commits: Vec<String> = order
+        .lines()
+        .filter(|commit| selected.contains(*commit))
+        .map(str::to_owned)
+        .collect();
 
-    let resolution_paths = merge_resolution_paths(repo, merge_tip, identity)?;
-    if !resolution_paths.is_empty() {
-        commits.push(merge_tip.to_string());
+    // Reverts are negative delivery evidence, never a later task delivery.
+    // Apply the exclusion to every selection route, including known receipts.
+    let mut content_commits = Vec::new();
+    for commit in commits {
+        let message = git_text(repo, &["show", "-s", "--format=%B", &commit])?;
+        if !delivery_evolution::is_revert_message(&message) {
+            content_commits.push(commit);
+        }
     }
-    if commits.is_empty() {
+    let commits = content_commits;
+    let resolution_paths = merge_resolution_paths(repo, merge_tip, identity)?;
+    if commits.is_empty() && resolution_paths.is_empty() {
         return None;
     }
-
-    // GH #840: a worker-owned merge can replace an earlier task hunk before
-    // the final merge tip is integrated. When the tip and target agree on a
-    // delivered path, preserve that final tree effect instead of requiring
-    // the original non-merge patch to remain byte-for-byte applicable.
-    let merge_tip_paths = merge_tip_tree_effect_paths(repo, &target, merge_tip, &commits)?;
+    let origin = format!("origin/{target}");
+    let target_ref =
+        if git_ref_exists(repo, &origin) && git_commit_is_ancestor(repo, merge_tip, &origin) {
+            origin
+        } else {
+            target.to_string()
+        };
     let mut present_paths = Vec::new();
     let mut superseded_paths = Vec::new();
     let mut superseding_commits = Vec::new();
     let mut dropped_paths = Vec::new();
     let mut unknown_reason = None;
-    for (index, commit) in commits.iter().enumerate() {
-        let presence = if commit == merge_tip {
-            super::delivery_content_presence_in_parent_for_paths(
-                repo,
-                commit,
-                target,
-                Some(&resolution_paths),
-            )
-        } else {
-            super::delivery_content_presence_in_parent(repo, commit, target)
-        };
-        match presence {
+    let mut proven_resolutions = HashSet::new();
+    if !resolution_paths.is_empty() {
+        match super::delivery_content_presence_in_parent_for_paths(
+            repo,
+            merge_tip,
+            target,
+            Some(&resolution_paths),
+        ) {
             DeliveryContentPresence::Present { paths } => {
+                proven_resolutions.extend(paths.iter().cloned());
                 append_unique(&mut present_paths, paths);
             }
+            DeliveryContentPresence::Superseded { paths, commits } => {
+                proven_resolutions.extend(paths.iter().cloned());
+                append_unique(&mut superseded_paths, paths);
+                append_unique(&mut superseding_commits, commits);
+            }
+            DeliveryContentPresence::Dropped { paths } => append_unique(&mut dropped_paths, paths),
+            DeliveryContentPresence::Unknown { reason } => {
+                unknown_reason.get_or_insert(reason);
+            }
+        }
+    }
+    for commit in &commits {
+        match super::delivery_content_presence_in_parent(repo, commit, target) {
+            DeliveryContentPresence::Present { paths } => append_unique(&mut present_paths, paths),
             DeliveryContentPresence::Superseded { paths, commits } => {
                 append_unique(&mut superseded_paths, paths);
                 append_unique(&mut superseding_commits, commits);
             }
             DeliveryContentPresence::Dropped { paths } => {
-                let later = &commits[index + 1..];
-                for path in paths
-                    .into_iter()
-                    .filter(|path| !merge_tip_paths.contains(path))
-                {
-                    // cas-3f8c: the task's own later commit replaced this
-                    // hunk (cas-bf07: 8f6121a9 added `headerLatencyLabel`,
-                    // fc578d02 swapped it for `headerConnectionChip`). The
-                    // later commit's own check proves the path's delivery;
-                    // the earlier hunk was never meant to survive.
-                    match rewritten_by_later_task_commit(repo, commit, &path, later) {
-                        Some(rewriter) => {
-                            append_unique(&mut superseded_paths, vec![path]);
-                            append_unique(&mut superseding_commits, vec![rewriter]);
+                for path in paths {
+                    // A resolution may replace only the owned lines in its
+                    // novel hunks, on a path whose final effect was proven.
+                    // It never enters the later-commit list for other paths.
+                    let proof = if proven_resolutions.contains(&path) {
+                        let parent = git_text(repo, &["rev-parse", &format!("{commit}^1")])?;
+                        delivery_evolution::line_content_presence_with_resolution(
+                            repo,
+                            &parent,
+                            commit,
+                            &target_ref,
+                            &path,
+                            Some(merge_tip),
+                        )
+                    } else {
+                        Ok(None)
+                    };
+                    match proof {
+                        Ok(Some(DeliveryContentPresence::Superseded { paths, commits })) => {
+                            append_unique(&mut superseded_paths, paths);
+                            append_unique(&mut superseding_commits, commits);
                         }
-                        None => append_unique(&mut dropped_paths, vec![path]),
+                        Ok(Some(DeliveryContentPresence::Present { paths })) => {
+                            append_unique(&mut present_paths, paths)
+                        }
+                        Err(reason) => {
+                            unknown_reason.get_or_insert(reason);
+                        }
+                        _ => append_unique(&mut dropped_paths, vec![path]),
                     }
                 }
             }
@@ -565,28 +618,6 @@ pub(super) fn merge_tip_content_presence(
     }
 }
 
-/// The last later commit of the same delivery that touches `path`, when
-/// `commit`'s effect on `path` does not survive there: the task itself
-/// replaced that hunk before handing the branch over (cas-3f8c). `None`
-/// when no later task commit touches the path, or when the earlier hunk is
-/// still intact at the task's final version of it. In that case its absence
-/// from the target is a real drop, and the caller keeps reporting it.
-fn rewritten_by_later_task_commit(
-    repo: &Path,
-    commit: &str,
-    path: &str,
-    later: &[String],
-) -> Option<String> {
-    let last_touch = later.iter().rev().find(|later_commit| {
-        super::commit_changes_path(repo, later_commit, path).unwrap_or(false)
-    })?;
-    let parent = git_text(repo, &["rev-parse", &format!("{commit}^1")])?;
-    let survives =
-        super::delivery_path_effect_survives_on_tree(repo, &parent, commit, last_touch, path)
-            .ok()?;
-    (!survives).then(|| last_touch.clone())
-}
-
 /// A task-owned merge may introduce a QA fix in its resolution itself.
 /// Restrict its first-parent effect to paths changed on a contributing side,
 /// and require a difference from that side too: merely importing the target
@@ -607,6 +638,25 @@ fn merge_resolution_paths(
     }
     let parents = git_text(repo, &["rev-list", "--parents", "-n", "1", merge_tip])?;
     let parents: Vec<_> = parents.split_whitespace().collect();
+    if parents.len() != 3 {
+        return Some(vec![]);
+    }
+    let remerge = git_text(
+        repo,
+        &[
+            "show",
+            "--remerge-diff",
+            "--format=",
+            "--name-only",
+            "-z",
+            merge_tip,
+            "--",
+        ],
+    )?;
+    let resolution_effect: HashSet<_> = remerge
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .collect();
     let first = *parents.get(1)?;
     let first_effect = git_text(
         repo,
@@ -641,7 +691,9 @@ fn merge_resolution_paths(
         )?;
         for path in side_effect.split('\0').filter(|path| !path.is_empty()) {
             if first_effect.contains(path)
+                && resolution_effect.contains(path)
                 && !git_diff_is_empty(repo, second, merge_tip, path)?
+                && resolution_has_novel_lines(repo, first, second, merge_tip, path)?
                 && !paths.iter().any(|known| known == path)
             {
                 paths.push(path.to_string());
@@ -649,6 +701,47 @@ fn merge_resolution_paths(
         }
     }
     Some(paths)
+}
+
+fn resolution_has_novel_lines(
+    repo: &Path,
+    first: &str,
+    second: &str,
+    tip: &str,
+    path: &str,
+) -> Option<bool> {
+    let mut parent_lines = HashSet::new();
+    for parent in [first, second] {
+        let output = Command::new("git")
+            .args(["show", &format!("{parent}:{path}")])
+            .current_dir(repo)
+            .output()
+            .ok()?;
+        if output.status.success() {
+            let contents = String::from_utf8(output.stdout).ok()?;
+            parent_lines.extend(contents.lines().map(|line| line.trim().to_string()));
+        }
+    }
+    let patch = git_text(
+        repo,
+        &[
+            "diff",
+            "--unified=0",
+            "--no-renames",
+            first,
+            tip,
+            "--",
+            path,
+        ],
+    )?;
+    Some(
+        patch
+            .lines()
+            .filter(|line| !line.starts_with("+++"))
+            .filter_map(|line| line.strip_prefix('+'))
+            .map(str::trim)
+            .any(|line| line.chars().any(|c| c.is_alphanumeric()) && !parent_lines.contains(line)),
+    )
 }
 
 fn is_merge_commit(repo: &Path, commit: &str) -> bool {
@@ -662,51 +755,6 @@ fn append_unique(values: &mut Vec<String>, additions: Vec<String>) {
             values.push(value);
         }
     }
-}
-
-/// Paths whose final merge-tip tree effect is the task delivery, even when an
-/// earlier non-merge task commit's exact patch no longer applies.
-///
-/// A worker can resolve a target-sync merge on top of an earlier task commit,
-/// replacing its hunk while retaining the intended path. The old attribution
-/// check only inspected each non-merge commit against the target and therefore
-/// reported that earlier hunk as dropped. Compare the merge tip to the
-/// authoritative target per delivered path, but require the merge tip to
-/// differ from at least one task commit's first parent. That last predicate
-/// preserves the genuinely-empty/reverted-delivery rejection.
-fn merge_tip_tree_effect_paths(
-    repo: &Path,
-    target: &str,
-    merge_tip: &str,
-    commits: &[String],
-) -> Option<HashSet<String>> {
-    let mut paths = HashSet::new();
-    for commit in commits {
-        let parent_ref = format!("{commit}^1");
-        let parent = git_text(repo, &["rev-parse", &parent_ref])?;
-        let changed = git_text(
-            repo,
-            &["diff", "--name-only", "--no-renames", &parent, commit, "--"],
-        )?;
-        for path in changed.lines().filter(|path| !path.is_empty()) {
-            let anchor_path = format!("{merge_tip}:{path}");
-            let anchor_exists = Command::new("git")
-                .args(["cat-file", "-e", &anchor_path])
-                .current_dir(repo)
-                .status()
-                .ok()?
-                .success();
-            if !anchor_exists {
-                continue;
-            }
-            let anchor_matches_target = git_diff_is_empty(repo, merge_tip, target, path)?;
-            let anchor_differs_from_parent = !git_diff_is_empty(repo, &parent, merge_tip, path)?;
-            if anchor_matches_target && anchor_differs_from_parent {
-                paths.insert(path.to_string());
-            }
-        }
-    }
-    Some(paths)
 }
 
 fn git_diff_is_empty(repo: &Path, left: &str, right: &str, path: &str) -> Option<bool> {
@@ -776,6 +824,223 @@ mod tests {
         }
     }
     #[test]
+    fn revert_of_task_commit_rejects_cas_0930() {
+        let dir = fixture();
+        let repo = dir.path();
+        let delivery = commit(repo, "copy.txt", "delivery\n", "cas-taskb: delivery");
+        git(repo, &["revert", "--no-edit", &delivery]);
+        git(repo, &["checkout", "main"]);
+        commit(repo, "target.rs", "target();\n", "advance target");
+        git(repo, &["checkout", "factory/worker"]);
+        git(
+            repo,
+            &["merge", "--no-ff", "main", "-m", "cas-taskb: target sync"],
+        );
+        let tip = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "main"]);
+        git(
+            repo,
+            &["merge", "--no-ff", "factory/worker", "-m", "integrate"],
+        );
+        let mut window = window();
+        window.identity.known_commits.push(tip.clone());
+        assert_eq!(
+            merge_tip_content_presence(repo, "main", &tip, Some(&window), &window.identity, None),
+            Some(DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()]
+            })
+        );
+    }
+
+    #[test]
+    fn merge_tip_cannot_supersede_non_resolution_path_cas_0930() {
+        let dir = fixture();
+        let repo = dir.path();
+        commit(repo, "lost.rs", "delivered();\n", "cas-taskb: delivery");
+        commit(repo, "qa.rs", "worker();\n", "cas-taskb: QA path");
+        git(repo, &["checkout", "main"]);
+        commit(repo, "qa.rs", "target();\n", "advance QA path");
+        git(repo, &["checkout", "factory/worker"]);
+        git(
+            repo,
+            &["merge", "--no-ff", "--no-commit", "-s", "ours", "main"],
+        );
+        std::fs::remove_file(repo.join("lost.rs")).unwrap();
+        std::fs::write(repo.join("qa.rs"), "novel_resolution();\n").unwrap();
+        git(repo, &["add", "-A"]);
+        git(repo, &["commit", "-qm", "cas-taskb: QA resolution"]);
+        let tip = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "main"]);
+        git(
+            repo,
+            &["merge", "--no-ff", "factory/worker", "-m", "integrate"],
+        );
+        commit(
+            repo,
+            "lost.rs",
+            "unrelated_later_edit();\n",
+            "later main edit",
+        );
+        let mut window = window();
+        window.identity.known_commits.push(tip.clone());
+        assert_eq!(
+            merge_resolution_paths(repo, &tip, &window.identity).unwrap(),
+            vec!["qa.rs"]
+        );
+        assert_eq!(
+            merge_tip_content_presence(repo, "main", &tip, Some(&window), &window.identity, None),
+            Some(DeliveryContentPresence::Dropped {
+                paths: vec!["lost.rs".into()]
+            })
+        );
+    }
+
+    #[test]
+    fn clean_auto_merge_path_is_not_resolution_cas_0930() {
+        let dir = fixture();
+        let repo = dir.path();
+        commit(repo, "copy.txt", "worker\nold\n", "unnamed worker change");
+        git(repo, &["checkout", "main"]);
+        commit(repo, "copy.txt", "old\ntarget\n", "unnamed target change");
+        git(repo, &["checkout", "factory/worker"]);
+        git(repo, &["merge", "--no-ff", "main", "-m", "cas-taskb: sync"]);
+        let tip = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "main"]);
+        git(
+            repo,
+            &["merge", "--no-ff", "factory/worker", "-m", "integrate"],
+        );
+        let identity = TaskCommitIdentity {
+            task_id: Some("cas-taskb".into()),
+            known_commits: vec![tip.clone()],
+        };
+        assert!(
+            merge_resolution_paths(repo, &tip, &identity)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(merge_tip_content_presence(repo, "main", &tip, None, &identity, None).is_none());
+    }
+
+    #[test]
+    fn revert_of_edit_then_delete_rejects_cas_0930() {
+        let dir = fixture();
+        let repo = dir.path();
+        let delivery = commit(repo, "copy.txt", "delivered\nkeep\n", "cas-taskb: delivery");
+        git(repo, &["checkout", "main"]);
+        git(
+            repo,
+            &["merge", "--no-ff", "factory/worker", "-m", "integrate"],
+        );
+        let edit = commit(repo, "copy.txt", "edited\nkeep\n", "edit delivery");
+        git(repo, &["revert", "--no-edit", &edit]);
+        commit(repo, "copy.txt", "keep\n", "delete without replacement");
+        assert_eq!(
+            delivery_content_presence_on_target(repo, &delivery, "main"),
+            DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn override_naming_dropping_merge_rejects_cas_0930() {
+        let dir = fixture();
+        let repo = dir.path();
+        let delivery = commit(repo, "copy.txt", "delivery\n", "cas-taskb: delivery");
+        git(repo, &["checkout", "main"]);
+        git(
+            repo,
+            &[
+                "merge",
+                "--no-ff",
+                "-s",
+                "ours",
+                "factory/worker",
+                "-m",
+                "drop delivery",
+            ],
+        );
+        let dropping = git(repo, &["rev-parse", "HEAD"]);
+        let review =
+            format!("reviewed-drop: {dropping} -- should not count its second-parent diff");
+        let error = validated_delivery_drop_review(
+            repo,
+            &delivery,
+            "main",
+            &["copy.txt".into()],
+            Some(&review),
+        )
+        .unwrap_err();
+        assert!(error.contains("does not touch"), "{error}");
+    }
+
+    #[test]
+    fn deleting_one_duplicate_does_not_transfer_line_ownership_cas_0930() {
+        let dir = fixture();
+        let repo = dir.path();
+        commit(
+            repo,
+            "copy.txt",
+            "duplicate();\nseparator();\n",
+            "baseline duplicate",
+        );
+        git(repo, &["branch", "-f", "main", "HEAD"]);
+        let delivery = commit(
+            repo,
+            "copy.txt",
+            "duplicate();\nseparator();\nduplicate();\n",
+            "cas-taskb: second duplicate",
+        );
+        git(repo, &["checkout", "main"]);
+        git(
+            repo,
+            &["merge", "--no-ff", "factory/worker", "-m", "integrate"],
+        );
+        commit(
+            repo,
+            "copy.txt",
+            "duplicate();\nseparator();\n",
+            "delete owned duplicate",
+        );
+        assert_eq!(
+            delivery_content_presence_on_target(repo, &delivery, "main"),
+            DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn unlabeled_inverse_patch_cannot_certify_supersession_cas_0930() {
+        let dir = fixture();
+        let repo = dir.path();
+        let delivery = commit(
+            repo,
+            "copy.txt",
+            "modern();\n",
+            "cas-taskb: change existing line",
+        );
+        git(repo, &["checkout", "main"]);
+        git(
+            repo,
+            &["merge", "--no-ff", "factory/worker", "-m", "integrate"],
+        );
+        commit(
+            repo,
+            "copy.txt",
+            "old\n",
+            "restore baseline with an ordinary subject",
+        );
+        assert_eq!(
+            delivery_content_presence_on_target(repo, &delivery, "main"),
+            DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()]
+            }
+        );
+    }
+
+    #[test]
     fn merge_resolution_itself_is_task_content_cas_0930() {
         let dir = fixture();
         let repo = dir.path();
@@ -787,8 +1052,9 @@ mod tests {
         window.identity.known_commits.push(merge.clone());
         assert_eq!(
             merge_tip_content_presence(repo, "main", &merge, Some(&window), &window.identity, None),
-            Some(DeliveryContentPresence::Present {
-                paths: vec!["work.rs".into()]
+            Some(DeliveryContentPresence::Superseded {
+                paths: vec!["work.rs".into()],
+                commits: vec![merge.clone()],
             })
         );
     }

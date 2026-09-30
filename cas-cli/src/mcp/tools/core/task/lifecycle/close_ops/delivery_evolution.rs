@@ -46,6 +46,9 @@ fn hunks(repo: &Path, left: &str, right: &str, path: &str) -> Result<Vec<Hunk>, 
             path,
         ],
     )?;
+    if patch.contains("Binary files ") || patch.contains("GIT binary patch") {
+        return Err("binary delivery evolution cannot be attributed to line ranges".into());
+    }
     let mut hunks: Vec<Hunk> = Vec::new();
     for line in patch.lines() {
         if line.starts_with("@@ ") {
@@ -74,143 +77,295 @@ fn meaningful(line: &str) -> bool {
     line.chars().any(|c| c.is_alphanumeric())
 }
 
-/// Map a delivered line through a patch. A replacement keeps its line
-/// lineage; a deletion ends it, so later recreation cannot hide a real loss.
-fn project(line: usize, hunks: &[Hunk]) -> Option<usize> {
-    let mut offset = 0isize;
-    for hunk in hunks {
-        if hunk.old_count > 0 && (hunk.old_start..hunk.old_start + hunk.old_count).contains(&line) {
-            return (hunk.new_count > 0).then(|| {
-                hunk.new_start + (line - hunk.old_start).min(hunk.new_count.saturating_sub(1))
-            });
-        }
-        let precedes_line = if hunk.old_count == 0 {
-            // Zero-length old ranges name the preceding line. An insertion
-            // immediately after this line must not move this line's owner.
-            hunk.old_start < line
-        } else {
-            hunk.old_start + hunk.old_count <= line
-        };
-        if precedes_line {
-            offset += hunk.new_count as isize - hunk.old_count as isize;
-        }
-    }
-    line.checked_add_signed(offset)
+#[derive(Clone)]
+struct OwnedLines {
+    positions: Vec<usize>,
+    commits: Vec<String>,
+    baseline: Vec<String>,
 }
 
-/// All absent, meaningful added lines need either an exact replacement in
-/// descendant history or a replacement of their mapped line on the target's
-/// first-parent lineage. Merge resolutions can map the line but never certify
-/// it themselves: a stale/ours integration still fails without a later edit.
-pub(super) fn superseding_commits(
+pub(super) fn is_revert_message(message: &str) -> bool {
+    let lower = message.trim_start().to_ascii_lowercase();
+    lower.starts_with("revert ")
+        || lower.starts_with("revert:")
+        || lower
+            .lines()
+            .any(|line| line.trim_start().starts_with("this reverts commit "))
+}
+
+fn tokens(line: &str) -> Vec<&str> {
+    line.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .filter(|token| !token.is_empty())
+        .collect()
+}
+
+// Extensions may retain a line's symbols in the same changed hunk. Never
+// look elsewhere in the file, where a duplicate has different ownership.
+fn retains_line(old: &str, new: &str) -> bool {
+    if old == new {
+        return true;
+    }
+    let old = tokens(old);
+    let new = tokens(new);
+    if old.is_empty() {
+        return false;
+    }
+    let mut cursor = 0;
+    old.into_iter().all(|token| {
+        let Some(offset) = new[cursor..]
+            .iter()
+            .position(|candidate| *candidate == token)
+        else {
+            return false;
+        };
+        cursor += offset + 1;
+        true
+    })
+}
+
+fn advance(
+    owner: &OwnedLines,
+    changes: &[Hunk],
+    ordinary: bool,
+    resolution_parent_lines: Option<&std::collections::HashSet<String>>,
+    reverted: bool,
+    commit: &str,
+) -> Option<OwnedLines> {
+    let mut next = OwnedLines {
+        positions: Vec::new(),
+        commits: owner.commits.clone(),
+        baseline: owner.baseline.clone(),
+    };
+    for line in &owner.positions {
+        let mut offset = 0isize;
+        let mut changed = false;
+        for hunk in changes {
+            if hunk.old_count > 0
+                && (hunk.old_start..hunk.old_start + hunk.old_count).contains(line)
+            {
+                if reverted {
+                    return None;
+                }
+                let added: Vec<_> = hunk
+                    .added
+                    .iter()
+                    .filter(|line| meaningful(line))
+                    .cloned()
+                    .collect();
+                if !owner.baseline.is_empty() && added == owner.baseline {
+                    // Unlabeled inverse patches also restore pre-delivery content.
+                    return None;
+                }
+                let removed_index = *line - hunk.old_start;
+                let old = hunk.removed.get(removed_index)?;
+                let occurrence = hunk.removed[..removed_index]
+                    .iter()
+                    .filter(|previous| *previous == old)
+                    .count();
+                let retained: Vec<_> = hunk
+                    .added
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, new)| retains_line(old, new))
+                    .collect();
+                if let Some((index, _)) = retained.get(occurrence) {
+                    next.positions.push(hunk.new_start + *index);
+                } else {
+                    // A merge may only transport content from a proven
+                    // parent. Its resolution cannot invent ownership.
+                    // Duplicate removal is loss, not a novel replacement.
+                    let novel_resolution = resolution_parent_lines.is_some_and(|parents| {
+                        hunk.added
+                            .iter()
+                            .any(|line| meaningful(line) && !parents.contains(line))
+                    });
+                    if (!ordinary && !novel_resolution)
+                        || hunk.added.iter().any(|new| retains_line(old, new))
+                    {
+                        return None;
+                    }
+                    let replacement: Vec<_> = hunk
+                        .added
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, new)| meaningful(new))
+                        .map(|(index, _)| hunk.new_start + index)
+                        .collect();
+                    if replacement.is_empty() {
+                        return None;
+                    }
+                    next.positions.extend(replacement);
+                    if !next.commits.iter().any(|known| known == commit) {
+                        next.commits.push(commit.to_string());
+                    }
+                }
+                changed = true;
+                break;
+            }
+            let precedes = if hunk.old_count == 0 {
+                hunk.old_start < *line
+            } else {
+                hunk.old_start + hunk.old_count <= *line
+            };
+            if precedes {
+                offset += hunk.new_count as isize - hunk.old_count as isize;
+            }
+        }
+        if !changed {
+            next.positions.push(line.checked_add_signed(offset)?);
+        }
+    }
+    next.positions.sort_unstable();
+    next.positions.dedup();
+    Some(next)
+}
+
+/// Prove each delivered line's ownership through every intervening edit on
+/// an actual descendant route to the target. Deleted/reverted ownership ends;
+/// a later file touch or matching duplicate cannot resurrect it. At a merge,
+/// only a surviving line from a parent that already proves delivery counts.
+/// `None` leaves binary/deletion-only patches to the reverse-patch proof.
+pub(super) fn line_content_presence(
     repo: &Path,
     parent: &str,
     delivery: &str,
     target: &str,
-    integration: &str,
-    post_integration: &[String],
     path: &str,
-) -> Result<Option<Vec<String>>, String> {
-    let delivery_hunks = hunks(repo, parent, delivery, path)?;
-    // A deleted target path is a real loss. Do not let an older replacement
-    // commit bless the later disappearance of the whole file.
-    let output = Command::new("git")
-        .args(["show", &format!("{target}:{path}")])
-        .current_dir(repo)
-        .output()
-        .map_err(|error| error.to_string())?;
-    if !output.status.success() {
+) -> Result<Option<super::DeliveryContentPresence>, String> {
+    line_content_presence_with_resolution(repo, parent, delivery, target, path, None)
+}
+
+/// Only a caller that independently measured a task-owned remerge resolution
+/// may authorize that one merge's novel replacement hunks on this path.
+pub(super) fn line_content_presence_with_resolution(
+    repo: &Path,
+    parent: &str,
+    delivery: &str,
+    target: &str,
+    path: &str,
+    resolution: Option<&str>,
+) -> Result<Option<super::DeliveryContentPresence>, String> {
+    let delivery_commit = super::resolve_branch_sha(repo, &format!("{delivery}^{{commit}}"))
+        .ok_or("delivery line anchor does not resolve to a commit")?;
+    let target_commit = super::resolve_branch_sha(repo, &format!("{target}^{{commit}}"))
+        .ok_or("delivery line target does not resolve to a commit")?;
+    let delivery = delivery_commit.as_str();
+    let target = target_commit.as_str();
+    let initial = match hunks(repo, parent, delivery, path) {
+        Ok(hunks) => hunks,
+        Err(reason) if reason.starts_with("binary delivery") => return Ok(None),
+        Err(reason) => return Err(reason),
+    };
+    let owners: Vec<_> = initial
+        .iter()
+        .flat_map(|hunk| {
+            hunk.added
+                .iter()
+                .enumerate()
+                .filter(|(_, line)| meaningful(line))
+                .map(move |(index, _)| {
+                    Some(OwnedLines {
+                        positions: vec![hunk.new_start + index],
+                        commits: Vec::new(),
+                        baseline: hunk
+                            .removed
+                            .iter()
+                            .filter(|line| meaningful(line))
+                            .cloned()
+                            .collect(),
+                    })
+                })
+        })
+        .collect();
+    if owners.is_empty() {
         return Ok(None);
     }
-    let target_text =
-        String::from_utf8(output.stdout).map_err(|_| "target content is not UTF-8")?;
-    let mut counts = std::collections::HashMap::<&str, usize>::new();
-    for line in target_text.lines().map(str::trim) {
-        *counts.entry(line).or_default() += 1;
+    if !super::git_commit_is_ancestor(repo, delivery, target) {
+        return Err("delivery line ancestry is not proven on the target".into());
     }
-    let mut missing = Vec::new();
-    for hunk in &delivery_hunks {
-        for (index, line) in hunk
-            .added
-            .iter()
-            .enumerate()
-            .filter(|(_, line)| meaningful(line))
-        {
-            let count = counts.entry(line.as_str()).or_default();
-            if *count > 0 {
-                *count -= 1;
-            } else {
-                missing.push((hunk.new_start + index, line.clone()));
-            }
-        }
-    }
-    if missing.is_empty() {
-        return Ok(None);
-    }
-    let mut owners: Vec<Option<String>> = vec![None; missing.len()];
     let history = text(
         repo,
         &[
             "rev-list",
-            "--full-history",
             "--ancestry-path",
+            "--topo-order",
             "--reverse",
-            "--no-merges",
+            "--parents",
             &format!("{delivery}..{target}"),
-            "--",
-            path,
         ],
     )?;
-    for commit in history.lines() {
-        let changes = hunks(repo, &format!("{commit}^1"), commit, path)?;
-        for (index, (_, line)) in missing.iter().enumerate() {
-            if owners[index].is_none()
-                && changes.iter().any(|hunk| {
-                    hunk.removed.contains(line) && hunk.added.iter().any(|line| meaningful(line))
-                })
-            {
-                owners[index] = Some(commit.to_string());
-            }
-        }
-        if owners.iter().all(Option::is_some) {
-            break;
-        }
-    }
-    if owners.iter().any(Option::is_none) {
-        let integration_patch = hunks(repo, delivery, integration, path)?;
-        let mut positions: Vec<_> = missing
-            .iter()
-            .map(|(line, _)| project(*line, &integration_patch))
-            .collect();
-        for commit in post_integration {
-            let changes = hunks(repo, &format!("{commit}^1"), commit, path)?;
-            let ordinary = super::git_commit_parent_count(repo, commit) == 1;
-            for (index, position) in positions.iter_mut().enumerate() {
-                let Some(line) = *position else {
-                    continue;
-                };
-                if owners[index].is_none()
-                    && ordinary
-                    && changes.iter().any(|hunk| {
-                        hunk.old_count > 0
-                            && (hunk.old_start..hunk.old_start + hunk.old_count).contains(&line)
-                            && hunk.added.iter().any(|line| meaningful(line))
-                    })
-                {
-                    owners[index] = Some(commit.clone());
+    let mut states = std::collections::HashMap::new();
+    states.insert(delivery.to_string(), owners);
+    for record in history.lines() {
+        let fields: Vec<_> = record.split_whitespace().collect();
+        let commit = fields[0];
+        let ordinary = fields.len() == 2;
+        let reverted = is_revert_message(&text(repo, &["show", "-s", "--format=%B", commit])?);
+        let resolution_parent_lines = if resolution == Some(commit) {
+            let mut lines = std::collections::HashSet::new();
+            for prior in fields.iter().skip(1) {
+                let output = Command::new("git")
+                    .args(["show", &format!("{prior}:{path}")])
+                    .current_dir(repo)
+                    .output()
+                    .map_err(|error| error.to_string())?;
+                if output.status.success() {
+                    let contents = String::from_utf8(output.stdout)
+                        .map_err(|_| "resolution parent is not UTF-8")?;
+                    lines.extend(contents.lines().map(|line| line.trim().to_string()));
                 }
-                *position = project(line, &changes);
+            }
+            Some(lines)
+        } else {
+            None
+        };
+        let mut merged: Vec<Option<OwnedLines>> = vec![None; states[delivery].len()];
+        for prior in fields.iter().skip(1) {
+            let Some(previous) = states.get(*prior) else {
+                continue;
+            };
+            let changes = hunks(repo, prior, commit, path)?;
+            for (index, owner) in previous.iter().enumerate() {
+                if merged[index].is_none() {
+                    merged[index] = owner.as_ref().and_then(|owner| {
+                        advance(
+                            owner,
+                            &changes,
+                            ordinary,
+                            resolution_parent_lines.as_ref(),
+                            reverted,
+                            commit,
+                        )
+                    });
+                }
             }
         }
+        states.insert(commit.to_string(), merged);
     }
-    if owners.iter().any(Option::is_none) {
-        return Ok(None);
+    let final_owners = states
+        .get(target)
+        .ok_or("target delivery line state is unavailable")?;
+    if final_owners.iter().any(Option::is_none) {
+        return Ok(Some(super::DeliveryContentPresence::Dropped {
+            paths: vec![path.to_string()],
+        }));
     }
     let mut commits = Vec::new();
-    for commit in owners.into_iter().flatten() {
-        if !commits.contains(&commit) {
-            commits.push(commit);
+    for owner in final_owners.iter().flatten() {
+        for commit in &owner.commits {
+            if !commits.contains(commit) {
+                commits.push(commit.clone());
+            }
         }
     }
-    Ok(Some(commits))
+    Ok(Some(if commits.is_empty() {
+        super::DeliveryContentPresence::Present {
+            paths: vec![path.to_string()],
+        }
+    } else {
+        super::DeliveryContentPresence::Superseded {
+            paths: vec![path.to_string()],
+            commits,
+        }
+    }))
 }

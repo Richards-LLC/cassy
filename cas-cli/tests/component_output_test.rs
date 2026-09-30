@@ -24,6 +24,64 @@ enum ReportKind {
 // status reports the entry/rule/high-value counts on one complete row.
 const COMPLETE_DOCTOR_REPORT: &str = "Store  [OK] database  [OK] schema\n29 ok · 3 warnings · 0 errors · 2ms\ncas doctor --verbose for timings and full messages\n";
 const COMPLETE_STATUS_REPORT: &str = "cas: 2 entries, 0 rules (0 proven), 0 high-value\n";
+// Independently authored 80-column rendering of the joined receipt. The split
+// through "full" is the shape observed in the assembly failure (cas-bca0).
+const WRAPPED_DOCTOR_REPORT_80COL: &str = "Store  [OK] database  [OK] schema\n29 ok · 3 warnings · 0 errors · 498ms · cas doctor --verbose for timings and ful\nl messages\n";
+
+#[test]
+fn pty_report_validation_accepts_doctor_footer_wrapped_at_80_columns() {
+    assert_eq!(
+        WRAPPED_DOCTOR_REPORT_80COL
+            .lines()
+            .nth(1)
+            .unwrap()
+            .chars()
+            .count(),
+        80
+    );
+    assert!(!WRAPPED_DOCTOR_REPORT_80COL.contains(DOCTOR_COMPLETION));
+    validate_report_text(WRAPPED_DOCTOR_REPORT_80COL, true, ReportKind::Doctor, false)
+        .expect("a completed terminal report may wrap through a word");
+
+    // Only the PTY interpretation is tolerant of terminal wraps; piped output
+    // must continue to contain the exact completion text.
+    let error = validate_report_text(WRAPPED_DOCTOR_REPORT_80COL, true, ReportKind::Doctor, true)
+        .expect_err("piped completion matching remains exact");
+    assert!(error.contains("missing completed"), "{error}");
+    let error = validate_report_text(
+        WRAPPED_DOCTOR_REPORT_80COL,
+        false,
+        ReportKind::Doctor,
+        false,
+    )
+    .expect_err("wrapped output cannot turn a failed child into success");
+    assert!(error.contains("child failed"), "{error}");
+    let truncated = WRAPPED_DOCTOR_REPORT_80COL.trim_end_matches("l messages\n");
+    let error = validate_report_text(truncated, true, ReportKind::Doctor, false)
+        .expect_err("a truncated completion row is not a completed report");
+    assert!(error.contains("missing completed"), "{error}");
+}
+
+#[test]
+#[cfg(unix)]
+fn pty_report_validation_accepts_real_80_column_wrap() {
+    // Print one logical 90-column receipt into an actual 80-column PTY. The
+    // screen parser must render the same split as the independent fixture.
+    let report = "Store  [OK] database  [OK] schema\n29 ok · 3 warnings · 0 errors · 498ms · cas doctor --verbose for timings and full messages\n";
+    let mut runner = PtyRunner::with_config(PtyRunnerConfig::with_size(80, 24));
+    runner
+        .spawn(
+            "sh",
+            &["-c", "printf '%s' \"$1\"", "report-fixture", report],
+        )
+        .unwrap();
+    let captured = completed_pty_report(&mut runner, ReportKind::Doctor)
+        .expect("a successful report wrapped by the real PTY");
+    assert_eq!(
+        screen_with_size(&captured, 80, 200).text().trim_end(),
+        WRAPPED_DOCTOR_REPORT_80COL.trim_end()
+    );
+}
 
 #[cfg(unix)]
 fn report_fixture(stdout: &str, exit_code: &str) -> std::process::Output {

@@ -9,10 +9,30 @@ pub const MIGRATION: Migration = Migration {
     subsystem: Subsystem::Tasks,
     description: "Normalize JSON-array and quoted legacy proof-target fragments",
     up: &[],
-    // This is a data migration: only its transaction's ledger receipt detects
-    // completion. A later cloud import is still normalized by task-store I/O.
+    // A missing ledger row is also detectable when every declaration already
+    // contains unique, trimmed strings in an array (or NULL). Be conservative
+    // about quote/bracket prefixes: they may be legacy fragments. The ledger
+    // still marks completed repairs of unknown targets preserved by the parser.
     detect: Some(
-        "SELECT EXISTS(SELECT 1 FROM cas_migrations WHERE id = 262 AND name = 'tasks_normalize_proof_targets')",
+        "SELECT CASE WHEN EXISTS (
+             SELECT 1 FROM cas_migrations WHERE id = 262 AND name = 'tasks_normalize_proof_targets'
+         ) OR NOT EXISTS (
+             SELECT 1 FROM tasks WHERE proof_targets IS NOT NULL AND CASE
+                 WHEN NOT json_valid(proof_targets) THEN 1
+                 WHEN json_type(proof_targets) != 'array' THEN 1
+                 ELSE json_array_length(proof_targets) = 0
+                     OR EXISTS (
+                         SELECT 1 FROM json_each(proof_targets) WHERE type != 'text'
+                             OR value = ''
+                             OR value != trim(value, char(9,10,11,12,13,32,133,160,5760,
+                                 8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,
+                                 8232,8233,8239,8287,12288))
+                             OR substr(value,1,1) IN ('[',char(34))
+                     )
+                     OR (SELECT COUNT(DISTINCT value) FROM json_each(proof_targets))
+                         != json_array_length(proof_targets)
+             END
+         ) THEN 1 ELSE 0 END",
     ),
 };
 
@@ -78,6 +98,12 @@ mod tests {
         crate::migration::apply_migration(&conn, &MIGRATION).unwrap();
         conn.execute_batch("COMMIT").unwrap();
         assert!(crate::migration::migration_is_detected(&conn, &MIGRATION));
+        conn.execute("DELETE FROM cas_migrations WHERE id=262", [])
+            .unwrap();
+        assert!(
+            crate::migration::migration_is_detected(&conn, &MIGRATION),
+            "a stripped ledger must still detect normalized task data"
+        );
         for (id, expected) in [
             (
                 "array",
@@ -104,6 +130,54 @@ mod tests {
         assert_eq!(changed, 0);
         conn.execute_batch("CREATE TRIGGER no_rewrites BEFORE UPDATE ON tasks BEGIN SELECT RAISE(ABORT,'second rewrite'); END;").unwrap();
         normalize_legacy_proof_targets(&conn).unwrap();
+    }
+
+    #[test]
+    fn detection_accepts_clean_data_without_a_ledger_and_refuses_legacy_values() {
+        let conn = fixture();
+        conn.execute("DELETE FROM tasks", []).unwrap();
+        assert!(crate::migration::migration_is_detected(&conn, &MIGRATION));
+        conn.execute("INSERT INTO tasks (id) VALUES ('probe')", [])
+            .unwrap();
+        for (value, detected) in [
+            (None, true),
+            (Some(r#"["rules","core"]"#), true),
+            (Some(r#"["target,with,commas","quoted\"target"]"#), true),
+            (Some(r#"["rules", "core"]"#), true),
+            (Some("rules,core"), false),
+            (Some(r#""rules", "core""#), false),
+            (Some(r#"["rules","core"],updates"#), false),
+            (Some(r#"["rules","rules"]"#), false),
+            (Some(r#"[" rules "]"#), false),
+            (Some(r#"["\u2003rules"]"#), false),
+            (Some(r#"["[\"rules\"", "\"core\"]"]"#), false),
+            (Some(r#"["\"rules\""]"#), false),
+            (Some(r#"["", "core"]"#), false),
+            (Some("[]"), false),
+            (Some("[null]"), false),
+            (Some("[1]"), false),
+            (Some("{}"), false),
+            (Some("null"), false),
+        ] {
+            conn.execute(
+                "UPDATE tasks SET proof_targets=?1 WHERE id='probe'",
+                [value],
+            )
+            .unwrap();
+            assert_eq!(
+                crate::migration::migration_is_detected(&conn, &MIGRATION),
+                detected,
+                "{value:?}"
+            );
+        }
+        // A completed normalization retains unknown malformed target names.
+        conn.execute(
+            "UPDATE tasks SET proof_targets='[null]' WHERE id='probe'",
+            [],
+        )
+        .unwrap();
+        crate::migration::apply_migration(&conn, &MIGRATION).unwrap();
+        assert!(crate::migration::migration_is_detected(&conn, &MIGRATION));
     }
 
     #[test]

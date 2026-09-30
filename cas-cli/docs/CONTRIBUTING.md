@@ -225,6 +225,32 @@ The helper uses Python 3.11's standard-library TOML parser.
 
 Gate evidence: PR #655/run 33430464567; PR #657/run 33435093275.
 
+### Release delivery completion
+
+After user-facing changes reach `main`, a source merge is not the delivery
+completion receipt. The existing release train's `--host-update` stage also
+runs `scripts/release-completion.py`; `--cut` requires its PASS before finishing,
+including when an external host-update stage is used or a previous stage-done
+marker exists. No additional CI lane is involved.
+
+`delivery-completion.json` binds the bumped runtime manifest/version, previous
+release tag, complete commit interval through the landed SHA, refreshed
+`origin/main`, exact successful publication workflow, and published asset
+digests. The gate downloads the host's release archive, installs its binary into
+an empty temporary home, checks its version and clean build commit, and compares
+its bytes with the updated host binary. Existing host, hub and refresh convergence
+proof is also required. A later merge on `main`, a stale same-version build,
+missing publication, or a deferred update fails completion. The main ref is
+checked again after installation. Failure replaces any earlier PASS receipt.
+
+Set `CAS_RELEASE_TRAIN_ANNOUNCEMENT_EMBARGO` to the operator's explicit reason to
+hold announcements. The cut records it in `announcement-embargo.txt`, keeps
+announce/report/receipts pending, and continues runtime publication and install
+proof. Standalone announce/report also honor it. Omission on resume preserves
+the embargo; explicitly setting it to an empty string lifts it. Resume then
+finishes the pending announcement evidence without republishing the runtime.
+An embargo never waives the publication or install requirement.
+
 ### Worker build caches
 
 Factory worker spawns use `sccache` automatically when it is installed, while

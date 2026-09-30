@@ -223,6 +223,7 @@ test-ci-tiers:
 	cd .. && ./scripts/test-self-hosted-rust-setup.sh
 	cd .. && ./scripts/test-release-publication-policy.sh
 	cd .. && ./scripts/test-release-published-receipt.sh
+	cd .. && python3 scripts/test-release-completion.py
 	cd .. && ./scripts/test-release-latency-receipt.sh
 	cd .. && ./scripts/test-codemap-latency-receipt.sh
 	cd .. && ./scripts/test-detect-pending-release.sh

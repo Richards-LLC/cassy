@@ -111,6 +111,11 @@ cut_run_stage() {
     local stage="$1" function_name="cut_stage_${1//-/_}" receipt status=0
     receipt="$(cut_stage_file "$stage")"
     if cut_stage_done "$stage" "$receipt"; then
+        # A historical done marker cannot prove a newly advanced main or a
+        # replaced installed binary. Re-check rule-175 on every completion.
+        if [[ "$stage" == host-update ]]; then
+            release_train_delivery_completion || return
+        fi
         printf 'stage %s: skipped (receipt %s matches current history)\n' "$stage" "$receipt"
         return 0
     fi
@@ -156,11 +161,22 @@ cut_stage_ledger() {
 }
 
 cut_run() {
-    local resume="${1:-false}" stage boundary=""
+    local resume="${1:-false}" stage boundary="" embargo
     mkdir -p "$run_dir"
     write_run_env "$run_dir/run.env"
     export CAS_RELEASE_TRAIN_INVOCATION_KIND=internal
     export CAS_RELEASE_TRAIN_RUN_DIR="$run_dir"
+    # Keep an explicit embargo across resumes. An explicitly empty value
+    # lifts it; omission does not silently authorize announcement writes.
+    if [[ -z "${CAS_RELEASE_TRAIN_ANNOUNCEMENT_EMBARGO+x}" && -s "$run_dir/announcement-embargo.txt" ]]; then
+        export CAS_RELEASE_TRAIN_ANNOUNCEMENT_EMBARGO="$(cat "$run_dir/announcement-embargo.txt")"
+    fi
+    embargo="${CAS_RELEASE_TRAIN_ANNOUNCEMENT_EMBARGO:-}"
+    if [[ -n "${embargo//[[:space:]]/}" ]]; then
+        printf '%s\n' "$CAS_RELEASE_TRAIN_ANNOUNCEMENT_EMBARGO" >"$run_dir/announcement-embargo.txt"
+    else
+        rm -f "$run_dir/announcement-embargo.txt"
+    fi
     if [[ "$resume" == true && -s "$run_dir/blockers.log" ]]; then
         export CAS_RELEASE_TRAIN_BLOCKER_STAGES="$(paste -sd, "$run_dir/blockers.log")"
     fi
@@ -186,6 +202,10 @@ cut_run() {
             continue
         fi
         boundary=""
+        if [[ -s "$run_dir/announcement-embargo.txt" && "$stage" =~ ^(announce|report|receipts)$ ]]; then
+            printf 'stage %s: pending (explicit announcement embargo; runtime publication continues)\n' "$stage"
+            continue
+        fi
         if ! cut_run_stage "$stage"; then
             cut_stage_failure "$stage" "stage failed; inspect the receipt and log"
             return 1

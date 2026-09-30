@@ -73,6 +73,7 @@ fn entry(id: &str, content: &str, created: &str) -> Entry {
         scope: Scope::Project,
         entry_type: EntryType::Learning,
         content: content.to_string(),
+        origin_project: Some(PROJECT_ID.to_string()),
         created: DateTime::parse_from_rfc3339(created)
             .unwrap()
             .with_timezone(&Utc),
@@ -102,10 +103,19 @@ async fn cloud_push_uploads_queued_entry_and_persists_acknowledgement() {
         .unwrap()
         .add(&local)
         .unwrap();
+    assert_eq!(
+        open_store_local(&fixture.root)
+            .unwrap()
+            .get(&local.id)
+            .unwrap()
+            .origin_project
+            .as_deref(),
+        Some(PROJECT_ID),
+        "push attribution must exist on the stored entry before enqueueing"
+    );
     let queue = SyncQueue::open(&fixture.root).unwrap();
     queue.init().unwrap();
-    let mut payload = serde_json::to_value(&local).unwrap();
-    payload["origin_project"] = json!(PROJECT_ID);
+    let payload = serde_json::to_value(&local).unwrap();
     queue
         .enqueue(
             EntityType::Entry,
@@ -127,11 +137,13 @@ async fn cloud_push_uploads_queued_entry_and_persists_acknowledgement() {
     assert_eq!(uploaded["entries"].as_array().unwrap().len(), 1);
     assert_eq!(uploaded["entries"][0]["id"], "push-entry");
     assert_eq!(uploaded["entries"][0]["content"], "Memory uploaded by CLI");
+    assert_eq!(uploaded["entries"][0]["origin_project"], PROJECT_ID);
     let stored = open_store_local(&fixture.root)
         .unwrap()
         .get("push-entry")
         .unwrap();
     assert_eq!(stored.content, "Memory uploaded by CLI");
+    assert_eq!(stored.origin_project.as_deref(), Some(PROJECT_ID));
     let queue = SyncQueue::open(&fixture.root).unwrap();
     assert_eq!(
         queue.stats(3).unwrap().total,
@@ -191,6 +203,7 @@ async fn cloud_pull_imports_remote_entry_and_task_into_store() {
         .unwrap();
     assert_eq!(stored.content, "Remote learning");
     assert_eq!(stored.entry_type, EntryType::Learning);
+    assert_eq!(stored.origin_project.as_deref(), Some(PROJECT_ID));
     let task = open_task_store_local(&fixture.root)
         .unwrap()
         .get("cas-c001")
@@ -267,6 +280,12 @@ async fn cloud_pull_persists_remote_and_local_conflict_winners() {
         store.get("local-wins").unwrap().content,
         "New local content"
     );
+    for id in ["remote-wins", "local-wins"] {
+        assert_eq!(
+            store.get(id).unwrap().origin_project.as_deref(),
+            Some(PROJECT_ID)
+        );
+    }
 }
 
 #[tokio::test]

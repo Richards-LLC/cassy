@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "documents": {
+    "skills/cas-supervisor/SKILL.md": {
+      "source": "cas-cli/src/builtins/skills/cas-supervisor.md",
+      "contains": [
+        {
+          "text": "AskUserQuestion",
+          "reason": "Keep the named operator-question surface available in the supervisor's briefing."
+        },
+        {
+          "text": "SendMessage",
+          "reason": "Keep the named agent-message surface available in the supervisor's briefing."
+        },
+        {
+          "text": "coordination",
+          "reason": "Supervisor lifecycle and typed wake messages must route through Cassy's coordination tool."
+        }
+      ],
+      "absent": [],
+      "any_of": []
+    }
+  }
+}

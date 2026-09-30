@@ -4324,22 +4324,6 @@ This is the body content."#;
         assert!(guide.contains(SESSION_TOOL_NAMING_LINE) && !guide.contains(TOOL_NAMING_LINE));
     }
 
-    /// Keep the callable coordination surfaces in the model-visible briefing.
-    #[test]
-    fn test_supervisor_guidance_hard_rules() {
-        let guide = supervisor_guidance();
-        for keyword in [
-            "AskUserQuestion",
-            "SendMessage",
-            "coordination",
-        ] {
-            assert!(
-                guide.contains(keyword),
-                "supervisor_guidance() missing Hard Rule keyword: {keyword:?}"
-            );
-        }
-    }
-
     #[test]
     fn supervisor_operator_reply_contract_is_registered_on_every_harness() {
         for (label, catalog, source) in [

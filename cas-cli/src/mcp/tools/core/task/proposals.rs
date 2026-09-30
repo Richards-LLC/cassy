@@ -636,6 +636,7 @@ mod tests {
             priority: 2,
             task_type: "task".into(),
             risk: Some("none".to_string()),
+            door: None,
             proof_targets: None,
             supervisor_override: None,
             reason: None,

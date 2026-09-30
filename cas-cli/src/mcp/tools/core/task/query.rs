@@ -251,6 +251,7 @@ impl CasCore {
                 .collect::<Vec<_>>();
             output.push_str(&format!("\nRisk: {}\n", risks.join(", ")));
         }
+        output.push_str(&format!("Door: {} (recorded only)\n", task.door.map(|door| door.to_string()).unwrap_or_else(|| "undeclared".into())));
         if !task.proof_targets.is_empty() {
             output.push_str(&format!(
                 "Proof Targets: {}\n",

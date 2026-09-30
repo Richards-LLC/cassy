@@ -2048,6 +2048,7 @@ impl CasService {
                     priority: 1,
                     task_type: "bug".to_owned(),
                     risk: Some("none".to_owned()),
+                    door: None,
                     proof_targets: None,
                     supervisor_override: None,
                     reason: None,

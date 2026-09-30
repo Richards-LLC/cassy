@@ -236,6 +236,7 @@ mod m257_qa_passes;
 mod m258_unauthored_pulled_rows;
 mod m259_rules_add_operator_authority;
 mod m260_entries_rules_add_origin_project;
+mod m261_tasks_add_door;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -508,6 +509,7 @@ pub const MIGRATIONS: &[Migration] = &[
     m258_unauthored_pulled_rows::MIGRATION,
     m259_rules_add_operator_authority::MIGRATION,
     m260_entries_rules_add_origin_project::MIGRATION,
+    m261_tasks_add_door::MIGRATION,
 ];
 
 #[cfg(test)]

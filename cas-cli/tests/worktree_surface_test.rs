@@ -318,6 +318,7 @@ fn close_update_request(id: String) -> TaskUpdateRequest {
         demo_statement: None,
         execution_note: None,
         risk: None,
+        door: None,
         proof_targets: None,
         external_ref: None,
         assignee: None,

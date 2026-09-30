@@ -472,7 +472,33 @@ run_pipeline() {
 
     date -u +%s >"$run_dir/pipeline.start.epoch"
     pipeline_log "pipeline start branch=$branch tip=$(git -C "$worktree" rev-parse --short HEAD)"
-    git -C "$worktree" push -q origin "HEAD:refs/heads/$branch" && pipeline_log "pushed $branch"
+    # Only a prior successful push by this run authorizes replacement of a
+    # train-owned release branch. Never refresh the lease from origin here:
+    # that would silently overwrite a concurrent operator's push on resume.
+    local pushed_branch pushed_sha lease="none" remote_sha
+    local -a push_args=()
+    if [[ -s "$run_dir/pipeline.pushed.ref" ]]; then
+        read -r pushed_branch pushed_sha <"$run_dir/pipeline.pushed.ref" || true
+    fi
+    if [[ "$branch" == release/* && "${pushed_branch:-}" == "$branch" \
+        && "${pushed_sha:-}" =~ ^[0-9a-f]{40}$ ]]; then
+        lease="$pushed_sha"
+        push_args+=("--force-with-lease=refs/heads/$branch:$lease")
+    fi
+    pipeline_log "push branch=$branch local=$gate_sha lease=$lease"
+    # Pin the source to the proof, even if HEAD moves while git is running.
+    if ! git -C "$worktree" push -q "${push_args[@]}" origin "$gate_sha:refs/heads/$branch"; then
+        remote_sha="$(git -C "$worktree" ls-remote --heads origin "refs/heads/$branch" \
+            | awk 'NR == 1 {print $1}' || true)"
+        pipeline_log "PUSH_REJECTED branch=$branch local=$gate_sha remote=${remote_sha:-absent-or-unavailable} lease=$lease"
+        pipeline_finish PUSH_REJECTED
+        return 1
+    fi
+    printf '%s %s\n' "$branch" "$gate_sha" >"$run_dir/pipeline.pushed.ref"
+    printf '%s branch=%s previous=%s local=%s lease=%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$branch" "${pushed_sha:-none}" "$gate_sha" "$lease" \
+        >>"$run_dir/pipeline.pushes.log"
+    pipeline_log "pushed $branch local=$gate_sha previous=${pushed_sha:-none} lease=$lease"
 
     local pr_number
     pr_number="$(gh_cmd pr list -R "$repo_slug" --head "$branch" --json number 2>/dev/null \
@@ -533,8 +559,19 @@ run_pipeline() {
     since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
     enqueue() {
-        local out
-        out="$(gh_cmd api graphql -f query='mutation($id:ID!){enqueuePullRequest(input:{pullRequestId:$id}){mergeQueueEntry{position state}}}' -F id="$pr_id" 2>&1 || true)"
+        local out pr_head
+        # Re-check on every attempt, including dropped-entry re-enqueues.
+        # Missing/malformed/API-error responses prove no head and fail closed.
+        pr_head="$(gh_cmd pr view "$pr_number" -R "$repo_slug" --json headRefOid 2>/dev/null \
+            | jq -r '.headRefOid // empty' 2>/dev/null || true)"
+        if [[ "$pr_head" != "$gate_sha" ]]; then
+            pipeline_log "PR_HEAD_MISMATCH PR=#$pr_number gated=$gate_sha head=${pr_head:-absent-or-unavailable}"
+            pipeline_finish PR_HEAD_MISMATCH
+            return 2
+        fi
+        # Bind the mutation too: the head can move after the preceding read.
+        out="$(gh_cmd api graphql -f query='mutation($id:ID!,$head:GitObjectID!){enqueuePullRequest(input:{pullRequestId:$id,expectedHeadOid:$head}){mergeQueueEntry{position state}}}' \
+            -F id="$pr_id" -F head="$gate_sha" 2>&1 || true)"
         if printf '%s' "$out" | grep -q '"state"'; then
             pipeline_log "enqueued"
             return 0
@@ -543,7 +580,15 @@ run_pipeline() {
         return 1
     }
 
-    enqueue || { sleep "$poll"; enqueue || true; }
+    local enqueue_status=0
+    enqueue || enqueue_status=$?
+    [[ "$enqueue_status" != 2 ]] || return 1
+    if [[ "$enqueue_status" != 0 ]]; then
+        sleep "$poll"
+        enqueue_status=0
+        enqueue || enqueue_status=$?
+        [[ "$enqueue_status" != 2 ]] || return 1
+    fi
 
     local requeues=0
     for ((i = 1; i <= watch_tries; i++)); do
@@ -582,7 +627,9 @@ run_pipeline() {
             if [[ $requeues -le 3 ]]; then
                 pipeline_log "entry dropped — re-enqueue #$requeues"
                 since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-                enqueue || true
+                enqueue_status=0
+                enqueue || enqueue_status=$?
+                [[ "$enqueue_status" != 2 ]] || return 1
             else
                 pipeline_log "DROPPED_TOO_OFTEN"
                 pipeline_finish DROPPED_TOO_OFTEN

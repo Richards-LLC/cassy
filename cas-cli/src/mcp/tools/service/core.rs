@@ -776,6 +776,7 @@ impl CasService {
             content: req.content,
             paths: req.paths,
             tags: req.tags,
+            source_ids: req.source_ids,
             auto_approve_tools: req.auto_approve_tools,
             auto_approve_paths: req.auto_approve_paths,
             changed_by: req.changed_by,

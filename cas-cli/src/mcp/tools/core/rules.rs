@@ -5,22 +5,65 @@ use cas_store::{RetrievalAggregate, SqliteRetrievalStore};
 use std::collections::HashSet;
 
 fn enforceable_mechanism(rule: &Rule) -> Option<&'static str> {
-    let sources: HashSet<_> = rule
-        .source_ids
-        .iter()
-        .map(String::as_str)
-        .filter(|id| !id.trim().is_empty())
-        .collect();
-    if sources.len() < 2 {
+    if rule.status == RuleStatus::Retired || rule.harmful_count > 0 {
         return None;
     }
-    ["lint", "hook", "gate", "type"]
+    ["lint", "test", "hook", "gate", "type"]
         .into_iter()
         .find(|mechanism| {
             rule.tags
                 .iter()
                 .any(|tag| tag == &format!("enforceable:{mechanism}"))
         })
+}
+
+fn distinct_rule_sources(rule: &Rule) -> usize {
+    rule.source_ids
+        .iter()
+        .map(|id| id.trim())
+        .filter(|id| !id.is_empty())
+        .collect::<HashSet<_>>()
+        .len()
+}
+
+/// Encode chores belong to the project backlog rather than an arbitrary epic.
+/// Show them at the supervisor's assembly boundary even when they are not children.
+pub(crate) fn render_pending_encode_chores(tasks: &[Task]) -> String {
+    let mut pending: Vec<_> = tasks
+        .iter()
+        .filter(|task| {
+            !task.is_terminal()
+                && task.task_type == TaskType::Chore
+                && task
+                    .external_ref
+                    .as_deref()
+                    .is_some_and(|reference| reference.starts_with("rule-encode:"))
+        })
+        .collect();
+    if pending.is_empty() {
+        return String::new();
+    }
+    pending.sort_by(|a, b| a.id.cmp(&b.id));
+    let mut output = format!(
+        "\nPending rule encode chores (project backlog: {}):\n",
+        pending.len()
+    );
+    for task in pending.iter().take(20) {
+        output.push_str(&format!(
+            "- {} [{}] {} (assignee: {})\n",
+            task.id,
+            task.status,
+            task.title.replace(['\n', '\r'], " "),
+            task.assignee.as_deref().unwrap_or("unassigned")
+        ));
+    }
+    if pending.len() > 20 {
+        output.push_str(&format!(
+            "... {} more; task action=list task_type=chore\n",
+            pending.len() - 20
+        ));
+    }
+    output
 }
 
 fn encode_chore_ref(rule_id: &str) -> String {
@@ -78,9 +121,9 @@ impl CasCore {
     // Rule Tools (10)
     // ========================================================================
 
-    /// A durable external reference makes repeat promotion and a retry after
-    /// partial failure resolve to the same backlog item, including after the
-    /// original chore has closed.
+    /// A durable external reference makes repeat creation/tagging/promotion
+    /// and a retry after partial failure resolve to the same backlog item,
+    /// including after the original chore has closed.
     fn ensure_encode_chore(&self, rule: &Rule) -> Result<Option<String>, McpError> {
         let Some(mechanism) = enforceable_mechanism(rule) else {
             return Ok(None);
@@ -109,18 +152,24 @@ impl CasCore {
         chore.task_type = TaskType::Chore;
         chore.origin_project = task_store.project_id().map(str::to_owned);
         chore.external_ref = Some(external_ref);
+        let sources = if rule.source_ids.is_empty() {
+            format!(
+                "{} (legacy rule record; recover incident provenance from rule history)",
+                rule.id
+            )
+        } else {
+            rule.source_ids.join(", ")
+        };
         chore.description = format!(
             "Encode rule {} as a {mechanism} mechanism. Rule content: {}\nSource entry IDs: {}",
-            rule.id,
-            rule.content,
-            rule.source_ids.join(", ")
+            rule.id, rule.content, sources
         );
         chore.acceptance_criteria = format!(
             "The {mechanism} enforces rule {} and has a regression check covering the cited sources.",
             rule.id
         );
         task_store
-            .create_atomic(&chore, &[], None, Some("rule-promote"))
+            .create_atomic(&chore, &[], None, Some("rule-encode"))
             .map_err(|error| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
                 message: Cow::from(format!(
@@ -350,6 +399,7 @@ impl CasCore {
             let _ = self.sync_rules();
         }
 
+        let chore = self.ensure_encode_chore(&rule)?;
         let mut msg = format!("Marked {} as helpful", req.id);
         if promoted {
             msg.push_str(&format!(
@@ -366,6 +416,9 @@ impl CasCore {
             ));
         }
 
+        if let Some(chore) = chore {
+            msg.push_str(&format!("; encode chore {chore} exists"));
+        }
         Ok(Self::success(msg))
     }
 
@@ -519,17 +572,21 @@ impl CasCore {
             data: None,
         })?;
 
+        let chore = self.ensure_encode_chore(&rule)?;
+        let chore_suffix = chore
+            .map(|id| format!("; encode chore {id} exists"))
+            .unwrap_or_default();
         match hard_rule_author {
             Some(Ok(author)) => {
                 let _ = self.sync_rules();
                 Ok(Self::success(format!(
-                    "Created rule: {id} (operator hard rule authorised by {author}: synced to Claude Code and surfaced at session start, labelled DRAFT until promoted)"
+                    "Created rule: {id} (operator hard rule authorised by {author}: synced to Claude Code and surfaced at session start, labelled DRAFT until promoted){chore_suffix}"
                 )))
             }
             Some(Err(refusal)) => Ok(Self::success(format!(
-                "Created rule: {id} as an ordinary draft. It reads like a hard rule, but {refusal}, so it waits for promotion like any other draft."
+                "Created rule: {id} as an ordinary draft. It reads like a hard rule, but {refusal}, so it waits for promotion like any other draft.{chore_suffix}"
             ))),
-            None => Ok(Self::success(format!("Created rule: {id}"))),
+            None => Ok(Self::success(format!("Created rule: {id}{chore_suffix}"))),
         }
     }
 
@@ -625,6 +682,12 @@ impl CasCore {
             .check_rule(&rule.content, &rule.tags)
         {
             return Err(invalid(refusal.to_string()));
+        }
+
+        if enforceable_mechanism(&rule).is_none() && distinct_rule_sources(&rule) < 2 {
+            return Err(invalid(format!(
+                "{id} is a judgement rule; promotion requires at least two distinct source IDs"
+            )));
         }
 
         let floor = config.sync.min_helpful.max(0);
@@ -771,6 +834,16 @@ impl CasCore {
             changes.push("tags");
         }
 
+        if let Some(sources) = req.source_ids {
+            rule.source_ids = sources
+                .split(',')
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned)
+                .collect();
+            changes.push("source_ids");
+        }
+
         if let Some(ref tools) = req.auto_approve_tools {
             // Validate tools before setting
             let tool_list: Vec<&str> = tools.split(',').map(|t| t.trim()).collect();
@@ -842,10 +915,15 @@ impl CasCore {
             let _ = self.sync_rules();
         }
 
+        let chore = self.ensure_encode_chore(&rule)?;
+        let suffix = chore
+            .map(|id| format!("; encode chore {id} exists"))
+            .unwrap_or_default();
         Ok(Self::success(format!(
-            "Updated rule {}: {}",
+            "Updated rule {}: {}{}",
             req.id,
-            changes.join(", ")
+            changes.join(", "),
+            suffix
         )))
     }
 
@@ -910,8 +988,12 @@ impl CasCore {
             data: None,
         })?;
         let _ = self.sync_rules();
+        let chore = self.ensure_encode_chore(&restored)?;
+        let suffix = chore
+            .map(|id| format!("; encode chore {id} exists"))
+            .unwrap_or_default();
         Ok(Self::success(format!(
-            "Restored rule {}{} (status: {})",
+            "Restored rule {}{} (status: {}){suffix}",
             req.id,
             version
                 .map(|v| format!(" to version {v}"))
@@ -1028,9 +1110,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn one_distinct_source_files_no_encode_chore() {
+    async fn mechanical_rule_with_one_source_files_encode_chore() {
         let tasks = promote_with_sources(&["enforceable:gate"], &["mem-one"], false).await;
-        assert!(tasks.is_empty());
+        assert_eq!(tasks.len(), 1);
     }
 
     #[tokio::test]
@@ -1038,5 +1120,218 @@ mod tests {
         let tasks =
             promote_with_sources(&["enforceable:type"], &["mem-one", "mem-two"], true).await;
         assert_eq!(tasks.len(), 1);
+    }
+    fn isolated_core() -> (tempfile::TempDir, CasCore) {
+        let temp = tempfile::tempdir().expect("temporary project");
+        let cas_root = init_cas_dir(temp.path()).expect("isolated project");
+        let core = CasCore::with_daemon(cas_root, None, None);
+        core.open_rule_store().unwrap().init().unwrap();
+        core.open_task_store().unwrap().init().unwrap();
+        (temp, core)
+    }
+
+    fn update_rule(id: &str, tags: Option<&str>, sources: Option<&str>) -> RuleUpdateRequest {
+        RuleUpdateRequest {
+            id: id.to_owned(),
+            content: None,
+            paths: None,
+            tags: tags.map(str::to_owned),
+            source_ids: sources.map(str::to_owned),
+            auto_approve_tools: None,
+            auto_approve_paths: None,
+            changed_by: None,
+            change_note: Some("review incident evidence".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn mechanical_first_occurrence_files_chore_without_promoting_draft() {
+        for mechanism in ["lint", "test", "hook", "gate", "type"] {
+            let (_temp, core) = isolated_core();
+            core.cas_rule_create(Parameters(RuleCreateRequest {
+                scope: "project".into(),
+                content: "Parser failures must be caught by the grammar check".into(),
+                paths: None,
+                tags: Some(format!("enforceable:{mechanism}")),
+                source_ids: Some("incident-one".into()),
+                auto_approve_tools: None,
+                auto_approve_paths: None,
+            }))
+            .await
+            .unwrap();
+            let rules = core.open_rule_store().unwrap().list().unwrap();
+            assert_eq!(rules.len(), 1);
+            assert_eq!(rules[0].status, RuleStatus::Draft);
+            let tasks = core.open_task_store().unwrap().list(None).unwrap();
+            assert_eq!(tasks.len(), 1, "{mechanism}");
+            assert_eq!(tasks[0].external_ref, Some(encode_chore_ref(&rules[0].id)));
+            assert!(tasks[0].description.contains("incident-one"));
+        }
+    }
+
+    #[tokio::test]
+    async fn tagging_legacy_draft_files_once_even_after_chore_closes() {
+        let (_temp, core) = isolated_core();
+        let mut rule = Rule::new("legacy-rule".into(), "Check parser grammar".into());
+        core.open_rule_store().unwrap().add(&rule).unwrap();
+        core.cas_rule_update(Parameters(update_rule(
+            &rule.id,
+            Some("enforceable:test"),
+            None,
+        )))
+        .await
+        .unwrap();
+        let store = core.open_task_store().unwrap();
+        let mut tasks = store.list(None).unwrap();
+        assert_eq!(
+            tasks.len(),
+            1,
+            "the legacy rule record is the first occurrence"
+        );
+        let mut chore = tasks.remove(0);
+        chore.status = TaskStatus::Closed;
+        store.update(&chore).unwrap();
+        core.cas_rule_update(Parameters(update_rule(
+            &rule.id,
+            Some("enforceable:test"),
+            Some("incident-one"),
+        )))
+        .await
+        .unwrap();
+        core.cas_rule_promote(
+            rule.id.clone(),
+            Some("specific mechanical constraint".into()),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(store.list(None).unwrap().len(), 1);
+        rule = core.open_rule_store().unwrap().get(&rule.id).unwrap();
+        assert_eq!(rule.source_ids, vec!["incident-one"]);
+        assert_eq!(rule.status, RuleStatus::Proven);
+        core.cas_rule_delete(Parameters(IdRequest {
+            id: rule.id.clone(),
+        }))
+        .await
+        .unwrap();
+        assert_eq!(
+            core.open_rule_store()
+                .unwrap()
+                .get(&rule.id)
+                .unwrap()
+                .status,
+            RuleStatus::Retired
+        );
+        core.cas_rule_restore(Parameters(VersionRequest {
+            id: rule.id.clone(),
+            version: None,
+            version_id: None,
+            changed_by: None,
+            change_note: Some("restore verified constraint".into()),
+        }))
+        .await
+        .unwrap();
+        assert_eq!(
+            core.open_rule_store()
+                .unwrap()
+                .get(&rule.id)
+                .unwrap()
+                .status,
+            RuleStatus::Proven
+        );
+        assert_eq!(
+            store.list(None).unwrap().len(),
+            1,
+            "restore reuses even a closed chore"
+        );
+    }
+
+    #[tokio::test]
+    async fn judgement_rule_waits_for_two_distinct_sources() {
+        let (_temp, core) = isolated_core();
+        let mut rule = Rule::new(
+            "judgement-rule".into(),
+            "Prefer a compact review explanation".into(),
+        );
+        rule.source_ids = vec!["incident-one".into(), " incident-one ".into(), " ".into()];
+        let rules = core.open_rule_store().unwrap();
+        rules.add(&rule).unwrap();
+        let error = core
+            .cas_rule_promote(rule.id.clone(), Some("one incident".into()), None)
+            .await
+            .expect_err("duplicate and blank IDs are not independent evidence");
+        assert!(error.message.contains("two distinct source IDs"));
+        assert_eq!(rules.get(&rule.id).unwrap().status, RuleStatus::Draft);
+        assert!(
+            core.open_task_store()
+                .unwrap()
+                .list(None)
+                .unwrap()
+                .is_empty()
+        );
+        core.cas_rule_update(Parameters(update_rule(
+            &rule.id,
+            None,
+            Some("incident-one,incident-two"),
+        )))
+        .await
+        .unwrap();
+        core.cas_rule_promote(rule.id.clone(), Some("two observed incidents".into()), None)
+            .await
+            .unwrap();
+        assert_eq!(rules.get(&rule.id).unwrap().status, RuleStatus::Proven);
+        assert!(
+            core.open_task_store()
+                .unwrap()
+                .list(None)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn retired_harmful_and_unknown_mechanisms_do_not_file() {
+        let (_temp, core) = isolated_core();
+        let mut rule = Rule::new("example".into(), "Check parser grammar".into());
+        rule.tags = vec!["enforceable:prose".into()];
+        assert!(core.ensure_encode_chore(&rule).unwrap().is_none());
+        rule.tags = vec!["enforceable:test".into()];
+        rule.status = RuleStatus::Retired;
+        assert!(core.ensure_encode_chore(&rule).unwrap().is_none());
+        rule.status = RuleStatus::Draft;
+        rule.harmful_count = 1;
+        assert!(core.ensure_encode_chore(&rule).unwrap().is_none());
+        rule.harmful_count = 0;
+        rule.status = RuleStatus::Stale;
+        assert!(core.ensure_encode_chore(&rule).unwrap().is_some());
+    }
+
+    #[test]
+    fn pending_encode_chores_show_active_project_backlog_only() {
+        let mut chore = Task::new("chore-one".into(), "encode rule-one as test".into());
+        chore.task_type = TaskType::Chore;
+        chore.external_ref = Some(encode_chore_ref("rule-one"));
+        let mut closed = chore.clone();
+        closed.id = "chore-closed".into();
+        closed.status = TaskStatus::Closed;
+        let mut unrelated = chore.clone();
+        unrelated.id = "unrelated".into();
+        unrelated.external_ref = None;
+        let mut cancelled = closed.clone();
+        cancelled.status = TaskStatus::Cancelled;
+        let report = render_pending_encode_chores(&[chore.clone(), closed, unrelated, cancelled]);
+        assert!(report.contains("project backlog: 1"));
+        assert!(report.contains("chore-one [open] encode rule-one as test"));
+        assert!(!report.contains("chore-closed"));
+        assert!(!report.contains("unrelated"));
+        for status in [
+            TaskStatus::InProgress,
+            TaskStatus::Blocked,
+            TaskStatus::AwaitingMerge,
+        ] {
+            chore.status = status;
+            assert!(render_pending_encode_chores(&[chore.clone()]).contains("chore-one"));
+        }
+        assert!(render_pending_encode_chores(&[]).is_empty());
     }
 }

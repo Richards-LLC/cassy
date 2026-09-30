@@ -338,6 +338,7 @@ async fn test_rule_update() {
         content: Some("Updated rule content".to_string()),
         paths: Some("**/*.ts".to_string()),
         tags: None,
+        source_ids: None,
         auto_approve_tools: None,
         auto_approve_paths: None,
         changed_by: Some("test-actor".to_string()),
@@ -1030,7 +1031,7 @@ async fn rule_promote_is_a_recorded_decision_not_a_vote_cas_228e() {
         content: content.to_string(),
         paths: None,
         tags: None,
-        source_ids: None,
+        source_ids: Some("rejection-one,rejection-two".to_string()),
         auto_approve_tools: None,
         auto_approve_paths: None,
     };

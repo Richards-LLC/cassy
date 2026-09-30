@@ -351,7 +351,7 @@ fn writing_for_agents_meets_the_bar_it_sets_for_other_skills() {
             "is the one copy",
             "no `codex/` or `grok/` twin tree",
             "Name Cassy tools by bare name",
-            "three Codex-only ones under `builtins/codex/`",
+            "Codex-only files under `builtins/codex/`",
         ] {
             assert!(
                 body.contains(marker),

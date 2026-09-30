@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Test-audit architecture candidates · 2026-09-30</title><style>/* Generated from design-tokens.json by scripts/gen-design-tokens-css.py. Do not edit.
+   Paste into the artifact's <style>; DESIGN.md tokens replace these when a project has one. */
+:root {
+  color-scheme: light dark;
+  --bg: #F7F4EE;
+  --surface: #FFFFFF;
+  --surface-hero: #F1E7DD;
+  --line: #DAD3C7;
+  --line-strong: #8F8371;
+  --ink: #1B1D24;
+  --ink-muted: #5A5F6E;
+  --verdict: #2E3A9F;
+  --verdict-soft: #DDE1F7;
+  --evidence: #5A5F6E;
+  --action: #2E3A9F;
+  --good: #226845;
+  --warning: #7F5504;
+  --danger: #B3261E;
+  --good-tint: rgba(34,104,69,0.10);
+  --warning-tint: rgba(127,85,4,0.10);
+  --danger-tint: rgba(179,38,30,0.10);
+  --focus: #2E3A9F;
+  --series-1: #4C5CA8;
+  --series-2: #9D433B;
+  --series-3: #0095A0;
+  --series-4: #693F88;
+  --series-5: #5C6C00;
+  --magnitude-1: #E5E8F8;
+  --magnitude-2: #B7BEEB;
+  --magnitude-3: #8590DA;
+  --magnitude-4: #5563C2;
+  --magnitude-5: #2E3A9F;
+  --polarity-1: #B3261E;
+  --polarity-2: #DAD3C7;
+  --polarity-3: #226845;
+  --series-neutral: #6B7280;
+  --font-display: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, "Times New Roman", serif;
+  --font-body: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --type-eyebrow: 600 12px/16px var(--font-mono);
+  --type-caption: 400 14px/20px var(--font-body);
+  --type-body: 400 17px/26px var(--font-body);
+  --type-lede: 400 21px/30px var(--font-body);
+  --type-heading: 600 27px/32px var(--font-body);
+  --type-title: 400 34px/38px var(--font-display);
+  --type-verdict: 400 clamp(32px, 4.6vw, 52px)/1.08 var(--font-display);
+  --type-hero-number: 500 clamp(56px, 8vw, 96px)/1 var(--font-mono);
+  --type-ledger: 400 15px/22px var(--font-mono);
+  --measure: 68ch;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+  --space-16: 64px;
+  --space-24: 96px;
+  --container: 1120px;
+  --gutter: 24px;
+  --margin-column: 240px;
+  --radius-chip: 4px;
+  --radius-panel: 8px;
+  --radius-ledger: 0px;
+}
+@media screen and (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12141A;
+    --surface: #191C24;
+    --surface-hero: #241E1E;
+    --line: #2B3040;
+    --line-strong: #6B7390;
+    --ink: #E9E6E0;
+    --ink-muted: #A3A7B4;
+    --verdict: #A9B3FF;
+    --verdict-soft: rgba(169,179,255,0.16);
+    --evidence: #A3A7B4;
+    --action: #A9B3FF;
+    --good: #5FC492;
+    --warning: #E2B14D;
+    --danger: #EF7B72;
+    --good-tint: rgba(95,196,146,0.14);
+    --warning-tint: rgba(226,177,77,0.14);
+    --danger-tint: rgba(239,123,114,0.14);
+    --focus: #A9B3FF;
+    --series-1: #7083D1;
+    --series-2: #C86A60;
+    --series-3: #00A5B4;
+    --series-4: #8C52B6;
+    --series-5: #819334;
+    --magnitude-1: #2A3050;
+    --magnitude-2: #3F4A8C;
+    --magnitude-3: #5B69C4;
+    --magnitude-4: #8592EA;
+    --magnitude-5: #A9B3FF;
+    --polarity-1: #EF7B72;
+    --polarity-2: #2B3040;
+    --polarity-3: #5FC492;
+    --series-neutral: #9AA1AF;
+  }
+}
+
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:var(--type-body)}a{color:var(--action);overflow-wrap:anywhere}a:focus-visible{outline:3px solid var(--focus);outline-offset:4px}.skip{position:absolute;left:24px;top:-80px}.skip:focus{top:8px}main{max-width:1000px;margin:auto;padding:32px 24px}h1{font:var(--type-verdict);max-width:23ch;margin:0 0 24px}h2{font:var(--type-heading);margin:48px 0 20px}h3{font:600 21px/30px var(--font-body);margin:40px 0 16px}p,li{max-width:var(--measure)}p{margin:16px 0}header{background:var(--surface-hero);color:var(--ink);padding:32px;border-bottom:3px solid var(--verdict)}header figure{max-width:380px;margin:0}header h1{max-width:24ch}.eyebrow{font:var(--type-eyebrow);color:var(--ink-muted);margin:0 0 16px}figure{margin:24px 0;max-width:620px}svg{display:block;width:100%;height:auto;max-width:380px}svg text{font:14px var(--font-body);fill:var(--ink)}svg rect{fill:var(--surface);stroke:var(--line-strong);stroke-width:1.5}svg .planned{stroke-dasharray:5 3}svg .decisive{fill:var(--verdict-soft);stroke:var(--verdict);stroke-width:2.5}svg .arrow{stroke:var(--line-strong);stroke-width:2;fill:none}figcaption{font:var(--type-caption);color:var(--ink-muted);margin-top:12px;max-width:65ch}code{font:400 14px/22px var(--font-mono);overflow-wrap:anywhere}pre{white-space:pre-wrap}table{border-collapse:collapse;width:100%;font:400 14px/21px var(--font-body)}th,td{text-align:left;vertical-align:top;padding:12px;border-bottom:1px solid var(--line);overflow-wrap:anywhere}th{font-weight:600}caption{text-align:left;font:var(--type-caption);margin:8px 0}thead{border-bottom:2px solid var(--line-strong)}thead th{overflow-wrap:normal}.table-wrap{overflow-x:auto;margin:24px 0}tbody tr.recommended{background:var(--verdict-soft);color:var(--ink)}tbody tr.recommended th{border-left:3px solid var(--verdict)}footer{margin:48px 0;padding-top:16px;border-top:1px solid var(--line-strong);font:var(--type-caption)}@media(max-width:600px){main{padding:20px 24px}header{padding:24px 16px}h1{font-size:34px}header figure{max-width:100%}table{min-width:640px}h2{font-size:25px}header figcaption{font-size:13px;line-height:19px}}@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto;transition:none}}@media print{:root{color-scheme:light}body{background:var(--surface);color:var(--ink);font-size:11pt}main{padding:0;max-width:100%}header{background:var(--surface);color:var(--ink);padding:16px}h1{font-size:28pt}h2{font-size:18pt;margin-top:28px}.table-wrap{overflow:visible}table{min-width:0;font-size:9pt}th,td{padding:6px}figure,tr{break-inside:avoid}thead{display:table-header-group}svg{max-width:340px}a[href^="http"]::after{content:" (" attr(href) ")"}.skip{display:none}}
+</style></head><body><a class="skip" href="#report">Skip to report</a><main id="report"><header><p class="eyebrow">Architecture decision · 30 September 2026</p><h1>Test delivered frames through one terminal exchange</h1>
+<figure id="hero-figure" aria-labelledby="hero-title"><svg viewBox="0 0 324 186" role="img" aria-labelledby="hero-title hero-desc"><title id="hero-title">The guard sees itself while production can reverse</title><desc id="hero-desc">Both the original and reversed production order pass because the guard searches its own earlier string literals.</desc><text x="12" y="19">Guard sees its own strings</text><rect class="current" x="12" y="30" width="130" height="40"/><text x="77" y="55" text-anchor="middle">request literal</text><path class="arrow" d="M142,50 h28 l-4 -3 m4 3 l-4 3"/><rect class="current" x="170" y="30" width="142" height="40"/><text x="241" y="55" text-anchor="middle">drain literal</text><text x="12" y="99">Reversed production still passes</text><rect class="decisive" x="12" y="110" width="130" height="40"/><text x="77" y="135" text-anchor="middle">PTY drain</text><path class="arrow" d="M142,130 h28 l-4 -3 m4 3 l-4 3"/><rect class="current" x="170" y="110" width="142" height="40"/><text x="241" y="135" text-anchor="middle">keyframe</text><text x="12" y="176">Test finds lines 816 → 819 in both cases.</text></svg><figcaption>Source mutation inspection at 7ebc592583e21aa3d1d507c41467e193e259325c; 2026-09-30 UTC. This proves the guard is ineffective, not that output loss occurred.</figcaption></figure></header>
+<section><h2>Decision context</h2>
+<p>Practitioner decision brief · 2026-09-30. Recommend the daemon terminal-exchange
+candidate for supervisor selection and scheduling. The confirmed defect is a
+self-matching test; no terminal-output loss was reproduced. The interface below
+is proposed, and no production refactor ships in this report.</p>
+<p>Scope: the 16 SOURCE-TEXT entries in the supplied test-audit.txt and the
+builtins.rs prose-pin cluster, inspected at <code>7ebc592583e21aa3d1d507c41467e193e259325c</code>.
+Two independent read-only explorations examined actual callers and tests.
+The scan is targeted, not a whole-repository architectural assessment.</p>
+</section><section><h2>Options</h2>
+<div class="table-wrap"><table><caption>Decision evidence</caption>
+<thead>
+<tr>
+<th scope="col">Candidate</th>
+<th scope="col">Strength</th>
+<th scope="col">Dependency category</th>
+<th scope="col">Cost / effort</th>
+<th scope="col">Risk</th>
+<th scope="col">Reversibility</th>
+<th scope="col">Outcome</th>
+</tr>
+</thead>
+<tbody>
+<tr class="recommended"><th scope="row">Terminal exchange — recommended</th>
+<td>Strong</td>
+<td>In-process + local-substitutable PTY/WS</td>
+<td>Medium; focused daemon seam and protocol test</td>
+<td>Activity accounting or ordering regression</td>
+<td>Private interface can be inlined</td>
+<td>Frame delivery replaces ineffective ordering guard</td>
+</tr>
+<tr><th scope="row">Canonical harness catalog construction</th>
+<td>Worth exploring</td>
+<td>In-process; installation uses local filesystem</td>
+<td>Medium; catalog compatibility and consumers</td>
+<td>Public constants and observable file order</td>
+<td>Retain constants during migration</td>
+<td>Common membership and harness exceptions have one owner</td>
+</tr>
+<tr><th scope="row">Task delivery evidence measurement</th>
+<td>Speculative</td>
+<td>In-process + local-substitutable Git repositories</td>
+<td>High; close, receipts and epic status</td>
+<td>Authorization/status semantics can drift</td>
+<td>Stage consumers separately</td>
+<td>One measurement hides topology and content attribution</td>
+</tr>
+</tbody>
+</table></div>
+</section><section><h2>Why terminal exchange</h2>
+<p>The deciding criterion is a demonstrated gap between a test's claimed contract
+and what it can detect. <code>lifecycle.rs:813</code> includes its own file; searches at
+<code>:816</code> and <code>:819</code> find their own string literals before production at <code>:1910</code>
+and <code>:1914</code>. Swapping only the production statements in memory keeps the
+asserted comparison true. No Rust test was executed in this worker scan.</p>
+<div class="table-wrap"><table><caption>Decision evidence</caption>
+<thead>
+<tr>
+<th scope="col">Inspection</th>
+<th scope="col">First request / drain matches</th>
+<th scope="col">Actual request / drain</th>
+<th scope="col">Existing comparison</th>
+</tr>
+</thead>
+<tbody>
+<tr><th scope="row">Baseline source</th>
+<td>816 / 819</td>
+<td>1910 / 1914</td>
+<td>True</td>
+</tr>
+<tr><th scope="row">Production order reversed in memory</th>
+<td>816 / 819</td>
+<td>1914 / 1910</td>
+<td>True</td>
+</tr>
+</tbody>
+</table></div>
+<h3>Candidate 1: own terminal exchange</h3>
+<figure aria-labelledby="terminal-title"><svg viewBox="0 0 324 162" role="img" aria-labelledby="terminal-title terminal-desc"><title id="terminal-title">One operation owns snapshot, drain and ordered enqueue</title><desc id="terminal-desc">Before: Daemon / WS input / PTY drain. After (planned): Daemon / Exchange.</desc><text x="12" y="18">Before · call order</text><rect x="12.0" y="28" width="88.0" height="38" class="current"/><text x="56.0" y="52" text-anchor="middle">Daemon</text><path d="M100.0,47 h12 m0 0 l-4 -3 m4 3 l-4 3" class="arrow"/><rect x="112.0" y="28" width="88.0" height="38" class="current"/><text x="156.0" y="52" text-anchor="middle">WS input</text><path d="M200.0,47 h12 m0 0 l-4 -3 m4 3 l-4 3" class="arrow"/><rect x="212.0" y="28" width="88.0" height="38" class="current"/><text x="256.0" y="52" text-anchor="middle">PTY drain</text><text x="12" y="102">After · planned</text><rect x="12.0" y="112" width="138.0" height="38" class="planned"/><text x="81.0" y="136" text-anchor="middle">Daemon</text><path d="M150.0,131 h12 m0 0 l-4 -3 m4 3 l-4 3" class="arrow"/><rect x="162.0" y="112" width="138.0" height="38" class="planned"/><text x="231.0" y="136" text-anchor="middle">Exchange</text></svg><figcaption>Before: Daemon / WS input / PTY drain. After (planned): Daemon / Exchange.</figcaption></figure>
+<p>Arrows show call order; the proposed exchange owns the sequence.</p>
+<p>Source: <code>lifecycle.rs:1910–1918</code>, <code>runtime/ws_client.rs:375–399</code>,
+<code>runtime/queue_and_events.rs:2958–2969</code>, inspected at the scope revision above.
+The after path is planned. WS request captures a pane snapshot and feeds the
+encoded keyframe; PTY event handling later feeds encoded output to WS clients.</p>
+<p>Problem: the caller owns the ordering contract across separate operations,
+while the source guard fails to observe production order.</p>
+<p>Proposed interface sketch: a private terminal-exchange operation accepts
+pending requests, panes and client outboxes and returns exchange activity.
+It owns snapshot capture, backend drain and ordered frame enqueue. Preserve
+protocol encoding and pane-name resolution; this is not a new public API.</p>
+<p>Deletion test: wrapping the two existing calls merely moves complexity.
+Moving request/snapshot/drain/enqueue ownership together earns depth: deleting
+the new module would expose those sequencing facts to daemon/client code again.</p>
+<p>Benefits: callers learn activity rather than ordering; a focused test observes
+real encoded keyframe then output, with bytes pending, and reconstructs terminal
+state. In-process snapshot/protocol behavior needs no mock; a deterministic
+queued-byte PTY stand-in and local transport exercise the varying local seam.</p>
+<p>Counter-evidence: the current production order is correct. An existing broader
+frame-delivery test may already cover this scenario; check it before adding a
+second harness. A public trait or callback scheduler would add interface cost
+without proving transport delivery.</p>
+<h3>Candidate 2: derive harness catalogs</h3>
+<figure aria-labelledby="catalog-title"><svg viewBox="0 0 324 162" role="img" aria-labelledby="catalog-title catalog-desc"><title id="catalog-title">Canonical content plus explicit private harness exceptions</title><desc id="catalog-desc">Before: Claude / Codex / Grok. After (planned): Shared / Rules / Catalog.</desc><text x="12" y="18">Before · independent paths</text><rect x="12.0" y="28" width="88.0" height="38" class="current"/><text x="56.0" y="52" text-anchor="middle">Claude</text><rect x="112.0" y="28" width="88.0" height="38" class="current"/><text x="156.0" y="52" text-anchor="middle">Codex</text><rect x="212.0" y="28" width="88.0" height="38" class="current"/><text x="256.0" y="52" text-anchor="middle">Grok</text><text x="12" y="102">After · planned</text><rect x="12.0" y="112" width="88.0" height="38" class="planned"/><text x="56.0" y="136" text-anchor="middle">Shared</text><path d="M100.0,131 h12 m0 0 l-4 -3 m4 3 l-4 3" class="arrow"/><rect x="112.0" y="112" width="88.0" height="38" class="planned"/><text x="156.0" y="136" text-anchor="middle">Rules</text><path d="M200.0,131 h12 m0 0 l-4 -3 m4 3 l-4 3" class="arrow"/><rect x="212.0" y="112" width="88.0" height="38" class="planned"/><text x="256.0" y="136" text-anchor="middle">Catalog</text></svg><figcaption>Before: Claude / Codex / Grok. After (planned): Shared / Rules / Catalog.</figcaption></figure>
+<p>Before boxes are independent lists. Planned arrows resolve canonical content
+and private exceptions into one harness catalog.</p>
+<p>Source: <code>builtins.rs:94</code>, <code>:736</code>, <code>:1373</code>, <code>:2342</code>, <code>:3127</code>, <code>:4006</code>;
+<code>cli/doctor.rs:547</code>, <code>:669</code>; <code>tests/support/builtin_catalog.rs:9–29</code>;
+<code>builtin_flavor_drift_test.rs:79–130</code>, <code>:247</code>. Line numbers refer to the scope
+revision, before this delivery adds the new skill.</p>
+<p>At that revision Claude has 158 skill entries, Codex 161 and Grok 158.
+Grok membership and embedded sources equal canonical membership. Codex has
+157 common entries, replaces the shared supervisor checklist and adds three
+policy YAML entries: 315 registrations repeat shared declarations, not bodies.
+Grok ordering differs; membership parity does not establish order compatibility.</p>
+<p>Problem: adding common content touches three complete production lists; tests
+separately model permitted differences. Prose-pin proliferation amplifies the
+routing knowledge, but moving phrases to a registry does not own catalog assembly.</p>
+<p>Proposal: keep catalog accessor entry points, backed by a canonical embedded
+registry and narrow private harness exceptions. Reject duplicate paths, missing
+replacement targets and obsolete exceptions. Preserve actual agent availability
+and generated frontmatter projections; filesystem installation remains separate.</p>
+<p>Deletion test: today's selector merely dispatches. Deleting the proposed
+construction module would make sync, preview, doctor and tests recover
+inheritance, exceptions and projection independently. Moving arrays to another
+file would fail this test.</p>
+<p>Trade-off: aliasing only Grok is cheap but leaves policy scattered; per-file
+capability metadata adds a policy language that current variation does not need.
+The common-caller design deserves design-it-twice before changing public constant
+compatibility or the observable order of <code>SyncResult.updated_files</code>.</p>
+<h3>Candidate 3: measure task delivery evidence once</h3>
+<figure aria-labelledby="delivery-title"><svg viewBox="0 0 324 162" role="img" aria-labelledby="delivery-title delivery-desc"><title id="delivery-title">Shared measurement preserves separate authorization policies</title><desc id="delivery-desc">Before: Close / Receipt / Status. After (planned): Git state / Measure / Policies.</desc><text x="12" y="18">Before · independent paths</text><rect x="12.0" y="28" width="88.0" height="38" class="current"/><text x="56.0" y="52" text-anchor="middle">Close</text><rect x="112.0" y="28" width="88.0" height="38" class="current"/><text x="156.0" y="52" text-anchor="middle">Receipt</text><rect x="212.0" y="28" width="88.0" height="38" class="current"/><text x="256.0" y="52" text-anchor="middle">Status</text><text x="12" y="102">After · planned</text><rect x="12.0" y="112" width="88.0" height="38" class="planned"/><text x="56.0" y="136" text-anchor="middle">Git state</text><path d="M100.0,131 h12 m0 0 l-4 -3 m4 3 l-4 3" class="arrow"/><rect x="112.0" y="112" width="88.0" height="38" class="planned"/><text x="156.0" y="136" text-anchor="middle">Measure</text><path d="M200.0,131 h12 m0 0 l-4 -3 m4 3 l-4 3" class="arrow"/><rect x="212.0" y="112" width="88.0" height="38" class="planned"/><text x="256.0" y="136" text-anchor="middle">Policies</text></svg><figcaption>Before: Close / Receipt / Status. After (planned): Git state / Measure / Policies.</figcaption></figure>
+<p>Before boxes reconstruct evidence independently. Planned arrows pass Git
+evidence through measurement to the distinct policies.</p>
+<p>Source: <code>mcp/tools/core/task/lifecycle/close_ops.rs:10716</code>, <code>:14181</code>,
+<code>:14282</code>, <code>:15735</code>, <code>:19281</code>; consumer <code>service/factory_ops.rs:6330</code>.
+Existing real-Git tests at <code>close_ops.rs:25060</code> and <code>:25431</code> remain valuable.</p>
+<p>Problem: close, receipt validation and epic status reconstruct anchor/target
+selection, merge attribution and content outcomes along multiple paths.</p>
+<p>Proposal: one read-only measurement returns resolved anchor/target, ancestry,
+attribution, content outcome and uncertainty. Callers retain their distinct
+mutation authorization and presentation policies. Remote fetch remains outside
+measurement; reading origin tracking refs is a local operation.</p>
+<p>Deletion test: extracting the already deep content-presence helper merely moves
+it. The candidate earns depth only when consumers stop rebuilding the same
+measurement. Real temporary Git repositories test topology and content; command
+mocks cannot establish that behavior.</p>
+<p>Trade-off: this has greater potential reach but touches close authorization.
+No divergence was executed or established here. Retain the existing behavioral
+fixtures; moving the entire close file would only relocate complexity.</p>
+</section><section><h2>What we give up</h2>
+<p>Catalog construction could remove repeated registration from every future skill
+change. It loses first priority because public constants, order and consumer
+migration require more compatibility work, while terminal exchange has a
+concrete false-confidence reproducer. Prose consolidation stays with cas-e229;
+test-shape lint stays with cas-0c55.</p>
+</section><section><h2>Reversal cost</h2>
+<p>Terminal exchange stays private and can be inlined without changing protocol
+messages. Keep the behavioral test at the delivery interface. Rollback is
+medium effort if callers have already migrated; no storage migration is proposed.</p>
+</section><section><h2>Audit disposition</h2>
+<p>The audit is a search aid, not a verdict that 16 tests should be removed.</p>
+<div class="table-wrap"><table><caption>Decision evidence</caption>
+<thead>
+<tr>
+<th scope="col">Audited entry</th>
+<th scope="col">Observed surface</th>
+<th scope="col">Disposition</th>
+</tr>
+</thead>
+<tbody>
+<tr><th scope="row">skill_hygiene::release_notes_are_generic_procedure_and_rubric_driven</th>
+<td>Instruction contract, test :74</td>
+<td>Retain justified doc contract; prose registry owns consolidation</td>
+</tr>
+<tr><th scope="row">factory_codex_skill_guardrails::supervisor_reference_tree_uses_current_lifecycle_contract</th>
+<td>Instruction/reference contract, test :309</td>
+<td>Retain contract; deduplicate pins in existing work</td>
+</tr>
+<tr><th scope="row">worktree_surface::process_home_mutation_uses_the_canonical_test_env_guard</th>
+<td>HOME guard usage, test :39</td>
+<td>Structural guard; retain</td>
+</tr>
+<tr><th scope="row">retrieval_eval::the_production_runner_documents_its_unreplicated_surface</th>
+<td>Documentation contract, test :630</td>
+<td>Retain justified documentation contract</td>
+</tr>
+<tr><th scope="row">retrieval_eval::the_full_harness_has_a_named_sixty_second_budget</th>
+<td>Times run on actual fixture, test :684</td>
+<td>Mixed behavioral/source; preserve timing proof</td>
+</tr>
+<tr><th scope="row">retrieval_eval::the_documented_rebaseline_switch_is_the_one_the_harness_reads</th>
+<td>Reads own source, test :1206</td>
+<td>Weak self-reference; inspect actual configuration boundary</td>
+</tr>
+<tr><th scope="row">warning_hygiene::warning_only_symbols_are_scoped_to_the_builds_that_use_them</th>
+<td>Compilation hygiene, test :17</td>
+<td>Structural contract; retain</td>
+</tr>
+<tr><th scope="row">factory_target_cache::symlink_target_escape_is_reported_and_never_removed</th>
+<td>Real temporary symlink fixture, source :985</td>
+<td>Behavioral test; audit classification misleading</td>
+</tr>
+<tr><th scope="row">builtins::test_worker_discipline_reference_is_linked_and_assembly_proof_is_named</th>
+<td>Instruction contract, source :4833</td>
+<td>Registry consolidation remains separate work</td>
+</tr>
+<tr><th scope="row">server_signals::every_long_lived_server_entry_point_ignores_sigpipe</th>
+<td>Source entry-point wiring, source :181</td>
+<td>Supplement; real process behavior already at :107/:117</td>
+</tr>
+<tr><th scope="row">server_signals::short_lived_commands_keep_mains_sigpipe_default</th>
+<td>Source wiring, source :256</td>
+<td>Supplement; retain explicit scope distinction</td>
+</tr>
+<tr><th scope="row">mcp/runtime::casb123_mcp_startup_arms_parent_watchdog_before_schema_migration</th>
+<td>Source ordering, source :1612</td>
+<td>Wiring supplement; not executed watchdog proof</td>
+</tr>
+<tr><th scope="row">close_ops::reachable_anchor_with_dropped_content_blocks_close_and_epic_status_cas_b278</th>
+<td>Real Git fixture, source :25060</td>
+<td>Behavioral test; preserve</td>
+</tr>
+<tr><th scope="row">close_ops::reachable_anchor_with_later_refactor_proceeds_cas_b278</th>
+<td>Real Git fixture, source :25431</td>
+<td>Behavioral test; preserve</td>
+</tr>
+<tr><th scope="row">daemon/lifecycle::websocket_keyframe_requests_stay_before_pty_delta_drain</th>
+<td>Own-source first matches, source :813</td>
+<td>Replace after frame-delivery proof exists</td>
+</tr>
+<tr><th scope="row">migrations::test_every_migration_file_is_declared_and_registered</th>
+<td>Orphan inventory, source :592</td>
+<td>Intentional structural contract; retain</td>
+</tr>
+</tbody>
+</table></div>
+</section><section><h2>Open questions and next action</h2>
+<p>Candidate task <strong>cas-60c5</strong> records terminal exchange, evidence, constraints and
+behavioral acceptance. It remains unassigned and unstarted; the supervisor owns
+selection and scheduling. This report implements the scan/report/task stage.
+Chosen production interface and design trade-offs remain pending; settle them
+in Cassy spec and memory through cas-codebase-design's design-it-twice.</p>
+<p>Falsification: an existing frame-delivery proof that demonstrably fails under
+production-order reversal reduces this candidate to removing an ineffective
+supplement; a proposed extraction that merely sequences two callbacks fails the
+depth claim. No execution evidence supports the task-delivery refactor yet.</p>
+</section><section><h2>Provenance</h2>
+<ul>
+<li>Examined commit: <code>7ebc592583e21aa3d1d507c41467e193e259325c</code>; one snapshot, no time-window trend.</li>
+<li>Input: supplied <code>video-eval/test-audit.txt</code>, SOURCE-TEXT section; 16 named
+entries. Builtin phrase count comes from the sibling consolidation brief,
+not a newly measured assertion count here.</li>
+<li>Commands: <code>git show 7ebc592583e21aa3d1d507c41467e193e259325c:cas-cli/src/builtins.rs</code>;
+<code>rg -n 'process_ws_client_input|RequestPaneKeyframe|Output' cas-cli/src/ui/factory/daemon/runtime/ws_client.rs</code>;
+<code>sed -n '800,830p' cas-cli/src/ui/factory/daemon/runtime/lifecycle.rs</code>;
+<code>sed -n '1890,1950p' cas-cli/src/ui/factory/daemon/runtime/lifecycle.rs</code>.</li>
+<li>Reproducible inspection: <code>python3 /home/pippenz/.cas/artifacts/cas-ddb6/inspect-hotspots.py</code>;
+raw output <code>inspection.log</code> beside that script. It substitutes only the two
+production statements in memory and compares first and last string matches.</li>
+<li>Proof boundary: read-only code inspection and Python source mutation only.
+Rust execution, timing improvement and shipped architectural benefit are
+not verified; the supervisor's assembly owns Rust proof.</li>
+</ul>
+</section><footer>Source: <a href="2026-09-30-test-audit-candidates.md">Markdown report</a> · <a href="2026-09-30-test-audit-candidates.brief.md">Concept brief</a>. Proposed interfaces remain planned.</footer></main></body></html>

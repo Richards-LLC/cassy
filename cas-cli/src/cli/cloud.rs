@@ -7872,7 +7872,7 @@ mod team_cmd_tests {
 
     #[test]
     fn team_auto_on_writes_true_and_resolves_effective_team() {
-        let _guard = crate::test_support::TestEnvGuard::new();
+        let mut _guard = crate::test_support::TestEnvGuard::new();
         let project = TempDir::new().unwrap();
         let user = TempDir::new().unwrap();
 
@@ -7885,9 +7885,7 @@ mod team_cmd_tests {
         user_cfg.save_to_cas_dir(user.path()).unwrap();
 
         let user_cloud_json = user.path().join("cloud.json");
-        unsafe {
-            std::env::set_var("CAS_USER_CLOUD_JSON", &user_cloud_json);
-        }
+        _guard.set("CAS_USER_CLOUD_JSON", &user_cloud_json);
         execute_team_auto(&CloudTeamAutoCommands::On, &cli_json(), project.path()).unwrap();
         let saved = CloudConfig::load_from_cas_dir(project.path()).unwrap();
         assert_eq!(saved.team_auto_promote, Some(true));
@@ -7897,9 +7895,7 @@ mod team_cmd_tests {
                 .as_deref(),
             Some("team-1")
         );
-        unsafe {
-            std::env::remove_var("CAS_USER_CLOUD_JSON");
-        }
+        _guard.remove("CAS_USER_CLOUD_JSON");
     }
 
     #[test]

@@ -43,7 +43,7 @@ class SourceContracts(unittest.TestCase):
     def test_shared_owner_and_helpers(self):
         cases = [
             ('unrelated lock', 'let _g = OTHER_MUTEX.lock(); std::env::set_var("HOME", "x");', True),
-            ('guarded raw call', 'let _g = TestEnvGuard::new(); std::env::set_var("HOME", "x");', False),
+            ('guarded raw call', 'let _g = TestEnvGuard::new(); std::env::set_var("HOME", "x");', True),
             ('after drop', 'let g = TestEnvGuard::new(); drop(g); std::env::set_var("HOME", "x");', True),
             ('drop inside block', 'let g = TestEnvGuard::new(); { drop(g); } std::env::remove_var("HOME");', True),
             ('conditional drop', 'let g = TestEnvGuard::new(); if choice { drop(g); } let _other = TestEnvGuard::new();', True),
@@ -57,14 +57,38 @@ class SourceContracts(unittest.TestCase):
         for name, body, expected in cases:
             with self.subTest(case=name):
                 self.assertEqual(bool(analyze('#[test] fn contract() {' + body + '}')), expected)
-        good = 'fn helper(g: &mut TestEnvGuard) { std::env::set_var("HOME", "x"); } #[test] fn ok() { let mut g = TestEnvGuard::new(); helper(&mut g); }'
+        good = 'fn helper(g: &mut TestEnvGuard) { g.set("HOME", "x"); } #[test] fn ok() { let mut g = TestEnvGuard::new(); helper(&mut g); }'
         self.assertFalse(analyze(good))
         dropped = 'fn helper(g: TestEnvGuard) { drop(g); std::env::set_var("HOME", "x"); } #[test] fn bad() { helper(TestEnvGuard::new()); }'
         self.assertTrue(analyze(dropped))
         optional = '#[cfg(test)] fn helper(g: Option<TestEnvGuard>) { std::env::set_var("HOME", "x"); } #[test] fn bad() { helper(None); }'
         self.assertTrue(analyze(optional))
-        alias = 'use crate::test_support::TestEnvGuard as Guard; fn helper(g: &mut Guard) { std::env::set_var("HOME", "x"); } #[test] fn ok() { let mut g = Guard::new(); helper(&mut g); }'
+        alias = 'use crate::test_support::TestEnvGuard as Guard; fn helper(g: &mut Guard) { g.set("HOME", "x"); } #[test] fn ok() { let mut g = Guard::new(); helper(&mut g); }'
         self.assertFalse(analyze(alias))
+
+    def test_raw_mutations_under_a_guard_need_capture_and_restore(self):
+        for mutation in ('set_var("CAS_GH_BIN", "stub")',
+                         'remove_var("CAS_GH_BIN")', 'set_current_dir(".")'):
+            with self.subTest(mutation=mutation):
+                rows = analyze('#[test] fn leaks_on_panic() { let g = TestEnvGuard::new(); '
+                               'unsafe { std::env::' + mutation + '; } }')
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]['function'], 'leaks_on_panic')
+                self.assertEqual(rows[0]['detail'], 'std::env::' + mutation.split('(')[0])
+                self.assertTrue(LINT.ratchet(rows, baseline()))
+                # An exact reviewed legacy allowance remains possible; merely
+                # holding the guard never grants one automatically.
+                self.assertFalse(LINT.ratchet(rows, baseline(rows)))
+        safe = '#[test] fn safe() { let mut g = TestEnvGuard::new(); g.set("CAS_GH_BIN", "stub"); g.remove("CAS_GH_BIN"); g.set_current_dir("."); }'
+        self.assertFalse(analyze(safe))
+
+    def test_raw_guarded_helpers_and_callbacks_still_report_callers(self):
+        helper = 'fn fixture(g: &mut TestEnvGuard) { std::env::set_var("CAS_GH_BIN", "stub"); } '
+        rows = analyze(helper + '#[test] fn caller() { let mut g = TestEnvGuard::new(); fixture(&mut g); }')
+        self.assertEqual({r['function'] for r in rows}, {'fixture', 'caller'})
+        self.assertIn('unguarded-helper-call', {r['kind'] for r in rows})
+        callback = '#[test] fn callback() { TestEnvGuard::run_with_temp_home(|_| { std::env::remove_var("CAS_GH_BIN"); }); }'
+        self.assertTrue(analyze(callback))
 
     def test_function_and_module_imports(self):
         for imp, call in [('use std::env::{set_var as change};', 'change'),
@@ -73,6 +97,7 @@ class SourceContracts(unittest.TestCase):
                           ('use std::env::remove_var;', 'remove_var')]:
             with self.subTest(imp=imp):
                 self.assertTrue(analyze(imp + '#[test] fn bad() {' + call + '("HOME", "x");}'))
+                self.assertTrue(analyze(imp + '#[test] fn guarded() { let g = TestEnvGuard::new(); ' + call + '("HOME", "x");}'))
 
     def test_absolute_and_generic_mutations(self):
         for call in ('::std::env::set_var', 'std::env::set_var::<&str, &str>'):
@@ -139,7 +164,7 @@ class SourceContracts(unittest.TestCase):
         self.assertTrue(LINT.ratchet(added, manifest))
         self.assertIn('unguarded-helper-call', {r['kind'] for r in added})
         protected = analyze(source + '#[test] fn new() { let _g = TestEnvGuard::new(); fixture(); }')
-        self.assertFalse(LINT.ratchet(protected, manifest))
+        self.assertTrue(LINT.ratchet(protected, manifest))
         # A parent guard cannot protect an unguarded child created by a helper.
         child = 'fn fixture() { std::thread::spawn(|| { std::env::set_var("HOME", "x"); }); } '
         child_source = child + '#[test] fn old() { fixture(); }'
@@ -164,17 +189,72 @@ class SourceContracts(unittest.TestCase):
         self.assertIn('cas-cli/src/support.rs', {r['path'] for r in rows})
         sources['cas-cli/src/fixture.rs'] = 'use crate::support::*; #[test] fn bad() { fixture(); }'
         self.assertTrue(LINT.Analyzer(sources).run())
-        sources['cas-cli/src/fixture.rs'] = '#[test] fn safe() { let _g = TestEnvGuard::new(); crate::support::fixture(); }'
+        sources['cas-cli/src/fixture.rs'] = '#[test] fn still_unsafe() { let _g = TestEnvGuard::new(); crate::support::fixture(); }'
+        self.assertTrue(LINT.Analyzer(sources).run())
+        sources['cas-cli/src/support.rs'] = 'pub fn fixture(g: &mut TestEnvGuard) { g.set("HOME", "x"); }'
+        sources['cas-cli/src/fixture.rs'] = '#[test] fn safe() { let mut g = TestEnvGuard::new(); crate::support::fixture(&mut g); }'
         self.assertFalse(LINT.Analyzer(sources).run())
 
+    def test_module_glob_does_not_reach_unrelated_production_commands(self):
+        for mutation in ('set_var("TOKEN", "x")', 'remove_var("TOKEN")', 'set_current_dir(".")'):
+            with self.subTest(mutation=mutation):
+                sources = {
+                    'cas-cli/src/cli/update.rs': 'pub fn execute() {}',
+                    'cas-cli/src/cli/open.rs': 'pub fn execute() { std::env::' + mutation + '; }',
+                    'cas-cli/src/cli/integrate/mod.rs': 'pub fn execute() { violet::execute(); }',
+                    'cas-cli/src/cli/integrate/violet.rs': 'pub fn execute() { std::env::' + mutation + '; }',
+                    'cas-cli/src/cli/update_tests/tests.rs': 'use crate::cli::update::*; #[test] fn post_swap() { let g = TestEnvGuard::new(); execute(); }',
+                }
+                self.assertFalse(LINT.Analyzer(sources).run())
+                # A glob must still resolve the intended module's unsafe
+                # function; narrowing resolution cannot hide the real hazard.
+                sources['cas-cli/src/cli/update.rs'] = 'pub fn execute() { std::env::' + mutation + '; }'
+                rows = LINT.Analyzer(sources).run()
+                self.assertEqual({r['path'] for r in rows}, {
+                    'cas-cli/src/cli/update.rs', 'cas-cli/src/cli/update_tests/tests.rs'})
+                sources['cas-cli/src/cli/update_tests/tests.rs'] = sources['cas-cli/src/cli/update_tests/tests.rs'].replace('crate::cli::update::*', 'crate::unresolved::*')
+                self.assertTrue(LINT.Analyzer(sources).run())
+
+    def test_reviewed_production_mutations_are_reported_once_at_the_source(self):
+        sources = {
+            'cas-cli/src/eval.rs': 'struct NeutralEnv; impl NeutralEnv { fn acquire() { std::env::set_var("HOME", "fixture"); } } pub fn rank() { NeutralEnv::acquire(); }',
+            'cas-cli/tests/eval_test.rs': '#[test] fn rank_case() { let g = TestEnvGuard::new(); crate::eval::rank(); }',
+        }
+        unreviewed = LINT.Analyzer(sources).run()
+        self.assertIn('unguarded-helper-call', {r['kind'] for r in unreviewed})
+        reviewed = {r['id'] for r in unreviewed if r['kind'] == 'unguarded-mutation'}
+        rows = LINT.Analyzer(sources, reviewed_mutations=reviewed).run()
+        self.assertEqual({r['id'] for r in rows}, reviewed)
+        # A new or changed production mutation must still propagate.
+        sources['cas-cli/src/eval.rs'] = sources['cas-cli/src/eval.rs'].replace('"fixture"', '"different"')
+        self.assertIn('unguarded-helper-call', {r['kind'] for r in LINT.Analyzer(sources, reviewed_mutations=reviewed).run()})
+
+    def test_reviewed_test_helpers_still_propagate_to_every_caller(self):
+        for path, helper in (
+            ('cas-cli/tests/support.rs', 'pub fn fixture() { std::env::remove_var("HOME"); }'),
+            ('cas-cli/src/support.rs', '#[cfg(test)] pub fn fixture() { std::env::remove_var("HOME"); }'),
+        ):
+            with self.subTest(path=path):
+                sources = {path: helper, 'cas-cli/tests/cases.rs': '#[test] fn old() { let g = TestEnvGuard::new(); crate::support::fixture(); }'}
+                original = LINT.Analyzer(sources).run()
+                reviewed = {r['id'] for r in original if r['kind'] == 'unguarded-mutation'}
+                sources['cas-cli/tests/cases.rs'] += '#[test] fn new() { let g = TestEnvGuard::new(); crate::support::fixture(); }'
+                rows = LINT.Analyzer(sources, reviewed_mutations=reviewed).run()
+                self.assertEqual({r['function'] for r in rows}, {'fixture', 'old', 'new'})
+                self.assertTrue(LINT.ratchet(rows, baseline(original)))
+
     def test_canonical_exception_is_exact_and_cannot_cover_ordinary_tests(self):
-        source = 'impl TestEnvGuard { fn set() { std::env::set_var("HOME", "x"); } }'
+        source = 'impl TestEnvGuard { fn set() { std::env::set_var("HOME", "x"); } fn remove() { std::env::remove_var("HOME"); } fn set_current_dir() { std::env::set_current_dir("."); } }'
         rows = analyze(source, LINT.CANONICAL)
+        self.assertEqual(len(rows), 3)
+        self.assertTrue(all(r['canonical_impl'] for r in rows))
         self.assertFalse(LINT.ratchet(rows, baseline(rows, exceptions=True)))
         more = analyze(source.replace('"x"', '"different"'), LINT.CANONICAL)
         self.assertTrue(LINT.ratchet(more, baseline(rows, exceptions=True)))
         ordinary = analyze('#[test] fn bad() { std::env::set_var("HOME", "x"); }', LINT.CANONICAL)
         self.assertTrue(LINT.ratchet(ordinary, baseline(ordinary, exceptions=True)))
+        guarded = analyze('#[test] fn bad() { let g = TestEnvGuard::new(); std::env::remove_var("HOME"); }', LINT.CANONICAL)
+        self.assertTrue(LINT.ratchet(guarded, baseline(guarded, exceptions=True)))
 
     def test_baseline_schema_and_staleness(self):
         rows = analyze('#[test] fn bad() { std::env::set_var("HOME", "x"); }')
@@ -211,6 +291,20 @@ class GitRatchet(unittest.TestCase):
             source = '#[test] fn bad() { std::env::set_var("HOME", "x"); }'
             self.write('cas-cli/src/fixture.rs', source)
             self.write(LINT.BASELINE, json.dumps(baseline(analyze(source))))
+        if self._testMethodName in ('test_reviewed_production_source_stops_cli_propagation',
+                                    'test_reviewed_test_helper_keeps_cli_caller_ratchet'):
+            support = 'pub fn fixture() { std::env::set_var("HOME", "fixture"); }'
+            is_test_helper = self._testMethodName.endswith('caller_ratchet')
+            if is_test_helper:
+                support = '#[cfg(test)] ' + support
+            caller = '#[test] fn old() { let g = TestEnvGuard::new(); crate::support::fixture(); }'
+            self.write('cas-cli/src/support.rs', support)
+            self.write('cas-cli/src/fixture.rs', caller)
+            rows = LINT.Analyzer({'cas-cli/src/support.rs': support,
+                                  'cas-cli/src/fixture.rs': caller}).run()
+            if not is_test_helper:
+                rows = [r for r in rows if r['kind'] == 'unguarded-mutation']
+            self.write(LINT.BASELINE, json.dumps(baseline(rows)))
         for args in [('init', '-q'), ('config', 'user.name', 'Lint fixture'),
                      ('config', 'user.email', 'fixture@example.invalid')]:
             self.git(*args)
@@ -240,6 +334,34 @@ class GitRatchet(unittest.TestCase):
         result = self.lint()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn('crates/other/tests/new.rs:1', result.stderr)
+
+    def test_held_guard_does_not_hide_raw_mutations_from_cli(self):
+        self.write('crates/other/tests/new.rs', '#[test] fn bad() { let mut g = TestEnvGuard::new(); std::env::set_var("CAS_GH_BIN", "stub"); }')
+        result = self.lint()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('std::env::set_var', result.stderr)
+        self.write('crates/other/tests/new.rs', '#[test] fn safe() { let mut g = TestEnvGuard::new(); g.set("CAS_GH_BIN", "stub"); g.remove("CAS_GH_BIN"); g.set_current_dir("."); }')
+        result = self.lint()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_reviewed_production_source_stops_cli_propagation(self):
+        result = self.lint()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.write('cas-cli/tests/new.rs', '#[test] fn new() { let g = TestEnvGuard::new(); crate::support::fixture(); }')
+        result = self.lint()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('1 findings', result.stdout)
+        # The existing allowance never admits a changed production hazard.
+        self.write('cas-cli/src/support.rs', 'pub fn fixture() { std::env::set_var("HOME", "different"); }')
+        self.assertEqual(self.lint().returncode, 1)
+
+    def test_reviewed_test_helper_keeps_cli_caller_ratchet(self):
+        result = self.lint()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.write('cas-cli/tests/new.rs', '#[test] fn new() { let g = TestEnvGuard::new(); crate::support::fixture(); }')
+        result = self.lint()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('unguarded-helper-call', result.stderr)
 
     def test_committed_and_uncommitted_baseline_growth_fail(self):
         source = '#[test] fn bad() { std::env::set_var("HOME", "x"); }'
@@ -282,6 +404,13 @@ class GitRatchet(unittest.TestCase):
         self.write('cas-cli/src/fixture.rs', '#[test] fn safe() {}')
         (self.root / LINT.BASELINE).unlink()
         self.assertEqual(self.lint().returncode, 1)
+        # Initial inventory remains usable before the first baseline exists;
+        # no production mutation can be treated as reviewed in that case.
+        self.write('cas-cli/src/fixture.rs', '#[test] fn bad() { let g = TestEnvGuard::new(); std::env::remove_var("HOME"); }')
+        result = subprocess.run([sys.executable, str(ROOT / 'scripts/check-test-env.py'),
+                                 '--root', str(self.root), '--inventory'], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(json.loads(result.stdout)), 1)
 
     def test_nonmembers_and_production_startup_are_outside_scope(self):
         self.write('vendor/dependency/src/lib.rs', '#[test] fn bad() { std::env::remove_var("HOME"); }')

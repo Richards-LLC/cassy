@@ -8,7 +8,12 @@ the `test-env` row. Fast mode still scans the whole workspace: the base controls
 the ratchet, rather than hiding unchanged helper definitions.
 
 Tests and test support that mutate the process environment or current directory
-must hold the canonical `TestEnvGuard`. Another mutex, an independently named
+must use the canonical `TestEnvGuard` setters (`set`, `remove`, and
+`set_current_dir`). Raw `std::env::set_var`, `remove_var`, and `set_current_dir`
+calls remain findings even while a guard is held: serialization does not capture
+the prior value for restoration on panic. The diagnostic keeps the historical
+`unguarded-mutation` kind so existing exact finding identities remain stable.
+Another mutex, an independently named
 RAII restore helper, or nextest process isolation cannot establish that ownership
 for this lint. A direct guard parameter is an ownership witness; an optional
 parameter or a fallible/optional returned guard is insufficient. `Command.env`, `env_remove`, and `current_dir` affect
@@ -17,16 +22,24 @@ a child process and are outside this check.
 The scanner recognizes unit-test attributes, `cfg(test)` modules, integration
 tests, test-support paths, and named helpers reached from tests. It follows
 qualified helpers across files in the same crate and imported aliases. Bare
-helper calls without a local definition conservatively include possible
-glob-imported functions in that crate. Simple local declarations and function
+helper calls resolve explicit `crate::module::*` imports to that module;
+relative or unresolved imports retain conservative crate-level resolution.
+Simple local declarations and function
 parameters shadow bare helper names within their lexical scope; a declaration
 does not shadow its own initializer. Local closure bodies remain checked for
 process mutations. It
 tracks guard constructors, returned guards, lexical scopes, explicit `drop`,
 and same-thread callbacks. A second constructor while an owner remains live,
 including a constructor reached through a helper, is a violation. Each unsafe
-helper call also gets a caller-site identity: allowing a legacy helper mutation
-does not allow a new unguarded test to call that helper. Thread/task
+test-helper call also gets a caller-site identity: allowing a legacy helper
+mutation does not allow a new test to call that helper, even under a held guard.
+A reviewed raw mutation in production source remains a finding at its source,
+but does not propagate the same known hazard to every test caller. This narrow
+policy excludes `cfg(test)`, `tests/`, and other recognized test support; their
+caller-site ratchet remains intact. Changed or unreviewed production mutations
+still propagate. For example, the public retrieval-evaluation API's existing
+environment hazard remains recorded at `NeutralHookEnv` until cas-7cc95 injects
+its environment; its test callers do not receive duplicate allowances. Thread/task
 spawn closures and named spawn callbacks start without the parent's ownership;
 this only models ownership, and does not prove that a parent waits safely.
 Comments and string literals never become calls or grant exceptions.
@@ -87,8 +100,8 @@ miniature Git workspaces with a Cargo tripwire, including newly unsafe tests
 in another crate, nesting, missing checker, baseline growth and stale entries.
 
 This is a conservative source lint, not Rust name resolution or a borrow
-checker. Test-support helpers are checked independently unless their signature
-witnesses a shared guard. Reachable fixture owners include their restoration
+checker. Test-support helpers are checked independently; a shared guard parameter
+witnesses ownership but cannot excuse a raw mutation. Reachable fixture owners include their restoration
 methods. Unknown local receiver methods are conservatively matched to local
 implementation methods. Such sites can require a fixture conversion even when
 a caller currently happens to hold a guard. Arbitrary macro expansion,

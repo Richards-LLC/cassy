@@ -847,9 +847,7 @@ async fn task_update_blocked_by_is_rejected_when_reopening_a_closed_task() {
 
     // Reopen first through the attributed supervisor-only action, then add
     // the blocker: the documented two-call path works.
-    unsafe {
-        std::env::set_var("CAS_AGENT_ROLE", "supervisor");
-    }
+    test_env.set("CAS_AGENT_ROLE", "supervisor");
     service
         .task(Parameters(task_req(serde_json::json!({
             "action": "reopen",
@@ -858,9 +856,7 @@ async fn task_update_blocked_by_is_rejected_when_reopening_a_closed_task() {
         }))))
         .await
         .expect("attributed supervisor reopen should succeed on its own");
-    unsafe {
-        std::env::remove_var("CAS_AGENT_ROLE");
-    }
+    test_env.remove("CAS_AGENT_ROLE");
     service
         .task(Parameters(task_req(serde_json::json!({
             "action": "update",

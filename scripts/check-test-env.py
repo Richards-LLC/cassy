@@ -56,6 +56,7 @@ class Unit:
         self.functions = []
         self.call_cache, self.binding_cache = {}, {}
         self.aliases = {'TestEnvGuard': 'TestEnvGuard', 'env': 'std::env'}
+        self.glob_imports = []
         self.local_guard = any(self.values(i, i + 2) == ['struct', 'TestEnvGuard']
                                for i in range(len(self.ts))) and path != CANONICAL
         self._imports()
@@ -86,7 +87,10 @@ class Unit:
             save((*prefix, *part))
 
         def save(parts):
-            if not parts or '*' in parts:
+            if parts and parts[-1] == '*':
+                self.glob_imports.append('::'.join(parts[:-1]))
+                return
+            if not parts:
                 return
             if 'as' in parts:
                 pos = parts.index('as')
@@ -229,7 +233,7 @@ class Unit:
 
 
 class Analyzer:
-    def __init__(self, sources):
+    def __init__(self, sources, reviewed_mutations=()):
         self.units = [Unit(path, src) for path, src in sorted(sources.items())]
         self.functions = [f for u in self.units for f in u.functions]
         self.by_name = defaultdict(list)
@@ -240,6 +244,7 @@ class Analyzer:
         self.active, self.unsafe, self.nesting = [], {}, set()
         self.resolve_cache, self.raw_cache = {}, {}
         self.by_scope = defaultdict(list)
+        self.reviewed_mutations = set(reviewed_mutations)
         for f in self.functions:
             self.by_scope[(id(f.unit), f.scope)].append(f)
 
@@ -266,7 +271,9 @@ class Analyzer:
                               'canonical_impl': u.path == CANONICAL and bool(f.scope) and f.scope[-1] in ('TestEnvGuard', 'AmbientEnvRestore'),
                               'ignored_test': any(x.startswith('ignore') for x in f.attrs)
                               and any(x == 'test' for x in f.attrs)}
-        if kind in ('unguarded-mutation', 'unguarded-helper-call', 'nested-guard', 'nested-helper-call') and self.active:
+        reviewed_production_mutation = (kind == 'unguarded-mutation' and not f.test
+                                        and ident in self.reviewed_mutations)
+        if kind in ('unguarded-mutation', 'unguarded-helper-call', 'nested-guard', 'nested-helper-call') and self.active and not reviewed_production_mutation:
             self.unsafe[self.active[-1]] = True
             if kind.startswith('nested'):
                 self.nesting.add(self.active[-1])
@@ -296,6 +303,16 @@ class Analyzer:
         same_file = [x for x in candidates if x.unit is f.unit]
         if same_file:
             candidates = same_file
+        elif len(parts) == 1:
+            # An explicit module glob constrains a bare name to that module,
+            # rather than every same-named command in the crate. Relative
+            # globs retain conservative resolution: #[path] modules need not
+            # match their source file's directory hierarchy.
+            globs = [p for p in f.unit.glob_imports if p.startswith('crate::')]
+            if globs:
+                imported = [x for p in globs for x in self._resolve(f, p + '::' + name)]
+                if imported:
+                    candidates = imported
         crate = f.unit.path.split('/src/')[0].split('/tests/')[0]
         candidates = [x for x in candidates if x.unit.path.startswith(crate + '/')]
         # Prefer the closest lexical owner; keep ambiguous candidates rather
@@ -315,6 +332,12 @@ class Analyzer:
     def called(self, caller, callee, guards, site):
         protected = bool(guards) and '@maybe-dropped' not in guards
         self.analyze(callee, protected)
+        # Reviewed raw mutations in production code remain findings at their
+        # source, but record() does not propagate that same known hazard to
+        # every test caller (e.g. the public NeutralHookEnv evaluation API).
+        # Test helpers (cfg(test), tests/ and test-support files) always retain
+        # caller-site propagation, even when their mutations are baselined;
+        # an allowance for an old helper must never admit a new unsafe test.
         if self.unsafe.get((id(callee), protected)):
             kind = 'nested-helper-call' if (id(callee), protected) in self.nesting else 'unguarded-helper-call'
             self.record(caller, site, kind, callee.label)
@@ -384,7 +407,10 @@ class Analyzer:
                 if not method and path in {f'std::env::{x}' for x in MUTATORS}:
                     if u.path == CANONICAL and f.scope and f.scope[-1] in ('TestEnvGuard', 'AmbientEnvRestore'):
                         self.record(f, i, 'implementation-mutation', path)
-                    elif not guards or '@maybe-dropped' in guards:
+                    else:
+                        # A held lock only serializes a raw mutation; the
+                        # owner cannot restore a value it never captured.
+                        # Keep the historical kind/identity for the ratchet.
                         self.record(f, i, 'unguarded-mutation', path)
                 elif shared and names[-1] in CONSTRUCTORS:
                     if guards:
@@ -519,13 +545,16 @@ def main():
     args = parser.parse_args()
     try:
         root = args.root.resolve()
-        findings = Analyzer(workspace_sources(root)).run()
+        baseline_path = root / BASELINE
+        baseline = ({'version': 1, 'violations': [], 'exceptions': []}
+                    if args.inventory and not baseline_path.exists()
+                    else json.loads(baseline_path.read_text()))
+        current = read_baseline(baseline)
+        findings = Analyzer(workspace_sources(root), reviewed_mutations=current).run()
         if args.inventory:
             print(json.dumps(findings, indent=2))
             return 0
-        baseline = json.loads((root / BASELINE).read_text())
         errors = ratchet(findings, baseline)
-        current = read_baseline(baseline)
         # HEAD comparison covers unstaged growth; changed-since covers committed
         # lane growth. Initial installation has no previous baseline to compare.
         seed_history = git(root, 'log', '--reverse', '--format=%H', '--', BASELINE).splitlines()

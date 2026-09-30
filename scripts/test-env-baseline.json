@@ -138,26 +138,6 @@
       "reason": "Existing test override has no explicit shared TestEnvGuard ownership at this site; migrate its setup and restoration together. Retained exact tests::worker_status_transcript_path_resolves_codex_rollout_by_cwd std::env::set_var site from epic175f78c5; no claim that the legacy pattern is safe."
     },
     {
-      "id": "cas-cli/src/retrieval_eval.rs::NeutralHookEnv::acquire::unguarded-helper-call::5a8e4f749186e3a7::1",
-      "reason": "Existing NeutralHookEnv::acquire invokes NeutralHookEnv::set without definite shared TestEnvGuard ownership; this exact unguarded-helper-call site exists in the unchanged175f78c5 Rust source. Retain while migrating helper and caller lifetimes together; independent locks or restoration are not a safety exemption."
-    },
-    {
-      "id": "cas-cli/src/retrieval_eval.rs::NeutralHookEnv::acquire::unguarded-helper-call::5d3f6d6018dbbbe8::1",
-      "reason": "Existing NeutralHookEnv::acquire invokes NeutralHookEnv::set without definite shared TestEnvGuard ownership; this exact unguarded-helper-call site exists in the unchanged175f78c5 Rust source. Retain while migrating helper and caller lifetimes together; independent locks or restoration are not a safety exemption."
-    },
-    {
-      "id": "cas-cli/src/retrieval_eval.rs::NeutralHookEnv::acquire::unguarded-helper-call::9d482275c7767525::1",
-      "reason": "Existing NeutralHookEnv::acquire invokes NeutralHookEnv::set without definite shared TestEnvGuard ownership; this exact unguarded-helper-call site exists in the unchanged175f78c5 Rust source. Retain while migrating helper and caller lifetimes together; independent locks or restoration are not a safety exemption."
-    },
-    {
-      "id": "cas-cli/src/retrieval_eval.rs::NeutralHookEnv::acquire::unguarded-helper-call::b973fd2dea11c15d::1",
-      "reason": "Existing NeutralHookEnv::acquire invokes NeutralHookEnv::set without definite shared TestEnvGuard ownership; this exact unguarded-helper-call site exists in the unchanged175f78c5 Rust source. Retain while migrating helper and caller lifetimes together; independent locks or restoration are not a safety exemption."
-    },
-    {
-      "id": "cas-cli/src/retrieval_eval.rs::NeutralHookEnv::acquire::unguarded-helper-call::f793d47c2d8825ff::1",
-      "reason": "Existing NeutralHookEnv::acquire invokes NeutralHookEnv::set without definite shared TestEnvGuard ownership; this exact unguarded-helper-call site exists in the unchanged175f78c5 Rust source. Retain while migrating helper and caller lifetimes together; independent locks or restoration are not a safety exemption."
-    },
-    {
       "id": "cas-cli/src/retrieval_eval.rs::NeutralHookEnv::acquire::unguarded-mutation::1b707e973c7efe60::1",
       "reason": "Existing fixture owner NeutralHookEnv mutates/restores process state without an explicit canonical guard witness at this site. Retained exact NeutralHookEnv::acquire std::env::remove_var site from epic175f78c5; no claim that the legacy pattern is safe."
     },
@@ -172,14 +152,6 @@
     {
       "id": "cas-cli/src/retrieval_eval.rs::NeutralHookEnv::set::unguarded-mutation::b2c71b6ed25dd042::1",
       "reason": "Existing fixture owner NeutralHookEnv mutates/restores process state without an explicit canonical guard witness at this site. Retained exact NeutralHookEnv::set std::env::set_var site from epic175f78c5; no claim that the legacy pattern is safe."
-    },
-    {
-      "id": "cas-cli/src/retrieval_eval.rs::helpful_memories_production_ranking::unguarded-helper-call::22725bdc8fbf11ea::1",
-      "reason": "Existing helpful_memories_production_ranking invokes NeutralHookEnv::drop without definite shared TestEnvGuard ownership; this exact unguarded-helper-call site exists in the unchanged175f78c5 Rust source. Retain while migrating helper and caller lifetimes together; independent locks or restoration are not a safety exemption."
-    },
-    {
-      "id": "cas-cli/src/retrieval_eval.rs::probe_production_scorer_state::unguarded-helper-call::22725bdc8fbf11ea::1",
-      "reason": "Existing probe_production_scorer_state invokes NeutralHookEnv::drop without definite shared TestEnvGuard ownership; this exact unguarded-helper-call site exists in the unchanged175f78c5 Rust source. Retain while migrating helper and caller lifetimes together; independent locks or restoration are not a safety exemption."
     },
     {
       "id": "cas-cli/src/worktree/git_tests/tests.rs::an_unreadable_checkout_inventory_refuses_before_touching_anything::unguarded-mutation::06082db9edee32f3::1",
@@ -268,30 +240,6 @@
     {
       "id": "cas-cli/tests/factory_mcp_ops_test.rs::test_worker_status_scopes_agents_to_factory_session::unguarded-mutation::97d9338f85ac40ed::1",
       "reason": "Existing test override has no explicit shared TestEnvGuard ownership at this site; migrate its setup and restoration together. Retained exact test_worker_status_scopes_agents_to_factory_session std::env::set_var site from epic175f78c5; no claim that the legacy pattern is safe."
-    },
-    {
-      "id": "cas-cli/tests/retrieval_eval_test.rs::the_fast_production_runner_matches_the_real_build_context_path::unguarded-helper-call::63095785ce46b373::1",
-      "reason": "Existing the_fast_production_runner_matches_the_real_build_context_path invokes helpful_memories_production_ranking without definite shared TestEnvGuard ownership; this exact unguarded-helper-call site exists in the unchanged175f78c5 Rust source. Retain while migrating helper and caller lifetimes together; independent locks or restoration are not a safety exemption."
-    },
-    {
-      "id": "cas-cli/tests/retrieval_eval_test.rs::the_production_scorer_state_is_reported_not_guessed::unguarded-helper-call::22462fd44262844a::1",
-      "reason": "Existing the_production_scorer_state_is_reported_not_guessed invokes probe_production_scorer_state without definite shared TestEnvGuard ownership; this exact unguarded-helper-call site exists in the unchanged175f78c5 Rust source. Retain while migrating helper and caller lifetimes together; independent locks or restoration are not a safety exemption."
-    },
-    {
-      "id": "cas-cli/tests/retrieval_eval_test.rs::the_production_scorer_state_is_reported_not_guessed::unguarded-helper-call::81b12d9e4595b406::1",
-      "reason": "Existing the_production_scorer_state_is_reported_not_guessed invokes probe_production_scorer_state without definite shared TestEnvGuard ownership; this exact unguarded-helper-call site exists in the unchanged175f78c5 Rust source. Retain while migrating helper and caller lifetimes together; independent locks or restoration are not a safety exemption."
-    },
-    {
-      "id": "cas-cli/tests/retrieval_eval_test.rs::the_production_scorer_state_is_reported_not_guessed::unguarded-helper-call::8a5538e6cb456bc8::1",
-      "reason": "Existing the_production_scorer_state_is_reported_not_guessed invokes probe_production_scorer_state without definite shared TestEnvGuard ownership; this exact unguarded-helper-call site exists in the unchanged175f78c5 Rust source. Retain while migrating helper and caller lifetimes together; independent locks or restoration are not a safety exemption."
-    },
-    {
-      "id": "cas-cli/tests/retrieval_eval_test.rs::the_production_scorer_state_is_reported_not_guessed::unguarded-helper-call::d35ec9cdecdf4b33::1",
-      "reason": "Existing the_production_scorer_state_is_reported_not_guessed invokes probe_production_scorer_state without definite shared TestEnvGuard ownership; this exact unguarded-helper-call site exists in the unchanged175f78c5 Rust source. Retain while migrating helper and caller lifetimes together; independent locks or restoration are not a safety exemption."
-    },
-    {
-      "id": "cas-cli/tests/retrieval_eval_test.rs::the_production_selector_does_not_inherit_the_worker_environment::unguarded-helper-call::275fae06cd26f6af::1",
-      "reason": "Existing the_production_selector_does_not_inherit_the_worker_environment invokes helpful_memories_production_ranking without definite shared TestEnvGuard ownership; this exact unguarded-helper-call site exists in the unchanged175f78c5 Rust source. Retain while migrating helper and caller lifetimes together; independent locks or restoration are not a safety exemption."
     },
     {
       "id": "cas-cli/tests/team_pull_wiring_test.rs::CasRootGuard::drop::unguarded-mutation::0a131be927da1673::1",
@@ -500,14 +448,6 @@
     {
       "id": "cas-cli/tests/worker_hold_mcp_test.rs::worker_cannot_change_hold_state_cas_60dd::unguarded-helper-call::32ca4de0095c8897::1",
       "reason": "Existing worker_cannot_change_hold_state_cas_60dd invokes EnvGuard::drop without definite shared TestEnvGuard ownership; this exact unguarded-helper-call site exists in the unchanged175f78c5 Rust source. Retain while migrating helper and caller lifetimes together; independent locks or restoration are not a safety exemption."
-    },
-    {
-      "id": "cas-cli/tests/worktree_surface_test.rs::VarGuard::drop::unguarded-mutation::279e704836bb52aa::1",
-      "reason": "Existing fixture owner VarGuard mutates/restores process state without an explicit canonical guard witness at this site. Retained exact VarGuard::drop std::env::remove_var site from epic175f78c5; no claim that the legacy pattern is safe."
-    },
-    {
-      "id": "cas-cli/tests/worktree_surface_test.rs::VarGuard::drop::unguarded-mutation::ab472cfa1f6c351a::1",
-      "reason": "Existing fixture owner VarGuard mutates/restores process state without an explicit canonical guard witness at this site. Retained exact VarGuard::drop std::env::set_var site from epic175f78c5; no claim that the legacy pattern is safe."
     },
     {
       "id": "crates/cas-factory/tests/concurrent_factory_session_isolation.rs::EnvGuard::drop::unguarded-mutation::279e704836bb52aa::1",

@@ -567,7 +567,10 @@ pub(super) fn merge_tip_content_presence(
                 && (!delivery_history.contains(resolution)
                     || !in_work_window(window, epoch, false)))
             || delivery_evolution::is_revert_message(message)
-            || references_foreign_task(message, identity)
+            // An explicitly owned QA receipt can discuss other tasks whose
+            // content it integrates. Foreign references only disqualify a
+            // resolution inferred from an otherwise unnamed work window.
+            || (!owned && references_foreign_task(message, identity))
         {
             continue;
         }
@@ -598,6 +601,30 @@ pub(super) fn merge_tip_content_presence(
             resolutions.push((resolution.to_string(), paths));
         }
     }
+    // This task's own first-parent cycle ends at the handoff. Contextual
+    // mentions do not disown explicit receipts; unnamed foreign work and
+    // every revert remain outside the retirement window.
+    let mut cycle = Vec::new();
+    for commit in first_parent_commits
+        .iter()
+        .skip_while(|commit| !commits.iter().any(|owned| owned.as_str() == **commit))
+    {
+        let message = git_text(repo, &["show", "-s", "--format=%B", commit])?;
+        let owned = identity.matches_known_commit(commit)
+            || identity
+                .task_id
+                .as_deref()
+                .is_some_and(|id| message_references_task(&message, id));
+        let epoch = git_text(repo, &["show", "-s", "--format=%ct", commit])?
+            .parse::<i64>()
+            .ok()?;
+        if !delivery_evolution::is_revert_message(&message)
+            && (owned || !references_foreign_task(&message, identity))
+            && in_work_window(window, epoch, owned)
+        {
+            cycle.push(commit.to_string());
+        }
+    }
     if commits.is_empty() && resolutions.is_empty() {
         return None;
     }
@@ -615,24 +642,32 @@ pub(super) fn merge_tip_content_presence(
     let mut unknown_reason = None;
     let mut proven_resolutions = Vec::new();
     for (resolution, resolution_paths) in resolutions {
-        match super::delivery_content_presence_in_parent_for_paths(
-            repo,
-            &resolution,
-            target,
-            Some(&resolution_paths),
-        ) {
-            DeliveryContentPresence::Present { paths } => {
-                proven_resolutions.push((resolution, paths.clone()));
-                append_unique(&mut present_paths, paths);
-            }
-            DeliveryContentPresence::Superseded { paths, commits } => {
-                proven_resolutions.push((resolution, paths.clone()));
-                append_unique(&mut superseded_paths, paths);
-                append_unique(&mut superseding_commits, commits);
-            }
-            DeliveryContentPresence::Dropped { paths } => append_unique(&mut dropped_paths, paths),
-            DeliveryContentPresence::Unknown { reason } => {
-                unknown_reason.get_or_insert(reason);
+        // Mixed proofs list only evolved paths in Superseded.paths. Measure
+        // independently to preserve authorization for every Present path.
+        for path in resolution_paths {
+            let selected = vec![path];
+            match super::delivery_content_presence_in_parent_for_paths(
+                repo,
+                &resolution,
+                target,
+                Some(&selected),
+                true,
+            ) {
+                DeliveryContentPresence::Present { paths } => {
+                    proven_resolutions.push((resolution.clone(), paths.clone()));
+                    append_unique(&mut present_paths, paths);
+                }
+                DeliveryContentPresence::Superseded { paths, commits } => {
+                    proven_resolutions.push((resolution.clone(), paths.clone()));
+                    append_unique(&mut superseded_paths, paths);
+                    append_unique(&mut superseding_commits, commits);
+                }
+                DeliveryContentPresence::Dropped { paths } => {
+                    append_unique(&mut dropped_paths, paths)
+                }
+                DeliveryContentPresence::Unknown { reason } => {
+                    unknown_reason.get_or_insert(reason);
+                }
             }
         }
     }
@@ -653,16 +688,60 @@ pub(super) fn merge_tip_content_presence(
                         .filter(|(_, paths)| paths.contains(&path))
                         .map(|(resolution, _)| resolution.clone())
                         .collect();
-                    let proof = if !authorized.is_empty() {
+                    // Retirement alone is never evidence. Bind it to this
+                    // path's final task-authored handoff content, measured on
+                    // target before replaying any obsolete draft owner.
+                    let final_resolution_proven =
+                        proven_resolutions.iter().any(|(resolution, paths)| {
+                            resolution == merge_tip && paths.contains(&path)
+                        });
+                    let mut final_ordinary_proven = false;
+                    if !final_resolution_proven {
+                        for later in commits.iter().rev().filter(|later| cycle.contains(later)) {
+                            let parent = git_text(repo, &["rev-parse", &format!("{later}^1")])?;
+                            if git_diff_is_empty(repo, &parent, later, &path)? {
+                                continue;
+                            }
+                            final_ordinary_proven = matches!(
+                                delivery_evolution::line_content_presence(
+                                    repo,
+                                    &parent,
+                                    later,
+                                    &target_ref,
+                                    &path
+                                ),
+                                Ok(Some(
+                                    DeliveryContentPresence::Present { .. }
+                                        | DeliveryContentPresence::Superseded { .. }
+                                ))
+                            );
+                            break;
+                        }
+                    }
+                    let proof = if !authorized.is_empty() || final_ordinary_proven {
                         let parent = git_text(repo, &["rev-parse", &format!("{commit}^1")])?;
-                        delivery_evolution::line_content_presence_with_resolutions(
-                            repo,
-                            &parent,
-                            commit,
-                            &target_ref,
-                            &path,
-                            &authorized,
-                        )
+                        if (final_resolution_proven || final_ordinary_proven)
+                            && cycle.contains(commit)
+                        {
+                            delivery_evolution::line_content_presence_with_task_cycle(
+                                repo,
+                                &parent,
+                                commit,
+                                &target_ref,
+                                &path,
+                                &authorized,
+                                &cycle,
+                            )
+                        } else {
+                            delivery_evolution::line_content_presence_with_resolutions(
+                                repo,
+                                &parent,
+                                commit,
+                                &target_ref,
+                                &path,
+                                &authorized,
+                            )
+                        }
                     } else {
                         Ok(None)
                     };
@@ -703,6 +782,111 @@ pub(super) fn merge_tip_content_presence(
             paths: present_paths,
         })
     }
+}
+
+/// A non-merge receipt can be integrated with a later task-owned QA
+/// resolution. Credit each path independently; a foreign resolution cannot
+/// enter this list and still requires the reviewed-drop exit.
+pub(super) fn ordinary_anchor_content_presence(
+    repo: &Path,
+    target: &str,
+    anchor: &str,
+    identity: &TaskCommitIdentity,
+) -> DeliveryContentPresence {
+    let original = super::delivery_content_presence_in_parent(repo, anchor, target);
+    let DeliveryContentPresence::Dropped { paths } = &original else {
+        return original;
+    };
+    let target_ref = preferred_diff_target_ref(repo, target);
+    let inspect = || -> Option<DeliveryContentPresence> {
+        let anchor = git_text(repo, &["rev-parse", &format!("{anchor}^{{commit}}")])?;
+        let history = git_text(
+            repo,
+            &[
+                "log",
+                "--ancestry-path",
+                "--merges",
+                "--reverse",
+                "--format=%H%x1f%B%x1e",
+                &format!("{anchor}..{target_ref}"),
+            ],
+        )?;
+        let mut resolutions = Vec::new();
+        for record in history.split('\u{1e}') {
+            let Some((commit, message)) = record.trim().split_once('\u{1f}') else {
+                continue;
+            };
+            let owned = identity.matches_known_commit(commit)
+                || identity
+                    .task_id
+                    .as_deref()
+                    .is_some_and(|id| message_references_task(message, id));
+            if !owned || delivery_evolution::is_revert_message(message) {
+                continue;
+            }
+            for path in merge_resolution_paths(repo, commit, identity)? {
+                if !paths.contains(&path) {
+                    continue;
+                }
+                let selected = vec![path.clone()];
+                if matches!(
+                    super::delivery_content_presence_in_parent_for_paths(
+                        repo,
+                        commit,
+                        target,
+                        Some(&selected),
+                        true
+                    ),
+                    DeliveryContentPresence::Present { .. }
+                        | DeliveryContentPresence::Superseded { .. }
+                ) {
+                    resolutions.push((commit.to_string(), path));
+                }
+            }
+        }
+        let parent = git_text(repo, &["rev-parse", &format!("{anchor}^1")])?;
+        let mut dropped = Vec::new();
+        let mut proven_paths = Vec::new();
+        let mut commits = Vec::new();
+        for path in paths {
+            let authorized: Vec<_> = resolutions
+                .iter()
+                .filter(|(_, resolved)| resolved == path)
+                .map(|(commit, _)| commit.clone())
+                .collect();
+            match delivery_evolution::line_content_presence_with_resolutions(
+                repo,
+                &parent,
+                &anchor,
+                &target_ref,
+                path,
+                &authorized,
+            )
+            .ok()?
+            {
+                Some(DeliveryContentPresence::Superseded {
+                    paths,
+                    commits: authors,
+                }) => {
+                    append_unique(&mut proven_paths, paths);
+                    append_unique(&mut commits, authors);
+                }
+                Some(DeliveryContentPresence::Present { paths }) => {
+                    append_unique(&mut proven_paths, paths)
+                }
+                _ => dropped.push(path.clone()),
+            }
+        }
+        Some(if dropped.is_empty() {
+            DeliveryContentPresence::Superseded {
+                paths: proven_paths,
+                commits,
+            }
+        } else {
+            DeliveryContentPresence::Dropped { paths: dropped }
+        })
+    };
+    inspect().unwrap_or(original)
 }
 
 /// A task-owned merge may introduce a QA fix in its resolution itself.
@@ -911,7 +1095,7 @@ mod tests {
         }
     }
 
-    fn union_list_fixture(
+    fn parallel_merge_fixture(
         base: &str,
         delivered: &str,
         sibling: &str,
@@ -939,9 +1123,720 @@ mod tests {
         (dir, delivery)
     }
 
+    fn draft_handoff_fixture(
+        delete_draft: bool,
+        foreign_delete: bool,
+        lose_after: bool,
+        restore_baseline: bool,
+    ) -> (tempfile::TempDir, String) {
+        let dir = fixture();
+        let repo = dir.path();
+        commit(repo, "copy.txt", "base();\nkept();\n", "baseline");
+        git(repo, &["branch", "-f", "main", "HEAD"]);
+        commit(
+            repo,
+            "copy.txt",
+            "draft();\nkept();\n",
+            "cas-taskb: initial draft",
+        );
+        if delete_draft {
+            commit(
+                repo,
+                "copy.txt",
+                "kept();\n",
+                if foreign_delete {
+                    "cas-aaaa: remove foreign work"
+                } else {
+                    "cas-taskb: retire obsolete draft"
+                },
+            );
+        }
+        commit(
+            repo,
+            "copy.txt",
+            "final();\nkept();\n",
+            "cas-taskb: revised delivery",
+        );
+        git(repo, &["checkout", "main"]);
+        commit(repo, "copy.txt", "target();\nkept();\n", "target work");
+        git(repo, &["checkout", "factory/worker"]);
+        git(
+            repo,
+            &["merge", "--no-ff", "--no-commit", "-s", "ours", "main"],
+        );
+        let handoff = commit(
+            repo,
+            "copy.txt",
+            if restore_baseline {
+                "base();\nnovel_neighbor();\nkept();\n"
+            } else {
+                "handoff();\nkept();\n"
+            },
+            "cas-taskb: QA resolution",
+        );
+        git(repo, &["checkout", "main"]);
+        if lose_after {
+            git(
+                repo,
+                &[
+                    "merge",
+                    "--no-ff",
+                    "-s",
+                    "ours",
+                    "factory/worker",
+                    "-m",
+                    "lose handoff",
+                ],
+            );
+        } else {
+            git(
+                repo,
+                &["merge", "--no-ff", "factory/worker", "-m", "integrate"],
+            );
+        }
+        (dir, handoff)
+    }
+
+    #[test]
+    fn task_internal_replacement_proves_final_handoff_cas_0930() {
+        let (dir, handoff) = draft_handoff_fixture(false, false, false, false);
+        let mut window = window();
+        window.identity.known_commits.push(handoff.clone());
+        assert!(
+            matches!(merge_tip_content_presence(dir.path(), "main", &handoff,
+            Some(&window), &window.identity, None), Some(DeliveryContentPresence::Superseded { commits, .. })
+            if commits.contains(&handoff))
+        );
+    }
+
+    fn mixed_handoff_fixture(drop_present_path: bool) -> (tempfile::TempDir, String, String) {
+        let dir = fixture();
+        let repo = dir.path();
+        commit(repo, "copy.txt", "base();\n", "baseline copy");
+        commit(repo, "other.txt", "base_other();\n", "baseline other");
+        git(repo, &["branch", "-f", "main", "HEAD"]);
+        commit(repo, "copy.txt", "draft();\n", "cas-taskb: draft copy");
+        commit(
+            repo,
+            "other.txt",
+            "draft_other();\n",
+            "cas-taskb: draft other",
+        );
+        git(repo, &["checkout", "main"]);
+        commit(repo, "copy.txt", "target();\n", "target copy");
+        commit(repo, "other.txt", "target_other();\n", "target other");
+        git(repo, &["checkout", "factory/worker"]);
+        git(
+            repo,
+            &["merge", "--no-ff", "--no-commit", "-s", "ours", "main"],
+        );
+        std::fs::write(repo.join("copy.txt"), "handoff();\n").unwrap();
+        git(repo, &["add", "copy.txt"]);
+        let handoff = commit(
+            repo,
+            "other.txt",
+            "handoff_other();\n",
+            "cas-taskb: QA resolution",
+        );
+        git(repo, &["checkout", "main"]);
+        git(
+            repo,
+            &["merge", "--no-ff", "factory/worker", "-m", "integrate"],
+        );
+        let evolution = commit(repo, "other.txt", "evolved_other();\n", "evolve other");
+        if drop_present_path {
+            commit(repo, "copy.txt", "", "delete copy after handoff");
+        }
+        (dir, handoff, evolution)
+    }
+
+    #[test]
+    fn mixed_resolution_preserves_present_path_authorization_cas_0930() {
+        let (dir, handoff, evolution) = mixed_handoff_fixture(false);
+        let mut window = window();
+        window.identity.known_commits.push(handoff.clone());
+        let measured = merge_tip_content_presence(
+            dir.path(),
+            "main",
+            &handoff,
+            Some(&window),
+            &window.identity,
+            None,
+        );
+        assert!(
+            matches!(&measured, Some(DeliveryContentPresence::Superseded { paths, commits })
+            if paths.contains(&"copy.txt".to_string()) && paths.contains(&"other.txt".to_string())
+            && commits.contains(&handoff) && commits.contains(&evolution)),
+            "{measured:?}"
+        );
+    }
+
+    #[test]
+    fn mixed_resolution_cannot_authorize_dropped_neighbour_cas_0930() {
+        let (dir, handoff, _) = mixed_handoff_fixture(true);
+        let mut window = window();
+        window.identity.known_commits.push(handoff.clone());
+        assert_eq!(
+            merge_tip_content_presence(
+                dir.path(),
+                "main",
+                &handoff,
+                Some(&window),
+                &window.identity,
+                None
+            ),
+            Some(DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()],
+            })
+        );
+    }
+
+    #[test]
+    fn deletion_of_baseline_is_not_retired_draft_cas_0930() {
+        let dir = fixture();
+        let repo = dir.path();
+        commit(
+            repo,
+            "copy.txt",
+            "base();\nold_baseline();\nkept();\n",
+            "baseline",
+        );
+        git(repo, &["branch", "-f", "main", "HEAD"]);
+        commit(
+            repo,
+            "copy.txt",
+            "draft();\nold_baseline();\nkept();\n",
+            "cas-taskb: draft",
+        );
+        commit(
+            repo,
+            "copy.txt",
+            "draft();\nkept();\n",
+            "cas-taskb: delete baseline",
+        );
+        git(repo, &["checkout", "main"]);
+        commit(
+            repo,
+            "copy.txt",
+            "target();\nold_baseline();\nkept();\n",
+            "target",
+        );
+        git(repo, &["checkout", "factory/worker"]);
+        git(
+            repo,
+            &["merge", "--no-ff", "--no-commit", "-s", "ours", "main"],
+        );
+        let handoff = commit(
+            repo,
+            "copy.txt",
+            "handoff();\nkept();\n",
+            "cas-taskb: QA resolution",
+        );
+        git(repo, &["checkout", "main"]);
+        git(
+            repo,
+            &["merge", "--no-ff", "factory/worker", "-m", "integrate"],
+        );
+        commit(
+            repo,
+            "copy.txt",
+            "handoff();\nold_baseline();\nkept();\n",
+            "restore deleted baseline",
+        );
+        let mut window = window();
+        window.identity.known_commits.push(handoff.clone());
+        assert_eq!(
+            merge_tip_content_presence(
+                repo,
+                "main",
+                &handoff,
+                Some(&window),
+                &window.identity,
+                None
+            ),
+            Some(DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()],
+            })
+        );
+    }
+
+    #[test]
+    fn retired_draft_requires_surviving_handoff_cas_0930() {
+        let (dir, handoff) = draft_handoff_fixture(true, false, false, false);
+        let mut window = window();
+        window.identity.known_commits.push(handoff.clone());
+        let retirement = git(dir.path(), &["rev-parse", &format!("{handoff}^1^1")]);
+        let observed = merge_tip_content_presence(
+            dir.path(),
+            "main",
+            &handoff,
+            Some(&window),
+            &window.identity,
+            None,
+        );
+        assert!(
+            matches!(&observed, Some(DeliveryContentPresence::Superseded { commits, .. })
+            if commits.contains(&retirement) && commits.contains(&handoff)),
+            "retirement={retirement} handoff={handoff} observed={observed:?}"
+        );
+    }
+
+    #[test]
+    fn post_handoff_merge_loss_cannot_retire_draft_cas_0930() {
+        let (dir, handoff) = draft_handoff_fixture(false, false, true, false);
+        let mut window = window();
+        window.identity.known_commits.push(handoff.clone());
+        assert_eq!(
+            merge_tip_content_presence(
+                dir.path(),
+                "main",
+                &handoff,
+                Some(&window),
+                &window.identity,
+                None
+            ),
+            Some(DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()]
+            })
+        );
+    }
+
+    #[test]
+    fn draft_retirement_cannot_prove_missing_final_path_cas_0930() {
+        let (dir, handoff) = draft_handoff_fixture(true, false, true, false);
+        let mut window = window();
+        window.identity.known_commits.push(handoff.clone());
+        assert_eq!(
+            merge_tip_content_presence(
+                dir.path(),
+                "main",
+                &handoff,
+                Some(&window),
+                &window.identity,
+                None
+            ),
+            Some(DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()]
+            })
+        );
+    }
+
+    #[test]
+    fn foreign_pre_handoff_deletion_cannot_retire_owner_cas_0930() {
+        let (dir, handoff) = draft_handoff_fixture(true, true, false, false);
+        let mut window = window();
+        window.identity.known_commits.push(handoff.clone());
+        assert_eq!(
+            merge_tip_content_presence(
+                dir.path(),
+                "main",
+                &handoff,
+                Some(&window),
+                &window.identity,
+                None
+            ),
+            Some(DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()]
+            })
+        );
+    }
+
+    #[test]
+    fn retired_draft_baseline_restore_with_novel_neighbor_rejects_cas_0930() {
+        let (dir, handoff) = draft_handoff_fixture(true, false, false, true);
+        let mut window = window();
+        window.identity.known_commits.push(handoff.clone());
+        assert_eq!(
+            merge_tip_content_presence(
+                dir.path(),
+                "main",
+                &handoff,
+                Some(&window),
+                &window.identity,
+                None
+            ),
+            Some(DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()]
+            })
+        );
+    }
+
+    #[test]
+    fn ordinary_anchor_gets_task_owned_integration_resolution_cas_0930() {
+        let dir = fixture();
+        let repo = dir.path();
+        commit(repo, "copy.txt", "6. original item\n", "baseline");
+        git(repo, &["branch", "-f", "main", "HEAD"]);
+        let delivery = commit(repo, "copy.txt", "6. delivered item\n", "cas-taskb: docs");
+        git(repo, &["checkout", "main"]);
+        commit(repo, "copy.txt", "6. other item\n", "target item");
+        git(
+            repo,
+            &[
+                "merge",
+                "--no-ff",
+                "--no-commit",
+                "-s",
+                "ours",
+                "factory/worker",
+            ],
+        );
+        let integration = commit(
+            repo,
+            "copy.txt",
+            "6. other item\n7. delivered item\n",
+            "cas-taskb: integrate docs",
+        );
+        assert_eq!(
+            ordinary_anchor_content_presence(repo, "main", &delivery, &window().identity),
+            DeliveryContentPresence::Superseded {
+                paths: vec!["copy.txt".into()],
+                commits: vec![integration]
+            }
+        );
+    }
+
+    #[test]
+    fn parallel_ordinary_edit_records_actual_side_commit_cas_0930() {
+        let (dir, delivery) = parallel_merge_fixture(
+            "render(title, disabled);\n",
+            "render(delivered_title, disabled);\n",
+            "render(title, described);\n",
+            "render(delivered_title, described);\n",
+        );
+        let side = git(dir.path(), &["rev-parse", "main^1"]);
+        assert_eq!(
+            delivery_content_presence_on_target(dir.path(), &delivery, "main"),
+            DeliveryContentPresence::Superseded {
+                paths: vec!["copy.txt".into()],
+                commits: vec![side]
+            }
+        );
+    }
+
+    #[test]
+    fn conflicting_parallel_edits_cannot_certify_merge_cas_0930() {
+        let (dir, delivery) = parallel_merge_fixture(
+            "render(title, disabled);\n",
+            "render(delivered_title, disabled);\n",
+            "render(replaced_title, disabled);\n",
+            "render(delivered_title, described);\n",
+        );
+        assert_eq!(
+            delivery_content_presence_on_target(dir.path(), &delivery, "main"),
+            DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn parallel_import_union_preserves_every_parent_name_cas_0930() {
+        let (dir, delivery) = parallel_merge_fixture(
+            "import { Alpha, Beta } from \"./api\";\n",
+            "import { Beta, Delivery, Alpha } from \"./api\";\n",
+            "import { Alpha, Side, Beta } from \"./api\";\n",
+            "import { Beta, Delivery, Side, Alpha } from \"./api\";\n",
+        );
+        let side = git(dir.path(), &["rev-parse", "main^1"]);
+        assert_eq!(
+            delivery_content_presence_on_target(dir.path(), &delivery, "main"),
+            DeliveryContentPresence::Superseded {
+                paths: vec!["copy.txt".into()],
+                commits: vec![side]
+            }
+        );
+    }
+
+    #[test]
+    fn parallel_import_union_cannot_restore_removed_name_cas_0930() {
+        let (dir, delivery) = parallel_merge_fixture(
+            "import { Alpha, ADMIN, Beta } from \"./api\";\n",
+            "import { Alpha, Delivery, Beta } from \"./api\";\n",
+            "import { Alpha, ADMIN, Side, Beta } from \"./api\";\n",
+            "import { Alpha, Delivery, ADMIN, Side, Beta } from \"./api\";\n",
+        );
+        assert_eq!(
+            delivery_content_presence_on_target(dir.path(), &delivery, "main"),
+            DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn parallel_edit_cannot_restore_removed_privilege_cas_0930() {
+        let (dir, delivery) = parallel_merge_fixture(
+            "grant(user, ADMIN); render(title);\n",
+            "grant(user); render(title);\n",
+            "grant(user, ADMIN); render(described);\n",
+            "grant(user, ADMIN); render(described);\n",
+        );
+        assert_eq!(
+            delivery_content_presence_on_target(dir.path(), &delivery, "main"),
+            DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn parallel_edit_requires_final_survival_cas_0930() {
+        let (dir, delivery) = parallel_merge_fixture(
+            "render(title, disabled);\n",
+            "render(delivered_title, disabled);\n",
+            "render(title, described);\n",
+            "render(delivered_title, described);\n",
+        );
+        commit(dir.path(), "copy.txt", "", "delete combined delivery");
+        assert_eq!(
+            delivery_content_presence_on_target(dir.path(), &delivery, "main"),
+            DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn parallel_complete_block_evolution_records_side_commit_cas_0930() {
+        let (dir, delivery) = parallel_merge_fixture(
+            "base();\ntimeout(10);\n",
+            "delivered();\ntimeout(10);\n",
+            "base();\ntimeout(30);\nretry();\n",
+            "delivered();\ntimeout(30);\nretry();\n",
+        );
+        let side = git(dir.path(), &["rev-parse", "main^1"]);
+        assert_eq!(
+            delivery_content_presence_on_target(dir.path(), &delivery, "main"),
+            DeliveryContentPresence::Present {
+                paths: vec!["copy.txt".into()]
+            }
+        );
+        // Anchor ownership in the timeout before the side fork, then force
+        // its actual edit through a merge where the sibling route is lost.
+        let base = git(dir.path(), &["rev-parse", &format!("{delivery}^1")]);
+        assert_eq!(
+            delivery_evolution::line_content_presence(
+                dir.path(),
+                &format!("{base}^1"),
+                &base,
+                "main",
+                "copy.txt"
+            )
+            .unwrap(),
+            Some(DeliveryContentPresence::Superseded {
+                paths: vec!["copy.txt".into()],
+                commits: vec![delivery, side]
+            })
+        );
+    }
+
+    #[test]
+    fn parallel_block_partial_deletion_rejects_cas_0930() {
+        let (dir, delivery) = parallel_merge_fixture(
+            "base();\ntimeout(10);\n",
+            "delivered();\ntimeout(10);\n",
+            "base();\ntimeout(30);\nretry();\n",
+            "delivered();\ntimeout(30);\nretry();\n",
+        );
+        let base = git(dir.path(), &["rev-parse", &format!("{delivery}^1")]);
+        commit(
+            dir.path(),
+            "copy.txt",
+            "delivered();\ntimeout(30);\n",
+            "lose retry",
+        );
+        assert_eq!(
+            delivery_evolution::line_content_presence(
+                dir.path(),
+                &format!("{base}^1"),
+                &base,
+                "main",
+                "copy.txt"
+            )
+            .unwrap(),
+            Some(DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()]
+            })
+        );
+    }
+
+    #[test]
+    fn ordinary_loop_rewrite_spanning_closing_brace_supersedes_cas_0930() {
+        let dir = fixture();
+        let repo = dir.path();
+        commit(
+            repo,
+            "copy.txt",
+            "function labels() {\nfor (const item of group) {\nprepare();\n}\nbase();\nreturn labels;\n}\n",
+            "baseline",
+        );
+        let delivery = commit(
+            repo,
+            "copy.txt",
+            "function labels() {\nfor (const item of group) {\nprepare();\n}\ngroup.forEach((item) => {\nlabels.set(item, oldTag);\n});\nreturn labels;\n}\n",
+            "cas-taskb: labels",
+        );
+        let edit = commit(
+            repo,
+            "copy.txt",
+            "function labels() {\nfor (const item of group) {\nlabels.set(item, newTag);\n}\nreturn labels;\n}\n",
+            "ordinary labels rewrite",
+        );
+        assert_eq!(
+            delivery_content_presence_on_target(repo, &delivery, "HEAD"),
+            DeliveryContentPresence::Superseded {
+                paths: vec!["copy.txt".into()],
+                commits: vec![edit]
+            }
+        );
+        commit(
+            repo,
+            "copy.txt",
+            "function labels() {\nfor (const item of group) {\n}\nreturn labels;\n}\n",
+            "delete replacement",
+        );
+        assert_eq!(
+            delivery_content_presence_on_target(repo, &delivery, "HEAD"),
+            DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn merge_invention_without_ordinary_side_patch_rejects_cas_0930() {
+        let (dir, delivery) = parallel_merge_fixture(
+            "render(title, disabled);\nneighbor();\n",
+            "render(delivered_title, disabled);\nneighbor();\n",
+            "render(title, disabled);\nother_neighbor();\n",
+            "render(delivered_title, invented);\nother_neighbor();\n",
+        );
+        assert_eq!(
+            delivery_content_presence_on_target(dir.path(), &delivery, "main"),
+            DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn resolution_owns_novel_lines_not_imported_side_lines_cas_0930() {
+        let dir = fixture();
+        let repo = dir.path();
+        commit(
+            repo,
+            "copy.txt",
+            "base_owned();\nbase_inherited();\n",
+            "baseline",
+        );
+        git(repo, &["branch", "-f", "main", "HEAD"]);
+        commit(
+            repo,
+            "copy.txt",
+            "worker();\nbase_inherited();\n",
+            "cas-taskb: delivery",
+        );
+        git(repo, &["checkout", "main"]);
+        commit(
+            repo,
+            "copy.txt",
+            "target();\ninherited();\n",
+            "target changes",
+        );
+        git(repo, &["checkout", "factory/worker"]);
+        git(
+            repo,
+            &["merge", "--no-ff", "--no-commit", "-s", "ours", "main"],
+        );
+        let tip = commit(
+            repo,
+            "copy.txt",
+            "resolved();\ninherited();\n",
+            "cas-taskb: QA resolution",
+        );
+        git(repo, &["checkout", "main"]);
+        git(
+            repo,
+            &["merge", "--no-ff", "factory/worker", "-m", "integrate"],
+        );
+        commit(
+            repo,
+            "copy.txt",
+            "resolved();\n",
+            "delete unrelated imported side line",
+        );
+        let mut window = window();
+        window.identity.known_commits.push(tip.clone());
+        assert_eq!(
+            merge_tip_content_presence(repo, "main", &tip, Some(&window), &window.identity, None),
+            Some(DeliveryContentPresence::Superseded {
+                paths: vec!["copy.txt".into()],
+                commits: vec![tip]
+            })
+        );
+    }
+
+    #[test]
+    fn explicit_resolution_receipt_may_discuss_other_tasks_cas_0930() {
+        let dir = fixture();
+        let repo = dir.path();
+        commit(
+            repo,
+            "copy.txt",
+            "base_owned();\nbase_inherited();\n",
+            "baseline",
+        );
+        git(repo, &["branch", "-f", "main", "HEAD"]);
+        commit(
+            repo,
+            "copy.txt",
+            "worker();\nbase_inherited();\n",
+            "cas-taskb: delivery",
+        );
+        git(repo, &["checkout", "main"]);
+        commit(
+            repo,
+            "copy.txt",
+            "target();\ninherited();\n",
+            "target changes",
+        );
+        git(repo, &["checkout", "factory/worker"]);
+        git(
+            repo,
+            &["merge", "--no-ff", "--no-commit", "-s", "ours", "main"],
+        );
+        let tip = commit(
+            repo,
+            "copy.txt",
+            "resolved();\ninherited();\n",
+            "cas-taskb: QA resolution\n\nIntegrates cas-aaaa and preserves cas-bbbb behaviour.",
+        );
+        git(repo, &["checkout", "main"]);
+        git(
+            repo,
+            &["merge", "--no-ff", "factory/worker", "-m", "integrate"],
+        );
+        commit(
+            repo,
+            "copy.txt",
+            "resolved();\n",
+            "delete unrelated imported side line",
+        );
+        let mut window = window();
+        window.identity.known_commits.push(tip.clone());
+        assert_eq!(
+            merge_tip_content_presence(repo, "main", &tip, Some(&window), &window.identity, None),
+            Some(DeliveryContentPresence::Superseded {
+                paths: vec!["copy.txt".into()],
+                commits: vec![tip]
+            })
+        );
+    }
+
     #[test]
     fn union_cannot_restore_removed_baseline_list_member_cas_0930() {
-        let (dir, delivery) = union_list_fixture(
+        let (dir, delivery) = parallel_merge_fixture(
             "Alpha, ADMIN, Beta,\nneighbor();\n",
             "Alpha, DeliveryProbe, Beta,\nneighbor();\n",
             "Alpha, ADMIN, SiblingProbe, Beta,\nneighbor();\n",
@@ -957,7 +1852,7 @@ mod tests {
 
     #[test]
     fn union_cannot_introduce_items_absent_from_both_parents_cas_0930() {
-        let (dir, delivery) = union_list_fixture(
+        let (dir, delivery) = parallel_merge_fixture(
             "Alpha, Beta,\n",
             "Alpha, DeliveryProbe, Beta,\n",
             "Alpha, SiblingProbe, Beta,\n",
@@ -973,7 +1868,7 @@ mod tests {
 
     #[test]
     fn union_cannot_ignore_sibling_removal_of_baseline_item_cas_0930() {
-        let (dir, delivery) = union_list_fixture(
+        let (dir, delivery) = parallel_merge_fixture(
             "Alpha, Beta,\n",
             "Alpha, DeliveryProbe, Beta,\n",
             "Alpha, SiblingProbe,\n",
@@ -989,7 +1884,7 @@ mod tests {
 
     #[test]
     fn union_transport_still_requires_later_line_survival_cas_0930() {
-        let (dir, delivery) = union_list_fixture(
+        let (dir, delivery) = parallel_merge_fixture(
             "Alpha, Beta,\n",
             "Alpha, DeliveryProbe, Beta,\n",
             "Alpha, SiblingProbe, Beta,\n",
@@ -1158,6 +2053,130 @@ mod tests {
             merge_tip_content_presence(repo, "main", &tip, Some(&window), &window.identity, None),
             Some(DeliveryContentPresence::Dropped {
                 paths: vec!["copy.txt".into()]
+            })
+        );
+    }
+
+    fn expanded_grant_resolution_fixture(
+        adjacent: bool,
+        novel_grant: bool,
+    ) -> (tempfile::TempDir, String) {
+        let dir = fixture();
+        let repo = dir.path();
+        let separation = if adjacent {
+            ""
+        } else {
+            "kept_one();\nkept_two();\n"
+        };
+        commit(
+            repo,
+            "copy.txt",
+            &format!("grant(user, ADMIN);\n{separation}old_qa();\n"),
+            "baseline authorization",
+        );
+        git(repo, &["branch", "-f", "main", "HEAD"]);
+        commit(
+            repo,
+            "copy.txt",
+            &format!("grant(user);\n{separation}old_qa();\n"),
+            "cas-taskb: restrict grant",
+        );
+        git(repo, &["checkout", "main"]);
+        commit(
+            repo,
+            "copy.txt",
+            &format!("grant(user, ADMIN, audit);\n{separation}foreign_qa();\n"),
+            "expand baseline grant",
+        );
+        git(repo, &["checkout", "factory/worker"]);
+        git(
+            repo,
+            &["merge", "--no-ff", "--no-commit", "-s", "ours", "main"],
+        );
+        let grant = if novel_grant {
+            "grant(user, audit);"
+        } else {
+            "grant(user, ADMIN, audit);"
+        };
+        let handoff = commit(
+            repo,
+            "copy.txt",
+            &format!("{grant}\n{separation}novel_qa();\n"),
+            "cas-taskb: QA resolution",
+        );
+        git(repo, &["checkout", "main"]);
+        git(
+            repo,
+            &["merge", "--no-ff", "factory/worker", "-m", "integrate"],
+        );
+        (dir, handoff)
+    }
+
+    #[test]
+    fn task_owned_resolution_cannot_import_expanded_stale_grant_cas_0930() {
+        let (dir, handoff) = expanded_grant_resolution_fixture(false, false);
+        let mut window = window();
+        window.identity.known_commits.push(handoff.clone());
+        assert_eq!(
+            merge_resolution_paths(dir.path(), &handoff, &window.identity).unwrap(),
+            vec!["copy.txt"]
+        );
+        assert_eq!(
+            merge_tip_content_presence(
+                dir.path(),
+                "main",
+                &handoff,
+                Some(&window),
+                &window.identity,
+                None
+            ),
+            Some(DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()],
+            })
+        );
+    }
+
+    #[test]
+    fn adjacent_novel_resolution_cannot_own_imported_stale_grant_cas_0930() {
+        let (dir, handoff) = expanded_grant_resolution_fixture(true, false);
+        let mut window = window();
+        window.identity.known_commits.push(handoff.clone());
+        assert_eq!(
+            merge_resolution_paths(dir.path(), &handoff, &window.identity).unwrap(),
+            vec!["copy.txt"]
+        );
+        assert_eq!(
+            merge_tip_content_presence(
+                dir.path(),
+                "main",
+                &handoff,
+                Some(&window),
+                &window.identity,
+                None
+            ),
+            Some(DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()],
+            })
+        );
+    }
+
+    #[test]
+    fn task_owned_novel_grant_resolution_records_supersession_cas_0930() {
+        let (dir, handoff) = expanded_grant_resolution_fixture(false, true);
+        let mut window = window();
+        window.identity.known_commits.push(handoff.clone());
+        assert_eq!(
+            merge_tip_content_presence(
+                dir.path(),
+                "main",
+                &handoff,
+                Some(&window),
+                &window.identity,
+                None
+            ),
+            Some(DeliveryContentPresence::Superseded {
+                paths: vec!["copy.txt".into()],
+                commits: vec![handoff],
             })
         );
     }

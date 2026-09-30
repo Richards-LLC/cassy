@@ -10940,7 +10940,7 @@ fn anchored_delivery_content_gate(
             ),
         })
     } else {
-        delivery_content_presence_in_parent(repo_path, anchor, parent_branch)
+        task_attribution::ordinary_anchor_content_presence(repo_path, parent_branch, anchor, content_identity)
     };
 
     match presence {
@@ -19133,7 +19133,7 @@ pub(crate) fn delivery_content_presence_on_target(
     delivery_commit: &str,
     target_ref: &str,
 ) -> DeliveryContentPresence {
-    delivery_content_presence_on_target_for_paths(repo_path, delivery_commit, target_ref, None)
+    delivery_content_presence_on_target_for_paths(repo_path, delivery_commit, target_ref, None, false)
 }
 
 fn delivery_content_presence_on_target_for_paths(
@@ -19141,6 +19141,7 @@ fn delivery_content_presence_on_target_for_paths(
     delivery_commit: &str,
     target_ref: &str,
     selected_paths: Option<&[String]>,
+    resolution_only: bool,
 ) -> DeliveryContentPresence {
     use std::process::Command;
 
@@ -19235,7 +19236,12 @@ fn delivery_content_presence_on_target_for_paths(
     let mut evolved = Vec::new();
     let mut commits = Vec::new();
     for path in &paths {
-        let proof = match delivery_evolution::line_content_presence(repo_path, &delivery_parent, delivery_commit, &target, path) {
+        let measured = if resolution_only {
+            delivery_evolution::resolution_content_presence(repo_path, &delivery_parent, delivery_commit, &target, path)
+        } else {
+            delivery_evolution::line_content_presence(repo_path, &delivery_parent, delivery_commit, &target, path)
+        };
+        let proof = match measured {
             Ok(Some(proof)) => proof,
             Ok(None) => match reverse_delivery_path_applies_to_tree(repo_path, &delivery_parent, delivery_commit, &target, path) {
                 Ok(true) => DeliveryContentPresence::Present { paths: vec![path.clone()] },
@@ -19270,7 +19276,7 @@ pub(crate) fn delivery_content_presence_in_parent(
     delivery_commit: &str,
     parent_branch: &str,
 ) -> DeliveryContentPresence {
-    delivery_content_presence_in_parent_for_paths(repo_path, delivery_commit, parent_branch, None)
+    delivery_content_presence_in_parent_for_paths(repo_path, delivery_commit, parent_branch, None, false)
 }
 
 fn delivery_content_presence_in_parent_for_paths(
@@ -19278,6 +19284,7 @@ fn delivery_content_presence_in_parent_for_paths(
     delivery_commit: &str,
     parent_branch: &str,
     selected_paths: Option<&[String]>,
+    resolution_only: bool,
 ) -> DeliveryContentPresence {
     let origin_parent = format!("origin/{parent_branch}");
     let target = if git_ref_exists(repo_path, &origin_parent)
@@ -19300,6 +19307,7 @@ fn delivery_content_presence_in_parent_for_paths(
         delivery_commit,
         target,
         selected_paths,
+        resolution_only,
     )
 }
 
@@ -24944,6 +24952,7 @@ mod merge_state_gate_tests {
     fn historical_delivery_replay_cas_0930() {
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let target = "c2f3b0fa736a3a462f5f917642623cdf26607558";
+        let mut failures = Vec::new();
         for (id, anchor) in [("cas-3400", "df25d701"), ("cas-bf07", "3d004014"),
             ("cas-d636", "92554045"), ("cas-598e", "04ba55c1")] {
             let anchor = resolve_task_commit_receipt_sha(repo, anchor).expect("historical anchor");
@@ -24956,8 +24965,21 @@ mod merge_state_gate_tests {
             let outcome = anchored_delivery_content_gate(&task, repo, &anchor, target,
                 Some(&window), &window.identity, None, None);
             eprintln!("historical replay {id} anchor={anchor} target={target}: {outcome:?}");
-            assert!(outcome.is_none(), "{id}: {outcome:?}");
+            if id == "cas-d636" {
+                let reviewed = anchored_delivery_content_gate(&task, repo, &anchor, target,
+                    Some(&window), &window.identity, None,
+                    Some("reviewed-drop: d18d4a824e -- cas-a355's audited timeout resolution intentionally supersedes the delivered journey"));
+                eprintln!("historical replay {id} reviewed-drop=d18d4a824e: {reviewed:?}");
+                let only_journey = matches!(&outcome, Some(MergeStateGateOutcome::Reject(message))
+                    if message.lines().any(|line| line == "Dropped path(s): hub-web/e2e/journeys/network-switch.journey.ts"));
+                if !only_journey || !matches!(reviewed, Some(MergeStateGateOutcome::ProceedWithNote(_))) {
+                    failures.push(format!("{id}: without receipt={outcome:?}; reviewed={reviewed:?}"));
+                }
+            } else if outcome.is_some() {
+                failures.push(format!("{id}: {outcome:?}"));
+            }
         }
+        assert!(failures.is_empty(), "historical delivery failures:\n{}", failures.join("\n"));
     }
 
     /// cas-3f8c: a real drop still rejects, and the refusal now names the

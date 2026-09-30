@@ -11,23 +11,6 @@
 use std::process::Command;
 use tempfile::TempDir;
 
-/// Check if embedding model is available for testing
-/// Always returns false - local embeddings have been removed
-fn embeddings_available() -> bool {
-    false
-}
-
-/// Skip test if embeddings aren't available (use in non-ignored tests)
-/// Local embeddings have been removed - these tests are always skipped
-macro_rules! skip_without_embeddings {
-    () => {
-        if !embeddings_available() {
-            eprintln!("Skipping: local embeddings have been removed (cloud-only)");
-            return;
-        }
-    };
-}
-
 /// Helper to run CAS commands in a temp directory
 fn cas_cmd(dir: &TempDir) -> Command {
     let mut cmd = Command::new(cas::test_paths::binary(

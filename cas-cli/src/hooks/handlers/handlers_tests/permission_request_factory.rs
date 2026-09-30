@@ -18,9 +18,10 @@
 //!     hoist; see the block comment in notifications.rs for rationale.
 //!
 //! Like `factory_auto_approve.rs`, these tests mutate process env
-//! (`CAS_AGENT_ROLE`) and therefore serialize on a local mutex.
+//! (`CAS_AGENT_ROLE`) and therefore hold the shared canonical environment guard.
 
 use crate::hooks::handlers::handle_permission_request;
+use crate::test_support::TestEnvGuard;
 use cas_core::hooks::types::HookInput;
 
 fn input_for(tool: &str, file_path: Option<&str>) -> HookInput {
@@ -57,8 +58,8 @@ fn allow_reason(out: &cas_core::hooks::types::HookOutput) -> Option<String> {
 
 #[test]
 fn supervisor_write_permission_request_is_auto_approved_without_cas_root() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("supervisor"));
+    let mut env = TestEnvGuard::new();
+    super::set_role_env(&mut env, Some("supervisor"));
     let input = input_for("Write", Some("/tmp/foo.txt"));
     let out = handle_permission_request(&input, None).expect("handler ok");
     let reason = allow_reason(&out).expect("expected allow");
@@ -70,8 +71,8 @@ fn supervisor_write_permission_request_is_auto_approved_without_cas_root() {
 
 #[test]
 fn worker_edit_permission_request_is_auto_approved_without_cas_root() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("worker"));
+    let mut env = TestEnvGuard::new();
+    super::set_role_env(&mut env, Some("worker"));
     let input = input_for("Edit", Some("/tmp/foo.txt"));
     let out = handle_permission_request(&input, None).expect("handler ok");
     assert!(
@@ -82,8 +83,8 @@ fn worker_edit_permission_request_is_auto_approved_without_cas_root() {
 
 #[test]
 fn supervisor_bash_permission_request_is_auto_approved_without_cas_root() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("supervisor"));
+    let mut env = TestEnvGuard::new();
+    super::set_role_env(&mut env, Some("supervisor"));
     let input = input_for("Bash", None);
     let out = handle_permission_request(&input, None).expect("handler ok");
     assert!(
@@ -97,8 +98,8 @@ fn supervisor_write_permission_request_is_auto_approved_with_cas_root() {
     // Asymmetric-by-design with the PreToolUse hoist: belt #3 fires even
     // when cas_root=Some, because PermissionRequest has no protection
     // gate invariant to preserve. See comment in notifications.rs.
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("supervisor"));
+    let mut env = TestEnvGuard::new();
+    super::set_role_env(&mut env, Some("supervisor"));
     let input = input_for("Write", Some("/tmp/foo.txt"));
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = handle_permission_request(&input, Some(tmp.path())).expect("handler ok");
@@ -118,8 +119,8 @@ fn solo_user_permission_request_is_not_auto_approved() {
     // CAS_AGENT_ROLE unset — the handler must fall through. With no
     // agent store present, the cas_root=None early return (or the
     // agent-lookup failure) yields an empty output.
-    let _g = super::env_lock();
-    let _role = set_role_env(None);
+    let mut env = TestEnvGuard::new();
+    super::set_role_env(&mut env, None);
     let input = input_for("Write", Some("/tmp/foo.txt"));
     let out = handle_permission_request(&input, None).expect("handler ok");
     assert!(
@@ -132,41 +133,12 @@ fn solo_user_permission_request_is_not_auto_approved() {
 fn factory_agent_unknown_tool_permission_request_is_not_auto_approved() {
     // Tools outside FACTORY_AUTO_APPROVE_TOOLS must not get the bypass —
     // regression guard against widening the belt.
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("worker"));
+    let mut env = TestEnvGuard::new();
+    super::set_role_env(&mut env, Some("worker"));
     let input = input_for("WebFetch", None);
     let out = handle_permission_request(&input, None).expect("handler ok");
     assert!(
         allow_reason(&out).is_none(),
         "WebFetch is not in the factory auto-approve list"
     );
-}
-
-// ----------------------------------------------------------------------------
-// Env helpers — use the shared process-wide mutex from mod.rs so that
-// concurrent tests across sibling modules don't race on CAS_AGENT_ROLE.
-// ----------------------------------------------------------------------------
-
-struct RoleGuard(Option<String>);
-
-impl Drop for RoleGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match &self.0 {
-                Some(v) => std::env::set_var("CAS_AGENT_ROLE", v),
-                None => std::env::remove_var("CAS_AGENT_ROLE"),
-            }
-        }
-    }
-}
-
-fn set_role_env(role: Option<&str>) -> RoleGuard {
-    let prev = std::env::var("CAS_AGENT_ROLE").ok();
-    unsafe {
-        match role {
-            Some(v) => std::env::set_var("CAS_AGENT_ROLE", v),
-            None => std::env::remove_var("CAS_AGENT_ROLE"),
-        }
-    }
-    RoleGuard(prev)
 }

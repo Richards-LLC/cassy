@@ -5,67 +5,10 @@
 //! every turn to counter mid-session drift. Non-supervisor and non-factory
 //! sessions remain unchanged (returns empty).
 
+use crate::test_support::TestEnvGuard;
 use cas_core::hooks::types::{HookInput, HookSpecificOutput};
 
 use crate::hooks::handlers::handle_user_prompt_submit;
-
-// Env helpers — `resolve_role` falls back to `CAS_AGENT_ROLE` when
-// `HookInput::agent_role` is None/blank, so tests running inside a real
-// factory supervisor process inherit a "supervisor" role from the parent
-// env. Serialize through the shared `super::env_lock()` and reset the env
-// per test to prevent that leak.
-
-struct RoleGuard(Option<String>);
-
-impl Drop for RoleGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match &self.0 {
-                Some(v) => std::env::set_var("CAS_AGENT_ROLE", v),
-                None => std::env::remove_var("CAS_AGENT_ROLE"),
-            }
-        }
-    }
-}
-
-fn set_role_env(role: Option<&str>) -> RoleGuard {
-    let prev = std::env::var("CAS_AGENT_ROLE").ok();
-    unsafe {
-        match role {
-            Some(v) => std::env::set_var("CAS_AGENT_ROLE", v),
-            None => std::env::remove_var("CAS_AGENT_ROLE"),
-        }
-    }
-    RoleGuard(prev)
-}
-
-/// EPIC cas-8888 (cas-fd9f): pins `CAS_FACTORY_SUPERVISOR_CLI` — the
-/// reminder's tool-prefix now comes from `harness_policy::own_tool_prefix()`,
-/// so tests asserting a specific prefix must control this var explicitly
-/// rather than depending on the ambient process env.
-struct SupervisorCliGuard(Option<String>);
-
-impl Drop for SupervisorCliGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match &self.0 {
-                Some(v) => std::env::set_var("CAS_FACTORY_SUPERVISOR_CLI", v),
-                None => std::env::remove_var("CAS_FACTORY_SUPERVISOR_CLI"),
-            }
-        }
-    }
-}
-
-fn set_supervisor_cli_env(cli: Option<&str>) -> SupervisorCliGuard {
-    let prev = std::env::var("CAS_FACTORY_SUPERVISOR_CLI").ok();
-    unsafe {
-        match cli {
-            Some(v) => std::env::set_var("CAS_FACTORY_SUPERVISOR_CLI", v),
-            None => std::env::remove_var("CAS_FACTORY_SUPERVISOR_CLI"),
-        }
-    }
-    SupervisorCliGuard(prev)
-}
 
 fn supervisor_input() -> HookInput {
     HookInput {
@@ -105,16 +48,14 @@ fn non_factory_input() -> HookInput {
 /// Both checked together since they require the same setup.
 #[test]
 fn supervisor_gets_reminder_within_512_bytes() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("supervisor"));
+    let mut env = TestEnvGuard::new();
+    super::set_role_env(&mut env, Some("supervisor"));
     let input = supervisor_input();
     let output = handle_user_prompt_submit(&input, None).unwrap();
 
     let context = match &output.hook_specific_output {
         Some(HookSpecificOutput::UserPromptSubmit { additional_context }) => additional_context,
-        other => panic!(
-            "Expected UserPromptSubmit hookSpecificOutput, got: {other:?}"
-        ),
+        other => panic!("Expected UserPromptSubmit hookSpecificOutput, got: {other:?}"),
     };
 
     let byte_len = context.as_bytes().len();
@@ -127,17 +68,15 @@ fn supervisor_gets_reminder_within_512_bytes() {
 /// AC1: The reminder contains all 6 Hard Rule keywords.
 #[test]
 fn supervisor_reminder_contains_all_6_hard_rule_keywords() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("supervisor"));
-    let _cli = set_supervisor_cli_env(Some("claude"));
+    let mut env = TestEnvGuard::new();
+    super::set_role_env(&mut env, Some("supervisor"));
+    super::set_supervisor_cli_env(&mut env, Some("claude"));
     let input = supervisor_input();
     let output = handle_user_prompt_submit(&input, None).unwrap();
 
     let context = match &output.hook_specific_output {
         Some(HookSpecificOutput::UserPromptSubmit { additional_context }) => additional_context,
-        other => panic!(
-            "Expected UserPromptSubmit hookSpecificOutput, got: {other:?}"
-        ),
+        other => panic!("Expected UserPromptSubmit hookSpecificOutput, got: {other:?}"),
     };
 
     // All 6 Hard Rule keywords must appear in the reminder.
@@ -164,9 +103,9 @@ fn supervisor_reminder_contains_all_6_hard_rule_keywords() {
 /// Grok supervisor was told a tool call it cannot make on EVERY turn.
 #[test]
 fn grok_supervisor_reminder_uses_cas_prefix() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("supervisor"));
-    let _cli = set_supervisor_cli_env(Some("grok"));
+    let mut env = TestEnvGuard::new();
+    super::set_role_env(&mut env, Some("supervisor"));
+    super::set_supervisor_cli_env(&mut env, Some("grok"));
     let input = supervisor_input();
     let output = handle_user_prompt_submit(&input, None).unwrap();
 
@@ -188,8 +127,8 @@ fn grok_supervisor_reminder_uses_cas_prefix() {
 /// AC2: Worker sessions return empty (no reminder injected).
 #[test]
 fn worker_does_not_get_supervisor_reminder() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("worker"));
+    let mut env = TestEnvGuard::new();
+    super::set_role_env(&mut env, Some("worker"));
     let input = worker_input();
     let output = handle_user_prompt_submit(&input, None).unwrap();
 
@@ -203,8 +142,8 @@ fn worker_does_not_get_supervisor_reminder() {
 /// AC2: Non-factory (generic Claude) sessions return empty.
 #[test]
 fn non_factory_does_not_get_supervisor_reminder() {
-    let _g = super::env_lock();
-    let _role = set_role_env(None);
+    let mut env = TestEnvGuard::new();
+    super::set_role_env(&mut env, None);
     let input = non_factory_input();
     let output = handle_user_prompt_submit(&input, None).unwrap();
 
@@ -220,16 +159,14 @@ fn non_factory_does_not_get_supervisor_reminder() {
 /// knows which role it's been assigned.
 #[test]
 fn supervisor_reminder_contains_identity_context() {
-    let _g = super::env_lock();
-    let _role = set_role_env(Some("supervisor"));
+    let mut env = TestEnvGuard::new();
+    super::set_role_env(&mut env, Some("supervisor"));
     let input = supervisor_input();
     let output = handle_user_prompt_submit(&input, None).unwrap();
 
     let context = match &output.hook_specific_output {
         Some(HookSpecificOutput::UserPromptSubmit { additional_context }) => additional_context,
-        other => panic!(
-            "Expected UserPromptSubmit hookSpecificOutput, got: {other:?}"
-        ),
+        other => panic!("Expected UserPromptSubmit hookSpecificOutput, got: {other:?}"),
     };
 
     // The reminder must include an identity line (supervisor of team ...)

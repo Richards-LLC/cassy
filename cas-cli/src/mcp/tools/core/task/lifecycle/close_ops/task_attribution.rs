@@ -673,6 +673,22 @@ mod tests {
         }
     }
     #[test]
+    fn merge_resolution_itself_is_task_content_cas_0930() {
+        let dir = fixture();
+        let repo = dir.path();
+        commit(repo, "work.rs", "legacy();\n", "cas-taskb: delivery");
+        git(repo, &["checkout", "main"]);
+        git(repo, &["merge", "--no-ff", "--no-commit", "factory/worker"]);
+        let merge = commit(repo, "work.rs", "modern();\n", "cas-taskb: QA resolution");
+        let mut window = window();
+        window.identity.known_commits.push(merge.clone());
+        assert_eq!(
+            merge_tip_content_presence(repo, "main", &merge, Some(&window), &window.identity, None),
+            Some(DeliveryContentPresence::Present { paths: vec!["work.rs".into()] })
+        );
+    }
+
+    #[test]
     fn the_delivery_base_is_the_first_parent_of_the_earliest_task_commit() {
         let dir = fixture();
         let p = dir.path();

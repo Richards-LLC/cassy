@@ -24880,6 +24880,49 @@ mod merge_state_gate_tests {
         );
     }
 
+    #[test]
+    fn line_evolution_after_stale_merge_is_attributed_cas_0930() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        std::fs::write(p.join("work.rs"), "legacy();\nkeep();\n").unwrap();
+        git(p, &["add", "work.rs"]);
+        git(p, &["commit", "-qm", "cas-test1: delivery"]);
+        let delivery = head_sha(p);
+        git(p, &["checkout", "main"]);
+        git(p, &["merge", "--no-ff", "-s", "ours", "factory/worker", "-m", "stale integration"]);
+        // A stale merge first touches the path, without descending from the
+        // delivery. The later ordinary replacement explains the missing line.
+        git(p, &["checkout", "-b", "stale", &format!("{delivery}^1")]);
+        std::fs::write(p.join("work.rs"), "legacy();\nkeep();\nunrelated();\n").unwrap();
+        git(p, &["add", "work.rs"]);
+        git(p, &["commit", "-qm", "stale side"]);
+        git(p, &["checkout", "main"]);
+        git(p, &["merge", "--no-ff", "stale", "-m", "merge stale side"]);
+        std::fs::write(p.join("work.rs"), "modern();\nkeep();\nunrelated();\n").unwrap();
+        git(p, &["add", "work.rs"]);
+        git(p, &["commit", "-qm", "replace delivered line"]);
+        let replacement = head_sha(p);
+        assert_eq!(delivery_content_presence_on_target(p, &delivery, "main"),
+            DeliveryContentPresence::Superseded { paths: vec!["work.rs".into()], commits: vec![replacement] });
+    }
+
+    #[test]
+    fn unrelated_edit_cannot_explain_a_missing_line_cas_0930() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        std::fs::write(p.join("work.rs"), "delivered();\n").unwrap();
+        git(p, &["add", "work.rs"]);
+        git(p, &["commit", "-qm", "cas-test1: delivery"]);
+        let delivery = head_sha(p);
+        git(p, &["checkout", "main"]);
+        git(p, &["merge", "--no-ff", "-s", "ours", "factory/worker", "-m", "drop delivery"]);
+        std::fs::write(p.join("work.rs"), "unrelated();\n").unwrap();
+        git(p, &["add", "work.rs"]);
+        git(p, &["commit", "-qm", "unrelated later path edit"]);
+        assert_eq!(delivery_content_presence_on_target(p, &delivery, "main"),
+            DeliveryContentPresence::Dropped { paths: vec!["work.rs".into()] });
+    }
+
     /// cas-3f8c: a real drop still rejects, and the refusal now names the
     /// delivered lines the target lacks. The earlier hunk survives the same
     /// task's later commit, but the integration discarded the delivery.

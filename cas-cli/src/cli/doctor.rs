@@ -360,7 +360,7 @@ const EXPECTED_TABLES: &[&str] = &[
 /// it simply persists forever, unreachable by any test in this repo. That is
 /// exactly how `mecha-cassy-post` kept documenting a retired hub tool contract
 /// after every in-repo copy had been corrected.
-const RETIRED_USER_SKILLS: &[(&str, &str)] = &[("mecha-cassy-post", "mecha-cassy")];
+const RETIRED_USER_SKILLS: &[(&str, &str)] = &[("mecha-cassy-post", "violet")];
 
 /// Why a user-level skill directory should not be on this machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1268,11 +1268,11 @@ fn hub_audit_check_for(root: &Path, now: chrono::DateTime<chrono::Utc>) -> Check
 
 #[cfg(feature = "mcp-proxy")]
 fn host_proxy_check() -> Check {
-    match crate::cli::integrate::mecha_cassy::doctor_row_from_env(None) {
+    match crate::cli::integrate::violet::doctor_row_from_env(None) {
         Some(row) => Check::new("host proxy", match row.severity {
-            crate::cli::integrate::mecha_cassy::DoctorSeverity::Ok => CheckStatus::Ok,
-            crate::cli::integrate::mecha_cassy::DoctorSeverity::Warning => CheckStatus::Warning,
-            crate::cli::integrate::mecha_cassy::DoctorSeverity::Error => CheckStatus::Error,
+            crate::cli::integrate::violet::DoctorSeverity::Ok => CheckStatus::Ok,
+            crate::cli::integrate::violet::DoctorSeverity::Warning => CheckStatus::Warning,
+            crate::cli::integrate::violet::DoctorSeverity::Error => CheckStatus::Error,
         }, row.message),
         None => Check::new("host proxy", CheckStatus::Ok, "not configured on this host"),
     }
@@ -2558,7 +2558,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // blocks). Unlike the platform rows this one *can* be an Error: a missing
     // variable, a rejected bearer, or a drifted tool contract each mean the
     // next release post will fail, and each has an exact remedy.
-    recorder.mark("mechacassy hub", &checks);
+    recorder.mark("violet hub", &checks);
 
     // Check 13c: stale user-level skills (cas-332f). `cas update` only prunes
     // `cas-*` directories, so a hand-installed skill without that prefix is
@@ -5678,7 +5678,7 @@ mod tests {
         assert!(matches!(check.status, CheckStatus::Ok));
         assert!(check.message.contains("project=<unset>"));
         assert!(check.message.contains("cassy=Richards-LLC/cassy"));
-        assert!(check.message.contains("violet=Richards-LLC/mecha-cassy"));
+        assert!(check.message.contains("violet=Richards-LLC/violet_ps"));
         assert!(check
             .message
             .contains("cloud=Richards-LLC/petra-stella-cloud"));
@@ -8375,7 +8375,7 @@ mod tests {
         assert_eq!(strays.len(), 1);
         assert_eq!(strays[0].name, "mecha-cassy-post");
         assert_eq!(strays[0].path, retired);
-        assert_eq!(strays[0].reason, StrayReason::RetiredBy("mecha-cassy"));
+        assert_eq!(strays[0].reason, StrayReason::RetiredBy("violet"));
 
         let check = stray_user_skills_check(&strays);
         assert!(matches!(check.status, CheckStatus::Warning));
@@ -8385,7 +8385,7 @@ mod tests {
             check.message
         );
         assert!(
-            check.message.contains("mecha-cassy owns it now"),
+            check.message.contains("violet owns it now"),
             "{}",
             check.message
         );
@@ -8497,7 +8497,7 @@ mod tests {
             stray.path == managed && stray.reason == StrayReason::OrphanedManagedCopy
         }));
         assert!(strays.iter().any(|stray| {
-            stray.path == user && stray.reason == StrayReason::RetiredBy("mecha-cassy")
+            stray.path == user && stray.reason == StrayReason::RetiredBy("violet")
         }));
         let message = stray_user_skills_check(&strays).message;
         assert!(message.contains("cas doctor --fix --yes"), "{message}");

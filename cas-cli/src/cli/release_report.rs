@@ -36,7 +36,7 @@ const THEME_ORDER: [&str; 7] = [
     "Delivery",
     "Cloud",
     "Diagnostics",
-    "MechaCassy",
+    "Violet",
     "Install",
     "Unclassified",
 ];
@@ -853,8 +853,8 @@ fn classify_theme(issue: &GithubIssue) -> String {
             &["diagnostic", "doctor", "config", "history"][..],
         ),
         (
-            "MechaCassy",
-            &["mecha-cassy", "mecha_cassy", "slack", "hub"][..],
+            "Violet",
+            &["violet", "violet_ps", "mecha-cassy", "mecha_cassy", "slack", "hub"][..],
         ),
         ("Install", &["install", "release", "asset", "update"][..]),
     ] {
@@ -899,7 +899,7 @@ fn classify_theme(issue: &GithubIssue) -> String {
                 "index",
             ][..],
         ),
-        ("MechaCassy", &["mecha-cassy", "slack", "hub", "upload"][..]),
+        ("Violet", &["violet", "violet_ps", "mecha-cassy", "slack", "hub", "upload"][..]),
         ("Install", &["install", "release", "asset", "update"][..]),
     ] {
         if keys.iter().any(|key| text.contains(key)) {

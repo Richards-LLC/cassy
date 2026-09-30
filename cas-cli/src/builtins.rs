@@ -544,20 +544,26 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-release-notes/references/RUBRIC-template.md",
         content: include_str!("builtins/skills/cas-release-notes/references/RUBRIC-template.md"),
     },
-    // mecha-cassy skill (cas-945f, GH #687): the default Slack transport for
-    // every harness. The MechaCassy hub holds the Slack bot credential
-    // server-side and exposes two tools (mecha_read, mecha_post) over one authenticated MCP endpoint,
+    // violet skill (cas-945f, GH #687): the default Slack transport for
+    // every harness. The Violet hub holds the Slack bot credential
+    // server-side and exposes the primary violet_read/violet_post pair over
+    // one authenticated MCP endpoint (plus deprecated aliases for one release).
     // so a Codex or Grok worker posts on the same footing as Claude. The skill
     // owns channel resolution, the two-check preflight, ordered thread posting
     // with 1s pacing, the POSTED receipt, and the env-only credential rules;
     // release-notes still owns what the message says.
     BuiltinFile {
-        path: "skills/mecha-cassy/SKILL.md",
-        content: include_str!("builtins/skills/mecha-cassy/SKILL.md"),
+        path: "skills/violet/SKILL.md",
+        content: include_str!("builtins/skills/violet/SKILL.md"),
     },
     BuiltinFile {
-        path: "skills/mecha-cassy/references/registration.md",
-        content: include_str!("builtins/skills/mecha-cassy/references/registration.md"),
+        path: "skills/violet/references/registration.md",
+        content: include_str!("builtins/skills/violet/references/registration.md"),
+    },
+    // One-release managed redirect; sync replaces installed legacy bodies.
+    BuiltinFile {
+        path: "skills/mecha-cassy/SKILL.md",
+        content: include_str!("builtins/skills/mecha-cassy/SKILL.md"),
     },
     // cas-github-issues skill (cas-ff2f, GH #94): the recurring GitHub Issues
     // sweep — dedupe double-filings, verify-and-close fixed claims, task new
@@ -1151,15 +1157,20 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-release-notes/references/RUBRIC-template.md",
         content: include_str!("builtins/skills/cas-release-notes/references/RUBRIC-template.md"),
     },
-    // mecha-cassy skill (cas-945f, GH #687) — codex mirror. Byte-identical to
-    // the claude copy except for the harness tool prefix.
+    // violet skill (cas-945f, GH #687) — codex mirror. Byte-identical to
+    // the shared Claude source.
+    BuiltinFile {
+        path: "skills/violet/SKILL.md",
+        content: include_str!("builtins/skills/violet/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/violet/references/registration.md",
+        content: include_str!("builtins/skills/violet/references/registration.md"),
+    },
+    // One-release managed redirect; sync replaces installed legacy bodies.
     BuiltinFile {
         path: "skills/mecha-cassy/SKILL.md",
         content: include_str!("builtins/skills/mecha-cassy/SKILL.md"),
-    },
-    BuiltinFile {
-        path: "skills/mecha-cassy/references/registration.md",
-        content: include_str!("builtins/skills/mecha-cassy/references/registration.md"),
     },
     // cas-github-issues skill (cas-ff2f, GH #94) — codex mirror. Byte-identical
     // to the claude copy except for the harness tool prefix.
@@ -1754,15 +1765,20 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-release-notes/references/RUBRIC-template.md",
         content: include_str!("builtins/skills/cas-release-notes/references/RUBRIC-template.md"),
     },
-    // mecha-cassy skill (cas-945f, GH #687) — grok twin. Byte-identical to the
-    // claude copy except for the harness tool prefix.
+    // violet skill (cas-945f, GH #687) — grok twin. Byte-identical to the
+    // shared Claude source.
+    BuiltinFile {
+        path: "skills/violet/SKILL.md",
+        content: include_str!("builtins/skills/violet/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/violet/references/registration.md",
+        content: include_str!("builtins/skills/violet/references/registration.md"),
+    },
+    // One-release managed redirect; sync replaces installed legacy bodies.
     BuiltinFile {
         path: "skills/mecha-cassy/SKILL.md",
         content: include_str!("builtins/skills/mecha-cassy/SKILL.md"),
-    },
-    BuiltinFile {
-        path: "skills/mecha-cassy/references/registration.md",
-        content: include_str!("builtins/skills/mecha-cassy/references/registration.md"),
     },
     BuiltinFile {
         path: "skills/fallow/SKILL.md",
@@ -2109,13 +2125,13 @@ pub const GENERAL_PARITY_CAPABILITIES: &[RequiredCapability] = &[
         note: "",
     },
     RequiredCapability {
-        // cas-945f (GH #687): the MechaCassy Slack transport. Parity is the
+        // cas-945f (GH #687): the Violet Slack transport. Parity is the
         // whole point — before the hub, only the signed-in Claude profile had a
         // Slack connector, so Codex and Grok workers had no transport at all.
-        id: "mecha-cassy",
-        claude: Some("skills/mecha-cassy"),
-        codex: Some("skills/mecha-cassy"),
-        grok: Some("skills/mecha-cassy"),
+        id: "violet",
+        claude: Some("skills/violet"),
+        codex: Some("skills/violet"),
+        grok: Some("skills/violet"),
         note: "",
     },
     RequiredCapability {
@@ -3472,13 +3488,14 @@ pub const SHIPPED_NON_CAS_SKILL_DIRS: &[&str] = &[
     "design-spec",
     "fallow",
     "mcp-integration",
-    "mecha-cassy",
+    "mecha-cassy", // Legacy redirect; retain ownership after retirement for pruning.
     "project-overview",
     // Retired: renamed cas-release-notes (it collided with Grok's built-in
     // /release-notes). Kept so old installs are pruned.
     "release-notes",
     "session-learn",
     "verify-before-claim",
+    "violet",
 ];
 
 /// True for a skill directory name Cassy has shipped: any `cas-*` name or an
@@ -6117,19 +6134,18 @@ This is the body content."#;
         }
     }
 
-    /// cas-945f (GH #687): the mecha-cassy Slack transport ships for every
+    /// cas-8e10 (GH #1055): the Violet Slack transport ships for every
     /// harness, and both its files stay credential-free.
     ///
     /// The markers below are the operational load-bearing parts: without the
     /// authenticated tools/list gate and bounded read fallback a worker cannot
     /// distinguish a read-only outage from a dead write path, without
-    /// the ordered `thread_ts` capture the replies land as stray top-level
-    /// messages, without the pacing rule the hub's one-per-second refusal reads
-    /// as a hard failure, and without the `ts: null` rule an upload gets retried
-    /// and duplicated. Three worker credential exposures on 2026-09-02 came from
+    /// the ordered `message_id` capture the replies land as stray top-level
+    /// messages, and without the pacing rule the hub's one-per-second refusal
+    /// reads as a hard failure. Three worker credential exposures on 2026-09-02 came from
     /// the banned diagnostics, so those bans are asserted too.
     #[test]
-    fn test_builtin_skills_contains_mecha_cassy_transport() {
+    fn test_builtin_skills_contains_violet_transport() {
         for (label, catalog) in [
             ("claude", BUILTIN_SKILLS),
             ("codex", CODEX_BUILTIN_SKILLS),
@@ -6137,40 +6153,51 @@ This is the body content."#;
         ] {
             let skill = catalog
                 .iter()
-                .find(|b| b.path == "skills/mecha-cassy/SKILL.md")
+                .find(|b| b.path == "skills/violet/SKILL.md")
                 .unwrap_or_else(|| {
-                    panic!("skills/mecha-cassy/SKILL.md missing from {label} catalog")
+                    panic!("skills/violet/SKILL.md missing from {label} catalog")
                 });
             assert!(
                 is_managed_by_cas(skill.content),
-                "{label} mecha-cassy SKILL.md must be managed_by: cas"
+                "{label} violet SKILL.md must be managed_by: cas"
             );
             // The tool contract is pinned to the single machine-readable
             // source of truth rather than re-spelled here. When the hub
             // renames a tool, `cas integrate violet` and `cas doctor`
-            // change with MECHA_CASSY_TOOLS, and this assertion drags the
+            // change with VIOLET_TOOLS, and this assertion drags the
             // prose along with them instead of letting the skill keep
             // documenting a retired name (which is exactly how the
             // 2026-09-03 slack_* -> mecha_* rename broke every consumer
             // silently).
             #[cfg(feature = "mcp-proxy")]
-            for tool in cmcp_core::config::MECHA_CASSY_TOOLS {
+            for tool in cmcp_core::config::VIOLET_TOOLS {
                 assert!(
                     skill.content.contains(tool),
-                    "{label} mecha-cassy SKILL.md does not document hub tool {tool:?}; \
+                    "{label} violet SKILL.md does not document hub tool {tool:?}; \
                      the hub contract moved and the skill did not follow"
                 );
             }
-            for retired in ["slack_post_message", "slack_upload_file", "slack_read_channel", "slack_list_channels"] {
+            for retired in [
+                "slack_post_message",
+                "slack_upload_file",
+                "slack_read_channel",
+                "slack_list_channels",
+                "mecha_read",
+                "mecha_post",
+            ] {
                 assert!(
                     !skill.content.contains(retired),
-                    "{label} mecha-cassy SKILL.md still documents retired tool {retired:?}; \
+                    "{label} violet SKILL.md still documents retired tool {retired:?}; \
                      calls to it are denied by policy"
                 );
             }
 
             for required in [
-                "name: mecha-cassy",
+                "name: violet",
+                "violet.violet_read",
+                "violet.violet_post",
+                "anyOf",
+                "GH #1051",
                 "https://mecha-cassy.vercel.app/mcp/slack",
                 // Channel rule, draft-first, bounded read preflight.
                 "^[a-z0-9-]+-internal$",
@@ -6200,37 +6227,37 @@ This is the body content."#;
             ] {
                 assert!(
                     skill.content.contains(required),
-                    "{label} mecha-cassy SKILL.md missing required marker: {required:?}"
+                    "{label} violet SKILL.md missing required marker: {required:?}"
                 );
             }
 
             let registration = catalog
                 .iter()
-                .find(|b| b.path == "skills/mecha-cassy/references/registration.md")
+                .find(|b| b.path == "skills/violet/references/registration.md")
                 .unwrap_or_else(|| {
                     panic!(
-                        "skills/mecha-cassy/references/registration.md missing from \
+                        "skills/violet/references/registration.md missing from \
                          {label} catalog"
                     )
                 });
             for required in [
                 // All three harness registrations, by env reference only.
-                "[servers.mecha-cassy]",
-                "auth = \"env:MECHA_SLACK_TOKEN_<LABEL>\"",
+                "[servers.violet]",
+                "auth = \"env:VIOLET_SLACK_TOKEN_<LABEL>\"",
                 // The allowlist must name the live contract; a retired route
                 // is what produced "denied by policy" on every call.
-                "mecha-cassy.mecha_read",
-                "mecha-cassy.mecha_post",
-                "x-vercel-protection-bypass = \"env:MECHA_VERCEL_BYPASS\"",
-                "[mcp_servers.mecha-cassy]",
+                "violet.violet_read",
+                "violet.violet_post",
+                "x-vercel-protection-bypass = \"env:VIOLET_VERCEL_BYPASS\"",
+                "[mcp_servers.violet]",
                 "bearer_token_env_var",
                 "env_http_headers",
                 "\"type\": \"http\"",
-                "${MECHA_VERCEL_BYPASS}",
+                "${VIOLET_VERCEL_BYPASS}",
             ] {
                 assert!(
                     registration.content.contains(required),
-                    "{label} mecha-cassy registration.md missing required marker: {required:?}"
+                    "{label} violet registration.md missing required marker: {required:?}"
                 );
             }
 
@@ -6243,6 +6270,7 @@ This is the body content."#;
                     "xapp-",
                     "Bearer sk-",
                     "MECHA_CLIENT_TOKENS=",
+                    "VIOLET_CLIENT_TOKENS=",
                 ] {
                     assert!(
                         !file.content.contains(banned),
@@ -6254,14 +6282,73 @@ This is the body content."#;
             for required_ban in ["`printenv`", "`curl -v`", "never values"] {
                 assert!(
                     skill.content.contains(required_ban),
-                    "{label} mecha-cassy SKILL.md dropped credential rule: {required_ban:?}"
+                    "{label} violet SKILL.md dropped credential rule: {required_ban:?}"
                 );
             }
         }
     }
 
+    /// A sync upgrades the old managed skill and prunes its obsolete registration,
+    /// while preserving a user's additional file in the legacy directory.
     #[test]
-    fn test_builtin_mecha_cassy_skill_body_under_12kb() {
+    fn test_violet_sync_upgrades_legacy_skill_for_every_harness() {
+        const LEGACY_PATH: &str = "skills/mecha-cassy/references/registration.md";
+        const LEGACY: &[BuiltinFile] = &[
+            BuiltinFile {
+                path: "skills/mecha-cassy/SKILL.md",
+                content: "---\nname: mecha-cassy\nmetadata:\n  managed_by: cas\n---\n# Old transport\n",
+            },
+            BuiltinFile {
+                path: LEGACY_PATH,
+                content: "# Old registration\n[servers.mecha-cassy]\n",
+            },
+        ];
+        for (label, catalog) in [
+            ("claude", BUILTIN_SKILLS),
+            ("codex", CODEX_BUILTIN_SKILLS),
+            ("grok", GROK_BUILTIN_SKILLS),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let target = temp.path().join(label);
+            sync_all_builtins_inner(&target, &[], LEGACY).unwrap();
+            let personal = target.join("skills/mecha-cassy/my-notes.md");
+            std::fs::write(&personal, "Local channel notes\n").unwrap();
+
+            let result = sync_all_builtins_inner(&target, &[], catalog).unwrap();
+            for path in [
+                "skills/violet/SKILL.md",
+                "skills/violet/references/registration.md",
+                "skills/mecha-cassy/SKILL.md",
+            ] {
+                let builtin = catalog.iter().find(|b| b.path == path).unwrap();
+                assert_eq!(
+                    std::fs::read_to_string(target.join(path)).unwrap(),
+                    builtin.content
+                );
+            }
+            let redirect = std::fs::read_to_string(target.join("skills/mecha-cassy/SKILL.md")).unwrap();
+            assert!(redirect.contains("[violet](../violet/SKILL.md)"));
+            assert!(redirect.contains("one release"));
+            assert!(!redirect.contains("mecha_read") && !redirect.contains("mecha_post"));
+            assert!(
+                !target.join(LEGACY_PATH).exists(),
+                "{label} kept the old registration"
+            );
+            assert!(result.pruned_files.contains(&LEGACY_PATH.to_string()));
+            assert_eq!(
+                std::fs::read_to_string(&personal).unwrap(),
+                "Local channel notes\n"
+            );
+
+            let again = sync_all_builtins_inner(&target, &[], catalog).unwrap();
+            assert!(again.updated_files.is_empty(), "{label} sync is not idempotent");
+            assert!(again.pruned_files.is_empty(), "{label} prune is not idempotent");
+            assert!(personal.exists());
+        }
+    }
+
+    #[test]
+    fn test_builtin_violet_skill_body_under_12kb() {
         const MAX_BYTES: usize = 12 * 1024;
         for (label, catalog) in [
             ("claude", BUILTIN_SKILLS),
@@ -6270,16 +6357,16 @@ This is the body content."#;
         ] {
             let skill = catalog
                 .iter()
-                .find(|b| b.path == "skills/mecha-cassy/SKILL.md")
-                .unwrap_or_else(|| panic!("skills/mecha-cassy/SKILL.md missing from {label}"));
+                .find(|b| b.path == "skills/violet/SKILL.md")
+                .unwrap_or_else(|| panic!("skills/violet/SKILL.md missing from {label}"));
             assert!(
                 skill.content.len() <= MAX_BYTES,
-                "{label} mecha-cassy SKILL.md is {} bytes, over the {MAX_BYTES}-byte limit",
+                "{label} violet SKILL.md is {} bytes, over the {MAX_BYTES}-byte limit",
                 skill.content.len()
             );
             assert!(
                 skill.content.lines().count() <= 80,
-                "{label} mecha-cassy SKILL.md has {} lines, over the ~80-line authoring target",
+                "{label} violet SKILL.md has {} lines, over the ~80-line authoring target",
                 skill.content.lines().count()
             );
         }
@@ -6288,7 +6375,7 @@ This is the body content."#;
     /// cas-6cb5 (GH #731): file receipts must prove the bytes survived the
     /// upload, not merely report a successful response or matching size.
     #[test]
-    fn test_builtin_mecha_cassy_file_upload_integrity_contract() {
+    fn test_builtin_violet_file_upload_integrity_contract() {
         for (label, catalog) in [
             ("claude", BUILTIN_SKILLS),
             ("codex", CODEX_BUILTIN_SKILLS),
@@ -6296,15 +6383,15 @@ This is the body content."#;
         ] {
             let skill = catalog
                 .iter()
-                .find(|b| b.path == "skills/mecha-cassy/SKILL.md")
-                .unwrap_or_else(|| panic!("skills/mecha-cassy/SKILL.md missing from {label}"));
+                .find(|b| b.path == "skills/violet/SKILL.md")
+                .unwrap_or_else(|| panic!("skills/violet/SKILL.md missing from {label}"));
             for required in [
                 "programmatic file path",
                 "reads bytes from disk",
                 "never paste base64 through the model",
                 "Download the provider's explicit file endpoint",
                 "message permalink",
-                "authenticated `mecha_read`",
+                "authenticated `violet_read`",
                 "hub-packed bytes",
                 "external signed or private-provider URLs receive no hub credentials",
                 "configured MCP origin",
@@ -6320,7 +6407,7 @@ This is the body content."#;
             ] {
                 assert!(
                     skill.content.contains(required),
-                    "{label} mecha-cassy SKILL.md missing upload-integrity marker: {required:?}"
+                    "{label} violet SKILL.md missing upload-integrity marker: {required:?}"
                 );
             }
         }

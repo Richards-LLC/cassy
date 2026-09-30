@@ -66,12 +66,12 @@ fn factory_pane_configs_propagates_configured_proxy_credentials() {
     std::fs::write(
         &config_path,
         r#"
-[servers.mecha-cassy]
+[servers.violet]
 transport = "http"
-auth = "env:MECHA_SLACK_TOKEN_TEST_WORKER"
+auth = "env:VIOLET_SLACK_TOKEN_TEST_WORKER"
 
-[servers.mecha-cassy.headers]
-x-vercel-protection-bypass = "env:MECHA_VERCEL_BYPASS_TEST_WORKER"
+[servers.violet.headers]
+x-vercel-protection-bypass = "env:VIOLET_VERCEL_BYPASS_TEST_WORKER"
 
 [servers.unrelated]
 auth = "env:UNRELATED_CREDENTIAL_MUST_NOT_PROPAGATE"
@@ -79,8 +79,8 @@ auth = "env:UNRELATED_CREDENTIAL_MUST_NOT_PROPAGATE"
     )
     .unwrap();
     let _config_home = RestoreEnv::set("XDG_CONFIG_HOME", config_home.path());
-    let _token = RestoreEnv::set("MECHA_SLACK_TOKEN_TEST_WORKER", "token-value");
-    let _bypass = RestoreEnv::set("MECHA_VERCEL_BYPASS_TEST_WORKER", "bypass-value");
+    let _token = RestoreEnv::set("VIOLET_SLACK_TOKEN_TEST_WORKER", "token-value");
+    let _bypass = RestoreEnv::set("VIOLET_VERCEL_BYPASS_TEST_WORKER", "bypass-value");
     let _unrelated = RestoreEnv::set("UNRELATED_CREDENTIAL_MUST_NOT_PROPAGATE", "unrelated");
 
     let config = MuxConfig {
@@ -96,11 +96,11 @@ auth = "env:UNRELATED_CREDENTIAL_MUST_NOT_PROPAGATE"
         .expect("worker config must be present");
 
     assert_eq!(
-        env_value(worker_config, "MECHA_SLACK_TOKEN_TEST_WORKER"),
+        env_value(worker_config, "VIOLET_SLACK_TOKEN_TEST_WORKER"),
         Some("token-value")
     );
     assert_eq!(
-        env_value(worker_config, "MECHA_VERCEL_BYPASS_TEST_WORKER"),
+        env_value(worker_config, "VIOLET_VERCEL_BYPASS_TEST_WORKER"),
         Some("bypass-value")
     );
     assert_eq!(
@@ -146,6 +146,38 @@ auth = "env:NEON_API_KEY_TEST_WORKER"
         env_value(worker_config, "NEON_API_KEY_TEST_WORKER"),
         Some("neon-value")
     );
+}
+
+#[test]
+fn factory_panes_forward_both_violet_credential_generations() {
+    let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let config_home = tempfile::tempdir().unwrap();
+    let path = config_home.path().join("code-mode-mcp/config.toml");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let _config_home = RestoreEnv::set("XDG_CONFIG_HOME", config_home.path());
+    let _home = RestoreEnv::set("HOME", config_home.path());
+    let _old_token = RestoreEnv::set("MECHA_SLACK_TOKEN_COMPAT_TEST", "legacy-token");
+    let _old_bypass = RestoreEnv::set("MECHA_VERCEL_BYPASS", "legacy-bypass");
+    let _new_token = RestoreEnv::set("VIOLET_SLACK_TOKEN_COMPAT_TEST", "new-token");
+    let _new_bypass = RestoreEnv::set("VIOLET_VERCEL_BYPASS", "new-bypass");
+    for prefix in ["VIOLET", "MECHA"] {
+        std::fs::write(&path, format!("[servers.violet]\ntransport = \"http\"\nauth = \"env:{prefix}_SLACK_TOKEN_COMPAT_TEST\"\n[servers.violet.headers]\nx-vercel-protection-bypass = \"env:{prefix}_VERCEL_BYPASS\"\n")).unwrap();
+        let config = MuxConfig { cwd: PathBuf::from("/tmp/test"), workers: 1, include_director: false, ..MuxConfig::default() };
+        let configs = Mux::factory_pane_configs(&config);
+        let (_, pane) = configs.iter().find(|(name, _)| name == "worker-1").unwrap();
+        assert_eq!(env_value(pane, "MECHA_SLACK_TOKEN_COMPAT_TEST"), Some("legacy-token"));
+        assert_eq!(env_value(pane, "VIOLET_SLACK_TOKEN_COMPAT_TEST"), Some("new-token"));
+        assert_eq!(env_value(pane, "MECHA_VERCEL_BYPASS"), Some("legacy-bypass"));
+        assert_eq!(env_value(pane, "VIOLET_VERCEL_BYPASS"), Some("new-bypass"));
+        let _no_new_token = RestoreEnv::remove("VIOLET_SLACK_TOKEN_COMPAT_TEST");
+        let _no_new_bypass = RestoreEnv::remove("VIOLET_VERCEL_BYPASS");
+        let configs = Mux::factory_pane_configs(&config);
+        let (_, pane) = configs.iter().find(|(name, _)| name == "worker-1").unwrap();
+        assert_eq!(env_value(pane, "MECHA_SLACK_TOKEN_COMPAT_TEST"), Some("legacy-token"));
+        assert_eq!(env_value(pane, "MECHA_VERCEL_BYPASS"), Some("legacy-bypass"));
+        assert_eq!(env_value(pane, "VIOLET_SLACK_TOKEN_COMPAT_TEST"), None);
+        assert_eq!(env_value(pane, "VIOLET_VERCEL_BYPASS"), None);
+    }
 }
 
 /// cas-ff74 (GH #1005 item 2): a server defined only in the operator's user
@@ -576,12 +608,12 @@ fn factory_pane_configs_reads_proxy_credentials_from_cas_credentials_file() {
     std::fs::write(
         &config_path,
         r#"
-[servers.mecha-cassy]
+[servers.violet]
 transport = "http"
-auth = "env:MECHA_SLACK_TOKEN_CREDENTIALS_FILE"
+auth = "env:VIOLET_SLACK_TOKEN_CREDENTIALS_FILE"
 
-[servers.mecha-cassy.headers]
-x-vercel-protection-bypass = "env:MECHA_VERCEL_BYPASS"
+[servers.violet.headers]
+x-vercel-protection-bypass = "env:VIOLET_VERCEL_BYPASS"
 "#,
     )
     .unwrap();
@@ -589,12 +621,12 @@ x-vercel-protection-bypass = "env:MECHA_VERCEL_BYPASS"
     std::fs::create_dir_all(credentials.parent().unwrap()).unwrap();
     std::fs::write(
         &credentials,
-        "export MECHA_SLACK_TOKEN_CREDENTIALS_FILE='token-from-file'\nexport MECHA_VERCEL_BYPASS='bypass-from-file'\n",
+        "export VIOLET_SLACK_TOKEN_CREDENTIALS_FILE='token-from-file'\nexport VIOLET_VERCEL_BYPASS='bypass-from-file'\n",
     )
     .unwrap();
     let _credentials_file = RestoreEnv::set("CAS_CREDENTIALS_FILE", &credentials);
-    let _token = RestoreEnv::remove("MECHA_SLACK_TOKEN_CREDENTIALS_FILE");
-    let _bypass = RestoreEnv::remove("MECHA_VERCEL_BYPASS");
+    let _token = RestoreEnv::remove("VIOLET_SLACK_TOKEN_CREDENTIALS_FILE");
+    let _bypass = RestoreEnv::remove("VIOLET_VERCEL_BYPASS");
 
     let config = MuxConfig {
         cwd: PathBuf::from("/tmp/test"),
@@ -610,11 +642,11 @@ x-vercel-protection-bypass = "env:MECHA_VERCEL_BYPASS"
         .expect("worker config must be present");
 
     assert_eq!(
-        env_value(worker_config, "MECHA_SLACK_TOKEN_CREDENTIALS_FILE"),
+        env_value(worker_config, "VIOLET_SLACK_TOKEN_CREDENTIALS_FILE"),
         Some("token-from-file")
     );
     assert_eq!(
-        env_value(worker_config, "MECHA_VERCEL_BYPASS"),
+        env_value(worker_config, "VIOLET_VERCEL_BYPASS"),
         Some("bypass-from-file")
     );
     let credentials_arg = format!(
@@ -642,20 +674,20 @@ fn factory_pane_configs_reads_proxy_credentials_from_login_profile_source() {
     std::fs::write(
         &config_path,
         r#"
-[servers.mecha-cassy]
+[servers.violet]
 transport = "http"
-auth = "env:MECHA_SLACK_TOKEN_PROFILE_SOURCE"
+auth = "env:VIOLET_SLACK_TOKEN_PROFILE_SOURCE"
 
-[servers.mecha-cassy.headers]
-x-vercel-protection-bypass = "env:MECHA_VERCEL_BYPASS_PROFILE_SOURCE"
+[servers.violet.headers]
+x-vercel-protection-bypass = "env:VIOLET_VERCEL_BYPASS_PROFILE_SOURCE"
 "#,
     )
     .unwrap();
-    let credentials = home.path().join("private/mecha-cassy.env");
+    let credentials = home.path().join("private/violet.env");
     std::fs::create_dir_all(credentials.parent().unwrap()).unwrap();
     std::fs::write(
         &credentials,
-        "export MECHA_SLACK_TOKEN_PROFILE_SOURCE='token-from-profile'\nexport MECHA_VERCEL_BYPASS_PROFILE_SOURCE='bypass-from-profile'\n",
+        "export VIOLET_SLACK_TOKEN_PROFILE_SOURCE='token-from-profile'\nexport VIOLET_VERCEL_BYPASS_PROFILE_SOURCE='bypass-from-profile'\n",
     )
     .unwrap();
     std::fs::write(
@@ -667,8 +699,8 @@ x-vercel-protection-bypass = "env:MECHA_VERCEL_BYPASS_PROFILE_SOURCE"
         ),
     )
     .unwrap();
-    let _token = RestoreEnv::remove("MECHA_SLACK_TOKEN_PROFILE_SOURCE");
-    let _bypass = RestoreEnv::remove("MECHA_VERCEL_BYPASS_PROFILE_SOURCE");
+    let _token = RestoreEnv::remove("VIOLET_SLACK_TOKEN_PROFILE_SOURCE");
+    let _bypass = RestoreEnv::remove("VIOLET_VERCEL_BYPASS_PROFILE_SOURCE");
 
     let config = MuxConfig {
         cwd: PathBuf::from("/tmp/test"),
@@ -683,11 +715,11 @@ x-vercel-protection-bypass = "env:MECHA_VERCEL_BYPASS_PROFILE_SOURCE"
         .expect("worker config must be present");
 
     assert_eq!(
-        env_value(worker_config, "MECHA_SLACK_TOKEN_PROFILE_SOURCE"),
+        env_value(worker_config, "VIOLET_SLACK_TOKEN_PROFILE_SOURCE"),
         Some("token-from-profile")
     );
     assert_eq!(
-        env_value(worker_config, "MECHA_VERCEL_BYPASS_PROFILE_SOURCE"),
+        env_value(worker_config, "VIOLET_VERCEL_BYPASS_PROFILE_SOURCE"),
         Some("bypass-from-profile")
     );
 }

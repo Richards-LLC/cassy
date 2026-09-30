@@ -7,6 +7,41 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.38.0] - 2026-09-29
+
+### Changed
+
+- The Slack assistant is Violet everywhere. The builtin `violet` skill,
+  `VIOLET_*` settings and `violet_read`/`violet_post` are primary. The
+  `mecha-cassy` skill, `MECHA_*` variables and `mecha_*` tools keep working
+  for one release. New projects file Violet issues in the `violet_ps` tracker.
+- Integration tests build as 10 test programs instead of 107, cutting the link
+  time of every test build. Every existing suite is still wired in; a check
+  refuses any test file that no program includes.
+- A release candidate is proved once. The assembly run (the full suite in the
+  worktree plus the queue's archive runner in a plain clone) writes a receipt
+  keyed by the tested code, and the integration sweep and release gate reuse
+  it instead of re-running. The version bump and ledger do not invalidate it.
+- Factory pushes and epic pull requests run only the tests affected by a
+  change, widening to the whole workspace when unsure. The merge queue still
+  runs the full suite. Pull requests into main are unchanged.
+- Factory workers may type-check their change with
+  `cargo check -p <crate> --lib` (or `--tests` when tests changed), capped by
+  `max_concurrent_builders`. Every other build and test stays with assembly.
+- After each release, the worker build cache is refreshed from the released
+  commit, so a new worker's first check no longer recompiles the workspace.
+
+### Fixed
+
+- Messages to a Claude supervisor are no longer silently dropped. A test run
+  with a temporary home could delete a live session's team files; cleanup now
+  touches only files it owns, and a deleted team folder is rebuilt from the
+  running session. A relay that cannot be delivered is shown as an incident.
+- `release-train.sh --cut --resume` completes a release that stopped after
+  publishing, instead of failing its clean-worktree check.
+- Task closes no longer dead-end after a supervisor merges a branch by hand,
+  after tests are consolidated, or after a reviewed conflict resolution.
+
 ## [3.37.0] - 2026-09-29
 
 ### Added

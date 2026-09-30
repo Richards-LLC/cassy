@@ -158,6 +158,9 @@ async fn create_task(service: &CasService, request: serde_json::Value) -> String
 #[tokio::test]
 async fn loose_task_parented_to_epic_closes_after_merge_to_epic_only_cas_e258() {
     let _env = TestEnvGuard::temp_home();
+    // Public create registers the work target strictly; init_cas_dir only
+    // initializes the project store, not this isolated HOME's host registry.
+    cas::store::known_repos::ensure_host_schema().expect("fixture host registry schema");
     let repo = GitRepo::new();
     run_git(&repo.root, &["branch", "epic/lane"]);
     let cas_root = init_cas_dir(&repo.root).unwrap();

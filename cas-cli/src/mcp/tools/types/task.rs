@@ -81,21 +81,9 @@ pub fn validate_delivery_mode(value: Option<&str>) -> Result<Option<DeliveryMode
     }
 }
 
-/// Parse the comma-separated proof-target declaration into trimmed,
-/// de-duplicated target names.
+/// Parse JSON-array strings and legacy comma-separated proof declarations.
 pub fn parse_proof_targets(value: Option<&str>) -> Vec<String> {
-    let mut targets = Vec::new();
-    for target in value
-        .unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .filter(|target| !target.is_empty())
-    {
-        if !targets.iter().any(|known| known == target) {
-            targets.push(target.to_string());
-        }
-    }
-    targets
+    cas_types::parse_proof_targets(value)
 }
 
 /// Validate a task's declared risk and proof-target contract at a write
@@ -190,9 +178,13 @@ pub struct TaskCreateRequest {
     /// Test modules/targets that must be covered by close-time proof for a
     /// blast-radius task.
     #[schemars(
-        description = "Comma-separated test modules or targets required to prove a blast-radius task's complete diff coverage"
+        description = "JSON array, JSON-array string, or comma-separated test modules or targets required to prove a blast-radius task's complete diff coverage"
     )]
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "cas_mcp::types::deserialize_proof_targets"
+    )]
+    #[schemars(with = "Option<cas_mcp::types::ProofTargetsParameter>")]
     pub proof_targets: Option<String>,
 
     /// Supervisor-only override for the required risk declaration.
@@ -478,9 +470,13 @@ pub struct TaskUpdateRequest {
 
     /// Update the test modules/targets required by blast-radius proof.
     #[schemars(
-        description = "Comma-separated test modules or targets for blast-radius proof; pass empty to clear"
+        description = "JSON array, JSON-array string, or comma-separated test modules or targets for blast-radius proof; pass empty to clear"
     )]
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "cas_mcp::types::deserialize_proof_targets"
+    )]
+    #[schemars(with = "Option<cas_mcp::types::ProofTargetsParameter>")]
     pub proof_targets: Option<String>,
 
     /// Update external reference

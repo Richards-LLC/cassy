@@ -394,3 +394,43 @@ fn test_opinion_contradict_request() {
     assert_eq!(req.id, "2024-01-15-001");
     assert_eq!(req.evidence, "Completely wrong approach");
 }
+
+#[test]
+fn proof_target_wire_forms_share_domain_normalization() {
+    for input in [
+        serde_json::json!(["rules", "core", "rules"]),
+        serde_json::json!(r#"["rules", "core", "rules"]"#),
+        serde_json::json!("rules, core, rules"),
+    ] {
+        let create = serde_json::json!({"title":"proof forms", "risk":"blast-radius", "proof_targets":input});
+        let request: TaskCreateRequest = serde_json::from_value(create).unwrap();
+        let (_, targets) = validate_task_risk_declaration(
+            cas_types::TaskType::Task,
+            request.risk.as_deref(),
+            request.proof_targets.as_deref(),
+            false,
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(targets, ["rules", "core"]);
+        let update: TaskUpdateRequest =
+            serde_json::from_value(serde_json::json!({"id":"cas-test", "proof_targets":input}))
+                .unwrap();
+        assert_eq!(
+            parse_proof_targets(update.proof_targets.as_deref()),
+            targets
+        );
+    }
+    for input in [
+        serde_json::json!(["rules", 1]),
+        serde_json::json!({"rules":true}),
+    ] {
+        assert!(
+            serde_json::from_value::<TaskCreateRequest>(
+                serde_json::json!({"title":"bad", "proof_targets":input})
+            )
+            .is_err()
+        );
+    }
+}

@@ -426,7 +426,7 @@ impl CasCore {
             .proof_targets
             .as_deref()
             .map(|targets| crate::mcp::tools::types::parse_proof_targets(Some(targets)))
-            .unwrap_or_else(|| task.proof_targets.clone());
+            .unwrap_or_else(|| cas_types::normalize_proof_targets(&task.proof_targets));
         if effective_risk.contains(&cas_types::TaskRisk::BlastRadius)
             && effective_proof_targets.is_empty()
         {
@@ -536,11 +536,11 @@ impl CasCore {
             }
             if proof_targets_fix {
                 let widened = &effective_proof_targets;
-                let preserves_existing = task
-                    .proof_targets
+                let existing = cas_types::normalize_proof_targets(&task.proof_targets);
+                let preserves_existing = existing
                     .iter()
                     .all(|target| widened.iter().any(|candidate| candidate == target));
-                if widened.len() <= task.proof_targets.len() || !preserves_existing {
+                if widened.len() <= existing.len() || !preserves_existing {
                     return Err(McpError {
                         code: ErrorCode::INVALID_PARAMS,
                         message: Cow::from(

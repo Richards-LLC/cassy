@@ -18,13 +18,46 @@ pub(super) fn rejection(
     task_id: &str,
     prefix: &str,
 ) -> Option<String> {
-    let snapshots: Vec<_> = paths.iter().filter(|path| is_snapshot(path)).collect();
-    if snapshots.is_empty() {
-        return None;
-    }
     let (Some(base), Some(tip)) = (base, tip) else {
-        return Some("SNAPSHOT APPROVAL REQUIRED: cannot resolve the attributed snapshot delivery base/tip; restore the task delivery receipt before close.".into());
+        return paths.iter().any(|path| is_snapshot(path)).then(||
+            "SNAPSHOT APPROVAL REQUIRED: cannot resolve the attributed snapshot delivery base/tip; restore the task delivery receipt before close.".into());
     };
+    // Keep task attribution, but recover both names of a rename: ordinary
+    // --name-only output can omit the deleted snapshot's old name.
+    let output = Command::new("git")
+        .current_dir(repo)
+        .args(["diff", "--name-status", "-z", base, tip, "--"])
+        .output();
+    let names = match output {
+        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout).into_owned(),
+        _ => return Some("SNAPSHOT APPROVAL REQUIRED: cannot enumerate the attributed delivery diff; restore its Git base/tip before close.".into()),
+    };
+    let mut snapshots = std::collections::BTreeSet::new();
+    let mut fields = names.split('\0').filter(|field| !field.is_empty());
+    while let Some(status) = fields.next() {
+        let Some(first) = fields.next() else {
+            return Some("SNAPSHOT APPROVAL REQUIRED: malformed Git name-status receipt.".into());
+        };
+        let second = if status.starts_with('R') || status.starts_with('C') {
+            let Some(second) = fields.next() else {
+                return Some("SNAPSHOT APPROVAL REQUIRED: malformed Git rename receipt.".into());
+            };
+            Some(second)
+        } else {
+            None
+        };
+        let attributed = paths.is_empty()
+            || paths
+                .iter()
+                .any(|path| path == first || second == Some(path.as_str()));
+        if attributed {
+            for path in [Some(first), second].into_iter().flatten() {
+                if is_snapshot(path) {
+                    snapshots.insert(path);
+                }
+            }
+        }
+    }
     let mut missing = Vec::new();
     for path in snapshots {
         let output = Command::new("git")
@@ -33,6 +66,7 @@ pub(super) fn rejection(
                 "diff",
                 "--no-ext-diff",
                 "--no-textconv",
+                "--no-renames",
                 "--unified=0",
                 base,
                 tip,
@@ -57,6 +91,8 @@ pub(super) fn rejection(
                     && !line.starts_with("+++")
                     && !line.starts_with("---")
                     || line.starts_with("Binary files ")
+                    || line.starts_with("old mode ")
+                    || line.starts_with("new mode ")
             })
             .collect();
         // Paths reported by attribution can include an unchanged snapshot from
@@ -181,6 +217,28 @@ mod tests {
             )
             .is_none()
         );
+        git(repo, &["mv", "view.snap", "regular.json"]);
+        git(
+            repo,
+            &["commit", "-qm", "rename snapshot outside extension"],
+        );
+        let renamed = git(repo, &["rev-parse", "HEAD"]);
+        let renamed_paths = vec!["regular.json".into()];
+        assert!(
+            rejection(
+                repo,
+                Some(&tip),
+                Some(&renamed),
+                &renamed_paths,
+                "",
+                "cas-fixture",
+                "mcp__cs__"
+            )
+            .unwrap()
+            .contains("view.snap")
+        );
+        assert!(rejection(repo, Some(&tip), Some(&renamed), &renamed_paths,
+            "snapshot-approved: view.snap — -after — deleted snapshot superseded by regular fixture", "cas-fixture", "mcp__cs__").is_none());
         assert!(
             rejection(
                 repo,

@@ -11,7 +11,7 @@ const scratch = mkdtempSync(join(hub, '.verified-fixture-'));
 let passed = 0;
 try {
   writeFileSync(join(scratch, 'vitest.config.mjs'), `export default { test: { include: ['${scratch}/*.test.js'], environment: 'node' } };`);
-  writeFileSync(join(scratch, 'playwright.config.mjs'), `export default { testDir: '${scratch}', testMatch: '*.spec.js' };`);
+  writeFileSync(join(scratch, 'playwright.config.mjs'), `export default { testDir: '${scratch}', outputDir: '${scratch}/results', testMatch: '*.spec.js' };`);
   writeFileSync(join(scratch, 'proof.test.js'), `import { test, expect } from 'vitest'; test('proof', () => expect(2+2).toBe(4));`);
   writeFileSync(join(scratch, 'proof.spec.js'), `import { test, expect } from '@playwright/test'; test('proof', () => expect(2+2).toBe(4));`);
   for (const runner of ['vitest', 'playwright']) {

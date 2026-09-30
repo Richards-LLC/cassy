@@ -53,6 +53,7 @@ class Shapes(unittest.TestCase):
 
     def test_test_only_global_source_and_duration_pin(self):
         self.assertTrue(self.hits('const SOURCE: &str = include_str!("lib.rs");', 'tests/probe.rs'))
+        self.assertFalse(self.hits('// pin: registration completeness\nconst SOURCES: [(&str, &str); 1] = [("name", include_str!("lib.rs"))];', 'tests/probe.rs'))
         self.assertTrue(self.hits('#[cfg(test)] mod tests { const SOURCE: &str = include_str!("lib.rs"); }'))
         self.assertTrue(self.hits('#[test] fn t() { assert_eq!(WINDOW, Duration::from_secs(60)); }'))
         self.assertFalse(self.hits('#[tokio::test]\n// pin: compatibility\nasync fn t() { assert_eq!(LIMIT, 3); }'))

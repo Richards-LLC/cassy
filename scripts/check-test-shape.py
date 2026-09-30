@@ -31,6 +31,7 @@ def lint(source, path):
     ts = tokens(source, comments)
     pin_lines = {source.count("\n", 0, a) + 1 for a, b in comments if re.match(r"//\s*pin:\s*\S", source[a:b])}
     ps = pairs(ts)
+    closing = {b: a for a, b in ps.items()}
     integration = '/tests/' in '/' + path or path.startswith('tests/')
     scopes = []
     for i, t in enumerate(ts):
@@ -105,8 +106,15 @@ def lint(source, path):
                 seen.add(i)
                 # Pin on a let/qualified expression applies to that statement.
                 start = i
-                while start > begin + 1 and ts[start-1].value not in (';', '{', '}'):
-                    start -= 1
+                while start > begin + 1:
+                    previous = start - 1
+                    # A semicolon in an array type is not a statement boundary.
+                    if not ts[previous].string and ts[previous].value in (')', ']') and previous in closing:
+                        start = closing[previous]
+                    elif not ts[previous].string and ts[previous].value in (';', '{', '}'):
+                        break
+                    else:
+                        start -= 1
                 if not function_pin and not pinned(source, ts[start].start) and not pinned(source, t.start) and source.count("\n", 0, t.start) + 1 not in pin_lines:
                     line = source.count('\n', 0, t.start) + 1
                     hits.append((line, kind))

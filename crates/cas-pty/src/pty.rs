@@ -406,9 +406,11 @@ plus ending your turn — a blocked turn cannot receive supervisor messages or s
 Foreground `gh run watch` and CI poll loops are banned; queue the run, set a reminder, end the \
 turn, then check once with `gh run list`. Workers may type-check committed changes with exactly `cargo check -p <crate> [-p <crate> ...] --lib` for lib-only edits or `--tests` when test files changed; choose one target flag, \
 under the build guard and max_concurrent_builders cap, using the private seeded target cache; \
-record `check: PASS <sha>` before parking. Other Rust builds and all Rust test runs \
-(cargo build/test/nextest, rustc, run-scoped-tests.sh) remain forbidden; the supervisor builds \
-and tests once at epic assembly. Budget your context: report context headroom as a percentage only \
+record `check: PASS <sha>` before parking. Workers may run targeted tests with exactly \
+`cargo nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`, through the same \
+capped runner. Select one package and a nonempty positive named-test filter; omitted target \
+means --lib. Commit first; record `test: PASS <sha> <package> <filter> <count>`. Full Rust builds \
+and suites (cargo build/test, rustc, run-scoped-tests.sh) remain supervisor-owned at epic assembly. Budget your context: report context headroom as a percentage only \
 when it drops below 20%, then CHECKPOINT (commit + push + handoff note + ask for a respawn); \
 prefer small pushed commits over large WIP — never work into auto-compaction. Write in facts, \
 not narration: say what is now true and what it cost, not what you are about to do, not a recap \

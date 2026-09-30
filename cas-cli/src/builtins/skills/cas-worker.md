@@ -124,7 +124,7 @@ with a stale blocked update.
   timing, push-first table, cleanup contract.
 - [details.md](references/details.md) — structured execution state,
   context budgeting, exact fields/actions, and sync mechanics.
-- [discipline.md](references/discipline.md) — no-Rust-build rule
+- [discipline.md](references/discipline.md) — capped checks, targeted tests
   and clean-CI notes.
 - [recovery.md](references/recovery.md) — failures, reassignment,
   connectivity, and worktree recovery.

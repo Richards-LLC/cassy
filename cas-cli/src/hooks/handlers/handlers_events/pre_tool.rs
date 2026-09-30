@@ -30,7 +30,7 @@ pub fn handle_pre_tool_use(
     // In a workspace that is not fmt-clean, either shape spills unrelated
     // changes. Workers use scoped format commands and may run only capped,
     // package-scoped cargo check --lib or --tests (cas-3efd, cas-3051).
-    // The supervisor builds and tests the epic tip once, at assembly.
+    // Workers run targeted tests; the supervisor runs the full suite at assembly.
     // Hoist this before the cas_root early return and factory Bash auto-allow so
     // an unscoped run always gets the loud, actionable refusal.
     // ========================================================================
@@ -52,7 +52,7 @@ pub fn handle_pre_tool_use(
                  A workspace normalization requires separate operator approval and must not be run from a worker.",
             ));
         }
-        // Only this literal Cargo shape may compile. Rewrite through the
+        // Only the literal package-scoped Cargo shapes may compile. Rewrite through the
         // capped runner; a snapshot alone cannot prevent simultaneous starts.
         if let Some((args, suffix)) = command.and_then(worker_check_command) {
             let Some(root) = cas_root else {
@@ -66,7 +66,16 @@ pub fn handle_pre_tool_use(
                 "{} factory worker-check --cas-root {} -- {}{}",
                 shell_quote_path(&executable),
                 shell_quote_path(root),
-                args.join(" "),
+                args.iter()
+                    .map(|arg| {
+                        if arg.trim_start().starts_with("test(") {
+                            format!("'{}'", arg)
+                        } else {
+                            arg.clone()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" "),
                 suffix,
             );
             let mut updated = input.tool_input.clone().unwrap_or_default();
@@ -92,11 +101,11 @@ pub fn handle_pre_tool_use(
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
                 &format!(
-                    "🚫 NO WORKER RUST BUILDS: `{what}` is outside the compile-only exception (cas-3efd). \
+                    "🚫 NO WORKER RUST BUILDS: `{what}` is outside the capped worker exceptions. \
                      Use exactly `cargo check -p <crate> [-p <crate> ...] --lib` for lib-only edits or `--tests` when test files changed, optionally with log redirection and backgrounding. Choose one target flag. \
                      The hook runs it under max_concurrent_builders using your private seeded target cache. \
                      Commit first so a successful check records `check: PASS <sha>`. \
-                     Build/test/nextest remain supervisor-only at epic assembly (cas-4cbb)."
+                     Targeted tests use exactly `cargo nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`; an omitted target selects --lib. Empty/all() filters, repeated packages, broad flags and compound commands are refused. Full builds and suites remain supervisor-only at epic assembly."
                 ),
             ));
         }
@@ -1065,10 +1074,44 @@ pub fn handle_pre_tool_use(
     Ok(HookOutput::empty())
 }
 
-/// Accept a literal check plus a simple log/background suffix, never compound
+/// Accept a literal check/targeted nextest plus a simple log/background suffix, never compound
 /// commands, shell substitutions, toolchains, environment overrides or wrappers.
 fn worker_check_command(command: &str) -> Option<(Vec<String>, String)> {
     let command = command.trim();
+    if command.contains(['\n', '\r']) {
+        return None;
+    }
+    // Single quotes make the mandatory filter a literal shell argument. Match
+    // the suffix after the filter so '&' within a filter is not backgrounding.
+    if command.starts_with("cargo nextest ") {
+        let pattern = regex::Regex::new(r"^cargo\s+nextest\s+run\s+-p\s+([A-Za-z0-9_-]+)(?:\s+(--lib)|\s+--test\s+([A-Za-z0-9_-]+))?\s+-E\s+'([^'\n]+)'(\s*(?:>{1,2}\s*[A-Za-z0-9_/.-]+\s*(?:2>&1\s*)?)?&?\s*)$").ok()?;
+        let matched = pattern.captures(command)?;
+        let mut args = vec![
+            "nextest".into(),
+            "run".into(),
+            "-p".into(),
+            matched[1].into(),
+        ];
+        if matched.get(2).is_some() {
+            args.push("--lib".into());
+        }
+        if let Some(harness) = matched.get(3) {
+            args.extend(["--test".into(), harness.as_str().into()]);
+        }
+        args.extend(["-E".into(), matched[4].into()]);
+        if !crate::factory_worker_check::allowed_args(&args) {
+            return None;
+        }
+        let suffix = matched.get(5)?.as_str();
+        return Some((
+            args,
+            if suffix.trim().is_empty() {
+                String::new()
+            } else {
+                format!(" {suffix}")
+            },
+        ));
+    }
     let split = command.find(['>', '&']).unwrap_or(command.len());
     let (body, suffix) = command.split_at(split);
     let suffix_pattern =

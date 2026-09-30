@@ -41,8 +41,8 @@ test to the main checkout's `.cas`. There is no `CAS_TASK_ID`.
 
 ## From `cas-worker/references/recovery.md` — stuck builds and test binaries
 
-Workers may run capped package-scoped compile checks. Build and test triage
-beyond that exception belongs to the supervisor at epic assembly.
+Workers may run capped package-scoped compile checks and targeted nextest
+with one package, an explicit harness and a mandatory named-test filter. Full-suite triage belongs to the supervisor at epic assembly.
 
 ### A build that looks stuck: killed vs wedged
 

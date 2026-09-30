@@ -535,7 +535,7 @@ pub struct FactoryConfig {
     pub nice_cargo: bool,
 
     /// Maximum number of workers allowed to build concurrently on this host.
-    /// Compile-only worker checks hold OS slot locks under this hard cap.
+    /// Worker compile checks and targeted tests hold OS slot locks under this hard cap.
     /// `spawn_workers` additionally applies a soft load/concurrency guard;
     /// `force=true` overrides only that spawn-time check.
     #[serde(default = "default_max_concurrent_builders")]

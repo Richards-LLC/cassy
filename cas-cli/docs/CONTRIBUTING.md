@@ -160,16 +160,17 @@ Install the standard local runner once with `cargo install cargo-nextest` (or
 `make -C cas-cli install-tools`). `scripts/run-scoped-tests.sh` defaults to
 nextest and rejects a silent zero-test success.
 
-### Worker checks and supervisor assembly
+### Worker checks, targeted tests and supervisor assembly
 
 Workers may type-check their committed change with exactly
 `cargo check -p <affected crate> [-p <crate> ...] --lib` for lib-only edits or
 `--tests` when test files changed; choose one target flag. Include consumers of
 changed shared interfaces. The PreToolUse guard routes that command through
 `cas factory worker-check`, which holds an OS builder-slot lock until Cargo
-exits, checks the existing build guard, and enforces `max_concurrent_builders`
+exits. Lock descriptors are close-on-exec so compiler-cache daemons cannot
+retain slots after the runner exits. It checks the existing build guard, and enforces `max_concurrent_builders`
 even across simultaneous launches. A refusal requires retrying later. Run long
-checks in the background with a log; no test code executes.
+checks in the background with a log. Compile checks execute no tests.
 
 The runner requires a clean committed worktree, forces its private seeded
 `target/`, and records `check: PASS <sha>` with the selected packages. Task close
@@ -177,14 +178,27 @@ copies matching exact-delivery receipts into worker evidence. Dirty trees,
 failed retries, other worktrees and other SHAs cannot supply this receipt.
 Check receipts are optional compile-only evidence and do not waive test proof.
 
-Only the supervisor builds and runs Rust tests: once per release candidate at
+Workers may also run exactly
+`cargo nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`.
+An omitted target selects `--lib`; `--test` must name one explicit harness from
+`scripts/cas-test-targets.py`. Select exactly one package and a mandatory
+positive named-test filter (`test(name)` or `test(=name)`, joined by `|`/`&`).
+Empty/all(), regex/glob, negated and binary-wide selectors are refused, as are
+environment prefixes, compound commands, repeated packages and broader flags.
+The same capped runner invokes the shared `run-verified-tests.sh` zero-test
+guard, forces the private target, and records only successful nonzero counts
+against an unchanged clean commit: `test: PASS <sha> <package> <filter> <count>`.
+Failed retries invalidate that scope's receipt; close imports all matching
+exact-delivery receipts. Targeted receipts complement full-suite assembly proof.
+
+The supervisor runs the full build and Rust suite once per release candidate at
 assembly it runs `python3 scripts/assembly-proof.py prove <epic-worktree>` and
 records `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd>
-log=<path>` on the epic. Workers still cannot run build/test/nextest/clippy/run,
+log=<path>` on the epic. Workers still cannot run build/test/clippy/run or unfiltered nextest,
 `rustc`, scoped-test scripts, or `make test*`. Child closes reference assembly
 proof rather than scoped `--proof` or `loaded_proof` notes. Non-Rust suites are
 unaffected. An older runtime that denies the check exception requires parking
-with the unverified crates named for assembly.
+with the unverified crates and test filters named for assembly.
 
 The assembly command runs native full-workspace nextest in the factory
 worktree, then the gate's archive-mode row in a plain clone outside every

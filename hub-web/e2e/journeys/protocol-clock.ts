@@ -2,9 +2,9 @@ import type { Page } from "@playwright/test";
 import { JOURNEY_NOW } from "./clock";
 import type { ProtocolTime } from "./hub-double";
 
-/** One clock for the page's deadlines AND the double's delayed wire replies.
- * Replies run on page.clock, not a second Node wall clock. Register all pending
- * replies before advancing, so an attach/refusal cannot miss its deadline. */
+/** One clock for browser deadlines AND delayed wire replies. The protocol's
+ * fetch/sign/socket work settles between ticks: jumping past an HTTP deadline
+ * before the test host can answer would manufacture an outage. */
 export class ProtocolClock implements ProtocolTime {
   private instant = JOURNEY_NOW;
   private origin = JOURNEY_NOW;
@@ -16,23 +16,56 @@ export class ProtocolClock implements ProtocolTime {
 
   async start(): Promise<void> {
     // Seed the empty app first, then pause before navigating to paired machines.
-    // The future instant lets pauseAt work even on a slow host.
     this.instant = JOURNEY_NOW + 60_000;
     await this.page.clock.pauseAt(this.instant);
     this.origin = this.instant - await this.page.evaluate(() => performance.now());
+    await this.page.exposeBinding("__protocolMoment", (_source, elapsed: number) => {
+      this.instant = this.origin + elapsed;
+    });
     await this.page.exposeBinding("__protocolTimer", (_source, id: number, elapsed: number) => {
       this.instant = this.origin + elapsed;
       const callback = this.callbacks.get(id);
       this.callbacks.delete(id);
       callback?.();
     });
+    await this.page.addInitScript(() => {
+      const wire = window as unknown as {
+        __protocolMoment: (elapsed: number) => Promise<void>;
+        __protocolIdle: () => Promise<void>;
+      };
+      const pending = new Set<Promise<unknown>>();
+      function observe<T>(work: Promise<T>): Promise<T> {
+        pending.add(work);
+        void work.then(() => pending.delete(work), () => pending.delete(work));
+        return work;
+      }
+      wire.__protocolIdle = async () => {
+        while (pending.size) await Promise.allSettled([...pending]);
+      };
+      const fetch = window.fetch.bind(window);
+      window.fetch = (...args) => observe((async () => {
+        // Publish the browser's time BEFORE the double receives a signed request.
+        await wire.__protocolMoment(performance.now());
+        return fetch(...args);
+      })());
+      const sign = crypto.subtle.sign.bind(crypto.subtle);
+      crypto.subtle.sign = (...args) => observe(sign(...args));
+      const Socket = window.WebSocket;
+      window.WebSocket = class extends Socket {
+        constructor(url: string | URL, protocols?: string | string[]) {
+          super(url, protocols);
+          observe(new Promise<void>(resolve => {
+            for (const event of ["open", "error", "close"]) this.addEventListener(event, () => resolve(), { once: true });
+          }));
+          // A binding round trip acknowledges each received frame after its
+          // synchronous app listeners, without inspecting the connection's fields.
+          this.addEventListener("message", () => { observe(wire.__protocolMoment(performance.now())); });
+        }
+      };
+    });
   }
 
   now(): number { return this.instant; }
-
-  async synchronize(): Promise<void> {
-    this.instant = this.origin + await this.page.evaluate(() => performance.now());
-  }
 
   delay(callback: () => void, ms: number): void {
     const id = ++this.nextId;
@@ -54,16 +87,23 @@ export class ProtocolClock implements ProtocolTime {
   }
 
   async advance(ms: number): Promise<void> {
-    await Promise.all(this.registrations);
-    this.instant += ms;
-    await this.page.clock.runFor(ms);
-    await Promise.all(this.registrations);
-    // runFor fires browser timers; await their binding acknowledgements too,
-    // so deadline assertions cannot accidentally pass on later wall-clock IO.
-    await this.page.evaluate(async () => {
-      const wire = window as unknown as { __protocolReplies?: Set<Promise<void>> };
-      await Promise.all(wire.__protocolReplies ?? []);
-    });
-    await this.synchronize();
+    // One second is below the protocol's shortest HTTP/state timeout (3 s).
+    // These are virtual ticks, each followed by IO acknowledgements, not sleeps.
+    while (ms > 0) {
+      const tick = Math.min(ms, 1_000);
+      await Promise.all(this.registrations);
+      await this.page.clock.runFor(tick);
+      await this.page.evaluate(async () => {
+        const wire = window as unknown as {
+          __protocolIdle: () => Promise<void>;
+          __protocolReplies?: Set<Promise<void>>;
+        };
+        await Promise.all(wire.__protocolReplies ?? []);
+        await wire.__protocolIdle();
+      });
+      await Promise.all(this.registrations);
+      this.instant = this.origin + await this.page.evaluate(() => performance.now());
+      ms -= tick;
+    }
   }
 }

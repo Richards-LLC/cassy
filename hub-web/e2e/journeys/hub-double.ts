@@ -40,7 +40,6 @@ export type HistoryPage = {
 
 export type ProtocolTime = {
   now(): number;
-  synchronize(): Promise<void>;
   delay(callback: () => void, ms: number): void;
 };
 
@@ -456,7 +455,6 @@ export class HubDouble {
   }
 
   private async hub(route: Route): Promise<void> {
-    await this.options.time?.synchronize();
     const url = new URL(route.request().url());
     const machineId = url.hostname.replace(/\.test$/, "");
     const path = url.pathname;

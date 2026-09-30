@@ -148,6 +148,22 @@ impl TaskStore for MockTaskStore {
         Ok(now)
     }
 
+    fn update_from_sync(&self, task: &Task, expected: &Task) -> Result<Option<DateTime<Utc>>> {
+        self.check_error()?;
+        let mut tasks = self.tasks.write().unwrap();
+        let current = tasks
+            .get(&task.id)
+            .ok_or_else(|| StoreError::NotFound(task.id.clone()))?;
+        if current.updated_at != expected.updated_at {
+            return Ok(None);
+        }
+        let now = Utc::now();
+        let mut stored = task.clone();
+        stored.updated_at = now;
+        tasks.insert(task.id.clone(), stored);
+        Ok(Some(now))
+    }
+
     fn append_note(&self, task_id: &str, formatted_note: &str) -> Result<DateTime<Utc>> {
         self.check_error()?;
         let mut tasks = self.tasks.write().unwrap();

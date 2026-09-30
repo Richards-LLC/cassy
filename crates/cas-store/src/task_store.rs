@@ -205,6 +205,196 @@ impl SqliteTaskStore {
         })
     }
 
+    fn update_checked(
+        &self,
+        task: &Task,
+        receipt_id: &str,
+        expected: Option<&Task>,
+    ) -> Result<Option<DateTime<Utc>>> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+
+            if let Some(expected) = expected {
+                if expected.id != task.id {
+                    return Err(StoreError::Parse(
+                        "sync expectation names a different task".into(),
+                    ));
+                }
+                let clock: Option<String> = tx
+                    .query_row(
+                        "SELECT updated_at FROM tasks WHERE id = ?",
+                        params![task.id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                let Some(clock) = clock else {
+                    return Err(StoreError::TaskNotFound(task.id.clone()));
+                };
+                if Self::parse_datetime(&clock) != Some(expected.updated_at) {
+                    return Ok(None);
+                }
+                if !task.lifecycle_matches(expected)
+                    && crate::delivery_store::delivery_owns_task_lifecycle(&tx, &task.id)?
+                {
+                    return Ok(None);
+                }
+            }
+
+            // cas-ec74: read the clock ONCE and return that same instant. The
+            // caller's `task.updated_at` is deliberately ignored (updated_at is
+            // store-owned), but the value we persist has to be observable or
+            // callers are forced to guess it with a second `Utc::now()` — which
+            // is exactly how lifecycle occurrences became unmatchable.
+            let now = Utc::now();
+
+            // Combine the status read with the UPDATE: only SELECT the old status
+            // when the new status differs from what's in the DB, avoiding the
+            // pre-read on the common case where status hasn't changed.
+            let new_status_str = task.status.to_string();
+            let prev_status: Option<String> = tx
+                .query_row(
+                    "SELECT status FROM tasks WHERE id = ? AND status != ?",
+                    params![task.id, new_status_str],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let mut persisted_deliverables = task.deliverables.clone();
+            let mut persisted_terminal_outcome = task.terminal_outcome.clone();
+            let reopening_terminal = matches!(prev_status.as_deref(), Some("closed" | "cancelled"))
+                && !task.is_terminal();
+            let resuming_merge_conflict = prev_status.as_deref() == Some("awaiting_merge")
+                && task.status == TaskStatus::InProgress;
+            if reopening_terminal || resuming_merge_conflict {
+                // cas-ed9a: a close-cycle anchor is evidence for that completed
+                // cycle only. Enforce invalidation at the persistence choke point
+                // so every Closed -> non-Closed path (MCP update, reopen, UI,
+                // recovery, and future callers) gets the same protection.
+                // cas-5054 extends that invariant to conflict rework: the parked
+                // anchor must not satisfy or false-reject the eventual re-close.
+                persisted_deliverables.retain_factory_branch_anchor_as_history();
+                if reopening_terminal {
+                    persisted_deliverables.negative_result = None;
+                    persisted_terminal_outcome = None;
+                }
+            }
+            if resuming_merge_conflict {
+                // The decision note written by the lifecycle layer preserves the
+                // diagnostic branch identity. These fields describe the prior
+                // park cycle and must be rebuilt from the resolved branch on close.
+                persisted_deliverables.parked_branch = None;
+                persisted_deliverables.merge_conflicted = false;
+            }
+
+            // Updates preserve the row's provenance. Only creation supplies a
+            // default; an unattributed imported task must not become local on
+            // its next edit.
+            let persisted_origin_project = task.origin_project.as_ref();
+
+            let rows = tx.execute(
+            "UPDATE tasks SET title = ?1, description = ?2, design = ?3,
+             acceptance_criteria = ?4, notes = ?5, status = ?6, priority = ?7,
+             task_type = ?8, assignee = ?9, labels = ?10, updated_at = ?11,
+             closed_at = ?12, close_reason = ?13, external_ref = ?14, content_hash = ?15,
+             branch = ?16, worktree_id = ?17,
+             pending_verification = ?18, pending_worktree_merge = ?19, epic_verification_owner = ?20, team_id = ?21,
+             deliverables = ?22, demo_statement = ?23, execution_note = ?24, share = ?25, depth = ?26,
+             terminal_outcome = ?27, origin_project = COALESCE(?28, origin_project), delivery_mode = ?29,
+             risk = ?30, proof_targets = ?31, door = ?32
+             WHERE id = ?33",
+            params![
+                task.title,
+                task.description,
+                task.design,
+                task.acceptance_criteria,
+                task.notes,
+                new_status_str,
+                task.priority.0,
+                task.task_type.to_string(),
+                task.assignee,
+                Self::labels_to_string(&task.labels),
+                now.to_rfc3339(),
+                task.closed_at.map(|t| t.to_rfc3339()),
+                task.close_reason,
+                task.external_ref,
+                task.content_hash,
+                task.branch,
+                task.worktree_id,
+                if task.pending_verification { 1 } else { 0 },
+                if task.pending_worktree_merge { 1 } else { 0 },
+                task.epic_verification_owner,
+                task.team_id,
+                Self::deliverables_to_string(&persisted_deliverables),
+                task.demo_statement,
+                task.execution_note,
+                task.share.as_ref().map(|s| s.to_string()),
+                task.depth.to_string(),
+                Self::terminal_outcome_to_string(&persisted_terminal_outcome),
+                persisted_origin_project,
+                task.delivery_mode.to_string(),
+                Self::risks_to_string(&task.risk),
+                Self::proof_targets_to_string(&task.proof_targets),
+                task.door.map(|door| door.to_string()),
+                task.id,
+            ],
+        )?;
+            if rows == 0 {
+                return Err(StoreError::TaskNotFound(task.id.clone()));
+            }
+
+            // Emit status change events only when status actually changed
+            // (prev_status is Some only when old status differs from new)
+            if let Some(prev) = prev_status {
+                let prev_status: TaskStatus = prev.parse().unwrap_or(TaskStatus::Open);
+                if prev_status != task.status {
+                    let (event_type, summary, recording_event_type) = match task.status {
+                        TaskStatus::InProgress => (
+                            EventType::TaskStarted,
+                            format!("Task started: {}", task.title),
+                            RecordingEventType::TaskStarted,
+                        ),
+                        TaskStatus::Closed => (
+                            EventType::TaskCompleted,
+                            format!("Task completed: {}", task.title),
+                            RecordingEventType::TaskCompleted,
+                        ),
+                        TaskStatus::Cancelled => (
+                            EventType::TaskBlocked,
+                            format!("Task cancelled without delivery: {}", task.title),
+                            RecordingEventType::TaskBlocked,
+                        ),
+                        TaskStatus::Blocked => (
+                            EventType::TaskBlocked,
+                            format!("Task blocked: {}", task.title),
+                            RecordingEventType::TaskBlocked,
+                        ),
+                        TaskStatus::Open => (
+                            EventType::TaskCreated,
+                            format!("Task reopened: {}", task.title),
+                            RecordingEventType::TaskCreated,
+                        ),
+                        TaskStatus::AwaitingMerge => (
+                            EventType::TaskBlocked,
+                            format!("Task awaiting merge: {}", task.title),
+                            RecordingEventType::TaskBlocked,
+                        ),
+                    };
+                    let event = Event::new(event_type, EventEntityType::Task, &task.id, summary);
+                    let _ = record_event_with_conn(&tx, &event);
+
+                    // Capture event for recording playback
+                    let _ = capture_task_event(&tx, recording_event_type, &task.id, None);
+                }
+            }
+
+            if !receipt_id.is_empty() {
+                Self::record_mutation_receipt_with_conn(&tx, receipt_id, &task.id)?;
+            }
+            tx.commit()?;
+            Ok(Some(now))
+        }) // with_write_retry
+    }
+
     fn parse_datetime(s: &str) -> Option<DateTime<Utc>> {
         if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
             return Some(dt.with_timezone(&Utc));
@@ -910,162 +1100,12 @@ impl TaskStore for SqliteTaskStore {
     }
 
     fn update_with_mutation_receipt(&self, task: &Task, receipt_id: &str) -> Result<DateTime<Utc>> {
-        crate::shared_db::with_write_retry(|| {
-            let conn = crate::shared_db::lock_connection(&self.conn)?;
-            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+        self.update_checked(task, receipt_id, None)?
+            .ok_or_else(|| StoreError::Other("unconditional task update was refused".to_string()))
+    }
 
-            // cas-ec74: read the clock ONCE and return that same instant. The
-            // caller's `task.updated_at` is deliberately ignored (updated_at is
-            // store-owned), but the value we persist has to be observable or
-            // callers are forced to guess it with a second `Utc::now()` — which
-            // is exactly how lifecycle occurrences became unmatchable.
-            let now = Utc::now();
-
-            // Combine the status read with the UPDATE: only SELECT the old status
-            // when the new status differs from what's in the DB, avoiding the
-            // pre-read on the common case where status hasn't changed.
-            let new_status_str = task.status.to_string();
-            let prev_status: Option<String> = tx
-                .query_row(
-                    "SELECT status FROM tasks WHERE id = ? AND status != ?",
-                    params![task.id, new_status_str],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            let mut persisted_deliverables = task.deliverables.clone();
-            let mut persisted_terminal_outcome = task.terminal_outcome.clone();
-            let reopening_terminal = matches!(prev_status.as_deref(), Some("closed" | "cancelled"))
-                && !task.is_terminal();
-            let resuming_merge_conflict = prev_status.as_deref() == Some("awaiting_merge")
-                && task.status == TaskStatus::InProgress;
-            if reopening_terminal || resuming_merge_conflict {
-                // cas-ed9a: a close-cycle anchor is evidence for that completed
-                // cycle only. Enforce invalidation at the persistence choke point
-                // so every Closed -> non-Closed path (MCP update, reopen, UI,
-                // recovery, and future callers) gets the same protection.
-                // cas-5054 extends that invariant to conflict rework: the parked
-                // anchor must not satisfy or false-reject the eventual re-close.
-                persisted_deliverables.retain_factory_branch_anchor_as_history();
-                if reopening_terminal {
-                    persisted_deliverables.negative_result = None;
-                    persisted_terminal_outcome = None;
-                }
-            }
-            if resuming_merge_conflict {
-                // The decision note written by the lifecycle layer preserves the
-                // diagnostic branch identity. These fields describe the prior
-                // park cycle and must be rebuilt from the resolved branch on close.
-                persisted_deliverables.parked_branch = None;
-                persisted_deliverables.merge_conflicted = false;
-            }
-
-            // Updates preserve the row's provenance. Only creation supplies a
-            // default; an unattributed imported task must not become local on
-            // its next edit.
-            let persisted_origin_project = task.origin_project.as_ref();
-
-            let rows = tx.execute(
-            "UPDATE tasks SET title = ?1, description = ?2, design = ?3,
-             acceptance_criteria = ?4, notes = ?5, status = ?6, priority = ?7,
-             task_type = ?8, assignee = ?9, labels = ?10, updated_at = ?11,
-             closed_at = ?12, close_reason = ?13, external_ref = ?14, content_hash = ?15,
-             branch = ?16, worktree_id = ?17,
-             pending_verification = ?18, pending_worktree_merge = ?19, epic_verification_owner = ?20, team_id = ?21,
-             deliverables = ?22, demo_statement = ?23, execution_note = ?24, share = ?25, depth = ?26,
-             terminal_outcome = ?27, origin_project = COALESCE(?28, origin_project), delivery_mode = ?29,
-             risk = ?30, proof_targets = ?31, door = ?32
-             WHERE id = ?33",
-            params![
-                task.title,
-                task.description,
-                task.design,
-                task.acceptance_criteria,
-                task.notes,
-                new_status_str,
-                task.priority.0,
-                task.task_type.to_string(),
-                task.assignee,
-                Self::labels_to_string(&task.labels),
-                now.to_rfc3339(),
-                task.closed_at.map(|t| t.to_rfc3339()),
-                task.close_reason,
-                task.external_ref,
-                task.content_hash,
-                task.branch,
-                task.worktree_id,
-                if task.pending_verification { 1 } else { 0 },
-                if task.pending_worktree_merge { 1 } else { 0 },
-                task.epic_verification_owner,
-                task.team_id,
-                Self::deliverables_to_string(&persisted_deliverables),
-                task.demo_statement,
-                task.execution_note,
-                task.share.as_ref().map(|s| s.to_string()),
-                task.depth.to_string(),
-                Self::terminal_outcome_to_string(&persisted_terminal_outcome),
-                persisted_origin_project,
-                task.delivery_mode.to_string(),
-                Self::risks_to_string(&task.risk),
-                Self::proof_targets_to_string(&task.proof_targets),
-                task.door.map(|door| door.to_string()),
-                task.id,
-            ],
-        )?;
-            if rows == 0 {
-                return Err(StoreError::TaskNotFound(task.id.clone()));
-            }
-
-            // Emit status change events only when status actually changed
-            // (prev_status is Some only when old status differs from new)
-            if let Some(prev) = prev_status {
-                let prev_status: TaskStatus = prev.parse().unwrap_or(TaskStatus::Open);
-                if prev_status != task.status {
-                    let (event_type, summary, recording_event_type) = match task.status {
-                        TaskStatus::InProgress => (
-                            EventType::TaskStarted,
-                            format!("Task started: {}", task.title),
-                            RecordingEventType::TaskStarted,
-                        ),
-                        TaskStatus::Closed => (
-                            EventType::TaskCompleted,
-                            format!("Task completed: {}", task.title),
-                            RecordingEventType::TaskCompleted,
-                        ),
-                        TaskStatus::Cancelled => (
-                            EventType::TaskBlocked,
-                            format!("Task cancelled without delivery: {}", task.title),
-                            RecordingEventType::TaskBlocked,
-                        ),
-                        TaskStatus::Blocked => (
-                            EventType::TaskBlocked,
-                            format!("Task blocked: {}", task.title),
-                            RecordingEventType::TaskBlocked,
-                        ),
-                        TaskStatus::Open => (
-                            EventType::TaskCreated,
-                            format!("Task reopened: {}", task.title),
-                            RecordingEventType::TaskCreated,
-                        ),
-                        TaskStatus::AwaitingMerge => (
-                            EventType::TaskBlocked,
-                            format!("Task awaiting merge: {}", task.title),
-                            RecordingEventType::TaskBlocked,
-                        ),
-                    };
-                    let event = Event::new(event_type, EventEntityType::Task, &task.id, summary);
-                    let _ = record_event_with_conn(&tx, &event);
-
-                    // Capture event for recording playback
-                    let _ = capture_task_event(&tx, recording_event_type, &task.id, None);
-                }
-            }
-
-            if !receipt_id.is_empty() {
-                Self::record_mutation_receipt_with_conn(&tx, receipt_id, &task.id)?;
-            }
-            tx.commit()?;
-            Ok(now)
-        }) // with_write_retry
+    fn update_from_sync(&self, task: &Task, expected: &Task) -> Result<Option<DateTime<Utc>>> {
+        self.update_checked(task, "", Some(expected))
     }
 
     fn append_note(&self, task_id: &str, formatted_note: &str) -> Result<DateTime<Utc>> {

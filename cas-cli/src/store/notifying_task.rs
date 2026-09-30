@@ -140,6 +140,14 @@ impl TaskStore for NotifyingTaskStore {
         Ok(persisted_at)
     }
 
+    fn update_from_sync(&self, task: &Task, expected: &Task) -> Result<Option<DateTime<Utc>>> {
+        let persisted_at = self.inner.update_from_sync(task, expected)?;
+        if persisted_at.is_some() {
+            self.notify_updated(task, Some(expected.status));
+        }
+        Ok(persisted_at)
+    }
+
     fn append_note(&self, task_id: &str, formatted_note: &str) -> Result<DateTime<Utc>> {
         let task = self.inner.get(task_id)?;
         let persisted_at = self.inner.append_note(task_id, formatted_note)?;

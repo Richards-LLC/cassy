@@ -1,0 +1,9 @@
+{"session_id":"fc70e6f3-4e32-43cc-b2da-259c777cd9a6",
+                "transcript_path":"/tmp/wirecap/projects/x.jsonl",
+                "cwd":"/tmp/wirecap/proj",
+                "prompt_id":"d323a56b-73b1-4afc-8b3f-32605be51b91",
+                "hook_event_name":"MessageDisplay",
+                "turn_id":"83db6fbe-820e-4db4-8845-d5515e9158c3",
+                "message_id":"513a75fd-35f5-451b-a7ed-b925c5ecc4d9",
+                "index":0,"final":true,
+                "delta":"I'll run the bash command and spawn the agent."}

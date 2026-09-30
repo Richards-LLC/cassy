@@ -585,7 +585,9 @@ fn captured_265_prompt_payload_reaches_handler_and_records_turn() {
     store
         .enqueue_with_session("supervisor", WORKER, "captured payload mail", SESSION)
         .unwrap();
-    let payload = r#"{"session_id":"cbd23493-0cf2-404e-95a3-ad60bf9d1505","transcript_path":"/fixture/session.jsonl","cwd":"/fixture/project","prompt_id":"695ddcaa-d5b2-4d95-9bdd-4f20a4ed0923","permission_mode":"default","hook_event_name":"UserPromptSubmit","prompt":"reply with the single word ok","session_title":"[supervisor] factory"}"#;
+    let payload = include_str!(
+        "../../../../../crates/cas-core/src/hooks/fixtures/claude-2.1.265-user-prompt-submit.json"
+    );
     let input: HookInput = serde_json::from_str(payload).unwrap();
     assert_eq!(
         input.prompt_id.as_deref(),

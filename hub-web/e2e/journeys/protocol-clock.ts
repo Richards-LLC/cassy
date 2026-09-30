@@ -87,22 +87,23 @@ export class ProtocolClock implements ProtocolTime {
   }
 
   async advance(ms: number): Promise<void> {
-    // One second is below the protocol's shortest HTTP/state timeout (3 s).
+    // Two seconds is below the protocol's shortest HTTP/state timeout (3 s).
     // These are virtual ticks, each followed by IO acknowledgements, not sleeps.
     while (ms > 0) {
-      const tick = Math.min(ms, 1_000);
+      const tick = Math.min(ms, 2_000);
       await Promise.all(this.registrations);
       await this.page.clock.runFor(tick);
-      await this.page.evaluate(async () => {
+      const elapsed = await this.page.evaluate(async () => {
         const wire = window as unknown as {
           __protocolIdle: () => Promise<void>;
           __protocolReplies?: Set<Promise<void>>;
         };
         await Promise.all(wire.__protocolReplies ?? []);
         await wire.__protocolIdle();
+        return performance.now();
       });
       await Promise.all(this.registrations);
-      this.instant = this.origin + await this.page.evaluate(() => performance.now());
+      this.instant = this.origin + elapsed;
       ms -= tick;
     }
   }

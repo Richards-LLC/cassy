@@ -42,25 +42,24 @@ dependency, verify on upgrade) · 🔧 fix shipped · 🏗 EPIC · ⏭ n/a
   `grok-build-1.0.5-2026-08-25` and `grok-build-0.2.114-2026-07-30` receipts
   remain historical evidence.
 - **2026-09-23 operator decision:** Defer the audit gaps for MCP discovery health, busy-worker message delivery, compaction survival, consent popups, background liveness, and memory; these are not tracked.
-- **Locally installed and latest stable:** **1.0.41** (`grok 1.0.41
-  (4220f3b224a6) [stable]`, checked 2026-09-23). The exact 1.0.40 binary
-  remains retained and is the binary named by the validation receipt. Wingetly
-  independently lists the 1.0.40 package among shipped versions:
-  [Grok Build versions](https://wingetly.io/apps/x-ai/grok-build).
-- **Latest release-note evidence:** the local `~/.grok/CHANGELOG.md` snapshot
-  provides versioned sections for **1.0.6–1.0.13**. Its companion
-  `~/.grok/CHANGELOG.json` is a flat item list with no version/date attribution.
-  Releasebot's [Grok Build feed](https://releasebot.io/updates/xai/grok-build),
-  curated from xAI and updated 2026-09-18, provides per-version notes for
-  **1.0.17–1.0.25** and **1.0.30–1.0.34**. xAI's official [Grok Build
-  changelog](https://x.ai/build/changelog) still shows **0.2.117** as its latest
-  release-note page; direct curl is Cloudflare-protected (HTTP 403 on
-  2026-09-23), so that page remains the 0.2.117 source rather than evidence for
-  newer 1.0.x releases.
-- **Validated-version source gap:** local notes cover 1.0.6–1.0.13 and
-  Releasebot covers 1.0.17–1.0.25 plus 1.0.30–1.0.34;
-  1.0.14–1.0.16, 1.0.26–1.0.29, and 1.0.35–1.0.41 are consolidated below as
-  a per-version source gap. The 1.0.40 receipt explicitly records the
+- **Locally installed stable:** **1.0.44** (`grok 1.0.44 (5b807183dd79) [stable]`,
+  checked 2026-09-30). This is the newest stable observed on this host; the
+  public changelog does not establish a global latest 1.0.x version.
+- **Latest release-note evidence:** today's local `~/.grok/CHANGELOG.md` has
+  versioned sections for **1.0.35–1.0.40**, backfilled below. The earlier local
+  snapshot supplied **1.0.6–1.0.13**. The companion `~/.grok/CHANGELOG.json`
+  remains a flat list without version/date attribution, so it cannot explain
+  1.0.41–1.0.44. Releasebot's [Grok Build feed](https://releasebot.io/updates/xai/grok-build),
+  curated from xAI and last updated 2026-09-23, now also lists through **1.0.40**.
+  xAI's official [Grok Build changelog](https://x.ai/build/changelog), retrieved
+  through Exa on 2026-09-30, still shows **0.2.117** as its latest release-note
+  page; it provides no newer 1.0.x notes.
+- **Validation and source gaps:** the installed version is four patches beyond
+  the **1.0.40** validated pin. **1.0.41, 1.0.42, 1.0.43, and 1.0.44** each have
+  a named source-gap entry; historical **1.0.14–1.0.16** and **1.0.26–1.0.29**
+  gaps remain. The 1.0.40 generic note is source-limited, not a compatibility
+  verdict. This source-only sweep does not renew the conformance receipt.
+  The 1.0.40 receipt explicitly records the
   delegated 1.0.17 MCP-input, 1.0.8 consent-popup, 1.0.34 memory, and
   0.2.105 compaction checks as not covered by this bounded non-interactive
   matrix. The earlier 0.2.102–0.2.103 and 0.2.107–0.2.111 gaps remain
@@ -68,9 +67,9 @@ dependency, verify on upgrade) · 🔧 fix shipped · 🏗 EPIC · ⏭ n/a
 
 ## Cassy ↔ Grok touchpoints (what a release can break)
 
-The load-bearing surface is `crates/cas-pty/src/pty.rs::PtyConfig::grok` (approx.
-lines 423–580; instructions constants near top of file). Ground truth is that
-code + its "Verified against … 0.2.114" block — re-read it on upgrade rather than
+The load-bearing surface is `crates/cas-pty/src/pty.rs::PtyConfig::grok` (instructions
+constants near the top of the file). Ground truth is that code + its
+"Verified against … 1.0.40" block — re-read it on upgrade rather than
 trusting this diary alone.
 
 ### CLI flags (spawn args)
@@ -136,7 +135,17 @@ At minimum, `PtyConfig::grok` sets:
 
 | Grok version | Headline | Cassy verdict | Pointer |
 | --- | --- | --- | --- |
-| 1.0.14–1.0.16, 1.0.26–1.0.29, 1.0.35–1.0.41 | No per-version notes in checked feeds | — (source gap) | this doc |
+| 1.0.44 | Installed stable; no attributable release notes | — (source gap) | this doc |
+| 1.0.43 | No attributable release notes | — (source gap) | this doc |
+| 1.0.42 | No attributable release notes | — (source gap) | this doc |
+| 1.0.41 | No attributable release notes; gap rechecked | — (source gap) | this doc |
+| 1.0.40 | Generic fixes/updates; separately validated pin | ⏭ source-limited | local changelog + receipt |
+| 1.0.39 | API-sourced effort · MCP argument repair · compaction/profile retention | 👀 / 🟢 | local changelog |
+| 1.0.38 | Instruction-file reads · inline tool schema · subagent cancellation | 👀 / 🟢 | local changelog |
+| 1.0.37 | Shell permission parsing · recommended effort default | ✅ / 👀 | local changelog |
+| 1.0.36 | Managed-only hooks · background command tasks · effort/MCP auth fixes | 👀 / 🟢 / ✅ | local changelog |
+| 1.0.35 | Headless MCP handshake status · daemon tool visibility · memory wiring | 🟢 / 👀 | local changelog |
+| 1.0.14–1.0.16, 1.0.26–1.0.29 | No per-version notes in checked feeds | — (source gap) | this doc |
 | 1.0.34 | Memory generally available · Markdown heading colors | 👀 / ⏭ | this doc |
 | 1.0.33 | Structured MCP results · cancellation/session/subagent recovery · clone/skill fixes | 👀 / 🟢 | this doc |
 | 1.0.32 | Pre-session config listing · first-session crash/TLS fixes | 👀 / ⏭ | this doc |
@@ -191,20 +200,135 @@ At minimum, `PtyConfig::grok` sets:
 
 ## Entries
 
-### 1.0.14–1.0.16, 1.0.26–1.0.29, 1.0.35–1.0.41 — consolidated release-note source gap
+### 1.0.44 — installed stable; release-note source gap
 
-Reviewed 2026-09-23. The checked sources are the local versioned
-`~/.grok/CHANGELOG.md` (through 1.0.13), its flat/unversioned
-`~/.grok/CHANGELOG.json`, the [Releasebot Grok Build feed](https://releasebot.io/updates/xai/grok-build)
-(per-version entries through 1.0.34, updated 2026-09-18), the [official xAI
-changelog](https://x.ai/build/changelog) (currently showing 0.2.117), and
-[Wingetly's package history](https://wingetly.io/apps/x-ai/grok-build) (which
-lists 1.0.40 and 1.0.34 among shipped versions). No per-version release notes
-were attributable to these ranges. Direct curl to x.ai returned HTTP 403 from
-Cloudflare on this review date. → — **source gap; no release behavior or Cassy
-verdict is inferred.** The exact 1.0.40 binary is validated by the separate
-`grok-build-1.0.40-2026-09-23` receipt; 1.0.41 is installed but has no
-corresponding release-note evidence or validation receipt.
+Reviewed 2026-09-30. Sources: installed `grok --version`, local
+`~/.grok/CHANGELOG.md` (through 1.0.40), unversioned `~/.grok/CHANGELOG.json`,
+[xAI's public changelog](https://x.ai/build/changelog) (through 0.2.117), and
+[Releasebot's feed](https://releasebot.io/updates/xai/grok-build) (through 1.0.40).
+
+- The binary identifies **1.0.44 (5b807183dd79) [stable]**, but none of these
+  sources attributes release notes to 1.0.44. → — **source gap.** No changes to
+  spawn flags, `--rules`, MCP `cas__*`, hooks, env or transcripts are inferred;
+  the 1.0.40 live receipt does not validate this install.
+
+### 1.0.43 — release-note source gap
+
+Reviewed 2026-09-30. Sources: local `~/.grok/CHANGELOG.md`/`.json`,
+[xAI's public changelog](https://x.ai/build/changelog), and
+[Releasebot's feed](https://releasebot.io/updates/xai/grok-build).
+
+- No checked source supplies a versioned **1.0.43** section. → — **source gap.**
+  Neither release behavior nor Cassy compatibility is inferred from the version number.
+
+### 1.0.42 — release-note source gap
+
+Reviewed 2026-09-30. Sources: local `~/.grok/CHANGELOG.md`/`.json`,
+[xAI's public changelog](https://x.ai/build/changelog), and
+[Releasebot's feed](https://releasebot.io/updates/xai/grok-build).
+
+- No checked source supplies a versioned **1.0.42** section. → — **source gap.**
+  Neither release behavior nor Cassy compatibility is inferred from the version number.
+
+### 1.0.41 — release-note source gap rechecked
+
+Reviewed 2026-09-30. Sources: local `~/.grok/CHANGELOG.md`/`.json`,
+[xAI's public changelog](https://x.ai/build/changelog), and
+[Releasebot's feed](https://releasebot.io/updates/xai/grok-build).
+
+- The previous sweep observed the installed **1.0.41** binary; today's checked
+  sources still supply no versioned notes. → — **source gap.** That install
+  observation did not renew the 1.0.40 receipt or establish a per-item verdict.
+
+### 1.0.40 — generic fixes and updates
+
+Backfilled 2026-09-30. Source: local `~/.grok/CHANGELOG.md`, **1.0.40 — 2026-09-20**.
+
+- **The note describes miscellaneous fixes/updates without naming a component.**
+  → ⏭ **source-limited.** No specific effect on Cassy's flags, hooks, env or
+  MCP server can be attributed. The separate 2026-09-23 live matrix remains
+  the evidence validating the exact 1.0.40 binary; the generic note adds no proof.
+
+### 1.0.39 — API-sourced effort · MCP argument repair · compaction/profile retention
+
+Backfilled 2026-09-30. Source: local `~/.grok/CHANGELOG.md`, **1.0.39 — 2026-09-20**.
+
+- **Effort menus use the model API; children can lock in their parent's model.**
+  → 👀 **watch — model/effort.** Cassy supplies `--model` and `--reasoning-effort`
+  when configured. API menu changes do not prove new CLI effort vocabulary;
+  keep the known mapping and check selected models on the next installed-version matrix.
+- **Unambiguous malformed MCP argument shapes are repaired automatically.**
+  → ✅ **no server change.** Cassy's tool schemas remain authoritative; client
+  repair is not a substitute for task receipts or permission checks.
+- **Attachments survive compaction, agent profiles survive resume, and worktree
+  capture accepts uninitialized submodules.** → 🟢 **host reliability win.**
+  Cassy's injected UUID, `--rules`, inherited `CAS_*` env and transcript path
+  remain the integration seam. Default subagent type, temporary helper placement
+  and memory reasoning filtering introduce no required Cassy change. Long-session
+  compaction remains outside the bounded 1.0.40 matrix.
+
+### 1.0.38 — instruction-file reads · inline tool schema · subagent cancellation
+
+Backfilled 2026-09-30. Source: local `~/.grok/CHANGELOG.md`, **1.0.38 — 2026-09-19**.
+
+- **Deployments can configure reading behavior for skill/instruction files.**
+  → 👀 **watch — role/skill discovery.** Cassy's launch-time `--rules` and env
+  remain the role/identity channel; do not assume host read settings replace them.
+- **Inline-only tool schemas avoid tool-call errors, and cancelled subagents
+  stop showing a pending-cancellation state.** → 🟢 **host reliability win.**
+  No rename to persistent `cas__*` MCP discovery or the session UUID is documented.
+  Image paste and permission-prompt wrapping are otherwise ⏭ **n/a**.
+
+### 1.0.37 — shell permission parsing · recommended effort default
+
+Backfilled 2026-09-30. Source: local `~/.grok/CHANGELOG.md`, **1.0.37 — 2026-09-18**.
+
+- **Quoted filename variables obey configured shell permission rules.** → ✅
+  **no action.** Cassy's explicit `bypassPermissions` launch and its independent
+  worktree guard remain the contract; the fix does not promise configured denies disappear.
+- **The model effort picker starts at the model recommendation.** → 👀 **watch
+  — default effort.** Cassy's supplied `--reasoning-effort` remains explicit;
+  omitted effort inherits the host default. Mermaid/context/clipboard UI is ⏭ **n/a**.
+
+### 1.0.36 — managed-only hooks · background tasks · effort/MCP auth fixes
+
+Backfilled 2026-09-30. Source: local `~/.grok/CHANGELOG.md`, **1.0.36 — 2026-09-17**.
+
+- **An organization can suppress hooks outside managed policy.** → 👀 **watch
+  — hook deployment.** Grok's ignored SessionStart stdout still makes Cassy's
+  `--rules` plus env load-bearing, but managed-only policy can also suppress
+  local hooks. No enabled policy or Cassy breakage was demonstrated in this sweep.
+- **Background shell commands get live streaming task rows and child shell
+  approvals become visible.** → 🟢 **host observability win.** Cassy's task
+  leases and liveness remain separate; the validated bypass launch is unchanged.
+- **Mixed-case configured effort values work, sandbox folder-trust startup is
+  repaired, and plugin MCP auth accepts a manifest client ID.** → ✅ **no action.**
+  Cassy emits canonical effort values and uses persistent local stdio discovery,
+  not plugin OAuth. Dashboard, syntax and configured-agent UI fixes are ⏭ **n/a**.
+
+### 1.0.35 — MCP handshake status · daemon tool visibility · memory wiring
+
+Backfilled 2026-09-30. Source: local `~/.grok/CHANGELOG.md`, **1.0.35 — 2026-09-16**.
+
+- **Headless MCP status follows the real handshake; daemon tool search/calls
+  show arguments and outputs.** → 🟢 **host observability win.** Cassy's persistent
+  `cas__*` discovery still needs real handshake/tool-call evidence; status UI
+  alone does not establish the uncovered MCP-discovery audit checks.
+- **Enabling memory from a config-disabled session now attaches it correctly.**
+  → 👀 **watch — context.** Grok memory remains separate from Cassy memory and
+  inherited identity; the existing operator-deferred memory audit is unchanged.
+  Memory UI, minimal-mode paste and syntax highlighting are otherwise ⏭ **n/a**.
+
+### 1.0.14–1.0.16, 1.0.26–1.0.29 — consolidated historical release-note source gap
+
+Rechecked 2026-09-30. Historical local notes cover 1.0.6–1.0.13; today's local
+`~/.grok/CHANGELOG.md` covers 1.0.35–1.0.40. The
+[Releasebot feed](https://releasebot.io/updates/xai/grok-build) supplies 1.0.17–1.0.25
+and 1.0.30–1.0.40, while the [official xAI page](https://x.ai/build/changelog)
+remains at 0.2.117. No checked source supplies per-version notes for
+**1.0.14–1.0.16 or 1.0.26–1.0.29**. → — **source gap; no release behavior or
+Cassy verdict is inferred.** The prior 1.0.35–1.0.40 gaps are now backfilled;
+1.0.41–1.0.44 remain individually named above.
 
 ### 1.0.34 — memory generally available · Markdown heading colors
 

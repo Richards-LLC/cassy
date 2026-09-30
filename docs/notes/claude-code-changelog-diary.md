@@ -40,10 +40,27 @@ When a new Claude Code version ships:
 | 🏗 EPIC | Large enough to warrant a factory EPIC (link epic note) |
 | ⏭ n/a | Internal / no user-facing surface |
 
+## Version status
+
+- **Cassy validated against:** Claude Code **2.1.280**, with the complete isolated
+  factory matrix recorded in
+  `crates/cas-pty/conformance/claude-code-2.1.280-2026-09-23.json`.
+- **Locally installed:** **2.1.285** (`2.1.285 (Claude Code)`, checked 2026-09-30).
+- **Latest reviewed:** **2.1.285** in Anthropic's official changelog. Every section
+  from **2.1.281–2.1.285** is present; this interval has no source gaps.
+- **Gap:** the installed version is five patches beyond the validated pin. This
+  sweep reviews upstream notes and Cassy's launch/hook/MCP code; it does not
+  establish a new live conformance receipt.
+
 ## Index
 
 | CC version | Headline | Cassy verdict | Pointer |
 | ------------ | ---------- | ------------- | --------- |
+| 2.1.285 | Hook completion/cancellation · deferred MCP · background command deadlines | 🟢 / ✅ / 👀 | this doc |
+| 2.1.284 | MCP resume/startup waits · elicitation blocking · auto-mode default | 🟢 / ✅ | this doc |
+| 2.1.283 | MCP progress/cleanup · config-write errors · prompt-file composition | 🟢 / ✅ | this doc |
+| 2.1.282 | Resume history · managed policy parsing · reserved MCP skill names | 🟢 / ✅ | this doc |
+| 2.1.281 | MCP-hook readiness · bypass-mode rm timeout · AGENTS.md/provider support | 🟢 / ✅ / 👀 | this doc |
 | 2.1.280 | Opus 5.5 default · MCP description cap · hook telemetry · subagent/message reliability | 🟢 / ✅ | this doc |
 | 2.1.279 | No section in Anthropic's official changelog | ⏭ source gap | this doc |
 | 2.1.278 | Server-side auto-mode classifier default | ✅ no action | this doc |
@@ -155,6 +172,103 @@ When a new Claude Code version ships:
 ---
 
 ## Entries
+
+### 2.1.285 — hook completion/cancellation · deferred MCP · background command deadlines
+
+Reviewed 2026-09-30. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21285).
+
+- **Synchronous hooks finish when their own process exits even if a detached child retains
+  output handles; cancellation during setup prevents a shell command or hook from starting.**
+  → 🟢 **host lifecycle win.** Cassy's SessionStart/PreToolUse hooks benefit without changing
+  their event payloads or config (`cas-cli/src/cli/hook/config_gen.rs`). This is source review;
+  the 2.1.280 receipt does not validate these new timing paths.
+- **Tool-level `anthropic/alwaysLoad=false` takes precedence over a server's eager-loading
+  setting; disabled mid-session MCP tools disappear in SDK/headless sessions, and stdio
+  diagnostics handle omitted `type` and redact plugin connection details.** → ✅ **no action.**
+  Cassy uses its configured `cas` stdio server and does not depend on plugin diagnostics,
+  the reserved `widgets` server name, or forced eager loading. Normal deferred discovery
+  remains the client contract.
+- **Background Bash/PowerShell commands gain enforced deadlines (30-minute default, two-hour
+  maximum), and resumed background sessions accept follow-up prompts.** → 👀 **watch — long
+  command liveness.** Cassy's worker guidance already requires background logs for long work;
+  a log alone does not prevent the host deadline. No Cassy code change follows from the notes;
+  future live validation should check command completion and notification timing.
+- **Forked/headless subagent permission and result delivery, pending-plan hook inputs, and
+  malformed compacted transcripts are repaired.** → 🟢 **host reliability win.** Explicit
+  `bypassPermissions`, inherited `CAS_*` identity, and Cassy's durable coordination remain
+  the launch contract (`crates/cas-pty/src/pty.rs::PtyConfig::claude`). New WebFetch/retry env
+  switches and Windows system-env restrictions do not rename Cassy's identity variables.
+
+### 2.1.284 — MCP resume/startup waits · elicitation blocking · auto-mode default
+
+Reviewed 2026-09-30. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21284).
+
+- **Resumed MCP calls wait up to ten seconds for a connecting server; the non-interactive
+  first turn still waits up to two seconds for servers named by allowed tools or MCP hooks
+  even with startup wait set to zero.** → 🟢 **MCP readiness win.** Cassy's stdio tools and
+  hook dispatch retain their names and payloads; these are host readiness bounds, not Cassy
+  task timeouts. Interactive reconnect-all and policy-aware `mcp add` errors improve recovery.
+- **Failed hooks log stderr and status more reliably; Elicitation/ElicitationResult JSON
+  blocking decisions now decline requests.** → ✅ **no action.** Cassy's generated hooks use
+  their existing events; they do not register these two elicitation events. No new hook
+  registration is required (`cas-cli/src/cli/hook/config_gen.rs`).
+- **Interactive terminal/VS Code sessions default to auto mode when permission mode is
+  unspecified; Explore inherits an unrecognized custom model instead of switching tiers.**
+  → ✅ **no action.** Cassy's Claude worker explicitly passes
+  `--permission-mode bypassPermissions` alongside `--dangerously-skip-permissions`;
+  model pins remain explicit.
+
+### 2.1.283 — MCP progress/cleanup · config-write errors · prompt-file composition
+
+Reviewed 2026-09-30. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21283).
+
+- **Background MCP progress survives handoff, starting stdio servers are cleaned up at exit,
+  and transient remote 404s no longer poison the connection.** → 🟢 **MCP lifecycle win.**
+  Cassy's `cas serve` stdio lifecycle benefits; remote authentication and progress UI require
+  no change to Cassy's tool dispatch or inherited env.
+- **MCP config writes report failure, server instructions count toward context, and MCP image
+  results are also written to files.** → ✅ **no action.** Cassy's integration owns its config
+  writes and textual task receipts; these changes improve client observability. Opt-in
+  `OTEL_LOG_TOOL_CONTENT` logging remains a host setting, not a Cassy logging requirement.
+- **Text and file system-prompt flags compose, and the 2.1.282 `claude-ai` name restriction is
+  reverted.** → ✅ **no action.** Cassy's Claude role priming uses hooks and a queued launch
+  contract, not self-hosted runner prompt wrappers or a server named `claude-ai`.
+
+### 2.1.282 — resume history · managed policy parsing · reserved MCP skill names
+
+Reviewed 2026-09-30. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21282).
+
+- **Continue/resume retains prior reasoning and tool history more faithfully; one invalid
+  managed setting no longer drops an entire permissions/worktree block.** → 🟢 **host
+  reliability win.** Cassy's transcript evidence and worktree isolation remain authoritative;
+  the host repair does not require a new Cassy state transition.
+- **Servers named `anthropic-skills` or `claude-ai` stop listing skills/prompts, while tools
+  remain available.** → ✅ **no action.** Cassy's server is `cas`; neither reserved name is
+  used. The `claude-ai` portion is reverted in 2.1.283. SessionStart prompt-display and editor
+  UI fixes introduce no hook payload or env change.
+
+### 2.1.281 — MCP-hook readiness · bypass-mode rm timeout · AGENTS.md/provider support
+
+Reviewed 2026-09-30. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21281).
+
+- **Blocking `mcp_tool` hooks wait for their connecting server; resumed MCP/tool-search history
+  and interrupted tool outcomes are retained more accurately.** → 🟢 **host reliability win.**
+  Cassy's hooks remain command hooks invoking `cas hook`, while its MCP names and durable
+  coordination records stay independent. URL-mode elicitation adds no requirement to the
+  local stdio server.
+- **Dangerous recursive removals involving command substitution prompt even in bypass mode;
+  dangerous-rm prompts deny after two minutes unless the timeout is explicitly disabled.**
+  → 👀 **watch — unattended commands.** Cassy's launch still selects bypass mode, but that
+  flag does not promise every destructive shell command runs unprompted. Cassy does not set
+  the new rm opt-out variables; these are host policy bounds, not a demonstrated Cassy bug.
+- **AGENTS.md works across third-party providers and telemetry-disabled sessions; launch env
+  takes precedence over settings env, with diagnostics for ignored variables.** → ✅ **no
+  action.** Cassy already supplies the canonical AGENTS.md and process-level `CAS_*` identity.
+  Self-hosted runner migration to prompt files does not affect `PtyConfig::claude`.
+- **Send-now backgrounds running tools rather than cancelling; child sessions inherit
+  `--setting-sources` restrictions.** → ✅ **no action.** Cassy's urgent Claude redirect uses
+  Esc in the validated 2.1.280 matrix, not send-now. The installed 2.1.285 redirect remains
+  unvalidated; no source-note evidence warrants changing the injection contract here.
 
 ### 2.1.280 — Opus 5.5 default · MCP description cap · hook telemetry · subagent/message reliability
 

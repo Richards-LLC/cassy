@@ -8,11 +8,13 @@ The most common close rejection: your `factory/<name>` branch has commits not ye
 2. **Before any escalation, drain the inbox: run `coordination action=inbox_poll` repeatedly until it returns `No unread messages`.** A poll returns at most 10 rows by default, so one call is not guaranteed to pull all unread supervisor messages. Polling marks messages seen for inbox polling without consuming daemon transport delivery, and the claim is at-most-once — if a poll response is lost those rows are not replayed, so also re-read any supervisor messages just delivered in your conversation. If a message says the branch was merged or requests more changes, follow it and do not send a stale merge request.
 3. **`delivery_mode=local_merge`**: run `git rev-parse factory/<name>` to capture the current tip, then send the supervisor a merge request with that SHA. Do **not** push origin; the supervisor merges your local factory branch.
 4. **Parent is `epic/<slug>` (`delivery_mode=push_branch`)**: run `git rev-parse factory/<name>` to capture the current tip, `git push origin factory/<name>`, then message the supervisor to merge your branch into the epic:
-   ```
+
+   ```text
    coordination action=message target=supervisor \
      summary="factory/<name> pushed, needs epic merge before close" \
      message="Fresh after polling unread inbox messages: <task-id> factory/<name> tip <sha>. Please re-check reachability, then merge into epic/<slug> if still needed so close can pass."
    ```
+
    Do **NOT** `gh pr create --base epic/...` — epic branches are supervisor-local; the ref doesn't exist on origin and the call always fails.
 5. **Parent is `main`/`master`/`staging`**: push and complete the project's PR/merge flow, then retry close.
 6. **Guard still counts unmerged commits after a confirmed merge** → squash-merge SHA drift. Clear it yourself first: re-close with `commit_receipt=<sha>` naming the commit that carries this task's work. Only if the receipt is rejected, send the supervisor the exact guard text *and* the rejection reason. Do not retry-loop against the guard. `completion_receipt` is accepted only after your current tip is merged. Both receipts are specified in [close-gate.md](close-gate.md) "Delivery receipts".
@@ -45,6 +47,7 @@ Prevention: below 20 % headroom, checkpoint (commit, push or park, handoff note,
 ## Worktree Issues (Isolated Mode)
 
 **Submodule not initialized**: Worktrees don't include submodules. Symlink from the main repo:
+
 ```bash
 ln -s /path/to/main/repo/vendor/<submodule> vendor/<submodule>
 ```
@@ -54,9 +57,11 @@ ln -s /path/to/main/repo/vendor/<submodule> vendor/<submodule>
 1. **Merge conflict from another worker?** Checkpoint uncommitted work as a commit, then rebase onto the **local** branch the supervisor named at assignment (`main`, `master`, or `epic/<slug>`); see [details.md](details.md) "Syncing". Do **not** rebase onto `origin/<branch>`: the supervisor merges into the local branch, so `origin/main` is stale and `origin/epic/...` does not exist. If conflicts appear in files you own, resolve them; if in files you don't own, report to supervisor.
 
 2. **Missing dependency or new module?** Check if another worker added dependencies, diffing against that same local branch:
+
    ```bash
    git diff <branch> -- Cargo.toml Cargo.lock package.json pnpm-lock.yaml
    ```
+
    If new crates/packages were added, rebase onto it.
 
 3. **Non-Rust failure: reproducible on the base branch?** Commit your work first, then `git switch --detach <branch>`, run the same non-Rust command, and `git switch -` back.
@@ -70,12 +75,15 @@ Only report to supervisor after completing at least steps 1–2. Include the err
 If Cassy tools stop responding or return connection errors:
 
 1. **Check the symlink**: Worktrees get MCP config via symlink, not a copy.
+
    ```bash
    ls -la .mcp.json  # Should be a symlink to main repo's .mcp.json
    ```
+
    If the symlink is broken or missing, the MCP server can't start.
 
 2. **Check the Cassy server process**: The `cas serve` process may have crashed.
+
    ```bash
    ps aux | grep 'cas serve'
    ```
@@ -99,7 +107,8 @@ This is different from connectivity failure above. Here the MCP handshake comple
 **Do not** fall back to running `cas task` as a shell subcommand — it does not exist. **Do not** run `cas init` from inside the worktree (creates a duplicate `.cas/`). **Do not** kill/restart `cas serve` yourself.
 
 Report to supervisor immediately with:
-```
+
+```text
 coordination action=message target=supervisor \
   summary="zero cas tools available" \
   message="<your-name>: no Cassy tools in tool set. Need respawn."
@@ -114,6 +123,7 @@ If a bug that was supposedly fixed in the source code still manifests, the runni
 ## Supervisor goes silent
 
 If the supervisor hasn't responded after 5 minutes on any blocking question:
+
 1. Re-read task state with `action=show` — supervisor may have acted without messaging back.
 2. Send ONE follow-up via `coordination action=message`.
 3. If still no response after another 5 minutes, focus on any non-blocked work or pause. Do not spam.
@@ -124,9 +134,11 @@ If the supervisor reassigns your current task to another worker:
 
 1. **Commit WIP immediately** (`git add <paths> && git commit -m "WIP: <task-id> handoff"`) — do not lose work in progress, and do not use `git stash`: the stash stack is shared by every worktree.
 2. **Post progress notes** summarizing what's done and what's left:
-   ```
+
+   ```text
    task action=notes id=<task-id> notes="WIP: <what's done>, remaining: <what's left>" note_type=progress
    ```
+
 3. **Message supervisor** with the commit SHA of your WIP so the new assignee can pick it up.
 4. **Stop work on that task immediately** — do not finish "just one more thing." Move to your next assigned task or check `task action=mine`.
 

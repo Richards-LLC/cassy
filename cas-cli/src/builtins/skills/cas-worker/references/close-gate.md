@@ -87,6 +87,7 @@ The 6 checks below apply to every task type. These gates sit on top of them:
 ## Pre-Close Self-Verification
 
 ### 1. No shortcut markers
+
 ```bash
 # Must return zero UNEXPLAINED results in your changed lines
 git diff -U0 <base> | rg 'TODO|FIXME|XXX|HACK'
@@ -96,19 +97,24 @@ git diff -U0 <base> | rg 'for now|temporarily|placeholder|stub|workaround'
 Triage hits, don't grind: scope to your changed lines (as above), and legit occurrences — UI `placeholder=` attributes, pre-existing comments in untouched lines, test-fixture names — don't block close. Record a one-line justification for anything you leave; only new, unexplained markers are failures.
 
 Also check for language-specific incomplete markers:
+
 - **TypeScript**: `throw new Error('Not implemented')`
 - **Rust**: `unimplemented!()`, `todo!()`
 - **Python**: `raise NotImplementedError`
 
 ### 2. All new code is wired up
+
 For every new function, class, module, route, or handler you created:
+
 ```bash
 # Verify it's actually called/imported somewhere outside its definition
 rg 'your_new_symbol'            # repo-wide; scope to source dirs in monorepos, e.g. apps/ packages/ src/
 ```
+
 If zero external references → you built it but didn't wire it in. Fix before closing.
 
 Registration checklist (varies by framework):
+
 - New CLI command → added to command registry?
 - New API route/endpoint → added to router or module?
 - New migration → listed in migration runner?
@@ -116,6 +122,7 @@ Registration checklist (varies by framework):
 - New config field → has a default, is read somewhere?
 
 ### 3. Changed signatures don't break callers
+
 ```bash
 # If you changed a function signature, verify all call sites
 rg 'changed_function' src/
@@ -132,6 +139,7 @@ For Rust changes, follow [discipline.md](discipline.md) for capped package-scope
 ```
 
 If tests fail in code you didn't modify:
+
 1. Re-run to check if flaky (transient failures happen).
 2. If consistent, report as blocker with the specific test name and error output.
 3. Do NOT try to fix other people's tests — that's out of scope.
@@ -149,7 +157,9 @@ If tests fail in code you didn't modify:
 **JS/TS monorepos (pnpm/turbo):** same blast-radius logic. Changed a shared package or exported type → run the *consuming* apps' typecheck and tests (`pnpm -r typecheck`, `pnpm --filter <app> test`), not just the package's own suite. A changed interface compiles fine in its own package and breaks only where it's consumed.
 
 ### 5. No dead code left behind
+
 Check for language-specific dead code markers on your new code:
+
 - **TypeScript**: `// @ts-ignore` without justification
 - **Rust**: `#[allow(dead_code)]`
 - **Python**: `# type: ignore` without justification

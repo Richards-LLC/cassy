@@ -54,7 +54,7 @@ does **not** execute the tool: call it, not another ToolSearch.
 
 For status, ready and close-failure messages, send this block with nothing before or after it:
 
-```
+```text
 status: <in_progress|ready|blocked|partial>
 tip: <sha> on factory/<name>; worktree: <clean|dirty>
 ci: <run id + result | not started>

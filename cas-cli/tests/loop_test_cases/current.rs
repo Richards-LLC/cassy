@@ -176,6 +176,18 @@ async fn factory_loop_cancel_persists_reason_and_missing_session_is_a_noop() {
 }
 
 #[tokio::test]
+async fn stop_hook_without_active_loop_allows_exit_and_creates_no_loop() {
+    let mut env = TestEnvGuard::temp_home();
+    let fixture = Fixture::new(&mut env);
+    let output = fixture.stop("no-loop", None);
+    assert_eq!(output.decision, None);
+    assert_eq!(output.reason, None);
+    let store = open_loop_store(&fixture.root).unwrap();
+    assert!(store.get_active_for_session("no-loop").unwrap().is_none());
+    assert!(store.list_recent(10).unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn stop_hook_blocks_with_prompt_and_persists_each_iteration() {
     let mut env = TestEnvGuard::temp_home();
     let fixture = Fixture::new(&mut env);

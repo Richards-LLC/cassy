@@ -136,6 +136,13 @@
     "skills/cas-codebase-design/DESIGN-IT-TWICE.md": [
       "66fb90331afdb5d38fcd07e11bda980e29751c8a93c7219f273651a7b6bb4916"
     ],
+    "skills/cas-codebase-design/LICENSE": [
+      "0e7ac423bf2c6e223b7c5b156f8cf72da49d748e56a1641402c31f22ad07dbb5",
+      "dcad88aea82f74872bcd5e715e7e6c933692324fd71303aa51a7af44cef52064"
+    ],
+    "skills/cas-codebase-design/references/design-it-twice.md": [
+      "94ac76131cf2a372df0f542d02d0f8851980ac0da88e79b95583c56450efe0c5"
+    ],
     "skills/cas-codebase-design/references/principles.md": [
       "7627d69867f9af31945452316249a5120eb498f71499414dbe12ae3c5f597042"
     ],
@@ -1131,11 +1138,21 @@
       "fc39c6919c9741537b91e60d1516ca6394ad4e50cfe0358812cf43da19103c6c",
       "ff4e8fb59dd7dcbcdc46a7aae58a2995726f27fa981d15e3dc4b03c4d9222510"
     ],
+    "skills/cas-tdd/LICENSE": [
+      "0e7ac423bf2c6e223b7c5b156f8cf72da49d748e56a1641402c31f22ad07dbb5",
+      "dcad88aea82f74872bcd5e715e7e6c933692324fd71303aa51a7af44cef52064"
+    ],
     "skills/cas-tdd/mocking.md": [
       "18d3c7fdd7737959718317c91f93d42cde4cd4a604ab32ff213d62b2e7efdc2d",
       "2502badf019ae7ff11833b2846275b147c13197c5c21e46de7aeffabfc3a254b",
       "681fdc031087327f00e82e8ef886514169ccb9ad2199a8f83a3144ee241ed49b",
       "fae0b98bfc3a51ddae1491e123ba9c86cd82ea01340f1207d6088808136c5312"
+    ],
+    "skills/cas-tdd/references/mocking.md": [
+      "a65714794f8be3ff548ab4b47c7b2740e1240ea32957b857485260432a45b1bd"
+    ],
+    "skills/cas-tdd/references/tests.md": [
+      "99508a396d41e2608a3396612c0b604678633cf0dd4a2ba16087151641649cb2"
     ],
     "skills/cas-tdd/tests.md": [
       "b676bf728f08c9206d178a02cbd67ee50316866f3204cff5b1930b1c2edf246a",

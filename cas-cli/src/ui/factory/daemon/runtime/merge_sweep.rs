@@ -59,6 +59,7 @@ enum SweepStatus {
     Passed,
     Failed,
     Unavailable,
+    NotConfigured,
     TimedOut,
     SetupFailed,
     Superseded,
@@ -101,6 +102,7 @@ struct SweepSettings {
     cwd: Option<String>,
     /// GH #1006: `factory.merge_sweep_env`. Values are never logged.
     env: crate::config::SweepEnv,
+    release_gate_home_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,6 +144,12 @@ impl From<&FactoryConfig> for SweepSettings {
                 .filter(|cwd| !cwd.is_empty())
                 .map(str::to_owned),
             env: config.merge_sweep_env.valid(),
+            release_gate_home_dir: config
+                .release_gate_home_dir
+                .as_deref()
+                .map(str::trim)
+                .filter(|directory| !directory.is_empty())
+                .map(str::to_owned),
         }
     }
 }
@@ -1066,6 +1074,25 @@ fn execute_sweep(
             };
         }
     };
+    if uses_assembly_proof(&worktree, &settings, &runner)
+        && settings.release_gate_home_dir.is_none()
+    {
+        let summary = "assembly proof not configured: set factory.release_gate_home_dir \
+            in .cas/config.toml to a durable scratch base outside temporary roots and \
+            every .cas ancestor (for example /home/cas-release-gate/base)"
+            .to_owned();
+        let _ = writeln!(log, "{summary}");
+        return SweepResult {
+            request,
+            status: SweepStatus::NotConfigured,
+            log_path,
+            summary,
+            failures: Vec::new(),
+            integration_epics: Vec::new(),
+            base_failure: None,
+            after_deferrals: 0,
+        };
+    }
     if let Some(error) = missing_package_setup(&runner.cwd, &runner) {
         let _ = writeln!(log, "{error}");
         return SweepResult {
@@ -1259,6 +1286,12 @@ fn hardlink_tree(source: &Path, destination: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn uses_assembly_proof(worktree: &Path, settings: &SweepSettings, runner: &TestRunner) -> bool {
+    runner.kind == TestRunnerKind::Cargo
+        && settings.nextest_filter.is_none()
+        && worktree.join("scripts/assembly-proof.py").is_file()
+}
+
 fn spawn_test_runner(
     worktree: &Path,
     settings: &SweepSettings,
@@ -1269,9 +1302,7 @@ fn spawn_test_runner(
     // projects, configured commands and failure-bisection filters keep their
     // original runner and cannot certify a two-context release proof.
     let assembly_helper = worktree.join("scripts/assembly-proof.py");
-    let assembly_proof = runner.kind == TestRunnerKind::Cargo
-        && settings.nextest_filter.is_none()
-        && assembly_helper.is_file();
+    let assembly_proof = uses_assembly_proof(worktree, settings, runner);
     let program = if assembly_proof {
         "python3"
     } else {
@@ -1309,6 +1340,14 @@ fn spawn_test_runner(
     // GH #1006: the operator's sweep env, applied before the identity scrub
     // so a configured value can never reintroduce a CAS identity variable.
     command.envs(settings.env.iter());
+    if assembly_proof {
+        // The persisted key wins over inherited daemon and generic sweep env.
+        // Refuse direct callers too, so none can invoke the unsafe default.
+        command.env(
+            "CAS_RELEASE_GATE_HOME_DIR",
+            settings.release_gate_home_dir.as_deref()?,
+        );
+    }
     scrub_test_process_identity(&mut command);
     #[cfg(unix)]
     {
@@ -1504,6 +1543,7 @@ fn status_text(status: SweepStatus) -> &'static str {
         SweepStatus::Passed => "PASSED",
         SweepStatus::Failed => "FAILED",
         SweepStatus::Unavailable => "SWEEP_UNAVAILABLE",
+        SweepStatus::NotConfigured => "NOT CONFIGURED",
         SweepStatus::TimedOut => "TIMED OUT",
         SweepStatus::SetupFailed => "SETUP FAILED",
         SweepStatus::Superseded => "SUPERSEDED",
@@ -1768,6 +1808,7 @@ mod tests {
             package_manager: None,
             cwd: temp.path().to_path_buf(),
         };
+        settings.release_gate_home_dir = Some("/home/cas-release-gate/base".to_owned());
         let mut child = spawn_test_runner(temp.path(), &settings, &log, &runner).unwrap();
         assert!(child.wait().unwrap().success());
         assert!(temp.path().join("assembly-called").is_file());

@@ -631,6 +631,12 @@ pub struct FactoryConfig {
     #[serde(default = "default_merge_sweep_timeout_secs")]
     pub merge_sweep_timeout_secs: u64,
 
+    /// Durable scratch base for the assembly proof's plain clone. The daemon
+    /// passes this as CAS_RELEASE_GATE_HOME_DIR; no inherited shell env is
+    /// required. Unset leaves full Cassy sweeps explicitly not configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_gate_home_dir: Option<String>,
+
     /// Command the post-merge sweep runs instead of the detected runner
     /// (`cargo nextest run --workspace` or the package manager's `test`
     /// script), via `sh -c` in the merged-tip worktree (GH #1006). Unset keeps
@@ -847,6 +853,7 @@ impl Default for FactoryConfig {
             ai_enrichment: cas_factory::AiEnrichmentConfig::default(),
             merge_sweep: true,
             merge_sweep_timeout_secs: default_merge_sweep_timeout_secs(),
+            release_gate_home_dir: None,
             merge_sweep_command: None,
             merge_sweep_cwd: None,
             merge_sweep_env: SweepEnv::default(),

@@ -126,6 +126,20 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
     });
 
     registry.register(ConfigMeta {
+        key: "factory.release_gate_home_dir",
+        section: "factory",
+        name: "Assembly Proof Scratch Base",
+        description: "Absolute scratch base for the assembly proof's plain clone, on the checkout filesystem outside system temporary roots, TMPDIR and every .cas ancestor (for example /home/cas-release-gate/base). The daemon passes it as CAS_RELEASE_GATE_HOME_DIR. Empty reports NOT CONFIGURED without running or attributing a failed suite.",
+        value_type: ConfigType::String,
+        default: "",
+        constraint: Constraint::None,
+        advanced: true,
+        requires_feature: None,
+        keywords: &["factory", "release", "assembly", "scratch", "clone", "integration"],
+        use_cases: &["Configure automatic assembly sweeps without daemon environment variables"],
+    });
+
+    registry.register(ConfigMeta {
         key: "factory.epic_base_branch",
         section: "factory",
         name: "Epic Base Branch",

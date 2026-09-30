@@ -1,0 +1,128 @@
+{
+  "description": "Behavioral contract for rule-026 lint; code snippets are parsed, never compiled or executed. Shared Rust tokenization excludes comments and literals. Scope/baseline policy still belongs to cas-b453 implementation.",
+  "cases": [
+    {
+      "name": "parallel-unguarded-env",
+      "path": "cas-cli/src/fixture.rs",
+      "source": "#[test] fn race() { unsafe { std::env::set_var(\"HOME\", \"other\"); } }",
+      "violation": true,
+      "incident": "cas-da84"
+    },
+    {
+      "name": "unguarded-factory-helper",
+      "path": "cas-cli/src/fixture.rs",
+      "source": "struct FactorySessionEnv; impl FactorySessionEnv { fn set() { unsafe { std::env::set_var(\"CAS_FACTORY_SESSION\", \"child\"); } } } #[test] fn focus() { FactorySessionEnv::set(); }",
+      "violation": true,
+      "incident": "cas-4a8e"
+    },
+    {
+      "name": "nested-shared-guard",
+      "path": "cas-cli/src/fixture.rs",
+      "source": "#[test] fn nested() { let _outer = TestEnvGuard::new(); let _inner = TestEnvGuard::new(); }",
+      "violation": true,
+      "incident": "cas-4cf0"
+    },
+    {
+      "name": "unguarded-remove",
+      "path": "cas-cli/src/fixture.rs",
+      "source": "#[test] fn remove() { unsafe { std::env::remove_var(\"CAS_FACTORY_SESSION\"); } }",
+      "violation": true
+    },
+    {
+      "name": "unguarded-cwd",
+      "path": "cas-cli/src/fixture.rs",
+      "source": "#[test] fn cwd() { std::env::set_current_dir(\".\").unwrap(); }",
+      "violation": true
+    },
+    {
+      "name": "guarded-setters",
+      "path": "cas-cli/src/fixture.rs",
+      "source": "#[test] fn safe() { let mut guard = TestEnvGuard::new(); guard.set(\"HOME\", \"other\"); guard.remove(\"CAS_FACTORY_SESSION\"); guard.set_current_dir(\".\"); }",
+      "violation": false
+    },
+    {
+      "name": "child-command-env",
+      "path": "cas-cli/src/fixture.rs",
+      "source": "#[test] fn child() { std::process::Command::new(\"fixture\").env(\"HOME\", \"child\").env_remove(\"CAS_FACTORY_SESSION\").current_dir(\".\"); }",
+      "violation": false
+    },
+    {
+      "name": "nested-temp-home-callback",
+      "path": "cas-cli/src/fixture.rs",
+      "source": "#[test] fn nested() { TestEnvGuard::run_with_temp_home(|_| { let _inner = TestEnvGuard::new(); }); }",
+      "violation": true
+    },
+    {
+      "name": "nested-helper-call",
+      "path": "cas-cli/src/fixture.rs",
+      "source": "fn fixture() { let _fixture = TestEnvGuard::temp_home(); } #[test] fn nested() { let _outer = TestEnvGuard::new(); fixture(); }",
+      "violation": true
+    },
+    {
+      "name": "constructor-alias",
+      "path": "cas-cli/src/fixture.rs",
+      "source": "use crate::test_support::TestEnvGuard as Guard; #[test] fn nested() { let _outer = Guard::new(); let _inner = Guard::temp_home(); }",
+      "violation": true
+    },
+    {
+      "name": "mutation-import-alias",
+      "path": "cas-cli/src/fixture.rs",
+      "source": "use std::env::set_var as change; #[test] fn bad() { unsafe { change(\"HOME\", \"other\"); } }",
+      "violation": true
+    },
+    {
+      "name": "dropped-guard-then-new",
+      "path": "cas-cli/src/fixture.rs",
+      "source": "#[test] fn sequence() { let first = TestEnvGuard::new(); drop(first); let _second = TestEnvGuard::new(); }",
+      "violation": false
+    },
+    {
+      "name": "disjoint-guard-scopes",
+      "path": "cas-cli/src/fixture.rs",
+      "source": "#[test] fn sequence() { { let _first = TestEnvGuard::new(); } { let _second = TestEnvGuard::new(); } }",
+      "violation": false
+    },
+    {
+      "name": "new-thread-separate-ownership",
+      "path": "cas-cli/src/fixture.rs",
+      "source": "#[test] fn thread() { let outer = TestEnvGuard::new(); let child = std::thread::spawn(|| { let _child = TestEnvGuard::new(); }); drop(outer); child.join().unwrap(); }",
+      "violation": false
+    },
+    {
+      "name": "literal-comment-distractions",
+      "path": "cas-cli/src/fixture.rs",
+      "source": "#[test] fn pure() { let source = r###\"std::env::set_var(\"HOME\", \"x\"); TestEnvGuard::new(); }\"###; /* outer /* std::env::remove_var(\"HOME\"); */ comment */ let quoted = \"TestEnvGuard::new()\"; }",
+      "violation": false
+    },
+    {
+      "name": "lexical-spacing",
+      "path": "cas-cli/src/fixture.rs",
+      "source": "#[test] fn bad() { unsafe { std :: env :: set_var (\"HOME\", \"other\"); } }",
+      "violation": true
+    },
+    {
+      "name": "second-guard-in-branch",
+      "path": "cas-cli/src/fixture.rs",
+      "source": "#[test] fn nested() { let _outer = TestEnvGuard::new(); if true { let _inner = TestEnvGuard::new(); } }",
+      "violation": true
+    },
+    {
+      "name": "non-test-production-mutation",
+      "path": "cas-cli/src/fixture.rs",
+      "source": "fn startup() { unsafe { std::env::set_var(\"CAS_FACTORY_SESSION\", \"factory\"); } }",
+      "violation": false
+    },
+    {
+      "name": "child-only-deliberate-nesting",
+      "path": "cas-cli/src/fixture.rs",
+      "source": "// test-env: subprocess-only \u2014 ignored bounded re-exec child proves nesting panics\n#[test] #[ignore = \"isolated child probe\"] #[should_panic] fn child() { let _outer = TestEnvGuard::new(); let _inner = TestEnvGuard::new(); }",
+      "violation": false
+    },
+    {
+      "name": "child-exception-cannot-protect-ordinary-test",
+      "path": "cas-cli/src/fixture.rs",
+      "source": "// test-env: subprocess-only \u2014 missing isolated child contract\n#[test] fn ordinary() { unsafe { std::env::set_var(\"HOME\", \"other\"); } }",
+      "violation": true
+    }
+  ]
+}

@@ -686,6 +686,11 @@ const AI_VOCABULARY_RULES: &[(&str, &str)] = &[
 /// art. A file-level exception is intentionally visible and checked for drift.
 const AI_VOCABULARY_ALLOWLIST: &[(&str, &str, &str)] = &[
     (
+        "skills/cas-codebase-design/references/design-it-twice.md",
+        "leverage",
+        "Architecture term for caller benefit used to compare the proposed interfaces.",
+    ),
+    (
         "skills/cas-codebase-design/SKILL.md",
         "leverage",
         "Architecture term for caller benefit from a deeper module interface.",

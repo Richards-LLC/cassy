@@ -301,7 +301,8 @@ fn factory_worker_scope_restores_prior_values_on_panic_cas_6651() {
         assert_eq!(std::env::var("CAS_FACTORY_MODE").as_deref(), Ok("1"));
         panic!("exercise worker scope restoration");
     }));
-    assert!(result.is_err());
+    let panic = result.expect_err("the deliberate fixture panic must unwind");
+    assert_eq!(panic.downcast_ref::<&str>().copied(), Some("exercise worker scope restoration"));
     assert_eq!(std::env::var("CAS_AGENT_ROLE").as_deref(), Ok("supervisor"));
     assert_eq!(std::env::var("CAS_FACTORY_MODE").as_deref(), Ok("0"));
 }

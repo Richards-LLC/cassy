@@ -1776,7 +1776,8 @@ fn gh_and_supervisor_scopes_restore_values_on_panic_cas_6651() {
         assert_eq!(std::env::var("CAS_AGENT_ROLE").as_deref(), Ok("supervisor"));
         panic!("exercise QA scope restoration");
     }));
-    assert!(result.is_err());
+    let panic = result.expect_err("the deliberate fixture panic must unwind");
+    assert_eq!(panic.downcast_ref::<&str>().copied(), Some("exercise QA scope restoration"));
     assert_eq!(std::env::var("CAS_QA_GH").as_deref(), Ok("original-gh"));
     assert!(std::env::var_os("CAS_TEST_GH_LOG").is_none());
     assert!(std::env::var_os("CAS_TEST_GH_HEAD").is_none());

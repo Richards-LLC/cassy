@@ -6,10 +6,10 @@
 //! Includes PtyRunner-based tests that verify output in a real terminal.
 
 use assert_cmd::Command;
-use cas_tui_test::{PtyRunner, PtyRunnerConfig, WaitExt, screen, screen_with_size};
+use cas_tui_test::{PtyRunner, PtyRunnerConfig, WaitExt, screen_with_size};
 use predicates::prelude::*;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 #[derive(Clone, Copy, Debug)]
@@ -98,6 +98,8 @@ fn report_validation_accepts_completed_successful_reports() {
         let accepted = validate_piped_report(&output, kind).expect("completed successful report");
         assert_eq!(accepted, report);
     }
+    let ascii = report_fixture(&COMPLETE_DOCTOR_REPORT.replace('·', "-"), "0");
+    validate_piped_report(&ascii, ReportKind::Doctor).expect("completed ASCII doctor report");
 }
 
 #[test]
@@ -181,12 +183,143 @@ fn pty_report_validation_accepts_completed_successful_children() {
 }
 
 #[test]
+#[cfg(unix)]
+fn pty_report_rejects_completed_output_from_a_running_child() {
+    let mut runner = PtyRunner::new();
+    runner
+        .spawn(
+            "sh",
+            &[
+                "-c",
+                "printf '%s' \"$1\"; exec sleep 30",
+                "report-fixture",
+                COMPLETE_STATUS_REPORT,
+            ],
+        )
+        .unwrap();
+    runner
+        .wait_for_text_timeout("2 entries, 0 rules", Duration::from_secs(2))
+        .unwrap();
+    let error =
+        completed_pty_report_timeout(&mut runner, ReportKind::Status, Duration::from_millis(100))
+            .expect_err("a printed report does not prove child completion");
+    assert!(error.contains("timed out"), "{error}");
+    assert!(
+        !runner.is_running(),
+        "timed-out fixture child must be reaped"
+    );
+}
+
+#[test]
 fn snapshot_redaction_preserves_stable_counts() {
     let report = "host: 7 findings — see `cas doctor --host`\ncas: 2 entries, 3 rules (1 proven), 4 high-value\nEntries: 2\nTasks: 5\nSchema: 42\n";
     assert_eq!(
         redact_dynamic_values(report),
         "host: [N] finding(s) — see `cas doctor --host`\ncas: 2 entries, 3 rules (1 proven), 4 high-value\nEntries: 2\nTasks: 5\nSchema: 42\n"
     );
+}
+
+const DOCTOR_COMPLETION: &str = "cas doctor --verbose for timings and full messages";
+const STATUS_REPORT_PATTERN: &str = r"(?m)^\s*cas: \d+ entries, \d+ rules \(\d+ proven\), \d+ high-value(?:, \d+ code symbols)?\s*$";
+
+/// Shared by real CLI/PTY tests and the negative child fixtures above. A clean
+/// buffer alone cannot prove a successful render: both completion and exit
+/// success are required before the no-ANSI assertion can pass.
+fn validate_report_text(
+    stdout: &str,
+    child_succeeded: bool,
+    report: ReportKind,
+    require_plain: bool,
+) -> Result<(), String> {
+    if !child_succeeded {
+        return Err(format!(
+            "child failed while rendering {report:?}:\n{stdout}"
+        ));
+    }
+    if require_plain && stdout.contains('\x1b') {
+        return Err(format!("unexpected ANSI in {report:?} report:\n{stdout}"));
+    }
+    let completed = match report {
+        ReportKind::Doctor => stdout.contains("Store")
+            && stdout.contains("database")
+            && stdout.contains("schema")
+            && stdout.contains(DOCTOR_COMPLETION)
+            && regex::Regex::new(
+                r"(?m)^\s*\d+ ok [·-] (?:\d+ info [·-] )?\d+ warnings [·-] \d+ errors [·-] [^\n]+",
+            )
+            .unwrap()
+            .is_match(stdout),
+        ReportKind::Status => regex::Regex::new(STATUS_REPORT_PATTERN)
+            .unwrap()
+            .is_match(stdout),
+        ReportKind::Version => regex::Regex::new(r"(?m)^cas \d+\.\d+\.\d+(?:[-+][^\s]+)?\r?$")
+            .unwrap()
+            .is_match(stdout),
+        ReportKind::Help => stdout.starts_with("Cassy\n") && stdout.contains("Usage: cas"),
+    };
+    if !completed {
+        return Err(format!("missing completed {report:?} report:\n{stdout}"));
+    }
+    Ok(())
+}
+
+fn validate_piped_report(
+    output: &std::process::Output,
+    report: ReportKind,
+) -> Result<String, String> {
+    let stdout = String::from_utf8(output.stdout.clone()).map_err(|error| error.to_string())?;
+    validate_report_text(&stdout, output.status.success(), report, true).map_err(|error| {
+        format!(
+            "{error}\nexit: {}\nstderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })?;
+    Ok(stdout)
+}
+
+fn completed_pty_report(runner: &mut PtyRunner, report: ReportKind) -> Result<String, String> {
+    completed_pty_report_timeout(runner, report, Duration::from_secs(10))
+}
+
+fn completed_pty_report_timeout(
+    runner: &mut PtyRunner,
+    report: ReportKind,
+    timeout: Duration,
+) -> Result<String, String> {
+    let deadline = Instant::now() + timeout;
+    while runner.is_running() {
+        if Instant::now() >= deadline {
+            let output = runner.get_output().as_str();
+            runner.kill().map_err(|error| error.to_string())?;
+            runner
+                .wait()
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "killed PTY child returned no exit status".to_string())?;
+            return Err(format!(
+                "timed out waiting for {report:?} child completion:\n{output}"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let status = runner
+        .wait()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "PTY child returned no exit status".to_string())?;
+    // Child exit and the reader thread draining the last PTY bytes are separate
+    // events. Collect stable output only after exit, then validate the final row.
+    let output = runner.wait_stable().map_err(|error| error.to_string())?;
+    let rendered = screen_with_size(&output, 80, 200).text();
+    validate_report_text(&rendered, status.success(), report, false)
+        .map_err(|error| format!("{error}\nexit: {status}"))?;
+    Ok(output)
+}
+
+fn decline_doctor_autofix(runner: &mut PtyRunner) {
+    runner
+        .wait_for_text_timeout("doctor found safe automatic fixes", Duration::from_secs(10))
+        .expect("fresh fixture must offer safe doctor fixes");
+    runner.send_input("n").expect("decline automatic fixes");
 }
 
 fn cas_cmd(dir: &Path) -> Command {
@@ -241,17 +374,7 @@ fn doctor_piped_no_ansi() {
         .output()
         .expect("failed to run cas doctor");
 
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    // Piped output should contain no ANSI escape sequences
-    assert!(
-        !stdout.contains('\x1b'),
-        "Piped output contains ANSI escape codes:\n{stdout}"
-    );
-    // Should contain key doctor output
-    assert!(
-        stdout.contains("Doctor") || stdout.contains("doctor") || stdout.contains("Store"),
-        "Doctor output missing expected content:\n{stdout}"
-    );
+    validate_piped_report(&output, ReportKind::Doctor).expect("successful complete plain report");
 }
 
 #[test]
@@ -265,11 +388,7 @@ fn doctor_no_color_env() {
         .output()
         .expect("failed to run cas doctor");
 
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        !stdout.contains('\x1b'),
-        "NO_COLOR=1 output contains ANSI escape codes:\n{stdout}"
-    );
+    validate_piped_report(&output, ReportKind::Doctor).expect("successful complete plain report");
 }
 
 #[test]
@@ -282,11 +401,7 @@ fn status_piped_no_ansi() {
         .output()
         .expect("failed to run cas status");
 
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        !stdout.contains('\x1b'),
-        "Piped status output contains ANSI escape codes:\n{stdout}"
-    );
+    validate_piped_report(&output, ReportKind::Status).expect("successful complete plain report");
 }
 
 #[test]
@@ -300,11 +415,7 @@ fn status_no_color_env() {
         .output()
         .expect("failed to run cas status");
 
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        !stdout.contains('\x1b'),
-        "NO_COLOR=1 status output contains ANSI escape codes:\n{stdout}"
-    );
+    validate_piped_report(&output, ReportKind::Status).expect("successful complete plain report");
 }
 
 // ============================================================================
@@ -331,15 +442,7 @@ fn version_piped_no_ansi() {
         .output()
         .expect("failed to run cas --version");
 
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        !stdout.contains('\x1b'),
-        "Version output contains ANSI escape codes:\n{stdout}"
-    );
-    assert!(
-        stdout.contains("cas"),
-        "Version output missing 'cas': {stdout}"
-    );
+    validate_piped_report(&output, ReportKind::Version).expect("successful complete plain report");
 }
 
 #[test]
@@ -350,19 +453,7 @@ fn help_piped_no_ansi() {
         .output()
         .expect("failed to run cas --help");
 
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        !stdout.contains('\x1b'),
-        "Help output contains ANSI escape codes:\n{stdout}"
-    );
-    assert!(
-        stdout.starts_with("Cassy\n"),
-        "Piped help must fall back to the plain Cassy wordmark:\n{stdout}"
-    );
-    assert!(
-        stdout.contains("Usage: cas"),
-        "The command usage must remain `cas`:\n{stdout}"
-    );
+    validate_piped_report(&output, ReportKind::Help).expect("successful complete plain report");
 }
 
 // ============================================================================
@@ -380,7 +471,8 @@ fn doctor_snapshot() {
         .output()
         .expect("failed to run cas doctor");
 
-    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stdout = validate_piped_report(&output, ReportKind::Doctor)
+        .expect("successful complete snapshot input");
     // Redact dynamic values (paths, timestamps, sizes)
     let redacted = redact_dynamic_values(&stdout);
     insta::assert_snapshot!(redacted);
@@ -397,7 +489,12 @@ fn status_empty_snapshot() {
         .output()
         .expect("failed to run cas status");
 
-    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stdout = validate_piped_report(&output, ReportKind::Status)
+        .expect("successful complete snapshot input");
+    assert_eq!(
+        stdout.trim(),
+        "cas: 0 entries, 0 rules (0 proven), 0 high-value"
+    );
     let redacted = redact_dynamic_values(&stdout);
     insta::assert_snapshot!(redacted);
 }
@@ -422,6 +519,8 @@ fn pty_cas_in_dir(dir: &TempDir, args: &[&str]) -> PtyRunner {
         .env("XDG_CONFIG_HOME", xdg.to_string_lossy())
         .env("CAS_SKIP_FACTORY_TOOLING", "1")
         .env_remove("CAS_ROOT")
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CODEX_HOME")
         .cwd(dir.path());
     if let Some(host_home) = std::env::var_os("HOME") {
         config = config.env("CAS_TEST_PROTECTED_HOME", host_home.to_string_lossy());
@@ -438,18 +537,12 @@ fn pty_doctor_output() {
 
     let mut runner = pty_cas_in_dir(&temp, &["doctor"]);
 
-    // Wait for doctor output to appear
-    let result = runner.wait_for_text_timeout("doctor", Duration::from_secs(10));
-    assert!(result.is_ok(), "Should find 'doctor' in PTY output");
-
-    let output = runner.get_output().as_str();
-    // Render tall enough to hold the whole report. The default 24-row screen
-    // made this assertion depend on the report's LENGTH, not on whether doctor
-    // rendered: the command echo sits on line 3, so the first check added to
-    // doctor after the report reached 24 lines scrolls the echo off the top and
-    // fails a test that is supposed to be about PTY rendering.
-    let scr = screen_with_size(&output, 80, 200);
-    scr.assert_contains("doctor").unwrap();
+    decline_doctor_autofix(&mut runner);
+    let output = completed_pty_report(&mut runner, ReportKind::Doctor)
+        .expect("doctor must complete successfully with its final report row");
+    screen_with_size(&output, 80, 200)
+        .assert_contains(DOCTOR_COMPLETION)
+        .unwrap();
 }
 
 #[test]
@@ -459,13 +552,11 @@ fn pty_status_output() {
 
     let mut runner = pty_cas_in_dir(&temp, &["status"]);
 
-    // Wait for status output
-    let result = runner.wait_for_text_timeout("cas", Duration::from_secs(10));
-    assert!(result.is_ok(), "Should find 'cas' in PTY status output");
-
-    let output = runner.get_output().as_str();
-    let scr = screen(&output);
-    scr.assert_contains("cas").unwrap();
+    let output = completed_pty_report(&mut runner, ReportKind::Status)
+        .expect("status must complete successfully with its count row");
+    screen_with_size(&output, 80, 200)
+        .assert_matches(STATUS_REPORT_PATTERN)
+        .unwrap();
 }
 
 #[test]
@@ -475,21 +566,9 @@ fn pty_doctor_has_expected_sections() {
 
     let mut runner = pty_cas_in_dir(&temp, &["doctor"]);
 
-    // TTY doctor offers the safe auto-fix set before rendering the report.
-    // Decline it so this section test can observe the full report.
-    runner
-        .wait_for_text_timeout("doctor found safe automatic fixes", Duration::from_secs(10))
-        .unwrap();
-    runner.send_input("n").unwrap();
-
-    // Wait for the output to stabilize
-    runner
-        .wait_for_text_timeout("Store", Duration::from_secs(10))
-        .unwrap();
-
-    let output = runner.get_output().as_str();
-    // New migration-accounted doctor checks may extend the report beyond the
-    // default 24-row terminal. This test verifies sections, not scrollback.
+    decline_doctor_autofix(&mut runner);
+    let output = completed_pty_report(&mut runner, ReportKind::Doctor)
+        .expect("doctor sections must belong to a completed successful report");
     let scr = screen_with_size(&output, 80, 200);
 
     // Verify key sections are present
@@ -611,15 +690,11 @@ fn redact_dynamic_values(s: &str) -> String {
         .replace_all(&result, "$1 · [PROJECT] ·")
         .to_string();
 
-    // Redact counts that follow "entries:", "tasks:", etc.
-    let count_re = regex::Regex::new(r":\s+\d+\b").unwrap();
-    result = count_re.replace_all(&result, ": [N]").to_string();
-
-    // The host finding count depends on which provider CLIs the machine has
-    // installed (hub launch readiness), so its plural is machine-specific too.
-    let findings_re = regex::Regex::new(r"\[N\] findings?\b").unwrap();
+    // Host findings depend on which provider CLIs are installed. Entry/task/
+    // rule/schema counts come from the fixture and must remain visible.
+    let findings_re = regex::Regex::new(r"(\bhost:\s+)\d+ findings?\b").unwrap();
     result = findings_re
-        .replace_all(&result, "[N] finding(s)")
+        .replace_all(&result, "${1}[N] finding(s)")
         .to_string();
 
     result

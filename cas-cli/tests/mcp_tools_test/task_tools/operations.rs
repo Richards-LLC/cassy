@@ -3934,12 +3934,10 @@ async fn test_task_mine_matches_env_worker_name_during_spawn_race() {
     // the worker process's env.
     let worker_name = "warm-gopher-85";
 
-    // Acquire the env lock since we're mutating CAS_AGENT_NAME.
-    let prev_name = std::env::var("CAS_AGENT_NAME").ok();
-    // SAFETY: env lock is held for the duration of this test body.
-    unsafe {
-        std::env::set_var("CAS_AGENT_NAME", worker_name);
-    }
+    let name_override = ScopedFactoryEnv::apply(
+        &mut test_env,
+        &[("CAS_AGENT_NAME", Some(worker_name))],
+    );
 
     // Create a task, then update its assignee to the worker's friendly name —
     // exactly what a supervisor does via `task update assignee=<worker-name>`.
@@ -4019,14 +4017,7 @@ async fn test_task_mine_matches_env_worker_name_during_spawn_race() {
         .expect("tasks_mine should succeed");
     let text = extract_text(result);
 
-    // Restore env before any assertion to avoid poisoning sibling tests on
-    // panic. SAFETY: still holding env lock.
-    unsafe {
-        match prev_name {
-            Some(v) => std::env::set_var("CAS_AGENT_NAME", v),
-            None => std::env::remove_var("CAS_AGENT_NAME"),
-        }
-    }
+    drop(name_override);
 
     assert!(
         text.contains(&id),
@@ -4663,16 +4654,8 @@ async fn test_task_mine_matches_case_insensitive_and_trimmed() {
 struct ScopedSupervisorRole;
 
 impl ScopedSupervisorRole {
-    fn enter() -> Self {
-        // SAFETY: held under TestEnvGuard in all callers.
-        unsafe { std::env::set_var("CAS_AGENT_ROLE", "supervisor") }
-        Self
-    }
-}
-
-impl Drop for ScopedSupervisorRole {
-    fn drop(&mut self) {
-        unsafe { std::env::remove_var("CAS_AGENT_ROLE") }
+    fn enter(env: &mut TestEnvGuard) -> ScopedFactoryEnv<'_> {
+        ScopedFactoryEnv::apply(env, &[("CAS_AGENT_ROLE", Some("supervisor"))])
     }
 }
 
@@ -4773,7 +4756,7 @@ async fn test_supervisor_force_transfer_live_worker_task() {
     supervisor_core.set_agent_id_for_testing(supervisor_id.clone());
 
     // Set the supervisor role env var.
-    let _role_guard = ScopedSupervisorRole::enter();
+    let _role_guard = ScopedSupervisorRole::enter(&mut test_env);
 
     // Supervisor force-transfers the task to the target worker.
     let transfer_req = TaskTransferRequest {
@@ -5060,7 +5043,7 @@ async fn a_task_without_a_lease_needs_its_assignee_or_a_supervisor_override() {
 
     let supervisor_core = CasCore::with_daemon(cas_dir.clone(), None, None);
     supervisor_core.set_agent_id_for_testing("supervisor-session-id".to_string());
-    let _role_guard = ScopedSupervisorRole::enter();
+    let _role_guard = ScopedSupervisorRole::enter(&mut test_env);
     supervisor_core
         .cas_task_transfer(Parameters(TaskTransferRequest {
             supervisor_override: Some(true),
@@ -5703,7 +5686,7 @@ async fn rejected_assignee_reports_that_the_whole_multi_field_update_was_aborted
         .await
         .unwrap();
     let task_id = extract_task_id(&extract_text(created)).unwrap().to_string();
-    unsafe { std::env::set_var("CAS_FACTORY_MODE", "1") }
+    test_env.set("CAS_FACTORY_MODE", "1");
     let error = service
         .cas_task_update(Parameters(TaskUpdateRequest {
             blocked_by: None,
@@ -5730,7 +5713,7 @@ async fn rejected_assignee_reports_that_the_whole_multi_field_update_was_aborted
         }))
         .await
         .expect_err("stale assignment must reject the batch");
-    unsafe { std::env::remove_var("CAS_FACTORY_MODE") }
+    test_env.remove("CAS_FACTORY_MODE");
 
     let message = error.message.to_string();
     assert!(message.contains("TASK UPDATE BATCH ABORTED"), "{message}");
@@ -5770,7 +5753,7 @@ async fn test_factory_mode_normalizes_session_uuid_assignee_to_display_name() {
 
     // Set CAS_FACTORY_MODE so the normalization branch activates.
     // SAFETY: we hold the process-wide env lock for the full test body.
-    unsafe { std::env::set_var("CAS_FACTORY_MODE", "1") }
+    test_env.set("CAS_FACTORY_MODE", "1");
 
     // Create a task.
     let created = service
@@ -5813,7 +5796,7 @@ async fn test_factory_mode_normalizes_session_uuid_assignee_to_display_name() {
 
     // Restore env before assertions so a panic doesn't poison sibling tests.
     // SAFETY: still holding env lock.
-    unsafe { std::env::remove_var("CAS_FACTORY_MODE") }
+    test_env.remove("CAS_FACTORY_MODE");
 
     let text = extract_text(update_result);
 
@@ -5868,7 +5851,7 @@ async fn test_factory_mode_empty_assignee_clears_without_remapping_to_live_worke
     let worker = cas::types::Agent::new(WORKER_SESSION.to_string(), WORKER_NAME.to_string());
     agent_store.register(&worker).expect("register worker");
 
-    unsafe { std::env::set_var("CAS_FACTORY_MODE", "1") }
+    test_env.set("CAS_FACTORY_MODE", "1");
 
     let created = service
         .cas_task_create(Parameters(make_task_create_req(
@@ -5942,7 +5925,7 @@ async fn test_factory_mode_empty_assignee_clears_without_remapping_to_live_worke
         .await
         .expect("empty assignee update must succeed as clear");
 
-    unsafe { std::env::remove_var("CAS_FACTORY_MODE") }
+    test_env.remove("CAS_FACTORY_MODE");
 
     let text = extract_text(clear_result);
     assert!(
@@ -5999,7 +5982,7 @@ async fn test_factory_mode_empty_assignee_clears_without_remapping_to_live_worke
         .await
         .expect("re-seed");
 
-    unsafe { std::env::set_var("CAS_FACTORY_MODE", "1") }
+    test_env.set("CAS_FACTORY_MODE", "1");
     service
         .cas_task_update(Parameters(TaskUpdateRequest {
             blocked_by: None,
@@ -6026,7 +6009,7 @@ async fn test_factory_mode_empty_assignee_clears_without_remapping_to_live_worke
         }))
         .await
         .expect("whitespace assignee must clear");
-    unsafe { std::env::remove_var("CAS_FACTORY_MODE") }
+    test_env.remove("CAS_FACTORY_MODE");
 
     let after_ws = task_store
         .get(&task_id)

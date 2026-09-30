@@ -50,25 +50,18 @@ fn create_req(title: &str, depth: Option<&str>) -> TaskCreateRequest {
     }
 }
 
-/// RAII guard that installs factory-worker env vars and clears them on drop.
+/// Borrowed factory-worker override; prior values are restored on drop.
 struct FactoryWorkerGuard;
 
 impl FactoryWorkerGuard {
-    fn enter() -> Self {
-        unsafe {
-            std::env::set_var("CAS_AGENT_ROLE", "worker");
-            std::env::set_var("CAS_FACTORY_MODE", "1");
-        }
-        Self
-    }
-}
-
-impl Drop for FactoryWorkerGuard {
-    fn drop(&mut self) {
-        unsafe {
-            std::env::remove_var("CAS_AGENT_ROLE");
-            std::env::remove_var("CAS_FACTORY_MODE");
-        }
+    fn enter(env: &mut TestEnvGuard) -> ScopedFactoryEnv<'_> {
+        ScopedFactoryEnv::apply(
+            env,
+            &[
+                ("CAS_AGENT_ROLE", Some("worker")),
+                ("CAS_FACTORY_MODE", Some("1")),
+            ],
+        )
     }
 }
 
@@ -392,7 +385,7 @@ async fn test_light_depth_factory_close_skips_p0_gate_and_closes() {
     let task_store = open_task_store(&cas_dir).unwrap();
     let service = CasService::new(core, None);
 
-    let _worker_guard = FactoryWorkerGuard::enter();
+    let _worker_guard = FactoryWorkerGuard::enter(&mut test_env);
 
     let created = service
         .task(Parameters(task_req(serde_json::json!({
@@ -471,7 +464,7 @@ async fn test_deep_depth_factory_close_does_not_use_review_queue() {
     let task_store = open_task_store(&cas_dir).unwrap();
     let service = CasService::new(core, None);
 
-    let _worker_guard = FactoryWorkerGuard::enter();
+    let _worker_guard = FactoryWorkerGuard::enter(&mut test_env);
 
     let created = service
         .task(Parameters(task_req(serde_json::json!({
@@ -627,10 +620,7 @@ async fn test_supervisor_can_reopen_closed_task() {
     let id = create_started_and_closed_light_task(&core, "supervisor reopen happy path").await;
 
     let reopen_text = {
-        // SAFETY: held under TestEnvGuard for the whole scope.
-        unsafe {
-            std::env::set_var("CAS_AGENT_ROLE", "supervisor");
-        }
+        test_env.set("CAS_AGENT_ROLE", "supervisor");
         let text = extract_text(
             core.cas_task_reopen(Parameters(TaskReopenRequest {
                 id: id.clone(),
@@ -639,9 +629,7 @@ async fn test_supervisor_can_reopen_closed_task() {
             .await
             .expect("supervisor reopen should succeed"),
         );
-        unsafe {
-            std::env::remove_var("CAS_AGENT_ROLE");
-        }
+        test_env.remove("CAS_AGENT_ROLE");
         text
     };
 
@@ -672,9 +660,7 @@ async fn test_supervisor_reopen_terminal_task_requires_non_empty_reason() {
     let task_store = open_task_store(&cas_dir).unwrap();
     let id = create_started_and_closed_light_task(&core, "terminal reopen reason required").await;
 
-    unsafe {
-        std::env::set_var("CAS_AGENT_ROLE", "supervisor");
-    }
+    test_env.set("CAS_AGENT_ROLE", "supervisor");
     let error = core
         .cas_task_reopen(Parameters(TaskReopenRequest {
             id: id.clone(),
@@ -682,9 +668,7 @@ async fn test_supervisor_reopen_terminal_task_requires_non_empty_reason() {
         }))
         .await
         .expect_err("terminal reopen without a reason must be rejected");
-    unsafe {
-        std::env::remove_var("CAS_AGENT_ROLE");
-    }
+    test_env.remove("CAS_AGENT_ROLE");
 
     assert!(
         error.message.contains("non-empty reason"),
@@ -727,10 +711,7 @@ async fn test_cd24_supervisor_can_reopen_blocked_task_with_reason() {
     }
 
     let reopen_text = {
-        // SAFETY: held under TestEnvGuard for the whole scope.
-        unsafe {
-            std::env::set_var("CAS_AGENT_ROLE", "supervisor");
-        }
+        test_env.set("CAS_AGENT_ROLE", "supervisor");
         let text = extract_text(
             core.cas_task_reopen(Parameters(TaskReopenRequest {
                 id: id.clone(),
@@ -742,9 +723,7 @@ async fn test_cd24_supervisor_can_reopen_blocked_task_with_reason() {
             .await
             .expect("supervisor reopen of a blocked task should succeed"),
         );
-        unsafe {
-            std::env::remove_var("CAS_AGENT_ROLE");
-        }
+        test_env.remove("CAS_AGENT_ROLE");
         text
     };
     assert!(
@@ -788,19 +767,14 @@ async fn test_cd24_closed_reopen_still_clears_closed_at() {
     );
 
     {
-        // SAFETY: held under TestEnvGuard for the whole scope.
-        unsafe {
-            std::env::set_var("CAS_AGENT_ROLE", "supervisor");
-        }
+        test_env.set("CAS_AGENT_ROLE", "supervisor");
         core.cas_task_reopen(Parameters(TaskReopenRequest {
             id: id.clone(),
             reason: Some("preserve close metadata regression coverage".to_string()),
         }))
         .await
         .expect("supervisor reopen should succeed");
-        unsafe {
-            std::env::remove_var("CAS_AGENT_ROLE");
-        }
+        test_env.remove("CAS_AGENT_ROLE");
     }
 
     let reopened = task_store.get(&id).expect("task should exist");
@@ -835,19 +809,14 @@ async fn test_cd24_reopen_rejects_other_statuses_and_names_alternative() {
         .expect("task_start should succeed");
 
     let result = {
-        // SAFETY: held under TestEnvGuard for the whole scope.
-        unsafe {
-            std::env::set_var("CAS_AGENT_ROLE", "supervisor");
-        }
+        test_env.set("CAS_AGENT_ROLE", "supervisor");
         let r = core
             .cas_task_reopen(Parameters(TaskReopenRequest {
                 id: id.clone(),
                 reason: Some("exercise nonterminal reopen rejection".to_string()),
             }))
             .await;
-        unsafe {
-            std::env::remove_var("CAS_AGENT_ROLE");
-        }
+        test_env.remove("CAS_AGENT_ROLE");
         let _ = temp;
         r
     };
@@ -915,16 +884,11 @@ async fn test_start_on_closed_message_is_supervisor_appropriate() {
         create_started_and_closed_light_task(&core, "start-on-closed supervisor message").await;
 
     let result = {
-        // SAFETY: held under TestEnvGuard for the whole scope.
-        unsafe {
-            std::env::set_var("CAS_AGENT_ROLE", "supervisor");
-        }
+        test_env.set("CAS_AGENT_ROLE", "supervisor");
         let r = core
             .cas_task_start(Parameters(IdRequest { id: id.clone() }))
             .await;
-        unsafe {
-            std::env::remove_var("CAS_AGENT_ROLE");
-        }
+        test_env.remove("CAS_AGENT_ROLE");
         r
     };
 

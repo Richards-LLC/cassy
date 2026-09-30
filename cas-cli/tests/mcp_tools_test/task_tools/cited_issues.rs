@@ -72,9 +72,7 @@ async fn assignment_attaches_the_cited_issue_and_the_worker_reads_it_from_disk_c
     .unwrap();
     let bin = tempfile::tempdir().unwrap();
     let gh = fake_gh(bin.path());
-    let previous = std::env::var_os(cas::github_issue_attach::GH_BIN_ENV);
-    // SAFETY: TestEnvGuard is held for the whole test body.
-    unsafe { std::env::set_var(cas::github_issue_attach::GH_BIN_ENV, &gh) };
+    test_env.set(cas::github_issue_attach::GH_BIN_ENV, &gh);
 
     let tasks = open_task_store(&cas_dir).unwrap();
     let mut task = cas::types::Task::new("cas-cite1".to_string(), "Fix large uploads".to_string());
@@ -112,8 +110,7 @@ async fn assignment_attaches_the_cited_issue_and_the_worker_reads_it_from_disk_c
     assert!(unavailable.contains("Not Found"), "{unavailable}");
 
     // The worker reads it from disk: it needs no gh at all.
-    // SAFETY: as above.
-    unsafe { std::env::set_var(cas::github_issue_attach::GH_BIN_ENV, "/nonexistent/gh") };
+    test_env.set(cas::github_issue_attach::GH_BIN_ENV, "/nonexistent/gh");
     let worker = CasCore::with_daemon(cas_dir.clone(), None, None);
     let shown = text_of(
         worker
@@ -141,11 +138,4 @@ async fn assignment_attaches_the_cited_issue_and_the_worker_reads_it_from_disk_c
         "{started}"
     );
 
-    // SAFETY: as above.
-    unsafe {
-        match previous {
-            Some(value) => std::env::set_var(cas::github_issue_attach::GH_BIN_ENV, value),
-            None => std::env::remove_var(cas::github_issue_attach::GH_BIN_ENV),
-        }
-    }
 }

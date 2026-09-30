@@ -33,25 +33,18 @@ fn task_req(value: serde_json::Value) -> cas_mcp::TaskRequest {
     serde_json::from_value(value).expect("TaskRequest should deserialize from test JSON")
 }
 
-/// RAII guard that installs factory-worker env vars and clears them on drop.
+/// Borrowed factory-worker override; prior values are restored on drop.
 struct FactoryWorkerGuard;
 
 impl FactoryWorkerGuard {
-    fn enter() -> Self {
-        unsafe {
-            std::env::set_var("CAS_AGENT_ROLE", "worker");
-            std::env::set_var("CAS_FACTORY_MODE", "1");
-        }
-        Self
-    }
-}
-
-impl Drop for FactoryWorkerGuard {
-    fn drop(&mut self) {
-        unsafe {
-            std::env::remove_var("CAS_AGENT_ROLE");
-            std::env::remove_var("CAS_FACTORY_MODE");
-        }
+    fn enter(env: &mut TestEnvGuard) -> ScopedFactoryEnv<'_> {
+        ScopedFactoryEnv::apply(
+            env,
+            &[
+                ("CAS_AGENT_ROLE", Some("worker")),
+                ("CAS_FACTORY_MODE", Some("1")),
+            ],
+        )
     }
 }
 
@@ -187,8 +180,8 @@ async fn test_e2e_light_depth_persists_then_closes_without_gates() {
     );
 
     // Session 2 — a separate worker process closes it.
-    let _worker = FactoryWorkerGuard::enter();
-    let close_text = start_and_close(&mut test_env, &cas_dir, &id).await;
+    let mut worker = FactoryWorkerGuard::enter(&mut test_env);
+    let close_text = start_and_close(worker.guard(), &cas_dir, &id).await;
     assert!(
         close_text.contains("Closed task"),
         "deep task close should report a terminal close: {close_text}"
@@ -242,8 +235,8 @@ async fn test_e2e_deep_depth_persists_then_closes() {
         "depth=deep must round-trip through SQLite"
     );
 
-    let _worker = FactoryWorkerGuard::enter();
-    let close_text = start_and_close(&mut test_env, &cas_dir, &id).await;
+    let mut worker = FactoryWorkerGuard::enter(&mut test_env);
+    let close_text = start_and_close(worker.guard(), &cas_dir, &id).await;
     assert!(
         close_text.contains("Closed task"),
         "deep task close should report a terminal close: {close_text}"
@@ -283,8 +276,8 @@ async fn test_e2e_unset_depth_reads_as_deep_then_closes() {
         "unset depth must read back as Deep (NULL→Deep)"
     );
 
-    let _worker = FactoryWorkerGuard::enter();
-    let close_text = start_and_close(&mut test_env, &cas_dir, &id).await;
+    let mut worker = FactoryWorkerGuard::enter(&mut test_env);
+    let close_text = start_and_close(worker.guard(), &cas_dir, &id).await;
     assert!(
         close_text.contains("Closed task"),
         "unset-depth task close should report a terminal close: {close_text}"
@@ -295,4 +288,21 @@ async fn test_e2e_unset_depth_reads_as_deep_then_closes() {
         TaskStatus::Closed,
         "unset-depth task must close without the retired supervisor-review queue"
     );
+}
+
+#[test]
+fn factory_worker_scope_restores_prior_values_on_panic_cas_6651() {
+    let mut test_env = TestEnvGuard::temp_home();
+    test_env.set("CAS_AGENT_ROLE", "supervisor");
+    test_env.set("CAS_FACTORY_MODE", "0");
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _worker = FactoryWorkerGuard::enter(&mut test_env);
+        assert_eq!(std::env::var("CAS_AGENT_ROLE").as_deref(), Ok("worker"));
+        assert_eq!(std::env::var("CAS_FACTORY_MODE").as_deref(), Ok("1"));
+        panic!("exercise worker scope restoration");
+    }));
+    let panic = result.expect_err("the deliberate fixture panic must unwind");
+    assert_eq!(panic.downcast_ref::<&str>().copied(), Some("exercise worker scope restoration"));
+    assert_eq!(std::env::var("CAS_AGENT_ROLE").as_deref(), Ok("supervisor"));
+    assert_eq!(std::env::var("CAS_FACTORY_MODE").as_deref(), Ok("0"));
 }

@@ -4,7 +4,6 @@ use std::path::Path;
 use std::process::Command;
 
 #[derive(Default)]
-#[cfg_attr(test, derive(Debug))]
 struct Hunk {
     old_start: usize,
     old_count: usize,
@@ -702,7 +701,6 @@ fn advance(
                         .filter(|(_, new)| {
                             meaningful(new)
                                 && (ordinary
-                                    || internal_resolution
                                     || resolution_parent_lines
                                         .is_some_and(|parents| !parents.contains(*new)))
                         })
@@ -853,7 +851,7 @@ fn line_content_presence_impl(
             }
         }
     }
-    let owners: Vec<_> = initial
+    let mut owners: Vec<_> = initial
         .iter()
         .flat_map(|hunk| {
             hunk.added
@@ -874,6 +872,59 @@ fn line_content_presence_impl(
                 })
         })
         .collect();
+    // A deletion-only draft revision has no added owners. Retire it only
+    // when every meaningful removed line came from an earlier eligible
+    // author in this task cycle. The caller independently proves final
+    // handoff content; this empty state cannot prove that content or retire
+    // a deletion of baseline/foreign work.
+    if owners.is_empty() && cycle.iter().any(|owned| owned == delivery) {
+        let mut task_draft = false;
+        for hunk in &initial {
+            if !hunk.removed.iter().any(|line| meaningful(line)) {
+                continue;
+            }
+            let blame = text(
+                repo,
+                &[
+                    "blame",
+                    "--line-porcelain",
+                    "-L",
+                    &format!("{},+{}", hunk.old_start, hunk.old_count),
+                    parent,
+                    "--",
+                    path,
+                ],
+            )?;
+            let mut author = None;
+            for record in blame.lines() {
+                if let Some(line) = record.strip_prefix('\t') {
+                    if meaningful(line) {
+                        if !author.is_some_and(|sha| cycle.iter().any(|owned| owned == sha)) {
+                            return Ok(None);
+                        }
+                        task_draft = true;
+                    }
+                } else {
+                    let fields: Vec<_> = record.split_whitespace().collect();
+                    if fields.len() >= 3
+                        && fields[0].len() == 40
+                        && fields[0].bytes().all(|byte| byte.is_ascii_hexdigit())
+                        && fields[1].parse::<usize>().is_ok()
+                        && fields[2].parse::<usize>().is_ok()
+                    {
+                        author = Some(fields[0]);
+                    }
+                }
+            }
+        }
+        if task_draft {
+            owners.push(Some(OwnedLines {
+                positions: Vec::new(),
+                commits: vec![delivery.to_string()],
+                baseline: Vec::new(),
+            }));
+        }
+    }
     if owners.is_empty() {
         return Ok(None);
     }
@@ -979,7 +1030,7 @@ fn line_content_presence_impl(
                 .iter()
                 .map(|owner| {
                     owner.as_ref().and_then(|owner| {
-                        let advanced = advance(
+                        advance(
                             owner,
                             &changes,
                             ordinary,
@@ -992,16 +1043,7 @@ fn line_content_presence_impl(
                                 && cycle.iter().any(|owned| owned == commit),
                             reverted,
                             commit,
-                        );
-                        #[cfg(test)]
-                        if !cycle.is_empty() && advanced.is_none()
-                            && (path == "hub-web/src/styles.css"
-                                || path == "hub-web/e2e/journeys/switch-machines.journey.ts"
-                                || path == "copy.txt")
-                        {
-                            eprintln!("[DEBUG-cas-0930] edge owner={delivery} path={path} at={commit} parent={prior} ordinary={ordinary} retire={} internal={} reverted={reverted} positions={:?} baseline={:?} changes={changes:?}", cycle.iter().any(|owned| owned == commit), !ordinary && resolution_parent_lines.is_some() && cycle.iter().any(|owned| owned == commit), owner.positions, owner.baseline);
-                        }
-                        advanced
+                        )
                     })
                 })
                 .collect();

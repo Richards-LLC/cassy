@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Receipt invalidation tests; no Rust process is invoked."""
 import copy
+import contextlib
+import io
 import importlib.util
 from pathlib import Path
 import tempfile
@@ -66,6 +68,46 @@ class ReceiptTests(unittest.TestCase):
         changed = dict(self.expected, code_input=proof.code_input(self.root))
         self.assertNotEqual(self.expected["code_input"], changed["code_input"])
         self.assertIsNone(proof.matching(self.root, changed))
+
+    def test_train_output_locations_do_not_change_environment_fingerprint(self):
+        base = {"RUSTFLAGS": "-C debuginfo=1", "HOME": "/home/fixture", "PATH": "/bin"}
+        output = dict(base, CAS_RELEASE_ARTIFACTS_ROOT="/output/train",
+                      CAS_RELEASE_RECEIPTS_RUN_DIR="/output/receipts")
+        self.assertEqual(proof.environment_material(self.root, base),
+                         proof.environment_material(self.root, output))
+        changed = dict(output, RUSTFLAGS="-C debuginfo=2")
+        self.assertNotEqual(proof.environment_material(self.root, base),
+                            proof.environment_material(self.root, changed))
+
+    def test_miss_reports_first_differing_input_without_environment_values(self):
+        self.record["inputs"]["environment"] = "old"
+        self.save()
+        expected = dict(self.expected, environment="new")
+        stream = io.StringIO()
+        with contextlib.redirect_stderr(stream):
+            self.assertIsNone(proof.matching(self.root, expected, diagnostic=True))
+        self.assertIn("key=environment reason=different", stream.getvalue())
+
+    def test_environment_detail_uses_names_and_hashes_only(self):
+        self.record["inputs"]["environment"] = "old"
+        self.record["environment_keys"] = {
+            key: proof.digest(value.encode())
+            for key, value in proof.environment_material(self.root, proof.test_environment(self.root)).items()}
+        self.record["environment_keys"]["RUSTFLAGS"] = proof.digest(b"secret-compiler-flag")
+        self.save()
+        stream = io.StringIO()
+        with contextlib.redirect_stderr(stream):
+            self.assertIsNone(proof.matching(self.root, dict(self.expected, environment="new"), diagnostic=True))
+        self.assertIn("environment_key=RUSTFLAGS", stream.getvalue())
+        self.assertNotIn("secret-compiler-flag", stream.getvalue())
+
+    def test_invalid_receipt_names_its_validation_key(self):
+        self.record["completed_epoch"] = 0
+        self.save()
+        stream = io.StringIO()
+        with contextlib.redirect_stderr(stream):
+            self.assertIsNone(proof.matching(self.root, self.expected, diagnostic=True))
+        self.assertIn("key=completed_epoch reason=future_or_expired", stream.getvalue())
 
     def test_prep_member_versions_lock_and_ledger_reuse_proof(self):
         for name in ("member-one", "member-two"):

@@ -26,7 +26,9 @@ MAX_AGE = 86400
 IDENTITY = {"CAS_FACTORY_SESSION", "CAS_AGENT_ROLE", "CAS_AGENT_NAME",
             "CAS_SUPERVISOR_NAME", "CAS_AGENT_ID", "CAS_SESSION_ID", "CAS_ROOT"}
 VOLATILE = {"_", "SHLVL", "PWD", "OLDPWD", "CARGO_BUILD_JOBS", "CARGO_TARGET_DIR",
-            "VERIFIED_TEST_LOG"}
+            "VERIFIED_TEST_LOG",
+            # Train output locations do not change the compiled/tested candidate.
+            "CAS_RELEASE_ARTIFACTS_ROOT", "CAS_RELEASE_RECEIPTS_RUN_DIR"}
 
 
 def digest(value):
@@ -155,19 +157,7 @@ def inputs(root):
     if not clean(root):
         raise ValueError("assembly proof requires a clean checkout")
     env = test_environment(root)
-    material = {}
-    for key, value in env.items():
-        if (key in VOLATILE or key.startswith("CAS_RELEASE_GATE_")
-                or key.startswith("CAS_RELEASE_TRAIN_") or key == "ZIG"):
-            continue
-        material[key] = value
-    zig = env.get("ZIG")
-    if zig:
-        material["ZIG_SHA256"] = digest(Path(zig).read_bytes())
-    # Ignored local build inputs still invalidate a proof from another checkout.
-    for name in (".env", "cas-cli/.env", ".cargo/config", ".cargo/config.toml"):
-        path = root / name
-        material["local:" + name] = digest(path.read_bytes()) if path.is_file() else "absent"
+    material = environment_material(root, env)
     cargo = env.get("CARGO", "cargo")
     tools = []
     for command in ([cargo, "--version"], [cargo, "nextest", "--version"], ["rustc", "-Vv"]):
@@ -183,34 +173,97 @@ def inputs(root):
     return result, env
 
 
+def environment_material(root, env):
+    material = {}
+    for key, value in env.items():
+        if (key in VOLATILE or key.startswith("CAS_RELEASE_GATE_")
+                or key.startswith("CAS_RELEASE_TRAIN_") or key == "ZIG"):
+            continue
+        material[key] = value
+    zig = env.get("ZIG")
+    if zig:
+        material["ZIG_SHA256"] = digest(Path(zig).read_bytes())
+    # Ignored local build inputs still invalidate a proof from another checkout.
+    for name in (".env", "cas-cli/.env", ".cargo/config", ".cargo/config.toml"):
+        path = root / name
+        material["local:" + name] = digest(path.read_bytes()) if path.is_file() else "absent"
+    return material
+
+
 def receipt_path(root, expected):
     key = digest(json.dumps(expected, sort_keys=True).encode())
     return common_dir(root).parent / ".cas/merge-sweeps/assembly-proofs" / (key + ".json")
 
 
-def matching(root, expected):
+def explain_miss(root, expected):
+    """Compare the newest nearby receipt without granting it authorization."""
+    paths = sorted(receipt_path(root, expected).parent.glob("*.json"),
+                   key=lambda path: path.stat().st_mtime, reverse=True)
+    for path in paths[:100]:
+        try:
+            record = json.loads(path.read_text())
+            recorded = record["inputs"]
+            if record.get("status") != "PASS" or recorded.get("repository") != expected.get("repository"):
+                continue
+            for key in expected:
+                if recorded.get(key) != expected[key]:
+                    detail = ""
+                    if key == "environment" and isinstance(record.get("environment_keys"), dict):
+                        current = {name: digest(value.encode())
+                                   for name, value in environment_material(root, test_environment(root)).items()}
+                        prior = record["environment_keys"]
+                        differing = next((name for name in sorted(set(prior) | set(current))
+                                          if prior.get(name) != current.get(name)), None)
+                        if differing:
+                            detail = f" environment_key={differing}"
+                    return f"MISS assembly key={key} reason=different{detail} receipt={path}"
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            continue
+    return "MISS assembly key=receipt reason=no_matching_receipt"
+
+
+def matching(root, expected, diagnostic=False):
     path = receipt_path(root, expected)
+
+    def miss(key, reason):
+        if diagnostic:
+            print(f"MISS assembly key={key} reason={reason} receipt={path}", file=sys.stderr)
+        return None
+
     try:
         record = json.loads(path.read_text())
+        for key in expected:
+            if record["inputs"].get(key) != expected[key]:
+                return miss(key, "different")
+        if record["inputs"] != expected:
+            return miss("inputs", "unexpected_keys")
+        if record["status"] != "PASS":
+            return miss("status", "not_PASS")
         age = time.time() - record["completed_epoch"]
-        if (record["inputs"] != expected or record["status"] != "PASS"
-                or not 0 <= age <= MAX_AGE or len(record["tree"]) != 40
-                or not isinstance(record["archive_size_bytes"], int)
-                or record["archive_size_bytes"] <= 0
-                or set(record["contexts"]) != {"worktree", "clone"}
+        if not 0 <= age <= MAX_AGE:
+            return miss("completed_epoch", "future_or_expired")
+        if len(record["tree"]) != 40:
+            return miss("tree", "invalid")
+        if (not isinstance(record["archive_size_bytes"], int)
+                or record["archive_size_bytes"] <= 0):
+            return miss("archive_size_bytes", "empty_or_invalid")
+        if (set(record["contexts"]) != {"worktree", "clone"}
                 or any(record["contexts"][name]["status"] != "PASS"
                        or record["contexts"][name]["tree"] != record["tree"]
                        or record["contexts"][name]["passed"] <= 0
                        for name in ("worktree", "clone"))):
-            return None
-        # The object must still exist; recorded code inputs must belong to the
-        # tested commit, rather than an arbitrary claim about the current tree.
-        if (git(root, "rev-parse", record["head"] + "^{tree}").decode().strip() != record["tree"]
-                or code_input(root, record["head"]) != expected["code_input"]):
-            return None
+            return miss("contexts", "incomplete_or_incoherent")
+        if git(root, "rev-parse", record["head"] + "^{tree}").decode().strip() != record["tree"]:
+            return miss("head", "tested_tree_differs")
+        if code_input(root, record["head"]) != expected["code_input"]:
+            return miss("code_input", "tested_commit_differs")
         return record, path
-    except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError):
+    except FileNotFoundError:
+        if diagnostic:
+            print(explain_miss(root, expected), file=sys.stderr)
         return None
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.CalledProcessError):
+        return miss("receipt", "malformed_or_unavailable_object")
 
 
 def write(path, record):
@@ -279,7 +332,9 @@ def prove(root):
             return found
         head = git(root, "rev-parse", "HEAD").decode().strip()
         record = {"inputs": expected, "status": "RUNNING", "head": head,
-                  "tree": git(root, "rev-parse", "HEAD^{tree}").decode().strip(), "contexts": {}}
+                  "tree": git(root, "rev-parse", "HEAD^{tree}").decode().strip(), "contexts": {},
+                  "environment_keys": {key: digest(value.encode())
+                                       for key, value in environment_material(root, env).items()}}
         write(path, record)
         log_dir = path.parent / (path.stem + "-logs")
         log_dir.mkdir(exist_ok=True)
@@ -319,7 +374,7 @@ def main():
         if args.action == "input":
             print(code_input(root))
             return 0
-        found = prove(root) if args.action == "prove" else matching(root, inputs(root)[0])
+        found = prove(root) if args.action == "prove" else matching(root, inputs(root)[0], diagnostic=True)
         if not found:
             return 1
         record, path = found
@@ -330,6 +385,8 @@ def main():
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:
         if args.action == "prove":
             print("FAIL assembly proof: " + str(exc), file=sys.stderr)
+        elif args.action == "check":
+            print("MISS assembly key=checkout reason=" + str(exc), file=sys.stderr)
         return 1
 
 

@@ -123,7 +123,7 @@ pub enum DocType {
     /// channel's two row classes are distinguishable from the first response
     /// that can carry either; the table itself lands in M6.
     HistoryDoc,
-    /// A durable factory artifact under `[factory] artifacts_root/<task-id>/`.
+    /// A durable factory artifact under `[factory] artifacts_root/<project-key>/<task-id>/`.
     Artifact,
 }
 

@@ -25,7 +25,7 @@ Start with sources that cannot mutate the live Cassy DB:
 If those still do not answer the question:
 
 1. Add a progress or decision note explaining why task/log artifacts were insufficient.
-2. Prefer inspecting a copied snapshot of `.cas/cas.db`. Take it with `sqlite3 <db> ".backup <path>"` into `~/.cas/artifacts/<task-id>/`, never `cp` into `/tmp`: `$TMPDIR` is RAM-backed on the operator host, so a store copy, a worktree tree, or a build cache placed there evicts memory and takes every live session's shell output down with it when it fills.
+2. Prefer inspecting a copied snapshot of `.cas/cas.db`. Take it with `sqlite3 <db> ".backup <path>"` into `~/.cas/artifacts/<project-key>/<task-id>/`, never `cp` into `/tmp`: `$TMPDIR` is RAM-backed on the operator host, so a store copy, a worktree tree, or a build cache placed there evicts memory and takes every live session's shell output down with it when it fills.
 3. If you must inspect the live DB, open it with a read-only SQLite URI such as `file:/abs/path/to/.cas/cas.db?mode=ro`. Do **not** use unrestricted `sqlite3 /path/to/.cas/cas.db` for routine report/evidence work.
 
 ## Syncing (Isolated Mode)
@@ -83,7 +83,7 @@ coordination action=message target=supervisor \
 
 Sending `message` alone without `summary` is rejected. `summary` is the one-line preview shown in the UI.
 
-Factory traffic is hard-capped: ordinary message bodies default to 1,200 characters, blocker/merge-request bodies to 2,500, and appended task notes to 1,500; put longer evidence in `[factory] artifacts_root/<task-id>/<name>.md` and send its path with a one-paragraph summary.
+Factory traffic is hard-capped: ordinary message bodies default to 1,200 characters, blocker/merge-request bodies to 2,500, and appended task notes to 1,500; put longer evidence in `[factory] artifacts_root/<project-key>/<task-id>/<name>.md` and send its path with a one-paragraph summary.
 
 **Valid `task` actions** (do not invent others): `create`, `proposal_inbox`, `proposal_accept`, `proposal_reject`, `proposal_reconcile`, `show`, `update`, `start`, `close`, `cancel`, `reopen`, `request_changes`, `delete`, `list`, `ready`, `blocked`, `notes`, `dep_add`, `dep_remove`, `dep_list`, `claim`, `release`, `reset`, `transfer`, `available`, `mine`.
 
@@ -125,3 +125,5 @@ Three layers (`project_session_start_truncation.md`):
 
 Add guidance to the body only if every session needs it. Otherwise put it in a
 reference such as this file.
+
+Use the exact project-scoped artifact directory in the assignment brief. The runtime derives `<project-key>` from the canonical shared Cassy store; the configured `factory.artifacts_root` is its parent base. New evidence goes there. Historical flat `<base>/<task-id>/` evidence stays readable; keep it in place rather than moving or deleting files whose project ownership is ambiguous.

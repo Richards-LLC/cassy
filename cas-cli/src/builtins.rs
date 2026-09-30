@@ -5805,7 +5805,7 @@ This is the body content."#;
             assert!(skill.contains("evidence-bundle.md"), "{label} cas-qa-craft omits the bundle");
             let bundle = get(FILES[5]);
             for marker in [
-                "~/.cas/artifacts/<task-id>/qa/",
+                "~/.cas/artifacts/<project-key>/<task-id>/qa/",
                 "bundle.json",
                 "snapshots: { dom: true, aria: true, screen: true }",
                 "screenshots: false",

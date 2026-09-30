@@ -471,3 +471,20 @@ An empty `execution_note` update may clear a constraint after approval when its
 exact repository proof is unchanged. Pending, skipped, unbound, and changed
 proofs remain locked; changing other scope fields or replacing the constraint
 still requires a fresh proof cycle.
+
+## Durable task artifacts
+
+`factory.artifacts_root` is the shared parent (default `~/.cas/artifacts`).
+New task evidence lives in `<base>/<project-key>/<task-id>/`; assignment briefs
+print the exact path. The key combines the project folder label with a SHA256
+of the canonical shared Cassy store path, so equal folder names and task IDs
+in different stores stay separate, while symlink aliases and factory workers
+using that shared store agree. Keep evidence paths in task notes or published
+artifact records when a project moves.
+
+Existing `<base>/<task-id>/` files remain readable and publishable. Completion
+receipts and QA citations accept those historical paths. They are excluded
+from automatic project cleanup: a flat directory can contain more than one
+project's evidence. New writes, issue attachments, QA rounds, message spills,
+search discovery and cleanup use the scoped namespace. No automatic file move
+or ownership guess is made for legacy directories.

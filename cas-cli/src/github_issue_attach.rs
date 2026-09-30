@@ -166,7 +166,7 @@ fn artifacts_root_for(cas_root: &Path) -> PathBuf {
     let configured = crate::config::Config::load(cas_root)
         .ok()
         .and_then(|config| config.factory().artifacts_root.clone());
-    crate::config::resolved_factory_artifacts_root(configured.as_deref())
+    crate::config::project_factory_artifacts_root(cas_root, &crate::config::resolved_factory_artifacts_root(configured.as_deref()))
 }
 
 /// Result of attaching one cited issue.
@@ -328,6 +328,9 @@ pub fn attach_cited_issues_with(
     }
     refs.into_iter()
         .map(|issue| {
+            let dir = if dir.join(format!("{}.md", issue.slug())).is_file()
+                || dir.join(format!("{}{UNAVAILABLE_SUFFIX}", issue.slug())).is_file()
+            { &dir } else { &legacy };
             let attached = dir.join(format!("{}.md", issue.slug()));
             let unavailable = dir.join(format!("{}{UNAVAILABLE_SUFFIX}", issue.slug()));
             match source.fetch(&issue) {
@@ -401,6 +404,8 @@ pub fn cited_issue_lines(cas_root: &Path, task: &Task) -> Vec<String> {
         return Vec::new();
     }
     let dir = attachment_dir(&artifacts_root_for(cas_root), &task.id);
+    let config = crate::config::Config::load(cas_root).unwrap_or_default();
+    let legacy = attachment_dir(&crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref()), &task.id);
     refs.iter()
         .map(|issue| {
             let attached = dir.join(format!("{}.md", issue.slug()));

@@ -8,7 +8,7 @@ never substitute weaker evidence and call it PASS.
 
 ## Layout
 
-The bundle lives at `~/.cas/artifacts/<task-id>/qa/`. `LEDGER.md` stays one
+The bundle lives at `~/.cas/artifacts/<project-key>/<task-id>/qa/`. `LEDGER.md` stays one
 level up. An independent QA round uses `independent-qa/round-<n>/` and a
 journey uses `journeys/<journey-id>/`, each with the same shape and its own
 `bundle.json`. Extra files are allowed; a validator reads only what
@@ -87,7 +87,7 @@ journey evaluation scores polish for it.
 // playwright.config.ts
 import { defineConfig } from '@playwright/test';
 
-const QA = process.env.QA_ARTIFACTS!; // ~/.cas/artifacts/<task-id>/qa
+const QA = process.env.QA_ARTIFACTS!; // ~/.cas/artifacts/<project-key>/<task-id>/qa
 
 export default defineConfig({
   outputDir: `${QA}/test-results`,

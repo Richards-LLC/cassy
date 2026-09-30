@@ -115,6 +115,21 @@ def refresh_worker_cache(version, worktree, receipt_path):
         git("merge-base", "--is-ancestor", released, "refs/remotes/origin/main")
         evidence["source_commit"] = released
         common = Path(git("rev-parse", "--path-format=absolute", "--git-common-dir"))
+        # The gate's exports live in its child shell. Standalone and resumed
+        # host updates must resolve Zig again before entering a fresh checkout
+        # that has no gitignored .context toolchain (same order as the gate).
+        configured = os.environ.get("ZIG", "")
+        candidates = []
+        if configured:
+            candidate = Path(configured)
+            candidates.append(candidate if candidate.is_absolute() else worktree / candidate)
+        candidates.extend((worktree / ".context/zig/zig", common.parent / ".context/zig/zig"))
+        zig = next((path.resolve() for path in candidates
+                    if path.is_file() and os.access(path, os.X_OK)), None)
+        if zig is None:
+            raise RuntimeError("no executable Zig in ZIG, release worktree or main checkout; "
+                               "run ./scripts/bootstrap-zig.sh")
+        evidence["ZIG"] = str(zig)
         cas_root = common.parent / ".cas"
         cache_root = cas_root / "build-cache"
         cache_root.mkdir(parents=True, exist_ok=True)
@@ -127,7 +142,7 @@ def refresh_worker_cache(version, worktree, receipt_path):
         with tempfile.TemporaryDirectory(prefix="release-cache-", dir=cache_root) as checkout:
             git("worktree", "add", "--detach", checkout, released)
             try:
-                env = dict(os.environ, CAS_ROOT=str(cas_root))
+                env = dict(os.environ, CAS_ROOT=str(cas_root), ZIG=str(zig))
                 code, stdout, stderr = run_cache_refresh(command, timeout, cwd=checkout, env=env)
                 log.write_text(stdout + stderr, encoding="utf-8")
                 evidence["exit"] = code

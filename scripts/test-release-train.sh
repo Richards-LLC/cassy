@@ -1243,6 +1243,8 @@ case "$1 $2" in
   "run list")
     printf '%s\n' '[{"databaseId":4242,"status":"completed","conclusion":"success","headBranch":"v9.99.8","headSha":"'"$(cat "$POST_PUBLICATION_LANDED")"'","createdAt":"2099-01-02T00:00:00Z"}]'
     ;;
+  "release view") printf '2099-01-02T00:15:08Z\n' ;;
+  "api repos"*) printf '{"workflow_runs":[{"id":4242,"created_at":"2099-01-02T00:00:00Z"}]}\n' ;;
   *) exit 2 ;;
 esac
 EOF
@@ -1250,15 +1252,10 @@ chmod +x "$post_publication_gh"
 post_publication_published="$tmp/post-publication-published.sh"
 cat >"$post_publication_published" <<'EOF'
 #!/usr/bin/env bash
-printf 'TAG=%s\nPUBLISHED_AT=2099-01-02T00:01:00Z\n' "$1"
+printf 'TAG=%s\nPUBLISHED_AT=2099-01-02T00:15:08Z\n' "$1"
 EOF
 chmod +x "$post_publication_published"
-post_publication_latency="$tmp/post-publication-latency.sh"
-cat >"$post_publication_latency" <<'EOF'
-#!/usr/bin/env bash
-printf 'TAG=%s\nPUBLISH_LATENCY_SECONDS=60\n' "$1"
-EOF
-chmod +x "$post_publication_latency"
+post_publication_latency="$repo_root/scripts/release-latency-receipt.sh"
 post_publication_landed="$(git -C "$stage_wt" rev-parse HEAD)"
 printf '%s\n' "$post_publication_landed" >"$post_publication_run/landed-main.sha"
 post_publication_stderr="$tmp/post-publication.stderr"
@@ -1266,6 +1263,7 @@ if (
     source "$repo_root/scripts/release-train.d/post-publication.sh"
     cut_has_external_stage() { return 1; }
     version=9.99.8
+    CAS_RELEASE_TRAIN_DATE="$stage_date"
     worktree="$stage_wt"
     run_dir="$post_publication_run"
     script_dir="$repo_root/scripts"
@@ -1279,10 +1277,27 @@ if (
 ) 2>"$post_publication_stderr" && [[ -s "$post_publication_run/release-workflow.json" ]] \
     && [[ -s "$post_publication_run/release-published.receipt" ]] \
     && [[ -s "$post_publication_run/release-latency.receipt" ]] \
+    && grep -qx 'WITHIN_BUDGET=false' "$post_publication_run/release-latency.receipt" \
+    && grep -q '908s; over budget (600s)' "$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md" \
     && ! grep -q 'command not found' "$post_publication_stderr"; then
-    ok 'gap 7: post-publication waits for Release, records both receipts, and has no missing helper'
+    ok 'gap 7: post-publication records an overrun and Dev trailer without blocking'
 else
     bad "gap 7: post-publication did not produce clean workflow/receipt output: $(cat "$post_publication_stderr" 2>/dev/null || true)"
+fi
+
+# Plant old evidence even when the preceding red run emitted no latency.
+[[ -s "$post_publication_run/release-latency.receipt" ]] || \
+    printf 'old measurement\n' >"$post_publication_run/release-latency.receipt"
+if (
+    source "$repo_root/scripts/release-train.d/post-publication.sh"
+    cut_has_external_stage() { return 1; }
+    release_train_post_publication() { return 1; }
+    run_dir="$post_publication_run"
+    cut_stage_post_publication
+); then
+    bad 'post-publication accepted failed measurement with stale nonempty receipts'
+else
+    ok 'post-publication measurement failure remains hard despite stale nonempty receipts'
 fi
 
 # ---------------------------------------------------------------------------
@@ -2581,10 +2596,15 @@ host_version=9.99.20
 host_wt="$(new_worktree host-update-wt)"
 git -C "$host_wt" tag "v$host_version"
 git -C "$host_wt" update-ref refs/remotes/origin/main HEAD
+mkdir -p "$host_wt/.context/zig"
+printf '#!/bin/sh\nexit 0\n' >"$host_wt/.context/zig/zig"
+chmod +x "$host_wt/.context/zig/zig"
 host_cache_stub="$tmp/host-cache"
 cat >"$host_cache_stub" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+[[ "${ZIG:-}" == /* && -x "$ZIG" ]] || { echo 'ZIG missing in refresh env' >&2; exit 13; }
+[[ ! -e .context/zig/zig ]] || { echo 'checkout unexpectedly contains Zig' >&2; exit 14; }
 printf 'head=%s root=%s\n' "$(git rev-parse HEAD)" "$CAS_ROOT" >>"${HOST_CACHE_LOG:?}"
 [[ "${HOST_CACHE_FAIL:-0}" == 0 ]] || { echo 'fixture refresh failed' >&2; exit 12; }
 snapshot=target-fixture-complete
@@ -2600,7 +2620,7 @@ run_host_update() {
     rm -f "$tmp/host-cache.log"
     env CAS_RELEASE_TRAIN_CAS="$host_stub" HOST_STUB_LOG="$tmp/host-stub.log" \
         CAS_RELEASE_TRAIN_WORKER_CACHE_CMD="$host_cache_stub" HOST_CACHE_LOG="$tmp/host-cache.log" \
-        HOST_STUB_EXPECT_VERSION="$host_version" HOST_STUB_BINARY="$host_version" \
+        ZIG= HOST_STUB_EXPECT_VERSION="$host_version" HOST_STUB_BINARY="$host_version" \
         HOST_STUB_HUB="$host_version" HOST_STUB_REFRESH="$host_version" "$@" \
         "$train" "$host_version" "$host_wt" --host-update
 }
@@ -2637,7 +2657,7 @@ if out="$(run_host_update 2>&1)" && [[ "$(host_status)" == PASS ]] \
     && grep -q '"cas_version": "9.99.20"' "$host_run_dir/host-update.json" \
     && grep -q '"snapshot": "target-fixture-complete"' "$host_run_dir/host-update.json" \
     && [[ "$(wc -l <"$tmp/host-cache.log" | tr -d ' ')" == 1 ]]; then
-    ok 'host-update: matching cas, hub and refresh versions pass with host-update.json evidence'
+    ok 'test_release_worker_build_cache: matching versions pass and detached refresh receives resolved ZIG'
 else
     bad "host-update did not pass on a converged host: $out"
 fi
@@ -2667,6 +2687,12 @@ elif [[ "$out" == *'BLOCKER host-update: cas update refresh failed: /srv/broken 
     ok 'host-update: any non-cloud_sync refresh failure blocks'
 else
     bad "host-update migration failure was not named: $out"
+fi
+
+if python3 "$script_dir/test-release-host-update.py" && python3 "$script_dir/test-release-publication-timing.py"; then
+    ok 'publication recovery: detached refresh Zig and receipt-backed Dev trailer fixtures'
+else
+    bad 'publication recovery Zig/trailer fixture suite'
 fi
 
 if python3 "$script_dir/test-release-integration.py"; then

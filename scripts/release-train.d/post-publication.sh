@@ -100,6 +100,11 @@ release_train_post_publication() {
         printf 'ERROR post-publication: latency receipt command failed for %s\n' "$tag" >&2
         return 1
     fi
+    if ! python3 "$script_dir/release-train-announce.py" --record-latency "$tag" "$tmp" "$draft"; then
+        rm -f "$tmp"
+        printf 'ERROR post-publication: missing or incoherent latency measurement for %s\n' "$tag" >&2
+        return 1
+    fi
     mv "$tmp" "$run_dir/release-latency.receipt"
 }
 
@@ -108,7 +113,7 @@ cut_stage_post_publication() {
         cut_run_external_stage post-publication
         return
     fi
-    release_train_post_publication
+    release_train_post_publication || return 1
     local receipt
     for receipt in release-workflow.json release-published.receipt release-latency.receipt; do
         [[ -s "$run_dir/$receipt" ]] || {

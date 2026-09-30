@@ -24,6 +24,141 @@ enum ReportKind {
 // status reports the entry/rule/high-value counts on one complete row.
 const COMPLETE_DOCTOR_REPORT: &str = "Store  [OK] database  [OK] schema\n29 ok · 3 warnings · 0 errors · 2ms\ncas doctor --verbose for timings and full messages\n";
 const COMPLETE_STATUS_REPORT: &str = "cas: 2 entries, 0 rules (0 proven), 0 high-value\n";
+// Independently authored 80-column rendering of the joined receipt. The split
+// through "full" is the shape observed in the assembly failure (cas-bca0).
+const WRAPPED_DOCTOR_REPORT_80COL: &str = "Store  [OK] database  [OK] schema\n29 ok · 3 warnings · 0 errors · 498ms · cas doctor --verbose for timings and ful\nl messages\n";
+
+// Verbatim captured output, kept alongside the independently authored fixtures.
+// Doctor PTY: daemon nextest log 215ea2978962d1e4516bc8a8918d211fc8af3f3e7a7dcb2af54dc73ccbb7a408,
+// pty_doctor_output (80x24 terminal; 200-row rendered screen), exit Success.
+// Piped doctor/status/help/version: installed cas build ee98022 (2026-09-30),
+// isolated init --yes project, COLUMNS=4000, NO_COLOR=1, all exit 0.
+// Only version tokens use the package version; all other captured bytes,
+// including temporary paths, timings and terminal wraps, remain verbatim.
+const CAPTURED_DOCTOR_PTY_REPORT: &str = concat!(
+    "doctor found safe automatic fixes; apply now? [y/N]\n[WARN] 3 warnings · 29 ok · .tmp1sqccl · ",
+    env!("CARGO_PKG_VERSION"),
+    "\n────────────────────────────────────────────────────────────────────────────────\nHost          [OK] registered project roots\n  [WARN] host  host: 3 findings — see `cas doctor --host`\nStore         [OK] cas directory  [OK] prompt hook  [OK] database  [OK] schema\n[OK] tables  [OK] entry store  [OK] memory stats  [OK] memory decay  [OK] rules\n [OK] tasks  [OK] cloud team-only\nIndexes       [OK] legacy search index  [OK] symbol index  [OK] embedding drain\n [OK] embeddings\n  [WARN] search index        Index not found at /tmp/.tmp1SQCcL/.cas/index/tanti\nvy-v15. Will be created on first search; Run a search to build it\n  [WARN] code history index  cannot check code history index: not a git reposito\nry: /tmp/.tmp1SQCcL (fatal: not a git repository (or any parent up to mount poin\nt /) Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).)\nCloud         [OK] supervisor relay  [OK] delivery retries  [OK] canonical id  [\nOK] cloud sync queue  [OK] cross-project rows\nConfig        [OK] SessionStart budget  [OK] configuration  [OK] issue repositor\nies  [OK] MCP stdio upstreams  [OK] MCP upstream reachability  [OK] sync target\n [OK] mcp config\nIntegrations  [OK] integrations\n\n29 ok · 3 warnings · 0 errors · 498ms · cas doctor --verbose for timings and ful\nl messages\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+);
+const CAPTURED_DOCTOR_PIPED_REPORT: &str = concat!(
+    "[WARN] 3 warnings · 29 ok · cas-bca0-capture-trsxxe38 · ",
+    env!("CARGO_PKG_VERSION"),
+    "\n────────────────────────────────────────────────────────────────────────────────\nHost          [OK] registered project roots\n  [WARN] host  host: 3 findings — see `cas doctor --host`\nStore         [OK] cas directory  [OK] prompt hook  [OK] database  [OK] schema  [OK] tables  [OK] entry store  [OK] memory stats  [OK] memory decay  [OK] rules  [OK] tasks  [OK] cloud team-only\nIndexes       [OK] legacy search index  [OK] symbol index  [OK] embedding drain  [OK] embeddings\n  [WARN] search index        Index not found at /tmp/cas-bca0-capture-trsxxe38/.cas/index/tantivy-v15. Will be created on first search; Run a search to build it\n  [WARN] code history index  cannot check code history index: not a git repository: /tmp/cas-bca0-capture-trsxxe38 (fatal: not a git repository (or any parent up to mount point /) Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).)\nCloud         [OK] supervisor relay  [OK] delivery retries  [OK] canonical id  [OK] cloud sync queue  [OK] cross-project rows\nConfig        [OK] SessionStart budget  [OK] configuration  [OK] issue repositories  [OK] MCP stdio upstreams  [OK] MCP upstream reachability  [OK] sync target  [OK] mcp config\nIntegrations  [OK] integrations\n\n29 ok · 3 warnings · 0 errors · 400ms · cas doctor --verbose for timings and full messages\n"
+);
+const CAPTURED_VERSION_REPORT: &str =
+    concat!("cas ", env!("CARGO_PKG_VERSION"), " (ee98022 2026-09-30)\n");
+const CAPTURED_STATUS_REPORT: &str = "cas: 0 entries, 0 rules (0 proven), 0 high-value\n";
+const CAPTURED_HELP_REPORT: &str = "Cassy\n\nCassy — a multi-agent coding factory with persistent memory and task coordination\n\nUsage: cas [OPTIONS] [COMMAND]\n\nCommands:\n  open              Interactive project picker — scan ~/projects/, select, launch or attach\n  init              Initialize Cassy in current directory\n  setup             Guide a complete machine through installation, login, pairing, and a first project\n  attach            Attach to a running factory session\n  list              List running factory sessions\n  kill              Terminate a factory session\n  kill-all          Terminate all factory sessions\n  factory           Launch factory session (bare `cas` runs factory with defaults)\n  claude            Launch factory with Claude as the supervisor on a chosen account profile\n  codex             Launch factory with Codex as the supervisor on a chosen account profile\n  grok              Launch factory with Grok as the supervisor (shortcut for `cas factory --supervisor-cli=grok`)\n  default           Set the default supervisor provider without launching (persist only)\n  bridge            Local helper server for external orchestration tools\n  hub               Stable machine-local Commander hub\n  serve             Run the CAS MCP server\n  doctor            Run diagnostics\n  viktor            Show credential-safe provisioning status for the managed Viktor gateway\n  config            Manage configuration\n  status            Show session status\n  limits            Show local provider rate-limit and credit availability\n  status-line       Output a status line for agent integrations\n  hook              Handle Claude Code hook events\n  auth              Authentication commands (login, logout, whoami)\n  login             Log in to Cassy Cloud (shortcut for 'auth login')\n  logout            Log out (shortcut for 'auth logout')\n  whoami            Show current user (shortcut for 'auth whoami')\n  update            Update Cassy to the latest version\n  changelog         Show release notes and changelog from GitHub releases\n  release           Release lifecycle helpers\n  mcp               Manage upstream MCP servers\n  queue             Prompt queue operations (poll/ack for native extensions)\n  cloud             Sync data with Cassy Cloud\n  device            Manage registered devices\n  sync              Synchronize generated project files\n  claude-md         Evaluate and optimize CLAUDE.md files for token efficiency\n  codemap           Codemap staleness info and pending changes\n  history           Structural git-history index (backfill/status)\n  index             Build local search indexes on demand (`cas index code`)\n  artifact          Publish and inspect durable task artifacts (publish/show/list)\n  knowledge         Distilled project knowledge wiki (build/status/list)\n  memory-migrate    Migrate the legacy memory store into knowledge pages\n  project-overview  PRODUCT_OVERVIEW.md staleness info and pending changes\n  integrate         Auto-integrate the project with Vercel/Neon/GitHub (writes SKILL files)\n  memory            Share or unshare personal memories with your team (retroactive)\n  known-repos       Inspect and bootstrap the host-scoped known_repos registry\n  worktree          Worktree-scoped diagnostics and maintenance (sweep, ...)\n  sweep-all         Shortcut for `cas worktree sweep --all-repos`\n  help              Print this message or the help of the given subcommand(s)\n\nOptions:\n      --json     Output in JSON format\n      --full     Include full content in JSON output\n  -v, --verbose  Verbose output\n  -h, --help     Print help\n  -V, --version  Print version\n";
+
+#[test]
+fn pty_report_validation_accepts_captured_wrapped_doctor() {
+    assert!(!CAPTURED_DOCTOR_PTY_REPORT.contains(DOCTOR_COMPLETION));
+    assert!(CAPTURED_DOCTOR_PTY_REPORT.contains("for timings and ful\nl messages"));
+    validate_report_text(CAPTURED_DOCTOR_PTY_REPORT, true, ReportKind::Doctor, false)
+        .expect("verbatim successful Doctor output from the 80-column PTY");
+    let error = validate_report_text(CAPTURED_DOCTOR_PTY_REPORT, false, ReportKind::Doctor, false)
+        .expect_err("a real report cannot hide a failed child");
+    assert!(error.contains("child failed"), "{error}");
+}
+
+#[test]
+#[cfg(unix)]
+fn report_validation_accepts_captured_cli_reports() {
+    for (kind, report) in [
+        (ReportKind::Doctor, CAPTURED_DOCTOR_PIPED_REPORT),
+        (ReportKind::Status, CAPTURED_STATUS_REPORT),
+        (ReportKind::Version, CAPTURED_VERSION_REPORT),
+        (ReportKind::Help, CAPTURED_HELP_REPORT),
+    ] {
+        let output = report_fixture(report, "0");
+        let accepted = validate_piped_report(&output, kind).expect("verbatim real CLI report");
+        assert_eq!(accepted, report);
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn report_validation_rejects_failed_children_with_captured_reports() {
+    for (kind, report) in [
+        (ReportKind::Doctor, CAPTURED_DOCTOR_PIPED_REPORT),
+        (ReportKind::Status, CAPTURED_STATUS_REPORT),
+        (ReportKind::Version, CAPTURED_VERSION_REPORT),
+        (ReportKind::Help, CAPTURED_HELP_REPORT),
+    ] {
+        let output = report_fixture(report, "23");
+        let error = validate_piped_report(&output, kind).expect_err("failed real-report child");
+        assert!(error.contains("child failed"), "{error}");
+    }
+}
+
+#[test]
+fn version_report_validation_rejects_incomplete_build_suffixes() {
+    for report in [
+        "cas 9.9.9 (ee98022)\n",
+        "cas 9.9.9 (ee98022 2026-09-30\n",
+        "cas 9.9.9 (ee98022 2026-09-30) extra\n",
+        "$ cas --version (ee98022 2026-09-30)\n",
+    ] {
+        let error = validate_report_text(report, true, ReportKind::Version, true)
+            .expect_err("incomplete build metadata or command echo is not a version report");
+        assert!(error.contains("missing completed"), "{error}");
+    }
+}
+
+#[test]
+fn pty_report_validation_accepts_doctor_footer_wrapped_at_80_columns() {
+    assert_eq!(
+        WRAPPED_DOCTOR_REPORT_80COL
+            .lines()
+            .nth(1)
+            .unwrap()
+            .chars()
+            .count(),
+        80
+    );
+    assert!(!WRAPPED_DOCTOR_REPORT_80COL.contains(DOCTOR_COMPLETION));
+    validate_report_text(WRAPPED_DOCTOR_REPORT_80COL, true, ReportKind::Doctor, false)
+        .expect("a completed terminal report may wrap through a word");
+
+    // Only the PTY interpretation is tolerant of terminal wraps; piped output
+    // must continue to contain the exact completion text.
+    let error = validate_report_text(WRAPPED_DOCTOR_REPORT_80COL, true, ReportKind::Doctor, true)
+        .expect_err("piped completion matching remains exact");
+    assert!(error.contains("missing completed"), "{error}");
+    let error = validate_report_text(
+        WRAPPED_DOCTOR_REPORT_80COL,
+        false,
+        ReportKind::Doctor,
+        false,
+    )
+    .expect_err("wrapped output cannot turn a failed child into success");
+    assert!(error.contains("child failed"), "{error}");
+    let truncated = WRAPPED_DOCTOR_REPORT_80COL.trim_end_matches("l messages\n");
+    let error = validate_report_text(truncated, true, ReportKind::Doctor, false)
+        .expect_err("a truncated completion row is not a completed report");
+    assert!(error.contains("missing completed"), "{error}");
+}
+
+#[test]
+#[cfg(unix)]
+fn pty_report_validation_accepts_real_80_column_wrap() {
+    // Print one logical 90-column receipt into an actual 80-column PTY. The
+    // screen parser must render the same split as the independent fixture.
+    let report = "Store  [OK] database  [OK] schema\n29 ok · 3 warnings · 0 errors · 498ms · cas doctor --verbose for timings and full messages\n";
+    let mut runner = PtyRunner::with_config(PtyRunnerConfig::with_size(80, 24));
+    runner
+        .spawn(
+            "sh",
+            &["-c", "printf '%s' \"$1\"", "report-fixture", report],
+        )
+        .unwrap();
+    let captured = completed_pty_report(&mut runner, ReportKind::Doctor)
+        .expect("a successful report wrapped by the real PTY");
+    assert_eq!(
+        screen_with_size(&captured, 80, 200).text().trim_end(),
+        WRAPPED_DOCTOR_REPORT_80COL.trim_end()
+    );
+}
 
 #[cfg(unix)]
 fn report_fixture(stdout: &str, exit_code: &str) -> std::process::Output {
@@ -121,6 +256,12 @@ fn pty_report_validation_rejects_echo_empty_and_failed_children() {
             "missing completed",
         ),
         (
+            ReportKind::Doctor,
+            "$ cas doctor --verbose for timings and full messages\n",
+            "0",
+            "missing completed",
+        ),
+        (
             ReportKind::Status,
             "$ cas status\n",
             "0",
@@ -131,6 +272,12 @@ fn pty_report_validation_rejects_echo_empty_and_failed_children() {
         (
             ReportKind::Doctor,
             COMPLETE_DOCTOR_REPORT,
+            "23",
+            "child failed",
+        ),
+        (
+            ReportKind::Doctor,
+            WRAPPED_DOCTOR_REPORT_80COL,
             "23",
             "child failed",
         ),
@@ -222,6 +369,24 @@ fn snapshot_redaction_preserves_stable_counts() {
 const DOCTOR_COMPLETION: &str = "cas doctor --verbose for timings and full messages";
 const STATUS_REPORT_PATTERN: &str = r"(?m)^\s*cas: \d+ entries, \d+ rules \(\d+ proven\), \d+ high-value(?:, \d+ code symbols)?\s*$";
 
+fn has_doctor_completion(stdout: &str, terminal_wrapped: bool) -> bool {
+    if stdout.contains(DOCTOR_COMPLETION) {
+        return true;
+    }
+    if !terminal_wrapped {
+        return false;
+    }
+    // Screen text inserts newlines even inside a word when a logical receipt
+    // wraps at the PTY's width. Ignore display whitespace only for this hint;
+    // the report's section/summary checks and child exit stay mandatory.
+    let compact: String = stdout.chars().filter(|c| !c.is_whitespace()).collect();
+    let completion: String = DOCTOR_COMPLETION
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    compact.contains(&completion)
+}
+
 /// Shared by real CLI/PTY tests and the negative child fixtures above. A clean
 /// buffer alone cannot prove a successful render: both completion and exit
 /// success are required before the no-ANSI assertion can pass.
@@ -243,7 +408,7 @@ fn validate_report_text(
         ReportKind::Doctor => stdout.contains("Store")
             && stdout.contains("database")
             && stdout.contains("schema")
-            && stdout.contains(DOCTOR_COMPLETION)
+            && has_doctor_completion(stdout, !require_plain)
             && regex::Regex::new(
                 r"(?m)^\s*\d+ ok [·-] (?:\d+ info [·-] )?\d+ warnings [·-] \d+ errors [·-] [^\n]+",
             )
@@ -252,7 +417,7 @@ fn validate_report_text(
         ReportKind::Status => regex::Regex::new(STATUS_REPORT_PATTERN)
             .unwrap()
             .is_match(stdout),
-        ReportKind::Version => regex::Regex::new(r"(?m)^cas \d+\.\d+\.\d+(?:[-+][^\s]+)?\r?$")
+        ReportKind::Version => regex::Regex::new(r"(?m)^cas \d+\.\d+\.\d+(?:[-+][^\s]+)?(?: \((?:[0-9a-f]+(?:-dirty)?|unknown(?:-dirty)?) (?:\d{4}-\d{2}-\d{2}|unknown)\))?\r?$")
             .unwrap()
             .is_match(stdout),
         ReportKind::Help => stdout.starts_with("Cassy\n") && stdout.contains("Usage: cas"),
@@ -540,9 +705,10 @@ fn pty_doctor_output() {
     decline_doctor_autofix(&mut runner);
     let output = completed_pty_report(&mut runner, ReportKind::Doctor)
         .expect("doctor must complete successfully with its final report row");
-    screen_with_size(&output, 80, 200)
-        .assert_contains(DOCTOR_COMPLETION)
-        .unwrap();
+    assert!(has_doctor_completion(
+        &screen_with_size(&output, 80, 200).text(),
+        true
+    ));
 }
 
 #[test]

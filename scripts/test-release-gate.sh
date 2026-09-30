@@ -52,9 +52,18 @@ new_fixture() {
         "$repo/.context/zig"
     cp "$gate" "$repo/scripts/release-gate.sh"
     cp "$script_dir/assembly-proof.py" "$repo/scripts/assembly-proof.py"
+    # Cargo is fake here: bypass only durable-location classification in the
+    # copied producer. Production guard behavior has its own Python regressions.
+    python3 - "$repo/scripts/assembly-proof.py" <<'PY_SCRATCH'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("scratch = clone_scratch(os.environ)",
+    "scratch = Path(os.environ['CAS_RELEASE_GATE_HOME_DIR']).resolve()"))
+PY_SCRATCH
     cp "$script_dir/release-portable.sh" "$repo/scripts/release-portable.sh"
     # Real defects in the new rows are covered by test-fast-release-rows.py.
-    for helper in cas-test-targets check-changed-markdown check-test-shape check-builtin-doc-hygiene check-builtin-contract-phrases; do
+    for helper in cas-test-targets check-changed-markdown check-test-shape check-test-env check-builtin-doc-hygiene check-builtin-contract-phrases; do
         printf '#!/usr/bin/env python3\n' >"$repo/scripts/$helper.py"
     done
     cp "$script_dir/check-workflow-run-interpolation.py" "$repo/scripts/check-workflow-run-interpolation.py"
@@ -73,6 +82,7 @@ EOF
 cat >"$repo/.gitignore" <<'EOF'
 .context/zig/
 .cas/
+__pycache__/
 EOF
     printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$repo/.context/zig/zig"
     chmod +x "$repo/.context/zig/zig"
@@ -278,7 +288,7 @@ assert_all_pass() {
     local output="$1"
     for name in scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config assemble-stale-base \
         version-literals fixture-paths workspace-tests macos-check nextest doctests archive-mode snapshot-portability \
-        builtin-projections changelog-and-versions release-script release-notes-shell-injection procedure-guardrails working-tree test-targets markdown-lint test-shape builtin-doc-hygiene \
+        builtin-projections changelog-and-versions release-script release-notes-shell-injection procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene \
         hub-web-dist-drift hub-web-visual-qa; do
         if ! grep -qF "PASS $name" <<<"$output"; then
             bad "passing fixture omitted PASS $name"
@@ -1060,7 +1070,8 @@ repo="$(new_fixture row-cache)"
 export CAS_RELEASE_GATE_CACHE_DIR="$tmp/pass-cache"
 export CAS_RELEASE_GATE_LOG_DIR="$tmp/row-logs"
 run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 >"$tmp/cache-first.log" 2>&1 || { cat "$tmp/cache-first.log"; exit 1; }
-if [[ "$(wc -l <"$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 27 ]] \
+expected_timing_rows=$(( $(grep -c '^PASS ' "$tmp/cache-first.log") + 1 ))
+if [[ "$(wc -l <"$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == "$expected_timing_rows" ]] \
     && [[ -s "$CAS_RELEASE_GATE_LOG_DIR/archive-mode.log" ]] \
     && grep -qE '^  timing: wall=[0-9]+\.[0-9]+s user=' "$tmp/cache-first.log"; then
     ok 'every row retains wall/CPU timing and successful raw logs'
@@ -1192,6 +1203,75 @@ else
     bad 'a changed workspace input retained the assembly row receipt'
 fi
 unset CAS_RELEASE_GATE_CACHE_DIR CAS_RELEASE_GATE_LOG_DIR
+
+# Full train entry point: assemble prove -> prep -> ledger -> detached gate.
+repo="$(new_fixture train-proof)"
+cp -R "$script_dir/release-train.d" "$repo/scripts/"
+cp "$script_dir/release-train-resume.py" "$repo/scripts/"
+# This regression exercises assembly onward, with no GitHub/toolchain preflight.
+printf 'cut_stage_preflight() { return 0; }\n' >"$repo/scripts/release-train.d/preflight.sh"
+cat >"$repo/scripts/bump-release-version.sh" <<'EOF'
+#!/usr/bin/env bash
+python3 - "$1" <<'PY_BUMP'
+from pathlib import Path
+import sys
+for path in [Path('cas-cli/Cargo.toml'), *Path('crates').glob('*/Cargo.toml'), Path('Cargo.lock'), Path('CHANGELOG.md')]:
+    path.write_text(path.read_text().replace('9.99.7', sys.argv[1]))
+PY_BUMP
+EOF
+cat >"$repo/scripts/gen-builtin-reference-history.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '{"train-ledger": []}\n' >cas-cli/src/builtins/reference-history.json
+EOF
+chmod +x "$repo/scripts/bump-release-version.sh" "$repo/scripts/gen-builtin-reference-history.sh"
+mkdir -p "$repo/docs/release-notes"
+printf 'reviewed release draft\n' >"$repo/docs/release-notes/2099-01-02-v9.99.8-slack.md"
+printf 'version = 4\n' >"$repo/Cargo.lock"
+for manifest in "$repo/cas-cli/Cargo.toml" "$repo"/crates/*/Cargo.toml; do
+    name="$(sed -n 's/^name = "\([^"]*\)"/\1/p' "$manifest")"
+    printf '\n[[package]]\nname = "%s"\nversion = "9.99.7"\n' "$name" >>"$repo/Cargo.lock"
+done
+git -C "$repo" add .
+git -C "$repo" commit -qm 'seed real train proof sequence'
+git -C "$repo" branch -M release/9.99.8
+train_proof_sha="$(git -C "$repo" rev-parse HEAD)"
+git -C "$repo" update-ref refs/remotes/origin/main "$train_proof_sha"
+git -C "$repo" branch "integration/$(basename "$repo")" "$train_proof_sha"
+mkdir -p "$repo/.cas/merge-sweeps"
+printf '{"status":"PASSED","tip":"%s","base":"%s","epics":[]}\n' "$train_proof_sha" "$train_proof_sha" \
+    >"$repo/.cas/merge-sweeps/integration.json"
+: >"$tmp/cargo.log"
+# The supervisor proof precedes the train's choice of output directories.
+run_gate "$repo" '' python3 "$repo/scripts/assembly-proof.py" prove "$repo" >"$tmp/supervisor-proof.log" 2>&1
+run_train_proof() {
+    local stop="$1"
+    shift
+    run_gate "$repo" '' env CAS_RELEASE_ARTIFACTS_ROOT="$tmp/train-artifacts" \
+        CAS_RELEASE_TRAIN_CAS=/bin/false CAS_RELEASE_TRAIN_CARGO="$repo/scripts/cargo-stub" \
+        CAS_RELEASE_TRAIN_DATE=2099-01-02 CAS_RELEASE_TRAIN_PREFLIGHT_CMD=true \
+        CAS_RELEASE_TRAIN_CUT_STOP_AFTER="$stop" CAS_RELEASE_TRAIN_CUT_POLL_SECS=1 \
+        CAS_RELEASE_TRAIN_CUT_GATE_TRIES=15 "$repo/scripts/release-train.sh" 9.99.8 "$repo" --cut "$@"
+}
+# Resume the successful assembly receipt with a newly selected receipt output
+# location: neither suite may re-run at assemble or the first full gate.
+run_train_proof assemble >"$tmp/train-proof.log" 2>&1 || true
+CAS_RELEASE_RECEIPTS_RUN_DIR="$tmp/train-artifacts/receipt-output" \
+    run_train_proof gate --resume >>"$tmp/train-proof.log" 2>&1 || true
+if grep -q 'stopped after stage assemble' "$tmp/train-proof.log" \
+    && grep -q 'stopped after stage gate' "$tmp/train-proof.log"; then
+    train_run="$tmp/train-artifacts/v9.99.8-train-proof"
+    if [[ "$(grep -c '^nextest run --workspace' "$tmp/cargo.log")" == 1 ]] \
+        && [[ "$(grep -c 'reused PASS assembly' "$train_run/gate.log")" == 2 ]] \
+        && [[ "$(grep -c '^nextest run --archive-file ' "$tmp/cargo.log")" == 1 ]] \
+        && grep -q 'stage prep: done' "$tmp/train-proof.log" \
+        && grep -q 'stage ledger: done' "$tmp/train-proof.log"; then
+        ok 'real train assemble, prep, ledger and detached gate reuse both assembly contexts'
+    else
+        bad "train sequence missed assembly reuse: $(cat "$tmp/cargo.log"); $(cat "$train_run/gate.log")"
+    fi
+else
+    bad "real train proof sequence failed: $(cat "$tmp/train-proof.log"); gate: $(cat "$tmp/train-artifacts/v9.99.8-train-proof/gate.log" 2>/dev/null)"
+fi
 
 # Real two-context producer with Cargo stubbed, then the real first full gate.
 repo="$(new_fixture two-context-proof)"

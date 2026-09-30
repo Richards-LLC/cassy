@@ -572,6 +572,7 @@ impl DaemonInitPhase {
             next_gui_client_id: 0,
             ws_listener: None,
             ws_clients: HashMap::new(),
+            terminal_exchange: Default::default(),
             next_ws_client_id: 0,
             tui_pane_sizes: HashMap::new(),
             web_pane_sizes: HashMap::new(),

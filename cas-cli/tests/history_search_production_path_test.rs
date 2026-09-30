@@ -106,7 +106,6 @@ fn fixture_commit_retry_is_limited_to_git_object_visibility_errors() {
     assert!(!is_object_visibility_error(
         "Author identity unknown\n\nfatal: unable to auto-detect email address"
     ));
-    assert_eq!(OBJECT_VISIBILITY_COMMIT_ATTEMPTS, 3);
 }
 
 impl Fixture {

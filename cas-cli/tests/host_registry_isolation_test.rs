@@ -33,6 +33,7 @@ fn every_init_fixture_overrides_home_for_spawned_cas_children() {
 }
 
 #[test]
+// pin: Enumerate production openers structurally so an unexercised registry write cannot escape the isolated test HOME.
 fn low_level_init_helper_has_no_host_registry_side_effect() {
     let source =
         std::fs::read_to_string(cas::test_paths::crate_root().join("src/store/detect.rs"))

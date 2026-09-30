@@ -21,6 +21,7 @@
 use crate::hooks::handlers::handle_pre_tool_use;
 use crate::hooks::handlers::handlers_events::is_harness_session_scratchpad;
 use crate::store::open_agent_store;
+use crate::test_support::TestEnvGuard;
 use crate::types::{Agent, AgentRole};
 use cas_core::hooks::types::HookInput;
 
@@ -211,7 +212,8 @@ fn factory_write_under_configured_artifacts_root_is_allowed() {
     )
     .expect("factory config");
 
-    let artifact_path = artifacts_root.join("cas-4060").join("proof.txt");
+    let artifact_path = crate::config::project_factory_artifacts_root(tmp.path(), &artifacts_root)
+        .join("cas-4060").join("proof.txt");
     let input = input_for("Write", artifact_path.to_str());
     let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
     assert!(
@@ -875,4 +877,47 @@ fn set_role_env(role: Option<&str>) -> RoleGuard {
         std::env::remove_var("CAS_CLONE_PATH");
     }
     RoleGuard { role: prev, clone_path }
+}
+
+#[test]
+fn workspace_artifact_writes_are_project_scoped_and_legacy_is_read_only_cas_6ebf() {
+    let _env = TestEnvGuard::with_optional_vars(&[
+        ("CAS_AGENT_ROLE", Some("worker")),
+        ("CAS_CLONE_PATH", None),
+    ]);
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().join("artifacts");
+    let a = temp.path().join("one/project/.cas");
+    let b = temp.path().join("two/project/.cas");
+    for root in [&a, &b] {
+        std::fs::create_dir_all(root).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            format!(
+                "[factory]\nartifacts_root = {:?}\n",
+                base.display().to_string()
+            ),
+        )
+        .unwrap();
+    }
+    let a_dirs = crate::config::factory_task_artifact_dirs(&a, &base, "cas-a4b1");
+    let b_dirs = crate::config::factory_task_artifact_dirs(&b, &base, "cas-a4b1");
+    for (dir, allowed) in [(&a_dirs[0], true), (&b_dirs[0], false), (&a_dirs[1], false)] {
+        let file = dir.join("proof.md");
+        let input = input_for("Write", file.to_str());
+        let output = handle_pre_tool_use(&input, Some(&a)).unwrap();
+        if allowed {
+            assert!(allow_reason(&output).is_some(), "{output:?}");
+        } else {
+            assert!(
+                deny_reason(&output)
+                    .unwrap()
+                    .contains("FACTORY WORKSPACE CONTRACT"),
+                "{output:?}"
+            );
+        }
+    }
+    let legacy_file = a_dirs[1].join("historical-proof.md");
+    let read = input_for("Read", legacy_file.to_str());
+    assert!(allow_reason(&handle_pre_tool_use(&read, Some(&a)).unwrap()).is_some());
 }

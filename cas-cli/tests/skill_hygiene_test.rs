@@ -20,6 +20,7 @@ fn source(flavor: &str, relative: &str) -> &'static str {
 }
 
 #[test]
+// pin: Cross-check init registration against the release skill and rubric; an omitted registration is invisible to catalog lookup.
 fn release_notes_are_generic_procedure_and_rubric_driven() {
     let init = include_str!("../src/cli/init/docs_and_skill.rs");
     assert!(init.contains("follow docs/release-notes/RUBRIC.md"));

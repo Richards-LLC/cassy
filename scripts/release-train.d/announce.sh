@@ -58,8 +58,20 @@ release_train_announce_append_posted() {
     mv "$temp" "$draft"
 }
 
+release_train_announcement_embargo_active() {
+    local embargo="${CAS_RELEASE_TRAIN_ANNOUNCEMENT_EMBARGO:-}"
+    if [[ -z "${CAS_RELEASE_TRAIN_ANNOUNCEMENT_EMBARGO+x}" && -s "$run_dir/announcement-embargo.txt" ]]; then
+        embargo="$(cat "$run_dir/announcement-embargo.txt")"
+    fi
+    [[ -n "${embargo//[[:space:]]/}" ]]
+}
+
 release_train_announce() {
     local draft body_dir post_cmd receipt proxy_toml
+    if release_train_announcement_embargo_active; then
+        printf 'BLOCKER announce: explicit announcement embargo; runtime publication and install proof remain required\n' >&2
+        return 1
+    fi
     draft="$(release_train_announce_draft_path)"
     receipt="$run_dir/announce.receipt"
     body_dir="$run_dir/announce-bodies"

@@ -2719,6 +2719,7 @@ mod tests {
     /// two are deliberately separate constants specifically to prevent this
     /// class of accidental coupling.
     #[test]
+    // pin: Grok retains its independent sixty-second transcript freshness window when Claude thresholds change.
     fn grok_window_unaffected_by_claude_widening() {
         assert_eq!(GROK_TRANSCRIPT_FRESH_WINDOW, Duration::from_secs(60));
         assert_ne!(GROK_TRANSCRIPT_FRESH_WINDOW, TRANSCRIPT_FRESH_WINDOW);

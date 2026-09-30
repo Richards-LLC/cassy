@@ -3,8 +3,8 @@
 #
 # The latency number is the claim GH #449 is closed on, so the script that
 # produces it must be provably unable to flatter a release: it measures from
-# the FIRST run of the tag (not a rerun), and it fails when the budget is
-# exceeded rather than printing a number nobody checks.
+# the FIRST run of the tag (not a rerun), and it records an overrun without blocking
+# the remaining work for an already-published release.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -89,19 +89,21 @@ out="$(CAS_RELEASE_TRAIN_RUN_DIR="$run_dir" FAKE_PUBLISHED_AT=2026-08-20T12:04:1
 expect_field "$out" INTERVENTIONS 3 'resume interventions count each blocker once'
 expect_field "$out" BLOCKERS gate,pipeline 'receipt preserves distinct blocker stages'
 
-# 2. A slow release must fail, not merely report.
+# 2. A slow published release must record the overrun and continue.
 set +e
 slow_out="$(FAKE_PUBLISHED_AT=2026-08-20T12:21:00Z "$receipt" v3.4.0 2>&1)"
 slow_status=$?
 set -e
-if [[ "$slow_status" -ne 0 ]]; then
-    ok 'an over-budget release exits non-zero'
+if [[ "$slow_status" -eq 0 ]]; then
+    ok 'an over-budget published release exits zero'
 else
-    bad 'an over-budget release exited 0'
+    bad 'an over-budget published release blocks completion'
 fi
+expect_field "$slow_out" WITHIN_BUDGET false 'overrun is retained in the receipt'
+expect_field "$slow_out" PUBLISH_LATENCY_SECONDS 1260 'overrun retains the actual measurement'
 grep -qF 'over the 600s budget' <<<"$slow_out" \
-    && ok 'over-budget failure names the budget' \
-    || bad 'over-budget failure does not name the budget'
+    && ok 'over-budget warning names the budget' \
+    || bad 'over-budget warning does not name the budget'
 
 # 3. An explicit budget is honoured.
 out="$(FAKE_PUBLISHED_AT=2026-08-20T12:21:00Z "$receipt" v3.4.0 --budget-seconds 1800)"
@@ -118,6 +120,24 @@ if [[ "$unpublished_status" -eq 1 ]]; then
 else
     bad "an unpublished release exited $unpublished_status"
 fi
+
+# Missing or incoherent measurements still fail, with no success receipt.
+for scenario in missing invalid reversed; do
+    published=2026-08-20T12:04:10Z
+    case "$scenario" in
+        missing) printf '{"workflow_runs":[]}' >"$tmp/bad-runs.json" ;;
+        invalid) printf '{"workflow_runs":[{"id":111,"created_at":"not-a-time"}]}' >"$tmp/bad-runs.json" ;;
+        reversed) cp "$tmp/runs.json" "$tmp/bad-runs.json"; published=2026-08-20T11:59:59Z ;;
+    esac
+    if FAKE_RUNS_JSON="$tmp/bad-runs.json" FAKE_PUBLISHED_AT="$published" \
+        "$receipt" v3.4.0 >"$tmp/bad.out" 2>"$tmp/bad.err"; then
+        bad "$scenario latency measurement passed"
+    elif [[ ! -s "$tmp/bad.out" ]]; then
+        ok "$scenario latency measurement fails before emitting a receipt"
+    else
+        bad "$scenario latency measurement emitted a success receipt"
+    fi
+done
 
 # 5. Argument validation.
 for bad_args in "3.4.0" "v3.4.0 --budget-seconds"; do

@@ -1320,6 +1320,7 @@ fn code_index_defers_while_busy_then_overrides_at_the_ceiling() {
 /// The ceiling is a product decision, not an incidental number: it bounds how stale
 /// `code_search` may be, and the doctor lag line is calibrated against it.
 #[test]
+// pin: Five-minute code-index staleness is the published freshness ceiling used to calibrate doctor lag.
 fn code_index_max_staleness_is_five_minutes() {
     assert_eq!(CODE_INDEX_MAX_STALENESS_SECS, 300);
 }

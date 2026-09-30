@@ -1439,6 +1439,7 @@ mod tests {
     /// down.  The daemon forwards these literals via `alt_screen_wheel_bytes`
     /// for Claude/Codex, so a silent typo would break wheel-to-PTY forward.
     #[test]
+    // pin: These PgUp/PgDn and SGR bytes are terminal protocol sequences forwarded verbatim to harness PTYs.
     fn scroll_arrow_consts_have_exact_byte_shape_cas_72c3() {
         assert_eq!(
             SCROLL_UP_ARROWS, b"\x1b[5~",
@@ -1455,6 +1456,7 @@ mod tests {
     /// Grok prompt-focused no-ops on PgUp/PgDn but scrolls on SGR 1006 wheel
     /// (button 64/65). Claude/Codex keep the cas-f93a PgUp/PgDn path.
     #[test]
+    // pin: These PgUp/PgDn and SGR bytes are terminal protocol sequences forwarded verbatim to harness PTYs.
     fn sgr_wheel_consts_and_harness_payloads_cas_d3b5() {
         assert_eq!(
             SCROLL_UP_SGR, b"\x1b[<64;2;2M",

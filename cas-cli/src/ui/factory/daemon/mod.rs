@@ -231,6 +231,8 @@ pub struct FactoryDaemon {
     ws_listener: Option<tokio::net::TcpListener>,
     /// Connected WebSocket clients
     ws_clients: HashMap<usize, WsConnection>,
+    /// Pending keyframes and the snapshot/delta exchange for WebSocket clients.
+    terminal_exchange: runtime::terminal_exchange::TerminalExchange,
     /// Next WebSocket client ID
     next_ws_client_id: usize,
     /// Per-pane sizes allocated by TUI layout (pane_id -> (cols, rows))

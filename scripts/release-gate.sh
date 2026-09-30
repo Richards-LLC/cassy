@@ -20,7 +20,7 @@ readonly -a gate_check_ids=(
     scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config assemble-stale-base
     version-literals fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
     snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
-    procedure-guardrails working-tree test-targets markdown-lint test-shape builtin-doc-hygiene
+    procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene
 )
 
 usage() {
@@ -93,7 +93,7 @@ if [[ "${1:-}" == --fast-rows ]]; then
     }
     # Keep an explicit allowlist: adding a costly full-gate row cannot silently
     # add a build or a host-dependent release precondition to lane admission.
-    set -- "$version" --only failure-log,version-literals,changelog-and-versions,release-script,release-notes-shell-injection,procedure-guardrails,test-targets,markdown-lint,test-shape,builtin-doc-hygiene
+    set -- "$version" --only failure-log,version-literals,changelog-and-versions,release-script,release-notes-shell-injection,procedure-guardrails,test-targets,markdown-lint,test-shape,test-env,builtin-doc-hygiene
 fi
 
 if [[ "$#" -ne 1 && "$#" -ne 2 && "$#" -ne 3 ]] || [[ ! "${1:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -342,7 +342,7 @@ run_check() {
     if [[ -z "$only_rows" && "$name" =~ ^(nextest|archive-mode)$ \
         && -f "$repo_root/scripts/assembly-proof.py" ]]; then
         local assembly_pass=''
-        if assembly_pass="$(python3 "$repo_root/scripts/assembly-proof.py" check "$repo_root")"; then
+        if assembly_pass="$(python3 "$repo_root/scripts/assembly-proof.py" check "$repo_root" 2>&1)"; then
             source_sha="$(sed -n 's/.*source_sha=\([0-9a-f]*\).*/\1/p' <<<"$assembly_pass")"
             print_result PASS "$name" "$command"
             printf '  reused %s\n' "$assembly_pass"
@@ -354,6 +354,9 @@ run_check() {
             fi
             return 0
         fi
+        printf '  %s\n' "$assembly_pass"
+    elif [[ -z "$only_rows" && "$name" =~ ^(nextest|archive-mode)$ ]]; then
+        printf '  MISS assembly key=implementation reason=helper_missing\n'
     fi
     key="$(row_cache_key "$name" || true)"
     env_fingerprint="$(cache_environment)"
@@ -1174,6 +1177,21 @@ check_markdown_lint() {
     python3 scripts/check-changed-markdown.py "${fast_base:-HEAD^}"
 }
 
+check_test_env() {
+    [[ -f scripts/check-test-env.py ]] || {
+        printf 'test-env: scripts/check-test-env.py is missing\n'
+        return 1
+    }
+    if [[ "$fast_rows" == true ]]; then
+        python3 scripts/check-test-env.py --changed-since "${fast_base:-HEAD^}" || return $?
+    else
+        python3 scripts/check-test-env.py || return $?
+    fi
+    if [[ -f scripts/test-check-test-env.py ]]; then
+        python3 scripts/test-check-test-env.py
+    fi
+}
+
 check_test_shape() {
     [[ -f scripts/check-test-shape.py ]] || {
         printf 'test-shape: scripts/check-test-shape.py is missing\n'
@@ -1302,6 +1320,7 @@ if [[ "$fast_rows" == true && ! -f scripts/check-test-shape.py ]]; then
 else
     run_check test-shape 'python3 scripts/check-test-shape.py (changed lane in fast mode)' check_test_shape
 fi
+run_check test-env 'whole-workspace process-state test lint and strict baseline ratchet' check_test_env
 run_check builtin-doc-hygiene 'shared operator-data policy on builtin sources' check_builtin_doc_hygiene
 run_check working-tree \
     'git diff --quiet; git diff --cached --quiet; git ls-files --others --exclude-standard' \

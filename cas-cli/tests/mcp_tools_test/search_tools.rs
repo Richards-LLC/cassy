@@ -272,7 +272,10 @@ async fn artifact_fixture_content_is_searchable_after_backfill() {
     let (temp, service) = setup_cas();
     let artifacts_root = temp.path().join("durable-artifacts");
     let task_id = "cas-artifact-fixture";
-    let artifact = artifacts_root.join(task_id).join("SEND-LOG.md");
+    // cas-6ebf: search discovers the project-scoped artifact namespace.
+    let artifact = cas::config::project_factory_artifacts_root(&temp.path().join(".cas"), &artifacts_root)
+        .join(task_id)
+        .join("SEND-LOG.md");
     std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
     std::fs::write(
         &artifact,

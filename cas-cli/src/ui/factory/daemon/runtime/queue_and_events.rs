@@ -542,6 +542,7 @@ fn append_workspace_contract_brief(
             )
         })
         .unwrap_or_else(|| crate::config::resolved_factory_artifacts_root(None));
+    let artifacts_root = crate::config::project_factory_artifacts_root(cas_dir, &artifacts_root);
     let task_artifacts = artifacts_root.join(task_id);
     message.push_str(&format!(
         "\n\nDurable artifacts for this task belong under `{}/`. Source and build output belong in the worktree.",
@@ -2963,9 +2964,8 @@ impl FactoryDaemon {
                 self.session_summarizer.note_output(data.len());
                 // Forward to any active web viewers
                 self.forward_pane_output(&pane_id, &data);
-                // Forward to GUI and WebSocket clients
+                // The terminal exchange enqueues WS output after these observers.
                 self.forward_pane_output_to_gui(&pane_id, &data);
-                self.forward_pane_output_to_ws(&pane_id, &data);
             }
             cas_mux::MuxEvent::PaneExited {
                 pane_id,
@@ -8907,7 +8907,10 @@ mod tests {
         assert!(prompt.contains("acme/widgets#77"), "{prompt}");
         assert!(
             prompt.contains(
-                &crate::github_issue_attach::attachment_dir(&artifacts, "cas-cite2")
+                &crate::github_issue_attach::attachment_dir(
+                    &crate::config::project_factory_artifacts_root(&cas_dir, &artifacts),
+                    "cas-cite2"
+                )
                     .display()
                     .to_string()
             ),
@@ -8920,8 +8923,11 @@ mod tests {
         );
         // The background fetch ran with this test's `gh`; let it finish
         // before the environment is restored.
-        let stated = crate::github_issue_attach::attachment_dir(&artifacts, "cas-cite2")
-            .join("acme__widgets__77.unavailable.md");
+        let stated = crate::github_issue_attach::attachment_dir(
+            &crate::config::project_factory_artifacts_root(&cas_dir, &artifacts),
+            "cas-cite2",
+        )
+        .join("acme__widgets__77.unavailable.md");
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         while !stated.is_file() && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
@@ -12783,9 +12789,9 @@ mod tests {
             .iter()
             .find(|prompt| prompt.prompt.contains("cas-mentioned-path"))
             .expect("mentioned-path task brief");
-        let resolved_stale_root = crate::config::resolved_factory_artifacts_root(
+        let resolved_stale_root = crate::config::project_factory_artifacts_root(&cas_dir, &crate::config::resolved_factory_artifacts_root(
             Some(artifacts_root.to_str().expect("artifacts root utf8")),
-        )
+        ))
         .join("cas-stale-path");
         assert!(
             stale_prompt.prompt.contains("Workspace-contract warning"),

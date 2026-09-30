@@ -4679,6 +4679,7 @@ This is the body content."#;
     /// The launch contract lives in cas-pty. Worker skills link the on-demand
     /// discipline file, which carries the assembly proof reference.
     #[test]
+    // pin: Verify the spawn source still delegates to the shared worker contract; catalog-only checks cannot detect an omitted spawn consumer.
     fn test_worker_discipline_reference_is_linked_and_assembly_proof_is_named() {
         let spawn_prompt = include_str!("../../crates/cas-pty/src/pty.rs");
         assert!(spawn_prompt.contains("WORKER_CONTRACT_ELEMENTS"));

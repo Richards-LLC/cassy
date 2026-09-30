@@ -715,7 +715,7 @@ impl CasService {
                 .map(|agent| agent.name.clone())
                 .unwrap_or_else(|| source.clone());
             message = crate::mcp::tools::traffic_limits::spill_message_to_artifact(
-                crate::mcp::tools::traffic_limits::message_spill_root(&config).as_deref(),
+                crate::mcp::tools::traffic_limits::message_spill_root(&self.inner.cas_root, &config).as_deref(),
                 req.task_id.as_deref(),
                 &sender,
                 &target,
@@ -3930,6 +3930,7 @@ mod cas99d2_redelivery_tests {
     /// The marker must match the token the daemon's teams-inbox writer already
     /// recognises as an intentional redelivery, so the two channels agree.
     #[test]
+    // pin: The inbox producer and teams redelivery consumer exchange this exact wire token.
     fn the_marker_matches_the_teams_inbox_redelivery_token() {
         assert_eq!(INBOX_REDELIVERY_MARKER, "[redelivery]");
     }
@@ -4326,7 +4327,7 @@ mod cas_89e1_post_merge_message_type_tests {
         assert!(
             error
                 .message
-                .contains("[factory] artifacts_root/cas-449b/<name>.md"),
+                .contains("[factory] artifacts_root/<project-key>/cas-449b/<name>.md"),
             "{error:?}"
         );
 
@@ -4387,8 +4388,10 @@ mod cas_89e1_post_merge_message_type_tests {
             .await
             .expect("an over-cap supervisor message is delivered, not refused");
 
-        let spilled: Vec<_> = std::fs::read_dir(artifacts.join("cas-6ee6"))
-            .expect("spill directory under artifacts_root/<task>")
+        let spilled: Vec<_> = std::fs::read_dir(
+            crate::config::project_factory_artifacts_root(&cas_root, &artifacts).join("cas-6ee6"),
+        )
+        .expect("spill directory under artifacts_root/<project-key>/<task>")
             .map(|entry| entry.unwrap().path())
             .collect();
         assert_eq!(spilled.len(), 1, "{spilled:?}");

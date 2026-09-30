@@ -797,9 +797,9 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#,
             .args(["--exact", "factory_worker_check::tests::daemon_grandchild_cannot_retain_slot_after_runner_exit", "--nocapture"])
             .env(FIXTURE, dir.path()).output().unwrap();
         assert!(output.status.success(), "{output:?}");
-        assert!(
-            String::from_utf8_lossy(&output.stdout).contains("1 passed"),
-            "zero-test child is not proof: {output:?}"
+        crate::test_child::assert_passed(
+            &String::from_utf8_lossy(&output.stdout),
+            "factory_worker_check::tests::daemon_grandchild_cannot_retain_slot_after_runner_exit",
         );
         let pid: i32 = std::fs::read_to_string(dir.path().join("grandchild.pid"))
             .unwrap()

@@ -207,6 +207,7 @@ fn pull_url_hits(root: &Path) -> Vec<(PathBuf, Vec<usize>)> {
 }
 
 #[test]
+// pin: Audit all owner-filtered pull call sites, including paths not reached by this runtime fixture.
 fn pull_url_scan_ignores_cfg_test_module_fixture() {
     let fixture = cas::test_paths::crate_root()
         .join("tests")
@@ -279,6 +280,7 @@ fn only_one_production_pull_url_builder_exists() {
 }
 
 #[test]
+// pin: Audit all owner-filtered pull call sites, including paths not reached by this runtime fixture.
 fn scoped_pull_builder_appends_project_id() {
     // Belt-and-suspenders source-level assertion: the one allowed builder
     // must, in the same file, also append `project_id=`. This catches a

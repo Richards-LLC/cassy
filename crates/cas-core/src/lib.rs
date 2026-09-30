@@ -120,3 +120,6 @@ pub use hooks::{
 // Re-export types from dependency crates for convenience
 pub use cas_store;
 pub use cas_types;
+
+#[cfg(test)]
+mod test_child;

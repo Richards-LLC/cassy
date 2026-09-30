@@ -137,9 +137,48 @@ struct ReleaseMetadata {
 struct ReleaseEvidence {
     tag_published_at: Option<String>,
     tag_to_published_seconds: Option<i64>,
+    publication_budget_seconds: Option<i64>,
     green_at: Option<String>,
     green_to_published_seconds: Option<i64>,
     receipt_path: Option<String>,
+}
+
+impl ReleaseEvidence {
+    fn record_latency(&mut self, values: &HashMap<String, String>) {
+        self.tag_to_published_seconds = values
+            .get("PUBLISH_LATENCY_SECONDS")
+            .and_then(|value| value.parse::<i64>().ok())
+            .filter(|seconds| *seconds >= 0);
+        self.publication_budget_seconds = values
+            .get("BUDGET_SECONDS")
+            .and_then(|value| value.parse::<i64>().ok())
+            .filter(|budget| *budget >= 0)
+            .filter(|budget| {
+                self.tag_to_published_seconds.is_some_and(|seconds| {
+                    values.get("WITHIN_BUDGET").map(String::as_str)
+                        == Some(if seconds <= *budget { "true" } else { "false" })
+                })
+            });
+    }
+
+    fn publication_timing(&self) -> String {
+        let Some(seconds) = self.tag_to_published_seconds else {
+            return "unavailable".to_string();
+        };
+        let timing = format_duration(seconds);
+        match self.publication_budget_seconds {
+            Some(budget) => format!(
+                "{timing} — {} ({} budget)",
+                if seconds <= budget {
+                    "within budget"
+                } else {
+                    "over budget"
+                },
+                format_duration(budget)
+            ),
+            None => format!("{timing} — budget unavailable"),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1206,7 +1245,11 @@ fn assemble_markdown(
         "| Fix entries | {fix_entries} | Top-level Fixed entries in the CHANGELOG section |\n"
     ));
     output.push_str(&format!(
-        "| Green to published | {latency} | gate.green.epoch to the published receipt, when available |\n\n"
+        "| Green to published | {latency} | gate.green.epoch to the published receipt, when available |\n"
+    ));
+    output.push_str(&format!(
+        "| Tag to published | {} | First tag workflow to publication; measured budget result |\n\n",
+        sources.release_evidence.publication_timing()
     ));
     output.push_str("## What you can do now\n\n");
     output.push_str(&was_now_sections(sources, true));
@@ -1943,8 +1986,8 @@ fn find_release_evidence(tag: &str, release: &Option<ReleaseMetadata>) -> Releas
         if let Some(value) = values.get("PUBLISHED_AT") {
             published_at = Some(value.clone());
         }
-        if let Some(value) = values.get("PUBLISH_LATENCY_SECONDS") {
-            evidence.tag_to_published_seconds = value.parse().ok();
+        if values.contains_key("PUBLISH_LATENCY_SECONDS") {
+            evidence.record_latency(&values);
         }
         if values.contains_key("PUBLISH_LATENCY_SECONDS") || path_text.contains("published.receipt")
         {
@@ -2190,6 +2233,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn publication_receipt_overrun_remains_visible_in_report_timing() {
+        let mut evidence = ReleaseEvidence::default();
+        evidence.record_latency(&parse_key_values(
+            "PUBLISH_LATENCY_SECONDS=908\nBUDGET_SECONDS=600\nWITHIN_BUDGET=false\n",
+        ));
+        assert_eq!(
+            evidence.publication_timing(),
+            "15m 8s — over budget (10m 0s budget)"
+        );
+        evidence.record_latency(&parse_key_values(
+            "PUBLISH_LATENCY_SECONDS=250\nBUDGET_SECONDS=600\nWITHIN_BUDGET=true\n",
+        ));
+        assert_eq!(
+            evidence.publication_timing(),
+            "4m 10s — within budget (10m 0s budget)"
+        );
+        evidence.record_latency(&parse_key_values(
+            "PUBLISH_LATENCY_SECONDS=908\nBUDGET_SECONDS=600\nWITHIN_BUDGET=true\n",
+        ));
+        assert_eq!(evidence.publication_timing(), "15m 8s — budget unavailable");
+        evidence.record_latency(&parse_key_values("PUBLISH_LATENCY_SECONDS=-1\n"));
+        assert_eq!(evidence.publication_timing(), "unavailable");
+    }
+
+    #[test]
     fn changelog_parser_selects_keep_a_changelog_section_and_entries() {
         let fixture = "# Changelog\n\n## [2.4.0] - 2026-09-01\n\n### Added\n- New thing (#12)\n\n### Fixed\n- Small fix\n\n## [2.3.0] - 2026-08-01\n- Older\n";
         let section = parse_changelog_section(fixture, "v2.4.0").expect("section");
@@ -2272,7 +2340,7 @@ Dev reply
         assert_eq!(articles[1].title, "Assembler detail");
         assert_eq!(articles[0].group, None);
 
-        let sources = AcquiredSources {
+        let mut sources = AcquiredSources {
             project: "fixture".to_string(),
             changelog: None,
             changelog_path: None,
@@ -2288,6 +2356,11 @@ Dev reply
             warnings: Vec::new(),
             retrieved_at: "2026-09-09T00:00:00Z".to_string(),
         };
+        sources.release_evidence.record_latency(&parse_key_values(
+            "PUBLISH_LATENCY_SECONDS=908\nBUDGET_SECONDS=600\nWITHIN_BUDGET=false\n",
+        ));
+        let report = assemble_markdown(Path::new("."), "2.4.0", "v2.4.0", &sources);
+        assert!(report.contains("| Tag to published | 15m 8s — over budget (10m 0s budget) |"));
         let user = was_now_sections(&sources, true);
         let dev = was_now_sections(&sources, false);
         assert!(user.contains("Readable report"));

@@ -36,6 +36,7 @@ use test_env_guard::TestEnvGuard;
 /// HOME/XDG_CONFIG_HOME mutation bypasses the canonical guard and can move the
 /// host registry between schema installation and strict store open.
 #[test]
+// pin: Structural scan forbids direct HOME writes across all test branches; canonical TestEnvGuard remains the mutation boundary.
 fn process_home_mutation_uses_the_canonical_test_env_guard() {
     let source = include_str!("worktree_surface_test.rs");
     let offenders = source
@@ -81,13 +82,7 @@ fn authority_boundary_test_is_hermetic_against_inherited_factory_env() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.lines().any(|line| line == "running 1 test")
-            && stdout.contains(&format!("test {child_test} ..."))
-            && stdout.contains("test result: ok"),
-        "authority-boundary helper did not execute {child_test}:\n{stdout}"
-    );
+    child_test_evidence::assert_passed(&String::from_utf8_lossy(&output.stdout), &child_test);
 }
 
 /// Initialize a project fixture while keeping the host-level known-repo
@@ -5568,3 +5563,6 @@ async fn epic_child_resolving_to_trunk_requires_allow_trunk_cas_c85e() {
         "the explicitly authorized destination receives the work"
     );
 }
+
+#[path = "../../crates/cas-core/src/test_child.rs"]
+mod child_test_evidence;

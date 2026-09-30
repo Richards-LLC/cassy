@@ -55,7 +55,7 @@ impl Project {
         // Point the factory artifacts root inside the project's temp tree so
         // the test never writes to the operator's real ~/.cas/artifacts.
         let artifacts_root = temp.path().join("factory-artifacts");
-        std::fs::create_dir_all(artifacts_root.join(TASK)).unwrap();
+        std::fs::create_dir_all(cas::config::project_factory_artifacts_root(&temp.path().join(".cas"), &artifacts_root).join(TASK)).unwrap();
         let config_path = temp.path().join(".cas").join("config.toml");
         let mut config = std::fs::read_to_string(&config_path).unwrap_or_default();
         config.push_str(&format!(
@@ -71,7 +71,7 @@ impl Project {
     }
 
     fn task_dir(&self) -> std::path::PathBuf {
-        self.artifacts_root.join(TASK)
+        cas::config::project_factory_artifacts_root(&self.cas_dir(), &self.artifacts_root).join(TASK)
     }
 
     fn cas_dir(&self) -> std::path::PathBuf {

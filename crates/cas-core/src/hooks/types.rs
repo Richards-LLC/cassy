@@ -66,6 +66,7 @@ impl PreToolUseHarness {
 
 /// Input received from Claude Code hooks via stdin
 #[derive(Debug, Clone, Deserialize, Default)]
+#[cfg_attr(test, derive(Serialize))]
 pub struct HookInput {
     /// Unique session identifier
     #[serde(default, alias = "sessionId")]
@@ -908,18 +909,20 @@ mod tests {
     /// deserialization-contract bug. Parse the real wire shape.
     #[test]
     fn userpromptsubmit_payload_deserializes_the_prompt_key() {
-        let input: HookInput = serde_json::from_str(
-            r#"{"session_id":"s","transcript_path":"/tmp/t","cwd":"/tmp",
-                "hook_event_name":"UserPromptSubmit","prompt":"do the thing"}"#,
-        )
+        let input: HookInput = serde_json::from_str(include_str!(
+            "fixtures/claude-2.1.265-user-prompt-submit.json"
+        ))
         .expect("Claude's real payload must deserialize");
 
         assert_eq!(
             input.user_prompt.as_deref(),
-            Some("do the thing"),
+            Some("reply with the single word ok"),
             "`prompt` must land in user_prompt, not be swallowed elsewhere"
         );
-        assert_eq!(input.submitted_prompt(), Some("do the thing"));
+        assert_eq!(
+            input.submitted_prompt(),
+            Some("reply with the single word ok")
+        );
         assert_eq!(
             input.subagent_prompt, None,
             "`prompt` must no longer be captured by subagent_prompt"
@@ -974,18 +977,9 @@ mod tests {
     /// event and the Ink-crash guard / secret redaction could never run.
     #[test]
     fn messagedisplay_payload_carries_text_under_delta() {
-        let input: HookInput = serde_json::from_str(
-            r#"{"session_id":"fc70e6f3-4e32-43cc-b2da-259c777cd9a6",
-                "transcript_path":"/tmp/wirecap/projects/x.jsonl",
-                "cwd":"/tmp/wirecap/proj",
-                "prompt_id":"d323a56b-73b1-4afc-8b3f-32605be51b91",
-                "hook_event_name":"MessageDisplay",
-                "turn_id":"83db6fbe-820e-4db4-8845-d5515e9158c3",
-                "message_id":"513a75fd-35f5-451b-a7ed-b925c5ecc4d9",
-                "index":0,"final":true,
-                "delta":"I'll run the bash command and spawn the agent."}"#,
-        )
-        .expect("the real MessageDisplay payload must deserialize");
+        let input: HookInput =
+            serde_json::from_str(include_str!("fixtures/cas-f3e3-message-display.json"))
+                .expect("the real MessageDisplay payload must deserialize");
 
         assert_eq!(
             input.message.as_deref(),
@@ -1310,3 +1304,8 @@ mod tests {
         );
     }
 }
+
+// Wire-contract inventory is test-only; production HookInput stays Deserialize-only.
+#[cfg(test)]
+#[path = "wire_contract.rs"]
+mod wire_contract;

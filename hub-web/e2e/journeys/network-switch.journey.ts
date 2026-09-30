@@ -341,6 +341,7 @@ test("HUB-J12 network switch: revoked pairing offers accessible Re-pair on deskt
 // cas-f698: the old two-machine journey hid this behind the healthy STUDIO.
 // Exact failure: footer .machine-badge-state still says "Reconnecting" after
 // ATLAS alone reaches Needs pairing. Enable this when cas-f698 fixes the footer.
+// cas-allow-skip: cas-f698; supervisor approved this singleton footer regression pending its product fix.
 test.fixme("HUB-J12 network switch: single revoked machine stops promising reconnection (cas-f698)", async ({ page }) => {
   const { hub, clock, header } = await connected(page);
   hub.refuseProofs("atlas", 1_000, "revoked", false);

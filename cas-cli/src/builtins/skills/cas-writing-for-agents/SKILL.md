@@ -50,7 +50,7 @@ Use this ladder to choose where material belongs:
 3. Disclosed reference: a separate file reached through a context pointer.
 
 Apply the branching test: inline what every branch needs; disclose what only some branches reach. Keep a concept's definition, rules and caveats together on its rung.
-A completion criterion controls both clarity and demand. Sharpen an observable bound first; require exhaustive coverage where the work needs legwork, such as “every modified model accounted for” rather than “produce a change list”. Visible later steps can pull attention toward premature completion. Hide them only when the bound remains irreducibly fuzzy and rushing is observed, and only across a real context boundary: a handoff or subagent dispatch. An inline call leaves later steps in context.
+A completion criterion controls both clarity and demand. Sharpen an observable bound first; raise demand to drive legwork through exhaustive coverage, such as “every modified model accounted for” rather than “produce a change list”. Visible later steps can pull attention toward premature completion. Hide them only when the bound remains irreducibly fuzzy and rushing is observed, and only across a real context boundary: a handoff or subagent dispatch. An inline call leaves later steps in context.
 
 ## Wording for current models
 

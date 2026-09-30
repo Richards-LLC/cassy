@@ -612,6 +612,14 @@ fn advance(
         commits: owner.commits.clone(),
         baseline: owner.baseline.clone(),
     };
+    // An owned QA merge may evolve into its own novel line. Imported parent
+    // text still requires exact equality; task ownership cannot make a stale
+    // expanded parent line carry a restricted delivery's ownership.
+    let retains_owned_line = |old: &str, new: &str| {
+        let novel_internal = internal_resolution
+            && resolution_parent_lines.is_some_and(|parents| !parents.contains(new));
+        retains_line(old, new, ordinary || novel_internal)
+    };
     for line in &owner.positions {
         let mut offset = 0isize;
         let mut changed = false;
@@ -647,7 +655,7 @@ fn advance(
                     .iter()
                     .enumerate()
                     .filter(|(_, new)| {
-                        retains_line(old, new, ordinary || internal_resolution)
+                        retains_owned_line(old, new)
                             || merge_union.is_some_and(|union| union.retains_list(*line, old, new))
                             || parallel_edits
                                 .get(line)
@@ -682,9 +690,9 @@ fn advance(
                                 .iter()
                                 .any(|line| parents.contains(line) && retains_line(old, line, true))
                     });
-                    if (!ordinary && !internal_resolution && !novel_resolution)
+                    if (!ordinary && !novel_resolution)
                         || hunk.added.iter().any(|new| {
-                            retains_line(old, new, ordinary || internal_resolution)
+                            retains_owned_line(old, new)
                                 || merge_union
                                     .is_some_and(|union| union.retains_list(*line, old, new))
                                 || parallel_edits

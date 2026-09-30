@@ -2057,6 +2057,130 @@ mod tests {
         );
     }
 
+    fn expanded_grant_resolution_fixture(
+        adjacent: bool,
+        novel_grant: bool,
+    ) -> (tempfile::TempDir, String) {
+        let dir = fixture();
+        let repo = dir.path();
+        let separation = if adjacent {
+            ""
+        } else {
+            "kept_one();\nkept_two();\n"
+        };
+        commit(
+            repo,
+            "copy.txt",
+            &format!("grant(user, ADMIN);\n{separation}old_qa();\n"),
+            "baseline authorization",
+        );
+        git(repo, &["branch", "-f", "main", "HEAD"]);
+        commit(
+            repo,
+            "copy.txt",
+            &format!("grant(user);\n{separation}old_qa();\n"),
+            "cas-taskb: restrict grant",
+        );
+        git(repo, &["checkout", "main"]);
+        commit(
+            repo,
+            "copy.txt",
+            &format!("grant(user, ADMIN, audit);\n{separation}foreign_qa();\n"),
+            "expand baseline grant",
+        );
+        git(repo, &["checkout", "factory/worker"]);
+        git(
+            repo,
+            &["merge", "--no-ff", "--no-commit", "-s", "ours", "main"],
+        );
+        let grant = if novel_grant {
+            "grant(user, audit);"
+        } else {
+            "grant(user, ADMIN, audit);"
+        };
+        let handoff = commit(
+            repo,
+            "copy.txt",
+            &format!("{grant}\n{separation}novel_qa();\n"),
+            "cas-taskb: QA resolution",
+        );
+        git(repo, &["checkout", "main"]);
+        git(
+            repo,
+            &["merge", "--no-ff", "factory/worker", "-m", "integrate"],
+        );
+        (dir, handoff)
+    }
+
+    #[test]
+    fn task_owned_resolution_cannot_import_expanded_stale_grant_cas_0930() {
+        let (dir, handoff) = expanded_grant_resolution_fixture(false, false);
+        let mut window = window();
+        window.identity.known_commits.push(handoff.clone());
+        assert_eq!(
+            merge_resolution_paths(dir.path(), &handoff, &window.identity).unwrap(),
+            vec!["copy.txt"]
+        );
+        assert_eq!(
+            merge_tip_content_presence(
+                dir.path(),
+                "main",
+                &handoff,
+                Some(&window),
+                &window.identity,
+                None
+            ),
+            Some(DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()],
+            })
+        );
+    }
+
+    #[test]
+    fn adjacent_novel_resolution_cannot_own_imported_stale_grant_cas_0930() {
+        let (dir, handoff) = expanded_grant_resolution_fixture(true, false);
+        let mut window = window();
+        window.identity.known_commits.push(handoff.clone());
+        assert_eq!(
+            merge_resolution_paths(dir.path(), &handoff, &window.identity).unwrap(),
+            vec!["copy.txt"]
+        );
+        assert_eq!(
+            merge_tip_content_presence(
+                dir.path(),
+                "main",
+                &handoff,
+                Some(&window),
+                &window.identity,
+                None
+            ),
+            Some(DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()],
+            })
+        );
+    }
+
+    #[test]
+    fn task_owned_novel_grant_resolution_records_supersession_cas_0930() {
+        let (dir, handoff) = expanded_grant_resolution_fixture(false, true);
+        let mut window = window();
+        window.identity.known_commits.push(handoff.clone());
+        assert_eq!(
+            merge_tip_content_presence(
+                dir.path(),
+                "main",
+                &handoff,
+                Some(&window),
+                &window.identity,
+                None
+            ),
+            Some(DeliveryContentPresence::Superseded {
+                paths: vec!["copy.txt".into()],
+                commits: vec![handoff],
+            })
+        );
+    }
+
     #[test]
     fn commented_out_delivered_line_records_superseding_commit_cas_0930() {
         let dir = fixture();

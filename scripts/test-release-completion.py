@@ -278,6 +278,11 @@ for stage in preflight assemble prep ledger gate pr-body pipeline publish post-p
     eval "$name() { printf '%s\\n' '$stage' >> \"\$run_dir/stages.log\"; }"
 done
 cut_stage_host_update() { release_train_delivery_completion; }
+# The stubbed assemble stage has no integration receipt to record.
+python3() {
+    if [[ "${1:-}" == */release-integrate.py ]]; then return 0; fi
+    command python3 "$@"
+}
 cut_run false
 '''
         env = dict(self.f.env, FIXTURE_WORKTREE=str(self.f.worktree), FIXTURE_RUN=str(self.f.receipts),

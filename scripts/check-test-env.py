@@ -54,7 +54,7 @@ class Unit:
         self.ts = tokens(source)
         self.ps = pairs(self.ts)
         self.functions = []
-        self.call_cache = {}
+        self.call_cache, self.binding_cache = {}, {}
         self.aliases = {'TestEnvGuard': 'TestEnvGuard', 'env': 'std::env'}
         self.local_guard = any(self.values(i, i + 2) == ['struct', 'TestEnvGuard']
                                for i in range(len(self.ts))) and path != CANONICAL
@@ -161,6 +161,45 @@ class Unit:
                 attrs = []
             i += 1
 
+    def local_binding(self, f, name, site):
+        if id(f) not in self.binding_cache:
+            bindings = []
+            for k, value in enumerate(f.params):
+                if value == ':' and k:
+                    bindings.append((f.params[k - 1], f.body, f.end))
+            scopes = [f.end]
+            for k in range(f.body + 1, f.end):
+                value = self.ts[k].value
+                if not self.ts[k].string and value == '{':
+                    scopes.append(self.ps[k])
+                elif not self.ts[k].string and value == '}':
+                    scopes.pop()
+                elif not self.ts[k].string and value == 'let':
+                    # Conditional patterns need control-flow name resolution;
+                    # do not let them suppress a later free helper call.
+                    if self.ts[k - 1].value in ('if', 'while', '&&'):
+                        continue
+                    pos = k + 1
+                    if self.ts[pos].value == 'mut':
+                        pos += 1
+                    candidate = self.ts[pos].value
+                    # Simple lexical declarations/parameters shadow free
+                    # helpers after the initializer. Closure bodies themselves
+                    # are still visited; pattern bindings remain conservative.
+                    if (not re.fullmatch(r'[A-Za-z_]\w*', candidate) or
+                            self.ts[pos + 1].value not in ('=', ':')):
+                        continue
+                    end = pos + 1
+                    while end < scopes[-1] and self.ts[end].value != ';':
+                        if not self.ts[end].string and self.ts[end].value in ('(', '[', '{'):
+                            end = self.ps[end]
+                        end += 1
+                    if end < scopes[-1]:
+                        bindings.append((candidate, end, scopes[-1]))
+            self.binding_cache[id(f)] = bindings
+        return any(bound == name and begin < site < end
+                   for bound, begin, end in self.binding_cache[id(f)])
+
     def call(self, i):
         if i not in self.call_cache:
             self.call_cache[i] = self._call(i)
@@ -233,7 +272,9 @@ class Analyzer:
                 self.nesting.add(self.active[-1])
         return ident
 
-    def resolve(self, f, path):
+    def resolve(self, f, path, site=None):
+        if site is not None and '::' not in path and f.unit.local_binding(f, path, site):
+            return []
         key = (id(f), path)
         if key not in self.resolve_cache:
             self.resolve_cache[key] = self._resolve(f, path)
@@ -268,7 +309,7 @@ class Analyzer:
     def callback(self, f, start, end, guards, site):
         words = f.unit.values(start, end)
         if words and all(re.fullmatch(r'[A-Za-z_]\w*|::', x) for x in words):
-            for callee in self.resolve(f, ''.join(words)):
+            for callee in self.resolve(f, ''.join(words), site):
                 self.called(f, callee, guards, site)
 
     def called(self, caller, callee, guards, site):
@@ -381,7 +422,7 @@ class Analyzer:
                         if callee.unit is u and callee.scope and callee.scope[-1][:1].isupper():
                             self.called(f, callee, guards, i)
                 elif not method:
-                    for callee in self.resolve(f, path):
+                    for callee in self.resolve(f, path, i):
                         self.called(f, callee, guards, i)
                         if len(path.split('::')) > 1 and callee.scope and callee.scope[-1][:1].isupper():
                             for owned in self.by_scope[(id(callee.unit), callee.scope)]:

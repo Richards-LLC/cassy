@@ -91,6 +91,27 @@ class SourceContracts(unittest.TestCase):
         self.assertTrue(analyze(source))
         self.assertTrue(analyze(source, 'crates/cas-core/src/fixture.rs'))
 
+    def test_local_closure_and_parameter_shadow_unsafe_global_helpers(self):
+        sources = {
+            'cas-cli/src/cli.rs': 'pub fn run_command() { std::env::set_current_dir("."); }',
+            'cas-cli/src/qa.rs': '#[test] fn safe() { let run_command = || { "pure" }; run_command(); }',
+        }
+        self.assertFalse(LINT.Analyzer(sources).run())
+        sources['cas-cli/src/qa.rs'] = '#[test] fn safe(run_command: impl FnOnce()) { run_command(); }'
+        self.assertFalse(LINT.Analyzer(sources).run())
+        # Scope expiry must restore real helper resolution.
+        sources['cas-cli/src/qa.rs'] = '#[test] fn bad() { { let run_command = || {}; run_command(); } run_command(); }'
+        self.assertTrue(LINT.Analyzer(sources).run())
+        # A shadowing closure cannot hide direct process mutation in its body.
+        sources['cas-cli/src/qa.rs'] = '#[test] fn bad() { let run_command = || { std::env::set_var("HOME", "x"); }; run_command(); }'
+        self.assertTrue(LINT.Analyzer(sources).run())
+        # A declaration does not shadow its own initializer.
+        sources['cas-cli/src/qa.rs'] = '#[test] fn bad() { let run_command = run_command(); }'
+        self.assertTrue(LINT.Analyzer(sources).run())
+        # Conditional patterns must not mask a helper after their branch.
+        sources['cas-cli/src/qa.rs'] = '#[test] fn bad() { if let Some(run_command) = value { run_command(); } run_command(); }'
+        self.assertTrue(LINT.Analyzer(sources).run())
+
     def test_shared_guard_nesting_is_checked_in_every_member(self):
         source = 'use test_env_guard::TestEnvGuard; #[test] fn bad() { let _a = TestEnvGuard::new(); let _b = TestEnvGuard::new(); }'
         self.assertTrue(analyze(source, 'crates/cas-core/src/fixture.rs'))

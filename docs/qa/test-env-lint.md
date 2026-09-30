@@ -18,7 +18,10 @@ The scanner recognizes unit-test attributes, `cfg(test)` modules, integration
 tests, test-support paths, and named helpers reached from tests. It follows
 qualified helpers across files in the same crate and imported aliases. Bare
 helper calls without a local definition conservatively include possible
-glob-imported functions in that crate. It
+glob-imported functions in that crate. Simple local declarations and function
+parameters shadow bare helper names within their lexical scope; a declaration
+does not shadow its own initializer. Local closure bodies remain checked for
+process mutations. It
 tracks guard constructors, returned guards, lexical scopes, explicit `drop`,
 and same-thread callbacks. A second constructor while an owner remains live,
 including a constructor reached through a helper, is a violation. Each unsafe
@@ -31,10 +34,14 @@ Comments and string literals never become calls or grant exceptions.
 ## Strict baseline
 
 `scripts/test-env-baseline.json` records each exact legacy finding with its
-reason. Initial Rust sources are unchanged from epic `175f78c5`; the reviewed
-inventory contains 1302 legacy findings and 10 exact exceptions.
-The legacy findings include 301 direct mutation sites and
-1001 calls reaching unsafe helper or restoration paths. The
+reason. The initial seed on epic `175f78c5` contained 1302 legacy findings and
+10 exact exceptions. Correcting local closure name resolution on the combined
+epic removed 236 false-positive allowances: pure `run_command`/`run` closures
+had incorrectly reached unrelated production CLI functions. The retained
+inventory contains 1066 legacy findings (284 direct mutation sites and 782
+calls reaching unsafe helper or restoration paths) and the same 10 exceptions.
+The new artifact-write test uses the shared guard rather than gaining an
+allowance. The
 legacy entries preserve existing tests while their fixture lifetimes are
 converted. They do not certify those patterns as safe.
 
@@ -85,7 +92,8 @@ witnesses a shared guard. Reachable fixture owners include their restoration
 methods. Unknown local receiver methods are conservatively matched to local
 implementation methods. Such sites can require a fixture conversion even when
 a caller currently happens to hold a guard. Arbitrary macro expansion,
-function-pointer dataflow, generated/include-only source outside workspace
+function-pointer dataflow, conditional/destructuring pattern name resolution,
+generated/include-only source outside workspace
 members, indirect trait dispatch, value moves, and full control-flow proofs
 are outside the analysis. Production-only process initialization is excluded.
 The canonical guard's runtime nesting panic remains the defense for paths that

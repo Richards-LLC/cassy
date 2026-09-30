@@ -76,4 +76,4 @@ pressure. Implementation instructions stay small. Treat steering text as
 pointers to existing checks and references, rather than accumulating reminders.
 
 For a historical replay and expected deduplicated task list, use
-[references/v3.38.0.md](references/v3.38.0.md).
+[references/release-replay-example.md](references/release-replay-example.md).

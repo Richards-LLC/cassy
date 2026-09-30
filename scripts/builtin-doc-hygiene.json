@@ -31,7 +31,7 @@
   ],
   "allowlist": [
     {
-      "path": "skills/cas-retro/references/v3.38.0.md",
+      "path": "skills/cas-retro/references/release-replay-example.md",
       "rule": "task-id",
       "reason": "Historical release replay: real task IDs are needed to verify deduplication against Cassy records."
     },

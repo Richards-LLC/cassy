@@ -227,6 +227,13 @@
     "skills/cas-dataviz/scripts/validate_palette.js": [
       "7e1bc6840b290d773e85fd4e16c89928bf5a9535c7359c948d2affc330105fd4"
     ],
+    "skills/cas-diagnosing-bugs/LICENSE": [
+      "0e7ac423bf2c6e223b7c5b156f8cf72da49d748e56a1641402c31f22ad07dbb5",
+      "dcad88aea82f74872bcd5e715e7e6c933692324fd71303aa51a7af44cef52064"
+    ],
+    "skills/cas-diagnosing-bugs/scripts/hitl-loop.template.sh": [
+      "a8345fb10948f21e5076e89be1fceb7f1bdc4acf818bd38de4b751d0c241d2f3"
+    ],
     "skills/cas-frontend-engineering/references/playwright-acceptance.md": [
       "c5fedcbaa654728eef731ebf6ce6402520cf4b86e49b1b59110a464c993c2745"
     ],
@@ -1473,6 +1480,10 @@
       "e62d81bf3eefad52e5bdaffeff87efb375e8170123518906333d9f86e5cf4107",
       "e809fde1290593c736c199a38c7fb72ea346db7c02b94735725821cfb3353b6a",
       "faa0a5269b0522cd70f4cf6ab963cfadf00906b5868d7cc90177c4b66bbece8d"
+    ],
+    "skills/cas-writing-for-agents/LICENSE": [
+      "0e7ac423bf2c6e223b7c5b156f8cf72da49d748e56a1641402c31f22ad07dbb5",
+      "dcad88aea82f74872bcd5e715e7e6c933692324fd71303aa51a7af44cef52064"
     ],
     "skills/cas-writing-for-agents/SKILL-MECHANICS.md": [
       "bde033a83ff71be8a3df2d0ef410452d627f82d19551e42b98db6472f973738a"

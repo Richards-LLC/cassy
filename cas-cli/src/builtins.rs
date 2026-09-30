@@ -648,6 +648,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-writing-for-agents/SKILL.md",
         content: include_str!("builtins/skills/cas-writing-for-agents/SKILL.md"),
     },
+    BuiltinFile {
+        path: "skills/cas-writing-for-agents/LICENSE",
+        content: include_str!("builtins/skills/cas-writing-for-agents/LICENSE"),
+    },
     // cas-cli-craft: terminal and text design craft (cas-4df0). No CAS tool
     // calls, so the codex and grok twins are byte-identical to this source.
     BuiltinFile {
@@ -689,6 +693,14 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-diagnosing-bugs/SKILL.md",
         content: include_str!("builtins/skills/cas-diagnosing-bugs/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-diagnosing-bugs/LICENSE",
+        content: include_str!("builtins/skills/cas-diagnosing-bugs/LICENSE"),
+    },
+    BuiltinFile {
+        path: "skills/cas-diagnosing-bugs/scripts/hitl-loop.template.sh",
+        content: include_str!("builtins/skills/cas-diagnosing-bugs/scripts/hitl-loop.template.sh"),
     },
     BuiltinFile { path: "skills/cas-codebase-design/SKILL.md", content: include_str!("builtins/skills/cas-codebase-design/SKILL.md") },
     BuiltinFile { path: "skills/cas-codebase-design/LICENSE", content: include_str!("builtins/skills/cas-codebase-design/LICENSE") },
@@ -1274,6 +1286,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-writing-for-agents/SKILL.md",
         content: include_str!("builtins/skills/cas-writing-for-agents/SKILL.md"),
     },
+    BuiltinFile {
+        path: "skills/cas-writing-for-agents/LICENSE",
+        content: include_str!("builtins/skills/cas-writing-for-agents/LICENSE"),
+    },
     // cas-cli-craft: terminal and text design craft (cas-4df0). No CAS tool
     // calls, so the codex and grok twins are byte-identical to this source.
     BuiltinFile {
@@ -1315,6 +1331,14 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-diagnosing-bugs/SKILL.md",
         content: include_str!("builtins/skills/cas-diagnosing-bugs/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-diagnosing-bugs/LICENSE",
+        content: include_str!("builtins/skills/cas-diagnosing-bugs/LICENSE"),
+    },
+    BuiltinFile {
+        path: "skills/cas-diagnosing-bugs/scripts/hitl-loop.template.sh",
+        content: include_str!("builtins/skills/cas-diagnosing-bugs/scripts/hitl-loop.template.sh"),
     },
     BuiltinFile { path: "skills/cas-codebase-design/SKILL.md", content: include_str!("builtins/skills/cas-codebase-design/SKILL.md") },
     BuiltinFile { path: "skills/cas-codebase-design/LICENSE", content: include_str!("builtins/skills/cas-codebase-design/LICENSE") },
@@ -1909,6 +1933,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-writing-for-agents/SKILL.md",
         content: include_str!("builtins/skills/cas-writing-for-agents/SKILL.md"),
     },
+    BuiltinFile {
+        path: "skills/cas-writing-for-agents/LICENSE",
+        content: include_str!("builtins/skills/cas-writing-for-agents/LICENSE"),
+    },
     // cas-cli-craft: terminal and text design craft (cas-4df0). No CAS tool
     // calls, so the codex and grok twins are byte-identical to this source.
     BuiltinFile {
@@ -1950,6 +1978,14 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-diagnosing-bugs/SKILL.md",
         content: include_str!("builtins/skills/cas-diagnosing-bugs/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-diagnosing-bugs/LICENSE",
+        content: include_str!("builtins/skills/cas-diagnosing-bugs/LICENSE"),
+    },
+    BuiltinFile {
+        path: "skills/cas-diagnosing-bugs/scripts/hitl-loop.template.sh",
+        content: include_str!("builtins/skills/cas-diagnosing-bugs/scripts/hitl-loop.template.sh"),
     },
     BuiltinFile { path: "skills/cas-codebase-design/SKILL.md", content: include_str!("builtins/skills/cas-codebase-design/SKILL.md") },
     BuiltinFile { path: "skills/cas-codebase-design/LICENSE", content: include_str!("builtins/skills/cas-codebase-design/LICENSE") },

@@ -2861,6 +2861,73 @@ fn filter_cursor_position_requests(carry: &[u8], chunk: &[u8]) -> (Vec<u8>, Vec<
 }
 
 #[cfg(test)]
+mod cpr_tests {
+    use super::{Pty, PtyConfig, PtyEvent, filter_cursor_position_requests};
+
+    #[test]
+    fn cpr_filter_delivers_entire_quiet_prompt() {
+        let (output, carry, request) = filter_cursor_position_requests(&[], b"prompt> ");
+        assert_eq!(output, b"prompt> ");
+        assert!(carry.is_empty());
+        assert!(!request);
+    }
+
+    #[test]
+    fn cpr_filter_matches_every_split_without_replaying_request_tail() {
+        for sequence in [b"\x1b[6n".as_slice(), b"\x1b[?6n".as_slice()] {
+            let (output, carry, request) = filter_cursor_position_requests(&[], sequence);
+            assert!(output.is_empty(), "complete CPR must not reach the viewer");
+            assert!(carry.is_empty(), "recognized CPR must leave no duplicate tail");
+            assert!(request, "complete CPR must be answered without another read");
+
+            for split in 1..sequence.len() {
+                let first = [b"head".as_slice(), &sequence[..split]].concat();
+                let (output, carry, request) = filter_cursor_position_requests(&[], &first);
+                assert_eq!(output, b"head");
+                assert_eq!(carry, sequence[..split]);
+                assert!(!request);
+
+                let second = [&sequence[split..], b" tail".as_slice()].concat();
+                let (output, carry, request) = filter_cursor_position_requests(&carry, &second);
+                assert_eq!(output, b" tail");
+                assert!(carry.is_empty());
+                assert!(request, "split CPR must be answered and filtered");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn quiet_pty_delivers_prompt_before_more_output_or_exit() {
+        let mut pty = Pty::spawn(
+            "quiet-prompt",
+            PtyConfig {
+                command: "sh".into(),
+                args: vec!["-c".into(), "printf 'prompt> '; read -r pending".into()],
+                ..PtyConfig::default()
+            },
+        )
+        .expect("quiet PTY must spawn");
+        let output = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let mut output = Vec::new();
+            while output.len() < 8 {
+                match pty.recv().await {
+                    Some(PtyEvent::Output(bytes)) => output.extend(bytes),
+                    _ => break,
+                }
+            }
+            output
+        })
+        .await;
+        let child_status = pty.child.try_wait();
+        // Always release the gated child, including the expected red timeout.
+        pty.kill_tree_force();
+        assert_eq!(output.expect("quiet prompt ending was withheld"), b"prompt> ");
+        assert!(child_status.unwrap().is_none(), "prompt must arrive while child is live");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn worker_spawn_audit_tracks_launched_cli_and_provider_account() {

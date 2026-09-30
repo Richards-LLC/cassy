@@ -1,0 +1,478 @@
+{
+  "version": 1,
+  "task_snapshot_provenance": "Read-only CAS database export; current stored task text, not a historical criteria snapshot.",
+  "reviewer_source_sha": "175f78c55d32c20a1b67b1b61901a30004175973",
+  "transport_policy": "Isolated model replay measures behaviour; API authority/protocol is simulated. A real registered shadow rerun on installed 3.39.0 is required before operator approval of any merge policy.",
+  "source_notes": "Cases c04-c06 are correlated instances of one self-reexec regression; report grouped as well as per-instance metrics. Historical assembly fixture failures are fixture defects, not production-defect claims. Holdout truth must never be given to reviewers.",
+  "cases": [
+    {
+      "task_context": {
+        "id": "cas-4245",
+        "title": "Prove each release candidate once: assembly receipt (worktree plus clean clone) reused by the merge sweep and release gate",
+        "description": "Today the full workspace suite runs at assembly, again in `cas factory integration-recover` (the sweep ran 10372 again at 2eae2e12 minutes after assembly passed 5ca526fd1), and again in the release gate. Make the supervisor assembly write a durable receipt keyed by the git tree it tested. It runs twice: from the .cas worktree and from a plain clone with no .cas, which is the CI-equivalent that caught the 3.36.0 queue failure. The sweep and the gate's nextest/archive rows reuse a matching-tree PASS instead of re-running, and the gate re-runs only rows whose inputs changed (for example docs-only release commits reuse the code proof).",
+        "acceptance_criteria": "For a release whose candidate tree matches the assembled tree, the full suite runs exactly twice (worktree and clone) before the queue; the sweep and gate cite the receipt; any tree mismatch forces a re-run."
+      },
+      "defect_group": "c01",
+      "id": "c01",
+      "kind": "defect",
+      "source_task": "cas-4245",
+      "base_sha": "92892e22e1147632503e8863451949ca42aa9d96",
+      "head_sha": "e452e24186be8749cf789b7c13c859d506e818e1",
+      "expected_fix_sha": "cc5c5350dcdbe0736bf46592e154490c9abc1fb9",
+      "expected_axis": "spec",
+      "scope": [
+        "scripts/assembly-proof.py",
+        "scripts/release-train.d/assemble.sh",
+        "scripts/release-gate.sh",
+        "scripts/test-assembly-proof.py"
+      ],
+      "defect": "Assembly receipt fingerprints workspace member version values and generated reference history; prep and ledger change those bytes and defeat intended reuse.",
+      "expected_fix": "Normalize only workspace-member manifest/lock versions and generated ledger, while dependency and code changes still invalidate proof.",
+      "criteria": [
+        "Matching two-context assembly proof is reused after release preparation and ledger generation.",
+        "Dependency and code changes invalidate the reused receipt."
+      ]
+    },
+    {
+      "task_context": {
+        "id": "cas-3253",
+        "title": "Change-scoped CI: test impact selection for factory/PR runs; full suite only on the release-bound queue entry",
+        "description": "Scoped Validation and PR checks should run the tests a change can affect: crate and module import graph plus recorded failure history, failing open to wider selection when unsure. The full suite runs once on the release-bound merge-queue entry. Record per-run selection size, time, and any post-merge failure the selection missed (recall). Keep the policy pinned in scripts/test-ci-test-tiers.sh.",
+        "acceptance_criteria": "Median factory/PR CI time drops measurably; recall is tracked; the release queue entry still runs the full suite; the tier-policy script pins the new split."
+      },
+      "defect_group": "c02",
+      "id": "c02",
+      "kind": "defect",
+      "source_task": "cas-3253",
+      "base_sha": "ed10752ed47ed94c1defb5116c4802c1e232590a",
+      "head_sha": "d460825c67c25127f28c17e831f46112729ddc09",
+      "expected_fix_sha": "fc942f642e0e87384b2f3ae812be28d41109246a",
+      "expected_axis": "spec",
+      "scope": [
+        ".github/workflows/ci.yml",
+        "scripts/test-ci-test-tiers.sh"
+      ],
+      "defect": "Scoped Validation condition removes the default-branch PR exclusion, expanding the operator-approved admission-only policy.",
+      "expected_fix": "Restore default-branch PR exclusion, matching dedupe explanation and original policy check.",
+      "criteria": [
+        "Change-scoped selection applies to factory pushes and epic-targeted PRs.",
+        "Default-branch PRs retain only required Fast Validation and macOS Check lanes."
+      ]
+    },
+    {
+      "task_context": {
+        "id": "cas-d0fb",
+        "title": "Consolidate cas-cli's 107 integration test binaries into a few test harnesses to cut test build and link time",
+        "description": "Measured 2026-09-29: cas-cli/tests has 107 top-level *.rs files (plus 13 support dirs). Each compiles to its own executable linking the whole cas library (cas-cli/src is about 493k lines, dev profile debug=1). The assembly target holds 703 executables. Move them under one or a few harness crates (e.g. tests/it/main.rs with `mod foo;` per current file, grouped by domain if isolation needs it). Keep per-test process isolation where tests mutate process-global state (env, cwd): nextest already runs each test in its own process, so a shared binary is safe. Keep CI's shard partitioning, archive mode and test-name filters working, and update scripts/test-ci-test-tiers.sh pins and any `--test <name>` references (release gate rows, run-scoped-tests, docs). Measure before and after: cold and warm `cargo nextest run --workspace --no-run` wall time, and the number of executables.",
+        "acceptance_criteria": "Integration test executables drop from 107 to at most 10; the full suite passes with the same test count; release-gate and CI references are updated; measured build-time improvement is recorded in the task."
+      },
+      "defect_group": "c03",
+      "id": "c03",
+      "kind": "defect",
+      "source_task": "cas-d0fb",
+      "base_sha": "92892e22e1147632503e8863451949ca42aa9d96",
+      "head_sha": "4fb8854c77be4b49e87c70f8ac6cd2eb9ed7faeb",
+      "expected_fix_sha": "0a93e428c6389904cc8da67fc18a4accf7047a38",
+      "expected_axis": "spec",
+      "scope": [
+        "cas-cli/Cargo.toml",
+        "cas-cli/tests/integration/contracts.rs",
+        "cas-cli/tests/hooks_test/main.rs",
+        "scripts/cas-test-targets.py"
+      ],
+      "defect": "Inventory sees root tests/*.rs only; directory-main hook suite is omitted from the grouped harness, dropping 34 executed tests.",
+      "expected_fix": "Include tests/*/main.rs in inventory and wire hooks_test/main.rs with correct nested module imports.",
+      "criteria": [
+        "At most ten integration harnesses preserve every previously executed integration test.",
+        "Inventory validation rejects any unwired original source suite."
+      ]
+    },
+    {
+      "task_context": {
+        "id": "cas-d0fb",
+        "title": "Consolidate cas-cli's 107 integration test binaries into a few test harnesses to cut test build and link time",
+        "description": "Measured 2026-09-29: cas-cli/tests has 107 top-level *.rs files (plus 13 support dirs). Each compiles to its own executable linking the whole cas library (cas-cli/src is about 493k lines, dev profile debug=1). The assembly target holds 703 executables. Move them under one or a few harness crates (e.g. tests/it/main.rs with `mod foo;` per current file, grouped by domain if isolation needs it). Keep per-test process isolation where tests mutate process-global state (env, cwd): nextest already runs each test in its own process, so a shared binary is safe. Keep CI's shard partitioning, archive mode and test-name filters working, and update scripts/test-ci-test-tiers.sh pins and any `--test <name>` references (release gate rows, run-scoped-tests, docs). Measure before and after: cold and warm `cargo nextest run --workspace --no-run` wall time, and the number of executables.",
+        "acceptance_criteria": "Integration test executables drop from 107 to at most 10; the full suite passes with the same test count; release-gate and CI references are updated; measured build-time improvement is recorded in the task."
+      },
+      "defect_group": "self-reexec",
+      "id": "c04",
+      "kind": "defect",
+      "source_task": "cas-d0fb",
+      "base_sha": "92892e22e1147632503e8863451949ca42aa9d96",
+      "head_sha": "4fb8854c77be4b49e87c70f8ac6cd2eb9ed7faeb",
+      "expected_fix_sha": "0a93e428c6389904cc8da67fc18a4accf7047a38",
+      "expected_axis": "spec",
+      "scope": [
+        "cas-cli/tests/factory_mcp_ops_test.rs",
+        "cas-cli/tests/integration/factory.rs",
+        "cas-cli/tests/integration/cli.rs"
+      ],
+      "defect": "After grouping, the isolated self-reexec still uses an unqualified libtest name and may execute zero tests while returning success.",
+      "expected_fix": "Derive the qualified selector from module_path! and assert printed test execution; require running 1 test except the intentionally early-exiting atexit helper.",
+      "criteria": [
+        "Grouping preserves execution of the isolated child test.",
+        "A zero-match child must not pass silently."
+      ]
+    },
+    {
+      "task_context": {
+        "id": "cas-d0fb",
+        "title": "Consolidate cas-cli's 107 integration test binaries into a few test harnesses to cut test build and link time",
+        "description": "Measured 2026-09-29: cas-cli/tests has 107 top-level *.rs files (plus 13 support dirs). Each compiles to its own executable linking the whole cas library (cas-cli/src is about 493k lines, dev profile debug=1). The assembly target holds 703 executables. Move them under one or a few harness crates (e.g. tests/it/main.rs with `mod foo;` per current file, grouped by domain if isolation needs it). Keep per-test process isolation where tests mutate process-global state (env, cwd): nextest already runs each test in its own process, so a shared binary is safe. Keep CI's shard partitioning, archive mode and test-name filters working, and update scripts/test-ci-test-tiers.sh pins and any `--test <name>` references (release gate rows, run-scoped-tests, docs). Measure before and after: cold and warm `cargo nextest run --workspace --no-run` wall time, and the number of executables.",
+        "acceptance_criteria": "Integration test executables drop from 107 to at most 10; the full suite passes with the same test count; release-gate and CI references are updated; measured build-time improvement is recorded in the task."
+      },
+      "defect_group": "self-reexec",
+      "id": "c05",
+      "kind": "defect",
+      "source_task": "cas-d0fb",
+      "base_sha": "92892e22e1147632503e8863451949ca42aa9d96",
+      "head_sha": "4fb8854c77be4b49e87c70f8ac6cd2eb9ed7faeb",
+      "expected_fix_sha": "0a93e428c6389904cc8da67fc18a4accf7047a38",
+      "expected_axis": "spec",
+      "scope": [
+        "cas-cli/tests/hub_clean_home_test.rs",
+        "cas-cli/tests/integration/factory.rs",
+        "cas-cli/tests/integration/cli.rs"
+      ],
+      "defect": "After grouping, the isolated self-reexec still uses an unqualified libtest name and may execute zero tests while returning success.",
+      "expected_fix": "Derive the qualified selector from module_path! and assert printed test execution; require running 1 test except the intentionally early-exiting atexit helper.",
+      "criteria": [
+        "Grouping preserves execution of the isolated child test.",
+        "A zero-match child must not pass silently."
+      ]
+    },
+    {
+      "task_context": {
+        "id": "cas-d0fb",
+        "title": "Consolidate cas-cli's 107 integration test binaries into a few test harnesses to cut test build and link time",
+        "description": "Measured 2026-09-29: cas-cli/tests has 107 top-level *.rs files (plus 13 support dirs). Each compiles to its own executable linking the whole cas library (cas-cli/src is about 493k lines, dev profile debug=1). The assembly target holds 703 executables. Move them under one or a few harness crates (e.g. tests/it/main.rs with `mod foo;` per current file, grouped by domain if isolation needs it). Keep per-test process isolation where tests mutate process-global state (env, cwd): nextest already runs each test in its own process, so a shared binary is safe. Keep CI's shard partitioning, archive mode and test-name filters working, and update scripts/test-ci-test-tiers.sh pins and any `--test <name>` references (release gate rows, run-scoped-tests, docs). Measure before and after: cold and warm `cargo nextest run --workspace --no-run` wall time, and the number of executables.",
+        "acceptance_criteria": "Integration test executables drop from 107 to at most 10; the full suite passes with the same test count; release-gate and CI references are updated; measured build-time improvement is recorded in the task."
+      },
+      "defect_group": "self-reexec",
+      "id": "c06",
+      "kind": "defect",
+      "source_task": "cas-d0fb",
+      "base_sha": "92892e22e1147632503e8863451949ca42aa9d96",
+      "head_sha": "4fb8854c77be4b49e87c70f8ac6cd2eb9ed7faeb",
+      "expected_fix_sha": "0a93e428c6389904cc8da67fc18a4accf7047a38",
+      "expected_axis": "spec",
+      "scope": [
+        "cas-cli/tests/worktree_surface_test.rs",
+        "cas-cli/tests/integration/factory.rs",
+        "cas-cli/tests/integration/cli.rs"
+      ],
+      "defect": "After grouping, the isolated self-reexec still uses an unqualified libtest name and may execute zero tests while returning success.",
+      "expected_fix": "Derive the qualified selector from module_path! and assert printed test execution; require running 1 test except the intentionally early-exiting atexit helper.",
+      "criteria": [
+        "Grouping preserves execution of the isolated child test.",
+        "A zero-match child must not pass silently."
+      ]
+    },
+    {
+      "task_context": {
+        "id": "cas-3253",
+        "title": "Change-scoped CI: test impact selection for factory/PR runs; full suite only on the release-bound queue entry",
+        "description": "Scoped Validation and PR checks should run the tests a change can affect: crate and module import graph plus recorded failure history, failing open to wider selection when unsure. The full suite runs once on the release-bound merge-queue entry. Record per-run selection size, time, and any post-merge failure the selection missed (recall). Keep the policy pinned in scripts/test-ci-test-tiers.sh.",
+        "acceptance_criteria": "Median factory/PR CI time drops measurably; recall is tracked; the release queue entry still runs the full suite; the tier-policy script pins the new split."
+      },
+      "defect_group": "c07",
+      "id": "c07",
+      "kind": "defect",
+      "source_task": "cas-3253",
+      "base_sha": "ed10752ed47ed94c1defb5116c4802c1e232590a",
+      "head_sha": "d460825c67c25127f28c17e831f46112729ddc09",
+      "expected_fix_sha": "b00a53e853e6fdf81c205d32265e6d2ceb2d380d",
+      "expected_axis": "standards",
+      "scope": [
+        ".github/workflows/ci.yml"
+      ],
+      "defect": "Full-suite shard inserts a GitHub expression directly into the shell run block for --base-sha.",
+      "expected_fix": "Pass the expression through step env IMPACT_BASE_SHA and use the shell variable in run.",
+      "criteria": [
+        "Record full-suite recall and timing evidence without expanding untrusted event text into shell source."
+      ]
+    },
+    {
+      "task_context": {
+        "id": "cas-d1ee",
+        "title": "Close gates dead-end after a supervisor git merge: proof_scope_fix says \"requires a merged delivery transaction\", legacy per-file --test proof demanded after test consolidation, content-drop anchor pinned across request_changes",
+        "description": "This happened on 2026-09-29 during 3.38.0. The supervisor merged worker branches into the epic with plain `git merge` plus a push; it did not use factory worktree_merge. Four tasks then could not close through any path the gates themselves suggest.\n(1) cas-4245 and cas-d0fb: the close gate says \"widen with task update proof_targets=\u2026 proof_scope_fix=true\". A supervisor update with a strictly wider list after the merge still fails with \"PROOF-SCOPE FIX REJECTED: parse error: proof correction requires a merged or close-ready delivery transaction or an authenticated merge observation on the task's WorkTarget\". The worktree is an ancestor of the epic tip, and \"parse error\" is a misleading prefix.\n(2) cas-d0fb: a supervisor_override close is rejected by the scoped-proof gate. It demands `SCOPED_PROOF_BASE=\u2026 scripts/run-scoped-tests.sh --proof -p cas --test retrieval_eval_test --test distributed_factory_test \u2026`, but those --test targets no longer exist after cas-d0fb consolidated them into 10 harnesses. Workers also can't run it (cas-4cbb), and the gate ignores that the epic's ASSEMBLY_PROOF is the policy.\n(3) cas-4b3a: DELIVERY CONTENT DROPPED stays pinned to the original anchor 889c7f1d after request_changes and a re-delivery at tip cdf539e0 (identical to the epic). No override path exists.\nWorkers end up blocked, and their status=blocked updates are refused by DELIVERY PROOF SCOPE LOCKED.",
+        "acceptance_criteria": "An ancestor-of-target check (the delivery tip reachable from the target tip) counts as a merge observation for proof_scope_fix, and the message drops \"parse error\". The scoped-proof close gate accepts an epic ASSEMBLY_PROOF note in place of a worker scoped receipt, per the cas-4cbb policy, and maps legacy test stems through scripts/cas-test-targets.py. The content-drop check measures the current delivery anchor after request_changes. The supervisor-override close honors an explicit reviewed-drop reason. Workers may set status=blocked while proof-scope locked. Regressions cover each case."
+      },
+      "defect_group": "c08",
+      "id": "c08",
+      "kind": "defect",
+      "source_task": "cas-37ba",
+      "base_sha": "643a631ebbe34be95c22dceac5120dc4aefb65f4",
+      "head_sha": "4c3f0dc39e8613407103f726775d55e9a2874be7",
+      "expected_fix_sha": "9ee399dd790b9799d7520dbeb7240ce7a4fa440a",
+      "expected_axis": "spec",
+      "scope": [
+        "cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs",
+        "crates/cas-store/src/task_store.rs"
+      ],
+      "defect": "Recovery fixture supplies caller updated_at as the optimistic-lock token, although TaskStore::update owns and returns the stored timestamp.",
+      "expected_fix": "Use update return token; retain a stale-token rejection and unchanged Blocked status assertion.",
+      "criteria": [
+        "Proof-scope recovery works after a blocker report.",
+        "A stale optimistic-lock token must still refuse recovery."
+      ]
+    },
+    {
+      "task_context": {
+        "id": "cas-d1ee",
+        "title": "Close gates dead-end after a supervisor git merge: proof_scope_fix says \"requires a merged delivery transaction\", legacy per-file --test proof demanded after test consolidation, content-drop anchor pinned across request_changes",
+        "description": "This happened on 2026-09-29 during 3.38.0. The supervisor merged worker branches into the epic with plain `git merge` plus a push; it did not use factory worktree_merge. Four tasks then could not close through any path the gates themselves suggest.\n(1) cas-4245 and cas-d0fb: the close gate says \"widen with task update proof_targets=\u2026 proof_scope_fix=true\". A supervisor update with a strictly wider list after the merge still fails with \"PROOF-SCOPE FIX REJECTED: parse error: proof correction requires a merged or close-ready delivery transaction or an authenticated merge observation on the task's WorkTarget\". The worktree is an ancestor of the epic tip, and \"parse error\" is a misleading prefix.\n(2) cas-d0fb: a supervisor_override close is rejected by the scoped-proof gate. It demands `SCOPED_PROOF_BASE=\u2026 scripts/run-scoped-tests.sh --proof -p cas --test retrieval_eval_test --test distributed_factory_test \u2026`, but those --test targets no longer exist after cas-d0fb consolidated them into 10 harnesses. Workers also can't run it (cas-4cbb), and the gate ignores that the epic's ASSEMBLY_PROOF is the policy.\n(3) cas-4b3a: DELIVERY CONTENT DROPPED stays pinned to the original anchor 889c7f1d after request_changes and a re-delivery at tip cdf539e0 (identical to the epic). No override path exists.\nWorkers end up blocked, and their status=blocked updates are refused by DELIVERY PROOF SCOPE LOCKED.",
+        "acceptance_criteria": "An ancestor-of-target check (the delivery tip reachable from the target tip) counts as a merge observation for proof_scope_fix, and the message drops \"parse error\". The scoped-proof close gate accepts an epic ASSEMBLY_PROOF note in place of a worker scoped receipt, per the cas-4cbb policy, and maps legacy test stems through scripts/cas-test-targets.py. The content-drop check measures the current delivery anchor after request_changes. The supervisor-override close honors an explicit reviewed-drop reason. Workers may set status=blocked while proof-scope locked. Regressions cover each case."
+      },
+      "defect_group": "c09",
+      "id": "c09",
+      "kind": "defect",
+      "source_task": "cas-37ba",
+      "base_sha": "643a631ebbe34be95c22dceac5120dc4aefb65f4",
+      "head_sha": "4c3f0dc39e8613407103f726775d55e9a2874be7",
+      "expected_fix_sha": "9ee399dd790b9799d7520dbeb7240ce7a4fa440a",
+      "expected_axis": "spec",
+      "scope": [
+        "cas-cli/src/mcp/tools/core/task/lifecycle/proof_scope.rs",
+        "cas-cli/src/mcp/tools/core/task/update.rs"
+      ],
+      "defect": "Closed fixture without dispatch expects the proof-scope helper to reject terminal status changes, although terminal policy belongs to the update handler.",
+      "expected_fix": "Assert the helper boundary accurately and exercise Closed-to-Blocked rejection through the real update handler.",
+      "criteria": [
+        "Proof-scope reports preserve exact scope while mixed updates remain locked.",
+        "Terminal tasks cannot change to Blocked through the public update handler."
+      ]
+    },
+    {
+      "task_context": {
+        "id": "cas-d1ee",
+        "title": "Close gates dead-end after a supervisor git merge: proof_scope_fix says \"requires a merged delivery transaction\", legacy per-file --test proof demanded after test consolidation, content-drop anchor pinned across request_changes",
+        "description": "This happened on 2026-09-29 during 3.38.0. The supervisor merged worker branches into the epic with plain `git merge` plus a push; it did not use factory worktree_merge. Four tasks then could not close through any path the gates themselves suggest.\n(1) cas-4245 and cas-d0fb: the close gate says \"widen with task update proof_targets=\u2026 proof_scope_fix=true\". A supervisor update with a strictly wider list after the merge still fails with \"PROOF-SCOPE FIX REJECTED: parse error: proof correction requires a merged or close-ready delivery transaction or an authenticated merge observation on the task's WorkTarget\". The worktree is an ancestor of the epic tip, and \"parse error\" is a misleading prefix.\n(2) cas-d0fb: a supervisor_override close is rejected by the scoped-proof gate. It demands `SCOPED_PROOF_BASE=\u2026 scripts/run-scoped-tests.sh --proof -p cas --test retrieval_eval_test --test distributed_factory_test \u2026`, but those --test targets no longer exist after cas-d0fb consolidated them into 10 harnesses. Workers also can't run it (cas-4cbb), and the gate ignores that the epic's ASSEMBLY_PROOF is the policy.\n(3) cas-4b3a: DELIVERY CONTENT DROPPED stays pinned to the original anchor 889c7f1d after request_changes and a re-delivery at tip cdf539e0 (identical to the epic). No override path exists.\nWorkers end up blocked, and their status=blocked updates are refused by DELIVERY PROOF SCOPE LOCKED.",
+        "acceptance_criteria": "An ancestor-of-target check (the delivery tip reachable from the target tip) counts as a merge observation for proof_scope_fix, and the message drops \"parse error\". The scoped-proof close gate accepts an epic ASSEMBLY_PROOF note in place of a worker scoped receipt, per the cas-4cbb policy, and maps legacy test stems through scripts/cas-test-targets.py. The content-drop check measures the current delivery anchor after request_changes. The supervisor-override close honors an explicit reviewed-drop reason. Workers may set status=blocked while proof-scope locked. Regressions cover each case."
+      },
+      "defect_group": "c10",
+      "id": "c10",
+      "kind": "defect",
+      "source_task": "cas-37ba",
+      "base_sha": "643a631ebbe34be95c22dceac5120dc4aefb65f4",
+      "head_sha": "4c3f0dc39e8613407103f726775d55e9a2874be7",
+      "expected_fix_sha": "9ee399dd790b9799d7520dbeb7240ce7a4fa440a",
+      "expected_axis": "spec",
+      "scope": [
+        "cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs",
+        "scripts/check-scoped-test-surface.sh"
+      ],
+      "defect": "Fixture compares canonical sorted/deduplicated scoped targets to traversal order, rather than exact set and uniqueness.",
+      "expected_fix": "Compare the exact target set and uniqueness, retaining checker execution and cache assertions.",
+      "criteria": [
+        "Scoped proof gate and surface checker agree on the complete required target set.",
+        "Required targets are unique and path-order-independent."
+      ]
+    },
+    {
+      "task_context": {
+        "id": "cas-3efd",
+        "title": "Workers may type-check their change (cargo check on affected crates) before parking, under the builder cap",
+        "description": "Needs the operator's go: it reverses the 2026-09-25 decision that workers never run cargo. Allow factory workers `cargo check -p <affected crates> --tests` (compile only, no test runs), using their seeded hardlinked target cache, gated by the existing max_concurrent_builders cap and build guard. Relax the PreToolUse cargo guard for exactly that command shape. The close gate records \"check: PASS <sha>\" as worker evidence. Measure: compile errors found at assembly per epic should drop to 0 (2026-09-29 had 2).",
+        "acceptance_criteria": "A worker can run the allowed check and nothing else; the guard still denies test/build/nextest; concurrency stays capped; an epic of at least 4 lanes reaches assembly with zero compile errors."
+      },
+      "defect_group": "c11",
+      "id": "c11",
+      "kind": "defect",
+      "source_task": "cas-3efd/cas-3051",
+      "base_sha": "a112f677c92ab5ded698934ee5387ebde995df4d",
+      "head_sha": "6db2e506ee6b5f3577485865a7cb1dfb539d5d1c",
+      "expected_fix_sha": "9ee399dd790b9799d7520dbeb7240ce7a4fa440a",
+      "expected_axis": "standards",
+      "scope": [
+        "cas-cli/src/hooks/handlers/handlers_tests/unscoped_test_guard.rs",
+        "cas-cli/src/hooks/handlers/handlers_events/pre_tool.rs"
+      ],
+      "defect": "Allowed-check rewrite fixture redirects logs to bare /tmp and inherits an unrelated clone binding; recursive workspace enforcement correctly denies it.",
+      "expected_fix": "Bind fixture clone/cwd, write permitted check logs inside the fixture, and keep explicit bare-/tmp denials for both harnesses/targets.",
+      "criteria": [
+        "Both harnesses rewrite the literal permitted package-scoped check through the capped runner.",
+        "Rewriting does not bypass workspace file restrictions."
+      ]
+    },
+    {
+      "task_context": {
+        "id": "cas-5569",
+        "title": "Supervisor relays silently abandoned: the Claude team tree (config.json + inboxes/) vanishes mid-session and the daemon retries ENOENT 15\u00d7 then drops the message",
+        "description": "ROOT CAUSE (verified 2026-09-29, session cas-src-cosmic-crow-66): the daemon delivers to the Claude supervisor through Claude Code native Agent Teams inbox files at $CLAUDE_CONFIG_DIR/teams/<session>/inboxes/<name>.json (TeamsManager, cas-cli/src/ui/factory/daemon/runtime/teams.rs; CLAUDE_CONFIG_DIR=/home/pippenz/.claude-pippenz@gmail.com). Partway through the session, teams/cas-src-cosmic-crow-66/config.json and inboxes/ disappeared; only three worker *-settings.json files remain.\n\nFrom 2026-09-29T16:17:10Z on, every supervisor-bound delivery failed \"No such file or directory (os error 2)\". After 15 attempts over ~900s it is marked last_pending_reason=abandoned_unknown_target (crates/cas-store/src/prompt_queue_store.rs ~5352-5422). 48 rows, 16:17:10Z to 19:08:37Z, e.g. prompt_queue ids 1738360 and 1738462. No alert, no fallback. Messages were seen only when the supervisor was already mid-turn and the turn-start hook surfaced pending rows (e.g. id 1734907), which is why it looked intermittent and why finished deliveries waited 25\u201360 min.\n\nVery likely the same cause as cas-5129 (Claude worker spawns never start): Claude workers join via --team-name and need the team's config.json. The last good Claude spawn was 15:57Z; later ones hung with no transcript. Codex workers are unaffected. Still unknown: what deleted config.json and inboxes/ between 15:57Z and 16:17Z. Candidates: Claude Code team cleanup (a teammate exit, TeamDelete, a Claude CLI update/restart), cas update's `.claude` sync, or a Cassy reaper. Find it from logs or reproduce.\n\nFix:\n(1) Before each inbox write, verify the team tree and recreate config.json and inboxes/ idempotently from the daemon's own spawn record if missing, logging loudly.\n(2) Never retry ENOENT 15\u00d7 in silence: on the first failure, fall back to PTY prompt injection for the supervisor, and surface a Commander/operator alert naming the missing path.\n(3) Treat an abandoned merge-ready relay as an incident (worker_status red and an operator ping).\n(4) Find and stop whatever deletes the tree.\nRegression test: delete the team tree mid-session and assert the next supervisor relay is still delivered within 60s.",
+        "acceptance_criteria": "A test where a worker parks for merge while the supervisor is idle shows the supervisor woken within 60s; worker_status shows zero undelivered merge-ready relays older than 60s in a live session; the root cause is named with evidence."
+      },
+      "defect_group": "c12",
+      "id": "c12",
+      "kind": "defect",
+      "source_task": "cas-37ba",
+      "base_sha": "92892e22e1147632503e8863451949ca42aa9d96",
+      "head_sha": "65e717f3b978e9843f053ff1639fecf3b13df937",
+      "expected_fix_sha": "9ee399dd790b9799d7520dbeb7240ce7a4fa440a",
+      "expected_axis": "spec",
+      "scope": [
+        "crates/cas-store/src/prompt_queue_store.rs"
+      ],
+      "defect": "Abandoned relay fixture unwraps a transition to Delivered, although both are rank-3 terminal siblings and the transition is rejected.",
+      "expected_fix": "Assert rejection, unchanged Abandoned stage, absent delivery timestamp and continued forensic reporting.",
+      "criteria": [
+        "An abandoned unknown-target relay remains reportable.",
+        "Terminal sibling states cannot be rewritten as successful delivery."
+      ]
+    },
+    {
+      "task_context": {
+        "id": "cas-4245",
+        "title": "Prove each release candidate once: assembly receipt (worktree plus clean clone) reused by the merge sweep and release gate",
+        "description": "Today the full workspace suite runs at assembly, again in `cas factory integration-recover` (the sweep ran 10372 again at 2eae2e12 minutes after assembly passed 5ca526fd1), and again in the release gate. Make the supervisor assembly write a durable receipt keyed by the git tree it tested. It runs twice: from the .cas worktree and from a plain clone with no .cas, which is the CI-equivalent that caught the 3.36.0 queue failure. The sweep and the gate's nextest/archive rows reuse a matching-tree PASS instead of re-running, and the gate re-runs only rows whose inputs changed (for example docs-only release commits reuse the code proof).",
+        "acceptance_criteria": "For a release whose candidate tree matches the assembled tree, the full suite runs exactly twice (worktree and clone) before the queue; the sweep and gate cite the receipt; any tree mismatch forces a re-run."
+      },
+      "defect_group": "c13",
+      "id": "c13",
+      "kind": "defect",
+      "source_task": "cas-37ba",
+      "base_sha": "92892e22e1147632503e8863451949ca42aa9d96",
+      "head_sha": "e452e24186be8749cf789b7c13c859d506e818e1",
+      "expected_fix_sha": "9ee399dd790b9799d7520dbeb7240ce7a4fa440a",
+      "expected_axis": "spec",
+      "scope": [
+        "cas-cli/src/builtins.rs",
+        "cas-cli/src/builtins/skills/cas-supervisor/references/workflow.md"
+      ],
+      "defect": "Builtin workflow fixture still requires the old assembly-command phrase after the canonical workflow switches to the two-context assembly-proof command.",
+      "expected_fix": "Update the output contract pin to the current single-run assembly wording and exact command without changing shipped workflow text.",
+      "criteria": [
+        "Builtin supervisor workflow and its contract checks agree on the current two-context assembly proof procedure."
+      ]
+    },
+    {
+      "task_context": {
+        "id": "cas-8e10",
+        "title": "Violet phase B items 1\u20132: builtin `violet` skill (with a one-release `mecha-cassy` redirect stub) and every skill reference moved to violet_read/violet_post",
+        "description": "GH #1055 items 1 and 2.\n(1) Rename cas-cli/src/builtins/skills/mecha-cassy/ to violet/ in all three harness trees (claude, codex, grok) and update the builtins.rs registration (53 matches). The body calls violet.violet_read/violet.violet_post via the `violet` proxy server. Keep a short mecha-cassy redirect stub for one release so installed copies aren't orphaned; cas sync/update replaces them. Update cas-cli/tests/builtin_skill_description_test.rs and any builtins tests that pin names.\n(2) Update the skills that point at the old names in all three trees: cas-release-notes and references/RUBRIC-template.md; cas-supervisor and references/{filing-cas-bugs,reporting-and-routing}.md; cas-worker; cli-routing and references/routing.md; cas-cut-release and references/failure-log.md, but keep historical failure-log entries verbatim and change only live guidance; cas-github-issues. Release-posting skills say violet_post, and rubric templates say Violet.\nRegenerate the builtin reference ledger if required. Also consider #1051: the violet_post anyOf schema is flattened; note it in the skill if not fixed. Base on the cas-86f1 epic branch.",
+        "acceptance_criteria": "A fresh sync installs a `violet` skill in every harness; no live skill tells agents to use mecha_* (history excepted); a redirect stub exists for one release; builtins tests and the reference ledger are updated."
+      },
+      "defect_group": "c14",
+      "id": "c14",
+      "kind": "defect",
+      "source_task": "cas-4b3a",
+      "base_sha": "92892e22e1147632503e8863451949ca42aa9d96",
+      "head_sha": "3eff5e8b02cffc93ccd2d29aa4ef957f1a8d1c91",
+      "expected_fix_sha": "03f36326d279d87223ebdea2c89786673dc2aa87",
+      "expected_axis": "standards",
+      "scope": [
+        "cas-cli/src/builtins/skills/violet/references/registration.md"
+      ],
+      "defect": "Shipped reusable registration instructions contain a concrete operator organization/tracker issue.",
+      "expected_fix": "Resolve the tracker through cas config get issues.components.violet and preserve fail-closed/no-local-mint behavior.",
+      "criteria": [
+        "Reusable shipped registration instructions resolve project tracker configuration.",
+        "Missing hub client endpoint fails closed without minting locally."
+      ]
+    },
+    {
+      "task_context": {
+        "id": "cas-8e10",
+        "title": "Violet phase B items 1\u20132: builtin `violet` skill (with a one-release `mecha-cassy` redirect stub) and every skill reference moved to violet_read/violet_post",
+        "description": "GH #1055 items 1 and 2.\n(1) Rename cas-cli/src/builtins/skills/mecha-cassy/ to violet/ in all three harness trees (claude, codex, grok) and update the builtins.rs registration (53 matches). The body calls violet.violet_read/violet.violet_post via the `violet` proxy server. Keep a short mecha-cassy redirect stub for one release so installed copies aren't orphaned; cas sync/update replaces them. Update cas-cli/tests/builtin_skill_description_test.rs and any builtins tests that pin names.\n(2) Update the skills that point at the old names in all three trees: cas-release-notes and references/RUBRIC-template.md; cas-supervisor and references/{filing-cas-bugs,reporting-and-routing}.md; cas-worker; cli-routing and references/routing.md; cas-cut-release and references/failure-log.md, but keep historical failure-log entries verbatim and change only live guidance; cas-github-issues. Release-posting skills say violet_post, and rubric templates say Violet.\nRegenerate the builtin reference ledger if required. Also consider #1051: the violet_post anyOf schema is flattened; note it in the skill if not fixed. Base on the cas-86f1 epic branch.",
+        "acceptance_criteria": "A fresh sync installs a `violet` skill in every harness; no live skill tells agents to use mecha_* (history excepted); a redirect stub exists for one release; builtins tests and the reference ledger are updated."
+      },
+      "defect_group": "c15",
+      "id": "c15",
+      "kind": "clean",
+      "source_task": "cas-4b3a",
+      "base_sha": "c17fdbf86a12a7443761a1e87e06b0a06215a2cb",
+      "head_sha": "03f36326d279d87223ebdea2c89786673dc2aa87",
+      "expected_fix_sha": "03f36326d279d87223ebdea2c89786673dc2aa87",
+      "expected_axis": "standards",
+      "scope": [
+        "cas-cli/src/builtins/skills/violet/references/registration.md"
+      ],
+      "defect": "No seeded defect; corrected real delivery used as clean negative.",
+      "expected_fix": "No fix is expected.",
+      "criteria": [
+        "Reusable registration resolves tracker configuration and missing hub endpoint fails closed."
+      ]
+    },
+    {
+      "task_context": {
+        "id": "cas-3253",
+        "title": "Change-scoped CI: test impact selection for factory/PR runs; full suite only on the release-bound queue entry",
+        "description": "Scoped Validation and PR checks should run the tests a change can affect: crate and module import graph plus recorded failure history, failing open to wider selection when unsure. The full suite runs once on the release-bound merge-queue entry. Record per-run selection size, time, and any post-merge failure the selection missed (recall). Keep the policy pinned in scripts/test-ci-test-tiers.sh.",
+        "acceptance_criteria": "Median factory/PR CI time drops measurably; recall is tracked; the release queue entry still runs the full suite; the tier-policy script pins the new split."
+      },
+      "defect_group": "c16",
+      "id": "c16",
+      "kind": "clean",
+      "source_task": "cas-3253",
+      "base_sha": "a74649bd9504e7677773a2788bb717038cfe91de",
+      "head_sha": "b00a53e853e6fdf81c205d32265e6d2ceb2d380d",
+      "expected_fix_sha": "b00a53e853e6fdf81c205d32265e6d2ceb2d380d",
+      "expected_axis": "standards",
+      "scope": [
+        ".github/workflows/ci.yml"
+      ],
+      "defect": "No seeded defect; corrected real delivery used as clean negative.",
+      "expected_fix": "No fix is expected.",
+      "criteria": [
+        "The impact base SHA reaches the shard through an environment variable rather than shell-source interpolation."
+      ]
+    },
+    {
+      "task_context": {
+        "id": "cas-4245",
+        "title": "Prove each release candidate once: assembly receipt (worktree plus clean clone) reused by the merge sweep and release gate",
+        "description": "Today the full workspace suite runs at assembly, again in `cas factory integration-recover` (the sweep ran 10372 again at 2eae2e12 minutes after assembly passed 5ca526fd1), and again in the release gate. Make the supervisor assembly write a durable receipt keyed by the git tree it tested. It runs twice: from the .cas worktree and from a plain clone with no .cas, which is the CI-equivalent that caught the 3.36.0 queue failure. The sweep and the gate's nextest/archive rows reuse a matching-tree PASS instead of re-running, and the gate re-runs only rows whose inputs changed (for example docs-only release commits reuse the code proof).",
+        "acceptance_criteria": "For a release whose candidate tree matches the assembled tree, the full suite runs exactly twice (worktree and clone) before the queue; the sweep and gate cite the receipt; any tree mismatch forces a re-run."
+      },
+      "defect_group": "c17",
+      "id": "c17",
+      "kind": "clean",
+      "source_task": "cas-4245",
+      "base_sha": "0a181b64480518e27f0ce1872b557a9ca784dcf8",
+      "head_sha": "cc5c5350dcdbe0736bf46592e154490c9abc1fb9",
+      "expected_fix_sha": "cc5c5350dcdbe0736bf46592e154490c9abc1fb9",
+      "expected_axis": "spec",
+      "scope": [
+        "scripts/assembly-proof.py",
+        "scripts/test-assembly-proof.py"
+      ],
+      "defect": "No seeded defect; corrected real delivery used as clean negative.",
+      "expected_fix": "No fix is expected.",
+      "criteria": [
+        "Preparation member-version bumps and generated ledger changes reuse the assembly proof.",
+        "Dependency, third-party lock and code changes still invalidate proof."
+      ]
+    },
+    {
+      "task_context": {
+        "id": "cas-d0fb",
+        "title": "Consolidate cas-cli's 107 integration test binaries into a few test harnesses to cut test build and link time",
+        "description": "Measured 2026-09-29: cas-cli/tests has 107 top-level *.rs files (plus 13 support dirs). Each compiles to its own executable linking the whole cas library (cas-cli/src is about 493k lines, dev profile debug=1). The assembly target holds 703 executables. Move them under one or a few harness crates (e.g. tests/it/main.rs with `mod foo;` per current file, grouped by domain if isolation needs it). Keep per-test process isolation where tests mutate process-global state (env, cwd): nextest already runs each test in its own process, so a shared binary is safe. Keep CI's shard partitioning, archive mode and test-name filters working, and update scripts/test-ci-test-tiers.sh pins and any `--test <name>` references (release gate rows, run-scoped-tests, docs). Measure before and after: cold and warm `cargo nextest run --workspace --no-run` wall time, and the number of executables.",
+        "acceptance_criteria": "Integration test executables drop from 107 to at most 10; the full suite passes with the same test count; release-gate and CI references are updated; measured build-time improvement is recorded in the task."
+      },
+      "defect_group": "c18",
+      "id": "c18",
+      "kind": "clean",
+      "source_task": "cas-d0fb",
+      "base_sha": "7c40187139edef5552195b2f53d29de150897a69",
+      "head_sha": "0a93e428c6389904cc8da67fc18a4accf7047a38",
+      "expected_fix_sha": "0a93e428c6389904cc8da67fc18a4accf7047a38",
+      "expected_axis": "spec",
+      "scope": [
+        "scripts/cas-test-targets.py",
+        "cas-cli/tests/integration/contracts.rs",
+        "cas-cli/tests/factory_mcp_ops_test.rs",
+        "cas-cli/tests/worktree_surface_test.rs",
+        "cas-cli/tests/hub_clean_home_test.rs"
+      ],
+      "defect": "No seeded defect; corrected real delivery used as clean negative.",
+      "expected_fix": "No fix is expected.",
+      "criteria": [
+        "Directory-main integration suites stay wired.",
+        "Isolated child-test reexecs assert actual execution after grouping."
+      ]
+    }
+  ]
+}

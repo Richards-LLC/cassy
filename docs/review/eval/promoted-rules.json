@@ -1,0 +1,23 @@
+[
+  {
+    "id": "rule-026",
+    "content": "Tests and helpers that mutate process environment or current directory must hold the canonical TestEnvGuard for their full duration and restore state through that guard. Share an existing guard with helpers; do not nest guards on the same thread.",
+    "paths": "",
+    "tags": "[\"from_verification\",\"category:test_isolation\",\"enforceable:lint\"]",
+    "status": "proven"
+  },
+  {
+    "id": "rule-172",
+    "content": "Hook-payload tests MUST parse raw JSON in the real wire shape. Never build a `HookInput` by struct literal in a test that guards a deserialization contract.\n\nWhy: a struct literal sets the Rust field directly and so never exercises serde at all. Twice now a handler has been dead in production for a full release with every one of its tests green:\n- GH #165 / cas-78d3 \u2014 Claude Code sends the submitted prompt as `prompt`; CAS aliased `prompt` onto `subagent_prompt`, so `user_prompt` was None on every real turn and turn-start inbox surfacing never ran. Seven struct-literal tests stayed green throughout.\n- cas-f3e3 \u2014 Claude Code sends assistant text on MessageDisplay as `delta` (a streaming chunk with `index`/`final`), not `message`. `handle_message_display` returned on its first line for every real event; its four struct-literal tests stayed green.\n\nThe rule:\n1. Any test asserting \"field X reaches handler Y\" must start from `serde_json::from_str`/`from_value` on a payload in the harness's real wire shape.\n2. Payload fixtures must come from a CAPTURED LIVE PAYLOAD, not from docs and never from CAS's own structs \u2014 reading the shape off the struct you are testing is the circularity that hides this bug class. Capture is cheap: point a hook command at a script that appends stdin to a file, take one turn, read the file.\n3. Struct literals remain fine for tests about handler LOGIC, once the payload contract is separately pinned by a parse test.\n4. When you add or alias a `HookInput` field, add a parse test using the captured payload in the same commit, and cite the source in a doc comment on the field.\n\nReference fixtures + the per-event key table: docs/analysis/2026-08-07-hook-wire-shape-audit.md. Captured-wire tests live in `crates/cas-core/src/hooks/types.rs` (mod tests).",
+    "paths": "crates/cas-core/src/hooks/**,cas-cli/src/hooks/**,cas-cli/tests/hook_schema.rs",
+    "tags": "[\"hooks\",\"testing\",\"serde\",\"wire-shape\",\"cas-f3e3\",\"enforceable:test\"]",
+    "status": "proven"
+  },
+  {
+    "id": "rule-175",
+    "content": "Completion contract: after user-facing CAS changes merge to main, do not declare the session delivery complete until a new version is bumped, published, and clean-update/install verification proves the released binary contains all session changes merged since the prior release. The release must include every session addition already on main. Slack announcement duties may remain parked only under an explicit operator embargo and do not block binary publication.",
+    "paths": "Cargo.toml,cas-cli/**,crates/**,.claude/**,.codex/**,.grok/**,scripts/**,docs/**",
+    "tags": "[\"release\",\"main\",\"completion\",\"enforceable:gate\"]",
+    "status": "proven"
+  }
+]

@@ -486,6 +486,30 @@ else
     bad "supervisor proof receipt was not accepted without CI lookup: $proof_out"
 fi
 
+compile_wt="$(new_worktree lane-compile-admission)"
+mkdir -p "$compile_wt/src"
+printf '[package]\nname="lane_fixture"\nversion="0.1.0"\n' >"$compile_wt/Cargo.toml"
+printf 'pub fn original() {}\n' >"$compile_wt/src/lib.rs"
+git -C "$compile_wt" add .
+git -C "$compile_wt" -c commit.gpgsign=false commit -qm 'compile fixture base'
+git -C "$compile_wt" checkout -qb factory/compile-lane
+printf 'pub fn changed() {}\n' >"$compile_wt/src/lib.rs"
+git -C "$compile_wt" add .
+git -C "$compile_wt" -c commit.gpgsign=false commit -qm 'compile fixture lane'
+git -C "$compile_wt" checkout -q main
+compile_out="$(LANE_GH_CALLS="$lane_calls" LANE_GH_RUNS="$lane_runs" LANE_GH_JOBS="$lane_jobs" \
+    CAS_RELEASE_TRAIN_GH="$tmp/lane-gh.sh" "$train" 9.99.4 "$compile_wt" --check-lane factory/compile-lane 2>&1 || true)"
+if [[ "$compile_out" == *'LANE COMPILE REQUIRED'* && "$compile_out" == *'cargo check -p lane_fixture --tests'* ]]; then
+    ok '--check-lane requires combined-tree compile proof before CI admission'
+else
+    bad "--check-lane omitted compile admission: $compile_out"
+fi
+if python3 "$script_dir/test-lane-compile.py"; then
+    ok 'combined-tree compile receipt regressions'
+else
+    bad 'combined-tree compile receipt regressions'
+fi
+
 printf '[]\n' >"$lane_runs"
 printf '{"jobs":[]}\n' >"$lane_jobs"
 out="$(run_lane_check || true)"

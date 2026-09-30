@@ -83,6 +83,25 @@ class Announce(unittest.TestCase):
                     self.assertIn(token, result.stderr)
                     self.assertIn("line 2" if index in (0, 2) else "line 1", result.stderr)
 
+    def test_pre_publication_allows_only_digest_tokens(self):
+        # Preflight runs before publication: the receipt-fillable digests are
+        # still placeholders there, and every other token must still fail.
+        bodies = list(BODIES)
+        bodies[1] += " Linux `{{LINUX_SHA256}}` macOS `{{MACOS_SHA256}}`."
+        bodies[3] += " Linux `{{LINUX_SHA256}}` macOS `{{MACOS_SHA256}}`."
+        self.write_draft(bodies)
+        command = [sys.executable, str(SCRIPT), "--validate", str(self.draft), str(self.body_dir)]
+        allowed = subprocess.run(command + ["--pre-publication"], capture_output=True, text=True)
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+        strict = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(strict.returncode, 1)
+        self.assertIn("{{LINUX_SHA256}}", strict.stderr)
+        bodies[3] += " {{INTERVENTIONS}}"
+        self.write_draft(bodies)
+        other = subprocess.run(command + ["--pre-publication"], capture_output=True, text=True)
+        self.assertEqual(other.returncode, 1)
+        self.assertIn("{{INTERVENTIONS}}", other.stderr)
+
     def test_clean_validation_writes_exact_bodies(self):
         result = self.validate()
         self.assertEqual(result.returncode, 0, result.stderr)

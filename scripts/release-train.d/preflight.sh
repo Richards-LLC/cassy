@@ -302,7 +302,7 @@ cut_preflight_check_draft() {
     }
     lint_dir="$run_dir/preflight-announce-bodies"
     mkdir -p "$lint_dir"
-    if ! lint_output="$(python3 "$script_dir/release-train-announce.py" --validate "$draft" "$lint_dir" 2>&1)"; then
+    if ! lint_output="$(python3 "$script_dir/release-train-announce.py" --validate "$draft" "$lint_dir" --pre-publication 2>&1)"; then
         printf '%s\n' "$lint_output" >"$run_dir/preflight-announce.log"
         printf '%s\n' "$lint_output" >&2
         cut_preflight_block release-draft \

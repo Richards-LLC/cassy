@@ -51,11 +51,20 @@ def body_lines(body: str) -> list[str]:
     return body.strip("\n").splitlines()
 
 
-def lint_body(index: int, body: str) -> None:
+# post-publication fills these from the published assets; they are the only
+# tokens a draft may carry before publication (preflight).
+DIGEST_TOKENS = frozenset({"{{LINUX_SHA256}}", "{{MACOS_SHA256}}"})
+
+
+def lint_body(index: int, body: str, allow_digest_tokens: bool = False) -> None:
     lines = body_lines(body)
     if not lines:
         fail(f"body {BODY_NAMES[index]} is empty")
-    token = re.search(r"\{\{.*?\}\}", body.strip("\n"), flags=re.DOTALL)
+    token = next(
+        (match for match in re.finditer(r"\{\{.*?\}\}", body.strip("\n"), flags=re.DOTALL)
+         if not (allow_digest_tokens and match.group() in DIGEST_TOKENS)),
+        None,
+    )
     if token:
         line_number = body.strip("\n")[:token.start()].count("\n") + 1
         fail(f"body {BODY_NAMES[index]} line {line_number} contains unresolved token {token.group()}")
@@ -96,22 +105,22 @@ def lint_body(index: int, body: str) -> None:
             fail(f"body {BODY_NAMES[index]} bullet spans more than two lines")
 
 
-def extract_bodies(draft: Path) -> list[str]:
+def extract_bodies(draft: Path, allow_digest_tokens: bool = False) -> list[str]:
     text = draft.read_text(encoding="utf-8")
     bodies = re.findall(r"\x60\x60\x60(?:text)?\r?\n(.*?)\r?\n\x60\x60\x60", text, flags=re.DOTALL)
     if len(bodies) != 4:
         fail(f"draft must contain exactly four fenced bodies; found {len(bodies)}")
     for index, body in enumerate(bodies):
-        lint_body(index, body)
+        lint_body(index, body, allow_digest_tokens)
     return bodies
 
 
-def validate(draft_arg: str, body_dir_arg: str) -> None:
+def validate(draft_arg: str, body_dir_arg: str, pre_publication: bool = False) -> None:
     draft = Path(draft_arg).expanduser().resolve()
     body_dir = Path(body_dir_arg).expanduser().resolve()
     if not draft.is_file():
         fail(f"draft does not exist: {draft}")
-    bodies = extract_bodies(draft)
+    bodies = extract_bodies(draft, allow_digest_tokens=pre_publication)
     body_dir.mkdir(parents=True, exist_ok=True)
     for name, body in zip(BODY_NAMES, bodies):
         (body_dir / f"{name}.txt").write_text(body + "\n", encoding="utf-8")
@@ -322,11 +331,14 @@ def main(argv: list[str]) -> int:
         if len(argv) == 4 and argv[1] == "--validate":
             validate(argv[2], argv[3])
             return 0
+        if len(argv) == 5 and argv[1] == "--validate" and argv[4] == "--pre-publication":
+            validate(argv[2], argv[3], pre_publication=True)
+            return 0
         if len(argv) == 6 and argv[1] == "--post":
             post(argv[2], argv[3], argv[4], argv[5])
             return 0
         print(
-            "usage: release-train-announce.py --validate DRAFT BODY_DIR | "
+            "usage: release-train-announce.py --validate DRAFT BODY_DIR [--pre-publication] | "
             "--post VERSION DRAFT RECEIPT BODY_DIR | --record-latency TAG RECEIPT DRAFT",
             file=sys.stderr,
         )

@@ -10940,7 +10940,7 @@ fn anchored_delivery_content_gate(
             ),
         })
     } else {
-        delivery_content_presence_in_parent(repo_path, anchor, parent_branch)
+        task_attribution::ordinary_anchor_content_presence(repo_path, parent_branch, anchor, content_identity)
     };
 
     match presence {
@@ -19250,10 +19250,6 @@ fn delivery_content_presence_on_target_for_paths(
             },
             Err(reason) => return DeliveryContentPresence::Unknown { reason },
         };
-        #[cfg(test)]
-        if Some(repo_path) == std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent() {
-            eprintln!("delivery path result: anchor={delivery_commit} path={path} resolution_only={resolution_only} proof={proof:?}");
-        }
         match proof {
             DeliveryContentPresence::Present { .. } => {},
             DeliveryContentPresence::Dropped { .. } => dropped.push(path.clone()),
@@ -24974,8 +24970,9 @@ mod merge_state_gate_tests {
                     Some(&window), &window.identity, None,
                     Some("reviewed-drop: d18d4a824e -- cas-a355's audited timeout resolution intentionally supersedes the delivered journey"));
                 eprintln!("historical replay {id} reviewed-drop=d18d4a824e: {reviewed:?}");
-                if !matches!(outcome, Some(MergeStateGateOutcome::Reject(_)))
-                    || !matches!(reviewed, Some(MergeStateGateOutcome::ProceedWithNote(_))) {
+                let only_journey = matches!(&outcome, Some(MergeStateGateOutcome::Reject(message))
+                    if message.lines().any(|line| line == "Dropped path(s): hub-web/e2e/journeys/network-switch.journey.ts"));
+                if !only_journey || !matches!(reviewed, Some(MergeStateGateOutcome::ProceedWithNote(_))) {
                     failures.push(format!("{id}: without receipt={outcome:?}; reviewed={reviewed:?}"));
                 }
             } else if outcome.is_some() {

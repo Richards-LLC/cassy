@@ -588,9 +588,25 @@ fn advance(
     merge_union: Option<&MergeUnionContext<'_>>,
     parallel_edits: &ParallelEdits,
     resolution_parent_lines: Option<&std::collections::HashSet<String>>,
+    retire_draft: bool,
+    internal_resolution: bool,
     reverted: bool,
     commit: &str,
 ) -> Option<OwnedLines> {
+    if reverted && owner.positions.is_empty() && !changes.is_empty() {
+        return None;
+    }
+    // Retirement cannot erase the baseline-restoration fence. In particular,
+    // a later QA merge restoring that line beside a novel neighbour rejects
+    // even if the original draft had already been retired.
+    if (internal_resolution || retire_draft && owner.positions.is_empty())
+        && changes
+            .iter()
+            .flat_map(|hunk| &hunk.added)
+            .any(|line| meaningful(line) && owner.baseline.contains(line))
+    {
+        return None;
+    }
     let mut next = OwnedLines {
         positions: Vec::new(),
         commits: owner.commits.clone(),
@@ -612,7 +628,11 @@ fn advance(
                     .filter(|line| meaningful(line))
                     .cloned()
                     .collect();
-                if !owner.baseline.is_empty() && added == owner.baseline {
+                if !owner.baseline.is_empty()
+                    && (added == owner.baseline
+                        || internal_resolution
+                            && added.iter().any(|line| owner.baseline.contains(line)))
+                {
                     // Unlabeled inverse patches also restore pre-delivery content.
                     return None;
                 }
@@ -627,7 +647,7 @@ fn advance(
                     .iter()
                     .enumerate()
                     .filter(|(_, new)| {
-                        retains_line(old, new, ordinary)
+                        retains_line(old, new, ordinary || internal_resolution)
                             || merge_union.is_some_and(|union| union.retains_list(*line, old, new))
                             || parallel_edits
                                 .get(line)
@@ -636,7 +656,9 @@ fn advance(
                     .collect();
                 if let Some((index, new)) = retained.get(occurrence) {
                     next.positions.push(hunk.new_start + *index);
-                    if ordinary && old != *new && !next.commits.iter().any(|known| known == commit)
+                    if (ordinary || internal_resolution)
+                        && old != *new
+                        && !next.commits.iter().any(|known| known == commit)
                     {
                         next.commits.push(commit.to_string());
                     }
@@ -660,9 +682,9 @@ fn advance(
                                 .iter()
                                 .any(|line| parents.contains(line) && retains_line(old, line, true))
                     });
-                    if (!ordinary && !novel_resolution)
+                    if (!ordinary && !internal_resolution && !novel_resolution)
                         || hunk.added.iter().any(|new| {
-                            retains_line(old, new, ordinary)
+                            retains_line(old, new, ordinary || internal_resolution)
                                 || merge_union
                                     .is_some_and(|union| union.retains_list(*line, old, new))
                                 || parallel_edits
@@ -679,12 +701,13 @@ fn advance(
                         .filter(|(_, new)| {
                             meaningful(new)
                                 && (ordinary
+                                    || internal_resolution
                                     || resolution_parent_lines
                                         .is_some_and(|parents| !parents.contains(*new)))
                         })
                         .map(|(index, _)| hunk.new_start + index)
                         .collect();
-                    if replacement.is_empty() {
+                    if replacement.is_empty() && !retire_draft {
                         return None;
                     }
                     next.positions.extend(replacement);
@@ -739,7 +762,16 @@ pub(super) fn line_content_presence_with_resolutions(
     path: &str,
     resolutions: &[String],
 ) -> Result<Option<super::DeliveryContentPresence>, String> {
-    line_content_presence_impl(repo, parent, delivery, target, path, resolutions, false)
+    line_content_presence_impl(
+        repo,
+        parent,
+        delivery,
+        target,
+        path,
+        resolutions,
+        false,
+        &[],
+    )
 }
 
 pub(super) fn resolution_content_presence(
@@ -749,7 +781,31 @@ pub(super) fn resolution_content_presence(
     target: &str,
     path: &str,
 ) -> Result<Option<super::DeliveryContentPresence>, String> {
-    line_content_presence_impl(repo, parent, delivery, target, path, &[], true)
+    line_content_presence_impl(repo, parent, delivery, target, path, &[], true, &[])
+}
+
+/// Caller proves the final handoff's own content on this path before allowing
+/// draft retirement. The cycle is task-owned first-parent history only;
+/// post-handoff edits and all other callers retain the ordinary drop rules.
+pub(super) fn line_content_presence_with_task_cycle(
+    repo: &Path,
+    parent: &str,
+    delivery: &str,
+    target: &str,
+    path: &str,
+    resolutions: &[String],
+    cycle: &[String],
+) -> Result<Option<super::DeliveryContentPresence>, String> {
+    line_content_presence_impl(
+        repo,
+        parent,
+        delivery,
+        target,
+        path,
+        resolutions,
+        false,
+        cycle,
+    )
 }
 
 fn line_content_presence_impl(
@@ -760,6 +816,7 @@ fn line_content_presence_impl(
     path: &str,
     resolutions: &[String],
     novel_only: bool,
+    cycle: &[String],
 ) -> Result<Option<super::DeliveryContentPresence>, String> {
     let delivery_commit = super::resolve_branch_sha(repo, &format!("{delivery}^{{commit}}"))
         .ok_or("delivery line anchor does not resolve to a commit")?;
@@ -928,6 +985,10 @@ fn line_content_presence_impl(
                             merge_union.as_ref(),
                             &parallel_edits,
                             resolution_parent_lines.as_ref(),
+                            ordinary && cycle.iter().any(|owned| owned == commit),
+                            !ordinary
+                                && resolution_parent_lines.is_some()
+                                && cycle.iter().any(|owned| owned == commit),
                             reverted,
                             commit,
                         )

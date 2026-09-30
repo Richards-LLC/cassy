@@ -6392,6 +6392,14 @@ impl CasService {
             &subtasks,
         ));
 
+        let project_tasks = task_store.list(None).map_err(|error| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to list encode chores: {error}"),
+            )
+        })?;
+        report.push_str(&crate::mcp::tools::core::rules::render_pending_encode_chores(&project_tasks));
+
         Ok(Self::success(report))
     }
 

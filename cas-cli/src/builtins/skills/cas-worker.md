@@ -23,7 +23,8 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
    onto the supervisor's named target after checkpointing dirt.
 3. Implement its scope, commit logical units with the task ID, and push unless
    `delivery_mode=local_merge`. Add milestone `note_type=progress` notes.
-4. At delivery, read [close-gate.md](references/close-gate.md). Close with
+4. Before close, invoke [`verify-before-claim`](../verify-before-claim/SKILL.md)
+   and read [close-gate.md](references/close-gate.md). Close with
    `task action=close id=<task-id> reason="PASS <sha>: <evidence>"` when porcelain
    is empty and HEAD is the claimed commit. Hand verification-required guidance
    to the supervisor; quote it in `need:`.
@@ -39,6 +40,9 @@ use assigned work; `ready` and `available` are backlog
   visibility, not authorization.
 
 ## Conditional references
+
+- Detached work or checkpoint timing: [reminders.md](../cas-supervisor/references/reminders.md)
+  for the push-first table and cleanup contract.
 
 - Check/test work: [discipline.md](references/discipline.md) for capped commands,
   clean-commit receipts and the supervisor's full assembly proof.

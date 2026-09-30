@@ -80,6 +80,11 @@ Back every finding with a command output or an exact line reference.
 
 ## Phase 2: Quality (only when Phase 1 passes)
 
+Read the repository root `CODING_STANDARDS.md` when present for judgment-only
+Standards review; keep acceptance-criterion and scope findings on the Spec axis.
+Skip mechanically enforced rules and let documented repo decisions override
+smell heuristics.
+
 Compare the change with how neighbouring code solves the same problem (`rg '<pattern>' -l`). Then look for, and report only with evidence:
 
 - correctness: edge cases, error propagation, races;

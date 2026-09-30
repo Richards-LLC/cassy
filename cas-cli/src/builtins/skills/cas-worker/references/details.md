@@ -24,6 +24,26 @@ Choose the local or remote ref from current assignment evidence; do not assume
 their freshness. A frozen parked delivery stays on its original branch; a new
 assignment uses its own per-task branch from the target tip.
 
+## Task fields
+
+**`task`** — the task ID field is always `id` (NOT `task_id`, `taskId`, `_id`). Notes parameter is `notes` (plural, NOT `note`).
+
+```text
+# Start / show / close
+task action=start id=cas-abc1
+task action=show id=cas-abc1
+task action=close id=cas-abc1 reason="Implemented X, tests pass"
+
+# Progress notes (note_type ∈ progress|blocker|decision|discovery|question|platform_proof)
+task action=notes id=cas-abc1 notes="Found root cause in Y" note_type=progress
+
+# Mark blocked
+task action=update id=cas-abc1 status=blocked
+task action=notes id=cas-abc1 notes="Blocked: <reason>" note_type=blocker
+```
+
+`platform_proof` is the note the close gate reads for `risk=platform`.
+
 ## Resume state
 
 Read task state with `action=show` or `action=start brief=true` after a context

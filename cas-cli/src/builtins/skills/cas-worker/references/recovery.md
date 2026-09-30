@@ -10,8 +10,8 @@ landed before sending a merge request or making a corrective commit.
 Capture `git rev-parse factory/<name>` (or the active per-task branch).
 
 For `local_merge`, keep the local commit. Otherwise push that branch. Send
-`coordination action=message target=supervisor` with `merge_request=true`, the
-branch, SHA, target and evidence. Re-close after confirmed merge. For an epic,
+`coordination action=message target=supervisor merge_request=true summary="Merge requested" message="<branch, SHA, target and evidence>"`.
+Re-close after confirmed merge. For an epic,
 request supervisor merge rather than `gh pr create --base epic/...`.
 A squash/cherry-pick mismatch may need `commit_receipt`; transactional
 `completion_receipt` requires the source tip merged. See [close-gate.md](close-gate.md)

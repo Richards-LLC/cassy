@@ -9,13 +9,13 @@ The historical brief's approximate counts used an earlier revision.
 | Surface | Before words | After words | Change |
 | --- | ---: | ---: | ---: |
 | AGENTS.md | 738 | 264 | -474 |
-| Worker skill | 873 | 466 | -407 |
+| Worker skill | 873 | 483 | -390 |
 | Close delivery reference | 2580 | 641 | -1939 |
-| Evidence/sync reference | 1108 | 387 | -721 |
+| Evidence/sync reference | 1108 | 469 | -639 |
 | Check/test command reference | 517 | 517 | +0 |
 | Recovery reference | 1633 | 493 | -1140 |
 | OpenCode worker launch prompt | 781 | 406 | -375 |
-| Four references total | 5838 | 2038 | -3800 |
+| Four references total | 5838 | 2120 | -3718 |
 
 The launch brief retains assignment, one-task ownership, progress, commit/push,
 close/handoff, typed wakes, urgent-stop recovery, availability, backgrounding,
@@ -54,3 +54,26 @@ managed initialization block, JSON parity, MIT notice and Markdown hygiene.
 Supervisor assembly owns `cas-pty` worker contracts/parity, `cas-mux` projection,
 `cas` builtin worker/role guidance and SessionStart budget suites, plus the
 independent Standards-axis loading integration from cas-fdfa.
+
+
+## Contract restoration after review
+
+Supervisor request 1882566 records seven executed contract failures missed by
+the initial source checks. The corrective delivery rebases onto `aa64c907f` and
+restores the pinned guidance before preserving the remaining word-count trim.
+
+| Failed surface | Corrective evidence |
+| --- | --- |
+| Verifier projection | `.claude/agents/task-verifier.md` equals the canonical generated header plus `task-verifier.body.md`. |
+| Worker reminders | Restored the pointer to `../cas-supervisor/references/reminders.md`. |
+| Task-field examples | Restored the original exact ID/notes field explanation and start/show/close/notes/blocked examples in `details.md`. |
+| Pre-close proof | Worker lifecycle directly points to `verify-before-claim` before close. |
+| MCP call shapes | Recovery message includes target, summary, message and typed merge request on one complete command line. |
+| Task-ID hygiene exception | Removed the stale close-gate task-ID entry from `scripts/builtin-doc-hygiene.json`. |
+| AI-vocabulary exception | Removed the stale worker-body journey entry from `builtin_doc_hygiene_test.rs`. |
+
+Source checks now cover these seven surfaces as well as the original counts,
+pointer/contract markers and snapshot parity. They still do not execute Rust
+contracts. The supervisor runs all of `integration_contracts` and
+`builtin_flavor_drift_test` when this delivery parks; acceptance stays dependent
+on that executed evidence, rather than a claim based on the source scan.

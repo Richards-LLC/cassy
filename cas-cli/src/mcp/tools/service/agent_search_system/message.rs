@@ -3930,6 +3930,7 @@ mod cas99d2_redelivery_tests {
     /// The marker must match the token the daemon's teams-inbox writer already
     /// recognises as an intentional redelivery, so the two channels agree.
     #[test]
+    // pin: The inbox producer and teams redelivery consumer exchange this exact wire token.
     fn the_marker_matches_the_teams_inbox_redelivery_token() {
         assert_eq!(INBOX_REDELIVERY_MARKER, "[redelivery]");
     }

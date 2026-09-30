@@ -1609,6 +1609,7 @@ mod tests {
     }
 
     #[test]
+    // pin: The watchdog must be armed before blocking schema work; isolate run_server_impl so the test cannot match its own strings.
     fn casb123_mcp_startup_arms_parent_watchdog_before_schema_migration() {
         let source = include_str!("runtime.rs");
         let body = source

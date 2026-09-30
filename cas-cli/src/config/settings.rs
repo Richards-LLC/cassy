@@ -2297,6 +2297,7 @@ harness = "codex"
     /// The whole point of cas-05e3/cas-fbac is that brand-new installs work
     /// without editing `.cas/config.toml`.
     #[test]
+    // pin: Stock worker routing is a shipped compatibility policy; empty config must retain this harness, model and effort.
     fn worker_stock_default_kicks_in_when_nothing_configured() {
         let llm = LlmConfig::default();
         assert_eq!(

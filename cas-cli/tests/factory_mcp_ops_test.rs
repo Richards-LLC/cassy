@@ -420,13 +420,7 @@ fn run_isolated_codex_test(child_test: &str, state: IsolatedCodexState) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains(&format!("test {child_filter} ..."))
-            && stdout.lines().any(|line| line == "running 1 test")
-            && stdout.contains("test result: ok"),
-        "isolated helper did not execute {child_filter}:\n{stdout}"
-    );
+    child_test_evidence::assert_passed(&String::from_utf8_lossy(&output.stdout), &child_filter);
 }
 
 fn factory_env_in_isolated_codex_child(child_test: &str) -> FactoryTestEnv {
@@ -10791,3 +10785,6 @@ async fn shared_clone_supervisors_cannot_mutate_each_others_fleet_cas_bebc() {
     assert_eq!(reset.status, TaskStatus::Open);
     assert_eq!(reset.assignee, None);
 }
+
+#[path = "../../crates/cas-core/src/test_child.rs"]
+mod child_test_evidence;

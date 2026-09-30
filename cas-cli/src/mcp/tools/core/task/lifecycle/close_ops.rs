@@ -1,5 +1,6 @@
 pub(crate) mod gate_text;
 mod task_attribution;
+mod snapshot_approval;
 
 use super::TaskLifecycleGateError;
 use crate::harness_policy::{
@@ -4716,6 +4717,19 @@ impl CasCore {
                 "DELIVERY RECEIPT REJECTED: merge_base_sha does not match the live source/target merge base.",
             ));
         }
+        // Receipt acceptance is an alternate close entry: bind snapshot
+        // approval before the immutable proof cycle can be persisted.
+        if let Some(error) = snapshot_approval::rejection(
+            &context.repo_root,
+            Some(&input.merge_base_sha),
+            Some(&input.commit_sha),
+            &[],
+            &task.notes,
+            &task.id,
+            crate::mcp::tools::core::guidance::caller_prefix(),
+        ) {
+            return Ok(Self::tool_error(error));
+        }
         let worker_path = match self.resolve_worker_worktree_path(task, Some(&context)) {
             Ok(Some(path)) => path,
             Ok(None) => {
@@ -7932,6 +7946,17 @@ impl CasCore {
                     None
                 },
             );
+            if let Some(error) = snapshot_approval::rejection(
+                proof_repo,
+                scoped_proof_base.as_deref(),
+                delivered_tip.as_deref(),
+                &changed_paths,
+                &task.notes,
+                &task.id,
+                crate::mcp::tools::core::guidance::caller_prefix(),
+            ) {
+                return Ok(Self::tool_error(error));
+            }
             // cas-3efd: compile-only checks do not replace the
             // supervisor's epic-assembly run. An ASSEMBLY_PROOF on the parent
             // epic whose tested head contains this delivery also stands for a
@@ -25075,6 +25100,7 @@ mod merge_state_gate_tests {
     /// gate and epic_status must inspect the current target tree, refuse the
     /// false all-clear, and name the dropped path.
     #[test]
+    // pin: Inspect actual Git-merged fixture content to distinguish a dropped delivery from a legitimate later source refactor.
     fn reachable_anchor_with_dropped_content_blocks_close_and_epic_status_cas_b278() {
         let dir = init_factory_repo("worker");
         let p = dir.path();
@@ -25446,6 +25472,7 @@ mod merge_state_gate_tests {
     /// and epic_status must name the superseding commit without asking a
     /// worker to resurrect the older implementation.
     #[test]
+    // pin: Inspect actual Git-merged fixture content to distinguish a dropped delivery from a legitimate later source refactor.
     fn reachable_anchor_with_later_refactor_proceeds_cas_b278() {
         let dir = init_factory_repo("worker");
         let p = dir.path();

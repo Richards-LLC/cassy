@@ -202,6 +202,7 @@ fn codex_worker_runtime_instruction_allows_close_then_escalate() {
 }
 
 #[test]
+// pin: Inspect source registration as well as supervisor references to detect a file omitted from the embedded catalog.
 fn supervisor_reference_tree_uses_current_lifecycle_contract() {
     let root = source_root();
     // Audit D1: every flavor names tools by bare name.

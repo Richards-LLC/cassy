@@ -1031,6 +1031,46 @@ else
     fi
 fi
 
+# Residual template tokens must stop both entry points before adapter writes.
+cp "$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md" \
+    "$preflight_lint_wt/docs/release-notes/$stage_date-v9.99.9-slack.md"
+python3 - "$preflight_lint_wt/docs/release-notes/$stage_date-v9.99.9-slack.md" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+source = path.read_text()
+path.write_text(source.replace('• *Release handoff*', '• *Release handoff* {{INTERVENTIONS}}', 1))
+PY
+if (
+    source "$repo_root/scripts/release-train.d/preflight.sh"
+    version=9.99.9
+    worktree="$preflight_lint_wt"
+    run_dir="$preflight_lint_run"
+    CAS_RELEASE_TRAIN_DATE="$stage_date"
+    cut_stage_file() { printf '%s/stage.%s.done\n' "$run_dir" "$1"; }
+    cut_preflight_check_draft
+) >"$tmp/preflight-token.out" 2>"$tmp/preflight-token.err"; then
+    bad 'preflight accepted a residual template token'
+elif grep -q '{{INTERVENTIONS}}' "$tmp/preflight-token.err"; then
+    ok 'preflight rejects and names a residual template token'
+else
+    bad "preflight did not name the token: $(cat "$tmp/preflight-token.err")"
+fi
+token_out="$(CAS_RELEASE_TRAIN_DATE="$stage_date" \
+    CAS_RELEASE_TRAIN_ANNOUNCE_POST_CMD="$bad_announce_stub" \
+    CAS_RELEASE_TRAIN_ANNOUNCE_STUB_LOG="$bad_announce_log" \
+    "$train" 9.99.9 "$preflight_lint_wt" --announce 2>&1 || true)"
+if [[ "$token_out" == *'{{INTERVENTIONS}}'* ]] && [[ ! -e "$bad_announce_log" ]]; then
+    ok 'announce rejects a residual token before any adapter write'
+else
+    bad "announce accepted or posted a residual token: $token_out"
+fi
+if python3 "$script_dir/test-release-train-announce.py"; then
+    ok 'announce body fixtures and last check before Violet writes'
+else
+    bad 'announce body fixtures and last check before Violet writes'
+fi
+
 # Gap 2: preflight must print the exact user-facing line that violates the
 # announcement wording rule, not only point at a saved lint log.
 wording_draft="$tmp/wording-draft.md"

@@ -55,6 +55,10 @@ def lint_body(index: int, body: str) -> None:
     lines = body_lines(body)
     if not lines:
         fail(f"body {BODY_NAMES[index]} is empty")
+    token = re.search(r"\{\{.*?\}\}", body.strip("\n"), flags=re.DOTALL)
+    if token:
+        line_number = body.strip("\n")[:token.start()].count("\n") + 1
+        fail(f"body {BODY_NAMES[index]} line {line_number} contains unresolved token {token.group()}")
     if "**" in body:
         fail(f"body {BODY_NAMES[index]} contains forbidden ** markdown")
     for line_number, line in enumerate(lines, start=1):
@@ -272,6 +276,12 @@ def post(version: str, draft_arg: str, receipt_arg: str, body_dir_arg: str) -> N
     )
     paths = [body_dir / f"{name}.txt" for name in BODY_NAMES]
     texts = [path.read_text(encoding="utf-8").rstrip("\n") for path in paths]
+    # The membership read may take time. Check every captured body again before
+    # the first write, then post these same strings without reopening the files.
+    for index, text in enumerate(texts):
+        lint_body(index, text)
+        if text != bodies[index]:
+            fail(f"validated body is changed: {paths[index]}")
     posted_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     receipt_values: dict[str, str] = {"POSTED_AT": posted_at, "CHANNEL": channel}
     parent: str | None = None

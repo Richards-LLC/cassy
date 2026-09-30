@@ -14,11 +14,15 @@
 //! whole fix: a later write would lose the race with Codex's own startup read.
 //!
 //! Lives in its own integration-test binary because it mutates process-global
-//! environment (`CODEX_HOME`, `PATH`).
+//! environment (`CODEX_HOME`, `PATH`) under the canonical TestEnvGuard.
 
 use cas_mux::{Pane, SupervisorCli};
+
+#[path = "../../../cas-cli/src/test_env_guard.rs"]
+mod test_env_guard;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier};
+use test_env_guard::TestEnvGuard;
 
 #[cfg(unix)]
 #[path = "support/warm_stub.rs"]
@@ -67,64 +71,32 @@ fn trust_entry_present(config: &Path, workdir: &Path) -> bool {
 ///
 /// The real `~/.codex/config.toml` is never touched: `CODEX_HOME` is resolved
 /// in-process at call time and is set before every phase. `PATH` is restored by
-/// [`EnvGuard`] so nothing added to this binary later inherits an empty `PATH`.
-fn isolate_codex_env(tag: &str) -> (Scratch, Scratch, PathBuf) {
+/// [`TestEnvGuard`] so nothing added to this binary later inherits an empty `PATH`.
+fn isolate_codex_env(env: &mut TestEnvGuard, tag: &str) -> (Scratch, Scratch, PathBuf) {
     let home = Scratch::new(&format!("{tag}-home"));
     let empty_path = Scratch::new(&format!("{tag}-bin"));
-    unsafe {
-        std::env::set_var("CODEX_HOME", home.path());
-        std::env::set_var("PATH", empty_path.path());
-    }
+    env.set("CODEX_HOME", home.path());
+    env.set("PATH", empty_path.path());
     let config = home.path().join("config.toml");
     (home, empty_path, config)
-}
-
-/// Restores `PATH` / `CODEX_HOME` when the test ends.
-struct EnvGuard {
-    path: Option<std::ffi::OsString>,
-    codex_home: Option<std::ffi::OsString>,
-}
-
-impl EnvGuard {
-    fn capture() -> Self {
-        Self {
-            path: std::env::var_os("PATH"),
-            codex_home: std::env::var_os("CODEX_HOME"),
-        }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match &self.path {
-                Some(v) => std::env::set_var("PATH", v),
-                None => std::env::remove_var("PATH"),
-            }
-            match &self.codex_home {
-                Some(v) => std::env::set_var("CODEX_HOME", v),
-                None => std::env::remove_var("CODEX_HOME"),
-            }
-        }
-    }
 }
 
 /// All three phases run in one test: they mutate process-global env
 /// (`CODEX_HOME`, `PATH`), which cannot be done safely from parallel threads.
 #[tokio::test]
 async fn codex_panes_pre_trust_workdir_and_other_harnesses_do_not() {
-    let _env = EnvGuard::capture();
-    codex_worker_pane_pre_trusts_workdir_before_launch().await;
-    codex_supervisor_pane_pre_trusts_workdir_before_launch().await;
-    claude_worker_pane_does_not_touch_codex_config().await;
+    let mut env = TestEnvGuard::temp_home();
+    codex_worker_pane_pre_trusts_workdir_before_launch(&mut env).await;
+    codex_supervisor_pane_pre_trusts_workdir_before_launch(&mut env).await;
+    claude_worker_pane_does_not_touch_codex_config(&mut env).await;
     #[cfg(unix)]
-    codex_does_not_launch_when_trust_read_back_cannot_verify().await;
+    codex_does_not_launch_when_trust_read_back_cannot_verify(&mut env).await;
     #[cfg(unix)]
-    concurrent_codex_workers_launch_only_after_every_trust_entry_is_read_back().await;
+    concurrent_codex_workers_launch_only_after_every_trust_entry_is_read_back(&mut env).await;
 }
 
-async fn codex_worker_pane_pre_trusts_workdir_before_launch() {
-    let (_home, _bin, config) = isolate_codex_env("worker");
+async fn codex_worker_pane_pre_trusts_workdir_before_launch(env: &mut TestEnvGuard) {
+    let (_home, _bin, config) = isolate_codex_env(env, "worker");
     let workdir_dir = Scratch::new("worker-cwd");
     let workdir = workdir_dir.path().to_path_buf();
 
@@ -160,8 +132,8 @@ async fn codex_worker_pane_pre_trusts_workdir_before_launch() {
     );
 }
 
-async fn codex_supervisor_pane_pre_trusts_workdir_before_launch() {
-    let (_home, _bin, config) = isolate_codex_env("supervisor");
+async fn codex_supervisor_pane_pre_trusts_workdir_before_launch(env: &mut TestEnvGuard) {
+    let (_home, _bin, config) = isolate_codex_env(env, "supervisor");
     let workdir_dir = Scratch::new("supervisor-cwd");
     let workdir = workdir_dir.path().to_path_buf();
 
@@ -187,8 +159,8 @@ async fn codex_supervisor_pane_pre_trusts_workdir_before_launch() {
     );
 }
 
-async fn claude_worker_pane_does_not_touch_codex_config() {
-    let (_home, _bin, config) = isolate_codex_env("claude");
+async fn claude_worker_pane_does_not_touch_codex_config(env: &mut TestEnvGuard) {
+    let (_home, _bin, config) = isolate_codex_env(env, "claude");
     let workdir_dir = Scratch::new("claude-cwd");
     let workdir = workdir_dir.path().to_path_buf();
 
@@ -223,8 +195,8 @@ async fn claude_worker_pane_does_not_touch_codex_config() {
 /// config at process start, so executing it after an unparseable/read-back
 /// failure would reintroduce the permanent interactive-prompt park.
 #[cfg(unix)]
-async fn codex_does_not_launch_when_trust_read_back_cannot_verify() {
-    let (_home, bin, config) = isolate_codex_env("unverified");
+async fn codex_does_not_launch_when_trust_read_back_cannot_verify(env: &mut TestEnvGuard) {
+    let (_home, bin, config) = isolate_codex_env(env, "unverified");
     let workdir = Scratch::new("unverified-cwd");
     std::fs::write(&config, "this is [not valid TOML\n").unwrap();
     let codex = bin.join("codex");
@@ -265,9 +237,11 @@ async fn codex_does_not_launch_when_trust_read_back_cannot_verify() {
 /// at process start and drops a per-cwd receipt, so this asserts the actual
 /// `Pane::worker` happens-before boundary rather than only the write helper.
 #[cfg(unix)]
-async fn concurrent_codex_workers_launch_only_after_every_trust_entry_is_read_back() {
+async fn concurrent_codex_workers_launch_only_after_every_trust_entry_is_read_back(
+    env: &mut TestEnvGuard,
+) {
     const WORKERS: usize = 8;
-    let (_home, bin, config) = isolate_codex_env("concurrent");
+    let (_home, bin, config) = isolate_codex_env(env, "concurrent");
     let workdirs: Vec<Scratch> = (0..WORKERS)
         .map(|index| Scratch::new(&format!("concurrent-cwd-{index}")))
         .collect();
@@ -362,4 +336,42 @@ exit 23
             scratch.path().display(),
         );
     }
+}
+
+#[test]
+fn isolated_codex_environment_is_restored_on_panic() {
+    use test_env_guard::{AmbientEnvRestore, test_env_lock};
+
+    let original_home = Scratch::new("unwind-original-home");
+    let original_path = Scratch::new("unwind-original-path");
+    let _home = AmbientEnvRestore::set("CODEX_HOME", original_home.path());
+    let _path = AmbientEnvRestore::set("PATH", original_path.path());
+    let panic = std::panic::catch_unwind(|| {
+        let mut env = TestEnvGuard::new();
+        let (home, bin, _) = isolate_codex_env(&mut env, "unwind");
+        assert_eq!(
+            std::env::var_os("CODEX_HOME"),
+            Some(home.path().as_os_str().to_owned())
+        );
+        assert_eq!(
+            std::env::var_os("PATH"),
+            Some(bin.path().as_os_str().to_owned())
+        );
+        panic!("codex fixture assertion failed");
+    })
+    .expect_err("fixture must unwind");
+    assert_eq!(
+        panic.downcast_ref::<&str>(),
+        Some(&"codex fixture assertion failed")
+    );
+
+    let _lock = test_env_lock();
+    assert_eq!(
+        std::env::var_os("CODEX_HOME"),
+        Some(original_home.path().as_os_str().to_owned())
+    );
+    assert_eq!(
+        std::env::var_os("PATH"),
+        Some(original_path.path().as_os_str().to_owned())
+    );
 }

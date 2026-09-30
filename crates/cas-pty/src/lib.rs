@@ -67,3 +67,7 @@ pub use pty::{
     missing_contract_elements, rendered_contract_surface,
 };
 pub use pty::{Pty, PtyConfig, PtyEvent, TeamsSpawnConfig};
+
+#[cfg(test)]
+#[path = "../../../cas-cli/src/test_env_guard.rs"]
+mod test_env_guard;

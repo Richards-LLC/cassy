@@ -620,6 +620,7 @@ pub(super) fn merge_tip_content_presence(
             &resolution,
             target,
             Some(&resolution_paths),
+            true,
         ) {
             DeliveryContentPresence::Present { paths } => {
                 proven_resolutions.push((resolution, paths.clone()));
@@ -911,7 +912,7 @@ mod tests {
         }
     }
 
-    fn union_list_fixture(
+    fn parallel_merge_fixture(
         base: &str,
         delivered: &str,
         sibling: &str,
@@ -940,8 +941,289 @@ mod tests {
     }
 
     #[test]
+    fn parallel_ordinary_edit_records_actual_side_commit_cas_0930() {
+        let (dir, delivery) = parallel_merge_fixture(
+            "render(title, disabled);\n",
+            "render(delivered_title, disabled);\n",
+            "render(title, described);\n",
+            "render(delivered_title, described);\n",
+        );
+        let side = git(dir.path(), &["rev-parse", "main^1"]);
+        assert_eq!(
+            delivery_content_presence_on_target(dir.path(), &delivery, "main"),
+            DeliveryContentPresence::Superseded {
+                paths: vec!["copy.txt".into()],
+                commits: vec![side]
+            }
+        );
+    }
+
+    #[test]
+    fn conflicting_parallel_edits_cannot_certify_merge_cas_0930() {
+        let (dir, delivery) = parallel_merge_fixture(
+            "render(title, disabled);\n",
+            "render(delivered_title, disabled);\n",
+            "render(replaced_title, disabled);\n",
+            "render(delivered_title, described);\n",
+        );
+        assert_eq!(
+            delivery_content_presence_on_target(dir.path(), &delivery, "main"),
+            DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn parallel_import_union_preserves_every_parent_name_cas_0930() {
+        let (dir, delivery) = parallel_merge_fixture(
+            "import { Alpha, Beta } from \"./api\";\n",
+            "import { Beta, Delivery, Alpha } from \"./api\";\n",
+            "import { Alpha, Side, Beta } from \"./api\";\n",
+            "import { Beta, Delivery, Side, Alpha } from \"./api\";\n",
+        );
+        let side = git(dir.path(), &["rev-parse", "main^1"]);
+        assert_eq!(
+            delivery_content_presence_on_target(dir.path(), &delivery, "main"),
+            DeliveryContentPresence::Superseded {
+                paths: vec!["copy.txt".into()],
+                commits: vec![side]
+            }
+        );
+    }
+
+    #[test]
+    fn parallel_import_union_cannot_restore_removed_name_cas_0930() {
+        let (dir, delivery) = parallel_merge_fixture(
+            "import { Alpha, ADMIN, Beta } from \"./api\";\n",
+            "import { Alpha, Delivery, Beta } from \"./api\";\n",
+            "import { Alpha, ADMIN, Side, Beta } from \"./api\";\n",
+            "import { Alpha, Delivery, ADMIN, Side, Beta } from \"./api\";\n",
+        );
+        assert_eq!(
+            delivery_content_presence_on_target(dir.path(), &delivery, "main"),
+            DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn parallel_edit_cannot_restore_removed_privilege_cas_0930() {
+        let (dir, delivery) = parallel_merge_fixture(
+            "grant(user, ADMIN); render(title);\n",
+            "grant(user); render(title);\n",
+            "grant(user, ADMIN); render(described);\n",
+            "grant(user, ADMIN); render(described);\n",
+        );
+        assert_eq!(
+            delivery_content_presence_on_target(dir.path(), &delivery, "main"),
+            DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn parallel_edit_requires_final_survival_cas_0930() {
+        let (dir, delivery) = parallel_merge_fixture(
+            "render(title, disabled);\n",
+            "render(delivered_title, disabled);\n",
+            "render(title, described);\n",
+            "render(delivered_title, described);\n",
+        );
+        commit(dir.path(), "copy.txt", "", "delete combined delivery");
+        assert_eq!(
+            delivery_content_presence_on_target(dir.path(), &delivery, "main"),
+            DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn parallel_complete_block_evolution_records_side_commit_cas_0930() {
+        let (dir, delivery) = parallel_merge_fixture(
+            "base();\ntimeout(10);\n",
+            "delivered();\ntimeout(10);\n",
+            "base();\ntimeout(30);\nretry();\n",
+            "delivered();\ntimeout(30);\nretry();\n",
+        );
+        let side = git(dir.path(), &["rev-parse", "main^1"]);
+        assert_eq!(
+            delivery_content_presence_on_target(dir.path(), &delivery, "main"),
+            DeliveryContentPresence::Present {
+                paths: vec!["copy.txt".into()]
+            }
+        );
+        // Anchor ownership in the timeout before the side fork, then force
+        // its actual edit through a merge where the sibling route is lost.
+        let base = git(dir.path(), &["rev-parse", &format!("{delivery}^1")]);
+        assert_eq!(
+            delivery_evolution::line_content_presence(
+                dir.path(),
+                &format!("{base}^1"),
+                &base,
+                "main",
+                "copy.txt"
+            )
+            .unwrap(),
+            Some(DeliveryContentPresence::Superseded {
+                paths: vec!["copy.txt".into()],
+                commits: vec![delivery, side]
+            })
+        );
+    }
+
+    #[test]
+    fn parallel_block_partial_deletion_rejects_cas_0930() {
+        let (dir, delivery) = parallel_merge_fixture(
+            "base();\ntimeout(10);\n",
+            "delivered();\ntimeout(10);\n",
+            "base();\ntimeout(30);\nretry();\n",
+            "delivered();\ntimeout(30);\nretry();\n",
+        );
+        let base = git(dir.path(), &["rev-parse", &format!("{delivery}^1")]);
+        commit(
+            dir.path(),
+            "copy.txt",
+            "delivered();\ntimeout(30);\n",
+            "lose retry",
+        );
+        assert_eq!(
+            delivery_evolution::line_content_presence(
+                dir.path(),
+                &format!("{base}^1"),
+                &base,
+                "main",
+                "copy.txt"
+            )
+            .unwrap(),
+            Some(DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()]
+            })
+        );
+    }
+
+    #[test]
+    fn ordinary_loop_rewrite_spanning_closing_brace_supersedes_cas_0930() {
+        let dir = fixture();
+        let repo = dir.path();
+        commit(
+            repo,
+            "copy.txt",
+            "function labels() {\nfor (const item of group) {\nprepare();\n}\nbase();\nreturn labels;\n}\n",
+            "baseline",
+        );
+        let delivery = commit(
+            repo,
+            "copy.txt",
+            "function labels() {\nfor (const item of group) {\nprepare();\n}\ngroup.forEach((item) => {\nlabels.set(item, oldTag);\n});\nreturn labels;\n}\n",
+            "cas-taskb: labels",
+        );
+        let edit = commit(
+            repo,
+            "copy.txt",
+            "function labels() {\nfor (const item of group) {\nlabels.set(item, newTag);\n}\nreturn labels;\n}\n",
+            "ordinary labels rewrite",
+        );
+        assert_eq!(
+            delivery_content_presence_on_target(repo, &delivery, "HEAD"),
+            DeliveryContentPresence::Superseded {
+                paths: vec!["copy.txt".into()],
+                commits: vec![edit]
+            }
+        );
+        commit(
+            repo,
+            "copy.txt",
+            "function labels() {\nfor (const item of group) {\n}\nreturn labels;\n}\n",
+            "delete replacement",
+        );
+        assert_eq!(
+            delivery_content_presence_on_target(repo, &delivery, "HEAD"),
+            DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn merge_invention_without_ordinary_side_patch_rejects_cas_0930() {
+        let (dir, delivery) = parallel_merge_fixture(
+            "render(title, disabled);\nneighbor();\n",
+            "render(delivered_title, disabled);\nneighbor();\n",
+            "render(title, disabled);\nother_neighbor();\n",
+            "render(delivered_title, invented);\nother_neighbor();\n",
+        );
+        assert_eq!(
+            delivery_content_presence_on_target(dir.path(), &delivery, "main"),
+            DeliveryContentPresence::Dropped {
+                paths: vec!["copy.txt".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn resolution_owns_novel_lines_not_imported_side_lines_cas_0930() {
+        let dir = fixture();
+        let repo = dir.path();
+        commit(
+            repo,
+            "copy.txt",
+            "base_owned();\nbase_inherited();\n",
+            "baseline",
+        );
+        git(repo, &["branch", "-f", "main", "HEAD"]);
+        commit(
+            repo,
+            "copy.txt",
+            "worker();\nbase_inherited();\n",
+            "cas-taskb: delivery",
+        );
+        git(repo, &["checkout", "main"]);
+        commit(
+            repo,
+            "copy.txt",
+            "target();\ninherited();\n",
+            "target changes",
+        );
+        git(repo, &["checkout", "factory/worker"]);
+        git(
+            repo,
+            &["merge", "--no-ff", "--no-commit", "-s", "ours", "main"],
+        );
+        let tip = commit(
+            repo,
+            "copy.txt",
+            "resolved();\ninherited();\n",
+            "cas-taskb: QA resolution",
+        );
+        git(repo, &["checkout", "main"]);
+        git(
+            repo,
+            &["merge", "--no-ff", "factory/worker", "-m", "integrate"],
+        );
+        commit(
+            repo,
+            "copy.txt",
+            "resolved();\n",
+            "delete unrelated imported side line",
+        );
+        let mut window = window();
+        window.identity.known_commits.push(tip.clone());
+        assert_eq!(
+            merge_tip_content_presence(repo, "main", &tip, Some(&window), &window.identity, None),
+            Some(DeliveryContentPresence::Superseded {
+                paths: vec!["copy.txt".into()],
+                commits: vec![tip]
+            })
+        );
+    }
+
+    #[test]
     fn union_cannot_restore_removed_baseline_list_member_cas_0930() {
-        let (dir, delivery) = union_list_fixture(
+        let (dir, delivery) = parallel_merge_fixture(
             "Alpha, ADMIN, Beta,\nneighbor();\n",
             "Alpha, DeliveryProbe, Beta,\nneighbor();\n",
             "Alpha, ADMIN, SiblingProbe, Beta,\nneighbor();\n",
@@ -957,7 +1239,7 @@ mod tests {
 
     #[test]
     fn union_cannot_introduce_items_absent_from_both_parents_cas_0930() {
-        let (dir, delivery) = union_list_fixture(
+        let (dir, delivery) = parallel_merge_fixture(
             "Alpha, Beta,\n",
             "Alpha, DeliveryProbe, Beta,\n",
             "Alpha, SiblingProbe, Beta,\n",
@@ -973,7 +1255,7 @@ mod tests {
 
     #[test]
     fn union_cannot_ignore_sibling_removal_of_baseline_item_cas_0930() {
-        let (dir, delivery) = union_list_fixture(
+        let (dir, delivery) = parallel_merge_fixture(
             "Alpha, Beta,\n",
             "Alpha, DeliveryProbe, Beta,\n",
             "Alpha, SiblingProbe,\n",
@@ -989,7 +1271,7 @@ mod tests {
 
     #[test]
     fn union_transport_still_requires_later_line_survival_cas_0930() {
-        let (dir, delivery) = union_list_fixture(
+        let (dir, delivery) = parallel_merge_fixture(
             "Alpha, Beta,\n",
             "Alpha, DeliveryProbe, Beta,\n",
             "Alpha, SiblingProbe, Beta,\n",

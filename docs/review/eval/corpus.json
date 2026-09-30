@@ -2,7 +2,7 @@
   "version": 3,
   "task_snapshot_provenance": "Read-only CAS database export; current stored task text, not a historical criteria snapshot.",
   "reviewer_source_sha": "175f78c55d32c20a1b67b1b61901a30004175973",
-  "transport_policy": "Isolated model replay measures behaviour; API authority/protocol is simulated. A real registered shadow rerun on installed 3.39.0 is required before operator approval of any merge policy.",
+  "transport_policy": "Isolated model replay measures behaviour; API authority/protocol is simulated. A real registered shadow rerun on installed 3.39 is required before operator approval of any merge policy.",
   "source_notes": "Cases c04-c06 are correlated instances of one self-reexec regression; report grouped as well as per-instance metrics. Historical assembly fixture failures are fixture defects, not production-defect claims. Holdout truth must never be given to reviewers.",
   "cases": [
     {

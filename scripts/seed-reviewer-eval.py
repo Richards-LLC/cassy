@@ -92,7 +92,7 @@ for case in cases:
         case['addition_provenance']='Supplemental real corrected fixture after independent discovery of c18 contamination.'
     if case['id']=='c20':
         case['addition_provenance']='Supplemental corrected factory self-reexec slice after c19 contamination. Same historical fix as c18, narrower real file scope; report selection bias and correlation.'
-manifest=dict(version=3,task_snapshot_provenance='Read-only CAS database export; current stored task text, not a historical criteria snapshot.',reviewer_source_sha=git('rev-parse',args.reviewer_sha),transport_policy='Isolated model replay measures behaviour; API authority/protocol is simulated. A real registered shadow rerun on installed 3.39.0 is required before operator approval of any merge policy.',
+manifest=dict(version=3,task_snapshot_provenance='Read-only CAS database export; current stored task text, not a historical criteria snapshot.',reviewer_source_sha=git('rev-parse',args.reviewer_sha),transport_policy='Isolated model replay measures behaviour; API authority/protocol is simulated. A real registered shadow rerun on installed 3.39 is required before operator approval of any merge policy.',
               source_notes='Cases c04-c06 are correlated instances of one self-reexec regression; report grouped as well as per-instance metrics. Historical assembly fixture failures are fixture defects, not production-defect claims. Holdout truth must never be given to reviewers.',cases=cases)
 Path('docs/review/eval/corpus.json').write_text(json.dumps(manifest,indent=2)+'\n')
 print(f'PASS {len(cases)} pinned cases: {sum(c["kind"]=="defect" for c in cases)} defects and {sum(c["kind"]=="clean" for c in cases)} negatives; all scope paths exist at authentic heads')

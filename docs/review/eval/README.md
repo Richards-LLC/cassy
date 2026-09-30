@@ -2,7 +2,7 @@
 
 This corpus evaluates review behavior. It grants no merge authority. The operator
 must approve thresholds after inspecting measured results, and must require a
-rerun through the installed 3.39.0 registered shadow protocol before enabling any
+rerun through the installed 3.39 registered shadow protocol before enabling any
 policy that relies on these reviewers.
 
 `corpus.json` pins 14 real defects (12 classes), five nominal negatives and four eligible clean
@@ -124,7 +124,7 @@ batch. Cached input tokens remain a subset of total input tokens.
 
 ## Real registered rerun
 
-Once 3.39.0 is installed, the supervisor provisions real replay deliveries,
+Once 3.39 is installed, the supervisor provisions real replay deliveries,
 legacy dispatches, implementers, verifier children and two distinct registered
 Standard SubAgent reviewers per case. No identity is minted or impersonated by
 the runner. The supervisor provides authenticated actor adapters and a binding

@@ -20,7 +20,7 @@
     "A missing or invalid run remains a recall miss; no survivor-only accuracy score.",
     "Bad commits are unique actual fixes rejected by the other axis or failing targeted tests; all actual fixes form the denominator.",
     "Untested fixes make the observed bad-commit rate a lower bound, never policy-ready evidence.",
-    "Before enabling policy, rerun through the real registered installed 3.39.0 shadow protocol and retain actual dispatch/round/verification/cross-check receipts.",
+    "Before enabling policy, rerun through the real registered installed 3.39 shadow protocol and retain actual dispatch/round/verification/cross-check receipts.",
     "The supervisor supplies runtime assembly proof and targeted-test receipts; the worker never runs Rust builds/tests.",
     "Thresholds require explicit operator approval and cannot be relaxed merely because this batch fails."
   ],

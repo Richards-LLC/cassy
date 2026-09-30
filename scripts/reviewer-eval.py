@@ -523,7 +523,7 @@ def score(corpus, out, labels):
             'combined_recall': len(combined_hits)/len(all_seeds) if all_seeds else None,
             'policy_ready': False, 'authority': 'simulated unless registered receipts independently verified',
             'mandatory_preconditions': ['Operator approves thresholds',
-                 'Installed 3.39.0 registered shadow protocol rerun', 'Supervisor targeted-test proof for all fix commits']}
+                 'Installed 3.39 registered shadow protocol rerun', 'Supervisor targeted-test proof for all fix commits']}
 
 
 def main():

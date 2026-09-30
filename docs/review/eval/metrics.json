@@ -137,7 +137,7 @@
   "authority": "simulated unless registered receipts independently verified",
   "mandatory_preconditions": [
     "Operator approves thresholds",
-    "Installed 3.39.0 registered shadow protocol rerun",
+    "Installed 3.39 registered shadow protocol rerun",
     "Supervisor targeted-test proof for all fix commits"
   ],
   "measurement_window_utc": [

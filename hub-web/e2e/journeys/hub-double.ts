@@ -6,7 +6,7 @@
 // shapes follow the hub wire types in src/types.ts and the relay contract in
 // src/pairing-relay.ts. Evidence label: "real-bundle, protocol-double".
 import type { Page, Route, WebSocketRoute } from "@playwright/test";
-import { journeyNow, journeyStamp } from "./clock";
+import { journeyNow } from "./clock";
 
 export const RELAY = "https://petra-stella-cloud.vercel.app";
 export const SCOPES = ["machine-read", "session-read", "pane-read", "pane-input", "message-send", "pane-interrupt"];
@@ -38,7 +38,15 @@ export type HistoryPage = {
   next_before?: number;
 };
 
+export type ProtocolTime = {
+  now(): number;
+  synchronize(): Promise<void>;
+  delay(callback: () => void, ms: number): void;
+};
+
 export type DoubleOptions = {
+  /** Controlled journeys own the browser and protocol reply clock together. */
+  time?: ProtocolTime;
   machines: Machine[];
   /** Seed these machine ids as already paired (IndexedDB), as a returning user. */
   paired?: string[];
@@ -105,6 +113,9 @@ export class HubDouble {
   readonly artifactRequests: string[] = [];
   private readonly sockets = new Map<string, WebSocketRoute>();
   private readonly waiters: Array<() => void> = [];
+  private readonly protocolWaiters = new Set<() => void>();
+  /** Actual legacy connects / multiplex subscriptions, not inferred UI readiness. */
+  readonly attaches: string[] = [];
   private readonly held = new Set<string>();
   private readonly attachDelays = new Map<string, number>();
   private polls = 0;
@@ -132,6 +143,8 @@ export class HubDouble {
   private readonly unreadLegacySockets = new WeakSet<WebSocketRoute>();
   /** client_refs the double refused with `upstream_unavailable`, in order. */
   readonly upstreamRefusals: string[] = [];
+  /** Refusal frames actually delivered, distinct from sends received/refused. */
+  readonly deliveredRefusals: string[] = [];
   /** POST /v1/sessions bodies, in order (cas-0f51). */
   readonly launches: LaunchCall[] = [];
   /** Sessions started but still booting: listed after this many more session fetches. */
@@ -140,6 +153,26 @@ export class HubDouble {
   private readonly live = new Map<string, { messages: Array<Record<string, unknown>>; replies: Array<Record<string, unknown>> }>();
 
   constructor(private readonly page: Page, private readonly options: DoubleOptions) {}
+
+  private now(): number { return this.options.time?.now() ?? journeyNow(); }
+  private stamp(offset = 0): string { return new Date(this.now() + offset).toISOString(); }
+  private delay(callback: () => void, ms: number): void {
+    if (this.options.time) this.options.time.delay(callback, ms);
+    else setTimeout(callback, ms);
+  }
+
+  /** Resolve on the next matching wire observation, with no polling sleeps. */
+  waitFor(observed: () => boolean): Promise<void> {
+    if (observed()) return Promise.resolve();
+    return new Promise(resolve => {
+      const check = () => {
+        if (observed()) { this.protocolWaiters.delete(check); resolve(); }
+      };
+      this.protocolWaiters.add(check);
+    });
+  }
+
+  private observed(): void { for (const check of this.protocolWaiters) check(); }
 
   machine(id: string): Machine {
     const found = this.options.machines.find((m) => m.id === id);
@@ -341,6 +374,7 @@ export class HubDouble {
     if (!message.SendMessage || !this.upstreamDown.has(session)) return undefined;
     const clientRef = String(message.SendMessage.client_ref);
     this.upstreamRefusals.push(clientRef);
+    this.observed();
     return clientRef;
   }
 
@@ -372,7 +406,7 @@ export class HubDouble {
 
   /** The session's machine clock, for the stamps its history replays. */
   private machineNow(session: string): string {
-    return journeyStamp(this.options.clockAheadMs?.[session] ?? 0);
+    return this.stamp(this.options.clockAheadMs?.[session] ?? 0);
   }
 
   /** Replayed like the daemon's history page: every row names its session, and a message its in_reply_to (protocol.rs ConversationHistoryMessage). */
@@ -422,6 +456,7 @@ export class HubDouble {
   }
 
   private async hub(route: Route): Promise<void> {
+    await this.options.time?.synchronize();
     const url = new URL(route.request().url());
     const machineId = url.hostname.replace(/\.test$/, "");
     const path = url.pathname;
@@ -432,10 +467,11 @@ export class HubDouble {
     if (refusal && refusal.count > 0 && route.request().headers()["dpop"]) {
       refusal.count -= 1;
       this.refusedProofs.push({ machine: machineId, path, reason: refusal.reason });
+      this.observed();
       return route.fulfill({
         status: 401,
         headers: { "www-authenticate": `DPoP error="${refusal.retryable ? "invalid_dpop_proof" : "invalid_token"}", error_description="${refusal.reason}"` },
-        json: { error: "unauthorized", reason: refusal.reason, retryable: refusal.retryable, server_time: Math.floor(journeyNow() / 1000) },
+        json: { error: "unauthorized", reason: refusal.reason, retryable: refusal.retryable, server_time: Math.floor(this.now() / 1000) },
       });
     }
     if (path === "/v1/machine") {
@@ -491,7 +527,7 @@ export class HubDouble {
       // never answers.
       if (id.startsWith("art-cloud-down")) return route.fulfill({ status: 502, json: { error: "cloud_failed", status: null } });
       if (id.startsWith("art-offline")) return route.abort("connectionrefused");
-      return route.fulfill({ json: { artifact_id: id, cloud_artifact_id: `cloud-${id}`, url: `https://store.test/view/${encodeURIComponent(id)}?sig=journey`, expires_at: journeyStamp(600_000), name: `${id}.pdf`, mime: "application/pdf", size_bytes: 1024 } });
+      return route.fulfill({ json: { artifact_id: id, cloud_artifact_id: `cloud-${id}`, url: `https://store.test/view/${encodeURIComponent(id)}?sig=journey`, expires_at: this.stamp(600_000), name: `${id}.pdf`, mime: "application/pdf", size_bytes: 1024 } });
     }
     if (path.endsWith("/lease")) return route.fulfill({ json: { held_by_me: true, controller_label: "Journey browser" } });
     if (path.endsWith("/status")) {
@@ -553,7 +589,7 @@ export class HubDouble {
     const relay = this.options.relay;
     if (!relay) return route.fulfill({ status: 503, json: { error: "relay not configured for this journey" } });
     const body = (route.request().postDataJSON() ?? {}) as Record<string, unknown>;
-    const expiresAt = journeyStamp(600_000);
+    const expiresAt = this.stamp(600_000);
     if (url.pathname.endsWith("/requests")) {
       this.requestedScopes = (body.requested_scopes as string[]) ?? [];
       return route.fulfill({
@@ -611,10 +647,11 @@ export class HubDouble {
         // The real hub's legacy socket: the refusal, then a close (cas-0653).
         const refuse = () => {
           ws.send(JSON.stringify({ error: "upstream_unavailable", retryable: true, message: UPSTREAM_UNAVAILABLE_MESSAGE, client_ref: refused }));
+          this.deliveredRefusals.push(refused);
           void ws.close({ code: 1011, reason: "journey: session daemon link is reconnecting" });
         };
         const delay = this.upstreamRefusalDelays.get(session);
-        if (delay) setTimeout(refuse, delay); else refuse();
+        if (delay) this.delay(refuse, delay); else refuse();
         return;
       }
       this.handleSessionFrame(machineId, session, ws, message, pages);
@@ -623,7 +660,9 @@ export class HubDouble {
     const delay = this.attachDelays.get(session);
     this.attachDelays.delete(session);
     if (delay === undefined) welcome();
-    else setTimeout(welcome, delay);
+    else this.delay(welcome, delay);
+    this.attaches.push(session);
+    this.observed();
   }
 
   private welcomeFor(session: string): Record<string, unknown> {
@@ -646,6 +685,7 @@ export class HubDouble {
     const machineId = new URL(ws.url()).hostname.replace(/\.test$/, "");
     if (!this.reachable(machineId)) { void ws.close({ code: 1011, reason: "journey: unreachable" }); return; }
     this.machineSocketOpens.set(machineId, (this.machineSocketOpens.get(machineId) ?? 0) + 1);
+    this.observed();
     let bucket = this.machineSockets.get(machineId);
     if (!bucket) this.machineSockets.set(machineId, (bucket = new Set()));
     bucket.add(ws);
@@ -659,6 +699,7 @@ export class HubDouble {
       if (frame.proto === 2) { ws.send(JSON.stringify({ proto: 2 })); return; }
       if (frame.channel === "health" && typeof frame.ping === "number") {
         this.pongs.set(machineId, (this.pongs.get(machineId) ?? 0) + 1);
+        this.observed();
         ws.send(JSON.stringify({ channel: "health", pong: frame.ping }));
         return;
       }
@@ -674,7 +715,9 @@ export class HubDouble {
         const welcome = () => ws.send(JSON.stringify({ channel: `pty:${session}`, message: this.welcomeFor(session) }));
         const delay = this.attachDelays.get(session);
         this.attachDelays.delete(session);
-        if (delay === undefined) welcome(); else setTimeout(welcome, delay);
+        if (delay === undefined) welcome(); else this.delay(welcome, delay);
+        this.attaches.push(session);
+        this.observed();
         return;
       }
       if (!frame.message) return;
@@ -683,6 +726,7 @@ export class HubDouble {
         // The real hub's machine channel: the refusal, then the session's
         // stream closes so a new subscribe restarts the upstream (cas-0653).
         ws.send(JSON.stringify({ channel: `pty:${session}`, error: { code: "upstream_unavailable", retryable: true, message: UPSTREAM_UNAVAILABLE_MESSAGE, client_ref: refused } }));
+        this.deliveredRefusals.push(refused);
         subscribed.delete(session);
         ws.send(JSON.stringify({ channel: `pty:${session}`, closed: true }));
         return;

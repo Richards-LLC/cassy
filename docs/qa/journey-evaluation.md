@@ -46,8 +46,12 @@ For the Commander hub, the suite is `hub-web/e2e/journeys/`. It runs as the
 `journeys` project of the single `hub-web/playwright.config.ts`, with
 `@playwright/test` 1.63.
 
-- **One test per journey**, titled with the catalog id
-  (`HUB-J4 reply by typing`). Each stage is a `test.step`.
+- **One real-clock smoke per journey**, titled with the catalog id
+  (`HUB-J4 reply by typing`). Each stage is a `test.step`. Independent protocol
+  scenarios with controlled deadlines may run as separate tests with the same
+  catalog-id prefix (HUB-J12). The smoke owns the receipt directory; the verified
+  Playwright report and each scenario's trace prove the additional cases. A smoke
+  receipt alone is not proof of those cases.
 - **What it drives.** The production bundle (`hub-web/dist`), served at
   `/commander/` the way `cas hub` embeds it. At the network boundary, a hub
   protocol double serves the machine's HTTP and WebSocket API

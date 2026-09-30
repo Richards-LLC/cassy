@@ -234,6 +234,11 @@ pub struct TaskRequest {
     #[serde(default)]
     pub risk: Option<String>,
 
+    /// Optional recorded-only reversibility declaration; no merge policy reads it.
+    #[serde(default)]
+    #[schemars(description = "Recorded only: one-way or two-way; pass an empty string on update to clear. Does not affect merge policy.")]
+    pub door: Option<String>,
+
     /// Test modules/targets required by blast-radius close proof.
     #[schemars(
         description = "Comma-separated test modules or targets required to cover the task's complete delivery diff"

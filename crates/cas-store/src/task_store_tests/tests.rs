@@ -842,3 +842,21 @@ fn cancelled_reopen_is_atomic_and_clears_terminal_outcome() {
     assert_eq!(after.terminal_outcome, None);
     assert_eq!(after.updated_at, reopened.updated_at);
 }
+
+#[test]
+fn test_task_door_roundtrips_and_clears_without_changing_status() {
+    let (_temp, store) = create_test_store();
+    let mut task = Task::new("door-task".into(), "record reversibility".into());
+    task.door = Some(cas_types::TaskDoor::OneWay);
+    store.add(&task).unwrap();
+    assert_eq!(store.get(&task.id).unwrap().door, task.door);
+    assert_eq!(store.list(None).unwrap()[0].door, task.door);
+    task.door = Some(cas_types::TaskDoor::TwoWay);
+    store.update(&task).unwrap();
+    assert_eq!(store.get(&task.id).unwrap().door, task.door);
+    task.door = None;
+    store.update(&task).unwrap();
+    let retrieved = store.get(&task.id).unwrap();
+    assert_eq!(retrieved.door, None);
+    assert_eq!(retrieved.status, TaskStatus::Open);
+}

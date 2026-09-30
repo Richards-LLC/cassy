@@ -531,6 +531,16 @@
       "5c1e188088f4b58222d458113c8950f384dd61b634e046f24fc0793e6471a7f3",
       "a71af3a0ff73cdd73aaa39c8107d206071171386d82b727835b187be9ff5631a"
     ],
+    "skills/cas-retro/LICENSE": [
+      "0e7ac423bf2c6e223b7c5b156f8cf72da49d748e56a1641402c31f22ad07dbb5",
+      "dcad88aea82f74872bcd5e715e7e6c933692324fd71303aa51a7af44cef52064"
+    ],
+    "skills/cas-retro/agents/openai.yaml": [
+      "ae22908b4640c3106728e0e781930294ebb6f90f3b0897add3ec90f40e0abf79"
+    ],
+    "skills/cas-retro/references/v3.38.0.md": [
+      "7a9bff97e94fd3caf9cb0d56ad105991194743f0dcdaf0b0335b13b952adfb7d"
+    ],
     "skills/cas-supervisor/references/code-review-queue.md": [
       "09ea473a0b20854c50f26e82deb2299d3050510f9b03a8512935c97463f17183",
       "211e094a7bddfa2016226cc20137cc5fe536c02847189a5d6d9d5da94cb6ed78",

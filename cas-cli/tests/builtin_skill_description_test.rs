@@ -25,13 +25,14 @@ const FLAVORS: [(&str, builtin_catalog::Flavor); 3] = [
 ];
 
 /// Skills whose description, frontmatter and portability this task owns.
-const OWNED_SKILLS: [&str; 10] = [
+const OWNED_SKILLS: [&str; 11] = [
     "cas-dataviz",
     "cas-technical-drawing",
     "cas-image-generate",
     "cli-routing",
     "cas-nuxt-playwright",
     "cas-tdd",
+    "cas-retro",
     "cas-wizard",
     "session-learn",
     "cas-brainstorm",

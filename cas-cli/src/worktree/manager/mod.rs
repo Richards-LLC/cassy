@@ -522,6 +522,11 @@ impl WorktreeManager {
                 return Err(WorktreeError::Git(GitError::MergeConflictPaths(conflicts)));
             }
 
+            // Projects with a release gate validate the combined tree in a
+            // disposable preview, before the target can move. This is shared
+            // by CLI and MCP merge paths; force only concerns source dirt.
+            self.check_lane_fast_rows(worktree)?;
+
             // cas-4702 / GH #68: never move the main checkout's HEAD. When
             // the checkout already happens to be on the target branch the
             // merge runs in place (no checkout needed, working tree stays in
@@ -572,6 +577,35 @@ impl WorktreeManager {
         };
 
         Ok(merge_commit)
+    }
+
+    fn check_lane_fast_rows(&self, worktree: &Worktree) -> WorktreeResult<()> {
+        let relative = "scripts/check-lane-fast-rows.py";
+        let target_runner = self.repo_root.join(relative);
+        let source_runner = worktree.path.join(relative);
+        let runner = if target_runner.is_file() {
+            target_runner
+        } else if source_runner.is_file() {
+            source_runner
+        } else {
+            // Other projects retain their existing merge policy.
+            return Ok(());
+        };
+        let output = std::process::Command::new("python3")
+            .arg(runner)
+            .arg(&self.repo_root)
+            .arg(&worktree.parent_branch)
+            .arg(&worktree.branch)
+            .output()?;
+        if !output.status.success() {
+            return Err(WorktreeError::Git(GitError::CommandFailed(format!(
+                "LANE FAST ROWS FAILED (merge refused):\n{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            ))));
+        }
+        tracing::info!(receipt = %String::from_utf8_lossy(&output.stdout), "lane fast rows passed");
+        Ok(())
     }
 
     /// Remove a successfully merged worktree after any caller-owned durable

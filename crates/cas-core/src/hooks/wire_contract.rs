@@ -179,20 +179,61 @@ fn inventory_catches_new_moved_and_deleted_serde_bindings_without_handler_pins()
         baseline.clone().into_iter().collect::<BTreeSet<_>>(),
         expected
     );
-    for mutated in [
-        source.replacen("alias = \"prompt\"", "alias = \"newHarnessPrompt\"", 1),
-        source.replacen("alias = \"delta\"", "alias = \"wrongDelta\"", 1),
-        source.replacen(", alias = \"delta\"", "", 1),
-        source.replacen(
-            "pub user_prompt: Option<String>",
-            "pub wrong_prompt: Option<String>",
-            1,
+    for (case, mutated) in [
+        (
+            "new alias alongside an existing captured alias",
+            source.replacen(
+                "alias = \"prompt\"",
+                "alias = \"prompt\", alias = \"newHarnessPrompt\"",
+                1,
+            ),
+        ),
+        (
+            "new rename on a previously default-named field",
+            source.replacen(
+                "#[serde(default)]\n    pub cwd:",
+                "#[serde(default, rename = \"workingDirectory\")]\n    pub cwd:",
+                1,
+            ),
+        ),
+        (
+            "changed prompt alias",
+            source.replacen("alias = \"prompt\"", "alias = \"newHarnessPrompt\"", 1),
+        ),
+        (
+            "changed delta alias",
+            source.replacen("alias = \"delta\"", "alias = \"wrongDelta\"", 1),
+        ),
+        (
+            "changed final rename",
+            source.replacen("rename = \"final\"", "rename = \"isFinal\"", 1),
+        ),
+        (
+            "removed delta alias",
+            source.replacen(", alias = \"delta\"", "", 1),
+        ),
+        (
+            "prompt alias moved to the unconsumed subagent field (cas-78d3)",
+            source.replacen(", alias = \"prompt\"", "", 1).replacen(
+                "alias = \"subagentPrompt\"",
+                "alias = \"subagentPrompt\", alias = \"prompt\"",
+                1,
+            ),
+        ),
+        (
+            "changed consumed field",
+            source.replacen(
+                "pub user_prompt: Option<String>",
+                "pub wrong_prompt: Option<String>",
+                1,
+            ),
         ),
     ] {
+        assert_ne!(mutated, source, "mutation did not apply: {case}");
         assert_ne!(
             declarations(&mutated).0,
             baseline,
-            "wire contract inventory missed a changed binding"
+            "wire contract inventory missed {case}"
         );
     }
 }

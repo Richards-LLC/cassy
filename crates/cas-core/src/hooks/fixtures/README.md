@@ -17,3 +17,12 @@ against the wire value, including that it differs from the field's default.
 Do not add a new spelling to the grandfathered legacy inventory: those entries
 identify historical compatibility names with no retained capture evidence.
 Handler-logic tests may keep struct literals; they are not wire-contract proof.
+
+The source inventory reads only `HookInput` field serde metadata so that an added
+alias or rename cannot silently escape the captured-payload contracts. It does
+not assert handler source text, ordering or implementation. Expected bindings
+are written independently of the declaration parser; values are checked by
+deserializing these retained captures into the real `HookInput`. Unsupported
+metadata syntax fails closed and needs an explicit parser update. The inventory
+regressions cover additive aliases/renames, changed names, removed aliases and
+the historical prompt-to-subagent alias move.

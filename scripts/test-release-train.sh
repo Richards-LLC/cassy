@@ -1476,6 +1476,15 @@ case "$1 $2" in
     ;;
 "api graphql")
     if printf '%s' "$*" | grep -q enqueuePullRequest; then
+        if [[ -f "$state/mutation-head-moved" ]]; then
+            printf '{"headRefOid":"moved"}\n' >"$state/head.json"
+            # GitHub evaluates expectedHeadOid when executing the mutation.
+            # A check made before this request cannot close that race alone.
+            if [[ "$*" == *'expectedHeadOid:$head'* && "$*" == *"head=$GH_STUB_HEAD"* ]]; then
+                printf '{"errors":[{"message":"Head changed"}]}\n'
+                exit 1
+            fi
+        fi
         cat "$state/enqueue.json" 2>/dev/null || printf '{"data":{"enqueuePullRequest":{"mergeQueueEntry":{"state":"QUEUED"}}}}\n'
     else
         if [[ -f "$state/entry-$step.txt" ]]; then cat "$state/entry-$step.txt";
@@ -1609,7 +1618,7 @@ for push_case in rejected lease-match lease-moved non-release-lease; do
     else bad "$push_case push continued or hid its remote head: $out"; fi
 done
 
-for head_case in stale missing malformed api-error retry-moved requeue-moved; do
+for head_case in stale missing malformed api-error mutation-moved retry-moved requeue-moved; do
     wt_head="$(new_pipeline_fixture "head-$head_case")"
     head_dir="$(pipeline_run_dir "$wt_head")"
     seed_gate_receipt "$head_dir" "$wt_head"
@@ -1620,6 +1629,7 @@ for head_case in stale missing malformed api-error retry-moved requeue-moved; do
         missing) printf '{}\n' >"$state/head.json" ;;
         malformed) printf 'not JSON\n' >"$state/head.json" ;;
         api-error) touch "$state/head-api-error" ;;
+        mutation-moved) touch "$state/mutation-head-moved" ;;
         retry-moved|requeue-moved)
             git -C "$wt_head" rev-parse HEAD | jq -R '{headRefOid:.}' >"$state/head-1.json"
             printf '{"headRefOid":"moved"}\n' >"$state/head.json"

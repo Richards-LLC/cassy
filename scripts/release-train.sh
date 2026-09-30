@@ -569,7 +569,9 @@ run_pipeline() {
             pipeline_finish PR_HEAD_MISMATCH
             return 2
         fi
-        out="$(gh_cmd api graphql -f query='mutation($id:ID!){enqueuePullRequest(input:{pullRequestId:$id}){mergeQueueEntry{position state}}}' -F id="$pr_id" 2>&1 || true)"
+        # Bind the mutation too: the head can move after the preceding read.
+        out="$(gh_cmd api graphql -f query='mutation($id:ID!,$head:GitObjectID!){enqueuePullRequest(input:{pullRequestId:$id,expectedHeadOid:$head}){mergeQueueEntry{position state}}}' \
+            -F id="$pr_id" -F head="$gate_sha" 2>&1 || true)"
         if printf '%s' "$out" | grep -q '"state"'; then
             pipeline_log "enqueued"
             return 0

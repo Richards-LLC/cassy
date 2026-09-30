@@ -5,12 +5,18 @@ must approve thresholds after inspecting measured results, and must require a
 rerun through the installed 3.39.0 registered shadow protocol before enabling any
 policy that relies on these reviewers.
 
-`corpus.json` pins 14 real defects (12 classes) and four corrected-delivery clean
+`corpus.json` pins 14 real defects (12 classes), five nominal negatives and four eligible clean
 negatives from the 3.37.0/3.38.0 cycles. Every case has authentic base, delivery
 and repair SHAs. The `task_context` is a read-only export of the original task's
 current stored description and exact criteria, rather than a claimed historical
 criteria snapshot. `criteria`, `defect` and `expected_fix` outside `task_context`
 are hidden curator annotations. They never enter reviewer prompts.
+
+The original c18 negative revealed an unseeded real CI-inventory defect (cas-045f).
+Its case and measured verdicts remain preserved with `negative_contaminated=true`;
+it is excluded from the clean-negative denominator. Supplementary c19 pins the
+real corrected permitted-check fixture at 9ee399dd7 and was added before its
+model runs. This is a recorded corpus revision, not a silently removed failure.
 
 Cases c04–c06 are separate affected self-reexec callers from one regression;
 report both instance recall and grouped recall. c08–c13 include real failing
@@ -75,8 +81,9 @@ runner stages exactly those files and creates the real own-axis commit. The
 reviewer receives the full SHA and reports it. The bridge rejects paths outside
 the checkout and Git/bridge metadata; it supplies no CAS identity or merge
 authority. Commit execution is simulated and recorded separately from measured
-reviewer reasoning, patches and cross-checks. Supervisor approval of this
-transport is required for the first measured fixer batch. A baseline-only stage
+reviewer reasoning, patches and cross-checks. Supervisor approval #1898214 authorized this transport for the measured fixer
+batch. Requests are restricted to each case's explicit scope files. The Python
+boundary suite is a precondition for each batch. A baseline-only stage
 uses `--axes baseline` and requires no commit bridge.
 
 ## Independent grading

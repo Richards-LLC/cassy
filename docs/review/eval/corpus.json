@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "task_snapshot_provenance": "Read-only CAS database export; current stored task text, not a historical criteria snapshot.",
   "reviewer_source_sha": "175f78c55d32c20a1b67b1b61901a30004175973",
   "transport_policy": "Isolated model replay measures behaviour; API authority/protocol is simulated. A real registered shadow rerun on installed 3.39.0 is required before operator approval of any merge policy.",
@@ -472,7 +472,34 @@
       "criteria": [
         "Directory-main integration suites stay wired.",
         "Isolated child-test reexecs assert actual execution after grouping."
-      ]
+      ],
+      "negative_contaminated": true,
+      "contamination_evidence": "Independent baseline found CI impact inventory drops the restored hooks suite; reproduced on current3186bb37e and filed cas-045f. Preserve case/result, exclude from clean-negative denominator. Supplementalc19 added before its model runs."
+    },
+    {
+      "id": "c19",
+      "kind": "clean",
+      "source_task": "cas-3efd",
+      "base_sha": "7c40187139edef5552195b2f53d29de150897a69",
+      "head_sha": "9ee399dd790b9799d7520dbeb7240ce7a4fa440a",
+      "expected_fix_sha": "9ee399dd790b9799d7520dbeb7240ce7a4fa440a",
+      "expected_axis": "standards",
+      "scope": [
+        "cas-cli/src/hooks/handlers/handlers_tests/unscoped_test_guard.rs"
+      ],
+      "defect": "No seeded defect: real corrected fixture scope after assembly failure.",
+      "expected_fix": "No fix expected.",
+      "criteria": [
+        "Allowed-check fixture binds its clone/cwd and permitted log paths, retaining bare-/tmp denials."
+      ],
+      "defect_group": "c19",
+      "task_context": {
+        "id": "cas-3efd",
+        "title": "Workers may type-check their change (cargo check on affected crates) before parking, under the builder cap",
+        "description": "Needs the operator's go: it reverses the 2026-09-25 decision that workers never run cargo. Allow factory workers `cargo check -p <affected crates> --tests` (compile only, no test runs), using their seeded hardlinked target cache, gated by the existing max_concurrent_builders cap and build guard. Relax the PreToolUse cargo guard for exactly that command shape. The close gate records \"check: PASS <sha>\" as worker evidence. Measure: compile errors found at assembly per epic should drop to 0 (2026-09-29 had 2).",
+        "acceptance_criteria": "A worker can run the allowed check and nothing else; the guard still denies test/build/nextest; concurrency stays capped; an epic of at least 4 lanes reaches assembly with zero compile errors."
+      },
+      "addition_provenance": "Supplemental clean case after independently discovering c18 contamination; c18 remains preserved."
     }
   ]
 }

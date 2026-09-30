@@ -85,7 +85,11 @@ def schema(axis, cross=False, public=None):
                     'decision': {'enum': ['accept', 'revert']}, 'reason': string}))})
     source = string
     if public and axis == 'spec':
-        source = {'enum': public['criteria']}
+        # The provider rejects escaped quotes in strict enum string literals.
+        # Preserve canonical text in the prompt and validate exact equality
+        # locally; never rewrite a criterion merely to fit the grammar.
+        if not any('"' in criterion or '\\' in criterion for criterion in public['criteria']):
+            source = {'enum': public['criteria']}
     elif public and axis == 'standards':
         allowed = [rule['id'] for rule in public['promoted_rules']]
         if public['coding_standards'] is not None:
@@ -145,13 +149,16 @@ def prompt(case, axis, sources, fix_transport='native'):
              'Never fix another axis\'s concern. Uncertain findings have no commits.\n')
     if fix_transport == 'bridge' and axis != 'baseline':
         extra += BRIDGE_INSTRUCTIONS
+        extra += '\nCommit bridge permits only the supplied scope files. Dependencies may be read, '
+        extra += 'but do not edit them. Report certain outside-scope concerns without fixes.\n'
     return body + '\n' + ADAPTER + extra + '\nContext:\n' + json.dumps(context(case, axis, sources), indent=2)
 
 
 class CommitBridge:
     """Only stages requested replay files; no shell, credentials or authority."""
-    def __init__(self, checkout, axis, directory):
+    def __init__(self, checkout, axis, directory, allowed_paths=None):
         self.checkout, self.axis, self.directory = checkout, axis, directory
+        self.allowed_paths = set(allowed_paths) if allowed_paths is not None else None
         self.root = checkout/'.review-bridge'
         (self.root/'requests').mkdir(parents=True)
         (self.root/'responses').mkdir()
@@ -171,6 +178,8 @@ class CommitBridge:
         for path in paths:
             if not isinstance(path, str) or not path:
                 raise ValueError('Expected relative file names')
+            if self.allowed_paths is not None and path not in self.allowed_paths:
+                raise ValueError('File is outside this replay axis scope')
             relative = Path(path)
             if relative.is_absolute() or any(part in ('.git', '.review-bridge', '..') for part in relative.parts):
                 raise ValueError('Forbidden bridge path')
@@ -316,7 +325,7 @@ def validate_report(report, case, axis, checkout):
     ids = [f['id'] for f in findings(report)]
     if len(ids) != len(set(ids)):
         raise ValueError('Finding identifiers must be unique')
-    if report['status'] == 'approved' and any(v['status'] != 'approved' for v in report['criteria']):
+    if axis == 'spec' and report['status'] == 'approved' and any(v['status'] != 'approved' for v in report['criteria']):
         raise ValueError('Approved report with unapproved criterion')
     commits = git('rev-list', '--reverse', f'{case["head_sha"]}..HEAD', cwd=checkout).splitlines()
     declared = [f['commit'] for f in findings(report) if f.get('commit')]
@@ -345,7 +354,7 @@ def review(case, axis, sources, out, timeout, fix_transport='native'):
     text = prompt(case, axis, sources, fix_transport)
     public = context(case, axis, sources)
     if fix_transport == 'bridge' and axis != 'baseline':
-        with CommitBridge(checkout, axis, directory):
+        with CommitBridge(checkout, axis, directory, case['scope']):
             report, telemetry = invoke(checkout, directory, text, axis, timeout, public=public)
     else:
         report, telemetry = invoke(checkout, directory, text, axis, timeout, public=public)
@@ -419,21 +428,22 @@ def score(corpus, out, labels):
         selected = [r for r in results if r['axis'] == axis]
         expected = [c for c in corpus['cases'] if c['kind'] == 'defect' and
                     (axis == 'baseline' or c['expected_axis'] == axis)]
-        detected, tp, fp, subjective = set(), 0, 0, 0
+        detected, tp, fp, subjective, ungraded = set(), 0, 0, 0, 0
         commits, bad, test_unknown = set(), set(), set()
         input_tokens, cached_tokens, output_tokens, elapsed, errors = 0, 0, 0, 0, 0
         cross_input, cross_output, cross_time = 0, 0, 0
         telemetry_missing = 0
         clean_flagged = set()
-        clean_ids = {c['id'] for c in corpus['cases'] if c['kind'] == 'clean'}
+        clean_ids = {c['id'] for c in corpus['cases'] if c['kind'] == 'clean' and not c.get('negative_contaminated')}
         for result in selected:
             if result.get('validation_error'):
                 errors += 1
             for finding in findings(result.get('report') or {}):
                 key = f'{result["case_id"]}/{axis}/{finding["id"]}'
                 label = labels.get('findings', {}).get(key)
-                if label is None:
+                if label is None or not isinstance(label.get('correct'), bool):
                     pending.append(key)
+                    ungraded += 1
                     continue
                 if finding.get('judgement'):
                     subjective += 1
@@ -489,6 +499,9 @@ def score(corpus, out, labels):
                      'grouped_recall': len(hit_groups)/len(groups) if groups else None,
                      'true_findings': tp, 'false_findings': fp,
                      'precision': tp/(tp+fp) if tp+fp else None,
+                     'ungraded_findings': ungraded,
+                     'precision_lower_bound': tp/(tp+fp+ungraded) if tp+fp+ungraded else None,
+                     'precision_upper_bound': (tp+ungraded)/(tp+fp+ungraded) if tp+fp+ungraded else None,
                      'judgement_findings': subjective, 'fix_commits': len(commits),
                      'clean_negatives_false_flagged': len(clean_flagged), 'clean_negatives_total': len(clean_ids),
                      'bad_commits': len(bad), 'bad_commit_rate_lower_bound': len(bad)/len(commits) if commits else None,
@@ -540,9 +553,11 @@ def main():
         parser.error('--rules is required')
     sources = snapshot(args.reviewer_sha, args.rules)
     pin = out/'sources.json'
-    if pin.exists() and json.loads(pin.read_text()) != sources:
-        raise ValueError('Source snapshot changed; use a new output directory')
-    write(pin, sources)
+    if pin.exists():
+        if json.loads(pin.read_text()) != sources:
+            raise ValueError('Source snapshot changed; use a new output directory')
+    else:
+        write(pin, sources)
     if args.registered_adapter:
         # The adapter runs real registered actors, never aliases this worker as a supervisor.
         for case in cases:

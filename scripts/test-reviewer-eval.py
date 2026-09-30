@@ -118,6 +118,14 @@ class ReplayBoundaries(unittest.TestCase):
                 bridge.commit({'finding_id': 'f1', 'files': [path], 'fix': 'invalid request'})
         self.assertEqual(self.git('rev-parse', 'HEAD', cwd=checkout), self.case['head_sha'])
 
+    def test_bridge_refuses_other_files_inside_the_same_checkout(self):
+        checkout = evaluation.clone(self.case, 'spec', self.out)
+        bridge = evaluation.CommitBridge(checkout, 'spec', self.out/'bridge-receipts', ['contract.txt'])
+        (checkout/'unrelated.txt').write_text('another axis or case owns this\n')
+        with self.assertRaisesRegex(ValueError, 'outside this replay axis scope'):
+            bridge.commit({'finding_id': 'f1', 'files': ['unrelated.txt'], 'fix': 'forbidden change'})
+        self.assertEqual(self.git('rev-parse', 'HEAD', cwd=checkout), self.case['head_sha'])
+
     def test_missing_runs_are_recall_misses_and_ungraded_findings_stay_pending(self):
         report = self.report()
         report['findings'] = [{'id': 'f1', 'source': 'criterion', 'evidence': 'contract.txt:1'}]
@@ -132,6 +140,18 @@ class ReplayBoundaries(unittest.TestCase):
         labels = {'findings': {'opaque/spec/f1': {'correct': True, 'seed_match': True}}}
         row = evaluation.score(corpus, self.out, labels)['rows'][0]
         self.assertEqual(row['recall'], 0.5)
+
+    def test_quoted_criteria_remain_exact_without_unsupported_strict_enum(self):
+        public = {'criteria': ['The message drops "parse error".']}
+        value = evaluation.schema('spec', public=public)
+        self.assertEqual(value['properties']['findings']['items']['properties']['source'], {'type': 'string'})
+
+    def test_legacy_verified_wording_does_not_get_spec_only_protocol_validation(self):
+        checkout = evaluation.clone(self.case, 'baseline', self.out)
+        report = self.report('baseline')
+        report['status'] = 'approved'
+        report['criteria'][0]['status'] = 'VERIFIED'
+        self.assertEqual(evaluation.validate_report(report, self.case, 'baseline', checkout), [])
 
     def test_cross_axis_reverts_and_test_breakage_share_one_bad_commit_denominator(self):
         evaluation.write(self.out/'opaque/spec/result.json', {'report': self.report(),

@@ -1,0 +1,91 @@
+{
+  "method": "Independent curator read of authentic source and corrective commits; unexpected findings are checked separately. None remains disputed/ungraded, never forced into true/false.",
+  "findings": {
+    "c01/baseline/changelog-input-omitted": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "e452e2418 scripts/assembly-proof.py:63 excludes CHANGELOG; history/changelog.rs:535-563 reads actual repository file and asserts >20 nonempty sections. A malformed/deleted-section changelog can change this test outcome without changing code_input. No Rust execution claimed."
+    },
+    "c01/baseline/receipt-expiry-adds-suite-runs": {
+      "correct": null,
+      "seed_match": false,
+      "evidence": "e452e2418 CONTRIBUTING.md:180-181 explicitly specifies 24h expiry, retained by corrective cc5c5350d; the literal exactly-twice criterion omits this qualification. Code consequence is real but whether it is a defect conflicts with the documented policy. Leave disputed, requiring operator adjudication."
+    },
+    "c01/baseline/macos-clone-location": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "e452e2418 assembly-proof.py:201 unconditional default /var/tmp; direct prove invocation with unset override reaches it. release-portable.sh:136-146 documents /var/tmp as disposable on macOS and chooses /Users/Shared. This is a real platform-context mismatch; no macOS run claimed."
+    },
+    "c02/baseline/F1": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "d460825c6 ci-test-impact.py:151,175-190 makes main.rs wide but builds --lib/--test args, never --bin; main.rs:409-424 contains binary unit test. A main-only change can omit that unit target. Static selection-path evidence, no Rust execution."
+    },
+    "c02/baseline/F2": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "d460825c6 ci.yml scoped steps fetch history at499-500; queue shard record at934 does not. ci-test-impact.py:135-145,166-173 includes history-only failures in selection, while record predicts from absent default file. Thus its missed-test accounting can differ from the actual scoped selection. Conditional flaw substantiated, no CI run claimed."
+    },
+    "c03/baseline/missing-hook-tests": {
+      "correct": true,
+      "seed_match": true,
+      "evidence": "4fb8854c Cargo.toml autotests=false plus ten explicit harnesses omit tests/hooks_test/main.rs. Corrective 0a93e428c wires this directory root and nested imports; independent cas-f40e count reconciliation confirms 34 dropped/restored tests. This is the c03 seed."
+    },
+    "c03/baseline/inventory-misses-directory-root": {
+      "correct": true,
+      "seed_match": true,
+      "evidence": "4fb8854c cas-test-targets.py:76 root *.rs inventory omits hooks_test/main.rs. Corrective 0a93e428c adds */main.rs coverage and contract harness wiring. Both inventory and dropped execution describe the same c03 seed, counted once in recall."
+    },
+    "c04/baseline/F1": {
+      "correct": true,
+      "seed_match": true,
+      "evidence": "4fb8854c factory_mcp_ops_test.rs:399 uses --exact with leaf names after integration/factory.rs or cli.rs adds a module prefix. Corrective 0a93e428c uses module_path! qualification and actual execution evidence. This is the named case seed."
+    },
+    "c04/baseline/F2": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "4fb8854c hub_clean_home_test.rs:722 uses --exact with leaf names after integration/factory.rs or cli.rs adds a module prefix. Corrective 0a93e428c uses module_path! qualification and actual execution evidence. Correct related instance, not this case's named seed."
+    },
+    "c04/baseline/F3": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "4fb8854c worktree_surface_test.rs:64-82 uses --exact with leaf names after integration/factory.rs or cli.rs adds a module prefix. Corrective 0a93e428c uses module_path! qualification and actual execution evidence. Correct related instance, not this case's named seed."
+    },
+    "c05/baseline/B1": {
+      "correct": true,
+      "seed_match": true,
+      "evidence": "4fb8854c hub_clean_home_test.rs:722 uses --exact with leaf names after integration/factory.rs or cli.rs adds a module prefix. Corrective 0a93e428c uses module_path! qualification and actual execution evidence. This is the named case seed."
+    },
+    "c05/baseline/B2": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "4fb8854c factory_mcp_ops_test.rs:399 uses --exact with leaf names after integration/factory.rs or cli.rs adds a module prefix. Corrective 0a93e428c uses module_path! qualification and actual execution evidence. Correct related instance, not this case's named seed."
+    },
+    "c05/baseline/B3": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "4fb8854c ci.yml:924 still selects binary(mcp_protocol_test), while Cargo registers integration_cli and integration/cli.rs nests mcp_protocol_test. The archived selector names a removed binary. Independent unchanged source path confirms stale wiring; no nextest execution claimed."
+    },
+    "c05/baseline/B4": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "4fb8854c worktree_surface_test.rs:64-82 uses --exact with leaf names after integration/factory.rs or cli.rs adds a module prefix. Corrective 0a93e428c uses module_path! qualification and actual execution evidence. Correct related instance, not this case's named seed."
+    },
+    "c06/baseline/factory-child-tests": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "4fb8854c factory_mcp_ops_test.rs:399 uses --exact with leaf names after integration/factory.rs or cli.rs adds a module prefix. Corrective 0a93e428c uses module_path! qualification and actual execution evidence. Correct related instance, not this case's named seed."
+    },
+    "c06/baseline/cli-atexit-helper": {
+      "correct": true,
+      "seed_match": false,
+      "evidence": "4fb8854c hub_clean_home_test.rs:722 uses --exact with leaf names after integration/factory.rs or cli.rs adds a module prefix. Corrective 0a93e428c uses module_path! qualification and actual execution evidence. Correct related instance, not this case's named seed."
+    },
+    "c06/baseline/authority-test-vacuous": {
+      "correct": true,
+      "seed_match": true,
+      "evidence": "4fb8854c worktree_surface_test.rs:64-82 uses --exact with leaf names after integration/factory.rs or cli.rs adds a module prefix. Corrective 0a93e428c uses module_path! qualification and actual execution evidence. This is the named case seed."
+    }
+  },
+  "commits": {}
+}

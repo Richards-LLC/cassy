@@ -33,5 +33,16 @@
     "The initial isolated replay measures model behavior but simulates API authority and protocol."
   ],
   "operator_approved": false,
-  "merge_policy_changed": false
+  "merge_policy_changed": false,
+  "bridge_transport_approval": {
+    "supervisor_message": 1898214,
+    "sandboxed": true,
+    "scope_file_whitelist": true,
+    "production_difference": "Production shadow uses side refs directly; simulated runner commits only reviewer-selected in-scope files."
+  },
+  "corpus_revision": {
+    "original_cases": 18,
+    "supplemental_case": "c19",
+    "reason": "c18 nominal negative revealed a real latent CI inventory defect; preserved as contaminated, excluded from clean denominator. Four eligible clean negatives remain."
+  }
 }

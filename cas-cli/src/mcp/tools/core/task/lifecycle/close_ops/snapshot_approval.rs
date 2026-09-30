@@ -110,7 +110,13 @@ pub(super) fn rejection(
             })
         });
         if !approved {
-            let changed = lines.first().copied().unwrap_or("<binary snapshot change>");
+            // Suggest an added line when there is one: it names the new state.
+            let changed = lines
+                .iter()
+                .find(|line| line.starts_with('+'))
+                .or(lines.first())
+                .copied()
+                .unwrap_or("<binary snapshot change>");
             let approval =
                 format!("snapshot-approved: {path} — {changed} — <why this change is correct>");
             missing.push(format!(

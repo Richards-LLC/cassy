@@ -3,7 +3,8 @@
 pub fn assert_started(stdout: &str, name: &str) {
     assert!(
         stdout.lines().any(|line| line == "running 1 test")
-            && stdout.contains(&format!("test {name} ...")),
+            && (stdout.contains(&format!("test {name} ..."))
+                || stdout.contains(&format!("test {name} - should panic ..."))),
         "child did not execute exactly {name}:\n{stdout}"
     );
 }

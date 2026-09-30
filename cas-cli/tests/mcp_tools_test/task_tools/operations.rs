@@ -1102,7 +1102,7 @@ async fn task_note_cap_rejects_without_mutating_the_task() {
     assert!(
         error
             .message
-            .contains("[factory] artifacts_root/cas-note-cap/<name>.md"),
+            .contains("[factory] artifacts_root/<project-key>/cas-note-cap/<name>.md"),
         "{error:?}"
     );
     assert_eq!(task_store.get(&task.id).expect("read unchanged task").notes, "");

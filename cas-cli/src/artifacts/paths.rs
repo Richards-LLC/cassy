@@ -312,8 +312,10 @@ mod tests {
     fn a_relative_traversal_out_of_the_task_directory_is_refused() {
         let f = fixture();
         write(&f.outside.join("escape.pdf"), "outside bytes");
+        // task_dir is <base>/artifacts/<project-key>/<task>; climb to <base>.
         let traversal = f
             .task_dir
+            .join("..")
             .join("..")
             .join("..")
             .join("outside")

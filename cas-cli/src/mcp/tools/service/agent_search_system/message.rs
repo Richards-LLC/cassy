@@ -4327,7 +4327,7 @@ mod cas_89e1_post_merge_message_type_tests {
         assert!(
             error
                 .message
-                .contains("[factory] artifacts_root/cas-449b/<name>.md"),
+                .contains("[factory] artifacts_root/<project-key>/cas-449b/<name>.md"),
             "{error:?}"
         );
 
@@ -4388,8 +4388,10 @@ mod cas_89e1_post_merge_message_type_tests {
             .await
             .expect("an over-cap supervisor message is delivered, not refused");
 
-        let spilled: Vec<_> = std::fs::read_dir(artifacts.join("cas-6ee6"))
-            .expect("spill directory under artifacts_root/<task>")
+        let spilled: Vec<_> = std::fs::read_dir(
+            crate::config::project_factory_artifacts_root(&cas_root, &artifacts).join("cas-6ee6"),
+        )
+        .expect("spill directory under artifacts_root/<project-key>/<task>")
             .map(|entry| entry.unwrap().path())
             .collect();
         assert_eq!(spilled.len(), 1, "{spilled:?}");

@@ -31,6 +31,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - The no-build release-gate rows run at every lane merge and in Scoped
   Validation, including a test-shape lint for tests that restate constants or
   read source as text, and a builtin hygiene check shared with the Rust tests.
+- A whole-workspace lint requires tests that change environment variables or
+  the working directory to hold the shared test guard. A ratcheted baseline
+  records existing cases, and it can only shrink.
 - A release is complete only after the published binary and a clean install
   prove it contains every change merged to main since the previous release.
   An explicit announcement embargo holds Slack posts without holding
@@ -48,6 +51,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - The TDD, codebase-design, writing-for-agents and diagnosing-bugs skills
   gain material from mattpocock/skills v1.3 (MIT), including design-it-twice
   and a human-in-the-loop repro template.
+- The factory daemon captures a terminal snapshot, drains pending output and
+  queues both in one owned step; its test checks the order of delivered frames
+  instead of reading source text.
 
 ### Fixed
 

@@ -523,6 +523,36 @@ pub fn get_worker_delivery_by_receipt(
     .map_err(Into::into)
 }
 
+/// Read delivery authority on the task writer's connection and transaction,
+/// so a receipt created before its task projection cannot race a sync write.
+/// Failure/rework and completed cycles no longer own the active lifecycle.
+/// No schema is created on this read path (old/non-factory stores are valid).
+pub(crate) fn delivery_owns_task_lifecycle(conn: &Connection, task_id: &str) -> Result<bool> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table'
+         AND name = 'worker_delivery_transactions')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Ok(false);
+    }
+    let state: Option<String> = conn
+        .query_row(
+            "SELECT t.state FROM worker_delivery_transactions t
+             JOIN worker_completion_receipts r ON r.id = t.receipt_id
+             WHERE t.task_id = ?1 ORDER BY r.created_at DESC, r.id DESC LIMIT 1",
+            params![task_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(state) = state else { return Ok(false) };
+    let state: WorkerDeliveryState = state.parse().map_err(|error| {
+        StoreError::Parse(format!("invalid delivery state during sync: {error}"))
+    })?;
+    Ok(state != WorkerDeliveryState::Delivered && !state.is_recoverable_failure())
+}
+
 pub fn get_latest_worker_delivery(
     root: &Path,
     task_id: &str,

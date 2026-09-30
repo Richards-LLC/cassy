@@ -1042,6 +1042,28 @@ impl Task {
         !self.is_terminal()
     }
 
+    /// Whether a replicated row preserves the lifecycle and delivery evidence.
+    /// Body/notes can use a configurable conflict strategy, but these fields
+    /// require an independently fresh lifecycle write (cas-86eb).
+    pub fn lifecycle_matches(&self, other: &Self) -> bool {
+        self.status == other.status
+            && self.closed_at == other.closed_at
+            && self.close_reason == other.close_reason
+            && self.assignee == other.assignee
+            && self.branch == other.branch
+            && self.worktree_id == other.worktree_id
+            && self.pending_verification == other.pending_verification
+            && self.pending_worktree_merge == other.pending_worktree_merge
+            && self.terminal_outcome == other.terminal_outcome
+            && match (
+                serde_json::to_value(&self.deliverables),
+                serde_json::to_value(&other.deliverables),
+            ) {
+                (Ok(local), Ok(remote)) => local == remote,
+                _ => false,
+            }
+    }
+
     /// Whether no further work is expected for this lifecycle record.
     pub fn is_terminal(&self) -> bool {
         matches!(self.status, TaskStatus::Closed | TaskStatus::Cancelled)

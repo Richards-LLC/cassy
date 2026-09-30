@@ -1293,6 +1293,32 @@ async fn pull_team_task_and_dependency_fixtures_with_pull_count(
     Arc<dyn TaskStore>,
     Arc<SyncQueue>,
 ) {
+    pull_team_fixtures_with_delivery(
+        project_id,
+        tasks,
+        local_tasks,
+        local_dependencies,
+        task_dependencies,
+        pull_count,
+        None,
+    )
+    .await
+}
+
+async fn pull_team_fixtures_with_delivery(
+    project_id: &str,
+    tasks: Vec<serde_json::Value>,
+    local_tasks: Vec<Task>,
+    local_dependencies: Vec<crate::types::Dependency>,
+    task_dependencies: Vec<serde_json::Value>,
+    pull_count: usize,
+    delivery_state: Option<cas_types::WorkerDeliveryState>,
+) -> (
+    tempfile::TempDir,
+    SyncResult,
+    Arc<dyn TaskStore>,
+    Arc<SyncQueue>,
+) {
     use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig};
     use crate::store::{
         open_rule_store_local, open_skill_store_local, open_store_local, open_task_store_local,
@@ -1337,6 +1363,25 @@ async fn pull_team_task_and_dependency_fixtures_with_pull_count(
             local_task.origin_project = Some(project_id.to_string());
         }
         task_store.add(&local_task).unwrap();
+    }
+    if let Some(state) = delivery_state {
+        let local = task_store.list(None).unwrap().into_iter().next().unwrap();
+        let input = cas_types::WorkerCompletionReceiptInput {
+            task_id: local.id,
+            worker_agent_id: "worker-replay".into(),
+            repo_selector: "remote:github.com/org/replay".into(),
+            source_branch: "factory/replay".into(),
+            commit_sha: "a".repeat(40),
+            merge_base_sha: "b".repeat(40),
+            target_branch: "epic/replay".into(),
+            target_sha: "c".repeat(40),
+            proof_reference: "proof:replay".into(),
+            scope_summary: "replay".into(),
+            artifact_path: None,
+        };
+        let receipt =
+            cas_store::build_worker_completion_receipt(&input, "replay", chrono::Utc::now());
+        cas_store::create_worker_delivery(temp.path(), &receipt, state, "worker-replay").unwrap();
     }
     for dependency in local_dependencies {
         task_store.add_dependency(&dependency).unwrap();
@@ -1648,13 +1693,15 @@ async fn team_pull_stale_active_row_preserves_local_park_cas_86eb() {
     local.updated_at = parked_at;
     local.deliverables.parked_branch = Some("factory/replay".into());
     local.notes = "[2026-09-30 01:04] Close rejected: MERGE REQUIRED".into();
-    let remote = team_task_fixture(
+    let mut remote = team_task_fixture(
         &local.id,
         TaskStatus::InProgress,
         project,
         project,
         parked_at - chrono::Duration::seconds(30),
     );
+    // The server's whole-row revision is not a lifecycle generation.
+    remote["revision"] = serde_json::json!(9999);
 
     let (_temp, result, store, queue) =
         pull_team_task_fixtures(project, vec![remote], Some(local)).await;
@@ -1662,11 +1709,161 @@ async fn team_pull_stale_active_row_preserves_local_park_cas_86eb() {
     assert!(result.errors.is_empty(), "{:?}", result.errors);
     let retained = store.get("cas-2c41-replay").unwrap();
     assert_eq!(retained.status, TaskStatus::AwaitingMerge);
-    assert_eq!(retained.deliverables.parked_branch.as_deref(), Some("factory/replay"));
-    assert_eq!(retained.updated_at, parked_at, "rejection must not advance local clock");
+    assert_eq!(
+        retained.deliverables.parked_branch.as_deref(),
+        Some("factory/replay")
+    );
+    assert_eq!(
+        retained.updated_at, parked_at,
+        "rejection must not advance local clock"
+    );
     assert!(result.task_status_transitions.is_empty());
     assert_eq!(result.pulled_tasks, 0);
     assert_eq!(queue.list_conflicts(10).unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn team_pull_tied_or_stale_lifecycle_fields_keep_local_evidence() {
+    for offset in [0, -1] {
+        let project = "park-evidence";
+        let mut local = Task::new("cas-86eb-evidence".into(), "parked".into());
+        local.status = TaskStatus::AwaitingMerge;
+        local.updated_at = chrono::Utc::now() - chrono::Duration::minutes(2);
+        local.pending_worktree_merge = true;
+        local.deliverables.factory_branch_anchor = Some("a".repeat(40));
+        local.deliverables.parked_branch = Some("factory/replay".into());
+        let mut remote = local.clone();
+        remote.updated_at += chrono::Duration::seconds(offset);
+        remote.pending_worktree_merge = false;
+        remote.deliverables = Default::default();
+        let mut raw = serde_json::to_value(remote).unwrap();
+        raw["project_id"] = serde_json::json!(project);
+        raw["origin_project"] = serde_json::json!(project);
+        let (_temp, result, store, queue) =
+            pull_team_task_fixtures(project, vec![raw], Some(local.clone())).await;
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let retained = store.get(&local.id).unwrap();
+        assert!(retained.lifecycle_matches(&local));
+        assert_eq!(retained.updated_at, local.updated_at);
+        assert_eq!(result.pulled_tasks, 0);
+        assert_eq!(
+            queue.list_conflicts(10).unwrap()[0].strategy,
+            "task_lifecycle_guard"
+        );
+    }
+}
+
+#[tokio::test]
+async fn team_pull_newer_remote_lifecycle_updates_still_apply() {
+    for (before, after) in [
+        (TaskStatus::Open, TaskStatus::InProgress),
+        (TaskStatus::InProgress, TaskStatus::Closed),
+        (TaskStatus::Blocked, TaskStatus::InProgress),
+        (TaskStatus::AwaitingMerge, TaskStatus::InProgress),
+    ] {
+        let project = "fresh-owner";
+        let mut local = Task::new("cas-86eb-fresh".into(), "fresh lifecycle".into());
+        local.status = before;
+        local.updated_at = chrono::Utc::now() - chrono::Duration::minutes(2);
+        let raw = team_task_fixture(
+            &local.id,
+            after,
+            project,
+            project,
+            local.updated_at + chrono::Duration::minutes(1),
+        );
+        let (_temp, result, store, _queue) =
+            pull_team_task_fixtures(project, vec![raw], Some(local.clone())).await;
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.pulled_tasks, 1);
+        assert_eq!(store.get(&local.id).unwrap().status, after);
+        assert_eq!(result.task_status_transitions.len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn team_pull_delivery_transaction_rejects_even_newer_lifecycle_row() {
+    let project = "delivery-owner";
+    let mut local = Task::new("cas-86eb-delivery".into(), "parked delivery".into());
+    local.status = TaskStatus::AwaitingMerge;
+    local.updated_at = chrono::Utc::now() - chrono::Duration::minutes(2);
+    local.pending_worktree_merge = true;
+    local.deliverables.parked_branch = Some("factory/replay".into());
+    let raw = team_task_fixture(
+        &local.id,
+        TaskStatus::InProgress,
+        project,
+        project,
+        local.updated_at + chrono::Duration::minutes(1),
+    );
+    let (_temp, result, store, queue) = pull_team_fixtures_with_delivery(
+        project,
+        vec![raw],
+        vec![local.clone()],
+        Vec::new(),
+        Vec::new(),
+        1,
+        Some(cas_types::WorkerDeliveryState::AwaitingMerge),
+    )
+    .await;
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    let retained = store.get(&local.id).unwrap();
+    assert!(retained.lifecycle_matches(&local));
+    assert_eq!(retained.updated_at, local.updated_at);
+    assert_eq!(result.pulled_tasks, 0);
+    assert!(result.task_status_transitions.is_empty());
+    let conflicts = queue.list_conflicts(10).unwrap();
+    assert!(conflicts.iter().any(|conflict| {
+        conflict.strategy == "task_lifecycle_guard"
+            && conflict.winner_side == "local"
+            && conflict
+                .discarded_row_json
+                .contains("local_mutation_or_delivery")
+    }));
+}
+
+#[tokio::test]
+async fn team_pull_authorized_reopen_requires_fresh_row_even_with_reopen_note() {
+    for fresh in [false, true] {
+        let project = "reopen-owner";
+        let mut local = Task::new("cas-86eb-reopen".into(), "delivered".into());
+        local.status = TaskStatus::Closed;
+        local.closed_at = Some(chrono::Utc::now() - chrono::Duration::hours(1));
+        local.updated_at = chrono::Utc::now() - chrono::Duration::minutes(2);
+        local.close_reason = Some("delivered cycle".into());
+        let mut remote = local.clone();
+        remote.status = TaskStatus::Open;
+        remote.closed_at = None;
+        remote.close_reason = None;
+        remote.updated_at += chrono::Duration::seconds(if fresh { 1 } else { -1 });
+        remote.notes = format!(
+            "[{}] Reopened: actor=supervisor reason=regression",
+            chrono::Utc::now().format("%Y-%m-%d %H:%M")
+        );
+        let mut raw = serde_json::to_value(remote).unwrap();
+        raw["project_id"] = serde_json::json!(project);
+        raw["origin_project"] = serde_json::json!(project);
+        let (_temp, result, store, _queue) = pull_team_fixtures_with_delivery(
+            project,
+            vec![raw],
+            vec![local.clone()],
+            Vec::new(),
+            Vec::new(),
+            1,
+            Some(cas_types::WorkerDeliveryState::Delivered),
+        )
+        .await;
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(
+            store.get(&local.id).unwrap().status,
+            if fresh {
+                TaskStatus::Open
+            } else {
+                TaskStatus::Closed
+            }
+        );
+        assert_eq!(result.pulled_tasks, usize::from(fresh));
+    }
 }
 
 #[tokio::test]

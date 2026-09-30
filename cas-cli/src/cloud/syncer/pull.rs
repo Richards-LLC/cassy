@@ -1599,21 +1599,17 @@ impl CloudSyncer {
                     self.record_terminal_regression_conflict(&local, &task)?;
                     return Ok(UpsertResult::Skipped);
                 }
+                if !local.lifecycle_matches(&task) && task.updated_at <= local.updated_at {
+                    self.record_task_lifecycle_conflict(&local, &task, "lifecycle_timestamp")?;
+                    return Ok(UpsertResult::Skipped);
+                }
                 let notes_differ = local.notes != task.notes;
-                self.journal_local_overwrite(
-                    EntityType::Task,
-                    &task.id,
-                    &local,
-                    "owner",
-                    "owner_wins",
-                )?;
                 let mut merged = task;
                 if notes_differ {
                     merged.notes = merge_task_notes(&local.notes, &merged.notes);
                 }
                 append_sync_status_provenance(&mut merged, &local, sync_id, source);
-                store.update(&merged)?;
-                Ok(UpsertResult::Updated)
+                self.apply_task_from_sync(store, &merged, &local, "owner", "owner_wins")
             }
             Err(cas_store::StoreError::TaskNotFound(_)) => {
                 store.add(&task)?;
@@ -1626,8 +1622,8 @@ impl CloudSyncer {
     /// Apply owner identity before the ordinary timestamp/strategy resolver.
     /// A local row carrying a different owner is a replica and cannot replace
     /// the owner row. Conversely, an owner row replaces a foreign replica even
-    /// when its timestamp is older. Terminal regressions still use the
-    /// existing explicit-reopen guard.
+    /// when its timestamp is older, provided the lifecycle is unchanged.
+    /// Lifecycle writes still require freshness and explicit terminal reopen.
     fn upsert_task_with_owner_preference(
         &self,
         store: &dyn TaskStore,
@@ -1674,6 +1670,54 @@ impl CloudSyncer {
             }
             None => self.upsert_task(store, task, sync_id, source),
         }
+    }
+
+    fn apply_task_from_sync(
+        &self,
+        store: &dyn TaskStore,
+        remote: &Task,
+        expected: &Task,
+        winner_side: &str,
+        strategy: &str,
+    ) -> Result<UpsertResult, CasError> {
+        if store.update_from_sync(remote, expected)?.is_some() {
+            self.journal_local_overwrite(
+                EntityType::Task,
+                &remote.id,
+                expected,
+                winner_side,
+                strategy,
+            )?;
+            return Ok(UpsertResult::Updated);
+        }
+        // Both an intervening local mutation and a delivery transaction win
+        // atomically in the store. Preserve the rejected row in the same
+        // conflict journal used by the terminal guard; do not bump task time.
+        let current = store.get(&remote.id)?;
+        self.record_task_lifecycle_conflict(&current, remote, "local_mutation_or_delivery")?;
+        Ok(UpsertResult::Skipped)
+    }
+
+    fn record_task_lifecycle_conflict(
+        &self,
+        local: &Task,
+        remote: &Task,
+        reason: &str,
+    ) -> Result<(), CasError> {
+        let discarded = serde_json::to_string(&serde_json::json!({
+            "local": local,
+            "rejected_remote": remote,
+            "reason": reason,
+        }))?;
+        self.queue.record_conflict(
+            EntityType::Task.as_str(),
+            &local.id,
+            &discarded,
+            "local",
+            "task_lifecycle_guard",
+            None,
+            None,
+        )
     }
 
     fn record_terminal_regression_conflict(
@@ -2437,6 +2481,10 @@ impl CloudSyncer {
                     self.record_terminal_regression_conflict(&local, &task)?;
                     return Ok(UpsertResult::Skipped);
                 }
+                if !local.lifecycle_matches(&task) && task.updated_at <= local.updated_at {
+                    self.record_task_lifecycle_conflict(&local, &task, "lifecycle_timestamp")?;
+                    return Ok(UpsertResult::Skipped);
+                }
                 if self.remote_supersedes_local(
                     EntityType::Task,
                     &task.id,
@@ -2444,9 +2492,14 @@ impl CloudSyncer {
                     task.updated_at,
                 ) {
                     let notes_differ = local.notes != task.notes;
-                    self.journal_local_overwrite(
-                        EntityType::Task,
-                        &task.id,
+                    let mut merged = task;
+                    if notes_differ {
+                        merged.notes = merge_task_notes(&local.notes, &merged.notes);
+                    }
+                    append_sync_status_provenance(&mut merged, &local, sync_id, source);
+                    self.apply_task_from_sync(
+                        store,
+                        &merged,
                         &local,
                         if notes_differ { "merged" } else { "remote" },
                         if notes_differ {
@@ -2454,14 +2507,7 @@ impl CloudSyncer {
                         } else {
                             "timestamp_lww"
                         },
-                    )?;
-                    let mut merged = task;
-                    if notes_differ {
-                        merged.notes = merge_task_notes(&local.notes, &merged.notes);
-                    }
-                    append_sync_status_provenance(&mut merged, &local, sync_id, source);
-                    store.update(&merged)?;
-                    Ok(UpsertResult::Updated)
+                    )
                 } else {
                     Ok(UpsertResult::Skipped)
                 }
@@ -2653,6 +2699,10 @@ impl CloudSyncer {
                     self.record_terminal_regression_conflict(&local, &task)?;
                     return Ok(UpsertResult::Skipped);
                 }
+                if !local.lifecycle_matches(&task) && task.updated_at <= local.updated_at {
+                    self.record_task_lifecycle_conflict(&local, &task, "lifecycle_timestamp")?;
+                    return Ok(UpsertResult::Skipped);
+                }
                 let action = self.resolve_conflict(
                     "task",
                     &task.id,
@@ -2664,9 +2714,14 @@ impl CloudSyncer {
                 match action {
                     ConflictAction::UseRemote => {
                         let notes_differ = local.notes != task.notes;
-                        self.journal_local_overwrite(
-                            EntityType::Task,
-                            &task.id,
+                        let mut merged = task;
+                        if notes_differ {
+                            merged.notes = merge_task_notes(&local.notes, &merged.notes);
+                        }
+                        append_sync_status_provenance(&mut merged, &local, sync_id, source);
+                        self.apply_task_from_sync(
+                            store,
+                            &merged,
                             &local,
                             if notes_differ { "merged" } else { "remote" },
                             if notes_differ {
@@ -2674,14 +2729,7 @@ impl CloudSyncer {
                             } else {
                                 strategy.as_str()
                             },
-                        )?;
-                        let mut merged = task;
-                        if notes_differ {
-                            merged.notes = merge_task_notes(&local.notes, &merged.notes);
-                        }
-                        append_sync_status_provenance(&mut merged, &local, sync_id, source);
-                        store.update(&merged)?;
-                        Ok(UpsertResult::Updated)
+                        )
                     }
                     ConflictAction::UseLocal | ConflictAction::Skip => Ok(UpsertResult::Skipped),
                 }
@@ -3873,7 +3921,7 @@ mod tests {
 #[cfg(test)]
 mod web_close_tests {
     use super::{CloudSyncer, is_web_close_tombstone, merge_task_notes, reconcile_web_close};
-    use crate::cloud::syncer::{CloudSyncerConfig, UpsertResult};
+    use crate::cloud::syncer::{CloudSyncerConfig, ConflictResolution, UpsertResult};
     use crate::cloud::{CloudConfig, EntityType, SyncOperation, SyncQueue};
     use crate::store::{init_cas_dir, open_task_store};
     use crate::types::{Task, TaskStatus};
@@ -4225,5 +4273,74 @@ mod web_close_tests {
             TaskStatus::Closed,
             "sync must not accept a terminal exit lacking actor and reason"
         );
+    }
+
+    #[test]
+    fn all_task_upsert_routes_guard_stale_lifecycle_but_keep_body_strategy() {
+        for route in 0..3 {
+            let temp = TempDir::new().unwrap();
+            let cas_dir = init_cas_dir(temp.path()).unwrap();
+            let store = open_task_store(&cas_dir).unwrap();
+            let queue = Arc::new(SyncQueue::open(&cas_dir).unwrap());
+            queue.init().unwrap();
+            let syncer = CloudSyncer::new(
+                queue.clone(),
+                CloudConfig::default(),
+                CloudSyncerConfig::default(),
+            );
+            let mut local = Task::new("cas-86eb-paths".into(), "parked".into());
+            local.status = TaskStatus::AwaitingMerge;
+            local.deliverables.factory_branch_anchor = Some("a".repeat(40));
+            local.deliverables.parked_branch = Some("factory/replay".into());
+            store.add(&local).unwrap();
+            let mut remote = local.clone();
+            remote.status = TaskStatus::InProgress;
+            remote.updated_at -= chrono::Duration::seconds(1);
+            let outcome = match route {
+                0 => syncer.upsert_owner_task(&*store, remote, "stale-owner", "team_pull"),
+                1 => syncer.upsert_task(&*store, remote, "stale-personal", "personal_pull"),
+                _ => syncer.upsert_task_with_strategy(
+                    &*store,
+                    remote,
+                    ConflictResolution::RemoteWins,
+                    "stale-team",
+                    "team_pull",
+                ),
+            }
+            .unwrap();
+            assert!(matches!(outcome, UpsertResult::Skipped));
+            let retained = store.get(&local.id).unwrap();
+            assert!(retained.lifecycle_matches(&local));
+            assert_eq!(retained.updated_at, local.updated_at);
+            let conflicts = queue.list_conflicts(10).unwrap();
+            assert_eq!(conflicts.len(), 1);
+            assert_eq!(conflicts[0].strategy, "task_lifecycle_guard");
+            // Body resolution is still configurable; stale RemoteWins/owner
+            // bodies can apply when they preserve the lifecycle exactly.
+            let mut remote = local.clone();
+            remote.title = "owner body update".into();
+            remote.updated_at -= chrono::Duration::seconds(1);
+            let outcome = match route {
+                0 => syncer.upsert_owner_task(&*store, remote, "body-owner", "team_pull"),
+                1 => syncer.upsert_task(&*store, remote, "body-personal", "personal_pull"),
+                _ => syncer.upsert_task_with_strategy(
+                    &*store,
+                    remote,
+                    ConflictResolution::RemoteWins,
+                    "body-team",
+                    "team_pull",
+                ),
+            }
+            .unwrap();
+            assert_eq!(matches!(outcome, UpsertResult::Updated), route != 1);
+            assert_eq!(
+                store.get(&local.id).unwrap().title,
+                if route == 1 {
+                    "parked"
+                } else {
+                    "owner body update"
+                }
+            );
+        }
     }
 }

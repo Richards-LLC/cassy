@@ -669,6 +669,19 @@ pub trait TaskStore: Send + Sync {
     /// general write path.
     fn update(&self, task: &Task) -> Result<DateTime<Utc>>;
 
+    /// Apply a replicated row only if the expected local clock still matches.
+    /// Lifecycle changes are also refused while a local delivery transaction
+    /// owns the task. `None` means no mutation (no events, receipts or clock
+    /// bump). Successful writes use the ordinary store-owned clock.
+    ///
+    /// This sync-only path does not stage an outbound sync intent. Stores that
+    /// cannot perform the checks and write atomically must fail closed.
+    fn update_from_sync(&self, _task: &Task, _expected: &Task) -> Result<Option<DateTime<Utc>>> {
+        Err(StoreError::Other(
+            "atomic sync task updates are unsupported by this store".to_string(),
+        ))
+    }
+
     /// Update a task and bind a generic durable mutation receipt in the same
     /// store transaction.
     fn update_with_mutation_receipt(

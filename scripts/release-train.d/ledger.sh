@@ -132,6 +132,9 @@ cut_run_stage() {
             ;;
     esac
     [[ "$status" == 0 ]] || return "$status"
+    if [[ "$stage" == assemble ]]; then
+        python3 "$script_dir/release-integrate.py" "$worktree" --record-input || return 1
+    fi
     cut_mark_stage_done "$stage"
     printf 'stage %s: done sha=%s receipt=%s\n' \
         "$stage" "$(tr -d '[:space:]' <"$receipt")" "$receipt"
@@ -177,6 +180,9 @@ cut_run() {
                 cut_preflight_block clean-worktree "changes do not match this run's post-publication outputs"
                 return 1
             fi
+        elif ! python3 "$script_dir/release-integrate.py" "$worktree" --resume-check; then
+            cut_stage_failure integration-refresh "cannot refresh assembly input; inspect the named blocker"
+            return 1
         fi
     fi
     for stage in preflight assemble prep ledger gate pr-body pipeline publish \

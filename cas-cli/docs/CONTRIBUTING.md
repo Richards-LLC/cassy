@@ -206,6 +206,15 @@ records the tested Git tree, each context's tree and pass count, toolchain,
 environment and archive size. Full Cassy integration sweeps and the train's
 assembly stage use this same command; retries cite the existing receipt.
 
+Before the pipeline lands, `--cut --resume` compares the integration tip/base
+with the input recorded by assemble. A changed integration input archives the
+old stage receipts and reruns assemble, prep, ledger and every later stage.
+Release prose, member-version bumps and the generated ledger are replayed onto
+the new tested tip; source edits block automatic replay. A rebase conflict
+restores the checkout and prints a named blocker with a recovery command.
+After a valid pipeline/publish receipt exists, resume finishes that landed
+release without adopting a newer integration tip.
+
 The first full release gate automatically reuses its nextest and archive-mode
 rows from a matching receipt. `--only` remains a fresh diagnostic. Receipts
 expire after 24 hours; dirty checkouts, changed code/manifests/scripts/workflows,

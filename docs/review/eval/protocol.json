@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "purpose": "Proposed accuracy thresholds, recorded before the full measured batch is graded. The operator alone approves them; this file changes no merge policy.",
+  "reviewer_snapshot": "175f78c55d32c20a1b67b1b61901a30004175973",
+  "model_control": "Same configured Codex model and reasoning effort for all three independent passes; record actual configuration and emitted model IDs.",
+  "proposed_thresholds": {
+    "assigned_axis_recall_minimum": 0.9,
+    "combined_recall_minimum": 0.9,
+    "adjudicated_precision_minimum": 0.95,
+    "clean_negative_false_findings_maximum": 0,
+    "bad_commit_rate_maximum": 0,
+    "process_errors_maximum": 0,
+    "ungraded_findings_maximum": 0,
+    "fixes_without_cross_check_or_targeted_test_proof_maximum": 0
+  },
+  "conditions": [
+    "Report instance and independent-class recall; both must satisfy the proposed minimum.",
+    "Combined reviewers must meet or exceed the legacy baseline's recall and precision on identical replay inputs.",
+    "Precision includes independently adjudicated unexpected findings and flags all judgement findings separately.",
+    "A missing or invalid run remains a recall miss; no survivor-only accuracy score.",
+    "Bad commits are unique actual fixes rejected by the other axis or failing targeted tests; all actual fixes form the denominator.",
+    "Untested fixes make the observed bad-commit rate a lower bound, never policy-ready evidence.",
+    "Before enabling policy, rerun through the real registered installed 3.39 shadow protocol and retain actual dispatch/round/verification/cross-check receipts.",
+    "The supervisor supplies runtime assembly proof and targeted-test receipts; the worker never runs Rust builds/tests.",
+    "Thresholds require explicit operator approval and cannot be relaxed merely because this batch fails."
+  ],
+  "limitations": [
+    "Fourteen instances represent twelve independent defect classes, not a large random sample of future work.",
+    "The four negatives are corrected real slices; extra findings require independent adjudication, not automatic false labeling.",
+    "Current stored task descriptions/criteria may omit historical operator clarifications; report source-coverage gaps separately from reviewer misses.",
+    "The Standards snapshot does not explicitly prescribe every security or organization-hygiene seed; report that source-coverage limit without inventing rules.",
+    "Historical fixture failures are real test defects, not claims that the same behaviors failed in production.",
+    "The initial isolated replay measures model behavior but simulates API authority and protocol."
+  ],
+  "operator_approved": false,
+  "merge_policy_changed": false,
+  "bridge_transport_approval": {
+    "supervisor_message": 1898214,
+    "sandboxed": true,
+    "scope_file_whitelist": true,
+    "production_difference": "Production shadow uses side refs directly; simulated runner commits only reviewer-selected in-scope files."
+  },
+  "corpus_revision": {
+    "original_cases": 18,
+    "supplemental_cases": [
+      "c19",
+      "c20"
+    ],
+    "contaminated_negatives": [
+      "c18",
+      "c19"
+    ],
+    "eligible_clean_negatives": [
+      "c15",
+      "c16",
+      "c17",
+      "c20"
+    ],
+    "reason": "Two genuine latent defects found in nominal negatives are preserved; c20 authentic corrected factory-only slice restores four eligible clean negatives. Same-fix correlation and post-discovery selection bias are disclosed."
+  }
+}

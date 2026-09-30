@@ -1181,8 +1181,86 @@ impl GitOperations {
         source_branch: &str,
         no_ff: bool,
     ) -> Result<Option<String>> {
+        // Rust admission must inspect the actual committed candidate, including
+        // merge drivers/hooks, before a shared epic ref can move. Reuse the
+        // detached venue and its CAS/checkout refresh rather than checking
+        // after an in-place git merge has already advanced the ref.
+        if self.lane_compile_policy(target_branch, source_branch)?
+            && self.lane_changes_rust(target_branch, source_branch)?
+        {
+            self.ensure_merge_target_checked_out(&self.repo_root, target_branch)?;
+            return self.merge_branch_via_temp_worktree(target_branch, source_branch, no_ff);
+        }
         let repo_root = self.repo_root.clone();
         self.merge_branch_in_dir(&repo_root, Some(target_branch), source_branch, no_ff)
+    }
+
+    fn lane_compile_policy(&self, target: &str, source: &str) -> Result<bool> {
+        for reference in [target, source] {
+            let output = Command::new("git")
+                .args([
+                    "ls-tree",
+                    "--name-only",
+                    reference,
+                    "--",
+                    "scripts/check-lane-fast-rows.py",
+                ])
+                .current_dir(&self.repo_root)
+                .output()?;
+            if !output.status.success() {
+                return Err(GitError::CommandFailed(
+                    String::from_utf8_lossy(&output.stderr).into_owned(),
+                ));
+            }
+            if !output.stdout.is_empty() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn lane_changes_rust(&self, target: &str, source: &str) -> Result<bool> {
+        let output = Command::new("git")
+            .args([
+                "diff",
+                "--name-only",
+                "-z",
+                &format!("{target}...{source}"),
+                "--",
+            ])
+            .current_dir(&self.repo_root)
+            .output()?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ));
+        }
+        Ok(output
+            .stdout
+            .split(|byte| *byte == 0)
+            .any(|path| path.ends_with(b".rs")))
+    }
+
+    fn require_lane_compile(&self, candidate: &Path, base: &str, tip: &str) -> Result<()> {
+        if !self.lane_compile_policy(base, tip)? || !self.lane_changes_rust(base, tip)? {
+            return Ok(());
+        }
+        let verifier = candidate.join("scripts/check-lane-compile.py");
+        let output = Command::new("python3")
+            .arg(verifier)
+            .arg(&self.repo_root)
+            .arg(base)
+            .arg(tip)
+            .current_dir(candidate)
+            .output()?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(format!(
+                "LANE COMPILE FAILED (target unchanged):\n{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            )));
+        }
+        Ok(())
     }
 
     /// Refuse an in-place merge unless `dir`'s symbolic HEAD is exactly the
@@ -1374,6 +1452,11 @@ impl GitOperations {
             // compare-and-swap.
             _ => return Ok(Some(old_tip)),
         };
+
+        // Both worktree_merge and merge_workers_to_epic reach this boundary.
+        // The detached commit is complete; failure leaves the target ref and
+        // every linked target checkout at old_tip.
+        self.require_lane_compile(guard.path(), &old_tip, &new_tip)?;
 
         if self
             .compare_and_swap_ref(target_branch, &new_tip, &old_tip)

@@ -587,8 +587,11 @@ pub(crate) fn default_child_work_target_from_epic(
 /// Extends [`default_child_work_target_from_epic`] to a move between epics: a
 /// target that is still exactly a previous parent epic's base or lane was
 /// inherited, not chosen, so it follows the task to the new epic. Any other
-/// distinct target is an explicit pin and stays authoritative.
+/// distinct target is an explicit pin and stays authoritative. A standalone
+/// creation default also follows an epic whose own target is already its
+/// lane, provided both bindings resolve to the same Git repository.
 pub(crate) fn work_target_for_task_moved_into_epic(
+    cas_root: &Path,
     task: &cas_types::Task,
     epic: &cas_types::Task,
     previous_parents: &[cas_types::Task],
@@ -598,6 +601,22 @@ pub(crate) fn work_target_for_task_moved_into_epic(
     }
     let task_target = task.deliverables.work_target.as_ref()?;
     let inherited = inherited_work_target_from_epic(epic)?;
+    // cas-e258: the epic may already target its own lane rather than trunk.
+    // Compare against the repository's standalone creation policy as well,
+    // otherwise a loose task on main never follows such an epic. Resolve both
+    // bindings so equivalent project/remote selectors work without moving a
+    // task across repositories. An unresolved or distinct explicit pin stays.
+    if let Ok(task_repo) = resolve_repo_context(cas_root, task_target)
+        && let Ok(epic_repo) = resolve_repo_context(cas_root, &inherited)
+        && task_repo.git_common_dir == epic_repo.git_common_dir
+    {
+        let standalone_branch =
+            crate::config::Config::configured_epic_base_branch(&task_repo.repo_root)
+                .or_else(|| resolve_default_branch(&task_repo.repo_root).ok());
+        if standalone_branch.as_deref() == Some(task_target.target_branch.as_str()) {
+            return Some(inherited);
+        }
+    }
     let inherited_from_previous_parent = previous_parents.iter().any(|parent| {
         parent.id != epic.id
             && parent.task_type == cas_types::TaskType::Epic

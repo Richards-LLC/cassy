@@ -195,7 +195,10 @@ the merge action after fetching the PR landing so Cassy can reconcile delivery.
   - **No Cassy-internal agent actions.** Do not narrate supervisor/worker/factory/director orchestration, task lifecycle bookkeeping, who-closed-what, epics, etc.
   - **No ticket numbers.** No `cas-xxxx`, no epic IDs. Describe the change, not the tracking artifact.
   - Lead with the before→after punch; keep it tight.
-  - The Dev announcement's final trailer line carries `INTERVENTIONS=N`, `GREEN_TO_PIPELINE_SECS=N`, `MERGED_TO_PUBLISHER_SECS=N`, and the verified green-to-published latency; include `BLOCKERS=<stage,...>` when the receipt names blocker stages.
+  - The release train adds the Dev reply's measured `Publication timing` bullet
+    from `release-latency.receipt` after publication. Use that receipt's measured
+    seconds and budget result; omit the obsolete intervention and green-to-pipeline
+    trailer, whose values the train does not collect.
 
 ### User thread first: plain language
 
@@ -229,6 +232,11 @@ Slack mrkdwn only:
 - The glance test passes when every item's bold label is findable within five
   seconds. Put every body exactly as posted inside fenced blocks in the draft;
   the fenced text is the reviewed text.
+- Resolve every `{{...}}` token in those four bodies. Announcement lint rejects
+  remaining tokens, naming the body and token, at preflight and before posting.
+  To correct a Violet-authored message in place, use `violet_post` with
+  `kind: "edit"`, its `violet_read` `message_id`, and the complete corrected
+  `text`. `kind: "message"` creates a new message and does not accept `message_id`.
 
 ## Harness-diary updates: one parent + three replies
 

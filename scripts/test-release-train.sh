@@ -486,6 +486,30 @@ else
     bad "supervisor proof receipt was not accepted without CI lookup: $proof_out"
 fi
 
+compile_wt="$(new_worktree lane-compile-admission)"
+mkdir -p "$compile_wt/src"
+printf '[package]\nname="lane_fixture"\nversion="0.1.0"\n' >"$compile_wt/Cargo.toml"
+printf 'pub fn original() {}\n' >"$compile_wt/src/lib.rs"
+git -C "$compile_wt" add .
+git -C "$compile_wt" -c commit.gpgsign=false commit -qm 'compile fixture base'
+git -C "$compile_wt" checkout -qb factory/compile-lane
+printf 'pub fn changed() {}\n' >"$compile_wt/src/lib.rs"
+git -C "$compile_wt" add .
+git -C "$compile_wt" -c commit.gpgsign=false commit -qm 'compile fixture lane'
+git -C "$compile_wt" checkout -q main
+compile_out="$(LANE_GH_CALLS="$lane_calls" LANE_GH_RUNS="$lane_runs" LANE_GH_JOBS="$lane_jobs" \
+    CAS_RELEASE_TRAIN_GH="$tmp/lane-gh.sh" "$train" 9.99.4 "$compile_wt" --check-lane factory/compile-lane 2>&1 || true)"
+if [[ "$compile_out" == *'LANE COMPILE REQUIRED'* && "$compile_out" == *'cargo check -p lane_fixture --tests'* ]]; then
+    ok '--check-lane requires combined-tree compile proof before CI admission'
+else
+    bad "--check-lane omitted compile admission: $compile_out"
+fi
+if python3 "$script_dir/test-lane-compile.py"; then
+    ok 'combined-tree compile receipt regressions'
+else
+    bad 'combined-tree compile receipt regressions'
+fi
+
 printf '[]\n' >"$lane_runs"
 printf '{"jobs":[]}\n' >"$lane_jobs"
 out="$(run_lane_check || true)"
@@ -1031,6 +1055,46 @@ else
     fi
 fi
 
+# Residual template tokens must stop both entry points before adapter writes.
+cp "$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md" \
+    "$preflight_lint_wt/docs/release-notes/$stage_date-v9.99.9-slack.md"
+python3 - "$preflight_lint_wt/docs/release-notes/$stage_date-v9.99.9-slack.md" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+source = path.read_text()
+path.write_text(source.replace('• *Release handoff*', '• *Release handoff* {{INTERVENTIONS}}', 1))
+PY
+if (
+    source "$repo_root/scripts/release-train.d/preflight.sh"
+    version=9.99.9
+    worktree="$preflight_lint_wt"
+    run_dir="$preflight_lint_run"
+    CAS_RELEASE_TRAIN_DATE="$stage_date"
+    cut_stage_file() { printf '%s/stage.%s.done\n' "$run_dir" "$1"; }
+    cut_preflight_check_draft
+) >"$tmp/preflight-token.out" 2>"$tmp/preflight-token.err"; then
+    bad 'preflight accepted a residual template token'
+elif grep -q '{{INTERVENTIONS}}' "$tmp/preflight-token.err"; then
+    ok 'preflight rejects and names a residual template token'
+else
+    bad "preflight did not name the token: $(cat "$tmp/preflight-token.err")"
+fi
+token_out="$(CAS_RELEASE_TRAIN_DATE="$stage_date" \
+    CAS_RELEASE_TRAIN_ANNOUNCE_POST_CMD="$bad_announce_stub" \
+    CAS_RELEASE_TRAIN_ANNOUNCE_STUB_LOG="$bad_announce_log" \
+    "$train" 9.99.9 "$preflight_lint_wt" --announce 2>&1 || true)"
+if [[ "$token_out" == *'{{INTERVENTIONS}}'* ]] && [[ ! -e "$bad_announce_log" ]]; then
+    ok 'announce rejects a residual token before any adapter write'
+else
+    bad "announce accepted or posted a residual token: $token_out"
+fi
+if python3 "$script_dir/test-release-train-announce.py"; then
+    ok 'announce body fixtures and last check before Violet writes'
+else
+    bad 'announce body fixtures and last check before Violet writes'
+fi
+
 # Gap 2: preflight must print the exact user-facing line that violates the
 # announcement wording rule, not only point at a saved lint log.
 wording_draft="$tmp/wording-draft.md"
@@ -1422,11 +1486,29 @@ case "$1 $2" in
     else cat "$state/checks-default.json" 2>/dev/null || printf '[]\n'; fi
     ;;
 "pr view")
+    if [[ "$*" == *'--json headRefOid'* ]]; then
+        [[ ! -f "$state/head-api-error" ]] || exit 1
+        head_step="$(cat "$state/head-step.txt" 2>/dev/null || echo 1)"
+        printf '%s\n' "$((head_step + 1))" >"$state/head-step.txt"
+        if [[ -f "$state/head-$head_step.json" ]]; then cat "$state/head-$head_step.json";
+        elif [[ -f "$state/head.json" ]]; then cat "$state/head.json";
+        else printf '{"headRefOid":"%s"}\n' "$GH_STUB_HEAD"; fi
+        exit 0
+    fi
     if [[ -f "$state/prview-$step.json" ]]; then cat "$state/prview-$step.json";
     else cat "$state/prview-default.json" 2>/dev/null || printf '{}\n'; fi
     ;;
 "api graphql")
     if printf '%s' "$*" | grep -q enqueuePullRequest; then
+        if [[ -f "$state/mutation-head-moved" ]]; then
+            printf '{"headRefOid":"moved"}\n' >"$state/head.json"
+            # GitHub evaluates expectedHeadOid when executing the mutation.
+            # A check made before this request cannot close that race alone.
+            if [[ "$*" == *'expectedHeadOid:$head'* && "$*" == *"head=$GH_STUB_HEAD"* ]]; then
+                printf '{"errors":[{"message":"Head changed"}]}\n'
+                exit 1
+            fi
+        fi
         cat "$state/enqueue.json" 2>/dev/null || printf '{"data":{"enqueuePullRequest":{"mergeQueueEntry":{"state":"QUEUED"}}}}\n'
     else
         if [[ -f "$state/entry-$step.txt" ]]; then cat "$state/entry-$step.txt";
@@ -1480,6 +1562,7 @@ seed_gate_receipt() {
 run_pipeline() {
     local worktree="$1" state="$2"
     GH_STUB_STATE="$state" \
+    GH_STUB_HEAD="$(git -C "$worktree" rev-parse HEAD)" \
     CAS_RELEASE_TRAIN_GH="$tmp/gh-stub.sh" \
     CAS_RELEASE_TRAIN_POLL_SECS=0 \
     CAS_RELEASE_TRAIN_CHECK_TRIES=4 \
@@ -1490,6 +1573,109 @@ run_pipeline() {
 }
 
 new_gh_stub "$tmp/gh-stub.sh" "$tmp/gh-state-unused"
+
+# cas-5071: real divergent remotes must never enqueue stale PR contents.
+seed_ready_pr() {
+    local state="$1"
+    mkdir -p "$state"
+    printf '[{"number":4242}]\n' >"$state/pr-list.json"
+    printf '[{"name":"Fast Validation","bucket":"pass"},{"name":"macOS Check","bucket":"pass"}]\n' >"$state/checks-default.json"
+    printf '{"state":"MERGED","id":"PR_id","mergeable":"MERGEABLE","statusCheckRollup":[{"name":"Fast Validation"},{"name":"macOS Check"}]}\n' >"$state/prview-default.json"
+}
+
+for push_case in rejected lease-match lease-moved non-release-lease; do
+    wt_push="$(new_pipeline_fixture "push-$push_case")"
+    push_dir="$(pipeline_run_dir "$wt_push")"
+    branch="release/9.99.9"
+    [[ "$push_case" != non-release-lease ]] || branch=epic/non-release
+    git -C "$wt_push" checkout -qb "$branch"
+    base_sha="$(git -C "$wt_push" rev-parse HEAD)"
+    printf 'previous\n' >"$wt_push/old.txt"
+    git -C "$wt_push" add old.txt
+    git -C "$wt_push" -c commit.gpgsign=false commit -qm previous
+    old_sha="$(git -C "$wt_push" rev-parse HEAD)"
+    # Obtain the lease from a real successful train push followed by red CI.
+    # Reassembly must retain that receipt across the unsuccessful pipeline.
+    if [[ "$push_case" == rejected ]]; then
+        git -C "$wt_push" push -q origin "HEAD:refs/heads/$branch"
+    else
+        seed_gate_receipt "$push_dir" "$wt_push"
+        state="$tmp/state-first-push-$push_case"
+        seed_ready_pr "$state"
+        printf '[]\n' >"$state/checks-default.json"
+        run_pipeline "$wt_push" "$state" >/dev/null || true
+        if [[ "$(cat "$push_dir/pipeline.done")" != CHECKS_FAILED \
+            || "$(cat "$push_dir/pipeline.pushed.ref" 2>/dev/null)" != "$branch $old_sha" ]]; then
+            bad "$push_case did not record the successful initial train push"
+        fi
+    fi
+    remote_sha="$old_sha"
+    if [[ "$push_case" == lease-moved ]]; then
+        printf 'concurrent\n' >"$wt_push/concurrent.txt"
+        git -C "$wt_push" add concurrent.txt
+        git -C "$wt_push" -c commit.gpgsign=false commit -qm concurrent
+        remote_sha="$(git -C "$wt_push" rev-parse HEAD)"
+        git -C "$wt_push" push -q origin "HEAD:refs/heads/$branch"
+    fi
+    git -C "$wt_push" reset -q --hard "$base_sha"
+    printf 'reassembled\n' >"$wt_push/new.txt"
+    git -C "$wt_push" add new.txt
+    git -C "$wt_push" -c commit.gpgsign=false commit -qm reassembled
+    local_sha="$(git -C "$wt_push" rev-parse HEAD)"
+    seed_gate_receipt "$push_dir" "$wt_push"
+    state="$tmp/state-push-$push_case"
+    seed_ready_pr "$state"
+    push_rc=0
+    out="$(run_pipeline "$wt_push" "$state")" || push_rc=$?
+    actual_remote="$(git -C "$wt_push" ls-remote origin "refs/heads/$branch" | cut -f1)"
+    if [[ "$push_case" == lease-match ]]; then
+        if [[ "$push_rc" == 0 && "$actual_remote" == "$local_sha" ]] \
+            && grep -q enqueuePullRequest "$state/calls.log" \
+            && [[ "$(cat "$push_dir/pipeline.pushed.ref")" == "$branch $local_sha" ]] \
+            && [[ "$out" == *"lease=$old_sha"* ]]; then
+            ok 'matching recorded release lease replaces a reassembled branch and records its new head'
+        else bad "matching lease failed: $out"; fi
+    elif [[ "$push_rc" != 0 && "$(cat "$push_dir/pipeline.done")" == PUSH_REJECTED \
+        && "$actual_remote" == "$remote_sha" && "$out" == *"local=$local_sha"* \
+        && "$out" == *"remote=$remote_sha"* && ! -s "$state/calls.log" ]]; then
+        ok "$push_case push fails closed before any PR operation with both SHAs"
+    else bad "$push_case push continued or hid its remote head: $out"; fi
+done
+
+for head_case in stale missing malformed api-error mutation-moved retry-moved requeue-moved; do
+    wt_head="$(new_pipeline_fixture "head-$head_case")"
+    head_dir="$(pipeline_run_dir "$wt_head")"
+    seed_gate_receipt "$head_dir" "$wt_head"
+    state="$tmp/state-head-$head_case"
+    seed_ready_pr "$state"
+    case "$head_case" in
+        stale) printf '{"headRefOid":"stale"}\n' >"$state/head.json" ;;
+        missing) printf '{}\n' >"$state/head.json" ;;
+        malformed) printf 'not JSON\n' >"$state/head.json" ;;
+        api-error) touch "$state/head-api-error" ;;
+        mutation-moved) touch "$state/mutation-head-moved" ;;
+        retry-moved|requeue-moved)
+            git -C "$wt_head" rev-parse HEAD | jq -R '{headRefOid:.}' >"$state/head-1.json"
+            printf '{"headRefOid":"moved"}\n' >"$state/head.json"
+            if [[ "$head_case" == retry-moved ]]; then
+                printf '{}\n' >"$state/enqueue.json"
+            else
+                jq '.state="OPEN"' "$state/prview-default.json" >"$state/prview.tmp"
+                mv "$state/prview.tmp" "$state/prview-default.json"
+                printf 'no-entry\n' >"$state/entry-default.txt"
+            fi ;;
+    esac
+    head_rc=0
+    out="$(run_pipeline "$wt_head" "$state")" || head_rc=$?
+    enqueue_count="$(grep -c enqueuePullRequest "$state/calls.log" || true)"
+    expected_count=0
+    [[ "$head_case" != *moved ]] || expected_count=1
+    if [[ "$head_rc" != 0 && "$(cat "$head_dir/pipeline.done")" == PR_HEAD_MISMATCH \
+        && "$enqueue_count" == "$expected_count" ]] \
+        && [[ "$(cat "$head_dir/pipeline.pushed.ref")" == "$(git -C "$wt_head" branch --show-current) $(git -C "$wt_head" rev-parse HEAD)" ]]; then
+        ok "$head_case PR head fails closed before enqueue (including retries) and records the successful push"
+    else bad "$head_case PR head enqueued unproved contents: $out"; fi
+done
 
 # --- refuses while the gate is not green -----------------------------------
 wt_gate="$(new_pipeline_fixture gate-not-green)"

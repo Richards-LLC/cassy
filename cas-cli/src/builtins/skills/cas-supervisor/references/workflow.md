@@ -195,7 +195,26 @@ Projects shipping `scripts/check-lane-fast-rows.py` run the deterministic
 before either merge path moves the target. A failed receipt names the row and
 refuses the merge, including with `force=true`. Install
 `markdownlint-cli2@0.18.1` on the supervisor host before merging changed docs;
-the gate downloads no tools and invokes no Cargo commands.
+the fast gate downloads no tools and invokes no Cargo commands.
+
+Rust-touching lanes additionally require a capped compile PASS for the combined
+merge tree. A lane-tip check or green CI run cannot supply that receipt. Before
+merging, run the proof as a supervisor, in the background with a retained log:
+
+```bash
+python3 scripts/check-lane-compile.py . <target-branch> factory/<worker> --prove
+```
+
+The prover invokes the existing capped runner once with `--lib` and once with
+`--tests`, both scoped to the affected Cargo packages, in an isolated preview.
+It publishes a tree-keyed receipt only after both checks pass and the preview
+and input refs remain unchanged. A failed retry removes an earlier PASS. The
+normal preflight verifies this receipt without compiling. Missing proof prints
+the exact command to produce it; docs/scripts-only lanes need no compile proof.
+The Git merge helper also verifies the actual detached merge commit before its
+compare-and-swap advances the epic, covering merge drivers and concurrent lanes.
+Rust merges use the detached venue's clean-target-checkout rule; commit or stash
+target-checkout dirt first. Other projects retain their existing merge policy.
 
 A documented manual Git merge in a project that permits it uses the same
 preflight, from the target checkout immediately before the merge:

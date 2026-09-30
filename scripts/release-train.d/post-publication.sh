@@ -20,9 +20,10 @@ release_train_post_publication_workflow() {
     tag="v$version"
     repo="${CAS_RELEASE_TRAIN_REPO:-Richards-LLC/cassy}"
     gh="${CAS_RELEASE_TRAIN_GH:-gh}"
-    tries="${CAS_RELEASE_TRAIN_POST_PUBLICATION_TRIES:-40}"
+    # The Release workflow takes about 15 minutes (3.39: 14m14s); wait 30.
+    tries="${CAS_RELEASE_TRAIN_POST_PUBLICATION_TRIES:-120}"
     poll="${CAS_RELEASE_TRAIN_POST_PUBLICATION_POLL_SECS:-15}"
-    [[ "$tries" =~ ^[0-9]+$ ]] || tries=40
+    [[ "$tries" =~ ^[0-9]+$ ]] || tries=120
     [[ "$poll" =~ ^[0-9]+$ ]] || poll=15
     command -v "$gh" >/dev/null 2>&1 || {
         printf 'ERROR post-publication: GitHub CLI %s is not executable\n' "$gh" >&2

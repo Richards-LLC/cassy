@@ -18,7 +18,7 @@ cd "$repo_root"
 failure_log_rel='cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md'
 readonly -a gate_check_ids=(
     scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config assemble-stale-base
-    version-literals fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
+    version-literals ci-script-tests fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
     snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
     procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene
 )
@@ -1212,6 +1212,15 @@ check_builtin_doc_hygiene() {
     python3 scripts/check-builtin-contract-phrases.py
 }
 
+check_ci_script_tests() {
+    # This is the queue's script-only preflight, not a Cargo test target.
+    # Also discard inherited make modes: -n/-t/-i can manufacture a PASS.
+    env -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE -u CAS_AGENT_NAME \
+        -u CAS_SUPERVISOR_NAME -u CAS_AGENT_ID -u CAS_SESSION_ID -u CAS_ROOT \
+        -u MAKEFLAGS -u MFLAGS -u GNUMAKEFLAGS -u MAKELEVEL \
+        make -C cas-cli test-ci-tiers
+}
+
 check_working_tree() {
     local untracked
     if ! git diff --quiet; then
@@ -1269,6 +1278,13 @@ run_check ancestor-proxy-config \
 run_check version-literals \
     'find source/test files for <version> (excluding manifests, CHANGELOG, reference-history, failure-log)' \
     check_version_literals
+run_check ci-script-tests \
+    'make -C cas-cli test-ci-tiers (factory identity scrubbed)' \
+    check_ci_script_tests
+if row_selected ci-script-tests && [[ "${failures[*]}" == *ci-script-tests* ]]; then
+    printf 'RELEASE GATE FAILED: %s (aborted before build and Rust suite rows)\n' "${failures[*]}"
+    exit 1
+fi
 run_check fixture-paths \
     "$cargo_bin nextest run -p cas --test builtin_archive_portability_test builtin_inspection_tests_do_not_depend_on_the_checkout_at_runtime; no runtime CARGO_MANIFEST_DIR reads under cas-cli/src" \
     check_fixture_paths

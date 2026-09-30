@@ -20,8 +20,8 @@ fn promote_test_agent(cas_dir: &std::path::Path) {
 
 #[tokio::test]
 async fn cancel_without_commits_persists_pointer_and_lists_as_no_delivery() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     promote_test_agent(&cas_dir);
     let store = open_task_store(&cas_dir).unwrap();
@@ -116,8 +116,8 @@ async fn cancel_without_commits_persists_pointer_and_lists_as_no_delivery() {
 
 #[tokio::test]
 async fn cancel_refuses_blank_reason_without_mutation() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     promote_test_agent(&cas_dir);
     let store = open_task_store(&cas_dir).unwrap();
@@ -141,8 +141,8 @@ async fn cancel_refuses_blank_reason_without_mutation() {
 
 #[tokio::test]
 async fn direct_status_updates_cannot_change_terminal_work() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     promote_test_agent(&cas_dir);
     let store = open_task_store(&cas_dir).unwrap();
@@ -213,8 +213,8 @@ async fn direct_status_updates_cannot_change_terminal_work() {
 
 #[tokio::test]
 async fn epic_cancel_requires_terminal_children_then_cancels_without_delivery() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     promote_test_agent(&cas_dir);
     let store = open_task_store(&cas_dir).unwrap();
@@ -265,8 +265,8 @@ async fn epic_cancel_requires_terminal_children_then_cancels_without_delivery() 
 
 #[tokio::test]
 async fn registered_supervisor_can_reopen_cancelled_task_and_clear_outcome() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     promote_test_agent(&cas_dir);
     let store = open_task_store(&cas_dir).unwrap();

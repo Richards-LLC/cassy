@@ -32,13 +32,12 @@ fn proof_boundary_git(path: &std::path::Path, args: &[&str]) {
     );
 }
 
-async fn legacy_repository_proof_rejects_drift(isolated: bool) {
-    let (temp, service) = setup_cas();
+async fn legacy_repository_proof_rejects_drift(test_env: &mut TestEnvGuard, isolated: bool) {
+    let (temp, service) = setup_cas(test_env);
     // `cas_task_close` resolves the acting factory context while it validates
     // the proof root. Keep that process-global context stable for this whole
     // Git-worktree fixture so sibling factory tests cannot invalidate a
     // reviewed.txt proof between the deliberate drift and its restoration.
-    let _env_lock = env_test_lock();
     let cas_dir = temp.path().join(".cas");
     std::fs::write(
         cas_dir.join("config.toml"),
@@ -232,12 +231,14 @@ async fn legacy_repository_proof_rejects_drift(isolated: bool) {
 
 #[tokio::test]
 async fn test_legacy_nonisolated_verdict_is_bound_to_repository_proof() {
-    legacy_repository_proof_rejects_drift(false).await;
+    let mut test_env = TestEnvGuard::temp_home();
+    legacy_repository_proof_rejects_drift(&mut test_env, false).await;
 }
 
 #[tokio::test]
 async fn test_legacy_isolated_verdict_is_bound_to_repository_proof() {
-    legacy_repository_proof_rejects_drift(true).await;
+    let mut test_env = TestEnvGuard::temp_home();
+    legacy_repository_proof_rejects_drift(&mut test_env, true).await;
 }
 
 // =============================================================================
@@ -251,6 +252,7 @@ async fn test_legacy_isolated_verdict_is_bound_to_repository_proof() {
 /// its integration base, and return (temp, worker service, cas_dir, task id,
 /// worktree path).
 async fn delivered_worktree_fixture(
+    test_env: &mut TestEnvGuard,
     worker_branch: &str,
 ) -> (
     TempDir,
@@ -258,12 +260,8 @@ async fn delivered_worktree_fixture(
     std::path::PathBuf,
     String,
     TempDir,
-    std::sync::MutexGuard<'static, ()>,
 ) {
-    let (temp, service) = setup_cas();
-    // Ordering contract from support::setup_cas: take the env lock only after
-    // setup_cas has released its own brief hold, or this deadlocks.
-    let env_lock = env_test_lock();
+    let (temp, service) = setup_cas(test_env);
     let cas_dir = temp.path().join(".cas");
     std::fs::write(
         cas_dir.join("config.toml"),
@@ -323,7 +321,7 @@ async fn delivered_worktree_fixture(
     task.worktree_id = Some(worktree_id);
     task_store.update(&task).unwrap();
 
-    (temp, service, cas_dir, task_id, worker_dir, env_lock)
+    (temp, service, cas_dir, task_id, worker_dir)
 }
 
 fn close_request(task_id: &str, reason: &str) -> TaskCloseRequest {
@@ -352,8 +350,8 @@ async fn registered_supervisor(cas_dir: &std::path::Path, name: &str) -> cas::mc
 
 #[tokio::test]
 async fn public_verdicts_project_only_their_receipt_bound_delivery() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let supervisor_id = format!("delivery-supervisor-{}", std::process::id());
     let supervisor = registered_supervisor(&cas_dir, &supervisor_id).await;
@@ -520,8 +518,9 @@ async fn public_verdicts_project_only_their_receipt_bound_delivery() {
 
 #[tokio::test]
 async fn test_verdict_survives_the_worker_branch_advancing_after_dispatch() {
-    let (_temp, service, cas_dir, task_id, worker_dir, _env_lock) =
-        delivered_worktree_fixture("factory/proof-mover").await;
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service, cas_dir, task_id, worker_dir) =
+        delivered_worktree_fixture(&mut test_env, "factory/proof-mover").await;
 
     let first = extract_text(
         service
@@ -602,8 +601,9 @@ async fn test_verdict_survives_the_worker_branch_advancing_after_dispatch() {
 /// replace that durable evidence with a contentless first-parent merge.
 #[tokio::test]
 async fn test_recorded_delivery_receipt_survives_worker_ref_advance_to_supervisor_merge_cas_ba62() {
-    let (temp, service, cas_dir, task_id, worker_dir, _env_lock) =
-        delivered_worktree_fixture("factory/ba62-worker").await;
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service, cas_dir, task_id, worker_dir) =
+        delivered_worktree_fixture(&mut test_env, "factory/ba62-worker").await;
 
     // Add the receipt-bearing content after task start so its commit is
     // unambiguously inside the task's work window.
@@ -691,8 +691,9 @@ async fn test_recorded_delivery_receipt_survives_worker_ref_advance_to_superviso
 
 #[tokio::test]
 async fn test_close_remints_a_fresh_dispatch_when_the_bound_proof_is_dead() {
-    let (_temp, service, cas_dir, task_id, worker_dir, _env_lock) =
-        delivered_worktree_fixture("factory/proof-rewriter").await;
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service, cas_dir, task_id, worker_dir) =
+        delivered_worktree_fixture(&mut test_env, "factory/proof-rewriter").await;
 
     let first = extract_text(
         service
@@ -744,8 +745,9 @@ async fn test_close_remints_a_fresh_dispatch_when_the_bound_proof_is_dead() {
 /// dispatch is still live must not retire it or mint a replacement, so a
 /// supervisor can resolve the original handoff it was given.
 async fn test_close_retry_keeps_live_dispatch_for_original_supervisor_verdict() {
-    let (_temp, service, cas_dir, task_id, _worker_dir, _env_lock) =
-        delivered_worktree_fixture("factory/live-retry").await;
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service, cas_dir, task_id, _worker_dir) =
+        delivered_worktree_fixture(&mut test_env, "factory/live-retry").await;
 
     let first = extract_text(
         service
@@ -835,8 +837,9 @@ async fn test_close_retry_keeps_live_dispatch_for_original_supervisor_verdict() 
 /// on the task instead of replaying D1's VERIFICATION FAILED response.
 #[tokio::test]
 async fn test_rejected_verdict_mints_fresh_dispatch_for_code_close_retry_cas_04eb() {
-    let (_temp, service, cas_dir, task_id, worker_dir, _env_lock) =
-        delivered_worktree_fixture("factory/rejected-verdict-retry").await;
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service, cas_dir, task_id, worker_dir) =
+        delivered_worktree_fixture(&mut test_env, "factory/rejected-verdict-retry").await;
 
     let first = extract_text(
         service
@@ -933,8 +936,8 @@ async fn test_rejected_verdict_mints_fresh_dispatch_for_code_close_retry_cas_04e
 /// dispatch after D1 is rejected.
 #[tokio::test]
 async fn test_rejected_verdict_mints_fresh_dispatch_for_no_code_close_retry_cas_04eb() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     std::fs::write(
         cas_dir.join("config.toml"),
@@ -1043,8 +1046,9 @@ async fn test_rejected_verdict_mints_fresh_dispatch_for_no_code_close_retry_cas_
 
 #[tokio::test]
 async fn test_supervisor_verdict_follows_superseded_dispatch_with_unchanged_proof() {
-    let (_temp, service, cas_dir, task_id, _worker_dir, _env_lock) =
-        delivered_worktree_fixture("factory/superseded-verdict").await;
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service, cas_dir, task_id, _worker_dir) =
+        delivered_worktree_fixture(&mut test_env, "factory/superseded-verdict").await;
 
     let first = extract_text(
         service
@@ -1114,8 +1118,9 @@ async fn test_supervisor_verdict_follows_superseded_dispatch_with_unchanged_proo
 
 #[tokio::test]
 async fn test_close_consumes_approved_verdict_when_tip_is_unchanged() {
-    let (_temp, service, cas_dir, task_id, _worker_dir, _env_lock) =
-        delivered_worktree_fixture("factory/approved-tip-retry").await;
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service, cas_dir, task_id, _worker_dir) =
+        delivered_worktree_fixture(&mut test_env, "factory/approved-tip-retry").await;
 
     let first = extract_text(
         service
@@ -1166,8 +1171,9 @@ async fn test_close_consumes_approved_verdict_when_tip_is_unchanged() {
 
 #[tokio::test]
 async fn test_post_merge_close_dispatch_binds_the_published_target_head() {
-    let (temp, service, cas_dir, task_id, _worker_dir, _env_lock) =
-        delivered_worktree_fixture("factory/post-merge-target").await;
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service, cas_dir, task_id, _worker_dir) =
+        delivered_worktree_fixture(&mut test_env, "factory/post-merge-target").await;
     let task_store = open_task_store(&cas_dir).expect("task store");
     let mut task = task_store.get(&task_id).expect("task");
     task.status = TaskStatus::AwaitingMerge;
@@ -1248,9 +1254,9 @@ async fn test_post_merge_close_dispatch_binds_the_published_target_head() {
 
 #[tokio::test]
 async fn test_declared_work_target_dispatch_binds_target_branch_not_primary_head() {
-    let (temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let service = CasService::new(core.clone(), None);
-    let env_lock = env_test_lock();
     let cas_dir = temp.path().join(".cas");
     std::fs::write(
         cas_dir.join("config.toml"),
@@ -1397,13 +1403,12 @@ async fn test_declared_work_target_dispatch_binds_target_branch_not_primary_head
             .expect("close approved target task"),
     );
     assert!(closed.contains("Closed task:"), "{closed}");
-    drop(env_lock);
 }
 
 #[tokio::test]
 async fn test_worker_main_loop_cannot_self_attest_verification() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let agent_store = open_agent_store(&cas_dir).expect("open agent store");
     let task_store = open_task_store(&cas_dir).expect("open task store");
@@ -1471,8 +1476,8 @@ async fn test_worker_main_loop_cannot_self_attest_verification() {
 
 #[tokio::test]
 async fn test_task_verifier_capability_is_child_bound_and_replay_safe() {
-    let (temp, parent_service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, parent_service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let agent_store = open_agent_store(&cas_dir).expect("agent store");
     let verification_store = open_verification_store(&cas_dir).expect("verification store");
@@ -1776,8 +1781,8 @@ async fn test_task_verifier_capability_is_child_bound_and_replay_safe() {
 
 #[tokio::test]
 async fn test_legacy_unsafe_verification_rows_are_sanitized_on_public_reads() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let raw_capability = "vcap-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     let raw_path = "/home/legacy/private-proof.json";
@@ -1860,8 +1865,8 @@ async fn test_legacy_unsafe_verification_rows_are_sanitized_on_public_reads() {
 
 #[tokio::test]
 async fn test_official_child_uses_server_handoff_without_model_visible_bearer() {
-    let (temp, parent_service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, parent_service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let agent_store = open_agent_store(&cas_dir).expect("agent store");
     let verification_store = open_verification_store(&cas_dir).expect("verification store");
@@ -2121,9 +2126,9 @@ async fn test_official_child_uses_server_handoff_without_model_visible_bearer() 
 
 #[tokio::test]
 async fn test_spoofed_supervisor_and_codex_claims_do_not_grant_authority() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
-    let _spoofed_env = ScopedSupervisorEnv::new();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
+    let _spoofed_env = ScopedSupervisorEnv::new(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let agent_store = open_agent_store(&cas_dir).expect("agent store");
     let worker_id = format!("test-session-{}", std::process::id());
@@ -2162,8 +2167,8 @@ async fn test_spoofed_supervisor_and_codex_claims_do_not_grant_authority() {
 
 #[tokio::test]
 async fn test_anonymous_or_orphan_verification_add_fails_closed() {
-    let _env_lock = env_test_lock();
-    let _anonymous_env = ScopedFactoryEnv::apply(&[
+    let mut test_env = TestEnvGuard::temp_home();
+    let _anonymous_env = ScopedFactoryEnv::apply(&mut test_env, &[
         ("CAS_SESSION_ID", None),
         ("CAS_AGENT_NAME", None),
         ("CAS_AGENT_ROLE", Some("supervisor")),
@@ -2273,7 +2278,8 @@ fn add_exact_supervisor_fixture_verdict(
 
 #[tokio::test]
 async fn test_update_to_closed_is_exact_task_gated_but_other_task_update_remains_available() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     std::fs::write(
         cas_dir.join("config.toml"),
@@ -2344,8 +2350,8 @@ async fn test_update_to_closed_is_exact_task_gated_but_other_task_update_remains
 
 #[tokio::test]
 async fn test_update_to_closed_rejects_stale_task_row_behind_current_dispatch() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     std::fs::write(
         cas_dir.join("config.toml"),
@@ -2411,7 +2417,7 @@ async fn test_update_to_closed_rejects_stale_task_row_behind_current_dispatch() 
         .expect("exact current verdict authorizes update");
 
     {
-        let _supervisor = ScopedSupervisorEnv::new();
+        let _supervisor = ScopedSupervisorEnv::new(&mut test_env);
         service
             .cas_task_reopen(Parameters(TaskReopenRequest {
                 id: task_id.clone(),
@@ -2438,17 +2444,10 @@ async fn test_update_to_closed_rejects_stale_task_row_behind_current_dispatch() 
         .expect_err("reopened task cannot reuse the invalidated verdict");
 }
 
-// cas-3bd4: env_test_lock() now lives in `support.rs` so `setup_cas()`
-// can hold it while clearing factory env vars. Tests that need to set
-// `CAS_AGENT_ROLE=supervisor` via `ScopedSupervisorEnv` MUST call
-// `setup_cas()` FIRST and then acquire `env_test_lock()` — see the
-// support.rs docs. Acquiring before calling `setup_cas` would deadlock
-// because std `Mutex` is not re-entrant.
-
 #[tokio::test]
 async fn test_task_close_blocked_without_verification() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     // Initialize verification store
@@ -2539,8 +2538,8 @@ async fn test_task_close_blocked_without_verification() {
 
 #[tokio::test]
 async fn test_task_close_sets_assignee_for_worktree_merge_jail() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     std::fs::write(
@@ -2677,8 +2676,8 @@ fn simple_task_req(title: &str) -> TaskCreateRequest {
 /// the negative control at the end proves the jail is otherwise intact.
 #[tokio::test]
 async fn test_task_start_not_blocked_by_merge_gated_sibling_cas_6a99() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     // Verification ENABLED so check_pending_verification actually runs.
@@ -2755,7 +2754,8 @@ async fn test_task_start_not_blocked_by_merge_gated_sibling_cas_6a99() {
 /// renderer.
 #[tokio::test]
 async fn test_normal_close_records_and_renders_lease_history_reason_cas_7aef() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     std::fs::write(
         cas_dir.join("config.toml"),
@@ -2831,10 +2831,10 @@ async fn test_normal_close_records_and_renders_lease_history_reason_cas_7aef() {
 /// first task to Blocked.
 #[tokio::test]
 async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipts_cas_6c50() {
-    let (temp, service) = setup_cas_as(AgentRole::Supervisor);
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas_as(&mut test_env, AgentRole::Supervisor);
     let supervisor_id = format!("test-session-{}", std::process::id());
-    let _env_lock = env_test_lock();
-    let _supervisor_env = ScopedSupervisorEnv::new();
+    let _supervisor_env = ScopedSupervisorEnv::new(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let artifacts_root = temp.path().join("durable-artifacts");
     std::fs::create_dir_all(&artifacts_root).unwrap();
@@ -3028,10 +3028,10 @@ async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipt
 
 #[tokio::test]
 async fn test_merge_required_close_parks_awaiting_merge_and_releases_gate_cas_8d5b() {
+    let mut test_env = TestEnvGuard::temp_home();
     use std::process::Command;
 
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let agent_store = open_agent_store(&cas_dir).expect("open agent store");
     {
@@ -3284,10 +3284,10 @@ async fn test_merge_required_close_parks_awaiting_merge_and_releases_gate_cas_8d
 /// conflicted park identically to a clean, supervisor-actionable one.
 #[tokio::test]
 async fn test_a844_merge_conflict_flags_task_and_names_alternative() {
+    let mut test_env = TestEnvGuard::temp_home();
     use std::process::Command;
 
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let agent_store = open_agent_store(&cas_dir).expect("open agent store");
     {
@@ -3463,10 +3463,10 @@ async fn test_a844_merge_conflict_flags_task_and_names_alternative() {
 /// that doesn't exist.
 #[tokio::test]
 async fn test_a844_clean_divergence_not_flagged_as_conflict() {
+    let mut test_env = TestEnvGuard::temp_home();
     use std::process::Command;
 
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let agent_store = open_agent_store(&cas_dir).expect("open agent store");
     {
@@ -3599,10 +3599,10 @@ async fn test_a844_clean_divergence_not_flagged_as_conflict() {
 /// activity event recorded.
 #[tokio::test]
 async fn test_repeated_merge_required_close_does_not_duplicate_park_audit_cas_627f() {
+    let mut test_env = TestEnvGuard::temp_home();
     use std::process::Command;
 
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let agent_store = open_agent_store(&cas_dir).expect("open agent store");
     {
@@ -3792,11 +3792,11 @@ async fn test_repeated_merge_required_close_does_not_duplicate_park_audit_cas_62
 /// close succeeds using the commit-time task anchor.
 #[tokio::test]
 async fn test_merge_before_first_close_uses_commit_hook_anchor_cas_3d37() {
+    let mut test_env = TestEnvGuard::temp_home();
     use cas::hooks::{HookInput, handle_post_tool_use};
     use std::process::Command;
 
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let agent_store = open_agent_store(&cas_dir).expect("open agent store");
     let worker_id = {
@@ -4005,10 +4005,10 @@ async fn test_merge_before_first_close_uses_commit_hook_anchor_cas_3d37() {
 /// succeed without waiting on task B.
 #[tokio::test]
 async fn test_serial_second_task_on_same_branch_does_not_restrand_first_close_cas_4b3f() {
+    let mut test_env = TestEnvGuard::temp_home();
     use std::process::Command;
 
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let agent_store = open_agent_store(&cas_dir).expect("open agent store");
     {
@@ -4222,10 +4222,10 @@ async fn test_serial_second_task_on_same_branch_does_not_restrand_first_close_ca
 /// rejecting, so the worker's own close succeeds directly.
 #[tokio::test]
 async fn test_stale_local_epic_ref_falls_back_to_origin_cas_38e2() {
+    let mut test_env = TestEnvGuard::temp_home();
     use std::process::Command;
 
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let agent_store = open_agent_store(&cas_dir).expect("open agent store");
     {
@@ -4408,10 +4408,10 @@ async fn test_stale_local_epic_ref_falls_back_to_origin_cas_38e2() {
 /// so the parent epic can use it as a task-specific merge receipt.
 #[tokio::test]
 async fn test_reopened_task_does_not_reuse_stale_anchor_cas_cf64() {
+    let mut test_env = TestEnvGuard::temp_home();
     use std::process::Command;
 
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let agent_store = open_agent_store(&cas_dir).expect("open agent store");
     {
@@ -4581,7 +4581,7 @@ async fn test_reopened_task_does_not_reuse_stale_anchor_cas_cf64() {
     // cas-3c23: reopen is now supervisor-gated, so this "supervisor decides
     // rework is needed" scenario must run under CAS_AGENT_ROLE=supervisor.
     let reopen_text = {
-        let _sup = ScopedSupervisorEnv::new();
+        let _sup = ScopedSupervisorEnv::new(&mut test_env);
         extract_text(
             service
                 .cas_task_reopen(Parameters(TaskReopenRequest {
@@ -4656,10 +4656,10 @@ async fn test_reopened_task_does_not_reuse_stale_anchor_cas_cf64() {
 /// sibling test below.
 #[tokio::test]
 async fn test_nonepic_task_resolves_default_branch_and_proceeds_when_merged_cas_cf64() {
+    let mut test_env = TestEnvGuard::temp_home();
     use std::process::Command;
 
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     std::fs::write(
@@ -4770,10 +4770,10 @@ async fn test_nonepic_task_resolves_default_branch_and_proceeds_when_merged_cas_
 /// branch, `main`, absent a configured override) instead of skipping.
 #[tokio::test]
 async fn test_nonepic_task_with_unmerged_code_is_rejected_not_skipped_cas_cf64() {
+    let mut test_env = TestEnvGuard::temp_home();
     use std::process::Command;
 
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     std::fs::write(
@@ -4883,10 +4883,10 @@ async fn test_nonepic_task_with_unmerged_code_is_rejected_not_skipped_cas_cf64()
 /// this gate outright) was the other half of the backstop gap.
 #[tokio::test]
 async fn test_chore_type_task_with_unmerged_code_is_no_longer_exempt_cas_cf64() {
+    let mut test_env = TestEnvGuard::temp_home();
     use std::process::Command;
 
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     std::fs::write(
@@ -4990,8 +4990,8 @@ async fn test_chore_type_task_with_unmerged_code_is_no_longer_exempt_cas_cf64() 
 /// exemption must not turn every docs-only chore into a false reject.
 #[tokio::test]
 async fn test_chore_type_task_with_zero_commits_still_closes_on_notes_cas_cf64() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     std::fs::write(
@@ -5078,10 +5078,10 @@ async fn test_chore_type_task_with_zero_commits_still_closes_on_notes_cas_cf64()
 /// gate from the task-verifier flow.
 #[tokio::test]
 async fn test_task_close_blocks_on_uncommitted_worker_worktree() {
+    let mut test_env = TestEnvGuard::temp_home();
     use std::process::Command;
 
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     // Disable verification so we isolate the cas-895d uncommitted-work
@@ -5288,10 +5288,10 @@ enabled = false
 /// uncommitted-work gate now fires anyway.
 #[tokio::test]
 async fn test_task_close_blocks_on_uncommitted_system_b_worker_worktree_cas_4b3f() {
+    let mut test_env = TestEnvGuard::temp_home();
     use std::process::Command;
 
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     // Disable verification so we isolate the cas-895d uncommitted-work
@@ -5439,10 +5439,10 @@ async fn test_task_close_blocks_on_uncommitted_system_b_worker_worktree_cas_4b3f
 /// comparing its committed branch against the old unresolved-target sentinel.
 #[tokio::test]
 async fn test_task_close_resolves_configured_staging_system_b_target_cas_113f() {
+    let mut test_env = TestEnvGuard::temp_home();
     use std::process::Command;
 
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     std::fs::write(
         cas_dir.join("config.toml"),
@@ -5565,10 +5565,10 @@ async fn test_task_close_resolves_configured_staging_system_b_target_cas_113f() 
 /// because the check inspects committed history, not unstaged state.
 #[tokio::test]
 async fn test_additive_only_uses_worker_branch_not_main_worktree() {
+    let mut test_env = TestEnvGuard::temp_home();
     use std::process::Command;
 
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     // Disable verification — we're testing the additive-only gate.
@@ -5793,7 +5793,7 @@ enabled = false
     // verification/merge gates. Make the fixture a factory worker explicitly:
     // setup_cas clears ambient factory env so the test cannot accidentally
     // exercise a solo caller's close behavior.
-    let _worker = FactoryWorkerEnv::enter();
+    let _worker = FactoryWorkerEnv::enter(&mut test_env);
     let resp_c = extract_text(
         service
             .cas_task_close(Parameters(TaskCloseRequest {
@@ -5837,10 +5837,10 @@ enabled = false
 ///     the main branch.
 #[tokio::test]
 async fn test_close_gates_skipped_for_non_isolated_task_with_dirty_main() {
+    let mut test_env = TestEnvGuard::temp_home();
     use std::process::Command;
 
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     // Disable verification so we isolate the close gates.
@@ -6054,8 +6054,8 @@ enabled = false
 /// non-factory (direct CLI) flows where there's no worktree to inspect.
 #[tokio::test]
 async fn test_task_close_passes_without_worktree_and_clean_cwd() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     std::fs::write(
@@ -6134,8 +6134,8 @@ enabled = false
 /// `test_task_close_passes_without_worktree_and_clean_cwd` above.
 #[tokio::test]
 async fn test_3894_halted_worker_can_close_own_in_progress_task() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     std::fs::write(
@@ -6242,8 +6242,8 @@ enabled = false
 /// completed delivery has received an approved, current-cycle verdict.
 #[tokio::test]
 async fn test_a699_halted_approved_delivery_recloses() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     std::fs::write(
@@ -6330,10 +6330,10 @@ async fn test_a699_halted_approved_delivery_recloses() {
 /// not only a unit assertion on the ownership predicate.
 #[tokio::test]
 async fn test_0447_halted_inprogress_with_merged_receipt_closes_without_restart() {
+    let mut test_env = TestEnvGuard::temp_home();
     use std::process::Command;
 
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let repo = temp.path();
     let git = |args: &[&str]| -> String {
@@ -6476,8 +6476,8 @@ async fn test_0447_halted_inprogress_with_merged_receipt_closes_without_restart(
 /// aimed at a different assignee.
 #[tokio::test]
 async fn test_3894_halted_worker_still_blocked_closing_unowned_task() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     std::fs::write(
@@ -6536,8 +6536,8 @@ enabled = false
 
 #[tokio::test]
 async fn test_epic_close_requires_epic_verification_type() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     // Create epic
@@ -6668,8 +6668,8 @@ async fn test_epic_close_requires_epic_verification_type() {
 /// against the merged target.
 #[tokio::test]
 async fn test_epic_close_derives_anchor_from_epic_branch_gh_892() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     std::fs::write(cas_dir.join("config.toml"), "[verification]\nenabled = false\n")
         .expect("disable verification for anchor-focused close");
@@ -6744,8 +6744,8 @@ async fn test_epic_close_derives_anchor_from_epic_branch_gh_892() {
 /// that receipt against `main`, rather than requiring it on `epic/*`.
 #[tokio::test]
 async fn test_epic_close_accepts_target_receipt_when_epic_branch_lags_gh_892() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     std::fs::write(cas_dir.join("config.toml"), "[verification]\nenabled = false\n")
         .expect("disable verification for target receipt close");
@@ -6846,8 +6846,8 @@ async fn test_epic_close_accepts_target_receipt_when_epic_branch_lags_gh_892() {
 
 #[tokio::test]
 async fn test_task_lifecycle_with_verification() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     // Create task
@@ -6928,10 +6928,10 @@ async fn test_task_lifecycle_with_verification() {
 
 #[tokio::test]
 async fn test_task_close_reopens_after_rejected_verification() {
+    let mut test_env = TestEnvGuard::temp_home();
     use cas::types::VerificationIssue;
 
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     // Create task
@@ -7031,8 +7031,8 @@ async fn test_task_close_reopens_after_rejected_verification() {
 /// dispatch/skip path is wired up.
 #[tokio::test]
 async fn test_task_close_runs_verifier_or_skips_cleanly() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let task_store = open_task_store(&cas_dir).unwrap();
     let verification_store = open_verification_store(&cas_dir).unwrap();
@@ -7148,83 +7148,31 @@ async fn test_task_close_runs_verifier_or_skips_cleanly() {
 // itself lives inside close_ops.rs and is unaffected — these tests verify
 // that directly.
 
-/// Shared RAII guard that **snapshots** the prior value of each factory env
-/// var it mutates and restores it on drop — setting it back to its previous
-/// value, or removing it only if it was originally absent — instead of
-/// blindly `remove_var`-ing. This prevents a guard from clobbering a
-/// pre-existing factory env value owned by the surrounding test/process
-/// (cas-7cc9: the old guards unconditionally removed CAS_AGENT_ROLE /
-/// CAS_FACTORY_MODE / CAS_FACTORY_WORKER_CLI / CAS_FACTORY_SUPERVISOR_CLI on
-/// drop, leaking test pollution and breaking sibling factory env assumptions).
-///
-/// Every caller acquires `env_test_lock()` for the guard's full lifetime, so
-/// these process-global mutations never race another test thread.
-struct ScopedFactoryEnv {
-    /// (key, prior value) captured at construction, replayed on drop.
-    saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
-}
-
-impl ScopedFactoryEnv {
-    /// Apply each `(key, desired)` pair, capturing the prior value first:
-    /// `Some(v)` sets `key=v`; `None` removes `key`. On drop every key is
-    /// restored to the value captured here.
-    fn apply(vars: &[(&'static str, Option<&str>)]) -> Self {
-        let mut saved = Vec::with_capacity(vars.len());
-        // SAFETY: callers hold env_test_lock() for the guard's lifetime, so
-        // no other test thread can observe a torn read of these vars.
-        unsafe {
-            for (key, desired) in vars {
-                saved.push((*key, std::env::var_os(key)));
-                match desired {
-                    Some(value) => std::env::set_var(key, value),
-                    None => std::env::remove_var(key),
-                }
-            }
-        }
-        Self { saved }
-    }
-}
-
-impl Drop for ScopedFactoryEnv {
-    fn drop(&mut self) {
-        // SAFETY: same env_test_lock() contract as `apply`.
-        unsafe {
-            for (key, prior) in self.saved.drain(..) {
-                match prior {
-                    Some(value) => std::env::set_var(key, value),
-                    None => std::env::remove_var(key),
-                }
-            }
-        }
-    }
-}
-
 /// Small RAII guard so CAS_AGENT_ROLE is set to `supervisor` for the test
 /// body and restored to its prior value on drop, even on panic.
-struct ScopedSupervisorEnv {
-    _env: ScopedFactoryEnv,
+struct ScopedSupervisorEnv<'a> {
+    _env: ScopedFactoryEnv<'a>,
 }
 
-impl ScopedSupervisorEnv {
-    fn new() -> Self {
-        // SAFETY: setup_cas documents the same env_test_lock contract; the
-        // guard snapshots and restores rather than blindly removing.
+impl<'a> ScopedSupervisorEnv<'a> {
+    fn new(test_env: &'a mut TestEnvGuard) -> Self {
+        // The override borrows the test owner and restores the prior value.
         Self {
-            _env: ScopedFactoryEnv::apply(&[("CAS_AGENT_ROLE", Some("supervisor"))]),
+            _env: ScopedFactoryEnv::apply(test_env, &[("CAS_AGENT_ROLE", Some("supervisor"))]),
         }
     }
 }
 
 #[tokio::test]
 async fn test_supervisor_override_rejects_worker_with_supervisor_env_only() {
-    let (_temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
     let created = service
         .cas_task_create(Parameters(simple_task_req("override authority")))
         .await
         .unwrap();
     let id = extract_task_id(&extract_text(created)).unwrap().to_string();
-    let _guard = ScopedSupervisorEnv::new();
+    let _guard = ScopedSupervisorEnv::new(&mut test_env);
     let result = service
         .cas_task_close(Parameters(TaskCloseRequest {
             stranded_branch_override: None,
@@ -7246,8 +7194,8 @@ async fn test_supervisor_override_rejects_worker_with_supervisor_env_only() {
 /// unrelated orphan-recovery path.
 #[tokio::test]
 async fn test_close_supervisor_owned_epic_uses_owner_closed_wording() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let task_store = open_task_store(&cas_dir).unwrap();
     let verification_store = open_verification_store(&cas_dir).unwrap();
@@ -7296,7 +7244,7 @@ async fn test_close_supervisor_owned_epic_uses_owner_closed_wording() {
     epic.epic_verification_owner = Some(owner_id);
     task_store.update(&epic).expect("should update epic");
 
-    let _guard = ScopedSupervisorEnv::new();
+    let _guard = ScopedSupervisorEnv::new(&mut test_env);
     let response_text = extract_text(
         service
             .cas_task_close(Parameters(TaskCloseRequest {
@@ -7349,8 +7297,8 @@ async fn test_close_supervisor_owned_epic_uses_owner_closed_wording() {
 /// "(verification skipped — assignee inactive)" marker.
 #[tokio::test]
 async fn test_close_supervisor_bypass_orphaned_task() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let task_store = open_task_store(&cas_dir).unwrap();
     let verification_store = open_verification_store(&cas_dir).unwrap();
@@ -7399,7 +7347,7 @@ async fn test_close_supervisor_bypass_orphaned_task() {
     task_store.update(&task).expect("should update task");
 
     // Now flip the process into supervisor mode for the close call only.
-    let _guard = ScopedSupervisorEnv::new();
+    let _guard = ScopedSupervisorEnv::new(&mut test_env);
 
     let close_req = TaskCloseRequest {
         stranded_branch_override: None,
@@ -7475,8 +7423,8 @@ async fn test_close_supervisor_bypass_orphaned_task() {
 /// treat as inactive" branch distinct from the None-assignee branch above.
 #[tokio::test]
 async fn test_close_supervisor_bypass_ghost_assignee() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let task_store = open_task_store(&cas_dir).unwrap();
     let verification_store = open_verification_store(&cas_dir).unwrap();
@@ -7517,7 +7465,7 @@ async fn test_close_supervisor_bypass_ghost_assignee() {
     task.assignee = Some("ghost-agent-does-not-exist".to_string());
     task_store.update(&task).expect("should update task");
 
-    let _guard = ScopedSupervisorEnv::new();
+    let _guard = ScopedSupervisorEnv::new(&mut test_env);
 
     let close_req = TaskCloseRequest {
         stranded_branch_override: None,
@@ -7573,8 +7521,8 @@ async fn test_close_supervisor_bypass_ghost_assignee() {
 /// "assignee inactive".
 #[tokio::test]
 async fn test_close_supervisor_active_worker_assignee_by_name() {
-    let (temp, service) = setup_cas_as(AgentRole::Supervisor);
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas_as(&mut test_env, AgentRole::Supervisor);
     let cas_dir = temp.path().join(".cas");
     let task_store = open_task_store(&cas_dir).unwrap();
     let agent_store = open_agent_store(&cas_dir).expect("open agent store");
@@ -7638,7 +7586,7 @@ async fn test_close_supervisor_active_worker_assignee_by_name() {
         .expect("worker claim should succeed");
 
     // Flip the caller to supervisor for the close attempt.
-    let _guard = ScopedSupervisorEnv::new();
+    let _guard = ScopedSupervisorEnv::new(&mut test_env);
 
     // --- Attempt 1: no bypass flag. The close MUST drop into the normal
     //     verification path (worker is alive + holding a lease), not the
@@ -7721,8 +7669,8 @@ async fn test_close_supervisor_active_worker_assignee_by_name() {
 /// comes from `close_ops.rs` (VERIFICATION REQUIRED) — exactly what we assert.
 #[tokio::test]
 async fn test_close_supervisor_no_bypass_when_assignee_alive() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let task_store = open_task_store(&cas_dir).unwrap();
     let verification_store = open_verification_store(&cas_dir).unwrap();
@@ -7772,7 +7720,7 @@ async fn test_close_supervisor_no_bypass_when_assignee_alive() {
     task.assignee = Some(alive_agent_id);
     task_store.update(&task).expect("should update task");
 
-    let _guard = ScopedSupervisorEnv::new();
+    let _guard = ScopedSupervisorEnv::new(&mut test_env);
 
     let close_req = TaskCloseRequest {
         stranded_branch_override: None,
@@ -7853,14 +7801,14 @@ async fn test_close_supervisor_no_bypass_when_assignee_alive() {
 /// CodexWorkerEnv guard can't make worker_harness_from_env() report Codex in
 /// this Claude-worker context (cas-7cc9 / R2: the old guard left
 /// CAS_FACTORY_WORKER_CLI untouched on enter and omitted it on drop).
-struct FactoryWorkerEnv {
-    _env: ScopedFactoryEnv,
+struct FactoryWorkerEnv<'a> {
+    _env: ScopedFactoryEnv<'a>,
 }
 
-impl FactoryWorkerEnv {
-    fn enter() -> Self {
+impl<'a> FactoryWorkerEnv<'a> {
+    fn enter(test_env: &'a mut TestEnvGuard) -> Self {
         Self {
-            _env: ScopedFactoryEnv::apply(&[
+            _env: ScopedFactoryEnv::apply(test_env, &[
                 ("CAS_AGENT_ROLE", Some("worker")),
                 ("CAS_FACTORY_MODE", Some("1")),
                 ("CAS_FACTORY_WORKER_CLI", None),
@@ -7881,8 +7829,8 @@ fn task_req(value: serde_json::Value) -> cas_mcp::TaskRequest {
 /// authors zero commits and supplies its proof only on the close call.
 #[tokio::test]
 async fn no_code_close_ignores_inherited_base_and_accepts_inline_external_ref_cas_102c() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     std::fs::write(
         cas_dir.join("config.toml"),
@@ -8000,8 +7948,8 @@ async fn no_code_close_ignores_inherited_base_and_accepts_inline_external_ref_ca
 /// refused with a recovery command that works in their current state.
 #[tokio::test]
 async fn inline_no_code_intent_survives_dispatch_and_approved_proof_cas_099d() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     std::fs::write(
         cas_dir.join("config.toml"),
@@ -8416,12 +8364,12 @@ async fn close_with_external_receipt_fixture(
 
 #[tokio::test]
 async fn supervisor_external_pass_receipt_closes_zero_commit_delivery_cas_3924() {
-    let (temp, core) = setup_cas_as(AgentRole::Supervisor);
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas_as(&mut test_env, AgentRole::Supervisor);
     let supervisor_id = format!("test-session-{}", std::process::id());
-    let _env_lock = env_test_lock();
     let cas_dir = temp.path().join(".cas");
     let factory_session = "cas-3924-fixture-session";
-    let _env = ScopedFactoryEnv::apply(&[
+    let _env = ScopedFactoryEnv::apply(&mut test_env, &[
         ("CAS_AGENT_ROLE", Some("supervisor")),
         ("CAS_FACTORY_MODE", Some("1")),
         ("CAS_FACTORY_SESSION", Some(factory_session)),
@@ -8757,8 +8705,8 @@ async fn supervisor_external_pass_receipt_closes_zero_commit_delivery_cas_3924()
 /// explicit Task() spawn instructions.
 #[tokio::test]
 async fn test_factory_worker_close_creates_task_scoped_dispatch() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     // cas-8edb: under default `[code_review] owner = "supervisor"`, worker
@@ -8774,7 +8722,7 @@ owner = "worker"
     .expect("should write legacy code_review config");
 
     let service = CasService::new(core, None);
-    let _env = FactoryWorkerEnv::enter();
+    let _env = FactoryWorkerEnv::enter(&mut test_env);
 
     // Create and start a task so it's leased + InProgress with no verification.
     let create = task_req(serde_json::json!({
@@ -8838,13 +8786,13 @@ owner = "worker"
 
 #[tokio::test]
 async fn test_worker_close_zero_diff_uses_standard_verification_cas_8387() {
-    let (_temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, core) = setup_cas(&mut test_env);
 
     // No config.toml written: the removed code-review owner setting has no
     // bearing on the standard verification gate.
     let service = CasService::new(core, None);
-    let _env = FactoryWorkerEnv::enter();
+    let _env = FactoryWorkerEnv::enter(&mut test_env);
 
     let created = service
         .task(Parameters(task_req(serde_json::json!({
@@ -8890,12 +8838,12 @@ async fn test_worker_close_zero_diff_uses_standard_verification_cas_8387() {
 
 #[tokio::test]
 async fn test_worker_close_additive_only_uses_standard_verification_cas_8387() {
-    let (_temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, core) = setup_cas(&mut test_env);
 
     // Default config: the removed code-review owner setting is irrelevant.
     let service = CasService::new(core, None);
-    let _env = FactoryWorkerEnv::enter();
+    let _env = FactoryWorkerEnv::enter(&mut test_env);
 
     let created = service
         .task(Parameters(task_req(serde_json::json!({
@@ -8941,8 +8889,8 @@ async fn test_worker_close_additive_only_uses_standard_verification_cas_8387() {
 
 #[tokio::test]
 async fn test_legacy_owner_worker_still_requires_exact_close_verification_cas_8edb() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     // Opt back in to legacy `owner = "worker"` mode. This must still jail a
@@ -8957,7 +8905,7 @@ owner = "worker"
     .expect("should write legacy code_review config");
 
     let service = CasService::new(core, None);
-    let _env = FactoryWorkerEnv::enter();
+    let _env = FactoryWorkerEnv::enter(&mut test_env);
 
     let created = service
         .task(Parameters(task_req(serde_json::json!({
@@ -9002,12 +8950,12 @@ owner = "worker"
 /// bypassed — would be trapped by `VERIFICATION_JAIL_BLOCKED`.
 #[tokio::test]
 async fn test_skipped_verification_row_satisfies_jail_and_close() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let verification_store = open_verification_store(&cas_dir).unwrap();
     let service = CasService::new(core, None);
-    let _env = FactoryWorkerEnv::enter();
+    let _env = FactoryWorkerEnv::enter(&mut test_env);
 
     // Create + start a task so it's leased + InProgress.
     let created = service
@@ -9077,10 +9025,10 @@ async fn test_skipped_verification_row_satisfies_jail_and_close() {
 /// Only `task.close` triggers the jail now.
 #[tokio::test]
 async fn test_factory_worker_non_close_mutation_still_exempt() {
-    let (_temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, core) = setup_cas(&mut test_env);
     let service = CasService::new(core, None);
-    let _env = FactoryWorkerEnv::enter();
+    let _env = FactoryWorkerEnv::enter(&mut test_env);
 
     // Task A: will be leased + jailed (no verification record).
     let jailed = service
@@ -9146,13 +9094,13 @@ async fn test_factory_worker_non_close_mutation_still_exempt() {
 /// completes the close cleanly.
 #[tokio::test]
 async fn test_task_close_succeeds_after_verifier_clearance() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let task_store = open_task_store(&cas_dir).unwrap();
     let verification_store = open_verification_store(&cas_dir).unwrap();
     let service = CasService::new(core, None);
-    let _env = FactoryWorkerEnv::enter();
+    let _env = FactoryWorkerEnv::enter(&mut test_env);
 
     let created = service
         .task(Parameters(task_req(serde_json::json!({
@@ -9228,8 +9176,8 @@ async fn test_task_close_succeeds_after_verifier_clearance() {
 /// pending transition remains untouched.
 #[tokio::test]
 async fn test_close_auto_escalates_stale_verification_dispatch() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     let verification_store = open_verification_store(&cas_dir).unwrap();
@@ -9397,15 +9345,15 @@ async fn test_close_auto_escalates_stale_verification_dispatch() {
 /// claims are irrelevant; the persisted provenance must reflect the role gate.
 #[tokio::test]
 async fn test_registered_supervisor_can_verify_live_worker_task() {
+    let mut test_env = TestEnvGuard::temp_home();
     // Per support.rs ordering contract: setup helper FIRST (it briefly
     // grabs the lock to clear factory env vars), then acquire the lock
     // for the test body. std `Mutex` is not re-entrant — reversing the
     // order would deadlock. Clearing the factory env vars ensures
     // `worker_harness_from_env()` falls back to Claude (subagents=true)
     // and the supervisor authz branch actually runs.
-    let (temp, service) = setup_cas_as(AgentRole::Supervisor);
+    let (temp, service) = setup_cas_as(&mut test_env, AgentRole::Supervisor);
     let supervisor_id = format!("test-session-{}", std::process::id());
-    let _env_lock = env_test_lock();
     let cas_dir = temp.path().join(".cas");
     let agent_store = open_agent_store(&cas_dir).expect("open agent store");
     let task_store = open_task_store(&cas_dir).expect("open task store");
@@ -9528,14 +9476,14 @@ async fn test_registered_supervisor_can_verify_live_worker_task() {
 /// returns true. Snapshots and restores the prior value of each var on drop
 /// (cas-7cc9) rather than blindly removing it, so a surrounding factory env
 /// is left exactly as it was found.
-struct CodexWorkerEnv {
-    _env: ScopedFactoryEnv,
+struct CodexWorkerEnv<'a> {
+    _env: ScopedFactoryEnv<'a>,
 }
 
-impl CodexWorkerEnv {
-    fn enter() -> Self {
+impl<'a> CodexWorkerEnv<'a> {
+    fn enter(test_env: &'a mut TestEnvGuard) -> Self {
         Self {
-            _env: ScopedFactoryEnv::apply(&[
+            _env: ScopedFactoryEnv::apply(test_env, &[
                 ("CAS_AGENT_ROLE", Some("worker")),
                 ("CAS_FACTORY_MODE", Some("1")),
                 ("CAS_FACTORY_WORKER_CLI", Some("codex")),
@@ -9553,7 +9501,7 @@ impl CodexWorkerEnv {
 // drop, clobbering any pre-existing factory env owned by the surrounding
 // test/process. After the fix they snapshot the prior value and restore it (or
 // remove only vars that were originally absent). These tests hold
-// env_test_lock() for their whole body and do not call setup_cas(), so they
+// TestEnvGuard for their whole body and do not call setup_cas(), so they
 // exercise the guard against a deliberately non-empty starting environment.
 // =============================================================================
 
@@ -9561,11 +9509,11 @@ impl CodexWorkerEnv {
 /// found them: prior values are restored on drop, not removed. (AC1, AC3)
 #[test]
 fn test_codex_worker_env_restores_prior_factory_values_on_drop_cas_7cc9() {
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
 
     // Establish a non-empty prior environment that differs from what the
     // guard installs, so a blind remove-on-drop would be observable.
-    // SAFETY: env_test_lock held for the entire test body.
+    // SAFETY: TestEnvGuard held for the entire test body.
     unsafe {
         std::env::set_var("CAS_AGENT_ROLE", "supervisor");
         std::env::set_var("CAS_FACTORY_MODE", "0");
@@ -9573,7 +9521,7 @@ fn test_codex_worker_env_restores_prior_factory_values_on_drop_cas_7cc9() {
     }
 
     {
-        let _env = CodexWorkerEnv::enter();
+        let _env = CodexWorkerEnv::enter(&mut test_env);
         // Inside the guard the Codex-worker values are active.
         assert_eq!(std::env::var("CAS_AGENT_ROLE").as_deref(), Ok("worker"));
         assert_eq!(std::env::var("CAS_FACTORY_MODE").as_deref(), Ok("1"));
@@ -9601,7 +9549,7 @@ fn test_codex_worker_env_restores_prior_factory_values_on_drop_cas_7cc9() {
     );
 
     // Clean up the values this test introduced so no sibling depends on them.
-    // SAFETY: still holding env_test_lock.
+    // SAFETY: still holding TestEnvGuard.
     unsafe {
         std::env::remove_var("CAS_AGENT_ROLE");
         std::env::remove_var("CAS_FACTORY_MODE");
@@ -9613,10 +9561,10 @@ fn test_codex_worker_env_restores_prior_factory_values_on_drop_cas_7cc9() {
 /// leak its own injected values), confirming the snapshot==None branch. (AC2, AC4)
 #[test]
 fn test_codex_worker_env_removes_originally_absent_vars_on_drop_cas_7cc9() {
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
 
     // Start from a clean slate: these vars are absent before the guard.
-    // SAFETY: env_test_lock held for the entire test body.
+    // SAFETY: TestEnvGuard held for the entire test body.
     unsafe {
         std::env::remove_var("CAS_AGENT_ROLE");
         std::env::remove_var("CAS_FACTORY_MODE");
@@ -9624,7 +9572,7 @@ fn test_codex_worker_env_removes_originally_absent_vars_on_drop_cas_7cc9() {
     }
 
     {
-        let _env = CodexWorkerEnv::enter();
+        let _env = CodexWorkerEnv::enter(&mut test_env);
         assert_eq!(
             std::env::var("CAS_FACTORY_WORKER_CLI").as_deref(),
             Ok("codex")
@@ -9652,16 +9600,16 @@ fn test_codex_worker_env_removes_originally_absent_vars_on_drop_cas_7cc9() {
 /// (cas-7cc9 / R2). (AC1, AC2)
 #[test]
 fn test_factory_worker_env_clears_and_restores_worker_cli_cas_7cc9() {
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
 
     // Simulate a `codex` CLI value leaked from a sibling Codex context.
-    // SAFETY: env_test_lock held for the entire test body.
+    // SAFETY: TestEnvGuard held for the entire test body.
     unsafe {
         std::env::set_var("CAS_FACTORY_WORKER_CLI", "codex");
     }
 
     {
-        let _env = FactoryWorkerEnv::enter();
+        let _env = FactoryWorkerEnv::enter(&mut test_env);
         // A Claude-worker context must not observe a stale codex CLI.
         assert!(
             std::env::var_os("CAS_FACTORY_WORKER_CLI").is_none(),
@@ -9679,7 +9627,7 @@ fn test_factory_worker_env_clears_and_restores_worker_cli_cas_7cc9() {
     );
 
     // Clean up so no sibling inherits the simulated leak.
-    // SAFETY: still holding env_test_lock.
+    // SAFETY: still holding TestEnvGuard.
     unsafe {
         std::env::remove_var("CAS_FACTORY_WORKER_CLI");
     }
@@ -9695,12 +9643,12 @@ fn test_factory_worker_env_clears_and_restores_worker_cli_cas_7cc9() {
 /// Claude, which DOES require verification, breaking every Codex worker close.
 #[tokio::test]
 async fn test_codex_worker_close_not_jailed_under_supervisor_owned_review_cas_8aaf() {
-    let (_temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, core) = setup_cas(&mut test_env);
 
     // No config.toml written => default code_review.owner = "supervisor" (cas-865b).
     let service = CasService::new(core, None);
-    let _env = CodexWorkerEnv::enter();
+    let _env = CodexWorkerEnv::enter(&mut test_env);
 
     let created = service
         .task(Parameters(task_req(serde_json::json!({
@@ -9748,8 +9696,8 @@ async fn test_codex_worker_close_not_jailed_under_supervisor_owned_review_cas_8a
 /// the non-factory branch. Complements the Codex variant below.
 #[tokio::test]
 async fn test_claude_worker_close_dispatch_recommends_cas_coordination_cas_8aaf() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     // Opt into legacy owner=worker so the jail fires for Claude workers.
@@ -9761,7 +9709,7 @@ async fn test_claude_worker_close_dispatch_recommends_cas_coordination_cas_8aaf(
 
     let service = CasService::new(core, None);
     // Claude worker: CAS_FACTORY_WORKER_CLI not set => defaults to Claude harness.
-    let _env = FactoryWorkerEnv::enter();
+    let _env = FactoryWorkerEnv::enter(&mut test_env);
 
     let created = service
         .task(Parameters(task_req(serde_json::json!({
@@ -9825,8 +9773,8 @@ async fn test_claude_worker_close_dispatch_recommends_cas_coordination_cas_8aaf(
 /// guidance. Post-fix, harness is detected correctly and the jail bypasses.
 #[tokio::test]
 async fn test_codex_worker_not_jailed_even_under_owner_worker_cas_8aaf() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     // Force legacy owner=worker to confirm Codex workers are still bypassed.
@@ -9838,7 +9786,7 @@ async fn test_codex_worker_not_jailed_even_under_owner_worker_cas_8aaf() {
 
     let service = CasService::new(core, None);
     // Codex worker env: CAS_FACTORY_WORKER_CLI=codex makes harness=Codex.
-    let _env = CodexWorkerEnv::enter();
+    let _env = CodexWorkerEnv::enter(&mut test_env);
 
     let created = service
         .task(Parameters(task_req(serde_json::json!({
@@ -9904,8 +9852,8 @@ async fn test_codex_worker_not_jailed_even_under_owner_worker_cas_8aaf() {
 /// owner=supervisor factory workers are fully exempt from close-time jail).
 #[tokio::test]
 async fn test_close_verified_task_not_blocked_by_unrelated_unverified_task_cas_a3ca() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     // Legacy owner=worker so the jail check fires for task.close
@@ -9918,7 +9866,7 @@ async fn test_close_verified_task_not_blocked_by_unrelated_unverified_task_cas_a
     let service = CasService::new(core, None);
     // Claude factory worker — CAS_FACTORY_WORKER_CLI not set → defaults to
     // Claude harness (supports subagents → verification required for tasks).
-    let _env = FactoryWorkerEnv::enter();
+    let _env = FactoryWorkerEnv::enter(&mut test_env);
 
     // --- Task A: create, start, add approved verification ---
     let id_a = extract_task_id(&extract_text(
@@ -10018,8 +9966,8 @@ async fn test_close_verified_task_not_blocked_by_unrelated_unverified_task_cas_a
 /// disabled the jail for the task being closed.
 #[tokio::test]
 async fn test_close_unverified_task_still_blocked_by_own_missing_verification_cas_a3ca() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     // Legacy owner=worker so the jail fires for task.close
@@ -10030,7 +9978,7 @@ async fn test_close_unverified_task_still_blocked_by_own_missing_verification_ca
     .expect("write legacy code_review config");
 
     let service = CasService::new(core, None);
-    let _env = FactoryWorkerEnv::enter();
+    let _env = FactoryWorkerEnv::enter(&mut test_env);
 
     // Task A: in progress, NO verification
     let id_a = extract_task_id(&extract_text(
@@ -10082,8 +10030,8 @@ async fn test_close_unverified_task_still_blocked_by_own_missing_verification_ca
 /// how to resolve a dispatch whose bound worker/verifier is unavailable.
 #[tokio::test]
 async fn test_pending_dispatch_close_gate_prints_supervisor_recovery_cas_9fd4() {
-    let (_temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let created = service
         .cas_task_create(Parameters(simple_task_req(
@@ -10132,8 +10080,8 @@ async fn test_pending_dispatch_close_gate_prints_supervisor_recovery_cas_9fd4() 
 /// and unverified is irrelevant to A's close.
 #[tokio::test]
 async fn test_cdee_cas8236_sequence_close_verified_task_while_second_task_in_progress_cas_a3ca() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     std::fs::write(
@@ -10143,7 +10091,7 @@ async fn test_cdee_cas8236_sequence_close_verified_task_while_second_task_in_pro
     .expect("write owner=worker config");
 
     let service = CasService::new(core, None);
-    let _env = FactoryWorkerEnv::enter();
+    let _env = FactoryWorkerEnv::enter(&mut test_env);
 
     // cas-cdee analogue: completed and supervisor-verified
     let id_cdee = extract_task_id(&extract_text(
@@ -10268,11 +10216,11 @@ async fn test_cdee_cas8236_sequence_close_verified_task_while_second_task_in_pro
 /// the correct alias to message the supervisor.
 #[tokio::test]
 async fn test_codex_worker_epic_close_jail_recommends_cs_coordination_cas_1b80() {
-    let (temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     // setup_cas() clears CAS_FACTORY_SUPERVISOR_CLI (among other vars), so
     // supervisor_harness_from_env() defaults to Claude — the prerequisite for
     // verification_policy(Claude, Codex).epic_required() returning true.
-    let _env_lock = env_test_lock();
     let cas_dir = temp.path().join(".cas");
 
     // Opt into legacy owner=worker so the verification jail fires at task.close.
@@ -10286,7 +10234,7 @@ async fn test_codex_worker_epic_close_jail_recommends_cs_coordination_cas_1b80()
     let service = CasService::new(core, None);
     // Codex worker: CAS_FACTORY_WORKER_CLI=codex makes worker_harness_from_env()
     // return Codex, so worker_coordination_tool() returns mcp__cs__coordination.
-    let _env = CodexWorkerEnv::enter();
+    let _env = CodexWorkerEnv::enter(&mut test_env);
 
     // Create an Epic task. For Codex workers under a Claude supervisor,
     // verification_policy(Claude, Codex).epic_required() returns true
@@ -10370,15 +10318,15 @@ async fn test_codex_worker_epic_close_jail_recommends_cs_coordination_cas_1b80()
 /// the prior value on drop (cas-7cc9: snapshot/restore via ScopedFactoryEnv
 /// instead of an unconditional remove). setup_cas() clears this var, so callers
 /// that run after it see the same baseline as before.
-struct ScopedSupervisorCliEnv {
-    _env: ScopedFactoryEnv,
+struct ScopedSupervisorCliEnv<'a> {
+    _env: ScopedFactoryEnv<'a>,
 }
 
-impl ScopedSupervisorCliEnv {
-    fn set(cli: &str) -> Self {
-        // SAFETY: env-sensitive tests serialize via env_test_lock(); see setup_cas().
+impl<'a> ScopedSupervisorCliEnv<'a> {
+    fn set(test_env: &'a mut TestEnvGuard, cli: &str) -> Self {
+        // SAFETY: env-sensitive tests serialize via TestEnvGuard; see setup_cas().
         Self {
-            _env: ScopedFactoryEnv::apply(&[("CAS_FACTORY_SUPERVISOR_CLI", Some(cli))]),
+            _env: ScopedFactoryEnv::apply(test_env, &[("CAS_FACTORY_SUPERVISOR_CLI", Some(cli))]),
         }
     }
 }
@@ -10386,9 +10334,11 @@ impl ScopedSupervisorCliEnv {
 /// Drive the `supervisor_is_assignee` self-verify branch and assert the direct
 /// verification alias tracks the supervisor harness. Returns the rendered
 /// guidance so each harness variant can assert on it.
-async fn supervisor_self_assignee_close_guidance(supervisor_cli: Option<&str>) -> String {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+async fn supervisor_self_assignee_close_guidance(
+    test_env: &mut TestEnvGuard,
+    supervisor_cli: Option<&str>,
+) -> String {
+    let (temp, service) = setup_cas(test_env);
     let cas_dir = temp.path().join(".cas");
     let task_store = open_task_store(&cas_dir).unwrap();
     let agent_store = open_agent_store(&cas_dir).expect("open agent store");
@@ -10438,8 +10388,11 @@ async fn supervisor_self_assignee_close_guidance(supervisor_cli: Option<&str>) -
     task.assignee = Some(sup_id.clone());
     task_store.update(&task).expect("update task");
 
-    let _sup = ScopedSupervisorEnv::new();
-    let _cli = supervisor_cli.map(ScopedSupervisorCliEnv::set);
+    let mut supervisor_env = ScopedSupervisorEnv::new(test_env);
+    let _cli = match supervisor_cli {
+        Some(cli) => Some(ScopedSupervisorCliEnv::set(supervisor_env._env.guard(), cli)),
+        None => None,
+    };
 
     let response = extract_text(
         service
@@ -10470,7 +10423,8 @@ async fn supervisor_self_assignee_close_guidance(supervisor_cli: Option<&str>) -
 /// Codex verification alias in the self-verify guidance.
 #[tokio::test]
 async fn test_supervisor_self_assignee_close_uses_codex_verification_alias_cas_7998() {
-    let response = supervisor_self_assignee_close_guidance(Some("codex")).await;
+    let mut test_env = TestEnvGuard::temp_home();
+    let response = supervisor_self_assignee_close_guidance(&mut test_env, Some("codex")).await;
     assert!(
         response.contains("mcp__cs__verification"),
         "Codex supervisor self-verify guidance must use mcp__cs__verification: {response}"
@@ -10486,7 +10440,8 @@ async fn test_supervisor_self_assignee_close_uses_codex_verification_alias_cas_7
 /// path.
 #[tokio::test]
 async fn test_supervisor_self_assignee_close_uses_claude_verification_alias_cas_7998() {
-    let response = supervisor_self_assignee_close_guidance(None).await;
+    let mut test_env = TestEnvGuard::temp_home();
+    let response = supervisor_self_assignee_close_guidance(&mut test_env, None).await;
     assert!(
         response.contains("mcp__cas__verification"),
         "Claude supervisor self-verify guidance must use mcp__cas__verification: {response}"
@@ -10503,8 +10458,8 @@ async fn test_supervisor_self_assignee_close_uses_claude_verification_alias_cas_
 /// alias they cannot call.
 #[tokio::test]
 async fn test_timeout_escalation_uses_codex_supervisor_verification_alias_cas_7998() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     let created = service
@@ -10566,7 +10521,7 @@ async fn test_timeout_escalation_uses_codex_supervisor_verification_alias_cas_79
     .expect("expire typed dispatch");
 
     // Codex supervisor harness drives the alias selection in the timeout arm.
-    let _cli = ScopedSupervisorCliEnv::set("codex");
+    let _cli = ScopedSupervisorCliEnv::set(&mut test_env, "codex");
 
     let text = extract_text(
         service
@@ -10601,8 +10556,8 @@ async fn test_timeout_escalation_uses_codex_supervisor_verification_alias_cas_79
 /// verification_flow's domain (supervisor orphan bypass → Closed).
 #[tokio::test]
 async fn test_062d_close_lifecycle_push_to_owning_supervisor() {
-    let (temp, service) = setup_cas_as(AgentRole::Supervisor);
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas_as(&mut test_env, AgentRole::Supervisor);
     let cas_dir = temp.path().join(".cas");
 
     // Register a factory-session supervisor that owns lifecycle events.
@@ -10620,8 +10575,8 @@ async fn test_062d_close_lifecycle_push_to_owning_supervisor() {
     sup.factory_session = Some(session.to_string());
     agent_store.register(&sup).expect("register supervisor");
 
-    // SAFETY: hold env_test_lock for the factory session + supervisor role.
-    let _guard = ScopedFactoryEnv::apply(&[
+    // SAFETY: hold TestEnvGuard for the factory session + supervisor role.
+    let _guard = ScopedFactoryEnv::apply(&mut test_env, &[
         ("CAS_FACTORY_SESSION", Some(session)),
         ("CAS_AGENT_ROLE", Some("supervisor")),
     ]);
@@ -10707,10 +10662,10 @@ async fn test_062d_close_lifecycle_push_to_owning_supervisor() {
 /// illegal — the exact deadlock this task exists to break.
 #[tokio::test]
 async fn test_60393_owned_awaiting_merge_recloses_despite_preexisting_halt() {
+    let mut test_env = TestEnvGuard::temp_home();
     use std::process::Command;
 
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let agent_store = open_agent_store(&cas_dir).expect("open agent store");
     {
@@ -10906,10 +10861,10 @@ async fn test_60393_owned_awaiting_merge_recloses_despite_preexisting_halt() {
 /// the halt check itself was skipped for this owned task.
 #[tokio::test]
 async fn test_60393_unmerged_awaiting_merge_still_bounces_merge_required_under_halt() {
+    let mut test_env = TestEnvGuard::temp_home();
     use std::process::Command;
 
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let agent_store = open_agent_store(&cas_dir).expect("open agent store");
     {
@@ -11093,8 +11048,8 @@ async fn test_60393_unmerged_awaiting_merge_still_bounces_merge_required_under_h
 /// `test_3894_halted_worker_still_blocked_closing_unowned_task` above.
 #[tokio::test]
 async fn test_3894_halt_no_longer_blocks_close_of_own_inprogress_task() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let agent_store = open_agent_store(&cas_dir).expect("open agent store");
     {
@@ -11184,8 +11139,8 @@ async fn test_3894_halt_no_longer_blocks_close_of_own_inprogress_task() {
 /// diagnostic projection. Portable identifiers must still survive untouched.
 #[tokio::test]
 async fn test_verifier_embedded_paths_and_obfuscated_secrets_never_persist_or_project() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     std::fs::write(
         cas_dir.join("config.toml"),

@@ -12,36 +12,6 @@ use chrono::{Duration, Utc};
 use rmcp::handler::server::wrapper::Parameters;
 use rusqlite::Connection;
 
-struct EnvGuard(Vec<(&'static str, Option<String>)>);
-
-impl EnvGuard {
-    fn set(values: &[(&'static str, &'static str)]) -> Self {
-        let previous = values
-            .iter()
-            .map(|(key, _)| (*key, std::env::var(key).ok()))
-            .collect();
-        for (key, value) in values {
-            // SAFETY: callers hold support::env_test_lock for this guard's lifetime.
-            unsafe { std::env::set_var(key, value) };
-        }
-        Self(previous)
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        for (key, value) in self.0.drain(..) {
-            // SAFETY: callers hold support::env_test_lock for this guard's lifetime.
-            unsafe {
-                match value {
-                    Some(value) => std::env::set_var(key, value),
-                    None => std::env::remove_var(key),
-                }
-            }
-        }
-    }
-}
-
 struct ClosedFixture {
     temp: tempfile::TempDir,
     service: cas::mcp::CasCore,
@@ -51,16 +21,14 @@ struct ClosedFixture {
 }
 
 impl ClosedFixture {
-    fn new(suffix: &str) -> Self {
-        let (temp, service) = setup_cas();
+    fn new(env: &mut TestEnvGuard, suffix: &str) -> Self {
+        let (temp, service) = setup_cas(env);
         let cas_dir = temp.path().join(".cas");
         let task_store = open_task_store(&cas_dir).expect("task store");
         let agent_store = open_agent_store(&cas_dir).expect("agent store");
         let supervisor_id = format!("reopen-supervisor-{suffix}-{}", std::process::id());
-        let mut supervisor = cas::types::Agent::new(
-            supervisor_id.clone(),
-            format!("reopen-supervisor-{suffix}"),
-        );
+        let mut supervisor =
+            cas::types::Agent::new(supervisor_id.clone(), format!("reopen-supervisor-{suffix}"));
         supervisor.role = AgentRole::Supervisor;
         supervisor.factory_session = Some("atomic-reopen-session".to_string());
         agent_store
@@ -207,12 +175,14 @@ fn install_failure(conn: &Connection, name: &str, body: &str) {
 
 #[tokio::test]
 async fn reopen_rolls_back_every_later_write_and_retries_idempotently() {
-    let fixture = ClosedFixture::new("update");
-    let _env_lock = env_test_lock();
-    let _env = EnvGuard::set(&[
+    let mut test_env = TestEnvGuard::temp_home();
+    let fixture = ClosedFixture::new(&mut test_env, "update");
+    for (key, value) in [
         ("CAS_AGENT_ROLE", "supervisor"),
         ("CAS_FACTORY_SESSION", "atomic-reopen-session"),
-    ]);
+    ] {
+        test_env.set(key, value);
+    }
     let before = snapshot(&fixture);
     let db_path = fixture.cas_dir().join("cas.db");
 
@@ -292,12 +262,14 @@ async fn reopen_rolls_back_every_later_write_and_retries_idempotently() {
 
 #[tokio::test]
 async fn dedicated_reopen_is_failure_atomic_and_exact_retry_is_a_noop() {
-    let fixture = ClosedFixture::new("dedicated");
-    let _env_lock = env_test_lock();
-    let _env = EnvGuard::set(&[
+    let mut test_env = TestEnvGuard::temp_home();
+    let fixture = ClosedFixture::new(&mut test_env, "dedicated");
+    for (key, value) in [
         ("CAS_AGENT_ROLE", "supervisor"),
         ("CAS_FACTORY_SESSION", "atomic-reopen-session"),
-    ]);
+    ] {
+        test_env.set(key, value);
+    }
     let before = snapshot(&fixture);
     let db_path = fixture.cas_dir().join("cas.db");
     let conn = Connection::open(&db_path).expect("trigger db");

@@ -77,8 +77,8 @@ struct Fx {
 
 /// Repo whose `factory/test-agent` delivers `delivered` (path, body), for a
 /// task with the given demo_statement. The fixture core is the implementer.
-fn fixture(delivered: &[(&str, &str)], demo: &str) -> Fx {
-    let (temp, core) = setup_cas();
+fn fixture(test_env: &mut TestEnvGuard, delivered: &[(&str, &str)], demo: &str) -> Fx {
+    let (temp, core) = setup_cas(test_env);
     let repo = temp.path().to_path_buf();
     let artifacts = repo.join("artifacts");
     std::fs::write(
@@ -204,11 +204,11 @@ impl Fx {
 
 #[tokio::test]
 async fn user_facing_close_without_a_bundle_is_rejected_with_the_next_command() {
-    let fx = fixture(
+    let mut test_env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut test_env,
         &[("web/composer.css", ".composer{gap:8px}\n")],
         "Open the composer; spacing is even",
     );
-    let _env = env_test_lock();
 
     let refused = close_text(&fx.core, TASK).await;
     assert!(
@@ -236,11 +236,11 @@ async fn user_facing_close_without_a_bundle_is_rejected_with_the_next_command() 
 
 #[tokio::test]
 async fn valid_bundle_lets_the_delivery_park_and_a_later_commit_makes_it_stale() {
-    let fx = fixture(
+    let mut test_env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut test_env,
         &[("web/composer.css", ".composer{gap:8px}\n")],
         "Open the composer; spacing is even",
     );
-    let _env = env_test_lock();
     let head = git(&fx.repo, &["rev-parse", "factory/test-agent"]);
     let bundle = fx.write_bundle(&head);
 
@@ -273,8 +273,8 @@ async fn valid_bundle_lets_the_delivery_park_and_a_later_commit_makes_it_stale()
 
 #[tokio::test]
 async fn docs_only_delivery_with_a_demo_statement_is_not_gated() {
-    let fx = fixture(&[("docs/guide.md", "# Guide\n")], "Read the guide");
-    let _env = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut test_env, &[("docs/guide.md", "# Guide\n")], "Read the guide");
 
     let parked = close_text(&fx.core, TASK).await;
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
@@ -283,11 +283,11 @@ async fn docs_only_delivery_with_a_demo_statement_is_not_gated() {
 
 #[tokio::test]
 async fn demo_only_non_web_delivery_needs_the_evidence_ledger() {
-    let fx = fixture(
+    let mut test_env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut test_env,
         &[("cas-cli/src/report.rs", "pub fn report() {}\n")],
         "Run cas report; it prints totals",
     );
-    let _env = env_test_lock();
 
     let refused = close_text(&fx.core, TASK).await;
     assert!(
@@ -312,11 +312,11 @@ async fn demo_only_non_web_delivery_needs_the_evidence_ledger() {
 
 #[tokio::test]
 async fn demo_only_ledger_accepts_a_row_without_outer_pipes() {
-    let fx = fixture(
+    let mut test_env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut test_env,
         &[("cas-cli/src/report.rs", "pub fn report() {}\n")],
         "Run cas report; it prints totals",
     );
-    let _env = env_test_lock();
     let ledger = fx.artifacts.join(TASK).join("LEDGER.md");
     std::fs::create_dir_all(ledger.parent().unwrap()).unwrap();
     std::fs::write(
@@ -336,14 +336,14 @@ async fn demo_only_ledger_accepts_a_row_without_outer_pipes() {
 
 #[tokio::test]
 async fn healer_style_fixme_is_refused_even_on_a_test_only_delivery() {
-    let fx = fixture(
+    let mut test_env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut test_env,
         &[(
             "hub-web/e2e/generated/fleet.spec.ts",
             "import { test } from \"@playwright/test\";\ntest(\"fleet\", async () => {\n  test.fixme(true, \"verdict disagrees\");\n});\n",
         )],
         "",
     );
-    let _env = env_test_lock();
 
     let refused = close_text(&fx.core, TASK).await;
     assert!(
@@ -374,11 +374,11 @@ async fn healer_style_fixme_is_refused_even_on_a_test_only_delivery() {
 
 #[tokio::test]
 async fn evidence_gate_can_be_disabled_per_project() {
-    let fx = fixture(
+    let mut test_env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut test_env,
         &[("web/composer.css", ".composer{gap:8px}\n")],
         "Open the composer",
     );
-    let _env = env_test_lock();
     let config = fx.repo.join(".cas").join("config.toml");
     let body = std::fs::read_to_string(&config).unwrap();
     std::fs::write(
@@ -393,11 +393,11 @@ async fn evidence_gate_can_be_disabled_per_project() {
 
 #[tokio::test]
 async fn demo_only_terminal_rendering_change_also_needs_a_terminal_qa_receipt() {
-    let fx = fixture(
+    let mut test_env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut test_env,
         &[("cas-cli/src/ui/status.rs", "pub fn draw() {}\n")],
         "Run cas status; the table fits 80 columns",
     );
-    let _env = env_test_lock();
     let task_dir = fx.artifacts.join(TASK);
     std::fs::create_dir_all(&task_dir).unwrap();
     std::fs::write(
@@ -426,11 +426,11 @@ async fn demo_only_terminal_rendering_change_also_needs_a_terminal_qa_receipt() 
 
 #[tokio::test]
 async fn supervisor_override_waives_the_gate_with_a_logged_decision() {
-    let fx = fixture(
+    let mut test_env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut test_env,
         &[("web/composer.css", ".composer{gap:8px}\n")],
         "Open the composer",
     );
-    let _env = env_test_lock();
     let cas_dir = fx.repo.join(".cas");
     let id = format!("supervisor-session-{}", std::process::id());
     cas::store::open_agent_store(&cas_dir)

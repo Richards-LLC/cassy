@@ -22,7 +22,8 @@ async fn create_task(service: &CasService, title: &str) -> String {
 
 #[tokio::test]
 async fn task_get_alias_resolves_to_show() {
-    let (_temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, core) = setup_cas(&mut test_env);
     let service = CasService::new(core, None);
     let id = create_task(&service, "get alias target").await;
 
@@ -38,7 +39,8 @@ async fn task_get_alias_resolves_to_show() {
 
 #[tokio::test]
 async fn task_dep_add_blocked_by_alias_resolves_to_to_id() {
-    let (_temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, core) = setup_cas(&mut test_env);
     let service = CasService::new(core, None);
     let dependent = create_task(&service, "dependent").await;
     let blocker = create_task(&service, "blocker").await;
@@ -60,7 +62,8 @@ async fn task_dep_add_blocked_by_alias_resolves_to_to_id() {
 
 #[tokio::test]
 async fn task_dep_remove_blocked_by_alias_resolves_to_to_id() {
-    let (_temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, core) = setup_cas(&mut test_env);
     let service = CasService::new(core, None);
     let dependent = create_task(&service, "dependent for remove").await;
     let blocker = create_task(&service, "blocker for remove").await;
@@ -126,7 +129,8 @@ fn coordination_factory_aliases_map_to_canonical_fields() {
 
 #[tokio::test]
 async fn coordination_inbox_alias_resolves_to_inbox_poll() {
-    let (_temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, core) = setup_cas(&mut test_env);
     let service = CasService::new(core, None);
     let request: CoordinationRequest = serde_json::from_value(serde_json::json!({
         "action": "inbox"

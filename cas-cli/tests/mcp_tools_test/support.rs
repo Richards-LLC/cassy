@@ -1,6 +1,6 @@
+pub(crate) use crate::test_env_guard::TestEnvGuard;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard, OnceLock};
 use tempfile::TempDir;
 
 use cas::mcp::CasCore;
@@ -9,120 +9,46 @@ use cas::store::{
 };
 use cas::types::{Agent, AgentRole};
 
-/// Shared process-wide lock for tests that mutate environment variables
-/// (`CAS_AGENT_ROLE`, factory harness vars, etc.). Cargo runs integration
-/// tests concurrently by default and env vars are a global, so without
-/// this lock one test's `ScopedSupervisorEnv::new()` can be clobbered by
-/// another test's `setup_cas()` mid-flight, silently flipping the first
-/// test into the non-supervisor branch and producing nondeterministic
-/// failures (cas-3bd4: the bypass close test was flaking as the Skipped
-/// verification row lost the race to the dispatch Error row).
-///
-/// All env-sensitive tests must acquire this guard for the full duration
-/// of their test body, **after** calling `setup_cas` — see the doc on
-/// [`setup_cas`] for the ordering contract.
-///
-/// The guard also recovers from poisoning: a prior panic must not prevent
-/// subsequent tests from acquiring the lock.
-pub(crate) fn env_test_lock() -> MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+/// Initialize a CAS fixture under the caller's canonical environment guard.
+/// Acquire `TestEnvGuard::temp_home()` before setup and retain it through all
+/// handler awaits. Helpers borrow this owner; none acquires another lock.
+/// The temporary HOME protects host stores and is restored even on unwind.
+pub(crate) fn setup_cas(env: &mut TestEnvGuard) -> (TempDir, CasCore) {
+    setup_cas_as(env, AgentRole::Standard)
 }
 
-/// Helper to create an initialized CAS environment.
-///
-/// **Ordering contract with `env_test_lock()`:** Tests that need to hold
-/// the env lock MUST call `setup_cas()` first and acquire
-/// `env_test_lock()` immediately afterwards. `setup_cas` briefly acquires
-/// the lock itself for its env mutations, so acquiring it in the test
-/// body before calling `setup_cas` would deadlock (std `Mutex` is not
-/// re-entrant). With the setup-then-lock order, the two acquisitions
-/// happen in series and tests composing `setup_cas` with
-/// `ScopedSupervisorEnv` stay race-free relative to other tests that
-/// also call `setup_cas`.
-/// Repoint `HOME` at a throwaway directory for the whole test process.
-///
-/// Several production paths resolve the *host* store from `HOME` rather than
-/// from the core's `cas_root` — `hooks::context::build_host_constraints_section`
-/// reads `~/.cas/cas.db` on every `cas_context` call, which is correct in
-/// production and catastrophic in a test: `cas_context` with `scope = "all"`
-/// opened the developer's real global store (cas-78c8 / GH #156, caught by the
-/// `CAS_TEST_PROTECTED_DBS` tripwire). A temp `.cas` project directory does not
-/// protect against this, because the host lookup never consults it.
-///
-/// Set once per process and never changed, so parallel tests cannot observe a
-/// torn value. The directory is deliberately leaked: it must outlive every
-/// test, and the OS reclaims it with the rest of `/tmp`.
-fn pin_home_to_a_sandbox() {
-    static SANDBOX_HOME: OnceLock<PathBuf> = OnceLock::new();
-    SANDBOX_HOME.get_or_init(|| {
-        let _env_guard = env_test_lock();
-        let home = TempDir::new()
-            .expect("sandbox HOME should be created")
-            .keep();
-        let xdg = home.join(".config");
-        std::fs::create_dir_all(&xdg).expect("sandbox XDG_CONFIG_HOME should be created");
-        // SAFETY: performed once, under the process-wide env lock, before any
-        // store in this process resolves a host path from HOME.
-        unsafe {
-            std::env::set_var("HOME", &home);
-            std::env::set_var("XDG_CONFIG_HOME", &xdg);
-        }
-        home
-    });
-}
-
-pub(crate) fn setup_cas() -> (TempDir, CasCore) {
-    setup_cas_as(AgentRole::Standard)
-}
-
-/// Remove factory identity inherited from the worker that launched this test
-/// process. The test agent must be registered without a factory session so
-/// GH #734's registered-session precedence cannot bind it to the parent
-/// supervisor. Callers must hold [`env_test_lock`] while mutating the process
-/// environment.
-fn scrub_factory_identity_env() {
-    // SAFETY: callers hold the process-wide env lock while scrubbing the
-    // factory identity used by AgentStore::register.
-    unsafe {
-        std::env::remove_var("CAS_FACTORY_SESSION");
-        std::env::remove_var("CAS_AGENT_ROLE");
-        std::env::remove_var("CAS_AGENT_NAME");
-        std::env::remove_var("CAS_SUPERVISOR_NAME");
-        std::env::remove_var("CAS_AGENT_ID");
+/// Clear inherited factory identity before registering a fixture agent.
+fn scrub_factory_identity_env(env: &mut TestEnvGuard) {
+    for key in [
+        "CAS_FACTORY_SESSION",
+        "CAS_AGENT_ROLE",
+        "CAS_AGENT_NAME",
+        "CAS_SUPERVISOR_NAME",
+        "CAS_AGENT_ID",
+    ] {
+        env.remove(key);
     }
 }
 
-/// Helper to create an initialized CAS environment and register the test
-/// session agent with the requested role.
-pub(crate) fn setup_cas_as(role: AgentRole) -> (TempDir, CasCore) {
-    pin_home_to_a_sandbox();
-
-    // Clear factory env vars that leak from the parent process (e.g., running
-    // inside a factory supervisor session) before registering the test agent.
-    // Without this, AgentStore::register records the parent's factory session
-    // and GH #734's registered-session precedence routes lifecycle events away
-    // from the fixture's supervisor.
-    //
-    // cas-3bd4: acquire the shared env lock for the duration of these
-    // mutations. Keep the lock until after registration so another test
-    // cannot restore the parent identity between the scrub and the store
-    // write.
-    let _env_guard = env_test_lock();
-    scrub_factory_identity_env();
-    // SAFETY: we hold the process-wide env lock for the duration of this
-    // block; no other test thread can observe a torn env read.
-    unsafe {
-        std::env::remove_var("CAS_FACTORY_MODE");
-        std::env::remove_var("CAS_FACTORY_SUPERVISOR_CLI");
-        std::env::remove_var("CAS_FACTORY_WORKER_CLI");
+/// Register the test session agent with the requested role, borrowing the
+/// test's environment owner for setup and every later handler call.
+pub(crate) fn setup_cas_as(env: &mut TestEnvGuard, role: AgentRole) -> (TempDir, CasCore) {
+    let xdg = env.home().join(".config");
+    std::fs::create_dir_all(&xdg).expect("sandbox XDG_CONFIG_HOME should be created");
+    env.set("XDG_CONFIG_HOME", &xdg);
+    scrub_factory_identity_env(env);
+    for key in [
+        "CAS_FACTORY_MODE",
+        "CAS_FACTORY_SUPERVISOR_CLI",
+        "CAS_FACTORY_WORKER_CLI",
+    ] {
+        env.remove(key);
     }
 
     let temp = TempDir::new().expect("temp dir should be created");
     let cas_dir = temp.path().join(".cas");
     std::fs::create_dir_all(&cas_dir).expect(".cas dir should be created");
+    env.set("CAS_ROOT", &cas_dir);
 
     let store = open_store(&cas_dir).expect("entry store should open");
     store.init().expect("entry store should initialize");
@@ -172,7 +98,7 @@ pub(crate) fn setup_cas_as(role: AgentRole) -> (TempDir, CasCore) {
 /// Ambient `CAS_SESSION_ID` masks the bug via env auto-register, which is why
 /// the suite can stay green inside a factory session and red on a clean
 /// checkout.
-pub(crate) fn core_with_test_agent(cas_dir: impl AsRef<Path>) -> CasCore {
+pub(crate) fn core_with_test_agent(env: &mut TestEnvGuard, cas_dir: impl AsRef<Path>) -> CasCore {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let cas_dir: PathBuf = cas_dir.as_ref().to_path_buf();
     let session_id = format!(
@@ -184,9 +110,7 @@ pub(crate) fn core_with_test_agent(cas_dir: impl AsRef<Path>) -> CasCore {
     let agent_store = open_agent_store(&cas_dir).expect("agent store should open");
     // Idempotent if setup_cas already initialized the store.
     let _ = agent_store.init();
-    // This helper is used by tests that already hold env_test_lock() for the
-    // full scenario (see the ordering contract above).
-    scrub_factory_identity_env();
+    scrub_factory_identity_env(env);
     let agent = Agent::new(session_id.clone(), "test-agent".to_string());
     agent_store
         .register(&agent)
@@ -281,4 +205,44 @@ pub(crate) fn register_host_project(path: &str) {
         .expect("sandbox host registry")
         .upsert(std::path::Path::new(path))
         .expect("register sandbox host project");
+}
+
+/// A temporary override inside a test that already owns the canonical guard.
+/// Borrowing prevents the owner from dropping while these values are active.
+pub(crate) struct ScopedFactoryEnv<'a> {
+    env: &'a mut TestEnvGuard,
+    saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+impl<'a> ScopedFactoryEnv<'a> {
+    pub(crate) fn apply(env: &'a mut TestEnvGuard, vars: &[(&'static str, Option<&str>)]) -> Self {
+        let mut saved = Vec::with_capacity(vars.len());
+        for (key, desired) in vars {
+            saved.push((*key, std::env::var_os(key)));
+            match desired {
+                Some(value) => env.set(key, value),
+                None => env.remove(key),
+            }
+        }
+        Self { env, saved }
+    }
+
+    pub(crate) fn guard(&mut self) -> &mut TestEnvGuard {
+        self.env
+    }
+}
+
+fn restore_scoped_env(env: &mut TestEnvGuard, saved: &[(&str, Option<std::ffi::OsString>)]) {
+    for (key, prior) in saved.iter().rev() {
+        match prior {
+            Some(value) => env.set(key, value),
+            None => env.remove(key),
+        }
+    }
+}
+
+impl Drop for ScopedFactoryEnv<'_> {
+    fn drop(&mut self) {
+        restore_scoped_env(self.env, &self.saved);
+    }
 }

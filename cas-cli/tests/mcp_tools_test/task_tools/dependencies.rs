@@ -52,7 +52,8 @@ async fn create_task(service: &cas::mcp::CasCore, title: &str) -> String {
 /// is blocked_by B (waits on B).
 #[tokio::test]
 async fn test_dep_add_blocks_confirmation_states_blocked_by_in_plain_words() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let id_a = create_task(&service, "Task A").await;
     let id_b = create_task(&service, "Task B").await;
@@ -106,7 +107,8 @@ async fn test_dep_add_blocks_confirmation_states_blocked_by_in_plain_words() {
 /// 'blocks: […]' sections rather than raw `A -> B` arrows."
 #[tokio::test]
 async fn test_dep_list_renders_blocked_by_and_blocks_sections_no_arrows() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let id_a = create_task(&service, "Task A").await;
     let id_b = create_task(&service, "Task B").await;
@@ -168,7 +170,8 @@ async fn test_dep_list_renders_blocked_by_and_blocks_sections_no_arrows() {
 /// dep_list's new "Blocked by:" phrasing for consistency.
 #[tokio::test]
 async fn test_task_show_with_deps_has_no_arrows_and_names_both_directions() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let id_a = create_task(&service, "Task A").await;
     let id_b = create_task(&service, "Task B").await;
@@ -225,7 +228,8 @@ async fn test_task_show_with_deps_has_no_arrows_and_names_both_directions() {
 /// still in progress.
 #[tokio::test]
 async fn late_blocker_rearms_reopened_task_allows_start_with_warning_and_rejects_claim() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let task_store = open_task_store(&temp.path().join(".cas")).expect("task store");
 
     let blocker_id = create_task(&service, "In-progress blocker").await;
@@ -305,7 +309,8 @@ async fn late_blocker_rearms_reopened_task_allows_start_with_warning_and_rejects
 
 #[tokio::test]
 async fn open_blocks_allow_start_but_reject_close_and_ready_flags_cas_0487() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let blocker_id = create_task(&service, "Open blocker").await;
     let dependent_id = create_task(&service, "Startable dependent").await;
@@ -375,7 +380,8 @@ async fn open_blocks_allow_start_but_reject_close_and_ready_flags_cas_0487() {
 
 #[tokio::test]
 async fn requires_start_dependency_remains_a_hard_start_gate_cas_0487() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let prerequisite_id = create_task(&service, "Required prerequisite").await;
     let dependent_id = create_task(&service, "Requires prerequisite").await;
@@ -423,7 +429,8 @@ async fn requires_start_dependency_remains_a_hard_start_gate_cas_0487() {
 /// parent-child epic link or a soft related link must never wedge task start.
 #[tokio::test]
 async fn non_blocking_dependency_types_do_not_rearm_or_reject_start() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let task_store = open_task_store(&temp.path().join(".cas")).expect("task store");
 
     for dep_type in ["related", "parent"] {
@@ -478,7 +485,8 @@ async fn create_task_via_service(service: &cas::mcp::CasService, title: &str) ->
 
 #[tokio::test]
 async fn task_update_blocked_by_alone_creates_the_dependency() {
-    let (temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let task_store = open_task_store(&temp.path().join(".cas")).expect("task store");
     let service = cas::mcp::CasService::new(core, None);
 
@@ -527,7 +535,8 @@ async fn task_update_blocked_by_alone_creates_the_dependency() {
 
 #[tokio::test]
 async fn task_update_blocked_by_applies_alongside_another_field() {
-    let (temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let task_store = open_task_store(&temp.path().join(".cas")).expect("task store");
     let service = cas::mcp::CasService::new(core, None);
 
@@ -565,7 +574,8 @@ async fn task_update_blocked_by_applies_alongside_another_field() {
 
 #[tokio::test]
 async fn task_update_blocked_by_accepts_multiple_ids_and_is_idempotent() {
-    let (temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let task_store = open_task_store(&temp.path().join(".cas")).expect("task store");
     let service = cas::mcp::CasService::new(core, None);
 
@@ -609,7 +619,8 @@ async fn task_update_blocked_by_accepts_multiple_ids_and_is_idempotent() {
 
 #[tokio::test]
 async fn task_update_blocked_by_rejects_unknown_self_and_empty_values() {
-    let (_temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, core) = setup_cas(&mut test_env);
     let service = cas::mcp::CasService::new(core, None);
 
     let dependent_id = create_task_via_service(&service, "Dependent task").await;
@@ -659,7 +670,8 @@ async fn task_update_blocked_by_rejects_unknown_self_and_empty_values() {
 
 #[tokio::test]
 async fn task_update_blocked_by_rejects_the_parent_epic() {
-    let (_temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, core) = setup_cas(&mut test_env);
     let service = cas::mcp::CasService::new(core, None);
 
     let epic = service
@@ -702,7 +714,8 @@ async fn task_update_blocked_by_rejects_the_parent_epic() {
 
 #[tokio::test]
 async fn task_update_blocked_by_overrides_a_status_that_would_start_gated_work() {
-    let (temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let task_store = open_task_store(&temp.path().join(".cas")).expect("task store");
     let service = cas::mcp::CasService::new(core, None);
 
@@ -730,7 +743,8 @@ async fn task_update_blocked_by_overrides_a_status_that_would_start_gated_work()
 
 #[tokio::test]
 async fn task_update_blocked_by_closed_blocker_leaves_the_task_open() {
-    let (temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let task_store = open_task_store(&temp.path().join(".cas")).expect("task store");
     let service = cas::mcp::CasService::new(core, None);
 
@@ -760,7 +774,8 @@ async fn task_update_blocked_by_closed_blocker_leaves_the_task_open() {
 
 #[tokio::test]
 async fn task_update_blocked_by_rejects_the_epic_set_in_the_same_call() {
-    let (_temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, core) = setup_cas(&mut test_env);
     let service = cas::mcp::CasService::new(core, None);
 
     let epic = service
@@ -795,8 +810,8 @@ async fn task_update_blocked_by_rejects_the_epic_set_in_the_same_call() {
 
 #[tokio::test]
 async fn task_update_blocked_by_is_rejected_when_reopening_a_closed_task() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let task_store = open_task_store(&temp.path().join(".cas")).expect("task store");
     let service = cas::mcp::CasService::new(core, None);
 
@@ -863,7 +878,8 @@ async fn task_update_blocked_by_is_rejected_when_reopening_a_closed_task() {
 
 #[tokio::test]
 async fn task_update_blocked_by_writes_nothing_when_one_id_in_the_list_is_invalid() {
-    let (temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let task_store = open_task_store(&temp.path().join(".cas")).expect("task store");
     let service = cas::mcp::CasService::new(core, None);
 
@@ -899,7 +915,8 @@ async fn task_update_blocked_by_writes_nothing_when_one_id_in_the_list_is_invali
 
 #[tokio::test]
 async fn task_update_blocked_by_rejects_a_dependency_cycle_without_writing() {
-    let (temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let task_store = open_task_store(&temp.path().join(".cas")).expect("task store");
     let service = cas::mcp::CasService::new(core, None);
 

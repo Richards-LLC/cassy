@@ -750,6 +750,7 @@ impl CasService {
             crate::ui::factory::record_supervisor_mcp_call();
             let action = req.action.clone();
             let result = match req.action.as_str() {
+                "shadow" => this.inner.shadow_review(req.review.as_deref()).await,
                 "add" => this.verification_add(req).await,
                 "show" => this.verification_show(req).await,
                 "list" => this.verification_list(req).await,
@@ -763,7 +764,7 @@ impl CasService {
                 _ => Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
-                        "Unknown verification action: {}. Valid: add, show, list, latest, qa_record, qa_waive, qa_request, qa_status{}",
+                        "Unknown verification action: {}. Valid: shadow, add, show, list, latest, qa_record, qa_waive, qa_request, qa_status{}",
                         req.action,
                         if cfg!(feature = "mcp-proxy") {
                             ", external_verify"

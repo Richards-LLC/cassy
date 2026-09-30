@@ -1,4 +1,5 @@
 mod loop_tools;
+pub(crate) mod shadow_review;
 pub(crate) mod verification_tools;
 mod worktree_ops;
 

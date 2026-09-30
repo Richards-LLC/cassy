@@ -184,6 +184,22 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-cut-release/references/failure-log.md"),
     },
     BuiltinFile {
+        path: "skills/cas-shadow-review/SKILL.md",
+        content: include_str!("builtins/skills/cas-shadow-review/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-shadow-review/references/spec.md",
+        content: include_str!("builtins/skills/cas-shadow-review/references/spec.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-shadow-review/references/standards.md",
+        content: include_str!("builtins/skills/cas-shadow-review/references/standards.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-shadow-review/LICENSE",
+        content: include_str!("builtins/skills/cas-shadow-review/LICENSE"),
+    },
+    BuiltinFile {
         path: "skills/cas-supervisor/references/preflight.md",
         content: include_str!("builtins/skills/cas-supervisor/references/preflight.md"),
     },
@@ -828,6 +844,22 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-cut-release/references/failure-log.md"),
     },
     BuiltinFile {
+        path: "skills/cas-shadow-review/SKILL.md",
+        content: include_str!("builtins/skills/cas-shadow-review/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-shadow-review/references/spec.md",
+        content: include_str!("builtins/skills/cas-shadow-review/references/spec.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-shadow-review/references/standards.md",
+        content: include_str!("builtins/skills/cas-shadow-review/references/standards.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-shadow-review/LICENSE",
+        content: include_str!("builtins/skills/cas-shadow-review/LICENSE"),
+    },
+    BuiltinFile {
         path: "skills/cas-supervisor/references/preflight.md",
         content: include_str!("builtins/skills/cas-supervisor/references/preflight.md"),
     },
@@ -1403,6 +1435,22 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-supervisor/SKILL.md",
         content: include_str!("builtins/skills/cas-supervisor.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-shadow-review/SKILL.md",
+        content: include_str!("builtins/skills/cas-shadow-review/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-shadow-review/references/spec.md",
+        content: include_str!("builtins/skills/cas-shadow-review/references/spec.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-shadow-review/references/standards.md",
+        content: include_str!("builtins/skills/cas-shadow-review/references/standards.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-shadow-review/LICENSE",
+        content: include_str!("builtins/skills/cas-shadow-review/LICENSE"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/preflight.md",

@@ -647,6 +647,12 @@ pub struct KillAllArgs {
 /// Internal factory subcommands (hidden from help)
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum FactoryCommands {
+    /// Internal JSON parity for the advisory verification shadow action.
+    #[command(hide = true)]
+    ShadowReview {
+        #[arg(long)]
+        request: std::path::PathBuf,
+    },
     /// Internal capped runner installed by the worker PreToolUse guard.
     #[command(hide = true)]
     WorkerCheck {
@@ -1062,6 +1068,17 @@ pub enum FactoryCommands {
 pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>) -> Result<()> {
     if let Some(ref cmd) = args.command {
         return match cmd {
+            FactoryCommands::ShadowReview { request } => {
+                let root = cas_root.ok_or_else(|| anyhow::anyhow!("shadow review requires a Cassy project"))?;
+                if std::fs::metadata(request)?.len() > 512 * 1024 {
+                    anyhow::bail!("shadow review request exceeds 512 KiB");
+                }
+                let payload = std::fs::read_to_string(request)?;
+                let core = crate::mcp::server::CasCore::with_daemon(root.to_path_buf(), None, None);
+                let result = core.shadow_review_inner(Some(&payload)).map_err(anyhow::Error::msg)?;
+                println!("{result}");
+                Ok(())
+            }
             FactoryCommands::WorkerCheck {
                 cas_root,
                 cargo_args,

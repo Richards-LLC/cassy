@@ -185,7 +185,84 @@ pub(crate) fn extract_skill_id(text: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_skill_id;
+    use super::{ScopedFactoryEnv, TestEnvGuard, extract_skill_id, setup_cas};
+
+    #[test]
+    fn setup_owner_restores_environment_and_removes_home_on_unwind() {
+        use crate::test_env_guard::{AmbientEnvRestore, test_env_lock};
+
+        let _ambient = AmbientEnvRestore::set("CAS_MCP_FIXTURE_SENTINEL", "outer");
+        let original_home = {
+            let _observer = test_env_lock();
+            std::env::var_os("HOME")
+        };
+        let mut fixture_home = None;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut env = TestEnvGuard::temp_home();
+            let (_temp, _core) = setup_cas(&mut env);
+            fixture_home = Some(env.home().to_path_buf());
+            assert!(std::env::var_os("CAS_MCP_FIXTURE_SENTINEL").is_none());
+            env.set("CAS_MCP_FIXTURE_SENTINEL", "fixture");
+            panic!("exercise full fixture owner cleanup");
+        }));
+        assert!(result.is_err());
+        // Reacquisition also proves the panic did not strand the shared lock.
+        let _observer = test_env_lock();
+        assert_eq!(
+            std::env::var("CAS_MCP_FIXTURE_SENTINEL").as_deref(),
+            Ok("outer")
+        );
+        assert_eq!(std::env::var_os("HOME"), original_home);
+        assert!(
+            !fixture_home.unwrap().exists(),
+            "temporary HOME is reclaimed"
+        );
+    }
+
+    #[test]
+    fn scoped_factory_env_restores_on_unwind_with_the_fixture_owner_alive() {
+        let mut env = TestEnvGuard::temp_home();
+        let (_temp, _core) = setup_cas(&mut env);
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.remove("CAS_FACTORY_MODE");
+        let home = env.home().to_path_buf();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _scope = ScopedFactoryEnv::apply(
+                &mut env,
+                &[
+                    ("CAS_AGENT_ROLE", Some("supervisor")),
+                    ("CAS_FACTORY_MODE", Some("1")),
+                ],
+            );
+            assert_eq!(std::env::var("CAS_AGENT_ROLE").as_deref(), Ok("supervisor"));
+            assert_eq!(std::env::var("CAS_FACTORY_MODE").as_deref(), Ok("1"));
+            panic!("exercise fixture override cleanup");
+        }));
+        assert!(result.is_err());
+        assert_eq!(std::env::var("CAS_AGENT_ROLE").as_deref(), Ok("worker"));
+        assert!(std::env::var_os("CAS_FACTORY_MODE").is_none());
+        assert_eq!(std::env::var_os("HOME").as_deref(), Some(home.as_os_str()));
+        assert!(
+            home.is_dir(),
+            "fixture HOME survives a borrowed scope's unwind"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scoped_factory_env_restores_non_unicode_values() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let mut env = TestEnvGuard::temp_home();
+        let prior = std::ffi::OsString::from_vec(vec![0xff, b'x']);
+        env.set("CAS_AGENT_ROLE", &prior);
+        {
+            let _scope = ScopedFactoryEnv::apply(&mut env, &[("CAS_AGENT_ROLE", Some("worker"))]);
+            assert_eq!(std::env::var("CAS_AGENT_ROLE").as_deref(), Ok("worker"));
+        }
+        assert_eq!(std::env::var_os("CAS_AGENT_ROLE"), Some(prior));
+    }
 
     #[test]
     fn extract_skill_id_stops_before_degraded_validation_warning() {

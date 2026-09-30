@@ -9346,10 +9346,8 @@ async fn test_close_auto_escalates_stale_verification_dispatch() {
 #[tokio::test]
 async fn test_registered_supervisor_can_verify_live_worker_task() {
     let mut test_env = TestEnvGuard::temp_home();
-    // Per support.rs ordering contract: setup helper FIRST (it briefly
-    // grabs the lock to clear factory env vars), then acquire the lock
-    // for the test body. std `Mutex` is not re-entrant — reversing the
-    // order would deadlock. Clearing the factory env vars ensures
+    // The test owner serializes setup and the handler awaits. Clearing
+    // the inherited factory environment ensures
     // `worker_harness_from_env()` falls back to Claude (subagents=true)
     // and the supervisor authz branch actually runs.
     let (temp, service) = setup_cas_as(&mut test_env, AgentRole::Supervisor);
@@ -9513,12 +9511,9 @@ fn test_codex_worker_env_restores_prior_factory_values_on_drop_cas_7cc9() {
 
     // Establish a non-empty prior environment that differs from what the
     // guard installs, so a blind remove-on-drop would be observable.
-    // SAFETY: TestEnvGuard held for the entire test body.
-    unsafe {
-        std::env::set_var("CAS_AGENT_ROLE", "supervisor");
-        std::env::set_var("CAS_FACTORY_MODE", "0");
-        std::env::set_var("CAS_FACTORY_WORKER_CLI", "claude");
-    }
+    test_env.set("CAS_AGENT_ROLE", "supervisor");
+    test_env.set("CAS_FACTORY_MODE", "0");
+    test_env.set("CAS_FACTORY_WORKER_CLI", "claude");
 
     {
         let _env = CodexWorkerEnv::enter(&mut test_env);
@@ -9549,12 +9544,10 @@ fn test_codex_worker_env_restores_prior_factory_values_on_drop_cas_7cc9() {
     );
 
     // Clean up the values this test introduced so no sibling depends on them.
-    // SAFETY: still holding TestEnvGuard.
-    unsafe {
-        std::env::remove_var("CAS_AGENT_ROLE");
-        std::env::remove_var("CAS_FACTORY_MODE");
-        std::env::remove_var("CAS_FACTORY_WORKER_CLI");
-    }
+    test_env.remove("CAS_AGENT_ROLE");
+    test_env.remove("CAS_FACTORY_MODE");
+    test_env.remove("CAS_FACTORY_WORKER_CLI");
+
 }
 
 /// CodexWorkerEnv must remove vars that were originally absent (so it doesn't
@@ -9564,12 +9557,9 @@ fn test_codex_worker_env_removes_originally_absent_vars_on_drop_cas_7cc9() {
     let mut test_env = TestEnvGuard::temp_home();
 
     // Start from a clean slate: these vars are absent before the guard.
-    // SAFETY: TestEnvGuard held for the entire test body.
-    unsafe {
-        std::env::remove_var("CAS_AGENT_ROLE");
-        std::env::remove_var("CAS_FACTORY_MODE");
-        std::env::remove_var("CAS_FACTORY_WORKER_CLI");
-    }
+    test_env.remove("CAS_AGENT_ROLE");
+    test_env.remove("CAS_FACTORY_MODE");
+    test_env.remove("CAS_FACTORY_WORKER_CLI");
 
     {
         let _env = CodexWorkerEnv::enter(&mut test_env);
@@ -9603,10 +9593,7 @@ fn test_factory_worker_env_clears_and_restores_worker_cli_cas_7cc9() {
     let mut test_env = TestEnvGuard::temp_home();
 
     // Simulate a `codex` CLI value leaked from a sibling Codex context.
-    // SAFETY: TestEnvGuard held for the entire test body.
-    unsafe {
-        std::env::set_var("CAS_FACTORY_WORKER_CLI", "codex");
-    }
+    test_env.set("CAS_FACTORY_WORKER_CLI", "codex");
 
     {
         let _env = FactoryWorkerEnv::enter(&mut test_env);
@@ -9627,10 +9614,8 @@ fn test_factory_worker_env_clears_and_restores_worker_cli_cas_7cc9() {
     );
 
     // Clean up so no sibling inherits the simulated leak.
-    // SAFETY: still holding TestEnvGuard.
-    unsafe {
-        std::env::remove_var("CAS_FACTORY_WORKER_CLI");
-    }
+    test_env.remove("CAS_FACTORY_WORKER_CLI");
+
 }
 
 /// cas-8aaf: a Codex factory worker under supervisor-owned review (the default)
@@ -11333,4 +11318,38 @@ async fn test_verifier_embedded_paths_and_obfuscated_secrets_never_persist_or_pr
             && show_text.contains("src/lib.rs"),
         "show must render redaction markers while keeping portable identifiers: {show_text}"
     );
+}
+
+/// Borrowed supervisor scopes restore both present and absent values during
+/// unwind while the same test owner continues to serve the fixture.
+#[test]
+fn supervisor_scopes_restore_prior_values_on_unwind_cas_525b() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, _core) = setup_cas(&mut test_env);
+    test_env.set("CAS_AGENT_ROLE", "worker");
+    test_env.remove("CAS_FACTORY_SUPERVISOR_CLI");
+
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut supervisor = ScopedSupervisorEnv::new(&mut test_env);
+        let _cli = ScopedSupervisorCliEnv::set(supervisor._env.guard(), "codex");
+        assert_eq!(std::env::var("CAS_AGENT_ROLE").as_deref(), Ok("supervisor"));
+        assert_eq!(
+            std::env::var("CAS_FACTORY_SUPERVISOR_CLI").as_deref(),
+            Ok("codex")
+        );
+        panic!("exercise scoped supervisor cleanup");
+    }));
+    assert!(panic.is_err());
+    assert_eq!(std::env::var("CAS_AGENT_ROLE").as_deref(), Ok("worker"));
+    assert!(std::env::var_os("CAS_FACTORY_SUPERVISOR_CLI").is_none());
+
+    // A second override reuses the still-live canonical owner after unwind.
+    {
+        let _worker = CodexWorkerEnv::enter(&mut test_env);
+        assert_eq!(
+            std::env::var("CAS_FACTORY_WORKER_CLI").as_deref(),
+            Ok("codex")
+        );
+    }
+    assert!(std::env::var_os("CAS_FACTORY_WORKER_CLI").is_none());
 }

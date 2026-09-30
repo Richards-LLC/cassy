@@ -13,6 +13,11 @@ metadata:
 
 Write agent-facing documents as instructions for a repeated process, not prose for a one-time reader.
 
+## Context pointers
+
+Treat every always-loaded line as a context pointer: name the material and the condition for reaching it. A skill description and an `AGENTS.md` line naming a document do the same job; their wording decides whether the agent reaches the target. Sharpen a weak pointer before inlining its target.
+Prune pointers harder than bodies because they cost context every turn. Front-load the leading word, keep one trigger per distinct branch, collapse synonyms for that branch, and cut identity the body already carries.
+
 ## Steps
 
 1. **Write the description as a context pointer:** `Use when <trigger>; not for <sibling>.`, where the trigger names what the skill does. Put the key use case first, keep it within 250 characters, and use no emphasis words. The 1,024-character limit is the hard ceiling, but every harness fits all descriptions into one shared listing budget (Claude: 1% of context; Codex: 2%, or 8,000 characters) and drops or shortens the longest first. Add the `not for` clause only when a sibling or bundled skill competes for the same prompts.
@@ -36,6 +41,17 @@ Write agent-facing documents as instructions for a repeated process, not prose f
 
 A family of user-invoked skills may share one user-invoked router: a router helps people find the right skill, but it cannot invoke its peers.
 
+## Information hierarchy and completion
+
+Use this ladder to choose where material belongs:
+
+1. In-file steps: the actions the agent performs in order.
+2. In-file reference: definitions and rules consulted during those actions; a flat set of peer rules is valid.
+3. Disclosed reference: a separate file reached through a context pointer.
+
+Apply the branching test: inline what every branch needs; disclose what only some branches reach. Keep a concept's definition, rules and caveats together on its rung.
+A completion criterion controls both clarity and demand. Sharpen an observable bound first; require exhaustive coverage where the work needs legwork, such as “every modified model accounted for” rather than “produce a change list”. Visible later steps can pull attention toward premature completion. Hide them only when the bound remains irreducibly fuzzy and rushing is observed, and only across a real context boundary: a handoff or subagent dispatch. An inline call leaves later steps in context.
+
 ## Wording for current models
 
 - Use no capitals or emphasis words except for a true invariant, and at most one per file: current models over-trigger on them.
@@ -46,7 +62,7 @@ A family of user-invoked skills may share one user-invoked router: a router help
 - Examples are copied literally: give one exact example and label any anti-example as such.
 - Never ask the model to show or echo its reasoning.
 
-Say what to do rather than what not to do; a prohibition earns space only for a hard guardrail. Prefer compact, familiar leading words that summon a shared behaviour: `tight` for a fast deterministic loop, `red` for a bug-reproducing loop.
+Say what to do rather than what not to do; a prohibition earns space only for a hard guardrail. Hunt repeated descriptions in pointers and bodies, then replace them with familiar leading words: `tight` for a fast deterministic loop, `red` for an observable bug-reproducing loop. Repeat the word, not its definition; a coined word costs definition tokens and carries fewer learned associations.
 
 ## Instruction files
 
@@ -54,6 +70,6 @@ Say what to do rather than what not to do; a prohibition earns space only for a 
 
 ## Loads and pruning
 
-Context load is always-loaded text; cognitive load is the human effort of knowing which document to reach for. Material behind a pointer reduces the first and raises the second, so split only when a sequence or invocation branch earns the pointer, and co-locate a concept's definition, rules and caveats.
+Context load is always-loaded text; cognitive load is the human effort of knowing which document to reach for. Material behind a pointer reduces the first and raises the second, so split only when a sequence or invocation branch earns the pointer.
 
 Treat environment facts as lookups, not prose caches. Remove stale exposition, irrelevant branches and no-op instructions. Ticket-phase narration ("Phase 2", "v1 ships as advisory"), dated verification notes and operator-specific facts (an e-mail address, an absolute home path, one downstream framework's conventions) mark text that has gone stale; they belong in project rubrics, config keys or memories, never in a file installed for every user.

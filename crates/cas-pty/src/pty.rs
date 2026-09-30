@@ -3249,55 +3249,15 @@ mod tests {
     }
 
     use crate::pty::*;
-    use std::sync::{Mutex, MutexGuard};
-
-    // cas-0bf4: module-wide serialization for any test that constructs a
-    // `PtyConfig::{claude,codex}` with role="worker". Those constructors
-    // now read process-wide env vars (CAS_FACTORY_CARGO_BUILD_JOBS and
-    // CAS_FACTORY_NICE_WORKER) at call time; parallel tests can race if
-    // one sets the sentinel while another asserts on the non-wrapped
-    // command name. All worker-role PtyConfig tests must hold this
-    // mutex for the duration of their body.
-    pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    /// Lock the env mutex, clear the cas-0bf4 sentinels on entry, and
-    /// clear them again on drop. Safe to use from any test that may
-    /// observe or mutate those vars.
-    pub(crate) struct ScopedEnv {
-        _guard: MutexGuard<'static, ()>,
-    }
-
-    struct RestoreVar {
-        key: &'static str,
-        previous: Option<std::ffi::OsString>,
-    }
-
-    impl RestoreVar {
-        fn set(key: &'static str, value: &str) -> Self {
-            let previous = std::env::var_os(key);
-            // SAFETY: the surrounding ScopedEnv holds ENV_LOCK for this test.
-            unsafe { std::env::set_var(key, value) };
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for RestoreVar {
-        fn drop(&mut self) {
-            // SAFETY: the surrounding ScopedEnv still holds ENV_LOCK.
-            unsafe {
-                match &self.previous {
-                    Some(value) => std::env::set_var(self.key, value),
-                    None => std::env::remove_var(self.key),
-                }
-            }
-        }
-    }
+    use crate::test_env_guard::TestEnvGuard;
 
     fn shell_quote(value: &str) -> String {
         format!("'{}'", value.replace('\'', "'\"'\"'"))
     }
 
-    fn spawn_delayed_wait_status_probe(gated: bool) -> (
+    fn spawn_delayed_wait_status_probe(
+        gated: bool,
+    ) -> (
         std::path::PathBuf,
         std::path::PathBuf,
         std::path::PathBuf,
@@ -3339,36 +3299,6 @@ mod tests {
         let pty = Pty::spawn("delayed-wait-status-probe", config)
             .expect("delayed wait-status probe must spawn");
         (temp, ready, done, release, pty)
-    }
-
-    impl ScopedEnv {
-        pub(crate) fn new() -> Self {
-            let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            // SAFETY: mutex serializes env mutation across tests.
-            unsafe {
-                std::env::remove_var("CAS_FACTORY_CARGO_BUILD_JOBS");
-                std::env::remove_var("CAS_FACTORY_NICE_WORKER");
-                std::env::remove_var("CAS_FACTORY_NICE_LEVEL");
-                // cas-6ee8: clear effort-support override so tests don't bleed state.
-                std::env::remove_var("CAS_FACTORY_EFFORT_SUPPORTED");
-                std::env::remove_var("CAS_FACTORY_CHROME_SUPPORTED");
-            }
-            Self { _guard: guard }
-        }
-    }
-
-    impl Drop for ScopedEnv {
-        fn drop(&mut self) {
-            // SAFETY: mutex held for duration of this scope.
-            unsafe {
-                std::env::remove_var("CAS_FACTORY_CARGO_BUILD_JOBS");
-                std::env::remove_var("CAS_FACTORY_NICE_WORKER");
-                std::env::remove_var("CAS_FACTORY_NICE_LEVEL");
-                // cas-6ee8: clear effort-support override on exit.
-                std::env::remove_var("CAS_FACTORY_EFFORT_SUPPORTED");
-                std::env::remove_var("CAS_FACTORY_CHROME_SUPPORTED");
-            }
-        }
     }
 
     #[tokio::test]
@@ -3541,7 +3471,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pty_config_claude() {
-        let _e = ScopedEnv::new();
+        let _env = TestEnvGuard::new();
         let config = PtyConfig::claude(
             "test-agent",
             "worker",
@@ -3593,13 +3523,11 @@ mod tests {
 
     #[tokio::test]
     async fn worker_spawn_strips_operator_credentials_from_process_and_descendant() {
-        let _e = ScopedEnv::new();
+        let mut env = TestEnvGuard::new();
         let protected = PROTECTED_OPERATOR_ENV;
-        let _vars: Vec<_> = protected
-            .iter()
-            .copied()
-            .map(|key| RestoreVar::set(key, "fixture-value-not-for-output"))
-            .collect();
+        for key in protected {
+            env.set(key, "fixture-value-not-for-output");
+        }
         let probe = protected
             .iter()
             .map(|key| format!("[ -n \"${{{key}:-}}\" ]"))
@@ -3762,7 +3690,7 @@ mod tests {
     fn factory_worker_skill_load_keeps_tracked_worktree_porcelain_clean_cas_fb41() {
         use std::process::Command;
 
-        let _e = ScopedEnv::new();
+        let _env = TestEnvGuard::new();
         let sandbox = std::env::temp_dir().join(format!("cas-fb41-{}", uuid::Uuid::new_v4()));
         let main = sandbox.join("main");
         let worker = sandbox.join("worker");
@@ -3992,7 +3920,7 @@ mod tests {
     /// `.codex/config.toml`. Mirrors `configure_codex_mcp_server`.
     #[tokio::test]
     async fn test_pty_config_codex_worker_injects_cas_mcp_server() {
-        let _e = ScopedEnv::new();
+        let _env = TestEnvGuard::new();
         let config = PtyConfig::codex(
             "test-worker",
             "worker",
@@ -4030,7 +3958,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pty_config_codex_pins_cas_mcp_server_to_factory_root() {
-        let _e = ScopedEnv::new();
+        let _env = TestEnvGuard::new();
         let root = PathBuf::from("/tmp/cas root with spaces");
         let config = PtyConfig::codex(
             "test-worker",
@@ -4081,7 +4009,7 @@ mod tests {
     /// policy without claiming verification blocks unrelated work.
     #[tokio::test]
     async fn test_pty_config_codex_worker_single_task_loop() {
-        let _e = ScopedEnv::new();
+        let _env = TestEnvGuard::new();
         let config = PtyConfig::codex(
             "test-worker",
             "worker",
@@ -4126,7 +4054,7 @@ mod tests {
     /// before brute-forcing a manual register.
     #[tokio::test]
     async fn test_pty_config_codex_worker_injects_session_id() {
-        let _e = ScopedEnv::new();
+        let _env = TestEnvGuard::new();
         let config = PtyConfig::codex(
             "test-worker",
             "worker",
@@ -4162,7 +4090,7 @@ mod tests {
     /// role==Worker).
     #[tokio::test]
     async fn test_pty_config_codex_worker_injects_agent_name_and_role() {
-        let _e = ScopedEnv::new();
+        let _env = TestEnvGuard::new();
         let config = PtyConfig::codex(
             "strong-gazelle-97",
             "worker",
@@ -4189,7 +4117,7 @@ mod tests {
     /// pane name and role so it registers under its real identity.
     #[tokio::test]
     async fn test_pty_config_codex_supervisor_injects_agent_name_and_role() {
-        let _e = ScopedEnv::new();
+        let _env = TestEnvGuard::new();
         let config = PtyConfig::codex(
             "brave-panther-92",
             "supervisor",
@@ -4219,7 +4147,7 @@ mod tests {
     /// cas-3522: the supervisor's cs MCP server also needs CAS_SESSION_ID.
     #[tokio::test]
     async fn test_pty_config_codex_supervisor_injects_session_id() {
-        let _e = ScopedEnv::new();
+        let _env = TestEnvGuard::new();
         let config = PtyConfig::codex(
             "test-supervisor",
             "supervisor",
@@ -4247,7 +4175,7 @@ mod tests {
     ///     Claude → verification_required_for_task_type() returns the wrong policy.
     #[tokio::test]
     async fn test_pty_config_codex_worker_injects_factory_mode_and_worker_cli_cas_8aaf() {
-        let _e = ScopedEnv::new();
+        let _env = TestEnvGuard::new();
         let config = PtyConfig::codex(
             "test-worker",
             "worker",
@@ -4276,7 +4204,7 @@ mod tests {
     /// in its `cs` MCP server so supervisor-side harness detection is consistent.
     #[tokio::test]
     async fn test_pty_config_codex_supervisor_injects_factory_mode_and_worker_cli_cas_8aaf() {
-        let _e = ScopedEnv::new();
+        let _env = TestEnvGuard::new();
         let config = PtyConfig::codex(
             "test-supervisor",
             "supervisor",
@@ -4304,7 +4232,7 @@ mod tests {
     /// `session_start` invocation anymore — auto-registration replaces it.
     #[tokio::test]
     async fn test_pty_config_codex_worker_no_session_start_invocation() {
-        let _e = ScopedEnv::new();
+        let _env = TestEnvGuard::new();
         let config = PtyConfig::codex(
             "test-worker",
             "worker",
@@ -4415,25 +4343,15 @@ mod tests {
 
     /// cas-bbc2: `cas_binary_on_path()` returns true when an executable named
     /// `cas` lives in a PATH entry. Builds a temp dir with a fake `cas` file and
-    /// points PATH at it, under ENV_LOCK to avoid racing other env-mutating tests.
+    /// points PATH at it, under TestEnvGuard to avoid racing other env-mutating tests.
     #[tokio::test]
     async fn test_cas_binary_on_path_detects_binary() {
-        let _e = ScopedEnv::new();
+        let mut env = TestEnvGuard::new();
         let dir = std::env::temp_dir().join("cas-bbc2-preflight-present");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("cas"), b"#!/bin/sh\n").unwrap();
-        let saved = std::env::var_os("PATH");
-        // SAFETY: ENV_LOCK held via ScopedEnv serializes PATH mutation.
-        unsafe {
-            std::env::set_var("PATH", &dir);
-        }
+        env.set("PATH", &dir);
         let found = cas_binary_on_path();
-        unsafe {
-            match &saved {
-                Some(p) => std::env::set_var("PATH", p),
-                None => std::env::remove_var("PATH"),
-            }
-        }
         let _ = std::fs::remove_dir_all(&dir);
         assert!(found, "cas_binary_on_path must find a `cas` file on PATH");
     }
@@ -4442,21 +4360,11 @@ mod tests {
     /// so `Pty::spawn` can refuse a Codex spawn loudly.
     #[tokio::test]
     async fn test_cas_binary_on_path_absent_when_missing() {
-        let _e = ScopedEnv::new();
+        let mut env = TestEnvGuard::new();
         let dir = std::env::temp_dir().join("cas-bbc2-preflight-absent");
         std::fs::create_dir_all(&dir).unwrap();
-        let saved = std::env::var_os("PATH");
-        // SAFETY: ENV_LOCK held via ScopedEnv serializes PATH mutation.
-        unsafe {
-            std::env::set_var("PATH", &dir);
-        }
+        env.set("PATH", &dir);
         let found = cas_binary_on_path();
-        unsafe {
-            match &saved {
-                Some(p) => std::env::set_var("PATH", p),
-                None => std::env::remove_var("PATH"),
-            }
-        }
         let _ = std::fs::remove_dir_all(&dir);
         assert!(
             !found,
@@ -4525,7 +4433,7 @@ mod tests {
     /// supervisor messages, without breaking the one-task-at-a-time rule.
     #[tokio::test]
     async fn test_pty_config_codex_worker_stays_available_for_injected_messages() {
-        let _e = ScopedEnv::new();
+        let _env = TestEnvGuard::new();
         let config = PtyConfig::codex(
             "test-worker",
             "worker",
@@ -4603,13 +4511,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_pty_config_claude_custom_effort() {
-        // Hold ENV_LOCK and force effort-supported=1 so the version guard
+        // Hold TestEnvGuard and force effort-supported=1 so the version guard
         // does not race with other tests that set CAS_FACTORY_EFFORT_SUPPORTED=0.
-        let _e = ScopedEnv::new();
-        // SAFETY: ENV_LOCK held by ScopedEnv.
-        unsafe {
-            std::env::set_var("CAS_FACTORY_EFFORT_SUPPORTED", "1");
-        }
+        let mut env = TestEnvGuard::new();
+
+        env.set("CAS_FACTORY_EFFORT_SUPPORTED", "1");
         let config = PtyConfig::claude(
             "test-agent",
             "worker",
@@ -4637,10 +4543,8 @@ mod tests {
     /// Role-based defaults belong in the cascade resolver, not pty.rs.
     #[tokio::test]
     async fn test_pty_config_claude_supervisor_no_effort_omits_flag() {
-        let _e = ScopedEnv::new();
-        unsafe {
-            std::env::set_var("CAS_FACTORY_EFFORT_SUPPORTED", "1");
-        }
+        let mut env = TestEnvGuard::new();
+        env.set("CAS_FACTORY_EFFORT_SUPPORTED", "1");
         let config = PtyConfig::claude(
             "sup",
             "supervisor",
@@ -4662,10 +4566,8 @@ mod tests {
     /// cas-34f7f: when effort=None, --effort must be OMITTED (worker).
     #[tokio::test]
     async fn test_pty_config_claude_worker_no_effort_omits_flag() {
-        let _e = ScopedEnv::new();
-        unsafe {
-            std::env::set_var("CAS_FACTORY_EFFORT_SUPPORTED", "1");
-        }
+        let mut env = TestEnvGuard::new();
+        env.set("CAS_FACTORY_EFFORT_SUPPORTED", "1");
         let config = PtyConfig::claude(
             "wrk",
             "worker",
@@ -4687,10 +4589,8 @@ mod tests {
     /// cas-34f7f: explicit effort is passed through verbatim for Claude.
     #[tokio::test]
     async fn test_pty_config_claude_worker_with_explicit_effort() {
-        let _e = ScopedEnv::new();
-        unsafe {
-            std::env::set_var("CAS_FACTORY_EFFORT_SUPPORTED", "1");
-        }
+        let mut env = TestEnvGuard::new();
+        env.set("CAS_FACTORY_EFFORT_SUPPORTED", "1");
         let config = PtyConfig::claude(
             "wrk",
             "worker",
@@ -4752,7 +4652,7 @@ mod tests {
     /// `model_reasoning_effort=max` and to Claude as `--effort max`.
     #[tokio::test]
     async fn test_pty_config_max_effort_passes_through_to_codex_and_claude() {
-        let _e = ScopedEnv::new();
+        let mut env = TestEnvGuard::new();
         let codex = PtyConfig::codex(
             "wrk",
             "worker",
@@ -4773,9 +4673,7 @@ mod tests {
             !codex.args.iter().any(|arg| arg == "--chrome"),
             "Chrome is a Claude-only spawn flag"
         );
-        unsafe {
-            std::env::set_var("CAS_FACTORY_EFFORT_SUPPORTED", "1");
-        }
+        env.set("CAS_FACTORY_EFFORT_SUPPORTED", "1");
         let claude = PtyConfig::claude(
             "wrk",
             "worker",
@@ -4798,7 +4696,7 @@ mod tests {
     /// cas-34f7f: Codex worker with explicit effort → --config model_reasoning_effort=<v>.
     #[tokio::test]
     async fn test_pty_config_codex_worker_with_effort_high() {
-        let _e = ScopedEnv::new();
+        let _env = TestEnvGuard::new();
         let config = PtyConfig::codex(
             "wrk",
             "worker",
@@ -4820,7 +4718,7 @@ mod tests {
     /// cas-34f7f: Codex worker with None effort → no model_reasoning_effort arg.
     #[tokio::test]
     async fn test_pty_config_codex_worker_with_no_effort() {
-        let _e = ScopedEnv::new();
+        let _env = TestEnvGuard::new();
         let config = PtyConfig::codex(
             "wrk",
             "worker",
@@ -4843,9 +4741,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_claude_chrome_flag_for_supervisor_and_worker_when_supported() {
-        let _e = ScopedEnv::new();
-        // SAFETY: ScopedEnv holds ENV_LOCK across the override and constructions.
-        unsafe { std::env::set_var("CAS_FACTORY_CHROME_SUPPORTED", "1") };
+        let mut env = TestEnvGuard::new();
+
+        env.set("CAS_FACTORY_CHROME_SUPPORTED", "1");
         for role in ["supervisor", "worker"] {
             let config = PtyConfig::claude(
                 "test-agent",
@@ -4867,9 +4765,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_claude_chrome_flag_omitted_when_unsupported() {
-        let _e = ScopedEnv::new();
-        // SAFETY: ScopedEnv holds ENV_LOCK across the override and constructions.
-        unsafe { std::env::set_var("CAS_FACTORY_CHROME_SUPPORTED", "0") };
+        let mut env = TestEnvGuard::new();
+
+        env.set("CAS_FACTORY_CHROME_SUPPORTED", "0");
         assert!(!claude_supports_chrome_flag());
         for role in ["supervisor", "worker"] {
             let config = PtyConfig::claude(
@@ -4891,11 +4789,9 @@ mod tests {
     async fn test_effort_flag_included_when_supported() {
         // Verify that PtyConfig::claude includes --effort when the installed
         // claude CLI reports support (forced via env var to avoid a live probe).
-        let _e = ScopedEnv::new();
-        // SAFETY: ENV_LOCK held by ScopedEnv.
-        unsafe {
-            std::env::set_var("CAS_FACTORY_EFFORT_SUPPORTED", "1");
-        }
+        let mut env = TestEnvGuard::new();
+
+        env.set("CAS_FACTORY_EFFORT_SUPPORTED", "1");
 
         let config = PtyConfig::claude(
             "test-agent",
@@ -4921,11 +4817,9 @@ mod tests {
         // Regression test for cas-6ee8: when the installed claude CLI does not
         // support --effort, the flag must be silently omitted (not injected)
         // so the subprocess does not crash with an unrecognised-flag error.
-        let _e = ScopedEnv::new();
-        // SAFETY: ENV_LOCK held by ScopedEnv.
-        unsafe {
-            std::env::set_var("CAS_FACTORY_EFFORT_SUPPORTED", "0");
-        }
+        let mut env = TestEnvGuard::new();
+
+        env.set("CAS_FACTORY_EFFORT_SUPPORTED", "0");
 
         let config = PtyConfig::claude(
             "test-agent",
@@ -4954,11 +4848,9 @@ mod tests {
     async fn test_effort_flag_omitted_unsupported_default_effort() {
         // When effort=None (default) and CLI is unsupported, neither the flag
         // nor a role-default value should appear.
-        let _e = ScopedEnv::new();
-        // SAFETY: ENV_LOCK held by ScopedEnv.
-        unsafe {
-            std::env::set_var("CAS_FACTORY_EFFORT_SUPPORTED", "0");
-        }
+        let mut env = TestEnvGuard::new();
+
+        env.set("CAS_FACTORY_EFFORT_SUPPORTED", "0");
 
         let config = PtyConfig::claude(
             "sup",
@@ -4986,17 +4878,13 @@ mod tests {
     #[tokio::test]
     async fn test_claude_supports_effort_flag_env_override() {
         // Verify the env var bypass works for both true and false.
-        let _e = ScopedEnv::new();
-        unsafe {
-            std::env::set_var("CAS_FACTORY_EFFORT_SUPPORTED", "1");
-        }
+        let mut env = TestEnvGuard::new();
+        env.set("CAS_FACTORY_EFFORT_SUPPORTED", "1");
         assert!(
             claude_supports_effort_flag(),
             "env override '1' must return true"
         );
-        unsafe {
-            std::env::set_var("CAS_FACTORY_EFFORT_SUPPORTED", "0");
-        }
+        env.set("CAS_FACTORY_EFFORT_SUPPORTED", "0");
         assert!(
             !claude_supports_effort_flag(),
             "env override '0' must return false"
@@ -5005,9 +4893,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_pty_config_codex_with_effort() {
-        // Worker-role tests must hold ENV_LOCK (via ScopedEnv) so CAS_FACTORY_NICE_WORKER
+        // Worker-role tests must hold the canonical TestEnvGuard so CAS_FACTORY_NICE_WORKER
         // cannot be set concurrently, which would shift arg indices via maybe_wrap_with_nice.
-        let _e = ScopedEnv::new();
+        let _env = TestEnvGuard::new();
         let config = PtyConfig::codex(
             "test-agent",
             "worker",
@@ -5036,8 +4924,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_pty_config_codex_no_effort_when_none() {
-        // Worker-role tests must hold ENV_LOCK (via ScopedEnv).
-        let _e = ScopedEnv::new();
+        // Worker-role tests must hold the canonical TestEnvGuard.
+        let _env = TestEnvGuard::new();
         let config = PtyConfig::codex(
             "test-agent",
             "worker",
@@ -5263,12 +5151,12 @@ mod tests {
     // These exercise `cargo_build_jobs_for_worker` and
     // `maybe_wrap_with_nice` plus their integration with
     // `PtyConfig::claude`. They poke process-wide env vars, so they
-    // share a serializing mutex to avoid cross-test flakes when the
-    // suite runs with multiple threads. Scope is per-test: each test
-    // clears its own env on entry and on the exit via the guard.
+    // share the canonical guard to avoid cross-test flakes when the
+    // suite runs with multiple threads. Each test scrubs ambient factory
+    // overrides on entry and restores them on exit, including unwind.
     mod cas_0bf4_resource_contention {
-        use crate::pty::tests::ScopedEnv;
         use crate::pty::*;
+        use crate::test_env_guard::TestEnvGuard;
 
         /// Local twin of the helper in `claude_config_dir_contract_tests`,
         /// which is private to that module.
@@ -5280,30 +5168,24 @@ mod tests {
 
         #[test]
         fn cargo_build_jobs_honours_explicit_env_override() {
-            let _e = ScopedEnv::new();
-            // SAFETY: _e holds ENV_LOCK.
-            unsafe {
-                std::env::set_var("CAS_FACTORY_CARGO_BUILD_JOBS", "3");
-            }
+            let mut env = TestEnvGuard::new();
+
+            env.set("CAS_FACTORY_CARGO_BUILD_JOBS", "3");
             assert_eq!(cargo_build_jobs_for_worker(None).as_deref(), Some("3"));
         }
 
         #[test]
         fn cargo_build_jobs_trims_whitespace_override() {
-            let _e = ScopedEnv::new();
-            unsafe {
-                std::env::set_var("CAS_FACTORY_CARGO_BUILD_JOBS", "  6  ");
-            }
+            let mut env = TestEnvGuard::new();
+            env.set("CAS_FACTORY_CARGO_BUILD_JOBS", "  6  ");
             assert_eq!(cargo_build_jobs_for_worker(None).as_deref(), Some("6"));
         }
 
         #[test]
         fn cargo_build_jobs_auto_falls_through_to_computed() {
-            let _e = ScopedEnv::new();
+            let mut env = TestEnvGuard::new();
             // Explicit "auto" reads as fallthrough, computed value comes back.
-            unsafe {
-                std::env::set_var("CAS_FACTORY_CARGO_BUILD_JOBS", "auto");
-            }
+            env.set("CAS_FACTORY_CARGO_BUILD_JOBS", "auto");
             let got = cargo_build_jobs_for_worker(None)
                 .expect("available_parallelism should succeed on test host");
             let n: usize = got.parse().expect("computed CARGO_BUILD_JOBS must parse");
@@ -5315,7 +5197,7 @@ mod tests {
 
         #[test]
         fn cargo_build_jobs_empty_env_falls_through_to_computed() {
-            let _e = ScopedEnv::new();
+            let _env = TestEnvGuard::new();
             // No env set at all → compute. Same assertion as "auto".
             let got = cargo_build_jobs_for_worker(None)
                 .expect("available_parallelism should succeed on test host");
@@ -5349,7 +5231,7 @@ mod tests {
 
         #[test]
         fn cargo_build_jobs_derates_further_for_a_large_fleet() {
-            let _e = ScopedEnv::new();
+            let _env = TestEnvGuard::new();
             let cores = std::thread::available_parallelism()
                 .expect("available_parallelism should succeed on test host")
                 .get();
@@ -5372,10 +5254,8 @@ mod tests {
 
         #[test]
         fn explicit_env_override_still_wins_over_the_fleet_count() {
-            let _e = ScopedEnv::new();
-            unsafe {
-                std::env::set_var("CAS_FACTORY_CARGO_BUILD_JOBS", "7");
-            }
+            let mut env = TestEnvGuard::new();
+            env.set("CAS_FACTORY_CARGO_BUILD_JOBS", "7");
             // Operator intent outranks the computed derate at every fleet size.
             assert_eq!(cargo_build_jobs_for_worker(Some(64)).as_deref(), Some("7"));
             assert_eq!(cargo_build_jobs_for_worker(None).as_deref(), Some("7"));
@@ -5383,7 +5263,7 @@ mod tests {
 
         #[test]
         fn apply_worker_build_concurrency_replaces_rather_than_appends() {
-            let _e = ScopedEnv::new();
+            let _env = TestEnvGuard::new();
             let mut config = PtyConfig::claude(
                 "w1",
                 "worker",
@@ -5421,7 +5301,7 @@ mod tests {
 
         #[test]
         fn apply_worker_build_concurrency_is_noop_for_supervisor_config() {
-            let _e = ScopedEnv::new();
+            let _env = TestEnvGuard::new();
             let mut config = PtyConfig::claude(
                 "sup",
                 "supervisor",
@@ -5445,10 +5325,8 @@ mod tests {
 
         #[test]
         fn maybe_wrap_with_nice_is_noop_for_supervisor_role() {
-            let _e = ScopedEnv::new();
-            unsafe {
-                std::env::set_var("CAS_FACTORY_NICE_WORKER", "1");
-            }
+            let mut env = TestEnvGuard::new();
+            env.set("CAS_FACTORY_NICE_WORKER", "1");
             let (cmd, args) = maybe_wrap_with_nice(
                 "claude",
                 vec!["--session-id".to_string(), "abc".to_string()],
@@ -5460,7 +5338,7 @@ mod tests {
 
         #[test]
         fn maybe_wrap_with_nice_is_noop_without_env_sentinel() {
-            let _e = ScopedEnv::new();
+            let _env = TestEnvGuard::new();
             // No CAS_FACTORY_NICE_WORKER set — passthrough for workers too.
             let (cmd, args) = maybe_wrap_with_nice("claude", vec!["--foo".to_string()], "worker");
             assert_eq!(cmd, "claude");
@@ -5469,10 +5347,8 @@ mod tests {
 
         #[test]
         fn maybe_wrap_with_nice_wraps_worker_when_sentinel_set() {
-            let _e = ScopedEnv::new();
-            unsafe {
-                std::env::set_var("CAS_FACTORY_NICE_WORKER", "1");
-            }
+            let mut env = TestEnvGuard::new();
+            env.set("CAS_FACTORY_NICE_WORKER", "1");
             let (cmd, args) = maybe_wrap_with_nice(
                 "claude",
                 vec!["--session-id".to_string(), "xyz".to_string()],
@@ -5494,11 +5370,9 @@ mod tests {
 
         #[test]
         fn maybe_wrap_with_nice_honours_level_override() {
-            let _e = ScopedEnv::new();
-            unsafe {
-                std::env::set_var("CAS_FACTORY_NICE_WORKER", "1");
-                std::env::set_var("CAS_FACTORY_NICE_LEVEL", "15");
-            }
+            let mut env = TestEnvGuard::new();
+            env.set("CAS_FACTORY_NICE_WORKER", "1");
+            env.set("CAS_FACTORY_NICE_LEVEL", "15");
             let (cmd, args) = maybe_wrap_with_nice("claude", vec![], "worker");
             assert_eq!(cmd, "nice");
             assert_eq!(args[..2], ["-n".to_string(), "15".to_string()]);
@@ -5507,10 +5381,8 @@ mod tests {
 
         #[test]
         fn maybe_wrap_with_nice_rejects_non_1_sentinel_value() {
-            let _e = ScopedEnv::new();
-            unsafe {
-                std::env::set_var("CAS_FACTORY_NICE_WORKER", "true"); // not "1"
-            }
+            let mut env = TestEnvGuard::new();
+            env.set("CAS_FACTORY_NICE_WORKER", "true"); // not "1"
             let (cmd, _args) = maybe_wrap_with_nice("claude", vec![], "worker");
             assert_eq!(
                 cmd, "claude",
@@ -5520,10 +5392,8 @@ mod tests {
 
         #[test]
         fn claude_worker_gets_cargo_build_jobs_env() {
-            let _e = ScopedEnv::new();
-            unsafe {
-                std::env::set_var("CAS_FACTORY_CARGO_BUILD_JOBS", "4");
-            }
+            let mut env = TestEnvGuard::new();
+            env.set("CAS_FACTORY_CARGO_BUILD_JOBS", "4");
             let config = PtyConfig::claude(
                 "w1",
                 "worker",
@@ -5546,10 +5416,8 @@ mod tests {
 
         #[test]
         fn claude_supervisor_does_not_get_cargo_build_jobs_env() {
-            let _e = ScopedEnv::new();
-            unsafe {
-                std::env::set_var("CAS_FACTORY_CARGO_BUILD_JOBS", "4");
-            }
+            let mut env = TestEnvGuard::new();
+            env.set("CAS_FACTORY_CARGO_BUILD_JOBS", "4");
             let config = PtyConfig::claude(
                 "s1",
                 "supervisor",
@@ -5572,7 +5440,7 @@ mod tests {
         // (security/CVE patches). Workers stay pinned and silent.
         #[test]
         fn claude_worker_gets_quiet_network_env() {
-            let _e = ScopedEnv::new();
+            let _env = TestEnvGuard::new();
             let config = PtyConfig::claude(
                 "w1",
                 "worker",
@@ -5603,7 +5471,7 @@ mod tests {
 
         #[test]
         fn claude_supervisor_does_not_get_quiet_network_env() {
-            let _e = ScopedEnv::new();
+            let _env = TestEnvGuard::new();
             let config = PtyConfig::claude(
                 "s1",
                 "supervisor",
@@ -5634,7 +5502,7 @@ mod tests {
         // keep them, and the codex harness is untouched by cas-7d8e.
         #[test]
         fn claude_both_roles_keep_quiet_ux_env() {
-            let _e = ScopedEnv::new();
+            let _env = TestEnvGuard::new();
             for role in ["worker", "supervisor"] {
                 let config = PtyConfig::claude(
                     "a1",
@@ -5662,7 +5530,7 @@ mod tests {
 
         #[test]
         fn codex_keeps_quiet_network_env_for_both_roles() {
-            let _e = ScopedEnv::new();
+            let _env = TestEnvGuard::new();
             for role in ["worker", "supervisor"] {
                 let config = PtyConfig::codex(
                     "c1",
@@ -5694,10 +5562,8 @@ mod tests {
 
         #[test]
         fn claude_worker_command_wraps_in_nice_when_sentinel_set() {
-            let _e = ScopedEnv::new();
-            unsafe {
-                std::env::set_var("CAS_FACTORY_NICE_WORKER", "1");
-            }
+            let mut env = TestEnvGuard::new();
+            env.set("CAS_FACTORY_NICE_WORKER", "1");
             let config = PtyConfig::claude(
                 "w1",
                 "worker",
@@ -5720,11 +5586,9 @@ mod tests {
             // in config must not leak the literal string into
             // CARGO_BUILD_JOBS (cargo would reject it as a non-integer
             // and silently defeat the cap).
-            let _e = ScopedEnv::new();
+            let mut env = TestEnvGuard::new();
             for variant in ["Auto", "AUTO", "auto", "  Auto  "] {
-                unsafe {
-                    std::env::set_var("CAS_FACTORY_CARGO_BUILD_JOBS", variant);
-                }
+                env.set("CAS_FACTORY_CARGO_BUILD_JOBS", variant);
                 let got = cargo_build_jobs_for_worker(None)
                     .expect("available_parallelism should succeed on test host");
                 let n: usize = got.parse().expect("computed value must parse as integer");
@@ -5739,11 +5603,9 @@ mod tests {
         fn maybe_wrap_with_nice_rejects_non_numeric_level() {
             // cas-0bf4 correctness P2: a non-numeric NICE_LEVEL must not
             // reach `nice -n <garbage>` — would fail every worker spawn.
-            let _e = ScopedEnv::new();
-            unsafe {
-                std::env::set_var("CAS_FACTORY_NICE_WORKER", "1");
-                std::env::set_var("CAS_FACTORY_NICE_LEVEL", "high");
-            }
+            let mut env = TestEnvGuard::new();
+            env.set("CAS_FACTORY_NICE_WORKER", "1");
+            env.set("CAS_FACTORY_NICE_LEVEL", "high");
             let (cmd, args) = maybe_wrap_with_nice("claude", vec![], "worker");
             assert_eq!(cmd, "nice");
             assert_eq!(
@@ -5759,11 +5621,9 @@ mod tests {
             // itself rejects them for non-root, which is a separate OS
             // concern outside this helper. Documents the contract so a
             // future clamp-to-positive refactor is an explicit decision.
-            let _e = ScopedEnv::new();
-            unsafe {
-                std::env::set_var("CAS_FACTORY_NICE_WORKER", "1");
-                std::env::set_var("CAS_FACTORY_NICE_LEVEL", "-5");
-            }
+            let mut env = TestEnvGuard::new();
+            env.set("CAS_FACTORY_NICE_WORKER", "1");
+            env.set("CAS_FACTORY_NICE_LEVEL", "-5");
             let (_cmd, args) = maybe_wrap_with_nice("claude", vec![], "worker");
             assert_eq!(args[1], "-5");
         }
@@ -5771,10 +5631,8 @@ mod tests {
         #[test]
         fn codex_worker_gets_cargo_build_jobs_env() {
             // cas-0bf4 testing P1: codex spawn path must mirror claude.
-            let _e = ScopedEnv::new();
-            unsafe {
-                std::env::set_var("CAS_FACTORY_CARGO_BUILD_JOBS", "4");
-            }
+            let mut env = TestEnvGuard::new();
+            env.set("CAS_FACTORY_CARGO_BUILD_JOBS", "4");
             let config = PtyConfig::codex(
                 "w1",
                 "worker",
@@ -5797,10 +5655,8 @@ mod tests {
 
         #[test]
         fn codex_supervisor_does_not_get_cargo_build_jobs_env() {
-            let _e = ScopedEnv::new();
-            unsafe {
-                std::env::set_var("CAS_FACTORY_CARGO_BUILD_JOBS", "4");
-            }
+            let mut env = TestEnvGuard::new();
+            env.set("CAS_FACTORY_CARGO_BUILD_JOBS", "4");
             let config = PtyConfig::codex(
                 "s1",
                 "supervisor",
@@ -5820,10 +5676,8 @@ mod tests {
 
         #[test]
         fn codex_worker_command_wraps_in_nice_when_sentinel_set() {
-            let _e = ScopedEnv::new();
-            unsafe {
-                std::env::set_var("CAS_FACTORY_NICE_WORKER", "1");
-            }
+            let mut env = TestEnvGuard::new();
+            env.set("CAS_FACTORY_NICE_WORKER", "1");
             let config = PtyConfig::codex(
                 "w1",
                 "worker",
@@ -5842,10 +5696,8 @@ mod tests {
 
         #[test]
         fn nice_wrapped_codex_keeps_codex_submit_classification_cas_6e76() {
-            let _e = ScopedEnv::new();
-            unsafe {
-                std::env::set_var("CAS_FACTORY_NICE_WORKER", "1");
-            }
+            let mut env = TestEnvGuard::new();
+            env.set("CAS_FACTORY_NICE_WORKER", "1");
             let config = PtyConfig::codex(
                 "w1",
                 "worker",
@@ -5867,10 +5719,8 @@ mod tests {
 
         #[test]
         fn claude_supervisor_command_unwrapped_even_when_sentinel_set() {
-            let _e = ScopedEnv::new();
-            unsafe {
-                std::env::set_var("CAS_FACTORY_NICE_WORKER", "1");
-            }
+            let mut env = TestEnvGuard::new();
+            env.set("CAS_FACTORY_NICE_WORKER", "1");
             let config = PtyConfig::claude(
                 "s1",
                 "supervisor",
@@ -6053,7 +5903,7 @@ mod tests {
 
     #[test]
     fn opencode_worker_launch_is_self_contained_and_model_driven() {
-        let _e = ScopedEnv::new();
+        let _env = TestEnvGuard::new();
         let cwd = std::env::temp_dir().join("cas-opencode-worker");
         let config = PtyConfig::opencode(
             "open-worker",
@@ -6117,7 +5967,7 @@ mod tests {
 
     #[test]
     fn opencode_hosted_lanes_pin_endpoint_and_key_environment_without_values() {
-        let _e = ScopedEnv::new();
+        let _env = TestEnvGuard::new();
         let cases = [
             (
                 "qwencloud/qwen3.8-max",
@@ -6172,7 +6022,7 @@ mod tests {
 
     #[test]
     fn opencode_omits_unrequested_model_and_effort_without_a_default() {
-        let _e = ScopedEnv::new();
+        let _env = TestEnvGuard::new();
         let config = PtyConfig::opencode(
             "open-worker",
             "worker",
@@ -6198,7 +6048,7 @@ mod tests {
 
     #[test]
     fn opencode_resolves_relative_worktree_and_selects_supervisor_agent() {
-        let _e = ScopedEnv::new();
+        let _env = TestEnvGuard::new();
         let config = PtyConfig::opencode(
             "open-lead",
             "supervisor",
@@ -6239,13 +6089,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_pty_config_grok_basic() {
-        // ScopedEnv clears CAS_FACTORY_NICE_WORKER etc. for the duration of
+        // TestEnvGuard clears CAS_FACTORY_NICE_WORKER etc. for the duration of
         // this test — this suite runs inside a real factory worker session
         // that sets CAS_FACTORY_NICE_WORKER=1 in its own ambient env, which
         // would otherwise wrap `config.command` in `nice` and break the
         // exact-match assertion below (same reason `test_pty_config_claude`
         // uses it).
-        let _e = ScopedEnv::new();
+        let _env = TestEnvGuard::new();
         let config = PtyConfig::grok(
             "test-agent",
             "worker",

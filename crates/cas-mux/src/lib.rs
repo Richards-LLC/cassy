@@ -62,3 +62,7 @@ pub use pty::{
 pub use pty::{Pty, PtyConfig, PtyEvent, TeamsSpawnConfig};
 pub use render::{LayoutDirection, Renderer};
 pub use spec::{Effort, WorkerSpec};
+
+#[cfg(test)]
+#[path = "../../../cas-cli/src/test_env_guard.rs"]
+mod test_env_guard;

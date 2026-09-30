@@ -24,6 +24,34 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
   // Eleven stages plus the phone placeholder sweep: past the 60 s budget on a
   // loaded host, so it gets the headroom HUB-J3 has.
   test.setTimeout(120_000);
+  // cas-e265 diagnostic only: record public composer lifecycle on the built bundle.
+  await page.addInitScript(() => {
+    const events: unknown[] = [];
+    (window as unknown as { __draftEvents: unknown[] }).__draftEvents = events;
+    const record = (kind: string, field?: HTMLTextAreaElement, extra?: unknown) => {
+      if (events.length >= 2000) return;
+      events.push({ kind, at: performance.now(), thread: field?.dataset.threadKey,
+        value: field?.value, connected: field?.isConnected,
+        focus: document.activeElement?.id, title: document.title, extra });
+    };
+    document.addEventListener("input", event => {
+      if (event.target instanceof HTMLTextAreaElement && event.target.id === "message-text") record("input", event.target);
+    }, true);
+    const descriptor = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!;
+    Object.defineProperty(HTMLTextAreaElement.prototype, "value", { ...descriptor,
+      set(value: string) {
+        if (this.id === "message-text") record("set", this, { value, stack: new Error().stack });
+        descriptor.set!.call(this, value);
+      },
+    });
+    new MutationObserver(records => {
+      for (const change of records) for (const removed of change.removedNodes) {
+        if (!(removed instanceof Element)) continue;
+        const field = removed.matches("#message-text") ? removed : removed.querySelector("#message-text");
+        if (field instanceof HTMLTextAreaElement) record("removed", field);
+      }
+    }).observe(document, { childList: true, subtree: true });
+  });
   const hub = await journey.hub({ machines: [ATLAS, STUDIO, FORGE], paired: ["atlas", "studio", "forge"] });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
   const composer = page.getByRole("textbox", { name: "Your message" });
@@ -43,7 +71,10 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
     });
     // Observe a real background request, rather than waiting for a string in
     // main.ts to claim that a render happened.
-    await page.waitForResponse((response) => new URL(response.url()).pathname === "/v1/sessions");
+    await Promise.all([
+      page.waitForResponse((response) => new URL(response.url()).pathname === "/v1/sessions"),
+      page.clock.runFor(5_500),
+    ]);
     await expect(composer).toHaveValue("Please verify the gate first.\nKeep this half-written reply.");
     await expect(composer).toBeFocused();
     expect(await composer.evaluate((field: HTMLTextAreaElement) => ({
@@ -461,5 +492,13 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
     await expect(page.locator(".conversation-pane-slot .terminal-connecting")).toHaveCount(0, { timeout: 10_000 });
     await page.waitForTimeout(500);
     await expect(search).toBeFocused();
+  });
+});
+
+// cas-e265: keep DOM lifecycle evidence next to any failed built-bundle trace.
+test.afterEach(async ({ page }, testInfo) => {
+  await testInfo.attach("draft-lifecycle", {
+    body: JSON.stringify(await page.evaluate(() => (window as unknown as { __draftEvents: unknown[] }).__draftEvents)),
+    contentType: "application/json",
   });
 });

@@ -859,32 +859,31 @@ async fn test_worktree_list_shows_sibling_session_factory_worktree_without_store
 
 /// Scoped override of one env var, restored on drop (including unwind).
 ///
-/// The `_env` witness is the binary's canonical `TestEnvGuard`: it proves the
-/// caller holds the process-wide env lock for the whole test body, so the
-/// otherwise-unlocked mutation below cannot race a concurrently running test.
-/// Never construct one without it.
-struct VarGuard {
+/// Borrow the canonical owner so both the temporary override and its scoped
+/// restoration capture through that owner; no raw mutation bypasses it.
+struct VarGuard<'a> {
+    env: &'a mut TestEnvGuard,
     key: &'static str,
     original: Option<std::ffi::OsString>,
 }
 
-impl VarGuard {
-    fn set(_env: &TestEnvGuard, key: &'static str, value: &str) -> Self {
+impl<'a> VarGuard<'a> {
+    fn set(env: &'a mut TestEnvGuard, key: &'static str, value: &str) -> Self {
         let original = std::env::var_os(key);
-        // SAFETY: `_env` holds the process-wide test env lock until after this
-        // guard's Drop has restored the original value.
-        unsafe { std::env::set_var(key, value) };
-        Self { key, original }
+        env.set(key, value);
+        Self { env, key, original }
+    }
+
+    fn guard(&mut self) -> &mut TestEnvGuard {
+        self.env
     }
 }
 
-impl Drop for VarGuard {
+impl Drop for VarGuard<'_> {
     fn drop(&mut self) {
-        unsafe {
-            match &self.original {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
-            }
+        match &self.original {
+            Some(value) => self.env.set(self.key, value),
+            None => self.env.remove(self.key),
         }
     }
 }
@@ -1684,8 +1683,8 @@ async fn normal_close_uses_task_anchor_not_newer_same_worker_or_unrelated_worktr
     let mut env = test_env();
     let home = TempDir::new().expect("temp HOME");
     env.set("HOME", home.path());
-    let _role = VarGuard::set(&env, "CAS_AGENT_ROLE", "worker");
-    let _factory = VarGuard::set(&env, "CAS_FACTORY_MODE", "1");
+    env.set("CAS_AGENT_ROLE", "worker");
+    env.set("CAS_FACTORY_MODE", "1");
     let repo_a = GitRepo::new();
     let repo_b = GitRepo::new();
     run_git(
@@ -2345,7 +2344,7 @@ async fn test_worktree_merge_reassignment_ignores_closed_focused_epic_and_honors
     let session = "test-reassignment-focus-b86e";
     let home = TempDir::new().expect("home");
     env.set_current_dir(&repo.root);
-    let _session_env = VarGuard::set(&env, "CAS_FACTORY_SESSION", session);
+    env.set("CAS_FACTORY_SESSION", session);
     env.set("HOME", home.path());
     let meta_path = cas::ui::factory::metadata_path(session);
     std::fs::create_dir_all(meta_path.parent().expect("metadata parent")).unwrap();
@@ -2434,7 +2433,7 @@ async fn test_worktree_merge_ignores_focused_epic_without_task_authority() {
     let session = "test-focus-session-0b32";
     let home = TempDir::new().expect("home");
     env.set_current_dir(&repo.root);
-    let _session_env = VarGuard::set(&env, "CAS_FACTORY_SESSION", session);
+    env.set("CAS_FACTORY_SESSION", session);
     env.set("HOME", home.path());
     let meta_path = cas::ui::factory::metadata_path(session);
     std::fs::create_dir_all(meta_path.parent().expect("metadata parent")).unwrap();
@@ -2498,7 +2497,7 @@ async fn test_worktree_merge_rejects_cross_project_focused_epic_cas_0b32() {
     let session = "test-focus-cross-project-0b32";
     let home = TempDir::new().expect("home");
     env.set_current_dir(&repo.root);
-    let _session_env = VarGuard::set(&env, "CAS_FACTORY_SESSION", session);
+    env.set("CAS_FACTORY_SESSION", session);
     env.set("HOME", home.path());
     let meta_path = cas::ui::factory::metadata_path(session);
     std::fs::create_dir_all(meta_path.parent().unwrap()).unwrap();
@@ -2556,7 +2555,7 @@ async fn test_worktree_merge_rejects_focused_epic_for_non_member_worker_cas_0b32
     let session = "test-focus-non-member-0b32";
     let home = TempDir::new().expect("home");
     env.set_current_dir(&repo.root);
-    let _session_env = VarGuard::set(&env, "CAS_FACTORY_SESSION", session);
+    env.set("CAS_FACTORY_SESSION", session);
     env.set("HOME", home.path());
     let meta_path = cas::ui::factory::metadata_path(session);
     std::fs::create_dir_all(meta_path.parent().unwrap()).unwrap();
@@ -3774,8 +3773,8 @@ async fn awaiting_merge_reclose_uses_current_commit_receipt_cas_e159() {
     // The current continuation writes the actual delivery on its current lane,
     // then the supervisor merges that lane to the resolved close target.
     let old_commit_time = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
-    let _author_date = VarGuard::set(&env, "GIT_AUTHOR_DATE", &old_commit_time);
-    let _committer_date = VarGuard::set(&env, "GIT_COMMITTER_DATE", &old_commit_time);
+    env.set("GIT_AUTHOR_DATE", &old_commit_time);
+    env.set("GIT_COMMITTER_DATE", &old_commit_time);
     std::fs::write(worker_path.join("current.rs"), "pub fn current() {}\n").unwrap();
     run_git(&["add", "current.rs"], &worker_path);
     run_git(
@@ -4086,7 +4085,7 @@ async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
         );
 
         let reopen = {
-            let _role = VarGuard::set(&env, "CAS_AGENT_ROLE", "supervisor");
+            let _role = VarGuard::set(&mut env, "CAS_AGENT_ROLE", "supervisor");
             supervisor_service
                 .task(Parameters(task_req(serde_json::json!({
                     "action": "reopen",
@@ -4623,7 +4622,7 @@ async fn resolved_task_proof_freezes_scope_until_supervisor_starts_a_fresh_cycle
     assert!(rejected.message.contains("task action=reopen"));
 
     let worker_reopen = {
-        let _role = VarGuard::set(&env, "CAS_AGENT_ROLE", "worker");
+        let _role = VarGuard::set(&mut env, "CAS_AGENT_ROLE", "worker");
         worker
             .task(Parameters(task_req(serde_json::json!({
                 "action": "reopen",
@@ -4642,7 +4641,7 @@ async fn resolved_task_proof_freezes_scope_until_supervisor_starts_a_fresh_cycle
     );
 
     let reopen = {
-        let _role = VarGuard::set(&env, "CAS_AGENT_ROLE", "supervisor");
+        let _role = VarGuard::set(&mut env, "CAS_AGENT_ROLE", "supervisor");
         supervisor
             .task(Parameters(task_req(serde_json::json!({
                 "action": "reopen",
@@ -4678,8 +4677,8 @@ async fn resolved_task_proof_freezes_scope_until_supervisor_starts_a_fresh_cycle
         .expect("fresh scope may be updated");
 
     let close = {
-        let _role = VarGuard::set(&env, "CAS_AGENT_ROLE", "worker");
-        let _factory = VarGuard::set(&env, "CAS_FACTORY_MODE", "1");
+        let mut role = VarGuard::set(&mut env, "CAS_AGENT_ROLE", "worker");
+        let _factory = VarGuard::set(role.guard(), "CAS_FACTORY_MODE", "1");
         worker
             .task(Parameters(task_req(serde_json::json!({
                 "action": "close",
@@ -4754,7 +4753,7 @@ async fn public_registration_cannot_mint_or_capture_supervisor_verification_auth
     // supervisor_direct verification authority.
     let public = CasCore::with_daemon(cas_root.clone(), None, None);
     {
-        let _role = VarGuard::set(&env, "CAS_AGENT_ROLE", "supervisor");
+        let _role = VarGuard::set(&mut env, "CAS_AGENT_ROLE", "supervisor");
         public
             .cas_agent_register(Parameters(AgentRegisterRequest {
                 name: "supervisor".to_string(),
@@ -4817,7 +4816,7 @@ async fn public_registration_cannot_mint_or_capture_supervisor_verification_auth
     .expect("session exact dispatch");
     let public_session = CasCore::with_daemon(cas_root.clone(), None, None);
     {
-        let _role = VarGuard::set(&env, "CAS_AGENT_ROLE", "supervisor");
+        let _role = VarGuard::set(&mut env, "CAS_AGENT_ROLE", "supervisor");
         public_session
             .cas_agent_session_start(Parameters(SessionStartRequest {
                 session_id: Some("public-session-env-supervisor".to_string()),
@@ -4873,7 +4872,7 @@ async fn public_registration_cannot_mint_or_capture_supervisor_verification_auth
     );
     let worker_reregister = CasCore::with_daemon(cas_root.clone(), None, None);
     {
-        let _role = VarGuard::set(&env, "CAS_AGENT_ROLE", "supervisor");
+        let _role = VarGuard::set(&mut env, "CAS_AGENT_ROLE", "supervisor");
         worker_reregister
             .cas_agent_register(Parameters(AgentRegisterRequest {
                 name: "supervisor".to_string(),

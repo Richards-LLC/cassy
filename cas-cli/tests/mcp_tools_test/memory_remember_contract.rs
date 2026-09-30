@@ -336,11 +336,8 @@ fn recommended_action_surface_for_user_decision_round_trips() {
 async fn a_new_handoff_supersedes_the_previous_one_for_its_role_cas_0339() {
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, service) = setup_cas(&mut test_env);
-    // SAFETY: the process-wide env lock is held for the whole test, so no
-    // other test observes this change.
-    unsafe {
-        std::env::remove_var("CAS_AGENT_ROLE");
-    }
+
+    test_env.remove("CAS_AGENT_ROLE");
 
     let body = |which: &str| {
         format!(

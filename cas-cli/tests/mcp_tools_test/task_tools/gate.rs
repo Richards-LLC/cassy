@@ -334,9 +334,7 @@ async fn assigning_gate_to_worker_warns_that_gate_is_supervisor_owned() {
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
-    unsafe {
-        std::env::set_var("CAS_FACTORY_MODE", "1");
-    }
+    test_env.set("CAS_FACTORY_MODE", "1");
     let worker = Agent::new_with_role(
         "gate-assignment-worker-session".to_string(),
         "gate-assignment-worker".to_string(),
@@ -368,9 +366,7 @@ async fn assigning_gate_to_worker_warns_that_gate_is_supervisor_owned() {
         }),
     )
     .await;
-    unsafe {
-        std::env::remove_var("CAS_FACTORY_MODE");
-    }
+    test_env.remove("CAS_FACTORY_MODE");
 
     assert!(
         updated.contains("Gate task assigned to worker")

@@ -85,4 +85,3 @@ def pairs(ts):
     if stack:
         raise ValueError('unbalanced Rust delimiters')
     return result
-

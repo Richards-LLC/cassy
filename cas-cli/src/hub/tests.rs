@@ -216,6 +216,10 @@ fn h1_death_05_fixture_process_entry() {
     let Ok(port_file) = std::env::var("CAS_H1_DEATH_FIXTURE_PORT_FILE") else {
         return;
     };
+    std::fs::write(
+        std::path::Path::new(&port_file).with_extension("started"),
+        "hub::tests::h1_death_05_fixture_process_entry",
+    ).unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async move {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -276,6 +280,13 @@ async fn h1_death_05_real_sigill_fixture_preserves_exact_diagnostic_without_mult
     })
     .await
     .unwrap();
+
+    // This child intentionally dies from SIGILL before libtest can emit a
+    // passing summary. The entry receipt proves its test body actually ran.
+    assert_eq!(
+        std::fs::read_to_string(port_file.with_extension("started")).unwrap(),
+        "hub::tests::h1_death_05_fixture_process_entry",
+    );
 
     let source = RecordingReadModel::with_sessions(vec![fixture_session("death-fixture")]);
     let catalog = SessionCatalog::new(source.clone());

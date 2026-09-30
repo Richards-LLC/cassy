@@ -466,3 +466,27 @@ An empty `execution_note` update may clear a constraint after approval when its
 exact repository proof is unchanged. Pending, skipped, unbound, and changed
 proofs remain locked; changing other scope fields or replacing the constraint
 still requires a fresh proof cycle.
+
+### Test shape and runner evidence
+
+`python3 scripts/check-test-shape.py` checks tracked Rust tests and test-only
+helpers for constant/literal equality and reads of Rust source as text.
+`--changed-since <ref>` checks the merge-base diff, including working changes;
+the release fast rows and Scoped Validation run this form. Intentional external
+wire or structural contracts carry `// pin: <reason>` immediately above the
+statement or test/helper declaration, or on the assertion line. A reason does
+not convert a source-order assertion into behavior coverage.
+
+Use `npm test` and `npm run journeys -- <args>` in `hub-web`, or
+`scripts/journey-eval.sh` for journey bundles. These runners refuse successful
+zero-test summaries and export the passing count to `VERIFIED_TEST_COUNT_FILE`
+when requested. Rust re-exec helpers require the exact child name, one selected
+test, and one passing result; intentional signal/atexit children instead prove
+entry into the test body before their early exit.
+
+Closing a task that changes a committed `*.snap` or
+`opencode_projection.snapshot.json` requires a task decision note:
+`snapshot-approved: <relative file> — <actual +added or -removed line> — <why>`.
+The close gate checks the task-attributed Git diff, even after merge, and names
+the exact `task action=notes` command when approval is missing. Approval for a
+different file or a line absent from that diff does not satisfy the gate.

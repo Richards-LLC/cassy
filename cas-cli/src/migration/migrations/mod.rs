@@ -594,6 +594,7 @@ mod tests {
     /// registered is dead code that reads like shipped schema, so fail loudly
     /// the moment one appears.
     #[test]
+    // pin: An unregistered Rust migration file cannot appear in the runtime registry; inspect both disk files and declarations to detect dead migrations.
     fn test_every_migration_file_is_declared_and_registered() {
         let dir = crate::test_paths::crate_root().join("src/migration/migrations");
         let Ok(entries) = std::fs::read_dir(&dir) else {

@@ -178,6 +178,7 @@ mod tests {
     }
 
     #[test]
+    // pin: SIGPIPE policy is structural across every long-lived entry and fork branch; short-lived main retains the shell pipeline default.
     fn every_long_lived_server_entry_point_ignores_sigpipe() {
         const CALL: &str = "ignore_sigpipe_for_server()";
         let cases: [(&str, &str, &str); 7] = [
@@ -253,6 +254,7 @@ mod tests {
     }
 
     #[test]
+    // pin: SIGPIPE policy is structural across every long-lived entry and fork branch; short-lived main retains the shell pipeline default.
     fn short_lived_commands_keep_mains_sigpipe_default() {
         let main = include_str!("main.rs");
         assert!(

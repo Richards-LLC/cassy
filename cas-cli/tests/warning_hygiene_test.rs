@@ -14,6 +14,7 @@ fn assert_preceded_by(source: &str, item: &str, attribute: &str) {
 }
 
 #[test]
+// pin: Source cfg attributes must protect platform-only symbols even when this host cannot compile the other platform.
 fn warning_only_symbols_are_scoped_to_the_builds_that_use_them() {
     let factory = include_str!("../src/cli/factory/mod.rs");
     assert_preceded_by(

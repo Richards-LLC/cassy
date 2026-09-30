@@ -274,6 +274,7 @@ mod tests {
     /// be injected verbatim into the worker's prompt and, worse, would restore
     /// the original swallow.
     #[test]
+    // pin: Bracketed-paste delimiters are the terminal standard wire bytes, required by every injected worker prompt.
     fn bracketed_paste_delimiters_are_the_standard_sequences() {
         assert_eq!(PASTE_START, b"\x1b[200~");
         assert_eq!(PASTE_END, b"\x1b[201~");

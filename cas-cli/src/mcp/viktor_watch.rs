@@ -792,6 +792,7 @@ mod tests {
     }
 
     #[test]
+    // pin: Terminal state spellings are the external Viktor wire contract, not internal enum labels.
     fn terminal_states_match_viktor_contract() {
         for state in [
             "completed",

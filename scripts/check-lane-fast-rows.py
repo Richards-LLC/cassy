@@ -13,6 +13,8 @@ import subprocess
 import sys
 import tempfile
 
+from importlib.util import module_from_spec, spec_from_file_location
+
 
 def git(repo, *args, **kwargs):
     return subprocess.check_output(["git", "-C", str(repo), *args], **kwargs).decode().strip()
@@ -48,6 +50,13 @@ def check_merge(repo, target, source):
                     raise ValueError("fast-rows: exceeded 30s; merge refused") from None
             if status:
                 raise ValueError(f"fast-rows: named row(s) above failed (exit {status}); merge refused")
+            compiler = Path(__file__).with_name("check-lane-compile.py")
+            if not compiler.is_file():
+                raise ValueError("lane compile verifier missing; merge refused")
+            spec = spec_from_file_location("lane_compile", compiler)
+            module = module_from_spec(spec)
+            spec.loader.exec_module(module)
+            module.require(repo, target_sha, source_sha, tree)
             if git(repo, "rev-parse", target) != target_sha or git(repo, "rev-parse", source) != source_sha:
                 raise ValueError("fast-rows: source or target moved during validation; retry preflight")
             print(f"PASS lane fast rows: target={target_sha} source={source_sha}")

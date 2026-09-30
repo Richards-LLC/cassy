@@ -30,7 +30,7 @@ class FastRows(unittest.TestCase):
         self.write(".gitignore", "/cargo-called\n")
         for helper in ("release-gate.sh", "release-portable.sh", "cas-test-targets.py",
                        "check-workflow-run-interpolation.py", "check-changed-markdown.py",
-                       "check-lane-fast-rows.py", "check-builtin-doc-hygiene.py", "builtin-doc-hygiene.json",
+                       "check-lane-fast-rows.py", "check-lane-compile.py", "check-builtin-doc-hygiene.py", "builtin-doc-hygiene.json",
                        "check-builtin-contract-phrases.py", "check-test-env.py", "rust_test_source.py"):
             self.write("scripts/" + helper, (ROOT / "scripts" / helper).read_text())
         self.write("scripts/test-env-baseline.json", '{"version":1,"violations":[],"exceptions":[]}\n')
@@ -136,7 +136,7 @@ class FastRows(unittest.TestCase):
 
     def test_preview_accepts_combined_tree_and_cleans_up(self):
         command(self.repo, "git", "checkout", "-qb", "factory/lane")
-        self.write("cas-cli/src/example.rs", "// valid lane\n")
+        self.write("scripts/example.py", "# valid scripts-only lane\n")
         self.commit()
         result = command(self.repo, "python3", "scripts/check-lane-fast-rows.py", ".", "target", "factory/lane")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -156,6 +156,17 @@ class FastRows(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("FAIL test-targets", result.stdout)
         self.assertEqual(command(self.repo, "git", "rev-parse", "target").stdout.strip(), target)
+        self.assertFalse((self.repo / "cargo-called").exists())
+
+    def test_preview_requires_merged_tree_compile_receipt_for_rust(self):
+        command(self.repo, "git", "checkout", "-qb", "factory/lane")
+        self.write("cas-cli/src/example.rs", "// valid Rust lane\n")
+        self.commit()
+        result = command(self.repo, "python3", "scripts/check-lane-fast-rows.py", ".", "target", "factory/lane")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("LANE COMPILE REQUIRED", result.stderr)
+        self.assertIn("--prove", result.stderr)
+        self.assertEqual(command(self.repo, "git", "rev-parse", "target").stdout.strip(), self.base)
         self.assertFalse((self.repo / "cargo-called").exists())
 
     def test_env_baseline_growth_and_staleness_fail_admission(self):

@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- Release trains stop on a rejected branch push and refuse to enqueue a PR
+  whose head differs from the gated commit. Reassembled release branches use
+  the train's recorded push as an exact lease, preserving concurrent pushes.
+
 ## [3.38.0] - 2026-09-29
 
 ### Changed

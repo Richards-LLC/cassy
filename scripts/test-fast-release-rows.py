@@ -2,6 +2,8 @@
 """Exercise fast admission against real Git trees and real no-build checks."""
 
 import os
+import json
+import sys
 from pathlib import Path
 import shutil
 import subprocess
@@ -10,6 +12,7 @@ import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
 
 
 def command(repo, *args, **kwargs):
@@ -28,8 +31,9 @@ class FastRows(unittest.TestCase):
         for helper in ("release-gate.sh", "release-portable.sh", "cas-test-targets.py",
                        "check-workflow-run-interpolation.py", "check-changed-markdown.py",
                        "check-lane-fast-rows.py", "check-builtin-doc-hygiene.py", "builtin-doc-hygiene.json",
-                       "check-builtin-contract-phrases.py"):
+                       "check-builtin-contract-phrases.py", "check-test-env.py", "rust_test_source.py"):
             self.write("scripts/" + helper, (ROOT / "scripts" / helper).read_text())
+        self.write("scripts/test-env-baseline.json", '{"version":1,"violations":[],"exceptions":[]}\n')
         self.write("scripts/builtin-contract-phrases.json", '{"version":2,"documents":{"skills/example/SKILL.md":{"source":"cas-cli/src/builtins/skills/example/SKILL.md","catalogs":["claude","codex","grok"],"contains":[{"text":"fixture contract","reason":"Named fixture contract."}],"absent":[],"any_of":[]}},"alternatives":[]}\n')
         self.write("cas-cli/src/builtins/skills/example/SKILL.md", "fixture contract\n")
         self.write(".markdownlint-cli2.jsonc", (ROOT / ".markdownlint-cli2.jsonc").read_text())
@@ -77,7 +81,7 @@ class FastRows(unittest.TestCase):
         self.assertLess(time.monotonic() - start, 30)
         for row in ("failure-log", "version-literals", "changelog-and-versions", "release-script",
                     "release-notes-shell-injection", "procedure-guardrails", "test-targets",
-                    "markdown-lint", "test-shape", "builtin-doc-hygiene"):
+                    "markdown-lint", "test-shape", "test-env", "builtin-doc-hygiene"):
             if row == "test-shape":
                 self.assertIn("SKIP test-shape", result.stdout)
             else:
@@ -86,6 +90,9 @@ class FastRows(unittest.TestCase):
 
     def test_real_defects_name_the_row(self):
         cases = [
+            ("test-env", "cas-cli/tests/sample.rs", '#[test] fn sample() { std::env::set_var("HOME", "other"); }\n'),
+            ("test-env", "crates/cas-core/src/lib.rs", '#[test] fn sample() { std::env::set_current_dir("."); }\n'),
+            ("test-env", "cas-cli/tests/sample.rs", '#[test] fn sample() { let _a = TestEnvGuard::new(); let _b = TestEnvGuard::new(); }\n'),
             ("release-notes-shell-injection", ".github/workflows/fixture.yml", "jobs:\n  fixture:\n    steps:\n      - run: echo '${{ github.event.head_commit.message }}'\n"),
             ("test-targets", "cas-cli/tests/unwired/main.rs", "#[test]\nfn unwired() {}\n"),
             ("version-literals", "cas-cli/tests/sample.rs", '// current version 9.99.7\n'),
@@ -150,6 +157,41 @@ class FastRows(unittest.TestCase):
         self.assertIn("FAIL test-targets", result.stdout)
         self.assertEqual(command(self.repo, "git", "rev-parse", "target").stdout.strip(), target)
         self.assertFalse((self.repo / "cargo-called").exists())
+
+    def test_env_baseline_growth_and_staleness_fail_admission(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('fast_env_lint', ROOT / 'scripts/check-test-env.py')
+        lint = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = lint
+        spec.loader.exec_module(lint)
+        source = '#[test] fn sample() { std::env::set_var("HOME", "x"); }'
+        findings = lint.Analyzer({'cas-cli/tests/sample.rs': source}).run()
+        manifest = {'version': 1, 'violations': [{'id': r['id'], 'reason': 'Explicit legacy fixture.'} for r in findings], 'exceptions': []}
+        self.write('cas-cli/tests/sample.rs', source)
+        self.write('scripts/test-env-baseline.json', json.dumps(manifest))
+        self.commit()
+        grown = self.fast()
+        self.assertEqual(grown.returncode, 1, grown.stdout + grown.stderr)
+        self.assertIn('FAIL test-env', grown.stdout)
+        self.assertIn('baseline growth', grown.stdout)
+        self.write('cas-cli/tests/sample.rs', '#[test] fn sample() {}')
+        self.commit()
+        stale = self.fast()
+        self.assertEqual(stale.returncode, 1, stale.stdout + stale.stderr)
+        self.assertIn('stale baseline entry', stale.stdout)
+
+    def test_env_checker_is_mandatory_and_receives_base(self):
+        self.write('scripts/check-test-env.py', "import sys\nassert sys.argv[1:] == ['--changed-since', '" + self.base + "']\nprint('bad process state fixture.rs:1')\nsys.exit(1)\n")
+        self.commit()
+        result = self.fast()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('FAIL test-env', result.stdout)
+        (self.repo / 'scripts/check-test-env.py').unlink()
+        self.commit()
+        result = self.fast()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('FAIL test-env', result.stdout)
+        self.assertIn('scripts/check-test-env.py is missing', result.stdout)
 
     def test_optional_shape_checker_receives_the_lane_base_and_failure_is_named(self):
         self.write("scripts/check-test-shape.py", "import sys\nassert sys.argv[1:] == ['--changed-since', '" + self.base + "']\nprint('bad shape fixture.rs:1')\nsys.exit(1)\n")

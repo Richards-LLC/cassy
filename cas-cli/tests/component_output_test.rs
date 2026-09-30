@@ -407,7 +407,7 @@ fn validate_report_text(
         ReportKind::Status => regex::Regex::new(STATUS_REPORT_PATTERN)
             .unwrap()
             .is_match(stdout),
-        ReportKind::Version => regex::Regex::new(r"(?m)^cas \d+\.\d+\.\d+(?:[-+][^\s]+)?\r?$")
+        ReportKind::Version => regex::Regex::new(r"(?m)^cas \d+\.\d+\.\d+(?:[-+][^\s]+)?(?: \((?:[0-9a-f]+(?:-dirty)?|unknown(?:-dirty)?) (?:\d{4}-\d{2}-\d{2}|unknown)\))?\r?$")
             .unwrap()
             .is_match(stdout),
         ReportKind::Help => stdout.starts_with("Cassy\n") && stdout.contains("Usage: cas"),

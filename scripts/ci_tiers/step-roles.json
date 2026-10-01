@@ -1,0 +1,77 @@
+{
+  "Create Release": [
+    {
+      "file": ".github/workflows/release.yml",
+      "job": "release",
+      "step": {
+        "run_contains": "--title \"CAS $VERSION\" \\"
+      }
+    }
+  ],
+  "Dispatch install path proof": [
+    {
+      "file": ".github/workflows/release.yml",
+      "job": "release",
+      "step": {
+        "run_contains": "--limit 20 \\"
+      }
+    }
+  ],
+  "Verify private self-hosted sccache": [
+    {
+      "file": ".github/workflows/ci.yml",
+      "job": "fast-validation-preflight",
+      "step": {
+        "run_contains": "sccache rustc -vV"
+      }
+    },
+    {
+      "file": ".github/workflows/ci.yml",
+      "job": "fast-validation-suite-build",
+      "step": {
+        "run_contains": "sccache rustc -vV"
+      }
+    },
+    {
+      "file": ".github/workflows/ci.yml",
+      "job": "fast-validation-docs",
+      "step": {
+        "run_contains": "sccache rustc -vV"
+      }
+    }
+  ],
+  "Disable sccache for the self-hosted suite archive": [
+    {
+      "file": ".github/workflows/ci.yml",
+      "job": "fast-validation-suite-build",
+      "step": {
+        "run_contains": "echo 'RUSTC_WRAPPER=' >> \"$GITHUB_ENV\""
+      }
+    }
+  ],
+  "Build full suite archive": [
+    {
+      "file": ".github/workflows/self-hosted-fast-validation.yml",
+      "job": "trusted-suite-pilot",
+      "step": {
+        "run_contains": "-o \"$RUNNER_TEMP/archive.time\" \\"
+      }
+    },
+    {
+      "file": ".github/workflows/ci.yml",
+      "job": "fast-validation-suite-build",
+      "step": {
+        "run_contains": "python3 scripts/cas-test-targets.py cas-cli --check"
+      }
+    }
+  ],
+  "Markdown lint": [
+    {
+      "file": ".github/workflows/ci.yml",
+      "job": "docs-lint",
+      "step": {
+        "run_contains": "mapfile -t markdown_files < <("
+      }
+    }
+  ]
+}

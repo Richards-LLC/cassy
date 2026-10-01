@@ -8,8 +8,8 @@ Both values live in the machine's credentials file as
 `VIOLET_SLACK_TOKEN_<LABEL>` and `VIOLET_VERCEL_BYPASS` and are exported into the
 environment by the login shell. Configurations below name those variables and
 never hold their values. `cas integrate violet` prefers `VIOLET_*` names and
-falls back to the corresponding `MECHA_SLACK_TOKEN_<LABEL>` and
-`MECHA_VERCEL_BYPASS` names on existing machines; retain whichever env names
+falls back to the corresponding legacy variables on existing machines;
+retain whichever env names
 the integration receipt selects.
 
 ## One command, once per machine
@@ -50,6 +50,8 @@ mints locally.
 The hand-written shapes below remain the reference for repairing a machine by
 hand or for a project that has never named the hub routes itself.
 
+Use the endpoint printed by `cas integrate violet` for `<HUB_MCP_URL>` in the repair examples below.
+
 ## Cassy proxy — reaches every harness
 
 `.cas/proxy.toml`:
@@ -62,7 +64,7 @@ allowlist = [
 
 [servers.violet]
 transport = "http"
-url = "https://mecha-cassy.vercel.app/mcp/slack"
+url = "<HUB_MCP_URL>"
 auth = "env:VIOLET_SLACK_TOKEN_<LABEL>"
 
 [servers.violet.headers]
@@ -109,7 +111,7 @@ tools before starting a release posting run.
 
 ```toml
 [mcp_servers.violet]
-url = "https://mecha-cassy.vercel.app/mcp/slack"
+url = "<HUB_MCP_URL>"
 bearer_token_env_var = "VIOLET_SLACK_TOKEN_<LABEL>"
 env_http_headers = { "x-vercel-protection-bypass" = "VIOLET_VERCEL_BYPASS" }
 ```
@@ -126,7 +128,7 @@ A user-scope HTTP server in the selected profile's `.claude.json`:
   "mcpServers": {
     "violet": {
       "type": "http",
-      "url": "https://mecha-cassy.vercel.app/mcp/slack",
+      "url": "<HUB_MCP_URL>",
       "headers": {
         "Authorization": "Bearer ${VIOLET_SLACK_TOKEN_<LABEL>}",
         "x-vercel-protection-bypass": "${VIOLET_VERCEL_BYPASS}"

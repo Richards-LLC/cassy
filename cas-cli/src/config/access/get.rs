@@ -91,12 +91,16 @@ impl Config {
             "factory.merge_sweep_command" => {
                 Some(factory.merge_sweep_command.clone().unwrap_or_default())
             }
-            "factory.epic_base_branch" => Some(factory.epic_base_branch.clone().unwrap_or_default()),
+            "factory.epic_base_branch" => {
+                Some(factory.epic_base_branch.clone().unwrap_or_default())
+            }
             "factory.release_gate_home_dir" => {
                 Some(factory.release_gate_home_dir.clone().unwrap_or_default())
             }
             "factory.merge_sweep_cwd" => Some(factory.merge_sweep_cwd.clone().unwrap_or_default()),
-            "factory.merge_sweep_timeout_secs" => Some(factory.merge_sweep_timeout_secs.to_string()),
+            "factory.merge_sweep_timeout_secs" => {
+                Some(factory.merge_sweep_timeout_secs.to_string())
+            }
             "factory.ai_enrichment.enabled" => Some(factory.ai_enrichment.enabled.to_string()),
             "factory.ai_enrichment.endpoint" => Some(factory.ai_enrichment.endpoint.clone()),
             "factory.ai_enrichment.provider" => Some(factory.ai_enrichment.provider.clone()),
@@ -179,10 +183,6 @@ impl Config {
             "issues.repo" => Some(issues.repo.unwrap_or_default()),
             "issues.components.cassy" => Some(issue_repos.cassy),
             "issues.components.violet" => Some(issue_repos.violet),
-            "issues.components.mecha_cassy" => {
-                super::warn_deprecated_issue_key();
-                Some(issue_repos.violet)
-            }
             "issues.components.cloud" => Some(issue_repos.cloud),
             // History section
             "history.github_repo" => Some(history.github_repo.unwrap_or_default()),

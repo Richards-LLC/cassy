@@ -372,14 +372,7 @@ impl Config {
             // Issues section
             ("issues.repo".to_string(), issues.repo.unwrap_or_default()),
             ("issues.components.cassy".to_string(), issue_repos.cassy),
-            (
-                "issues.components.violet".to_string(),
-                issue_repos.violet.clone(),
-            ),
-            (
-                "issues.components.mecha_cassy".to_string(),
-                issue_repos.violet,
-            ),
+            ("issues.components.violet".to_string(), issue_repos.violet),
             ("issues.components.cloud".to_string(), issue_repos.cloud),
             // History section
             (

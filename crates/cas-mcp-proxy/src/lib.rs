@@ -1605,9 +1605,9 @@ pub fn describe_upstream_call_error(error: &anyhow::Error) -> String {
 }
 
 pub fn upstream_mcp_error_data(error: &anyhow::Error) -> Option<Value> {
-    let service_error = error.chain().find_map(|cause| {
-        cause.downcast_ref::<rmcp::service::ServiceError>()
-    })?;
+    let service_error = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<rmcp::service::ServiceError>())?;
     let rmcp::service::ServiceError::McpError(error) = service_error else {
         return None;
     };
@@ -1683,7 +1683,7 @@ fn safe_error_detail(error: &anyhow::Error) -> String {
             .downcast_ref::<MissingCredentialError>()
             .map(|missing| missing.name.as_str())
     }) {
-        let remedy = (name == "MECHA_VERCEL_BYPASS" || name.starts_with("MECHA_SLACK_TOKEN_"))
+        let remedy = (config::violet_credential_names(name).len() == 2)
             .then_some("; run `cas integrate violet` to refresh credentials")
             .unwrap_or_default();
         return format!("missing required environment variable {name}{remedy}");
@@ -1976,7 +1976,9 @@ fn expand_environment_placeholders(value: &str) -> Result<String> {
         }
 
         match config::violet_credential_value(name, |candidate| std::env::var(candidate).ok()) {
-            Some(current) if default.is_none() || !current.is_empty() => expanded.push_str(&current),
+            Some(current) if default.is_none() || !current.is_empty() => {
+                expanded.push_str(&current)
+            }
             Some(_) | None => match default {
                 Some(default) => expanded.push_str(default),
                 None => return resolve_environment_variable(name),
@@ -3067,14 +3069,14 @@ mod tests {
             headers: HashMap::new(),
             oauth: false,
         };
-        let engine = ProxyEngine::from_configs(HashMap::from([("mecha-cassy".to_string(), config)]))
+        let engine = ProxyEngine::from_configs(HashMap::from([("violet".to_string(), config)]))
             .await
             .unwrap();
         let snapshot = engine.health_snapshot().await;
         let server = snapshot
             .servers
             .iter()
-            .find(|server| server.name == "mecha-cassy")
+            .find(|server| server.name == "violet")
             .expect("configured upstream health must be present");
         let expected_code = format!("{MISSING_CREDENTIAL_ENV_PREFIX}{missing}");
         let expected_detail = format!("missing required environment variable {missing}");
@@ -3090,24 +3092,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mecha_cassy_missing_credential_health_names_refresh_command() {
-        let missing = format!("MECHA_SLACK_TOKEN_CAS_PROXY_HEALTH_{}", std::process::id());
+    async fn violet_missing_credential_health_names_refresh_command() {
+        let missing = format!("VIOLET_SLACK_TOKEN_CAS_PROXY_HEALTH_{}", std::process::id());
         let config = ServerConfig::Http {
             url: "https://example.invalid/mcp".to_string(),
             auth: Some(format!("env:{missing}")),
             headers: HashMap::new(),
             oauth: false,
         };
-        let engine =
-            ProxyEngine::from_configs(HashMap::from([("mecha-cassy".to_string(), config)]))
-                .await
-                .unwrap();
+        let engine = ProxyEngine::from_configs(HashMap::from([("violet".to_string(), config)]))
+            .await
+            .unwrap();
         let server = engine
             .health_snapshot()
             .await
             .servers
             .into_iter()
-            .find(|server| server.name == "mecha-cassy")
+            .find(|server| server.name == "violet")
             .expect("configured upstream health must be present");
 
         let expected = format!(

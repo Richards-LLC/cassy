@@ -360,7 +360,7 @@ mod tests {
         std::fs::create_dir_all(ancestor.join(".cas")).expect("ancestor .cas");
         std::fs::write(
             ancestor.join(".cas").join("proxy.toml"),
-            "[servers.mecha-cassy]\ntype = \"http\"\nurl = \"https://example.invalid/mcp\"\n",
+            "[servers.violet]\ntype = \"http\"\nurl = \"https://example.invalid/mcp\"\n",
         )
         .expect("ancestor proxy.toml");
 

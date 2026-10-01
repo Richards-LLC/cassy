@@ -3081,7 +3081,7 @@ fi
 portable_proxy="$portable_dir/proxy.toml"
 printf 'auth = "env:CASSY_PROXY_TOKEN_SOUNDWAVE"\n' >"$portable_proxy"
 portable_announce="$(
-    env -u MECHA_SLACK_TOKEN_ENV -u CAS_RELEASE_TRAIN_MECHA_TOKEN_ENV -u CASSY_PROXY_TOKEN_SOUNDWAVE \
+    env -u VIOLET_SLACK_TOKEN_ENV -u CAS_RELEASE_TRAIN_VIOLET_TOKEN_ENV -u CASSY_PROXY_TOKEN_SOUNDWAVE \
         CAS_RELEASE_TRAIN_PROXY_TOML="$portable_proxy" python3 - "$repo_root/scripts/release-train-announce.py" <<'PY'
 import importlib.util, os, sys
 spec = importlib.util.spec_from_file_location("announce", sys.argv[1])
@@ -3091,7 +3091,10 @@ unset = announce.announce_token_env({})
 from_credentials = announce.announce_token_env({"CASSY_PROXY_TOKEN_SOUNDWAVE": "secret"})
 os.environ["CASSY_PROXY_TOKEN_SOUNDWAVE"] = "secret"
 from_env = announce.announce_token_env({})
-os.environ["MECHA_SLACK_TOKEN_ENV"] = "MECHA_SLACK_TOKEN_PROWL"
+adapter = announce.load_report_adapter()
+for name in [adapter.LEGACY_TOKEN_SELECTOR_ENV, adapter.LEGACY_TRAIN_SELECTOR_ENV]:
+    os.environ.pop(name, None)
+os.environ[adapter.LEGACY_TOKEN_SELECTOR_ENV] = adapter.LEGACY_TOKEN_PREFIX + "_PROWL"
 explicit = announce.announce_token_env({})
 print(unset, from_credentials, from_env, explicit)
 PY

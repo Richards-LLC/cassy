@@ -14,8 +14,10 @@ mandatory #cas-internal publication workflow. They are separate duties.**
 
 ## Transport ownership and worker handoff
 
-**Use only the Violet hub/bot.** Never use Claude.ai Slack or a personal
-connector, including during a hub outage. The builtin
+**Use only the Violet hub/bot.** Read through `violet.violet_read` and post
+through `violet.violet_post`. Never write through Claude.ai Slack, the Claude
+Slack connector, the Codex Slack app, or a personal connector, including during
+a hub outage. The builtin
 [violet](../cas-cli/src/builtins/skills/violet/SKILL.md) owns channel
 resolution, authenticated `tools/list`, bounded `violet_read` dedupe, ordered
 thread posting with one-second pacing, `## POSTED` receipts and env-only

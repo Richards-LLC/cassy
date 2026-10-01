@@ -563,7 +563,11 @@ closed children are saved under the repository's common Git directory
 (`cas/epic-close-verdicts.json`), keyed by the exact refs and anchor each proof
 read. Retrying the same close reuses them and continues from the first
 unchecked child, so a large epic closes after a few retries. A moved target,
-lane or anchor invalidates only the affected verdicts.
+lane or anchor invalidates only the affected verdicts. A measured stranded
+child still rejects immediately. When the check is incomplete, no measured child
+blocks and the task store shows every child terminal, a live registered
+supervisor may instead close with `supervisor_override=true` and a reason; the
+waived output, including every unchecked child, is recorded as a decision note.
 
 An empty `execution_note` update may clear a constraint after approval when its
 exact repository proof is unchanged. Pending, skipped, unbound, and changed

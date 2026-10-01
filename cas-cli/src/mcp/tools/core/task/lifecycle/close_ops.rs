@@ -6245,7 +6245,27 @@ impl CasCore {
                 EpicCloseGateOutcome::ProceedWithNote(note) => {
                     append_close_decision_note(task_store.as_ref(), &mut task, &note);
                 }
-                EpicCloseGateOutcome::Reject(msg) => {
+                // cas-b412: the store fact "every child is terminal" is
+                // cheap and checked first. Only then may a live supervisor
+                // (authenticated by validate_supervisor_override above) waive
+                // the children the budget left unproven. Measured stranded
+                // children never reach this arm; they reject below.
+                EpicCloseGateOutcome::Incomplete(msg)
+                    if supervisor_override
+                        && req.stranded_branch_override.is_none()
+                        && subtasks.iter().all(Task::is_terminal) =>
+                {
+                    deferred_epic_override_note = Some(format!(
+                        "decision: supervisor override waived the incomplete epic close \
+                         check for `{epic_id}`. All {count} child task(s) are terminal in \
+                         the task store; no measured child blocked the close. Reason: {reason}\n\
+                         Waived gate output follows verbatim:\n{msg}",
+                        epic_id = req.id,
+                        count = subtasks.len(),
+                        reason = req.reason.as_deref().unwrap_or_default().trim(),
+                    ));
+                }
+                EpicCloseGateOutcome::Reject(msg) | EpicCloseGateOutcome::Incomplete(msg) => {
                     // cas-b192: the gate is legitimately unsatisfiable for an
                     // epic whose lanes all landed by squash and were then
                     // refactored. Without a designed door supervisors improvise
@@ -16754,6 +16774,11 @@ pub(crate) enum EpicCloseGateOutcome {
     Proceed,
     ProceedWithNote(String),
     Reject(String),
+    /// cas-b412: the budget ran out before every child was proven. Nothing
+    /// measured blocks the close, but unchecked children remain. Retrying
+    /// resumes from saved verdicts; a live supervisor may instead waive the
+    /// remainder once the task store shows every child terminal.
+    Incomplete(String),
 }
 
 /// Validate the narrative supplied with a stranded-branch override (cas-b192).
@@ -17202,7 +17227,12 @@ fn run_epic_close_merge_gate_with_budget(
             budget,
         },
     );
-    if collection.budget_exhausted {
+    if collection.budget_exhausted
+        && !collection
+            .statuses
+            .iter()
+            .any(EpicChildBranchStatus::blocks_epic_close)
+    {
         let checked = collection.statuses.len();
         let unchecked = subtasks
             .iter()
@@ -17211,7 +17241,7 @@ fn run_epic_close_merge_gate_with_budget(
             .collect::<Vec<_>>();
         let reused = collection.reused_verdicts;
         let proven = checked.saturating_sub(reused);
-        return EpicCloseGateOutcome::Reject(format!(
+        return EpicCloseGateOutcome::Incomplete(format!(
             "⚠️ EPIC CLOSE CHECK INCOMPLETE\n\n\
              Partial evaluation: checked {checked} of {total} child task(s) in the \
              {budget:?} close-gate budget ({reused} verdict(s) reused from earlier \
@@ -17221,8 +17251,11 @@ fn run_epic_close_merge_gate_with_budget(
              The check is resumable: verdicts for closed children are saved, so \
              retrying the same close continues from the first unchecked child. \
              Retry until it completes, or run `epic_status` for a paged \
-             diagnostic. This is a bounded fail-closed result, not an unknown \
-             mutation outcome.",
+             diagnostic. When every child is terminal, a live registered \
+             supervisor may instead close with supervisor_override=true and a \
+             reason naming what was inspected; the unchecked children are \
+             recorded in the decision note. This is a bounded fail-closed \
+             result, not an unknown mutation outcome.",
             total = collection.total_children,
             budget = budget,
             unchecked = unchecked.join("\n"),
@@ -28012,7 +28045,7 @@ mod epic_status_gate_tests {
             "50-child close gate exceeded the budget plus scheduling slack: {elapsed:?}"
         );
         match outcome {
-            EpicCloseGateOutcome::Reject(message) => {
+            EpicCloseGateOutcome::Reject(message) | EpicCloseGateOutcome::Incomplete(message) => {
                 assert!(
                     message.contains("MERGE REQUIRED")
                         || message.contains("Partial evaluation:")
@@ -28049,7 +28082,7 @@ mod epic_status_gate_tests {
         );
 
         match outcome {
-            EpicCloseGateOutcome::Reject(message) => {
+            EpicCloseGateOutcome::Incomplete(message) => {
                 assert!(message.contains("Partial evaluation: checked 0 of 3"));
                 assert!(message.contains("cas-partial-child-0"));
                 assert!(message.contains("cas-partial-child-1"));
@@ -28112,10 +28145,10 @@ mod epic_status_gate_tests {
     /// never close. Verdicts proven by one attempt are reused by the next
     /// without spending budget, so retries resume and the close completes.
     #[test]
-    fn epic_close_gate_resumes_across_calls_for_141_children_cas_b412() {
+    fn epic_close_gate_resumes_across_calls_for_150_children_cas_b412() {
         let dir = init_epic_repo(&[]);
         let p = dir.path();
-        let subtasks = merged_epic_children(p, 141, 8);
+        let subtasks = merged_epic_children(p, 150, 8);
         let task = epic("cas-big-epic");
         let req = base_req(&task.id);
 
@@ -28128,7 +28161,7 @@ mod epic_status_gate_tests {
         for _ in 0..200 {
             match run_epic_close_merge_gate_with_budget(&task, &req, "main", p, &subtasks, budget)
             {
-                EpicCloseGateOutcome::Reject(message) => {
+                EpicCloseGateOutcome::Incomplete(message) => {
                     assert!(message.contains("EPIC CLOSE CHECK INCOMPLETE"), "{message}");
                     assert!(message.contains("The check is resumable"), "{message}");
                     let checked: usize = message
@@ -28154,11 +28187,14 @@ mod epic_status_gate_tests {
                     completed = true;
                     break;
                 }
+                EpicCloseGateOutcome::Reject(message) => {
+                    panic!("merged children must never reject: {message}")
+                }
             }
         }
         assert!(
             completed,
-            "141 merged children must close within bounded retries (stopped at {last_checked})"
+            "150 merged children must close within bounded retries (stopped at {last_checked})"
         );
         assert!(partial_attempts >= 1, "the budget must force at least one partial attempt");
 
@@ -28171,8 +28207,8 @@ mod epic_status_gate_tests {
             full_view(std::time::Duration::ZERO),
         );
         assert!(!reused.budget_exhausted);
-        assert_eq!(reused.reused_verdicts, 141);
-        assert_eq!(reused.statuses.len(), 141);
+        assert_eq!(reused.reused_verdicts, 150);
+        assert_eq!(reused.statuses.len(), 150);
         assert!(reused.statuses.iter().all(|status| !status.blocks_epic_close()));
         assert!(matches!(
             run_epic_close_merge_gate_with_budget(

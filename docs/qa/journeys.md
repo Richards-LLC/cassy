@@ -469,7 +469,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** `/commander/` on a desktop, one live session whose supervisor missed a relayed update
 - **Goal:** the session's thread is only its conversation; a delivery problem is one attention item that goes away once resolved, and nothing claims I replied when I didn't
-- **Touches:** `hub-web/src/operator-notices.ts`, `hub-web/src/attention-objects.ts`, `hub-web/src/attention.ts`, `hub-web/src/thread-model.ts`, `hub-web/src/connection.ts`, `hub-web/src/conversation-view.ts`
+- **Touches:** `hub-web/src/operator-notices.ts`, `hub-web/src/attention-objects.ts`, `hub-web/src/attention.ts`, `hub-web/src/attention-view.ts`, `hub-web/src/thread-model.ts`, `hub-web/src/connection.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/conversation-shell.ts`
 - **Suite:** `hub-web/e2e/journeys/delivery-notice.journey.ts`
 - **Gaps:** the daemon's notice state and resolution announcement are doubled; that the daemon announces a real relay reaching the supervisor is proven by its Rust tests and at epic assembly
 
@@ -477,15 +477,18 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 1. Open the session: only its conversation — the blocker and the operator's later message are in the thread, the watchdog notice is not, and yesterday's turn shows "Sep 29, 17:20"
 2. A blocker I never answered does not say I replied — the blocker reads "You've written since this" with no tick, never "you replied"
-3. The delivery problem is one attention item — the notice is a single warning in Attention, and a repeat of it adds nothing
-4. It retires once the update gets through — the resolution removes it, and a reload does not bring it back
-5. An answer to an earlier session's question stays here — the supervisor's answer to a question from the ended session arrives in this thread with "re: earlier session wise-lion-31", and no earlier-session section opens for it
+3. The delivery problem is one attention item — the notice is a single warning in Attention dated "Sep 29, 17:49" (its own time, not when the page heard of it), and a repeat of it adds nothing
+4. On a phone, the delivery problem is one tap from the conversation — at 390×844 an Attention badge reading 1 sits in the thread header; tapping it opens the session's Attention as a sheet, focused on Close, showing the notice and its date
+5. Close it and keep reading — Escape closes the sheet, focus returns to the badge, and the thread is as it was
+6. It retires once the update gets through — the resolution removes it, and a reload does not bring it back
+7. An answer to an earlier session's question stays here — the supervisor's answer to a question from the ended session arrives in this thread with "re: earlier session wise-lion-31", and no earlier-session section opens for it
 
 #### Expected experience
 
 - The thread holds what the supervisor and the operator said; plumbing notices live in Attention.
 - "Acknowledged — you replied" appears only for a reply sent to that card.
-- Every turn not from today carries its date.
+- Every turn not from today carries its date, and so does every Attention item.
+- On a phone, a session's open Attention is never more than one tap from its conversation.
 - A reply belongs to the session it is sent from; another session's turn is only quoted.
 
 #### Edge paths

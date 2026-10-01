@@ -65,8 +65,8 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await expect(attentionItems.locator("time")).toHaveText("Sep 29, 17:49");
   });
 
+  const desktop = page.viewportSize()!;
   await journey.stage("On a phone, the delivery problem is one tap from the conversation", async () => {
-    const desktop = page.viewportSize()!;
     await page.setViewportSize({ width: 390, height: 844 });
     const badge = page.getByRole("button", { name: "Attention: 1 item for this session" });
     await expect(badge).toBeVisible();
@@ -77,14 +77,18 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await expect(sheet.getByRole("button", { name: "Close attention" })).toBeFocused();
     await expect(sheet.locator("article", { hasText: NOTICE_SUMMARY })).toBeVisible();
     await expect(sheet.locator("article", { hasText: NOTICE_SUMMARY }).locator("time")).toHaveText("Sep 29, 17:49");
+  });
+
+  await journey.stage("Close it and keep reading", async () => {
+    const sheet = page.getByRole("dialog", { name: "Attention for this session" });
     await page.keyboard.press("Escape");
     await expect(sheet).toBeHidden();
-    await expect(badge).toBeFocused();
+    await expect(page.getByRole("button", { name: "Attention: 1 item for this session" })).toBeFocused();
     await expect(log).toContainText("The ledger import is red");
-    await page.setViewportSize(desktop);
   });
 
   await journey.stage("It retires once the update gets through", async () => {
+    await page.setViewportSize(desktop);
     hub.send(SESSION, { OperatorNoticeResolved: { notification_id: 901, subject: SUBJECT } });
     await expect(attentionItems).toHaveCount(0);
     // After a reload the resolved notice does not come back.

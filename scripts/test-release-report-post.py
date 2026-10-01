@@ -97,7 +97,7 @@ def handler_for(state: StubState):
                 body = envelope(
                     {
                         "_id": request_id,
-                        "tools": [{"name": name} for name in ("violet_read", "violet_post", "mecha_read", "mecha_post")],
+                        "tools": [{"name": name} for name in ("violet_read", "violet_post")],
                     }
                 )
                 self.send_response(200)
@@ -368,14 +368,14 @@ def run_token_selection_proof() -> None:
     """Exercise registration-aware token selection without contacting the hub."""
 
     module = adapter_module()
-    registered = "MECHA_SLACK_TOKEN_SOUNDWAVE_64AF90"
+    registered = (module.LEGACY_TOKEN_PREFIX + "_SOUNDWAVE_64AF90")
     assert module.select_token_env(
-        {"MECHA_SLACK_TOKEN_CASSY_PROXY", "MECHA_SLACK_TOKEN_SOUNDWAVE"},
+        {(module.LEGACY_TOKEN_PREFIX + "_CASSY_PROXY"), (module.LEGACY_TOKEN_PREFIX + "_SOUNDWAVE")},
         registered,
     ) == registered
-    assert module.select_token_env({"MECHA_SLACK_TOKEN_ONLY"}, None) == "MECHA_SLACK_TOKEN_ONLY"
+    assert module.select_token_env({(module.LEGACY_TOKEN_PREFIX + "_ONLY")}, None) == (module.LEGACY_TOKEN_PREFIX + "_ONLY")
     assert module.select_token_env(
-        {"MECHA_SLACK_TOKEN_FIRST", "MECHA_SLACK_TOKEN_SECOND"}, None
+        {(module.LEGACY_TOKEN_PREFIX + "_FIRST"), (module.LEGACY_TOKEN_PREFIX + "_SECOND")}, None
     ) is None
 
     with tempfile.TemporaryDirectory(prefix="release-report-post-config-") as directory:
@@ -384,7 +384,7 @@ def run_token_selection_proof() -> None:
             json.dumps(
                 {
                     "mcpServers": {
-                        "mecha-cassy": {
+                        module.COMPATIBILITY["retired_server"]: {
                             "headers": {
                                 "Authorization": f"Bearer ${{{registered}}}",
                             }
@@ -398,11 +398,11 @@ def run_token_selection_proof() -> None:
             "VIOLET_SLACK_TOKEN_ENV", "CAS_RELEASE_TRAIN_VIOLET_TOKEN_ENV", "VIOLET_SLACK_TOKEN",
             "VIOLET_SLACK_TOKEN_CASSY_PROXY", "VIOLET_SLACK_TOKEN_SOUNDWAVE", "VIOLET_SLACK_TOKEN_SOUNDWAVE_64AF90",
             "CLAUDE_CONFIG_DIR",
-            "CAS_RELEASE_TRAIN_MECHA_TOKEN_ENV",
-            "MECHA_SLACK_TOKEN_ENV",
-            "MECHA_SLACK_TOKEN",
-            "MECHA_SLACK_TOKEN_CASSY_PROXY",
-            "MECHA_SLACK_TOKEN_SOUNDWAVE",
+            module.LEGACY_TRAIN_SELECTOR_ENV,
+            module.LEGACY_TOKEN_SELECTOR_ENV,
+            module.LEGACY_TOKEN_PREFIX,
+            (module.LEGACY_TOKEN_PREFIX + "_CASSY_PROXY"),
+            (module.LEGACY_TOKEN_PREFIX + "_SOUNDWAVE"),
             registered,
         }
         previous = {name: os.environ.get(name) for name in names}
@@ -411,16 +411,16 @@ def run_token_selection_proof() -> None:
                 os.environ.pop(name, None)
             os.environ["CLAUDE_CONFIG_DIR"] = str(config_dir)
             credentials = {
-                "MECHA_SLACK_TOKEN_CASSY_PROXY": "proxy-token",
-                "MECHA_SLACK_TOKEN_SOUNDWAVE": "soundwave-token",
+                (module.LEGACY_TOKEN_PREFIX + "_CASSY_PROXY"): "proxy-token",
+                (module.LEGACY_TOKEN_PREFIX + "_SOUNDWAVE"): "soundwave-token",
                 registered: "registered-token",
             }
             assert module.registered_violet_token_env() == registered
             assert module.resolve_token(credentials) == "registered-token"
 
-            os.environ["MECHA_SLACK_TOKEN_ENV"] = "MECHA_SLACK_TOKEN_SOUNDWAVE"
+            os.environ[module.LEGACY_TOKEN_SELECTOR_ENV] = (module.LEGACY_TOKEN_PREFIX + "_SOUNDWAVE")
             assert module.resolve_token(credentials) == "soundwave-token"
-            os.environ.pop("MECHA_SLACK_TOKEN_ENV")
+            os.environ.pop(module.LEGACY_TOKEN_SELECTOR_ENV)
 
             credentials.pop(registered)
             try:
@@ -445,37 +445,37 @@ def run_token_selection_proof() -> None:
 
 def run_violet_credential_proof() -> None:
     module = adapter_module()
-    names = {name for name in os.environ if name.startswith(("VIOLET_SLACK_TOKEN", "MECHA_SLACK_TOKEN"))}
-    names |= {"VIOLET_VERCEL_BYPASS", "MECHA_VERCEL_BYPASS", "CAS_RELEASE_TRAIN_VIOLET_TOKEN_ENV", "CAS_RELEASE_TRAIN_MECHA_TOKEN_ENV", "CLAUDE_CONFIG_DIR"}
+    names = {name for name in os.environ if name.startswith(("VIOLET_SLACK_TOKEN", module.LEGACY_TOKEN_PREFIX))}
+    names |= {"VIOLET_VERCEL_BYPASS", module.LEGACY_BYPASS_ENV, "CAS_RELEASE_TRAIN_VIOLET_TOKEN_ENV", module.LEGACY_TRAIN_SELECTOR_ENV, "CLAUDE_CONFIG_DIR"}
     previous = {name: os.environ.get(name) for name in names}
     try:
         for name in names:
             os.environ.pop(name, None)
         with tempfile.TemporaryDirectory(prefix="violet-credentials-") as directory:
             os.environ["CLAUDE_CONFIG_DIR"] = directory
-            credentials = {"MECHA_SLACK_TOKEN_TEST": "legacy-token", "MECHA_VERCEL_BYPASS": "legacy-bypass"}
+            credentials = {(module.LEGACY_TOKEN_PREFIX + "_TEST"): "legacy-token", module.LEGACY_BYPASS_ENV: "legacy-bypass"}
             assert module.resolve_token(credentials) == "legacy-token"
             assert module.resolve_secret("VIOLET_VERCEL_BYPASS", None, credentials) == "legacy-bypass"
             credentials.update(VIOLET_SLACK_TOKEN_TEST="new-token", VIOLET_VERCEL_BYPASS="new-bypass")
             assert module.resolve_token(credentials) == "new-token"
-            assert module.resolve_secret("MECHA_VERCEL_BYPASS", None, credentials) == "new-bypass"
+            assert module.resolve_secret(module.LEGACY_BYPASS_ENV, None, credentials) == "new-bypass"
             credentials["VIOLET_SLACK_TOKEN_TEST"] = ""
             credentials["VIOLET_VERCEL_BYPASS"] = ""
             assert module.resolve_token(credentials) == "legacy-token"
             assert module.resolve_secret("VIOLET_VERCEL_BYPASS", None, credentials) == "legacy-bypass"
             credentials.update(VIOLET_SLACK_TOKEN_TEST="new-token", VIOLET_SLACK_TOKEN_OTHER="other-token")
-            os.environ["MECHA_SLACK_TOKEN_ENV"] = "MECHA_SLACK_TOKEN_TEST"
+            os.environ[module.LEGACY_TOKEN_SELECTOR_ENV] = (module.LEGACY_TOKEN_PREFIX + "_TEST")
             os.environ["VIOLET_SLACK_TOKEN_ENV"] = "VIOLET_SLACK_TOKEN_OTHER"
             assert module.resolve_token(credentials) == "other-token"
-            os.environ.pop("MECHA_SLACK_TOKEN_ENV")
+            os.environ.pop(module.LEGACY_TOKEN_SELECTOR_ENV)
             os.environ.pop("VIOLET_SLACK_TOKEN_ENV")
-            registration = {"mcpServers": {"violet": {"headers": {"Authorization": "Bearer ${VIOLET_SLACK_TOKEN_TEST}"}}, "mecha-cassy": {"headers": {"Authorization": "Bearer ${MECHA_SLACK_TOKEN_OTHER}"}}}}
+            registration = {"mcpServers": {"violet": {"headers": {"Authorization": "Bearer ${VIOLET_SLACK_TOKEN_TEST}"}}, module.COMPATIBILITY["retired_server"]: {"headers": {"Authorization": f"Bearer ${{{module.LEGACY_TOKEN_PREFIX}_OTHER}}"}}}}
             Path(directory, ".claude.json").write_text(json.dumps(registration), encoding="utf-8")
             assert module.registered_violet_token_env() == "VIOLET_SLACK_TOKEN_TEST"
             assert module.resolve_token(credentials) == "new-token"
     finally:
         for name in set(os.environ) - set(previous):
-            if name.startswith(("VIOLET_SLACK_TOKEN", "MECHA_SLACK_TOKEN")):
+            if name.startswith(("VIOLET_SLACK_TOKEN", module.LEGACY_TOKEN_PREFIX)):
                 os.environ.pop(name, None)
         for name, value in previous.items():
             os.environ.pop(name, None)
@@ -493,6 +493,7 @@ def run_adapter(
     pdf_path: Path = PDF,
     credential_mode: str = "legacy",
 ):
+    module = adapter_module()
     state.remote_pdf = remote_pdf
     state.requests.clear()
     state.download_requests.clear()
@@ -501,18 +502,18 @@ def run_adapter(
         html = root / "v9.99.0.html"
         html.write_text("<!doctype html><title>stub</title>\n", encoding="utf-8")
         credentials = root / "credentials.env"
-        values = {"MECHA_SLACK_TOKEN_TEST": "stub-token", "MECHA_VERCEL_BYPASS": "stub-bypass"}
+        values = {(module.LEGACY_TOKEN_PREFIX + "_TEST"): "stub-token", module.LEGACY_BYPASS_ENV: "stub-bypass"}
         if credential_mode == "violet":
             values = {"VIOLET_SLACK_TOKEN_TEST": "stub-token", "VIOLET_VERCEL_BYPASS": "stub-bypass"}
         elif credential_mode == "both":
-            values.update(MECHA_SLACK_TOKEN_TEST="wrong-token", MECHA_VERCEL_BYPASS="wrong-bypass", VIOLET_SLACK_TOKEN_TEST="stub-token", VIOLET_VERCEL_BYPASS="stub-bypass")
+            values.update({module.LEGACY_TOKEN_PREFIX + "_TEST": "wrong-token", module.LEGACY_BYPASS_ENV: "wrong-bypass", "VIOLET_SLACK_TOKEN_TEST": "stub-token", "VIOLET_VERCEL_BYPASS": "stub-bypass"})
         elif credential_mode == "empty-violet":
             values.update(VIOLET_SLACK_TOKEN_TEST="", VIOLET_VERCEL_BYPASS="")
         credentials.write_text("".join(f"export {name}='{value}'\n" for name, value in values.items()), encoding="utf-8")
         receipt = root / "release-report.receipt"
         environment = os.environ.copy()
         for name in list(environment):
-            if name.startswith(("VIOLET_SLACK_TOKEN", "MECHA_SLACK_TOKEN")) or name in {"VIOLET_VERCEL_BYPASS", "MECHA_VERCEL_BYPASS", "CAS_RELEASE_TRAIN_VIOLET_TOKEN_ENV"}:
+            if name.startswith(("VIOLET_SLACK_TOKEN", module.LEGACY_TOKEN_PREFIX)) or name in {"VIOLET_VERCEL_BYPASS", module.LEGACY_BYPASS_ENV, "CAS_RELEASE_TRAIN_VIOLET_TOKEN_ENV"}:
                 environment.pop(name, None)
         environment.update(
             {
@@ -521,12 +522,12 @@ def run_adapter(
                 "CAS_RELEASE_TRAIN_REPORT_USER_THREAD_TS": user_thread,
                 "CAS_RELEASE_TRAIN_REPORT_DEV_THREAD_TS": dev_thread,
                 "CAS_CREDENTIALS_FILE": str(credentials),
-                "CAS_RELEASE_TRAIN_MECHA_TOKEN_ENV": "MECHA_SLACK_TOKEN_TEST",
+                module.LEGACY_TRAIN_SELECTOR_ENV: (module.LEGACY_TOKEN_PREFIX + "_TEST"),
                 "CAS_RELEASE_TRAIN_REPORT_REPO": "Richards-LLC/cassy",
             }
         )
-        environment.pop("MECHA_SLACK_TOKEN_TEST", None)
-        environment.pop("MECHA_VERCEL_BYPASS", None)
+        environment.pop((module.LEGACY_TOKEN_PREFIX + "_TEST"), None)
+        environment.pop(module.LEGACY_BYPASS_ENV, None)
         result = subprocess.run(
             [sys.executable, str(ADAPTER), "v9.99.0", str(pdf_path), str(html), user_thread, dev_thread],
             cwd=ROOT,
@@ -555,7 +556,7 @@ def main() -> int:
             result, fields = run_adapter(server, state, pdf, credential_mode=mode)
             assert result.returncode == 0, (mode, result.stderr)
             assert fields is not None, mode
-        print("Violet transport: canonical-only, both names, and empty primary credentials passed against four-tool hub")
+        print("Violet transport: canonical-only, both names, and empty primary credentials passed against canonical-only hub")
         result, fields = run_adapter(server, state, pdf)
         if result.returncode != 0:
             raise AssertionError(f"adapter failed: stdout={result.stdout!r} stderr={result.stderr!r}")

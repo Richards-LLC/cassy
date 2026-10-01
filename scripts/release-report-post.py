@@ -30,7 +30,12 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 
-DEFAULT_MCP_URL = "https://mecha-cassy.vercel.app/mcp/slack"
+COMPATIBILITY = json.loads((Path(__file__).resolve().parents[1] / "crates/cas-types/src/violet-compatibility.json").read_text(encoding="utf-8"))
+DEFAULT_MCP_URL = COMPATIBILITY["hub_url"]
+LEGACY_TOKEN_PREFIX = COMPATIBILITY["legacy_token_prefix"]
+LEGACY_BYPASS_ENV = COMPATIBILITY["legacy_bypass_env"]
+LEGACY_TOKEN_SELECTOR_ENV = COMPATIBILITY["legacy_token_selector_env"]
+LEGACY_TRAIN_SELECTOR_ENV = COMPATIBILITY["legacy_train_selector_env"]
 DEFAULT_CHANNEL = "cas-internal"
 DEFAULT_REPO = "Richards-LLC/cassy"
 MCP_PROTOCOL_VERSION = "2025-06-18"
@@ -169,12 +174,12 @@ def parse_credentials(path: Path) -> dict[str, str]:
 
 def credential_names(name: str) -> tuple[str, ...]:
     """Canonical name first, matching legacy name second; custom names unchanged."""
-    for prefix in ("VIOLET_SLACK_TOKEN", "MECHA_SLACK_TOKEN"):
+    for prefix in ("VIOLET_SLACK_TOKEN", LEGACY_TOKEN_PREFIX):
         if name == prefix or name.startswith(prefix + "_"):
             suffix = name[len(prefix):]
-            return ("VIOLET_SLACK_TOKEN" + suffix, "MECHA_SLACK_TOKEN" + suffix)
-    if name in {"VIOLET_VERCEL_BYPASS", "MECHA_VERCEL_BYPASS"}:
-        return ("VIOLET_VERCEL_BYPASS", "MECHA_VERCEL_BYPASS")
+            return ("VIOLET_SLACK_TOKEN" + suffix, LEGACY_TOKEN_PREFIX + suffix)
+    if name in {"VIOLET_VERCEL_BYPASS", LEGACY_BYPASS_ENV}:
+        return ("VIOLET_VERCEL_BYPASS", LEGACY_BYPASS_ENV)
     return (name,)
 
 
@@ -202,7 +207,7 @@ def registered_violet_token_env() -> str | None:
     servers = document.get("mcpServers")
     if not isinstance(servers, dict):
         return None
-    server = servers.get("violet") or servers.get("mecha-cassy")
+    server = servers.get("violet") or servers.get(COMPATIBILITY["retired_server"])
     if not isinstance(server, dict):
         return None
     headers = server.get("headers")
@@ -212,7 +217,7 @@ def registered_violet_token_env() -> str | None:
     if not isinstance(authorization, str):
         return None
     match = re.fullmatch(
-        r"\s*Bearer\s+\$\{((?:VIOLET|MECHA)_SLACK_TOKEN_[A-Z0-9][A-Z0-9_]*)\}\s*",
+        r"\s*Bearer\s+\$\{((?:VIOLET_SLACK_TOKEN|" + re.escape(LEGACY_TOKEN_PREFIX) + r")_[A-Z0-9][A-Z0-9_]*)\}\s*",
         authorization,
     )
     return match.group(1) if match else None
@@ -235,8 +240,8 @@ def select_token_env(candidates: set[str], registered_env: str | None) -> str | 
 def resolve_token(credentials: dict[str, str]) -> str:
     explicit = (os.environ.get("VIOLET_SLACK_TOKEN_ENV")
                 or os.environ.get("CAS_RELEASE_TRAIN_VIOLET_TOKEN_ENV")
-                or os.environ.get("CAS_RELEASE_TRAIN_MECHA_TOKEN_ENV")
-                or os.environ.get("MECHA_SLACK_TOKEN_ENV"))
+                or os.environ.get(LEGACY_TRAIN_SELECTOR_ENV)
+                or os.environ.get(LEGACY_TOKEN_SELECTOR_ENV))
     token = resolve_secret("VIOLET_SLACK_TOKEN", explicit, credentials)
     if token:
         return token
@@ -245,7 +250,7 @@ def resolve_token(credentials: dict[str, str]) -> str:
         {
             name
             for name, value in list(os.environ.items()) + list(credentials.items())
-            if name.startswith(("VIOLET_SLACK_TOKEN_", "MECHA_SLACK_TOKEN_"))
+            if name.startswith(("VIOLET_SLACK_TOKEN_", LEGACY_TOKEN_PREFIX + "_"))
             and not name.endswith("_ENV")
             and value
         }

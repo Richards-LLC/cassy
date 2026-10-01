@@ -125,7 +125,7 @@ impl FactoryDaemon {
             // attached viewers now decide. Without this the last dashboard
             // layout would keep a remote-only session pinned to a size no
             // viewer asked for.
-            let pane_ids: Vec<String> = self.tui_pane_sizes.keys().cloned().collect();
+            let pane_ids: Vec<String> = self.dashboard_pane_ids();
             for pane_id in pane_ids {
                 self.apply_effective_pane_size(&pane_id);
             }

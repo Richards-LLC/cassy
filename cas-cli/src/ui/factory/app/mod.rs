@@ -2392,13 +2392,36 @@ impl FactoryApp {
         self.terminal_cols = cols;
         self.terminal_rows = rows;
 
+        // Resize every real pane (supervisor and workers) to exactly the inner
+        // content rect the render path draws it into. Pending workers are part
+        // of the layout but have no PTY.
+        for (name, (pane_cols, pane_rows)) in self.dashboard_pane_allocation() {
+            if let Some(pane) = self.mux.get_mut(&name) {
+                let _ = pane.resize(pane_rows, pane_cols);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// The `(cols, rows)` the local dashboard layout allocates to each real
+    /// pane right now: the bordered inner rect of its slot in the current
+    /// layout (terminal size, real and pending workers, tabbed mode, sidecar
+    /// state, custom split sizes).
+    ///
+    /// This is computed from live layout state on every call, never cached.
+    /// The daemon's pane-size reconciliation reads it to decide a pane's PTY
+    /// geometry; a snapshot taken at the last terminal resize went stale as
+    /// soon as workers spawned, and the next viewer attach re-applied the
+    /// zero-worker supervisor width, so Claude laid out for 177 columns in a
+    /// 74-column pane (cas-06a2).
+    pub(crate) fn dashboard_pane_allocation(&self) -> Vec<(String, (u16, u16))> {
         // Include pending workers in layout so boot panes get space
         let all_names = self.layout_worker_names();
 
-        // Calculate actual layout areas and resize panes to match.
         // Must reserve the same identity-header rows as the render path,
         // otherwise PTYs are sized taller than the visible pane area.
-        let area = Rect::new(0, 0, cols, rows);
+        let area = Rect::new(0, 0, self.terminal_cols, self.terminal_rows);
         let layout = FactoryLayout::calculate_from_names_with_header_rows(
             area,
             &all_names,
@@ -2407,18 +2430,17 @@ impl FactoryApp {
             self.layout_sizes,
             Self::identity_header_rows(area),
         );
+        let inner = |r: Rect| (r.width.saturating_sub(2), r.height.saturating_sub(2));
 
-        // Resize only REAL worker panes (pending workers have no PTY)
+        let mut sizes = Vec::with_capacity(self.worker_names.len() + 1);
+        sizes.push((self.supervisor_name.clone(), inner(layout.supervisor_area)));
+
+        // Only REAL worker panes (pending workers have no PTY)
         if layout.is_tabbed {
             // Tabbed mode: all workers share the same viewport size
             if let Some(content_area) = layout.worker_content {
-                let inner_height = content_area.height.saturating_sub(2);
-                let inner_width = content_area.width.saturating_sub(2);
-
                 for name in &self.worker_names {
-                    if let Some(pane) = self.mux.get_mut(name) {
-                        let _ = pane.resize(inner_height, inner_width);
-                    }
+                    sizes.push((name.clone(), inner(content_area)));
                 }
             }
         } else {
@@ -2426,24 +2448,21 @@ impl FactoryApp {
             for name in &self.worker_names {
                 if let Some(idx) = all_names.iter().position(|n| n == name) {
                     if let Some(worker_area) = layout.worker_areas.get(idx) {
-                        let inner_height = worker_area.height.saturating_sub(2);
-                        let inner_width = worker_area.width.saturating_sub(2);
-                        if let Some(pane) = self.mux.get_mut(name) {
-                            let _ = pane.resize(inner_height, inner_width);
-                        }
+                        sizes.push((name.clone(), inner(*worker_area)));
                     }
                 }
             }
         }
+        sizes
+    }
 
-        // Resize supervisor pane
-        if let Some(pane) = self.mux.get_mut(&self.supervisor_name) {
-            let inner_height = layout.supervisor_area.height.saturating_sub(2);
-            let inner_width = layout.supervisor_area.width.saturating_sub(2);
-            let _ = pane.resize(inner_height, inner_width);
-        }
-
-        Ok(())
+    /// The `(cols, rows)` the local dashboard layout allocates to `pane_id`
+    /// right now, or `None` if the pane has no slot in the layout.
+    pub(crate) fn dashboard_pane_size(&self, pane_id: &str) -> Option<(u16, u16)> {
+        self.dashboard_pane_allocation()
+            .into_iter()
+            .find(|(name, _)| name == pane_id)
+            .map(|(_, size)| size)
     }
 
     /// Sync pane sizes with current terminal dimensions
@@ -6025,6 +6044,9 @@ mod tests {
 ///   - `reuse_branch_rejects_stale_non_worktree_directory`
 ///   - `post_spawn_assertion_fails_for_main_checkout`
 /// Both failed until the corresponding implementation was added.
+#[cfg(test)]
+mod pane_geometry_tests;
+
 #[cfg(test)]
 mod spawn_isolation_tests {
     use super::*;

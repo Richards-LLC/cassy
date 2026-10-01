@@ -13,6 +13,7 @@ mod release;
 mod sections;
 mod skill_validation;
 mod skills;
+mod slack;
 
 pub(crate) fn populate_registry(registry: &mut ConfigRegistry) {
     sections::add_section_descriptions(registry);
@@ -28,4 +29,5 @@ pub(crate) fn populate_registry(registry: &mut ConfigRegistry) {
     release::register_release(registry);
     skill_validation::register_skill_validation(registry);
     skills::register_skills(registry);
+    slack::register_slack(registry);
 }

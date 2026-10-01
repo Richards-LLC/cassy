@@ -277,6 +277,27 @@ fn build_candidate_facets(entry: &Entry) -> CandidateFacets {
 }
 
 impl CasCore {
+    /// ID-targeted memory operations address both active and archived entries.
+    /// Only a missing active entry warrants an archive lookup; preserve real
+    /// storage errors instead of disguising them as a missing ID.
+    pub(crate) fn resolve_memory_entry(store: &dyn Store, id: &str) -> Result<Entry, McpError> {
+        use cas_store::StoreError;
+
+        let result = match store.get(id) {
+            Err(StoreError::EntryNotFound(_)) => store.get_archived(id),
+            result => result,
+        };
+        result.map_err(|error| McpError {
+            code: if matches!(&error, StoreError::EntryNotFound(_)) {
+                ErrorCode::INVALID_PARAMS
+            } else {
+                ErrorCode::INTERNAL_ERROR
+            },
+            message: Cow::from(format!("Failed to resolve memory {id}: {error}")),
+            data: None,
+        })
+    }
+
     /// Run the pre-insert overlap check for a new memory. Returns
     /// `Some(OverlapOutcome)` when the decision requires action, or `None`
     /// when no candidates were found / the decision was LowOverlap.
@@ -850,24 +871,22 @@ impl CasCore {
     ) -> Result<CallToolResult, McpError> {
         let store = self.open_store()?;
 
-        let mut entry = store.get(&req.id).map_err(|e| McpError {
-            code: ErrorCode::INVALID_PARAMS,
-            message: Cow::from(format!("Entry not found: {e}")),
-            data: None,
-        })?;
+        let mut entry = Self::resolve_memory_entry(store.as_ref(), &req.id)?;
 
-        // Track access for session-aware context boosting and restore entries
-        // that were archived by decay when configured.
-        let promote_on_access = self.load_config().memory().decay.promote_on_access;
+        // Inspecting a manually archived memory must not promote its tier.
+        // Only unarchive restores it to the active set.
+        let promote_on_access =
+            !entry.archived && self.load_config().memory().decay.promote_on_access;
         record_memory_access(&mut entry, promote_on_access);
 
         // Persist access tracking (best-effort, don't fail the get)
         let _ = store.update(&entry);
 
         let output = format!(
-            "ID: {}\nType: {:?}\nTags: {}\nSource entries: {}\nCreated: {}\nImportance: {:.2}\nStability: {:.2}\nFeedback: +{} -{}\n\n{}",
+            "ID: {}\nType: {:?}\nArchived: {}\nTags: {}\nSource entries: {}\nCreated: {}\nImportance: {:.2}\nStability: {:.2}\nFeedback: +{} -{}\n\n{}",
             entry.id,
             entry.entry_type,
+            entry.archived,
             if entry.tags.is_empty() {
                 "none".to_string()
             } else {
@@ -896,11 +915,7 @@ impl CasCore {
     ) -> Result<CallToolResult, McpError> {
         let store = self.open_store()?;
 
-        let mut entry = store.get(&req.id).map_err(|e| McpError {
-            code: ErrorCode::INVALID_PARAMS,
-            message: Cow::from(format!("Entry not found: {e}")),
-            data: None,
-        })?;
+        let mut entry = Self::resolve_memory_entry(store.as_ref(), &req.id)?;
 
         entry.helpful_count += 1;
         entry.reinforce();
@@ -926,11 +941,7 @@ impl CasCore {
     ) -> Result<CallToolResult, McpError> {
         let store = self.open_store()?;
 
-        let mut entry = store.get(&req.id).map_err(|e| McpError {
-            code: ErrorCode::INVALID_PARAMS,
-            message: Cow::from(format!("Entry not found: {e}")),
-            data: None,
-        })?;
+        let mut entry = Self::resolve_memory_entry(store.as_ref(), &req.id)?;
 
         entry.harmful_count += 1;
 
@@ -954,11 +965,7 @@ impl CasCore {
     ) -> Result<CallToolResult, McpError> {
         let store = self.open_store()?;
 
-        let mut entry = store.get(&req.id).map_err(|e| McpError {
-            code: ErrorCode::INVALID_PARAMS,
-            message: Cow::from(format!("Entry not found: {e}")),
-            data: None,
-        })?;
+        let mut entry = Self::resolve_memory_entry(store.as_ref(), &req.id)?;
 
         entry.last_reviewed = Some(chrono::Utc::now());
 
@@ -1040,11 +1047,7 @@ impl CasCore {
         let store = self.open_store()?;
 
         // Verify entry exists
-        store.get(&req.id).map_err(|e| McpError {
-            code: ErrorCode::INVALID_PARAMS,
-            message: Cow::from(format!("Entry not found: {e}")),
-            data: None,
-        })?;
+        Self::resolve_memory_entry(store.as_ref(), &req.id)?;
 
         store.delete(&req.id).map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
@@ -1223,25 +1226,26 @@ impl CasCore {
     ) -> Result<CallToolResult, McpError> {
         let store = self.open_store()?;
 
-        let mut entry = store.get(&req.id).map_err(|e| McpError {
-            code: ErrorCode::INVALID_PARAMS,
-            message: Cow::from(format!("Entry not found: {e}")),
-            data: None,
-        })?;
+        let entry = Self::resolve_memory_entry(store.as_ref(), &req.id)?;
+        if !entry.archived {
+            store.archive(&req.id).map_err(|e| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Failed to archive: {e}")),
+                data: None,
+            })?;
+        }
 
-        entry.archived = true;
-        store.update(&entry).map_err(|e| McpError {
-            code: ErrorCode::INTERNAL_ERROR,
-            message: Cow::from(format!("Failed to archive: {e}")),
-            data: None,
-        })?;
-
-        // Remove from search index
+        // Also clean up an already-archived entry: an older failed post-write
+        // read could have left its live search document behind.
         if let Ok(search) = self.open_search_index() {
             let _ = search.delete(&req.id);
         }
 
-        Ok(Self::success(format!("Archived entry: {}", req.id)))
+        Ok(Self::success(if entry.archived {
+            format!("Entry already archived: {}", req.id)
+        } else {
+            format!("Archived entry: {}", req.id)
+        }))
     }
 
     /// Unarchive an entry
@@ -1251,28 +1255,17 @@ impl CasCore {
     ) -> Result<CallToolResult, McpError> {
         let store = self.open_store()?;
 
-        // Try to get from archived entries
-        let archived = store.list_archived().map_err(|e| McpError {
-            code: ErrorCode::INTERNAL_ERROR,
-            message: Cow::from(format!("Failed to list archived: {e}")),
-            data: None,
-        })?;
+        let mut entry = Self::resolve_memory_entry(store.as_ref(), &req.id)?;
+        if !entry.archived {
+            return Ok(Self::success(format!("Entry already active: {}", req.id)));
+        }
 
-        let mut entry = archived
-            .into_iter()
-            .find(|e| e.id == req.id)
-            .ok_or_else(|| McpError {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(format!("Archived entry not found: {}", req.id)),
-                data: None,
-            })?;
-
-        entry.archived = false;
-        store.update(&entry).map_err(|e| McpError {
+        store.unarchive(&req.id).map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Failed to unarchive: {e}")),
             data: None,
         })?;
+        entry.archived = false;
 
         // Re-add to search index
         if let Ok(search) = self.open_search_index() {
@@ -1291,11 +1284,7 @@ impl CasCore {
     ) -> Result<CallToolResult, McpError> {
         let store = self.open_store()?;
 
-        let mut entry = store.get(&req.id).map_err(|e| McpError {
-            code: ErrorCode::INVALID_PARAMS,
-            message: Cow::from(format!("Entry not found: {e}")),
-            data: None,
-        })?;
+        let mut entry = Self::resolve_memory_entry(store.as_ref(), &req.id)?;
 
         let mut changes = Vec::new();
 

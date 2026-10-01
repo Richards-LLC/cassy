@@ -20,7 +20,7 @@ links that break once installed.
 Numbers to carry away:
 
 | Measure | Value |
-|---|---|
+| --- | --- |
 | Supervisor SessionStart body (`supervisor_guidance()`) | **6,567 B ≈ 1,641 tok**; 2,649 B left of 9,216 B vs 2,400 B floor → **249 B headroom** |
 | Supervisor + Codex worker note (≈801 B) | 7,368 B; remainder 1,848 B vs 1,400 B test floor |
 | Worker SessionStart body (`worker_guidance()`) | **7,989 B ≈ 1,997 tok**; **11 B** under the 8,000 B component cap; 1,227 B under 9,216 B |
@@ -35,7 +35,7 @@ Numbers to carry away:
 ## Scope and method
 
 | Item | Value |
-|---|---|
+| --- | --- |
 | Skills | `cas-supervisor.md` + 13 references, `cas-supervisor-checklist.md`, `codex/skills/cas-codex-supervisor-checklist.md`, `cas-worker.md` + 4 references, `cas-task-tracking.md`, `cas-search.md`, `cas-memory-management/` (SKILL + 5 refs), `verify-before-claim/SKILL.md` |
 | Agents | `agents/{task-verifier,session-summarizer,duplicate-detector,learning-reviewer,rule-reviewer}.md`, `codex/agents/factory-supervisor.md` |
 | Parity | every file diffed against its `codex/` and `grok/` twin after prefix normalisation (`mcp__cas__` → `mcp__cs__` / `cas__`) |
@@ -61,7 +61,7 @@ so every byte of body growth is paid by degradable evidence sections (issue tria
 memories).
 
 | Body | File bytes | Injected body | ≈ tok | Cap / floor | Headroom |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | Claude `cas-supervisor.md` | 6,766 | 6,567 | 1,641 | soft 8,000 / hard 8,192; remainder ≥ 2,400 | **249 B** (remainder floor) |
 | Codex `cas-supervisor.md` | 6,665 | 6,466 | 1,616 | (not injected; mirror) | — |
 | Grok `cas-supervisor.md` | 6,756 | 6,557 | 1,639 | (Grok ignores SessionStart stdout) | — |
@@ -76,7 +76,7 @@ target today) and worker ≤ 8,000 B.
 of these in one pass (no-fail-fast), not just Scoped Validation:
 
 | Test | Location | Pins |
-|---|---|---|
+| --- | --- | --- |
 | `test_supervisor_guidance_loads`, `_hard_rules`, `_no_checklist` | `builtins.rs:3814,3839,3993` | keywords AskUserQuestion, SendMessage, "Never close", "Never implement", "Drive to the exit", exit-ladder rungs |
 | `test_supervisor_guidance_under_8kb` | `builtins.rs:4018` | < 8,192, ≤ 8,000, ≥ 512 headroom |
 | `supervisor_guidance_leaves_room_for_the_rest_of_the_session_start_payload` | `builtins.rs:4054` | remainder ≥ 2,400 B |
@@ -94,7 +94,7 @@ of these in one pass (no-fail-fast), not just Scoped Validation:
 | `builtin_doc_hygiene_test::supervisor_guidance_drives_each_turn_to_a_named_exit_rung` | `tests/builtin_doc_hygiene_test.rs:53` | exit ladder |
 | `builtin_flavor_drift_test` (incl. liveness contract `:1563`, decision table `:1124-1150`) | `tests/builtin_flavor_drift_test.rs` | three-way parity |
 | `agent_definition_contract_test::epic_walk_is_one_concurrent_pass_in_every_harness` | `tests/agent_definition_contract_test.rs:176` | epic walk wording |
-| `issue_intake_directive_test` | `tests/issue_intake_directive_test.rs:78-100` | registry keys incl. deprecated `issues.components.mecha_cassy` (L2-P0-18) |
+| `issue_intake_directive_test` | `tests/issue_intake_directive_test.rs:78-100` | registry keys incl. deprecated `issues.components.violet` (L2-P0-18) |
 | `session_start_issue_triage_test` | `tests/session_start_issue_triage_test.rs` | assembled payload keeps issue titles (fails on body growth) |
 | `verify_before_claim_skill_test` | `tests/verify_before_claim_skill_test.rs:79,113,129` | v1 narration, worker pre-close sentence, close-gate link |
 | `mcp_action_surface_test` | `tests/mcp_action_surface_test.rs:268-341` | "## Valid Actions" shape, memory Request Fields order |
@@ -139,7 +139,7 @@ agent-listing description), `per-invoke` (skill body or agent body per spawn), `
 ### P0 — misleads an agent today
 
 | # | Sev | Surface | file:line | Ax | Defect | Evidence | Fix | Δ tok |
-|---|---|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 01 | P0 | per-invoke (every verification) | `agents/task-verifier.md:378,385,392,399` | 6 | **Regression of 09-02 P0 #1.** All four verdict templates pass `files_reviewed=`; the tool's request struct field is `files`, no `deny_unknown_fields`, so the reviewed-files list is silently dropped on every verdict. The 09-02 review read the inner `VerificationAddRequest`, not the tool struct. | `crates/cas-mcp/src/types/ops_secondary.rs:353-396` `pub files: Option<String>`; mapping `service/worktree_verification_team_ops.rs:98` `files_reviewed: req.files`; wrong marker pinned at `builtins.rs:6274` | `files="…"` in the four templates ×3 flavours; change the pin to `files=`; optionally `#[serde(alias = "files_reviewed")]` on `VerificationRequest.files` | −10 |
 | 02 | P0 | per-invoke (worker deep close) | `verify-before-claim/SKILL.md:27-28,42,72-73` | 6,4 | Proof examples are `cargo test`, `cargo build`, `./target/release/cas`; workers are denied every one of them, and `cas-worker.md:31-34` routes every deep close through this skill ("If you cannot do all four, you are not done", `:103`). A Rust-task worker either hits the denial or concludes it cannot close. | `hooks/handlers/handlers_events/pre_tool.rs:30-69` NO WORKER RUST BUILDS; close appends the deferred build-proof note itself (`close_ops.rs:7316-7327`) | Add a factory-worker row: Rust proof = `git diff --stat` + `rg` wiring evidence + non-Rust suites; Rust tests defer to the epic `ASSEMBLY_PROOF`. Label the cargo rows "supervisor / non-factory". | +60 |
 | 03 | P0 | on-demand | `cas-supervisor/references/worker-recovery.md:82` | 6 | Dead-worker step "`shutdown_workers count=0`" shuts down **every** worker, live ones included. | `service/factory_ops.rs:2778-2785` (`limit == 0` → all known workers) | `mcp__cas__coordination action=shutdown_workers worker_names=<worker>` | +10 |
@@ -157,7 +157,7 @@ agent-listing description), `per-invoke` (skill body or agent body per spawn), `
 | 15 | P0 | on-demand | `workflow.md:133`, `worker-recovery.md:169` vs `cas-supervisor-checklist.md:21-23` | 4,6 | References tell the supervisor to `~/.cargo/bin/cargo build --release` and restart `cas serve`; the checklist says never kill/restart `cas serve` from the active MCP session — ask the operator. The build line is also cas-src-only in a universal builtin. | quoted lines; installed universally `builtins.rs:222` | "Binary stale? Stop and ask the operator to rebuild and reconnect MCP (preflight.md)." | −30 |
 | 16 | P0 | on-demand | `cas-supervisor/references/reference.md:87` | 6 | `config_dir` documented as "Claude-only, Codex/Grok ignore it"; Codex is supported via `CODEX_HOME`, only Grok warns. The Rust schema string (`ops_secondary.rs:1137`) is equally stale (L3). | `factory_ops.rs:50-65,121-170,2416-2423` | "`CLAUDE_CONFIG_DIR` for Claude, `CODEX_HOME` for Codex; explicit wins, else captured from the requester; Grok has none and warns." | −20 |
 | 17 | P0 | on-demand | `reference.md:47-48` | 6,4 | "Valid coordination actions (do not invent others)" omits `recycle_worker` and `restart_spawn_queue`, while `worker-recovery.md:111` tells the supervisor to run `restart_spawn_queue` — the prohibition forbids a real, recommended action. | `service/mod.rs:692,717` | add both; drop "do not invent others" (the server already returns the valid list on an unknown action) | +8 |
-| 18 | P0 | always (both bodies) + on-demand | `cas-supervisor.md:67`, `cas-worker.md:72`, `cas-supervisor/references/filing-cas-bugs.md:19,33`, `reporting-and-routing.md:13` | 6 | Bug-routing key `issues.components.mecha_cassy` is deprecated ("use issues.components.violet … accepted for one release"). Pinned by `issue_intake_directive_test.rs:93`; the `cas init` CLAUDE.md block carries it too (cross-lane). | `cas-cli/src/config/access/mod.rs:9-13`; `config/meta/seed/issues.rs:38-61`; `cas config get` prints the warning | switch to `issues.components.violet` in all flavours + the test in the same change; rename prose "MechaCassy" per the seed label | 0 |
+| 18 | P0 | always (both bodies) + on-demand | `cas-supervisor.md:67`, `cas-worker.md:72`, `cas-supervisor/references/filing-cas-bugs.md:19,33`, `reporting-and-routing.md:13` | 6 | Bug-routing key `issues.components.violet` is deprecated ("use issues.components.violet … accepted for one release"). Pinned by `issue_intake_directive_test.rs:93`; the `cas init` CLAUDE.md block carries it too (cross-lane). | `cas-cli/src/config/access/mod.rs:9-13`; `config/meta/seed/issues.rs:38-61`; `cas config get` prints the warning | switch to `issues.components.violet` in all flavours + the test in the same change; rename prose "Violet" per the seed label | 0 |
 | 19 | P0 | per-invoke | `cas-supervisor-checklist.md:103,108` (codex `:107,112`) | 6 | Says the stranded-branch epic-close gate "cannot be waived … regardless of supervisor overrides"; `stranded_branch_override` exists and is honoured for a live supervisor. `:108` repeats `:103`. | `mcp/tools/types/task.rs:313-321`; `close_ops.rs:5529-5560` | "…refused unless a live registered supervisor passes `stranded_branch_override="<inspection narrative>"`"; delete `:108` | −75 |
 | 20 | P0 | always (supervisor) + on-demand | `cas-supervisor.md:23`, `references/model-selection.md:192,199`, `workflow.md:75-79`, `codex/agents/factory-supervisor.md:18` | 6,4 | "Pass explicit `cli=`/`model=`/`effort=`" on every spawn contradicts the generated `lane=<lane>` mode; the fallbacks promised at `model-selection.md:13-17,51` fire **only** in lane mode, so a supervisor following the body never gets them and the "(fallback: …)" labels on explicit recipes are false. | `ops_secondary.rs:746-751,1102-1106` (lane excludes cli/model/effort); `factory_ops.rs:958,2323-2345` (lane resolution + loud fallback), `:2395-2407` (explicit path, no fallback), `:1278-1279` (no untiered warning with lane) | Body: "Pass `lane=<light\|standard\|taste\|heavy>` (preferred) or a full explicit recipe to force one model — never both." Update pins `builtins.rs:3914-3935,6869,7134`. | −40 |
 | 21 | P0 | on-demand | `model-selection.md:186` | 6 | "docs-only → light" contradicts `:13,16,180` (public docs/skills/prompts → taste) and conflates task `depth=light` with the light lane. | `mcp/tools/types/task.rs:259-264` (`depth` is execution depth) | "mechanical, non-public docs → light; public docs, skills, prompts → taste"; drop `depth=light` | 0 |
@@ -169,7 +169,7 @@ agent-listing description), `per-invoke` (skill body or agent body per spawn), `
 ### P1 — routing, format, budget, architecture
 
 | # | Sev | Surface | file:line | Ax | Defect | Evidence | Fix | Δ tok |
-|---|---|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 26 | P1 | always (worker) | `cas-worker.md` (whole body) | 3,8 | Injected body is 7,989 B vs the 8,000 B test cap — **11 B**. Every P0 fix above that touches the body fails `test_worker_guidance_under_session_start_budget` unless something is cut first. | `builtins.rs:4156-4172`; measured with an `extract_body` replica | Land #27 (and #33) first, in the same change as any body fix | — |
 | 27 | P1 | always (worker) | `cas-worker.md:115-133` | 6,8 | cas-src surface checklist (1,149 B, 14 % of the body) injected into every project's workers; pinned including the ticket label `cas-2327`. | `test_worker_skills_require_cas_src_surface_checklist` `builtins.rs:4563-4588` | Move to a "cas-src extras" section of `references/close-gate.md`; one pointer line; retarget the pin | −260 |
 | 28 | P1 | always (supervisor) | `cas-supervisor.md` (whole body) | 3,8 | 6,567 B is 117 B over the operator's ≤ 6,450 B target and 249 B above the 2,400 B remainder floor; the 3.17.3 release failed twice on this margin. | `builtins.rs:4054`; memory "skill-text-pins" | Cut #33-#36 items (≈ −1.2 KB) before any addition | — |
@@ -191,7 +191,7 @@ agent-listing description), `per-invoke` (skill body or agent body per spawn), `
 | 44 | P1 | per-invoke | `cas-supervisor-checklist.md:92` | 6 | Per-task review gate "Tests exist and pass" contradicts build-once/`ASSEMBLY_PROOF` (body `:29`, `workflow.md:184-186`). | quoted lines | "Tests added/updated for the change; run at assembly." | 0 |
 | 45 | P1 | on-demand | `intake.md`, `planning.md` | 3 | Orphaned references: nothing links either file (only their catalog registrations). | `rg -n "intake.md\|planning.md" cas-cli/src/builtins` → registrations only | Add to the body's reference line: "intake gate: intake.md · spec template: planning.md · preflight: preflight.md" | +30 |
 | 46 | P1 | on-demand | `model-selection.md:1-5`, `planning.md:1-5`, `cas-worker/references/close-gate.md:1-5` | 1 | References carry frontmatter (`name`/`description` on the first two) — Grok/Codex walk recursively and may register them as skills (rubric Axis 1 P1). | quoted frontmatter; no test requires it (`builtins.rs:6329-6360` is hash-based) | delete the blocks | −95 |
-| 47 | P1 | on-demand | `reporting-and-routing.md:9` | 6 | Describes a `cas-cut-release` fallback that posts through the direct MechaCassy MCP; no such stage exists. | `cas-cut-release/SKILL.md:47-56`; only a failure-log narrative mentions it | delete the sentence | −45 |
+| 47 | P1 | on-demand | `reporting-and-routing.md:9` | 6 | Describes a `cas-cut-release` fallback that posts through the direct Violet MCP; no such stage exists. | `cas-cut-release/SKILL.md:47-56`; only a failure-log narrative mentions it | delete the sentence | −45 |
 | 48 | P1 | always (Codex supervisor) | `codex/agents/factory-supervisor.md:3,12,42-44` | 1,2 | Description still a role summary (09-02 P1 #7 unfixed); no `model:`; Cassy never references the file (the Codex intro names skills only); forbids `/cas-start` etc. that exist in no catalog; `:42-44` repeats `:13`. | `ui/factory/app/mod.rs:2547-2553`; UNVERIFIED whether Codex CLI auto-loads `.codex/agents/*.md` | Wire it into the Codex intro or retire it; if kept: "Use when running as the Codex factory supervisor: …", `model: inherit`, drop dead lines | −85 |
 | 49 | P1 | per-invoke (verification) | `agents/task-verifier.md:12-24` | 5,6 | "Close-Path Error Detection" instructs the closer, not the verifier (which never calls close); the rejections the verifier can hit (`Verifier handoff rejected`, `Verifier capability rejected`, `Verification authority rejected`) are absent, and the section contradicts fail-closed `:468-471`. Pinned marker "Close-Path Error Detection" (`builtins.rs:6276`). | `verification_tools.rs:165,267-283,628-680`; close strings `close_ops.rs:5173,6249,5466,6862` | Replace with: "If `verification action=add` returns any of those three messages, stop, do not retry, quote it verbatim." Update the pin. | −220 |
 | 50 | P1 | per-invoke (verification) | `task-verifier.md:144,154,279`; `:109,123` vs `:475,478`; `:85-87` | 5,6 | `HEAD~10` diff base (still present) pulls unrelated or misses commits; reject policy contradicts itself (Step 0B: don't reject on keywords vs "any placeholder language = reject", "if in doubt, reject"); NOT-EXERCISED rows' effect on approval unstated. | `cas-types/src/task.rs:413,428,431` (`work_target`, `files_changed`, `commit_hash`) | Base = `git merge-base HEAD <work_target>`; prefer `deliverables.files_changed`; scope `:475` to changed code; replace `:478` with "reject only naming the unmet AC item"; decide NOT-EXERCISED policy (operator call) | 0 |
@@ -208,7 +208,7 @@ agent-listing description), `per-invoke` (skill body or agent body per spawn), `
 ### P2 — efficiency, duplication, structure (ranked by Δ × multiplier)
 
 | # | Sev | Surface | file:line | Ax | Defect | Evidence | Fix | Δ tok |
-|---|---|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 60 | P2 | per-invoke (every verification) | `agents/task-verifier.md` | 3,8 | 27,671 B ≈ 6.9 k tok per spawn. Demo/epic evidence `:26-93` (4.5 KB) applies only with a `demo_statement`; Phase 2 rubric `:298-370` (3.3 KB) is generic; four near-duplicate verdict templates `:374-400` (2.65 KB); posture SKIP bullets and confidence table restate Rust-enforced or display-only behaviour (`close_ops.rs:7032-7050`, `verification_tools.rs:528,876`). | section byte counts | Demo section → on-demand reference read only when `demo_statement` non-empty; one template; 6-line rubric | −3,200 per spawn |
 | 61 | P2 | always (supervisor) + on-demand | `cas-supervisor.md:23,55-63`; `workflow.md:75-80,104-105`; `reference.md:84,89`; `model-selection.md:13-17,51,106-107,136,194` | 3,8 | Lane matrix restated by hand ≈ 8 times (09-02 finding, grown); "Terra suspended" ×5. | byte spans in the supervisor sub-audits | Keep body `:23` (pinned) and the two generated blocks; delete the "Heterogeneous Teams" section (update `CANON_HETERO` pin) and every prose copy | −80 always, −1,050 on-demand |
 | 62 | P2 | always (supervisor) | `cas-supervisor.md:67`, `:70-72` | 8 | Bug-registry sentence (455 B) duplicates the CLAUDE.md block `cas init` injects into every project (`cli/init/docs_and_skill.rs:22`); "Context budgeting" (188 B) is maintainer text citing a memory file absent from the repo (`project_session_start_truncation.md`), and the budget is enforced by tests. Both pinned (`issue_intake_directive_test`, `test_skills_document_context_budgeting_cas_5787`). | quoted lines | "Bug filing: references/filing-cas-bugs.md"; move the budgeting note to a test comment; retarget pins | −140 always |
@@ -240,7 +240,7 @@ agent-listing description), `per-invoke` (skill body or agent body per spawn), `
 ### P3 — polish (one line each)
 
 | # | file:line | Fix |
-|---|---|---|
+| --- | --- | --- |
 | 87 | `cas-supervisor.md:25` | add liveness `budget_aborted` (`service/worker_liveness.rs:24`) |
 | 88 | `reference.md:42-46` | coordination-action list sits under "## Supervisor override"; add a heading; transfer takes no `reason` (`service/core.rs:694-716`) |
 | 89 | `workflow.md:39,108`; `reference.md:89` | vague "task/spec workflow" → planning.md; dead anchor `#spawn_workers-parameters`; "all four backends" → Claude and Codex |
@@ -266,7 +266,7 @@ agent-listing description), `per-invoke` (skill body or agent body per spawn), `
 ## Per-file scorecard (rubric axes; ✓ pass · ~ partial · ✗ fail)
 
 | File | Surface | Bytes | 1 FM | 2 Desc | 3 Size | 4 Word | 5 Proc | 6 Acc | 7 Parity | 8 Tok | Worst |
-|---|---|---|---|---|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `cas-supervisor.md` | always | 6,766 | ✓ | ✓ | ~ (249 B) | ~ | ✓ | ✗ | ✓ | ~ | P0-18, P0-20 |
 | `…/references/workflow.md` | on-demand | 19,299 | ✓ | — | ~ | ~ | ✗ | ✗ | ✓ | ~ | P0-11..15 |
 | `…/references/reference.md` | on-demand | 17,437 | ✓ | — | ~ | ~ | ~ | ✗ | ✓ | ~ | P0-16, P0-17 |
@@ -307,7 +307,7 @@ form `metadata: { managed_by: cas }`) — recorded once here rather than per fil
 ## Prior-review status (2026-09-02, items touching L2 scope)
 
 | Item | Status | Where now |
-|---|---|---|
+| --- | --- | --- |
 | P0 #1 task-verifier `files=` → `files_reviewed` | **REGRESSED** (premise wrong; now dropped) | L2-P0-01 |
 | P0 #2 `rg -E` | FIXED (now `grep -E`) | `task-verifier.md:279` (P3 regex nit) |
 | P0 #3 `pending_supervisor_review` | FIXED; replacement wording wrong for `completion_receipt` | L2-P0-09 |
@@ -366,7 +366,7 @@ worker contracts' unconditional push (P0-10), `ops_secondary.rs:1137` `config_di
 ## Search manifest
 
 | Command | Hits | Meaning |
-|---|---|---|
+| --- | --- | --- |
 | `python3 extract_body replica` over `{,codex/,grok/}skills/cas-{supervisor,worker,supervisor-checklist}.md` | 8 files | body bytes in the measurement table |
 | `rg -n "files_reviewed=\|files=" agents/task-verifier.md` | 4 `files_reviewed=`, 0 `files=` | P0-01 |
 | `sed -n 350,396p crates/cas-mcp/src/types/ops_secondary.rs` | `pub files` | tool struct field |
@@ -375,7 +375,7 @@ worker contracts' unconditional push (P0-10), `ops_secondary.rs:1137` `config_di
 | `sed -n 164,175p crates/cas-store/src/agent_store/ops_task_leases.rs` | owner check | P0-04 |
 | `sed -n 128,142p mcp/tools/types/task.rs` | TASK CREATE REJECTED | P0-06 |
 | `sed -n 948,970p service/core.rs` | invocation required; scope global; draft false | P0-07 |
-| `sed -n 9,13p config/access/mod.rs` | mecha_cassy deprecated | P0-18 |
+| `sed -n 9,13p config/access/mod.rs` | violet_ps deprecated | P0-18 |
 | `rg -n stranded_branch_override mcp/tools/types/task.rs` | 1 | P0-19 |
 | `awk '/^\[lanes/,0' lane-registry.toml` | 5 lanes | P0-20, P1-39, P1-40 |
 | `rg -n "Use skills" crates/cas-pty/src/pty.rs ui/factory/app/mod.rs` | 4 | P1-32 |

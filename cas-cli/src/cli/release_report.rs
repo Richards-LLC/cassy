@@ -893,7 +893,7 @@ fn classify_theme(issue: &GithubIssue) -> String {
         ),
         (
             "Violet",
-            &["violet", "violet_ps", "mecha-cassy", "mecha_cassy", "slack", "hub"][..],
+            &["violet", "violet_ps", "slack", "hub"][..],
         ),
         ("Install", &["install", "release", "asset", "update"][..]),
     ] {
@@ -938,7 +938,10 @@ fn classify_theme(issue: &GithubIssue) -> String {
                 "index",
             ][..],
         ),
-        ("Violet", &["violet", "violet_ps", "mecha-cassy", "slack", "hub", "upload"][..]),
+        (
+            "Violet",
+            &["violet", "violet_ps", "slack", "hub", "upload"][..],
+        ),
         ("Install", &["install", "release", "asset", "update"][..]),
     ] {
         if keys.iter().any(|key| text.contains(key)) {

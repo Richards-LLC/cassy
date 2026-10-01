@@ -7,6 +7,45 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.43.0] - 2026-10-01
+
+### Changed
+
+- Violet is the only Slack hub name. The MechaCassy proxy registration,
+  integration command, issues alias and redirect skill are retired.
+  `cas update` migrates matching production-hub MCP entries in Claude and
+  Codex profiles and project/user proxy files to `violet`, preserving credential
+  references and custom upstreams. Existing `MECHA_*` credentials still work
+  as fallbacks.
+- Slack posts go through `violet.violet_post` by default. Pre-tool hooks block
+  writes through the Claude Slack connector and Codex Slack app; set
+  `cas config set slack.transport any` to allow another transport explicitly.
+  Where native Codex MCP calls cannot run those hooks, generated guidance
+  requires Violet and `cas doctor` warns about locally detected Slack-app
+  access, noting that cached evidence may be stale.
+
+### Fixed
+
+- Factory pane text wraps to the visible width instead of being clipped,
+  including after layout changes and a web viewer attaches.
+- Clicking the ✕ on Claude Code's diff sidebar inside a factory pane closes
+  the panel, including after reopening it with `/diff`.
+- Closing large groups of tasks resumes from previously checked results
+  instead of restarting and repeatedly timing out.
+- Task close attributes snapshots and code changes to the delivered task,
+  excluding unrelated snapshots, later tasks' commits and merged-in target
+  content. Unrelated changes no longer trigger proof or approval demands.
+- Closing a merged task accepts its group's assembly proof instead of
+  requiring the same build checks again.
+- Archiving a memory no longer reports "entry not found" after saving the
+  archived state. Archived memories remain available by ID for inspection,
+  re-tiering and restoration.
+- The activity feed no longer shows push blocks from isolated test runs as
+  live activity.
+- `worktree_merge` accepts its documented `supervisor_override` and `reason`
+  fields for a failed-CI exception, validates authority and the explanation,
+  and records the decision.
+
 ## [3.42.0] - 2026-10-01
 
 ### Fixed

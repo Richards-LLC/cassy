@@ -205,8 +205,15 @@ assembly it runs `python3 scripts/assembly-proof.py prove <epic-worktree>` and
 records `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd>
 log=<path>` on the epic. Workers still cannot run build/test/clippy/run or unfiltered nextest,
 `rustc`, scoped-test scripts, or `make test*`. Child closes reference assembly
-proof rather than scoped `--proof` or `loaded_proof` notes. Non-Rust suites are
-unaffected. An older runtime that denies the check exception requires parking
+proof rather than scoped `--proof` or `loaded_proof` notes. That holds for a
+worker's close and for a supervisor closing an epic child whose delivery is
+already on the integration branch: close records a pending-assembly note when
+the epic has no covering `ASSEMBLY_PROOF` yet. Standalone tasks still carry
+their own receipts. A scoped receipt may be the runner's `SCOPED_PROOF:
+targets=…` or `command=…` line, or, when that exceeds the task-note limit, the
+short `SCOPED_PROOF_RECEIPT: id=… path=…` line; `--proof` always writes that
+file (default `<git-common-dir>/cas/scoped-proof/<head>.receipt`) and close
+verifies its digest. Non-Rust suites are unaffected. An older runtime that denies the check exception requires parking
 with the unverified crates and test filters named for assembly.
 
 The assembly command first runs the gate's `ci-script-tests` row:
@@ -548,6 +555,26 @@ must strictly descend from the delivery anchor, be reachable on the authoritativ
 target, and touch a dropped path. Together they must cover every dropped path.
 Cassy records the full resolved commit IDs, anchor, measured target, paths and
 review. A narrative without commit receipts cannot waive the content gate.
+
+When the content proof cannot decide (`DELIVERY CONTENT UNVERIFIABLE`, for
+example a fix committed inside a merge resolution), a live registered supervisor
+who has inspected the delivery can close with `supervisor_override=true` and
+`reason="reviewed-content: <delivery SHA>[,<SHA>...] -- <what was inspected>"`.
+Each named commit must be the delivery anchor or a descendant of it, be
+reachable on the target, and carry a non-empty first-parent diff. Cassy records
+the resolved commits, anchor, target and review as a decision note.
+
+The epic close gate proves every child within an 8 s budget. When it stops
+early (`EPIC CLOSE CHECK INCOMPLETE`), the verdicts it already proved for
+closed children are saved under the repository's common Git directory
+(`cas/epic-close-verdicts.json`), keyed by the exact refs and anchor each proof
+read. Retrying the same close reuses them and continues from the first
+unchecked child, so a large epic closes after a few retries. A moved target,
+lane or anchor invalidates only the affected verdicts. A measured stranded
+child still rejects immediately. When the check is incomplete, no measured child
+blocks and the task store shows every child terminal, a live registered
+supervisor may instead close with `supervisor_override=true` and a reason; the
+waived output, including every unchecked child, is recorded as a decision note.
 
 An empty `execution_note` update may clear a constraint after approval when its
 exact repository proof is unchanged. Pending, skipped, unbound, and changed

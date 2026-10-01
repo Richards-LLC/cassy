@@ -2960,7 +2960,7 @@ fn h5_session_worker_roster_comes_from_the_live_registry_not_the_session_file() 
     // A hub serves every project on the machine at once, and the process that
     // launched it carries one project's CAS_ROOT (the live hub on this machine
     // runs with cas-src's). That override must not decide which registry a
-    // gabber-studio or mecha_cassy session's roster is read from.
+    // gabber-studio or violet_ps session's roster is read from.
     let unrelated = tempfile::tempdir().unwrap();
     let unrelated_root = init_cas_dir(unrelated.path()).unwrap();
     env.set("CAS_ROOT", &unrelated_root);

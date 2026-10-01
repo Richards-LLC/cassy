@@ -180,10 +180,11 @@ def load_report_adapter() -> Any:
 
 
 def proxy_token_env() -> str | None:
+    compatibility = load_report_adapter().COMPATIBILITY
     configured = (os.environ.get("VIOLET_SLACK_TOKEN_ENV")
                   or os.environ.get("CAS_RELEASE_TRAIN_VIOLET_TOKEN_ENV")
-                  or os.environ.get("MECHA_SLACK_TOKEN_ENV")
-                  or os.environ.get("CAS_RELEASE_TRAIN_MECHA_TOKEN_ENV"))
+                  or os.environ.get(load_report_adapter().LEGACY_TOKEN_SELECTOR_ENV)
+                  or os.environ.get(compatibility["legacy_train_selector_env"]))
     if configured:
         return configured
     proxy = os.environ.get("CAS_RELEASE_TRAIN_PROXY_TOML")
@@ -206,10 +207,10 @@ def announce_token_env(credentials: dict[str, str]) -> str | None:
     empty" although this machine's registered Violet token was present.
     A proxy-derived name is pinned only when it resolves here; otherwise the
     adapter picks this machine's registered or only token. An operator's
-    explicit MECHA_SLACK_TOKEN_ENV is never overridden.
+    explicit token selector is never overridden.
     """
 
-    if os.environ.get("VIOLET_SLACK_TOKEN_ENV") or os.environ.get("MECHA_SLACK_TOKEN_ENV"):
+    if os.environ.get("VIOLET_SLACK_TOKEN_ENV") or os.environ.get(load_report_adapter().LEGACY_TOKEN_SELECTOR_ENV):
         return None
     token_env = proxy_token_env()
     if not token_env:

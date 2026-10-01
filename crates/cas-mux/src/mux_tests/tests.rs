@@ -116,12 +116,20 @@ fn factory_panes_forward_both_violet_credential_generations() {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     env.set("XDG_CONFIG_HOME", config_home.path());
     env.set("HOME", config_home.path());
-    env.set("MECHA_SLACK_TOKEN_COMPAT_TEST", "legacy-token");
-    env.set("MECHA_VERCEL_BYPASS", "legacy-bypass");
-    for prefix in ["VIOLET", "MECHA"] {
+    let contract = cas_types::violet_compatibility::violet_compatibility();
+    let tokens =
+        cas_types::violet_compatibility::violet_credential_names("VIOLET_SLACK_TOKEN_COMPAT_TEST");
+    env.set(&tokens[1], "legacy-token");
+    env.set(&contract.legacy_bypass_env, "legacy-bypass");
+    for token in &tokens {
+        let bypass = if token == &tokens[0] {
+            "VIOLET_VERCEL_BYPASS"
+        } else {
+            &contract.legacy_bypass_env
+        };
         env.set("VIOLET_SLACK_TOKEN_COMPAT_TEST", "new-token");
         env.set("VIOLET_VERCEL_BYPASS", "new-bypass");
-        std::fs::write(&path, format!("[servers.violet]\ntransport = \"http\"\nauth = \"env:{prefix}_SLACK_TOKEN_COMPAT_TEST\"\n[servers.violet.headers]\nx-vercel-protection-bypass = \"env:{prefix}_VERCEL_BYPASS\"\n")).unwrap();
+        std::fs::write(&path, format!("[servers.violet]\ntransport = \"http\"\nauth = \"env:{token}\"\n[servers.violet.headers]\nx-vercel-protection-bypass = \"env:{bypass}\"\n")).unwrap();
         let config = MuxConfig {
             cwd: PathBuf::from("/tmp/test"),
             workers: 1,
@@ -130,16 +138,13 @@ fn factory_panes_forward_both_violet_credential_generations() {
         };
         let configs = Mux::factory_pane_configs(&config);
         let (_, pane) = configs.iter().find(|(name, _)| name == "worker-1").unwrap();
-        assert_eq!(
-            env_value(pane, "MECHA_SLACK_TOKEN_COMPAT_TEST"),
-            Some("legacy-token")
-        );
+        assert_eq!(env_value(pane, &tokens[1]), Some("legacy-token"));
         assert_eq!(
             env_value(pane, "VIOLET_SLACK_TOKEN_COMPAT_TEST"),
             Some("new-token")
         );
         assert_eq!(
-            env_value(pane, "MECHA_VERCEL_BYPASS"),
+            env_value(pane, &contract.legacy_bypass_env),
             Some("legacy-bypass")
         );
         assert_eq!(env_value(pane, "VIOLET_VERCEL_BYPASS"), Some("new-bypass"));
@@ -147,12 +152,9 @@ fn factory_panes_forward_both_violet_credential_generations() {
         env.remove("VIOLET_VERCEL_BYPASS");
         let configs = Mux::factory_pane_configs(&config);
         let (_, pane) = configs.iter().find(|(name, _)| name == "worker-1").unwrap();
+        assert_eq!(env_value(pane, &tokens[1]), Some("legacy-token"));
         assert_eq!(
-            env_value(pane, "MECHA_SLACK_TOKEN_COMPAT_TEST"),
-            Some("legacy-token")
-        );
-        assert_eq!(
-            env_value(pane, "MECHA_VERCEL_BYPASS"),
+            env_value(pane, &contract.legacy_bypass_env),
             Some("legacy-bypass")
         );
         assert_eq!(env_value(pane, "VIOLET_SLACK_TOKEN_COMPAT_TEST"), None);
@@ -2492,4 +2494,30 @@ async fn interrupt_and_inject_keeps_flat_floor_for_textbox_submit_harnesses() {
          behavior unchanged — got elapsed={elapsed:?}, which suggests the new \
          quiescence poll leaked into a harness that must not use it"
     );
+}
+
+// ── cas-06a2: Pane::resize must reach the kernel PTY winsize ────────────────
+
+#[test]
+fn pane_resize_sets_kernel_pty_winsize() {
+    let Some(mut pane) = cat_pane("winsize") else {
+        eprintln!("skipping: PTY spawn unavailable in this environment");
+        return;
+    };
+    assert_eq!(pane.pty_winsize(), Some((24, 80)), "spawn size");
+    for (rows, cols) in [(56, 177), (56, 74), (10, 40), (56, 74)] {
+        pane.resize(rows, cols).expect("resize");
+        assert_eq!(pane.size(), (rows, cols));
+        assert_eq!(
+            pane.pty_winsize(),
+            Some((rows, cols)),
+            "the child's `stty size` must follow every resize"
+        );
+    }
+}
+
+#[test]
+fn pty_less_pane_reports_no_winsize() {
+    let pane = Pane::director("d", 24, 80).unwrap();
+    assert_eq!(pane.pty_winsize(), None);
 }

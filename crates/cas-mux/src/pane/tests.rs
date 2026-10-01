@@ -263,6 +263,57 @@ mod cases {
         assert!(Pane::update_alt_screen(b"\x1b[?25;1h", true));
     }
 
+    /// cas-4cd6: Claude Code's fullscreen TUI emits these exact bytes (captured
+    /// from a live 2.1.287 PTY). The pane must report SGR click interest only
+    /// once both a press-reporting mode and SGR encoding are on.
+    #[test]
+    fn mouse_modes_track_claude_fullscreen_sequence_cas_4cd6() {
+        let mut pane = Pane::director("test", 24, 80).expect("create pane");
+        assert!(!pane.wants_sgr_mouse_clicks());
+        pane.feed(b"\x1b[?1049h\x1b[?1000h").unwrap();
+        assert!(
+            !pane.wants_sgr_mouse_clicks(),
+            "press reporting without SGR encoding must not take SGR clicks"
+        );
+        pane.feed(b"\x1b[?1002h\x1b[?1003h\x1b[?1006h").unwrap();
+        assert!(pane.wants_sgr_mouse_clicks());
+        assert!(pane.is_in_alt_screen(), "alt-screen tracking unchanged");
+
+        // Turning every press mode off revokes interest even with SGR still on.
+        pane.feed(b"\x1b[?1003l\x1b[?1002l\x1b[?1000l").unwrap();
+        assert!(!pane.wants_sgr_mouse_clicks());
+    }
+
+    #[test]
+    fn mouse_modes_multi_param_and_split_chunks_cas_4cd6() {
+        let mut pane = Pane::director("test", 24, 80).expect("create pane");
+        // One sequence carrying both parameters.
+        pane.feed(b"\x1b[?1000;1006h").unwrap();
+        assert!(pane.wants_sgr_mouse_clicks());
+        pane.feed(b"\x1b[?1000;1006l").unwrap();
+        assert!(!pane.wants_sgr_mouse_clicks());
+
+        // A sequence split across reads is still seen whole via the carry.
+        pane.feed(b"\x1b[?1000h\x1b[?10").unwrap();
+        pane.feed(b"06h").unwrap();
+        assert!(pane.wants_sgr_mouse_clicks());
+
+        // Unrelated modes never touch mouse state.
+        let mut other = Pane::director("other", 24, 80).expect("create pane");
+        other.feed(b"\x1b[?25h\x1b[?2004h\x1b[?1004h\x1b[?1049h").unwrap();
+        assert!(!other.wants_sgr_mouse_clicks());
+    }
+
+    #[test]
+    fn mouse_modes_reset_on_exit_cas_4cd6() {
+        let mut pane = Pane::director("test", 24, 80).expect("create pane");
+        pane.feed(b"\x1b[?1049h\x1b[?1000h\x1b[?1006h").unwrap();
+        assert!(pane.wants_sgr_mouse_clicks());
+        // A killed TUI never emits the `l` resets; exit must clear them.
+        pane.mark_exited(Some(1));
+        assert!(!pane.wants_sgr_mouse_clicks());
+    }
+
     #[test]
     fn update_alt_screen_sparse_non_dec_esc_ignored() {
         // ESC bytes followed by non-'[' must not be treated as DEC sequences.

@@ -577,10 +577,6 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/violet/references/registration.md"),
     },
     // One-release managed redirect; sync replaces installed legacy bodies.
-    BuiltinFile {
-        path: "skills/mecha-cassy/SKILL.md",
-        content: include_str!("builtins/skills/mecha-cassy/SKILL.md"),
-    },
     // cas-github-issues skill (cas-ff2f, GH #94): the recurring GitHub Issues
     // sweep — dedupe double-filings, verify-and-close fixed claims, task new
     // issues into the active epic (successor epic when none is open), unblock
@@ -1222,10 +1218,6 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/violet/references/registration.md"),
     },
     // One-release managed redirect; sync replaces installed legacy bodies.
-    BuiltinFile {
-        path: "skills/mecha-cassy/SKILL.md",
-        content: include_str!("builtins/skills/mecha-cassy/SKILL.md"),
-    },
     // cas-github-issues skill (cas-ff2f, GH #94) — codex mirror. Byte-identical
     // to the claude copy except for the harness tool prefix.
     BuiltinFile {
@@ -1870,10 +1862,6 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/violet/references/registration.md"),
     },
     // One-release managed redirect; sync replaces installed legacy bodies.
-    BuiltinFile {
-        path: "skills/mecha-cassy/SKILL.md",
-        content: include_str!("builtins/skills/mecha-cassy/SKILL.md"),
-    },
     BuiltinFile {
         path: "skills/fallow/SKILL.md",
         content: include_str!("builtins/skills/fallow/SKILL.md"),
@@ -2984,6 +2972,9 @@ fn sync_all_builtins_inner(
         &mut reference_state,
     )?);
 
+    for name in prune_retired_hub_skills(&target_dir.join("skills"))? {
+        result.pruned_files.push(format!("skills/{name}"));
+    }
     reference_state.save(target_dir)?;
     Ok(result)
 }
@@ -3294,14 +3285,16 @@ fn enabled_optional_project_skills(project_root: &Path) -> HashSet<&'static str>
     if explicit.iter().any(|id| id == "fallow" || id == "cas-fallow") {
         enabled.insert("fallow");
     }
-    if explicit.iter().any(|id| {
-        id == "cas-nuxt-playwright" || id == "nuxt-playwright" || id == "nuxt"
-    }) {
+    if explicit
+        .iter()
+        .any(|id| id == "cas-nuxt-playwright" || id == "nuxt-playwright" || id == "nuxt")
+    {
         enabled.insert("cas-nuxt-playwright");
     }
-    if explicit.iter().any(|id| {
-        id == "cas-playwright-debug" || id == "playwright-debug" || id == "playwright"
-    }) {
+    if explicit
+        .iter()
+        .any(|id| id == "cas-playwright-debug" || id == "playwright-debug" || id == "playwright")
+    {
         enabled.insert("cas-playwright-debug");
     }
 
@@ -3604,7 +3597,6 @@ pub const SHIPPED_NON_CAS_SKILL_DIRS: &[&str] = &[
     "design-spec",
     "fallow",
     "mcp-integration",
-    "mecha-cassy", // Legacy redirect; retain ownership after retirement for pruning.
     "project-overview",
     // Retired: renamed cas-release-notes (it collided with Grok's built-in
     // /release-notes). Kept so old installs are pruned.
@@ -3617,7 +3609,10 @@ pub const SHIPPED_NON_CAS_SKILL_DIRS: &[&str] = &[
 /// True for a skill directory name Cassy has shipped: any `cas-*` name or an
 /// entry in [`SHIPPED_NON_CAS_SKILL_DIRS`].
 fn is_cassy_skill_dir_name(name: &str) -> bool {
-    name.starts_with("cas-") || SHIPPED_NON_CAS_SKILL_DIRS.contains(&name)
+    name.starts_with("cas-")
+        || SHIPPED_NON_CAS_SKILL_DIRS.contains(&name)
+        || name == cas_types::violet_compatibility::violet_compatibility().retired_server
+        || name == cas_types::violet_compatibility::violet_compatibility().retired_post_skill
 }
 
 /// Agent file names (`task-verifier.md`) one agent catalog ships.
@@ -3741,6 +3736,22 @@ pub fn prune_stale_cas_skill_dirs(
         removed.push(name);
     }
 
+    Ok(removed)
+}
+
+/// Remove installed managed copies of the retired hub skills only. Personal
+/// skills and symlink destinations remain operator-owned.
+pub fn prune_retired_hub_skills(skills_dir: &Path) -> std::io::Result<Vec<String>> {
+    let contract = cas_types::violet_compatibility::violet_compatibility();
+    let mut removed = Vec::new();
+    for name in [&contract.retired_server, &contract.retired_post_skill] {
+        let path = skills_dir.join(name);
+        if path.is_dir() && !path.is_symlink()
+            && std::fs::read_to_string(path.join("SKILL.md")).is_ok_and(|body| is_managed_by_cas(&body)) {
+            std::fs::remove_dir_all(path)?;
+            removed.push(name.clone());
+        }
+    }
     Ok(removed)
 }
 
@@ -3872,7 +3883,9 @@ impl InstallParity {
 pub fn install_parity_for_harness(harness: SupervisorCli, target_dir: &Path) -> InstallParity {
     match harness {
         SupervisorCli::Claude => install_parity(target_dir, BUILTIN_AGENTS, BUILTIN_SKILLS),
-        SupervisorCli::Codex => install_parity(target_dir, CODEX_BUILTIN_AGENTS, CODEX_BUILTIN_SKILLS),
+        SupervisorCli::Codex => {
+            install_parity(target_dir, CODEX_BUILTIN_AGENTS, CODEX_BUILTIN_SKILLS)
+        }
         SupervisorCli::Grok => install_parity(target_dir, GROK_BUILTIN_AGENTS, GROK_BUILTIN_SKILLS),
         SupervisorCli::OpenCode => InstallParity::default(),
     }
@@ -5409,7 +5422,7 @@ This is the body content."#;
             // change with VIOLET_TOOLS, and this assertion drags the
             // prose along with them instead of letting the skill keep
             // documenting a retired name (which is exactly how the
-            // 2026-09-03 slack_* -> mecha_* rename broke every consumer
+            // A past hub tool rename broke every consumer
             // silently).
             #[cfg(feature = "mcp-proxy")]
             for tool in cmcp_core::config::VIOLET_TOOLS {
@@ -5425,62 +5438,55 @@ This is the body content."#;
         }
     }
 
-    /// A sync upgrades the old managed skill and prunes its obsolete registration,
-    /// while preserving a user's additional file in the legacy directory.
+    /// Every installed project and user skill tree removes a managed redirect
+    /// and preserves an operator-owned skill with the same retired name.
     #[test]
-    fn test_violet_sync_upgrades_legacy_skill_for_every_harness() {
-        const LEGACY_PATH: &str = "skills/mecha-cassy/references/registration.md";
-        const LEGACY: &[BuiltinFile] = &[
-            BuiltinFile {
-                path: "skills/mecha-cassy/SKILL.md",
-                content: "---\nname: mecha-cassy\nmetadata:\n  managed_by: cas\n---\n# Old transport\n",
-            },
-            BuiltinFile {
-                path: LEGACY_PATH,
-                content: "# Old registration\n[servers.mecha-cassy]\n",
-            },
-        ];
-        for (label, catalog) in [
-            ("claude", BUILTIN_SKILLS),
-            ("codex", CODEX_BUILTIN_SKILLS),
-            ("grok", GROK_BUILTIN_SKILLS),
+    fn test_violet_sync_retires_legacy_skill_for_every_harness() {
+        let retired = &cas_types::violet_compatibility::violet_compatibility().retired_server;
+        for (harness, dir, project_scope) in [
+            (SupervisorCli::Claude, ".claude", true),
+            (SupervisorCli::Codex, ".codex", true),
+            (SupervisorCli::Grok, ".grok", true),
+            (SupervisorCli::OpenCode, ".opencode", true),
+            // OpenCode's user catalog is process-local; only its project
+            // catalog is installed on disk. The other user trees also sync.
+            (SupervisorCli::Claude, ".claude", false),
+            (SupervisorCli::Codex, ".codex", false),
+            (SupervisorCli::Grok, ".grok", false),
         ] {
             let temp = tempfile::tempdir().unwrap();
-            let target = temp.path().join(label);
-            sync_all_builtins_inner(&target, &[], LEGACY).unwrap();
-            let personal = target.join("skills/mecha-cassy/my-notes.md");
-            std::fs::write(&personal, "Local channel notes\n").unwrap();
-
-            let result = sync_all_builtins_inner(&target, &[], catalog).unwrap();
-            for path in [
-                "skills/violet/SKILL.md",
-                "skills/violet/references/registration.md",
-                "skills/mecha-cassy/SKILL.md",
-            ] {
-                let builtin = catalog.iter().find(|b| b.path == path).unwrap();
-                assert_eq!(
-                    std::fs::read_to_string(target.join(path)).unwrap(),
-                    builtin.content
-                );
-            }
-            let redirect = std::fs::read_to_string(target.join("skills/mecha-cassy/SKILL.md")).unwrap();
-            assert!(redirect.contains("[violet](../violet/SKILL.md)"));
-            assert!(redirect.contains("one release"));
-            assert!(!redirect.contains("mecha_read") && !redirect.contains("mecha_post"));
+            let target = temp.path().join(dir);
+            let sync = || {
+                if project_scope {
+                    sync_all_builtins_for_project(harness, temp.path())
+                } else {
+                    sync_all_builtins_for_harness(harness, &target)
+                }
+            };
+            let legacy = target.join("skills").join(retired);
+            std::fs::create_dir_all(&legacy).unwrap();
+            std::fs::write(
+                legacy.join("SKILL.md"),
+                "---\nmetadata:\n  managed_by: cas\n---\nOld redirect\n",
+            )
+            .unwrap();
+            sync().unwrap();
             assert!(
-                !target.join(LEGACY_PATH).exists(),
-                "{label} kept the old registration"
+                !legacy.exists(),
+                "{harness:?} (project={project_scope}) left the retired managed skill"
             );
-            assert!(result.pruned_files.contains(&LEGACY_PATH.to_string()));
-            assert_eq!(
-                std::fs::read_to_string(&personal).unwrap(),
-                "Local channel notes\n"
+            assert!(target.join("skills/violet/SKILL.md").exists());
+            std::fs::create_dir_all(&legacy).unwrap();
+            std::fs::write(
+                legacy.join("SKILL.md"),
+                "---\nname: personal\n---\nOperator notes\n",
+            )
+            .unwrap();
+            sync().unwrap();
+            assert!(
+                legacy.exists(),
+                "{harness:?} (project={project_scope}) removed an operator skill"
             );
-
-            let again = sync_all_builtins_inner(&target, &[], catalog).unwrap();
-            assert!(again.updated_files.is_empty(), "{label} sync is not idempotent");
-            assert!(again.pruned_files.is_empty(), "{label} prune is not idempotent");
-            assert!(personal.exists());
         }
     }
 

@@ -6565,6 +6565,9 @@ impl FactoryDaemon {
                 &pending_name,
             );
             self.app.spawning_count = self.app.spawning_count.saturating_sub(1);
+            // The pending boot pane left the layout: resize the remaining PTYs to
+            // their new slots (cas-06a2). A no-op when a worker pane replaced it.
+            let _ = self.app.sync_pane_sizes();
             append_spawn_audit(
                 self.app.cas_dir(),
                 &self.session_name,
@@ -6921,6 +6924,9 @@ impl FactoryDaemon {
                 );
             }
             self.app.spawning_count = self.app.spawning_count.saturating_sub(1);
+            // The pending boot pane left the layout: resize the remaining PTYs to
+            // their new slots (cas-06a2). A no-op when a worker pane replaced it.
+            let _ = self.app.sync_pane_sizes();
             return;
         }
 
@@ -7238,6 +7244,9 @@ impl FactoryDaemon {
                 }
             }
             self.app.spawning_count = self.app.spawning_count.saturating_sub(1);
+            // The pending boot pane left the layout: resize the remaining PTYs to
+            // their new slots (cas-06a2). A no-op when a worker pane replaced it.
+            let _ = self.app.sync_pane_sizes();
             return; // One completion per tick
         }
 

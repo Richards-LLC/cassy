@@ -379,27 +379,27 @@
     "c14/spec/SPEC-01": {
       "correct": true,
       "seed_match": false,
-      "evidence": "3eff5e8b0 cli/integrate/mod.rs:147 still dispatches Violet through MechaCassyArgs; mecha_cassy.rs:73,106 constructs MECHA credentials,1297-1328/1423-1444 repairs legacy routes,1581-1651 compares legacy-filtered allowlist (proxy/config.rs:569-575). Registration doc promises VIOLET defaults/routes/tool proof. Actual runtime mismatch; clean03f adds real VioletArgs module. None catches operator-org seed."
+      "evidence": "3eff5e8b0 cli/integrate/mod.rs:147 still dispatches Violet through VioletArgs; violet_ps.rs:73,106 constructs MECHA credentials,1297-1328/1423-1444 repairs legacy routes,1581-1651 compares legacy-filtered allowlist (proxy/config.rs:569-575). Registration doc promises VIOLET defaults/routes/tool proof. Actual runtime mismatch; clean03f adds real VioletArgs module. None catches operator-org seed."
     },
     "c14/spec/SPEC-03": {
       "correct": true,
       "seed_match": false,
-      "evidence": "3eff5e8b0 cli/integrate/mod.rs:147 still dispatches Violet through MechaCassyArgs; mecha_cassy.rs:73,106 constructs MECHA credentials,1297-1328/1423-1444 repairs legacy routes,1581-1651 compares legacy-filtered allowlist (proxy/config.rs:569-575). Registration doc promises VIOLET defaults/routes/tool proof. Actual runtime mismatch; clean03f adds real VioletArgs module. None catches operator-org seed."
+      "evidence": "3eff5e8b0 cli/integrate/mod.rs:147 still dispatches Violet through VioletArgs; violet_ps.rs:73,106 constructs MECHA credentials,1297-1328/1423-1444 repairs legacy routes,1581-1651 compares legacy-filtered allowlist (proxy/config.rs:569-575). Registration doc promises VIOLET defaults/routes/tool proof. Actual runtime mismatch; clean03f adds real VioletArgs module. None catches operator-org seed."
     },
     "c14/baseline/credential-names": {
       "correct": true,
       "seed_match": false,
-      "evidence": "3eff5e8b0 cli/integrate/mod.rs:147 still dispatches Violet through MechaCassyArgs; mecha_cassy.rs:73,106 constructs MECHA credentials,1297-1328/1423-1444 repairs legacy routes,1581-1651 compares legacy-filtered allowlist (proxy/config.rs:569-575). Registration doc promises VIOLET defaults/routes/tool proof. Actual runtime mismatch; clean03f adds real VioletArgs module. None catches operator-org seed."
+      "evidence": "3eff5e8b0 cli/integrate/mod.rs:147 still dispatches Violet through VioletArgs; violet_ps.rs:73,106 constructs MECHA credentials,1297-1328/1423-1444 repairs legacy routes,1581-1651 compares legacy-filtered allowlist (proxy/config.rs:569-575). Registration doc promises VIOLET defaults/routes/tool proof. Actual runtime mismatch; clean03f adds real VioletArgs module. None catches operator-org seed."
     },
     "c14/baseline/project-repair": {
       "correct": true,
       "seed_match": false,
-      "evidence": "3eff5e8b0 cli/integrate/mod.rs:147 still dispatches Violet through MechaCassyArgs; mecha_cassy.rs:73,106 constructs MECHA credentials,1297-1328/1423-1444 repairs legacy routes,1581-1651 compares legacy-filtered allowlist (proxy/config.rs:569-575). Registration doc promises VIOLET defaults/routes/tool proof. Actual runtime mismatch; clean03f adds real VioletArgs module. None catches operator-org seed."
+      "evidence": "3eff5e8b0 cli/integrate/mod.rs:147 still dispatches Violet through VioletArgs; violet_ps.rs:73,106 constructs MECHA credentials,1297-1328/1423-1444 repairs legacy routes,1581-1651 compares legacy-filtered allowlist (proxy/config.rs:569-575). Registration doc promises VIOLET defaults/routes/tool proof. Actual runtime mismatch; clean03f adds real VioletArgs module. None catches operator-org seed."
     },
     "c14/baseline/tool-receipt": {
       "correct": true,
       "seed_match": false,
-      "evidence": "3eff5e8b0 cli/integrate/mod.rs:147 still dispatches Violet through MechaCassyArgs; mecha_cassy.rs:73,106 constructs MECHA credentials,1297-1328/1423-1444 repairs legacy routes,1581-1651 compares legacy-filtered allowlist (proxy/config.rs:569-575). Registration doc promises VIOLET defaults/routes/tool proof. Actual runtime mismatch; clean03f adds real VioletArgs module. None catches operator-org seed."
+      "evidence": "3eff5e8b0 cli/integrate/mod.rs:147 still dispatches Violet through VioletArgs; violet_ps.rs:73,106 constructs MECHA credentials,1297-1328/1423-1444 repairs legacy routes,1581-1651 compares legacy-filtered allowlist (proxy/config.rs:569-575). Registration doc promises VIOLET defaults/routes/tool proof. Actual runtime mismatch; clean03f adds real VioletArgs module. None catches operator-org seed."
     },
     "c15/spec/SPEC-1": {
       "correct": false,

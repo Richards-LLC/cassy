@@ -638,7 +638,7 @@ fn issue_repo_registry_resolves_defaults_and_overrides_without_serializing_defau
         Some("Richards-LLC/cassy".to_string())
     );
     assert_eq!(
-        config.get("issues.components.mecha_cassy"),
+        config.get("issues.components.violet"),
         Some("Richards-LLC/violet_ps".to_string())
     );
     assert_eq!(
@@ -647,14 +647,8 @@ fn issue_repo_registry_resolves_defaults_and_overrides_without_serializing_defau
     );
     for (key, default) in [
         ("issues.components.cassy", "Richards-LLC/cassy"),
-        (
-            "issues.components.mecha_cassy",
-            "Richards-LLC/violet_ps",
-        ),
-        (
-            "issues.components.cloud",
-            "Richards-LLC/petra-stella-cloud",
-        ),
+        ("issues.components.violet", "Richards-LLC/violet_ps"),
+        ("issues.components.cloud", "Richards-LLC/petra-stella-cloud"),
     ] {
         assert!(config
             .list()
@@ -688,63 +682,21 @@ fn issue_repo_registry_resolves_defaults_and_overrides_without_serializing_defau
     assert!(raw.contains("cassy = \"example/runtime\""));
 }
 
-/// GH #963: `issues.components.violet` is canonical; the deprecated
-/// `issues.components.mecha_cassy` still reads and writes for one release,
-/// and the canonical key wins when a config carries both.
 #[test]
-fn violet_issue_key_is_canonical_and_mecha_cassy_is_a_deprecated_alias() {
-    let temp = TempDir::new().unwrap();
+fn violet_issue_key_resolves_and_retired_key_is_rejected() {
     let mut config = Config::default();
-    for key in ["issues.components.violet", "issues.components.mecha_cassy"] {
-        assert_eq!(
-            config.get(key),
-            Some("Richards-LLC/violet_ps".to_string()),
-            "{key}"
-        );
-        let meta = meta::registry().get(key).expect("component issue metadata");
-        assert_eq!(meta.section, "issues.components");
-    }
-    assert!(config.list().contains(&(
-        "issues.components.violet".to_string(),
-        "Richards-LLC/violet_ps".to_string()
-    )));
-
-    // The old key writes the canonical field and both names read it back.
-    config
-        .set("issues.components.mecha_cassy", "example/hub")
-        .unwrap();
+    let retired = &cas_types::violet_compatibility::violet_compatibility().retired_issue_key;
     assert_eq!(
         config.get("issues.components.violet"),
-        Some("example/hub".to_string())
+        Some("Richards-LLC/violet_ps".to_owned())
     );
-    assert_eq!(
-        config.get("issues.components.mecha_cassy"),
-        Some("example/hub".to_string())
-    );
-    config.save(temp.path()).unwrap();
-    let raw = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
-    assert!(raw.contains("violet = \"example/hub\""), "{raw}");
-    assert!(!raw.contains("mecha_cassy"), "{raw}");
-
-    // A config written before the rename still resolves, and the canonical
-    // key wins when both are present.
-    std::fs::write(
-        temp.path().join("config.toml"),
-        "[issues.components]\nmecha_cassy = \"legacy/hub\"\n",
-    )
-    .unwrap();
-    let legacy = Config::load(temp.path()).unwrap();
-    assert_eq!(
-        legacy.get("issues.components.violet"),
-        Some("legacy/hub".to_string())
-    );
-    std::fs::write(
-        temp.path().join("config.toml"),
-        "[issues.components]\nmecha_cassy = \"legacy/hub\"\nviolet = \"new/hub\"\n",
-    )
-    .unwrap();
-    let both = Config::load(temp.path()).unwrap();
-    assert_eq!(both.issue_repo_registry().violet, "new/hub".to_string());
+    assert!(config.get(retired).is_none());
+    assert!(config.set(retired, "example/hub").is_err());
+    assert!(meta::registry().get(retired).is_none());
+    config
+        .set("issues.components.violet", "example/hub")
+        .unwrap();
+    assert_eq!(config.issue_repo_registry().violet, "example/hub");
 }
 
 #[test]

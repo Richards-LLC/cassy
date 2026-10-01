@@ -744,7 +744,7 @@ fi
 # operator's own MCP configuration is how the original hour was lost.
 repo="$(new_fixture ancestor-proxy)"
 mkdir -p "$(dirname "$repo")/.cas"
-printf '[servers.mecha-cassy]\ntype = "http"\nurl = "https://example.invalid/mcp"\n' \
+printf '[servers.violet]\ntype = "http"\nurl = "https://example.invalid/mcp"\n' \
     >"$(dirname "$repo")/.cas/proxy.toml"
 output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
 if grep -qF 'FAIL ancestor-proxy-config' <<<"$output"; then

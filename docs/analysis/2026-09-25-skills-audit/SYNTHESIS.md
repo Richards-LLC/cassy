@@ -6,7 +6,7 @@ or skill was edited and no cargo command was run.
 Inputs, all in this directory:
 
 | Lane | Task | Report | Scope |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | L1 | cas-63c5 | `L1-rubric.md` + `L1-findings.md` | formats, house standard, harness parity |
 | L2 | cas-3e02 | `L2-findings.md` | factory core skills, built-in agents |
 | L3 | cas-988a | `L3-findings.md` | runtime prompts in Rust, MCP tool descriptions |
@@ -111,7 +111,7 @@ master row (column "Lane refs") or in the duplicate list (§2.4).
 - The L2 and L5 rows were checked by a read-only sub-audit at `ca73bb591`; see §2.5.
 
 | ID | Finding | Lane refs | Strongest evidence | ✔ |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | M01 | Claude workers get Codex `mcp__cs__` tool names in every assignment, stall nudge and reply footer. The prefix comes from the session-wide `worker_cli`, not from the recipient. | L3 P0.1 | `ui/factory/director/prompts.rs:1357-1393,744`; caller `app/mod.rs:1362` | ✔ |
 | M02 | Suggested `coordination action=message` calls omit the required `summary`. Affects runtime templates and skill examples. | L3 P0.2, L2 P0-05 | `agent_search_system/message.rs:637-645`; `prompts.rs:744,1388`; `pty.rs:20,41,315,1404`; `worker-recovery.md:137` | ✔ |
 | M03 | Text tells `local_merge` workers to push, and PreToolUse denies the push. Affects close remediation, the worker body and launch contracts. | L3 P0.3, L2 P0-10 | `close_ops.rs:10918,11786`; `cas-worker.md:37-39`; `pre_tool.rs:210-229` | ✔ |
@@ -128,11 +128,11 @@ master row (column "Lane refs") or in the duplicate list (§2.4).
 | M14 | Spawn guidance contradicts the lane registry. <br>• Explicit `cli`/`model`/`effort` bypasses lane fallbacks. <br>• "docs-only → light" conflicts with taste; `model-selection.md:13` must change too. <br>• `config_dir` is described as Claude-only, but Codex uses `CODEX_HOME`. | L2 P0-16, 20, 21 (+ L3 `config_dir` schema text) | `ops_secondary.rs:746-751,1137`; `factory_ops.rs:53-65,2323-2407` | ✔ (P0-21 partial) |
 | M15 | Worker references teach the wrong delivery state or rule. <br>• `completion_receipt` → "awaiting_merge" (actually `AwaitingVerification`, and only after merge). <br>• "Report headroom every note" contradicts the <20% rule. | L2 P0-09, 25 | `close_ops.rs:4166-4183` | ✔ |
 | M16 | Maintenance agents cannot do their job. <br>• learning-reviewer's skill create omits `invocation`, and the defaults would publish globally. <br>• rule-reviewer's "promote" is one vote. | L2 P0-07, 08 | `service/core.rs:951-968`; `rules.rs:37-41,233-256` | ✔ |
-| M17 | Deprecated names that expire next release: `issues.components.mecha_cassy` (both always-loaded bodies, CLAUDE.md block, pinned test) and `cas integrate mecha-cassy`. | L2 P0-18, L5 P0-2, L5 P1-25 | `config/access/mod.rs:8-13`; `cli/integrate/mod.rs:106-116` | ✔ |
+| M17 | Deprecated names that expire next release: `issues.components.violet` (both always-loaded bodies, CLAUDE.md block, pinned test) and `cas integrate violet`. | L2 P0-18, L5 P0-2, L5 P1-25 | `config/access/mod.rs:8-13`; `cli/integrate/mod.rs:106-116` | ✔ |
 | M18 | Memory entry-type "enum" leaves out the live `handoff` type. Unknown values silently become `learning`. | L2 P0-23 | `memory.rs:453-458,513` | ✔ |
 | M19 | Cassy-bug routing in the always-loaded worker body. <br>• `report_cas_bug` files into the downstream project's tracker. <br>• cas-src-only "fix them here" text is injected everywhere. | L2 P0-24 | `agent_search_system/system.rs:263-277` | ✔ |
 | M20 | fallow's `2>/dev/null \|\| true` hides every exit code. A missing binary looks like a clean pass. | L5 P0-1 | `fallow/SKILL.md:21-24,68,193`; live rc 0 on a nonexistent binary | ✔ |
-| M21 | The release-notes RUBRIC template example uses Markdown `**`, which mecha-cassy lint refuses. | L5 P0-4 | `RUBRIC-template.md:88-95` vs `mecha-cassy/SKILL.md:36-37` | ✔ |
+| M21 | The release-notes RUBRIC template example uses Markdown `**`, which violet lint refuses. | L5 P0-4 | `RUBRIC-template.md:88-95` vs `violet/SKILL.md:36-37` | ✔ |
 | M22 | The cas-qa-craft trigger only fires on `demo_statement`, but the gate also fires on user-facing paths and journeys. Agents following the skill get refused closes. Same text in `cas-worker.md:24`. | L5 P0-5 | `qa_pass.rs:100-108`; `qa_evidence_gate.rs:84-89` | ✔ |
 | M23 | Wrong MCP call shapes. <br>• `mcp_execute server= tool= args=` (the only param is `code`). <br>• Viktor `question` (should be `message`). <br>• The schema text itself calls `code` "TypeScript". | L5 P0-3, P0-12 (+ L5 cross-lane 2) | `ops_secondary.rs:1256-1272`; live `ask_viktor` schema | ✔ |
 | M24 | Instruction contradiction inside a skill: cas-brainstorm says "ONE question at a time" and also "ask the full frontier". | L5 P0-10 | `cas-brainstorm/SKILL.md:32` vs `:41` | ✔ |
@@ -143,7 +143,7 @@ master row (column "Lane refs") or in the duplicate list (§2.4).
 ### 2.2 P1: routing, format, budget, architecture
 
 | ID | Finding | Lane refs | Theme |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | M30 | SessionStart exceeds the 10K hook cap for every factory role. Knowledge and Handoff are protected by omission. The worker body has **11 B** of headroom under its 8,000 B cap. The supervisor is 117 B over the ≤6,450 B operator target. | L3 P1.1, L2 P1-26, P1-28 | T3 |
 | M31 | Claude workers on custom config dirs probably get no SessionStart (the fallback is supervisor-only). | L3 P1.3 | T3 |
 | M32 | The `coordination` description is cut at 2,048 characters. The lost tail contradicts `force`. | L3 P1.4 (+ L2 P0-14 same rule) | T3 |
@@ -160,13 +160,13 @@ master row (column "Lane refs") or in the duplicate list (§2.4).
 | M43 | `disallowed-tools` is documented as a guard. It is turn-scoped and Claude-only. | L1#6 | T5 |
 | M44 | Instruction-file projection. <br>• AGENTS.md is generated in Codex spelling with Claude-only `ToolSearch`/`TodoWrite` bootstrap and shouted caps. <br>• Grok loads CLAUDE.md **and** AGENTS.md (≈5.1k tok, ≈2.1k duplicated, neither in Grok's spelling) and cuts CLAUDE.md at 10,000 chars, losing the release-duty rubric link. <br>• The TodoWrite ban names a tool Opus 5.x/Fable do not have. | L1#7, L6 F3, F4, F5 | T1/T7 |
 | M45 | Opt-in skills are model-invocable in Codex and OpenCode. `disable-model-invocation` is ignored and `agents/openai.yaml` is never generated. | L1#10 (P2), L5 P1-10 | T1 |
-| M46 | Supervisor references are stale or contradictory. <br>• Three dead-worker procedures. <br>• is-wedged table lacks approval-hang and uses the wrong bands. <br>• "verify in TUI" / "ask the supervisor". <br>• Untiered, non-isolated spawn examples. <br>• `max` effort list. <br>• Suspended terra listed. <br>• Unfiltered `remind_event`. <br>• cas-src SHA check in checklist step 0. <br>• "tests pass" per task. <br>• Orphaned intake.md/planning.md. <br>• Phantom mecha-cassy fallback. | L2 P1-34, 35, 37, 38, 39, 40, 41, 43, 44, 45, 47 | T4/T5 |
+| M46 | Supervisor references are stale or contradictory. <br>• Three dead-worker procedures. <br>• is-wedged table lacks approval-hang and uses the wrong bands. <br>• "verify in TUI" / "ask the supervisor". <br>• Untiered, non-isolated spawn examples. <br>• `max` effort list. <br>• Suspended terra listed. <br>• Unfiltered `remind_event`. <br>• cas-src SHA check in checklist step 0. <br>• "tests pass" per task. <br>• Orphaned intake.md/planning.md. <br>• Phantom violet fallback. | L2 P1-34, 35, 37, 38, 39, 40, 41, 43, 44, 45, 47 | T4/T5 |
 | M47 | task-verifier structure. <br>• Close-path section addresses the closer. <br>• `HEAD~10` base. <br>• Self-contradicting reject policy. <br>• No `tools:` restriction. <br>• 27.7 KB per spawn (P2-60). | L2 P1-49, 50, 59 (+ P2-60) | T4 |
 | M48 | Stop-hook jobs run with identity stripped. The summarizer resolves the wrong caller and the duplicate detector ignores its job IDs. | L2 P1-51 | T5 |
 | M49 | task-tracking, search and memory skills drift from the schema. <br>• `status=blocked` vs `action=blocked`. <br>• Missing `platform_proof`, `spec`/`artifact` doc types. <br>• Cap handling. | L2 P1-52, 53, 54 | T5 |
 | M50 | Worker references. <br>• The clean-tree receipt applies to every close but is linked only for deep ones. <br>• A `vercel env pull` line contradicts the credential strip. | L2 P1-55, 56 | T5 |
-| M51 | cas-src-only content ships in universal builtins. <br>• Surface checklist in the worker body. <br>• Release prebuild, refresh script, `nextest -p cas`, Richards-LLC links. <br>• Release-train receipt rules. <br>• Universal staging/main Slack duty. <br>• mecha-cassy "Cassy vX.Y.Z" content policy. | L2 P1-27, P1-57, L5 P1-3, P1-4, P1-5 | T6 |
-| M52 | Release trio. <br>• cut-release reads a 31.9 KB failure log per cut (−5.7k). <br>• release-notes collides with Grok `/release-notes`. <br>• mecha-cassy promises diary posts but hard-codes one reply. | L5 P1-1, P1-2 (= L1#15), P1-6 | T4 |
+| M51 | cas-src-only content ships in universal builtins. <br>• Surface checklist in the worker body. <br>• Release prebuild, refresh script, `nextest -p cas`, Richards-LLC links. <br>• Release-train receipt rules. <br>• Universal staging/main Slack duty. <br>• violet "Cassy vX.Y.Z" content policy. | L2 P1-27, P1-57, L5 P1-3, P1-4, P1-5 | T6 |
+| M52 | Release trio. <br>• cut-release reads a 31.9 KB failure log per cut (−5.7k). <br>• release-notes collides with Grok `/release-notes`. <br>• violet promises diary posts but hard-codes one reply. | L5 P1-1, P1-2 (= L1#15), P1-6 | T4 |
 | M53 | QA and Playwright skills. <br>• Telemetry step out of order. <br>• `cli attach` without `-s`. <br>• False q-btn claim. <br>• Frontend-engineering routes to the uninvocable nuxt skill. <br>• 1.59 vs 1.62 floor. | L5 P1-7, 8, 9, 11, 12 | T5 |
 | M54 | fallow content is stale. <br>• 22 of 38 MCP tools listed. <br>• Node section. <br>• Plugin count. <br>• Exit codes 0–2 (3.x has 0–13). <br>• Vendored ≈2.57 references (−20.5k per read). <br>• Deprecated `setup-hooks` collides with `.claude/`. | L5 P1-13, 14, 15, 16, 17, 18 | T5 |
 | M55 | Ideation pipeline. <br>• brainstorm and supervisor intake both create epics (duplicates). <br>• "Light lane" offered as an Agent option. | L5 P1-19, 20 | T4 |
@@ -188,7 +188,7 @@ master row (column "Lane refs") or in the duplicate list (§2.4).
 ### 2.3 P2 / P3 (grouped; full detail is in the lane reports)
 
 | ID | Group | Lane refs | Δ tokens (est.) |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | M70 | MCP schema. <br>• Boilerplate (16.4% of `tools/list`). <br>• Supervisor-only params in worker tools. <br>• Action-list drift, and `action` is not an enum. <br>• Duplicated request structs. <br>• Stale values. | L3 P2.1–P2.4, L3 P3, L2 fix-order note (`mark_reviewed`, `request_changes`, `reset`) | −2.9k schema; −2–3k per worker session with the split |
 | M71 | Ambient recall. <br>• Keys on envelope words. <br>• Re-injects the task the agent just read. <br>• Provenance noise. | L3 P2.5 (+P3) | −400…−800 per turn |
 | M72 | Worker contract copies ×3, missing `remind_message`, `agent-authored` label, and other envelope polish. | L3 P2.6–P2.10, L3 P3 | −790 per spawn |
@@ -207,7 +207,7 @@ master row (column "Lane refs") or in the duplicate list (§2.4).
 ### 2.4 Duplicates merged
 
 | Reported as | Merged into |
-|---|---|
+| --- | --- |
 | Supervisor cross-lane P0 "non-SKILL.md files never refresh" | M05 |
 | Supervisor cross-lane P0 "Grok in cas-src resolves `.claude/skills`" | M39 |
 | L1#8 (descriptions > 250) | M62 |
@@ -223,7 +223,7 @@ master row (column "Lane refs") or in the duplicate list (§2.4).
 | L4 F5 (QA scripts unshipped) | M08 (raised to P0 by L5 P0-6) |
 | L5 P1-10 (Codex `disable-model-invocation`) | M45 |
 | L5 P1-23, P1-24 (session-learn) | M09 |
-| L5 P1-25 (`mecha_cassy` key) | M17 |
+| L5 P1-25 (`violet_ps` key) | M17 |
 | L5 P1-31 (cas-tdd cargo) | M11 |
 | L6 F3, F4, F5 (Grok double load, Claude-only bootstrap, TodoWrite shout) | M44 |
 | L6 F9 (retired agents installed) | M42 |
@@ -236,7 +236,7 @@ master row (column "Lane refs") or in the duplicate list (§2.4).
 sub-audit against the tree at `ca73bb591`; the rest were checked directly.
 
 | Row | Verdict | Note |
-|---|---|---|
+| --- | --- | --- |
 | L2 P0-21 | PARTIAL | `model-selection.md:186` "docs-only → light" does conflict with `:16,180`. But `:13` itself says light covers "bounded chores, docs", so the fix must change `:13` too. The `depth` conflation is real. |
 | L2 P0-04 | CONFIRMED, caveat | If the dead worker's lease has already expired, `task_claiming.rs:412-455` recovers it and `release` succeeds. The advice is still wrong for a live lease; `reset` is the right verb. |
 | L2 P0-08 | CONFIRMED, caveat | Retrieval evidence (`rules.rs:240`) is a second promotion path the lane did not mention. The reviewer's single `helpful` vote still cannot promote on its own. |
@@ -251,7 +251,7 @@ The table below is the `verification_dispatches` history for this epic's six lan
 the cas-src store):
 
 | Task | Dispatch state | Bound epic head | Anchor commits |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | cas-a4d8 (L4) | **invalidated** | `4836e56f7` | none |
 | cas-a4d8 (L4) | resolved | `0dd62c2cc` | none |
 | cas-63c5 (L1) | **invalidated** | `4836e56f7` | none |
@@ -398,7 +398,7 @@ Risk classes:
 Run the whole set in one pass with no fail-fast.
 
 | WP | Scope (master IDs) | Main files | Risk | Tests affected / to add | Est. savings | Depends on |
-|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- |
 | **WP1** Envelope and remediation correctness | M01, M02 (runtime), M03 (runtime), M04, M36 banner, M38, M72 remind/push | `director/prompts.rs`, `app/mod.rs`, `cas-pty/src/pty.rs`, `close_ops.rs`, `handlers_session.rs`, `pre_tool.rs`, `ops_secondary.rs` | R-build, R-pins (pty contract markers, `factory_codex_skill_guardrails`, `--lib cli::factory::parity`) | Add: every suggested `action=message` literal carries `summary=`. Add: per-recipient prefix test (Claude worker in a Codex-default session). | ≥1 failed call + recovery (~300–800 tok) per assignment or rejection | — |
 | **WP2** Always-loaded budget | M30, M33, M34, M35 (body side), M19, M51 (body parts), M71 (per-turn recall), L2 P2-62/73 | `session_budget.rs`, `cas-core/.../build_start.rs`, `…/context/mod.rs`, `handlers_session.rs`, `cas-worker.md`, `cas-supervisor.md` | R-build, R-pins (P-L2 in full) | Add: assembled payload ≤ 9,216 B per role on a realistic fixture. Retarget the surface-checklist pin. | Worker −2.6 KB (assembled) and −1.6 KB body; supervisor −4 KB assembled, −0.9 KB body | — (**first**: every WP7 body fix needs its headroom) |
 | **WP3** MCP schema diet and text | M32, M70 (no split), M23 schema text, M10 `files` alias, M14 `config_dir` text, M18 enum | `service/mod.rs`, `crates/cas-mcp/src/types*.rs`, `list_tools` post-process | R-build; pin `mcp_action_surface_test` | Add: every tool description ≤ 2,048; `action` enum = dispatch table; no `nullable`/`default:null` | −2.9k tok schema; −1.6k for the 4 always-selected tools | — (D2 extends it) |
@@ -424,7 +424,7 @@ single test would have caught M02, M04, M10, M12, M13 (`scope=code`, release) an
 **Suggested order.**
 
 | Wave | Packages | When |
-|---|---|---|
+| --- | --- | --- |
 | A (parallel) | WP1, WP2, WP3, WP4, WP14a, WP15, WP16, and the M17 part of WP5 | Now. Deprecated names expire next release. |
 | B | WP5 remainder, WP6, WP7, WP8 | After WP4 and WP2 |
 | C | WP9, WP10, WP11 | After D5/D7/D8/D10 |
@@ -440,7 +440,7 @@ Build and pin rules:
 ## 5. Decide first (operator)
 
 | # | Decision | Options | Recommendation | Gates |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | D1 | Tool naming in shipped text | (a) keep three spellings and fix delivery per recipient/harness; (b) **prefix-neutral catalog**: bare tool names in skills, prefix stated once in role guidance | (b). The spellings already fail to reach Grok and OpenCode, and Stop jobs already cross flavours. It retires ~276 embedded twins and most of the drift test. | WP11 wording, WP12, WP8 Stop bodies |
 | D2 | Split `coordination` | (a) keep one tool, trimmed; (b) worker-facing `coordination` plus supervisor `factory` tool | (b). Workers stop loading ~8 KB of spawn/worktree/db params, and tool annotations become honest. The skill-text edits are mechanical. | WP13, WP3 extension |
 | D3 | Instruction-file projection | (a) CLAUDE.md canonical, AGENTS.md generated in Codex spelling (today); (b) prefix-neutral generated AGENTS.md; (c) per-harness files; (d) **AGENTS.md canonical and harness-neutral, CLAUDE.md = `@AGENTS.md` + `claude-only` lines** (L6 F3) | (d), with bare tool names per D1. Keep each file < 10,000 chars (Grok cap). This also gives Codex a directive outside cas-src (M66). | WP12, WP14b |

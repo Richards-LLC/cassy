@@ -12,11 +12,7 @@ impl CasCore {
     ) -> Result<CallToolResult, McpError> {
         let store = self.open_store()?;
 
-        let mut entry = store.get(&req.id).map_err(|e| McpError {
-            code: ErrorCode::INVALID_PARAMS,
-            message: Cow::from(format!("Entry not found: {e}")),
-            data: None,
-        })?;
+        let mut entry = Self::resolve_memory_entry(store.as_ref(), &req.id)?;
 
         // Verify it's an opinion or hypothesis
         if entry.belief_type == BeliefType::Fact {
@@ -63,11 +59,7 @@ impl CasCore {
     ) -> Result<CallToolResult, McpError> {
         let store = self.open_store()?;
 
-        let mut entry = store.get(&req.id).map_err(|e| McpError {
-            code: ErrorCode::INVALID_PARAMS,
-            message: Cow::from(format!("Entry not found: {e}")),
-            data: None,
-        })?;
+        let mut entry = Self::resolve_memory_entry(store.as_ref(), &req.id)?;
 
         if entry.belief_type == BeliefType::Fact {
             return Err(Self::error(
@@ -111,11 +103,7 @@ impl CasCore {
     ) -> Result<CallToolResult, McpError> {
         let store = self.open_store()?;
 
-        let mut entry = store.get(&req.id).map_err(|e| McpError {
-            code: ErrorCode::INVALID_PARAMS,
-            message: Cow::from(format!("Entry not found: {e}")),
-            data: None,
-        })?;
+        let mut entry = Self::resolve_memory_entry(store.as_ref(), &req.id)?;
 
         if entry.belief_type == BeliefType::Fact {
             return Err(Self::error(

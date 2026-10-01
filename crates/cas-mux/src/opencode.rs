@@ -253,6 +253,7 @@ fn json_object(entries: impl IntoIterator<Item = (&'static str, Value)>) -> Valu
 /// atomically so a supervisor can safely fall back to process evidence.
 pub const OPENCODE_PLUGIN_SOURCE: &str = r#"import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { spawn } from "node:child_process";
 
 const CAS_SESSION_ID = process.env.CAS_SESSION_ID || "";
 const CAS_ROOT = process.env.CAS_ROOT || join(process.env.PWD || process.cwd(), ".cas");
@@ -326,9 +327,49 @@ async function applySessionEvent(event) {
   });
 }
 
+// Consult the same policy as Claude/Grok before dispatching a Slack tool or
+// proxy call. No shell interpolation: the tool arguments travel on stdin.
+function violetDispatch(code) {
+  if (typeof code === "string") {
+    try { return violetDispatch(JSON.parse(code)); } catch { return /^violet\./i.test(code.trim()); }
+  }
+  if (Array.isArray(code)) return code.length > 0 && code.every(violetDispatch);
+  return code?.server?.toLowerCase() === "violet";
+}
+
+async function enforceSlackPolicy(input, output) {
+  const tool = input?.tool || input?.toolName || "";
+  if (/^(violet[._]|mcp__violet__)/i.test(tool)) return;
+  if (!/slack|mcp_execute$/i.test(tool)) return;
+  const args = output?.args || input?.args || {};
+  if (/mcp_execute$/i.test(tool) && violetDispatch(args.code)) return;
+  const hookInput = { session_id: CAS_SESSION_ID || input?.sessionID || "opencode", cwd: DIRECTORY, hook_event_name: "PreToolUse", tool_name: tool, tool_input: args };
+  const result = await new Promise((resolve, reject) => {
+    const child = spawn("cas", ["hook", "PreToolUse"], { cwd: DIRECTORY, stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "";
+    const timer = setTimeout(() => { child.kill(); reject(new Error("Cassy Slack policy timed out; use violet.violet_post and the violet skill")); }, 3000);
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.resume();
+    child.stdin.on("error", () => {});
+    child.on("error", () => { clearTimeout(timer); reject(new Error("Cassy Slack policy unavailable; use violet.violet_post and the violet skill")); });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0) return reject(new Error("Cassy Slack policy failed; use violet.violet_post and the violet skill"));
+      try { resolve(JSON.parse(stdout)); } catch { reject(new Error("Invalid Cassy Slack policy response; use violet.violet_post and the violet skill")); }
+    });
+    child.stdin.end(JSON.stringify(hookInput));
+  });
+  if (result?.hookSpecificOutput?.permissionDecision === "deny") {
+    throw new Error(result.hookSpecificOutput.permissionDecisionReason || "Use violet.violet_post and the violet skill");
+  }
+}
+
 export const CassyPlugin = async () => ({
   event: async ({ event }) => { try { await applySessionEvent(event); } catch (error) { console.error("Cassy OpenCode event projection delayed:", error); } },
-  "tool.execute.before": async (input) => {
+  "tool.execute.before": async (input, output) => {
+    // A rejected policy promise must propagate to OpenCode, unlike delayed
+    // activity writes below, which remain best-effort.
+    await enforceSlackPolicy(input, output);
     try { await update((state) => {
       if (state.opencode_session_id !== sessionId(input?.sessionID || input?.session_id)) return null;
       const timestamp = now();
@@ -741,7 +782,8 @@ mod tests {
         );
         assert!(!OPENCODE_PLUGIN_SOURCE.contains("export const Hooks = {"));
         assert!(!OPENCODE_PLUGIN_SOURCE.contains("SessionStart"));
-        assert!(!OPENCODE_PLUGIN_SOURCE.contains("PreToolUse"));
+        assert!(OPENCODE_PLUGIN_SOURCE.contains("await enforceSlackPolicy(input, output)"));
+        assert!(OPENCODE_PLUGIN_SOURCE.contains("[\"hook\", \"PreToolUse\"]"));
     }
 
     #[test]

@@ -38,6 +38,7 @@ fn operator_reply_relay_reaches_another_authenticated_device() {
         operator_label: None,
         kind: crate::ui::factory::OperatorTurnKind::Answer,
         attachments: Vec::new(),
+        notice: None,
     }).unwrap();
     assert!(super::server::operator_reply_allowed(&Some((auth, viewer)), &frame));
     assert!(!super::server::operator_reply_allowed(&None, &frame));

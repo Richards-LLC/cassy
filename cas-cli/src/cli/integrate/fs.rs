@@ -136,6 +136,13 @@ fn atomic_write_via_temp_path(
     // Once creation succeeds, this invocation owns tmp_path and may clean it
     // up on a write, flush, or rename failure.
     let result = (|| -> std::io::Result<()> {
+        // Config files may contain credentials. Retain an existing file's
+        // permissions before putting any contents in its replacement.
+        if let Ok(metadata) = fs::symlink_metadata(path) {
+            if metadata.is_file() {
+                f.set_permissions(metadata.permissions())?;
+            }
+        }
         f.write_all(contents.as_bytes())?;
         f.flush()?;
         drop(f);
@@ -313,6 +320,22 @@ mod tests {
         fs::write(&p, "old").unwrap();
         atomic_write(&p, "new").unwrap();
         assert_eq!(fs::read_to_string(&p).unwrap(), "new");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_preserves_private_config_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        fs::write(&path, "old").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        atomic_write(&path, "new").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]

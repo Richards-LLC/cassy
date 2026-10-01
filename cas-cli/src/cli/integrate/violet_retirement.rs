@@ -520,6 +520,9 @@ mod tests {
     fn profile_and_proxy_failures_do_not_abort_unrelated_project_sync() {
         use clap::Parser;
         let temp = tempfile::tempdir().unwrap();
+        // Held for the whole test and dropped before `temp`: scrubs ambient
+        // CODEX_HOME/CLAUDE_CONFIG_DIR so the real profiles are never touched.
+        let mut env = crate::test_support::TestEnvGuard::new();
         let home = temp.path().join("home");
         let project = temp.path().join("project");
         let bad = home.join(".codex-bad/config.toml");
@@ -534,7 +537,6 @@ mod tests {
             "# Fixture\n\nProject-specific guidance.\n",
         )
         .unwrap();
-        let mut env = crate::TestEnvGuard::new();
         env.set("HOME", &home);
         env.set("XDG_CONFIG_HOME", home.join(".config"));
         env.set("CAS_ROOT", project.join(".cas"));

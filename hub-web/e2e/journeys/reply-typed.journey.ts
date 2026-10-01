@@ -1,5 +1,6 @@
 import { test, expect } from "./journey";
 import type { Machine } from "./hub-double";
+import { expectDraft, installDraftDiagnostic } from "./draft-diagnostic";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
 
 // A machine whose supervisor has a 64-character codename (cas-1334).
@@ -20,10 +21,11 @@ async function swipeAway(locator: import("@playwright/test").Locator, dx: number
   }, dx);
 }
 
-test("HUB-J5 reply by typing", async ({ page, journey }) => {
+test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
   // Eleven stages plus the phone placeholder sweep: past the 60 s budget on a
   // loaded host, so it gets the headroom HUB-J3 has.
   test.setTimeout(120_000);
+  await installDraftDiagnostic(page);
   const hub = await journey.hub({ machines: [ATLAS, STUDIO, FORGE], paired: ["atlas", "studio", "forge"] });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
   const composer = page.getByRole("textbox", { name: "Your message" });
@@ -44,7 +46,7 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
     // Observe a real background request, rather than waiting for a string in
     // main.ts to claim that a render happened.
     await page.waitForResponse((response) => new URL(response.url()).pathname === "/v1/sessions");
-    await expect(composer).toHaveValue("Please verify the gate first.\nKeep this half-written reply.");
+    await expectDraft(page, composer, "Please verify the gate first.\nKeep this half-written reply.", testInfo);
     await expect(composer).toBeFocused();
     expect(await composer.evaluate((field: HTMLTextAreaElement) => ({
       sameNode: field === (window as unknown as { __draftField: HTMLTextAreaElement }).__draftField,
@@ -61,7 +63,7 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
       (window as unknown as { __draftField: HTMLTextAreaElement }).__draftField.isConnected,
     )).toBe(false);
     await list.getByRole("button", { name: /cas-src/ }).click();
-    await expect(composer).toHaveValue("Please verify the gate first.\nKeep this half-written reply.");
+    await expectDraft(page, composer, "Please verify the gate first.\nKeep this half-written reply.", testInfo);
     await expect(composer).toBeFocused();
     expect(await composer.evaluate((field: HTMLTextAreaElement) => field.selectionStart)).toBe(7);
   });

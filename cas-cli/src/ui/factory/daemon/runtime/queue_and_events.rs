@@ -8487,6 +8487,58 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
+    /// cas-e829: a relay-watchdog alert reaches Commander as a notice that
+    /// names the relay it is about and whether that relay has since been
+    /// seen; a supervisor turn carries no notice.
+    #[test]
+    fn operator_notices_mark_daemon_alerts_and_follow_their_relay() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
+        cas_store::PromptQueueStore::init(&store).unwrap();
+        let queue: &dyn cas_store::PromptQueueStore = &store;
+        let payload = r#"{"schema_version":2,"reply_to":null,"message":"m","summary":"s","device_id":"*","kind":"blocker","attachments":[]}"#;
+        let relay = queue
+            .enqueue_with_session("lifecycle-wake:worker-died:9", "supervisor", "worker died", "acct-52")
+            .unwrap();
+        let cas_store::EnqueueIdempotentResult::Created(alert) = queue
+            .enqueue_idempotent(
+                "relay-watchdog",
+                "operator",
+                payload,
+                Some("acct-52"),
+                Some("s"),
+                None,
+                &format!("{}{relay}", cas_store::RELAY_OPERATOR_ESCALATION_DEDUPE_PREFIX),
+                Some(&cas_store::QueueOrigin::Daemon),
+            )
+            .unwrap()
+        else {
+            panic!("alert not created");
+        };
+        let reply = queue
+            .enqueue_urgent_with_outcome("supervisor", "operator", payload, Some("acct-52"), None, None, false, Some(&cas_store::QueueOrigin::Daemon))
+            .unwrap()
+            .id();
+        let rows: Vec<_> = [alert, reply]
+            .into_iter()
+            .map(|id| queue.queued_prompt(id).unwrap().unwrap())
+            .collect();
+        let notices = super::operator_notices(queue, "acct-52", &rows);
+        assert_eq!(
+            notices.get(&alert),
+            Some(&crate::ui::factory::OperatorNotice {
+                source: "relay-watchdog".into(),
+                subject: Some(relay),
+                resolved: false,
+            })
+        );
+        assert!(!notices.contains_key(&reply));
+        queue.mark_transport_delivered(relay).unwrap();
+        assert!(super::operator_notices(queue, "acct-52", &rows)[&alert].resolved);
+        let (_, replies) = super::commander_history_turns(rows, "acct-52", &notices);
+        assert_eq!(replies.iter().filter(|reply| reply.notice.is_some()).count(), 1);
+    }
+
     /// cas-55a4: an earlier-session row keeps the session it was written in,
     /// and a row with no session never borrows the session asking for history.
     #[test]

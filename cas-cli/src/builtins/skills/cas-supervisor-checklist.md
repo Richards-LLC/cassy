@@ -13,15 +13,19 @@ metadata:
 
 1. Identify yourself: `coordination action=whoami`
 2. Load EPIC/task context:
-   ```
+
+   ```text
    task action=list task_type=epic
    task action=ready
    task action=list status=blocked
    ```
+
 3. Pull relevant memories and rules:
-   ```
+
+   ```text
    search action=search query="<keywords>" doc_type=entry limit=5
    ```
+
 4. Check codemap freshness:
    - If `.claude/CODEMAP.md` is missing → run `/codemap` to generate it.
    - If it exists but is stale (structural changes since last update) → run `/codemap` to refresh.
@@ -35,9 +39,11 @@ metadata:
    will abort later.
 
    For a full on-demand report (including stale agents and orphan worktrees):
-   ```
+
+   ```text
    factory action=gc_report
    ```
+
    The report's "Prior-factory WIP candidates" section mirrors the banner and
    is safe to re-run at any time; it never auto-deletes.
 
@@ -59,7 +65,8 @@ Reporting style: [reporting-and-routing.md](../cas-supervisor/references/reporti
 **Forward motion:** place the session on the six-rung exit ladder every turn and leave the next rung owned by a worker or by a scheduled supervisor reminder.
 
 Record decisions as you go:
-```
+
+```text
 memory action=remember title="..." content="..." tags="decision"
 ```
 

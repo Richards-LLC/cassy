@@ -11,6 +11,17 @@ function reply(id: number, kind: OperatorTurnKind, message = `m${id}`, reply_to:
 }
 
 describe("threadModel", () => {
+  it("draws no session line when the thread's own session opens it, and one when another turn precedes it (cas-55a4)", () => {
+    const own = new ConversationHistory();
+    own.reply(reply(1, "answer"), at(9, 0), "live");
+    own.reply(reply(2, "answer"), at(9, 1), "live");
+    expect(threadModel(own.events, { now: NOW, session: "live" }).map((item) => item.type)).toEqual(["day", "group"]);
+    expect(threadModel(own.events, { now: NOW }).map((item) => item.type)).toEqual(["day", "session", "group"]);
+    const mixed = new ConversationHistory();
+    mixed.reply(reply(1, "blocker"), at(9, 0));
+    mixed.reply(reply(2, "answer"), at(9, 1), "live");
+    expect(threadModel(mixed.events, { now: NOW, session: "live" }).map((item) => item.type)).toEqual(["day", "group", "session", "group"]);
+  });
   it("groups consecutive turns from one side and marks only the outer corners", () => {
     const history = new ConversationHistory();
     history.submit("a", "sup", "Merge the lanes.", at(9, 41));

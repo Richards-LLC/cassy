@@ -387,7 +387,7 @@ export class ConversationView {
     this.renderLoadEarlier(loadingEarlier);
     const working = this.options.working?.() === true;
     // A dismissed failed send leaves the thread (cas-16eed); the unsent chip brings it back.
-    const model = threadModel(this.history.visibleEvents(), { working, historyEnd: this.options.historyEnd?.() === true });
+    const model = threadModel(this.history.visibleEvents(), { working, historyEnd: this.options.historyEnd?.() === true, session: this.history.currentSession });
     const document = this.element.ownerDocument;
     const next = new Map<string, HTMLElement>();
     const children: HTMLElement[] = [];

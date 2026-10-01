@@ -4071,9 +4071,12 @@ button.chip:disabled { cursor: default; }
 /* cas-55a4: one project's live sessions on one machine, together. */
 .conversation-group-head { margin: var(--space-2) 14px 0; color: var(--ink-mid); font: var(--weight-medium) var(--fs-xs)/1.35 var(--font-ui); }
 .conversation-row.grouped { padding-left: 22px; }
+.conversation-row[aria-current="true"] .conversation-session-mark { background: var(--bg-panel); }
 .conversation-session-mark { margin-left: 8px; padding: 1px 7px; border-radius: var(--radius-pill); background: var(--accent-soft); color: var(--ink); font: var(--weight-medium) 10px/1.4 var(--font-ui); white-space: nowrap; }
-.conversation-end { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); margin: -2px 14px var(--space-1) 77px; font-size: var(--fs-xs); color: var(--ink-mid); }
-.conversation-end button { padding: 3px 10px; border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-pill); background: var(--color-transparent); color: var(--ink-mid); font: var(--weight-medium) var(--fs-xs)/1.3 var(--font-ui); }
+.conversation-end { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); margin: -6px 14px var(--space-1) 73px; font-size: var(--fs-xs); color: var(--ink-mid); }
+.conversation-end button { padding: 2px 4px; border: 0; border-radius: 6px; background: var(--color-transparent); color: var(--ink-soft); font: var(--weight-medium) var(--fs-xs)/1.3 var(--font-ui); text-decoration: underline; text-underline-offset: 2px; }
+.conversation-end button:hover { color: var(--ink); }
+.conversation-end .conversation-end-confirm, .conversation-end .conversation-end-cancel { padding: 3px 10px; border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-pill); text-decoration: none; color: var(--ink-mid); }
 .conversation-end .conversation-end-confirm { color: var(--state-crit); border-color: currentColor; }
 .conversation-end-question { flex-basis: 100%; color: var(--ink); }
 .conversation-end-error { flex-basis: 100%; color: var(--state-crit); }

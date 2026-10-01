@@ -2066,12 +2066,7 @@ pub fn doctor_row(
         };
     }
 
-    match probe.list_tools(
-        violet_hub_url,
-        violet_compatibility,
-        &token_env,
-        &bypass_env,
-    ) {
+    match probe.list_tools(violet_hub_url(), &token_env, &bypass_env) {
         ProbeOutcome::Tools { tools } => {
             let drift = tool_drift(&allowlist, &tools);
             if drift.is_empty() {

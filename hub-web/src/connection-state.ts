@@ -23,6 +23,23 @@ export interface ConnectionSnapshot {
   authFailure?: "expired" | "revoked" | "scope-mismatch" | "needs-pairing";
 }
 
+/** A machine never live in this visit whose attempts have failed; retries continue. */
+export const CANT_REACH_RETRYING = "Can't reach · retrying";
+export const NEEDS_PAIRING = "Needs pairing";
+export type MachineConnectionLabelState = Pick<ConnectionSnapshot, "phase" | "degraded" | "fatal" | "authFailure">;
+
+/** Shared machine words; the caller supplies this visit's live history. */
+export function machineConnectionLabel(state: MachineConnectionLabelState | undefined, everConnected = true): string {
+  if (!state) return "Idle";
+  if (state.phase === "live") return state.degraded ? "Degraded" : "Live";
+  // Never live and already failed (cas-b789): name the failed attempts while retries continue.
+  const retrying = state.phase === "backoff" || (state.phase === "failed" && state.fatal !== true && !state.authFailure);
+  if (retrying && !everConnected) return CANT_REACH_RETRYING;
+  if (state.phase === "backoff") return "Reconnecting";
+  if (state.phase === "failed") return state.authFailure ? NEEDS_PAIRING : "Unreachable";
+  return "Connecting";
+}
+
 export interface AttachSnapshot extends ConnectionSnapshot {
   session: string;
   /** Start of the uninterrupted not-live lifecycle; stable across retries. */

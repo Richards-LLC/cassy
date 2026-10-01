@@ -21560,7 +21560,7 @@
         {
           "type": "clipped-content",
           "elementPath": "div:nth-of-type(1) > div.shell.attention-expanded > aside.context-panel:nth-of-type(2) > div.context-body:nth-of-type(2) > section.context-tab:nth-of-type(1) > div.attention-list > section.attention-group.attention-group--overflow:nth-of-type(6) > div.attention-group-body > article.attention-item.attention-item--info:nth-of-type(30) > div.attention-eyebrow:nth-of-type(1) > span.attention-identity > span.attention-session:nth-of-type(2)",
-          "textSample": "mecha_cassy-cosmic-badger-7",
+          "textSample": "violet_ps-cosmic-badger-7",
           "reason": "text-bounds-exceed-overflow-ancestor"
         },
         {
@@ -31562,7 +31562,7 @@
         {
           "type": "clipped-content",
           "elementPath": "div:nth-of-type(1) > div.shell.attention-expanded > aside.context-panel:nth-of-type(2) > div.context-body:nth-of-type(2) > section.context-tab:nth-of-type(1) > div.attention-list > section.attention-group.attention-group--overflow:nth-of-type(6) > div.attention-group-body > article.attention-item.attention-item--info:nth-of-type(31) > div.attention-eyebrow:nth-of-type(1) > span.attention-identity > span.attention-session:nth-of-type(2)",
-          "textSample": "mecha_cassy-cosmic-badger-7",
+          "textSample": "violet_ps-cosmic-badger-7",
           "reason": "text-bounds-exceed-overflow-ancestor"
         },
         {

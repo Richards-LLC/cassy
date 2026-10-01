@@ -234,8 +234,13 @@ fn default_pre_tool_use_timeout() -> u32 {
     2000
 }
 
+/// Shared with the generated factory hook settings. Includes normalized
+/// Grok/OpenCode tool names and the CAS proxy dispatch tool.
+pub(crate) const SLACK_POLICY_MATCHER: &str = ".*[Ss][Ll][Aa][Cc][Kk].*|.*mcp_execute";
+
 pub(crate) fn default_pre_tool_use_matcher() -> Vec<String> {
     vec![
+        SLACK_POLICY_MATCHER.into(),
         "Read".into(),
         "Glob".into(),
         "Grep".into(),

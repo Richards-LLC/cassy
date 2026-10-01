@@ -91,11 +91,13 @@ fn every_issue_filing_builtin_names_the_component_registry() {
                     "{harness:?} {relative} is missing registry key {key}"
                 );
             }
-            // GH #963: the `mecha_cassy` alias expires after one release, so
+            // Retired configuration names must not remain in instructions, so
             // shipped guidance must name only the current `violet` key.
             assert!(
-                !content.contains("issues.components.mecha_cassy"),
-                "{harness:?} {relative} still names the deprecated issues.components.mecha_cassy key"
+                !content.contains(
+                    &cas_types::violet_compatibility::violet_compatibility().retired_issue_key
+                ),
+                "{harness:?} {relative} still names the retired issue key"
             );
             // The component registry keys are the routed contract. Do not
             // freeze the sentence that describes when to file the ticket.

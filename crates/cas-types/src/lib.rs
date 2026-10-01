@@ -31,6 +31,7 @@
 //! ```
 
 pub mod error;
+pub mod violet_compatibility;
 
 mod agent;
 mod artifact;

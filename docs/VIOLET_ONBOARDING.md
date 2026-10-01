@@ -8,15 +8,21 @@ reuse the registration without copying a Slack bot token into a project.
 Two values make a machine work, and they are the only two secrets involved:
 
 | Variable | What it is | Who issues it |
-|---|---|---|
+| --- | --- | --- |
 | `VIOLET_SLACK_TOKEN_<LABEL>` | Your machine's bearer. Per-machine so one can be revoked without touching anyone else. | `POST /api/clients`, authorized by your Cassy Cloud login |
 | `VIOLET_VERCEL_BYPASS` | The shared edge-protection secret in front of the hub. | The hub's bypass route, Vercel read, or one hidden prompt |
 
-Violet variables take precedence; existing `MECHA_SLACK_TOKEN_<LABEL>` and
-`MECHA_VERCEL_BYPASS` values remain supported as fallback names. Empty Violet
-values fall back too. `cas integrate mecha-cassy` remains an accepted alias for
-one release; new setup uses `cas integrate violet`. The deployed MCP endpoint
-is still `https://mecha-cassy.vercel.app/mcp/slack`.
+Violet variables take precedence over installed-machine legacy variables;
+empty Violet values also fall back. The shared
+[compatibility manifest](../crates/cas-types/src/violet-compatibility.json)
+defines those fallback names and the deployed URL once for the Rust runtime
+and release scripts. Only `cas integrate violet` is accepted.
+
+`cas integrate violet` and `cas update --sync` retire production hub entries
+from project/user proxy files and all installed Claude/Codex account profiles.
+They preserve credential references, unrelated settings and custom endpoints.
+Managed retired skill copies are removed; operator-owned skills are retained.
+Use the endpoint printed by `cas integrate violet` when repairing a registration.
 
 Everything Cassy writes references those by **name**. No file in any repo, and
 no line of terminal output, ever holds a value.
@@ -28,7 +34,7 @@ no line of terminal output, ever holds a value.
 ### 1. Use the existing Cassy Cloud login
 
 The command uses team membership from the current `cas login` session. There
-is no Violet admin token and no `MECHA_ADMIN_TOKEN` setting.
+is no Violet admin token and no `VIOLET_ADMIN_TOKEN` setting.
 
 ```bash
 cas login
@@ -80,10 +86,10 @@ tools the hub answered with.
 ## What the command actually does
 
 | Artifact | Path | Contents |
-|---|---|---|
+| --- | --- | --- |
 | Credentials | `~/.config/cas/credentials.env` | The two plaintext values, mode `0600`; unrelated exports are preserved |
 | Login profile | `~/.profile`, `~/.bash_profile`, or `~/.zprofile` | A guarded source line for the credentials file |
-| Machine proxy registration | `~/.config/code-mode-mcp/config.toml` | The hub URL, `auth = "env:VIOLET_SLACK_TOKEN_<LABEL>"`, the bypass header as `env:VIOLET_VERCEL_BYPASS`, and the allowlist of `violet_read` / `violet_post` plus the compatibility `mecha-cassy` registration |
+| Machine proxy registration | `~/.config/code-mode-mcp/config.toml` | The hub URL, `auth = "env:VIOLET_SLACK_TOKEN_<LABEL>"`, the bypass header as `env:VIOLET_VERCEL_BYPASS`, and the allowlist of `violet_read` / `violet_post` plus the compatibility `violet` registration |
 | Claude Code | `$CLAUDE_CONFIG_DIR/.claude.json` (else `~/.claude.json`) | A user-scope `http` server whose headers use `${VAR}`, expanded by the client at launch |
 | Codex | `$CODEX_HOME/config.toml` (else `~/.codex/config.toml`) | `[mcp_servers.violet]` with `bearer_token_env_var` and `env_http_headers` |
 
@@ -106,7 +112,7 @@ Useful flags:
 ## Reading a red `violet` row
 
 | Row says | What happened | Fix |
-|---|---|---|
+| --- | --- | --- |
 | `not registered on this machine` | No hub server in the machine config. | `cas integrate violet` |
 | `VIOLET_SLACK_TOKEN_… is unset` / `set but empty` | The registration is fine; the credentials file is not. | Add the value, **open a new shell** |
 | `hub rejected this machine (HTTP 401…)` | The bearer is not registered hub-side, was revoked, or the hub was not redeployed after the token was added. | Confirm `cas login`, then re-run the command; the route names the cloud-login failure |
@@ -132,7 +138,7 @@ The hub repository is [`Richards-LLC/violet_ps`](https://github.com/Richards-LLC
 - `GET /api/bypass` accepts the same authorization and returns the existing
   bypass value; Cloud outages return `503 {"error":"cloud_unavailable"}`.
 - `DELETE /api/clients/<label>` revokes that machine label and its bearer.
-- `MECHA_CLOUD_TEAMS` is the hub's allowlist of Cassy Cloud team slugs;
+- `VIOLET_CLOUD_TEAMS` is the hub's allowlist of Cassy Cloud team slugs;
   production includes `petra-stella`.
 
 The hub should generate a random secret, append its `label:sha256` pair to the

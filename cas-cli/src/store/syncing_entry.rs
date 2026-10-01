@@ -180,10 +180,18 @@ impl Store for SyncingEntryStore {
         let access_metadata_only = self
             .inner
             .get(&entry.id)
+            .or_else(|_| self.inner.get_archived(&entry.id))
             .is_ok_and(|before| is_access_metadata_only_update(&before, entry));
         self.inner.update(entry)?;
         if !access_metadata_only {
-            self.queue_upsert(&self.inner.get(&entry.id)?);
+            // The write may have archived the row. Active-only reads exclude
+            // it and would report an error after the local mutation committed.
+            let persisted = if entry.archived {
+                self.inner.get_archived(&entry.id)?
+            } else {
+                self.inner.get(&entry.id)?
+            };
+            self.queue_upsert(&persisted);
         }
         Ok(())
     }
@@ -418,6 +426,46 @@ mod tests {
                 .unwrap()
                 .contains("Updated content")
         );
+    }
+
+    #[test]
+    fn update_archived_entry_queues_persisted_state_without_false_failure() {
+        let (temp, store) = create_test_store();
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        let mut entry = Entry::new("entry-archive-update".into(), "Archive me".into());
+        store.add(&entry).unwrap();
+        queue.clear().unwrap();
+
+        // Opinion contradiction archives by updating the entry, rather than
+        // calling Store::archive. The post-write read must follow its state.
+        entry.archived = true;
+        store
+            .update(&entry)
+            .expect("archive update must report success");
+        assert!(store.get(&entry.id).is_err());
+        assert!(store.get_archived(&entry.id).unwrap().archived);
+        let pending = queue.pending(10, 5).unwrap();
+        assert_eq!(pending.len(), 1);
+        let payload: Entry = serde_json::from_str(pending[0].payload.as_ref().unwrap()).unwrap();
+        assert!(payload.archived);
+        assert_eq!(
+            payload.origin_project,
+            store.get_archived(&entry.id).unwrap().origin_project
+        );
+
+        queue.clear().unwrap();
+        let mut archived = store.get_archived(&entry.id).unwrap();
+        archived.reinforce();
+        store.update(&archived).unwrap();
+        assert!(queue.pending(10, 5).unwrap().is_empty());
+
+        archived.content = "Edited while archived".into();
+        store.update(&archived).unwrap();
+        let pending = queue.pending(10, 5).unwrap();
+        assert_eq!(pending.len(), 1);
+        let payload: Entry = serde_json::from_str(pending[0].payload.as_ref().unwrap()).unwrap();
+        assert!(payload.archived);
+        assert_eq!(payload.content, archived.content);
     }
 
     #[test]

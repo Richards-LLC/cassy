@@ -15,6 +15,9 @@ ghostty_vt = { path = "../ghostty_vt" }
 # Recording
 cas-recording = { path = "../cas-recording" }
 
+# Shared hub credential contract
+cas-types = { path = "../cas-types" }
+
 # Factory protocol types
 cas-factory-protocol = { path = "../cas-factory-protocol" }
 

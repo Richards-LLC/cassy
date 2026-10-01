@@ -441,21 +441,9 @@ fn collect_env_references(value: &toml::Value, names: &mut BTreeSet<String>) {
                 });
             if let Some(name) = name {
                 names.insert(name.to_string());
-                // Either registration spelling may run with the other
-                // generation's credentials. Forward both matching names;
-                // the proxy resolves Violet first and legacy second.
-                if let Some(suffix) = name
-                    .strip_prefix("VIOLET_SLACK_TOKEN")
-                    .or_else(|| name.strip_prefix("MECHA_SLACK_TOKEN"))
-                    .filter(|suffix| suffix.is_empty() || suffix.starts_with('_'))
-                {
-                    names.insert(format!("VIOLET_SLACK_TOKEN{suffix}"));
-                    names.insert(format!("MECHA_SLACK_TOKEN{suffix}"));
-                }
-                if matches!(name, "VIOLET_VERCEL_BYPASS" | "MECHA_VERCEL_BYPASS") {
-                    names.insert("VIOLET_VERCEL_BYPASS".to_string());
-                    names.insert("MECHA_VERCEL_BYPASS".to_string());
-                }
+                names.extend(cas_types::violet_compatibility::violet_credential_names(
+                    name,
+                ));
             }
         }
         toml::Value::Array(values) => {

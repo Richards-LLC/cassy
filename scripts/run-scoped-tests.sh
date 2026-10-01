@@ -72,9 +72,13 @@
 #                 declared WorkTarget branch. When SCOPED_PROOF_BASE is unset,
 #                 the surface checker uses merge-base(HEAD, this branch).
 #   SCOPED_PROOF_RECEIPT
-#                 optional durable path for a supervisor proof receipt. When
-#                 set, --proof writes an exact-tip, content-addressed receipt
-#                 after both the test and surface checks pass.
+#                 durable path for the proof receipt. --proof writes an
+#                 exact-tip, content-addressed receipt after both the test and
+#                 surface checks pass (default: <git-common-dir>/cas/
+#                 scoped-proof/<head>.receipt). Cite its short
+#                 `SCOPED_PROOF_RECEIPT: id=… path=…` line in a task note when
+#                 the full targets line exceeds the note limit; close reads
+#                 and verifies the file.
 #
 # Exit codes: 0 = genuinely green with a nonzero passed count,
 #             1 = the run failed, executed nothing, or `--proof` missed a
@@ -316,6 +320,14 @@ if [[ "${proof_mode}" -eq 1 ]]; then
     # train rechecks every field against the current branch and the shared
     # classifier; the digest only proves the fields were not edited after the
     # proof runner wrote them.
+    if [[ -z "${SCOPED_PROOF_RECEIPT:-}" ]]; then
+        proof_common_dir="$(git -C "${REPO_ROOT}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+        if [[ -n "${proof_common_dir}" ]]; then
+            SCOPED_PROOF_RECEIPT="${proof_common_dir}/cas/scoped-proof/$(git -C "${REPO_ROOT}" rev-parse HEAD).receipt"
+        fi
+    elif [[ "${SCOPED_PROOF_RECEIPT}" != /* ]]; then
+        SCOPED_PROOF_RECEIPT="${PWD}/${SCOPED_PROOF_RECEIPT}"
+    fi
     if [[ -n "${SCOPED_PROOF_RECEIPT:-}" ]]; then
         proof_head="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
         proof_changed_files="$(git -C "${REPO_ROOT}" diff --name-only "${proof_merge_base}" HEAD | sed '/^$/d' | wc -l | tr -d '[:space:]')"

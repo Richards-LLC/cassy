@@ -235,8 +235,6 @@ pub struct FactoryDaemon {
     terminal_exchange: runtime::terminal_exchange::TerminalExchange,
     /// Next WebSocket client ID
     next_ws_client_id: usize,
-    /// Per-pane sizes allocated by TUI layout (pane_id -> (cols, rows))
-    tui_pane_sizes: HashMap<String, (u16, u16)>,
     /// Per-pane sizes reported by web viewers (pane_id -> (cols, rows))
     web_pane_sizes: HashMap<String, (u16, u16)>,
     /// Native Agent Teams manager for inter-agent messaging.

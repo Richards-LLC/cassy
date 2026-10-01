@@ -27,7 +27,7 @@ The house standard is accurate on structure but out of date on formats and wordi
 Δ tokens: estimated at bytes ÷ 4. "always" means every session or turn, "invoke" means per skill load, "0" means a correctness-only change.
 
 | # | Sev | Surface | file:line | Defect | Evidence | Fix | Δ tokens |
-|---|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- | --- |
 | 1 | P0 | on-demand scripts | `cas-cli/src/builtins.rs:2318-2339` (`sync_builtin_detailed`), `:2534-2549` (`is_reference_owned_by_managed_skill`), `scripts/gen-builtin-reference-history.sh` (`git ls-files '*references*'`) | Skill files that are neither `SKILL.md` nor under `references/` have no frontmatter, so `is_managed_by_cas` is false on both sides. After first install every update is `SkippedNotManaged` and the file is frozen. There are 8 such files: `cas-wizard/template.sh`, `cas-image-generate/scripts/generate-image.sh`, `cas-technical-drawing/scripts/draft.mjs` and `examples/shelf-box.json`, `cas-release-report/scripts/render.py`, `cas-dataviz/scripts/validate_palette.js` and `examples/*`. The SKILL.md bodies that describe these scripts do update, so text and script drift apart. | On this box, with binary 3.31.0 = HEAD, every `SKILL.md` is current. The installed scripts each match exactly one historical revision: `template.sh` = `c4e055525` (2026-08-20; newest `1ed1cacc9`), `generate-image.sh` = `39b6e7dbc` (08-29; newest `9de233fb9` 09-23), `draft.mjs` = `6d709e1a1` (09-06; newest 09-23), `render.py` = `a1e5d0db3` (09-08; newest `985a2e0d7`). The same holds in `~/.claude-daniel@…/skills`, `~/.codex/skills` and `~/.grok/skills`. | Treat every child of a managed skill directory as owned: extend `is_reference_owned_by_managed_skill` beyond `references/`, and widen the ledger glob to `cas-cli/src/builtins/**/skills/*/**` minus `SKILL.md`. Also add an install-parity doctor check that compares hashes against the embedded catalog. | 0 |
 | 2 | P1 | always (skill listing + bodies) | `.claude/skills/*` in any checkout; `builtins.rs:2792-2821` (project sync writes only the harness in use) | Grok walks `.claude/skills` at "High" priority, which beats `~/.grok/skills` ("Lowest"). In the cas-src main checkout, where the supervisor runs, Grok therefore resolves all 42 CAS skills from `.claude/skills` in the `mcp__cas__` spelling instead of Grok's `cas__`. Grok also loads `~/.claude/skills/cas` (Claude-flavoured) everywhere. Factory worktrees have no project skills, so workers there get `~/.grok/skills`, which is correct. | `grok inspect --json` in `/home/pippenz/Petrastella/cas-src`: 42 skills from `…/cas-src/.claude`, and `cas-search`, `cas-worker` and `cas-supervisor` all have source `project` from `.claude/skills`. `~/.grok/docs/user-guide/08-skills.md` shows the priority table and says "Grok scans the Claude and Cursor skill directories by default". The same run in the worktree picks `~/.grok/skills`. | Choose one: (a) write `.grok/skills` on project sync whenever Grok is an installed harness, since the local `.grok` tier outranks `.claude`; (b) spawn Grok with `GROK_CLAUDE_SKILLS_ENABLED=false`; or (c) make skill text prefix-neutral (for example "the CAS `task` tool"), which retires the three spellings entirely (see #13). | 0 |
 | 3 | P1 | always | `builtins.rs:1831-1860` (`project_opencode_catalog`), `:2819` (`OpenCode => Ok(SyncResult::default())`) | OpenCode parity is enforced only in tests. The `cas_` projection is never written to disk, so OpenCode loads 41 CAS skills from `.claude/skills` and 1 from `~/.claude/skills`, all in the `mcp__cas__` spelling. OpenCode's MCP tools are named `cas_<tool>`. | `opencode debug skill` in cas-src: 41 of the 42 project skill directories load, and `cas-task-tracking` has location `…/cas-src/.claude/skills/…` with `mcp__cas__` in its body. The one "missing" skill (`cas-supervisor`) comes from `~/.claude/skills`. `opencode_builtin_skills()` has no non-test caller (`grep`: `builtins.rs:2177,2457,8199,8215` only). | Either sync the projection to `.opencode/skills/` (OpenCode's first-party directory, which it scans alongside `.claude/skills`), or adopt option (c) from #2. Until then, stop claiming OpenCode parity in `REQUIRED_FACTORY_CAPABILITIES` docs. | 0 |
@@ -116,7 +116,7 @@ Every source was fetched live through Exa or read from the locally installed har
 File: `cas-cli/src/builtins/skills/cas-writing-for-agents/SKILL.md` (59 lines; last changed `aff6d88c5` 2026-09-24). Every 2026-09-02 finding against it has been fixed: it has steps, a Done criterion, frontmatter facts, the three-mirror rule and a line budget, and SKILL-MECHANICS is absorbed. That is pinned by `builtin_doc_hygiene_test.rs:286-345`. What remains is staleness against the research.
 
 | Line | Status | Finding | Proposed text / fix |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | 3 | OK | "Use when creating or editing a skill, AGENTS.md, CLAUDE.md, or an agent-facing reference document." Trigger-first, 98 chars. | Keep. |
 | 18 | Stale, incomplete | "every word spends context on every turn" is right, but the step gives no numbers or format rules. Missing: third-person what-it-does clause plus "Use when"; the ≤ 1,024 hard limit; the ~250-char house target; the budgets (Claude 1% of context with least-invoked dropped first; Codex 2% or 8,000 chars); "key use case first"; the "not for X" boundary when a bundled skill competes; no emphasis words. | Add: "Description: `<what it does>. Use when <trigger>; not for <sibling>.` ≤ 250 chars, key use case first, no emphasis words. Every harness truncates or drops long descriptions from a shared listing budget." |
 | 19 | OK | Imperative steps with observable done-states. This matches Codex "imperative steps with explicit inputs and outputs" and Anthropic's degrees-of-freedom advice. | Keep. |
@@ -140,7 +140,7 @@ Net effect of the proposed rewrite: about +25 lines (+~250 tokens), paid only wh
 Method: `diff -rq`, then a per-file re-diff after substituting `mcp__cas__` → `mcp__cs__` (Codex) or `cas__` (Grok), for all 138 files × 3 catalogs and 5–6 agents.
 
 | Divergence | Harness | Classification | Note |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Tool prefix `mcp__cas__` → `mcp__cs__` / `cas__` in 41+ files | Codex, Grok | **Intended adaptation** | Canonicalised by `normalize_harness_skill_content` (`builtins.rs:2225`) and the drift test's `CANON_TOOL`. |
 | `cas-supervisor.md:53` checklist pointer (Claude text names both checklists; Codex names only its own) | Codex | **Intended adaptation** | Sanctioned by the checklist twin. |
 | `cas-supervisor.md:55` heading "Heterogeneous Teams (Claude supervisor + Codex workers)" vs "(Grok supervisor + Claude/Codex workers)" | Grok (and Codex) | **Intended adaptation** | `CANON_HETERO`. |
@@ -153,7 +153,7 @@ Method: `diff -rq`, then a per-file re-diff after substituting `mcp__cas__` → 
 ### 3b. Resolved-copy parity (what each harness actually loads)
 
 | Harness | cwd | What loads | Verdict |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Claude 2.1.282 | any | `~/.claude-<acct>/skills` (current) plus project `.claude/skills` | Correct flavour. Retired agents are still listed (#5). |
 | Codex 0.156 | any | `~/.codex/skills` (deprecated location, still read) plus `.codex/skills`; `.codex/agents/*.md` ignored | Correct skill flavour. Agents are inert (#4). Opt-out skills are listed (#10). |
 | Grok 1.0.41 | factory worktree | `~/.grok/skills` wins; `~/.claude/skills/cas` is also loaded (Claude flavour) | Mostly correct. |
@@ -170,7 +170,7 @@ Method: `diff -rq`, then a per-file re-diff after substituting `mcp__cas__` → 
    - The ledger generator only globs `*references*`.
 4. **Prune:** `prune_stale_cas_skill_dirs` (`:3192`) and `prune_stale_cas_workflow_files` (`:3277`). Failures:
    - There is no agent prune (#5).
-   - The skill prune touches only `cas-*` directories, so a retired builtin without the `cas-` prefix (`codemap`, `fallow`, `design-spec`, `project-overview`, `release-notes`, `session-learn`, `verify-before-claim`, `mecha-cassy`, `mcp-integration`, `cli-routing`) would never be pruned.
+   - The skill prune touches only `cas-*` directories, so a retired builtin without the `cas-` prefix (`codemap`, `fallow`, `design-spec`, `project-overview`, `release-notes`, `session-learn`, `verify-before-claim`, `violet`, `mcp-integration`, `cli-routing`) would never be pruned.
 5. **Cross-harness discovery:** the mechanism assumes one harness reads one directory. Grok, OpenCode and increasingly Codex (`.agents/skills`) read each other's directories, so the per-harness spelling is not what the model sees (#2, #3, #7, #13).
 6. **AGENTS.md:** `cas sync agents-md` projects CLAUDE.md into one spelling (Codex), with no Grok or OpenCode variant (#7).
 
@@ -192,7 +192,7 @@ Method: `diff -rq`, then a per-file re-diff after substituting `mcp__cas__` → 
 ## 5. Search manifest
 
 | Command | Hits |
-|---|---|
+| --- | --- |
 | `diff -rq builtins/skills builtins/{codex,grok}/skills` (+ agents) | Codex: 1 only-in pair plus factory-supervisor; Grok: 0 |
 | per-file re-diff after prefix substitution (skills) | Codex: 1 file (2 lines); Grok: 1 file (2 lines) |
 | per-file re-diff after prefix substitution (agents) | 0 / 0 |

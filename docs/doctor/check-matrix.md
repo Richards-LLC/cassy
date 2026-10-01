@@ -23,7 +23,7 @@ confirmation). Human findings are never changed automatically.
 | cloud sync queue, cross-project rows, foreign knowledge pages, foreign project rows | project | consent-fix | preview by default; apply quarantine/release or purge only with its explicit consent flag and `--yes` | cloud quarantine and foreign-row tests |
 | `user-level store` | host | info / human | initialize the host registry or repair its schema | host-store check |
 | `known repos` | host | auto-fix | `cas doctor --fix` reuses `known-repos prune-missing`; repository files are never removed | known-repos prune tests |
-| `host proxy` | host | human | configure or repair the user-scoped proxy and credentials | MechaCassy doctor tests |
+| `host proxy` | host | human | configure or repair the user-scoped proxy and credentials | Violet doctor tests |
 | `hub service` | host | info / human | inspect `cas hub service status` and the runtime path | hub runtime/service tests |
 | `registered project roots` | host | human | remove a disposable registration with `cas known-repos forget`; unlink remote data first when applicable | registered-root tests |
 | `host user skills` | host | human | review stale user-level skills and delete their directories deliberately | user-skill scan tests |
@@ -37,7 +37,7 @@ confirmation). Human findings are never changed automatically.
 | unconfigured history repository | project | human | `cas config set history.github_repo <owner/repo>` or configure a GitHub origin | history-index tests |
 | unregistered cloud project (`project_not_found`) | cloud | human | `cas cloud sync` | cloud registration tests |
 
-Project runs report host findings once as `host: N findings — see `cas
+Project runs report host findings once as `host: N findings — see`cas
 doctor --host``. `cas doctor --full` expands that row into the host rows.
 `cas doctor --host` never runs project checks. Every consent repair prints its
 plan before applying it; a purge safety refusal is never followed by an apply

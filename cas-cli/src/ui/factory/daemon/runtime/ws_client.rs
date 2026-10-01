@@ -626,7 +626,7 @@ impl FactoryDaemon {
         for client in self.gui_clients.values() {
             pane_ids.extend(client.pane_sizes.keys().cloned());
         }
-        pane_ids.extend(self.tui_pane_sizes.keys().cloned());
+        pane_ids.extend(self.dashboard_pane_ids());
         pane_ids.extend(self.web_pane_sizes.keys().cloned());
 
         for pane_id in pane_ids {

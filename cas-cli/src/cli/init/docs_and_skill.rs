@@ -18,6 +18,8 @@ Cassy's MCP tools are `task`, `memory` and `search`, named with your harness's p
 - `memory`: action=remember.
 - `search`: action=search.
 
+Slack transport: use the `violet` skill and the Violet proxy for every Slack read (`violet.violet_read`) and post (`violet.violet_post`). Never use the Claude Slack connector or Codex Slack app. Pre-tool hooks deny non-Violet Slack writes by default; only an explicit operator setting `slack.transport=any` disables that guard.
+
 Bug routing: `cas config get issues.repo` names this project's tracker, and `issues.components.{cassy,violet,cloud}` name the Cassy, Violet and Cloud trackers. File an operational bug in the matching tracker before moving on; in the Cassy source repo itself, a Cassy bug becomes a task there. If `issues.repo` is unset, record the bug as a task note.
 Release notes: when a merge reaches `staging` or `main` and docs/release-notes/RUBRIC.md exists, use the `cas-release-notes` skill and follow docs/release-notes/RUBRIC.md."#;
 
@@ -723,13 +725,32 @@ mod tests {
 
     /// GH #963: the managed block names the current registry key only.
     #[test]
-    fn template_names_violet_not_deprecated_mecha_cassy_key() {
+    fn template_names_violet_not_retired_issue_key() {
         let section = build_agents_section();
         assert!(
             section.contains("issues.components.{cassy,violet,cloud}"),
             "{section}"
         );
-        assert!(!section.contains("mecha_cassy"), "{section}");
+        assert!(
+            !section.contains(
+                &cas_types::violet_compatibility::violet_compatibility().retired_issue_key
+            ),
+            "{section}"
+        );
+    }
+
+    #[test]
+    fn generated_agents_directive_routes_slack_reads_and_posts_to_violet() {
+        let section = build_agents_section();
+        for required in [
+            "violet.violet_read",
+            "violet.violet_post",
+            "`violet` skill",
+            "slack.transport=any",
+            "Codex Slack app",
+        ] {
+            assert!(section.contains(required), "missing {required}");
+        }
     }
 
     /// A symlinked project path doesn't cause an infinite loop during ancestor walk.

@@ -838,6 +838,7 @@ dependencies = [
  "cas-factory-protocol",
  "cas-pty",
  "cas-recording",
+ "cas-types",
  "criterion 0.6.0",
  "crossterm 0.29.0",
  "fs2",

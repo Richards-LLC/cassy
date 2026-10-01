@@ -26,45 +26,13 @@ pub const VIKTOR_CONVERSATION_TOOLS: [&str; 9] = [
 /// variable name, never stored in proxy configuration.
 pub const VIOLET_SERVER: &str = "violet";
 /// The deployed endpoint keeps its original hostname.
-pub const VIOLET_MCP_URL: &str = "https://mecha-cassy.vercel.app/mcp/slack";
+pub use cas_types::violet_compatibility::{
+    violet_compatibility, violet_credential_names, violet_hub_url,
+};
 pub const VIOLET_DEFAULT_TOKEN_ENV: &str = "VIOLET_SLACK_TOKEN_CASSY_PROXY";
 pub const VIOLET_DEFAULT_BYPASS_ENV: &str = "VIOLET_VERCEL_BYPASS";
 pub const VIOLET_BYPASS_HEADER: &str = "x-vercel-protection-bypass";
 pub const VIOLET_TOOLS: [&str; 2] = ["violet_read", "violet_post"];
-
-/// Compatibility registration retained for one release (GH #1055).
-pub const MECHA_CASSY_SERVER: &str = "mecha-cassy";
-pub const MECHA_CASSY_TOOLS: [&str; 2] = ["mecha_read", "mecha_post"];
-pub const MECHA_CASSY_MCP_URL: &str = VIOLET_MCP_URL;
-pub const MECHA_CASSY_BYPASS_HEADER: &str = VIOLET_BYPASS_HEADER;
-pub const MECHA_CASSY_DEFAULT_TOKEN_ENV: &str = "MECHA_SLACK_TOKEN_CASSY_PROXY";
-pub const MECHA_CASSY_DEFAULT_BYPASS_ENV: &str = "MECHA_VERCEL_BYPASS";
-
-/// Credential names to try in order. Both old and new registrations prefer
-/// Violet values, then fall back to the matching legacy variable. Custom names
-/// have no alias. Empty values are treated as unavailable by the resolver.
-pub fn violet_credential_names(name: &str) -> Vec<String> {
-    let suffix = name
-        .strip_prefix("VIOLET_SLACK_TOKEN")
-        .or_else(|| name.strip_prefix("MECHA_SLACK_TOKEN"))
-        .filter(|suffix| suffix.is_empty() || suffix.starts_with('_'));
-    if let Some(suffix) = suffix {
-        return vec![
-            format!("VIOLET_SLACK_TOKEN{suffix}"),
-            format!("MECHA_SLACK_TOKEN{suffix}"),
-        ];
-    }
-    if matches!(
-        name,
-        VIOLET_DEFAULT_BYPASS_ENV | MECHA_CASSY_DEFAULT_BYPASS_ENV
-    ) {
-        return vec![
-            VIOLET_DEFAULT_BYPASS_ENV.to_string(),
-            MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
-        ];
-    }
-    vec![name.to_string()]
-}
 
 /// Resolve the Violet/legacy pair without reading or mutating the environment.
 /// A custom variable retains its original semantics, including empty values.
@@ -440,7 +408,8 @@ impl Config {
     ) -> Result<(Config, HashMap<String, PathBuf>)> {
         let (mut merged, mut sources) = match user_path {
             Some(path) => {
-                let config = Config::load_from(path)?;
+                let mut config = Config::load_from(path)?;
+                config.retire_legacy_hub_registration();
                 let sources = config
                     .servers
                     .keys()
@@ -451,7 +420,8 @@ impl Config {
             None => (Config::default(), HashMap::new()),
         };
         if let Some(path) = project_path {
-            let project = Config::load_from(path)?;
+            let mut project = Config::load_from(path)?;
+            project.retire_legacy_hub_registration();
             for (name, server) in project.servers {
                 merged.servers.insert(name.clone(), server);
                 sources.insert(name, path.to_path_buf());
@@ -467,46 +437,6 @@ impl Config {
             merged.worker_read_routes = project.worker_read_routes;
         }
 
-        for (source, target, source_tools, target_tools) in [
-            (
-                MECHA_CASSY_SERVER,
-                VIOLET_SERVER,
-                MECHA_CASSY_TOOLS,
-                VIOLET_TOOLS,
-            ),
-            (
-                VIOLET_SERVER,
-                MECHA_CASSY_SERVER,
-                VIOLET_TOOLS,
-                MECHA_CASSY_TOOLS,
-            ),
-        ] {
-            if !merged.servers.contains_key(target)
-                && let Some(server) = merged.servers.get(source).cloned()
-            {
-                merged.servers.insert(target.to_string(), server);
-                if let Some(path) = sources.get(source).cloned() {
-                    sources.insert(target.to_string(), path);
-                }
-                merged.mirror_hub_worker_policy(source, target, source_tools, target_tools);
-                let routes: Vec<_> = merged
-                    .allowlist
-                    .iter()
-                    .filter_map(|route| {
-                        if route.server != source {
-                            return None;
-                        }
-                        let index = source_tools.iter().position(|tool| *tool == route.tool)?;
-                        Some(ExternalToolConfig {
-                            server: target.to_string(),
-                            tool: target_tools[index].to_string(),
-                            supervisor_only: route.supervisor_only,
-                        })
-                    })
-                    .collect();
-                merged.allowlist.extend(routes);
-            }
-        }
         Ok((merged, sources))
     }
 
@@ -645,78 +575,106 @@ impl Config {
             oauth: false,
         };
         let mut changed = false;
-        // GH #963: the same hub under its canonical Violet name, with the
-        // same env-referenced credentials.
-        for (server, tools) in [
-            (VIOLET_SERVER, VIOLET_TOOLS),
-            (MECHA_CASSY_SERVER, MECHA_CASSY_TOOLS),
-        ] {
-            if self.servers.get(server) != Some(&desired_server) {
-                self.servers
-                    .insert(server.to_string(), desired_server.clone());
-                changed = true;
-            }
-
-            let desired_routes = tools
-                .iter()
-                .map(|tool| ExternalToolConfig {
-                    server: server.to_string(),
-                    tool: (*tool).to_string(),
-                    supervisor_only: false,
-                })
-                .collect::<Vec<_>>();
-            if self
-                .allowlist
-                .iter()
-                .filter(|route| route.server == server)
-                .ne(desired_routes.iter())
-            {
-                self.allowlist.retain(|route| route.server != server);
-                self.allowlist.extend(desired_routes);
-                changed = true;
-            }
+        changed |= self.retire_legacy_hub_registration();
+        if self.servers.get(VIOLET_SERVER) != Some(&desired_server) {
+            self.servers.insert(VIOLET_SERVER.into(), desired_server);
+            changed = true;
         }
-        changed |= self.mirror_hub_worker_policy(
-            MECHA_CASSY_SERVER,
-            VIOLET_SERVER,
-            MECHA_CASSY_TOOLS,
-            VIOLET_TOOLS,
-        );
-        changed |= self.mirror_hub_worker_policy(
-            VIOLET_SERVER,
-            MECHA_CASSY_SERVER,
-            VIOLET_TOOLS,
-            MECHA_CASSY_TOOLS,
-        );
+        let desired_routes: Vec<_> = VIOLET_TOOLS
+            .iter()
+            .map(|tool| ExternalToolConfig {
+                server: VIOLET_SERVER.into(),
+                tool: (*tool).into(),
+                supervisor_only: false,
+            })
+            .collect();
+        if self
+            .allowlist
+            .iter()
+            .filter(|route| route.server == VIOLET_SERVER)
+            .ne(desired_routes.iter())
+        {
+            self.allowlist.retain(|route| route.server != VIOLET_SERVER);
+            self.allowlist.extend(desired_routes);
+            changed = true;
+        }
         changed
     }
 
-    /// Bootstrap a fresh machine. Existing hub registrations are operator-owned;
-    /// load_merged derives their missing alias without changing their credentials.
-    pub fn refresh_violet_managed_default(path: &Path) -> Result<bool> {
-        let mut config = Self::load_from(path)?;
-        if config.servers.contains_key(VIOLET_SERVER)
-            || config.servers.contains_key(MECHA_CASSY_SERVER)
-        {
-            return Ok(false);
+    /// Move only the retired production hub to Violet. Custom upstreams are
+    /// operator-owned. Credential references and restrictive policy survive.
+    pub fn retire_legacy_hub_registration(&mut self) -> bool {
+        let contract = violet_compatibility();
+        let retired = &contract.retired_server;
+        let is_production = self.servers.get(retired).is_some_and(|server| {
+            matches!(server, ServerConfig::Http { url, .. } | ServerConfig::Sse { url, .. } if url == violet_hub_url())
+        });
+        if !is_production {
+            return false;
         }
-        config.ensure_violet_registration(
-            VIOLET_MCP_URL,
-            VIOLET_DEFAULT_TOKEN_ENV,
-            VIOLET_DEFAULT_BYPASS_ENV,
+        self.mirror_hub_worker_policy(
+            retired,
+            VIOLET_SERVER,
+            [&contract.retired_tools[0], &contract.retired_tools[1]],
+            VIOLET_TOOLS,
         );
-        config.save_to(path)?;
-        Ok(true)
+        let server = self.servers.remove(retired).expect("checked above");
+        self.servers.entry(VIOLET_SERVER.into()).or_insert(server);
+        if let Some(access) = self.worker_access.remove(retired) {
+            self.worker_access.insert(VIOLET_SERVER.into(), access);
+        }
+        for routes in [&mut self.allowlist, &mut self.worker_read_routes] {
+            for route in routes.iter_mut().filter(|route| &route.server == retired) {
+                route.server = VIOLET_SERVER.into();
+                if let Some(index) = contract
+                    .retired_tools
+                    .iter()
+                    .position(|tool| tool == &route.tool)
+                {
+                    route.tool = VIOLET_TOOLS[index].into();
+                }
+            }
+            let mut seen = Vec::new();
+            routes.retain(|route| {
+                if seen.contains(route) {
+                    false
+                } else {
+                    seen.push(route.clone());
+                    true
+                }
+            });
+        }
+        true
     }
 
-    /// Compatibility entry point for callers using the old hub name.
-    pub fn ensure_mecha_cassy_registration(
-        &mut self,
-        url: &str,
-        token_env: &str,
-        bypass_env: &str,
-    ) -> bool {
-        self.ensure_violet_registration(url, token_env, bypass_env)
+    /// Migrate an existing file without adding routes to a project's policy.
+    pub fn retire_legacy_hub_file(path: &Path) -> Result<bool> {
+        if !path.exists() {
+            return Ok(false);
+        }
+        let mut config = Self::load_from(path)?;
+        let changed = config.retire_legacy_hub_registration();
+        if changed {
+            config.save_to(path)?;
+        }
+        Ok(changed)
+    }
+
+    /// Bootstrap a fresh machine, or retire its former production registration.
+    pub fn refresh_violet_managed_default(path: &Path) -> Result<bool> {
+        let mut config = Self::load_from(path)?;
+        let mut changed = config.retire_legacy_hub_registration();
+        if !config.servers.contains_key(VIOLET_SERVER) {
+            changed |= config.ensure_violet_registration(
+                violet_hub_url(),
+                VIOLET_DEFAULT_TOKEN_ENV,
+                VIOLET_DEFAULT_BYPASS_ENV,
+            );
+        }
+        if changed {
+            config.save_to(path)?;
+        }
+        Ok(changed)
     }
 
     pub fn violet_allowlisted_tools(&self) -> Vec<String> {
@@ -740,36 +698,6 @@ impl Config {
                 .and_then(|value| value.strip_prefix("env:"))
                 .map(str::to_string),
         ))
-    }
-
-    /// Tool names this configuration admits for the MechaCassy hub, in the
-    /// order they appear. Doctor compares this against the hub's live
-    /// `tools/list` to catch a renamed upstream contract.
-    pub fn mecha_cassy_allowlisted_tools(&self) -> Vec<String> {
-        self.allowlist
-            .iter()
-            .filter(|route| route.server == MECHA_CASSY_SERVER)
-            .map(|route| route.tool.clone())
-            .collect()
-    }
-
-    /// The environment-variable *names* a MechaCassy registration references,
-    /// as `(bearer, bypass-header)`. Never a value: an inline (non-`env:`)
-    /// credential returns `None` for that slot so callers report it as
-    /// unreferenced rather than printing it.
-    pub fn mecha_cassy_env_names(&self) -> Option<(Option<String>, Option<String>)> {
-        let ServerConfig::Http { auth, headers, .. } = self.servers.get(MECHA_CASSY_SERVER)? else {
-            return Some((None, None));
-        };
-        let bearer = auth
-            .as_deref()
-            .and_then(|value| value.strip_prefix("env:"))
-            .map(str::to_string);
-        let bypass = headers
-            .get(MECHA_CASSY_BYPASS_HEADER)
-            .and_then(|value| value.strip_prefix("env:"))
-            .map(str::to_string);
-        Some((bearer, bypass))
     }
 
     /// Refresh the user-scoped managed Viktor default without copying a
@@ -1187,18 +1115,19 @@ allowlist = ["neon.run_sql", "neon:write", "neon/read", "run_sql", "neon.*"]
     }
 
     #[test]
-    fn managed_violet_default_registers_both_names_without_secrets() {
+    fn managed_violet_default_registers_only_violet_without_secrets() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         assert!(Config::refresh_violet_managed_default(&path).unwrap());
         assert!(!Config::refresh_violet_managed_default(&path).unwrap());
         let config = Config::load_from(&path).unwrap();
-        assert_eq!(
-            config.servers.get(VIOLET_SERVER),
-            config.servers.get(MECHA_CASSY_SERVER)
+        assert!(config.servers.contains_key(VIOLET_SERVER));
+        assert!(
+            !config
+                .servers
+                .contains_key(&violet_compatibility().retired_server)
         );
         assert_eq!(config.violet_allowlisted_tools(), VIOLET_TOOLS);
-        assert_eq!(config.mecha_cassy_allowlisted_tools(), MECHA_CASSY_TOOLS);
         assert_eq!(
             config.violet_env_names(),
             Some((
@@ -1217,23 +1146,31 @@ allowlist = ["neon.run_sql", "neon:write", "neon/read", "run_sql", "neon.*"]
         let user = dir.path().join("config.toml");
         std::fs::write(
             &user,
-            r#"
-allowlist = ["supervisor:mecha-cassy.mecha_read"]
-worker_read_routes = ["mecha-cassy.mecha_read"]
+            format!(
+                r#"
+allowlist = ["supervisor:{retired}.{read}"]
+worker_read_routes = ["{retired}.{read}"]
 [worker_access]
-mecha-cassy = "read-only"
-[servers.mecha-cassy]
+{retired} = "read-only"
+[servers.{retired}]
 transport = "http"
-url = "https://staging.example.test/mcp"
-auth = "env:MECHA_SLACK_TOKEN_LAPTOP"
+url = "{url}"
+auth = "env:{token}"
 "#,
+                retired = violet_compatibility().retired_server,
+                read = violet_compatibility().retired_tools[0],
+                url = violet_hub_url(),
+                token = violet_credential_names("VIOLET_SLACK_TOKEN_LAPTOP")[1]
+            ),
         )
         .unwrap();
-        assert!(!Config::refresh_violet_managed_default(&user).unwrap());
+        assert!(Config::refresh_violet_managed_default(&user).unwrap());
         let (merged, sources) = Config::load_merged_with_sources_from(Some(&user), None).unwrap();
-        assert_eq!(
-            merged.servers.get(VIOLET_SERVER),
-            merged.servers.get(MECHA_CASSY_SERVER)
+        assert!(merged.servers.contains_key(VIOLET_SERVER));
+        assert!(
+            !merged
+                .servers
+                .contains_key(&violet_compatibility().retired_server)
         );
         assert_eq!(sources.get(VIOLET_SERVER), Some(&user));
         assert_eq!(merged.violet_allowlisted_tools(), ["violet_read"]);
@@ -1268,8 +1205,14 @@ auth = "env:MECHA_SLACK_TOKEN_LAPTOP"
     #[test]
     fn violet_credentials_prefer_new_values_and_fall_back_for_old_registrations() {
         for (primary, legacy) in [
-            ("VIOLET_SLACK_TOKEN_LAPTOP", "MECHA_SLACK_TOKEN_LAPTOP"),
-            (VIOLET_DEFAULT_BYPASS_ENV, MECHA_CASSY_DEFAULT_BYPASS_ENV),
+            (
+                "VIOLET_SLACK_TOKEN_LAPTOP",
+                violet_credential_names("VIOLET_SLACK_TOKEN_LAPTOP")[1].as_str(),
+            ),
+            (
+                VIOLET_DEFAULT_BYPASS_ENV,
+                violet_compatibility().legacy_bypass_env.as_str(),
+            ),
         ] {
             for requested in [primary, legacy] {
                 let mut values = HashMap::from([(legacy.to_string(), "old".to_string())]);
@@ -1345,137 +1288,27 @@ tool = "get_file_download_url"
     }
 
     #[test]
-    fn mecha_cassy_registration_is_env_reference_only_and_idempotent() {
-        let mut config = Config::default();
-        assert!(config.ensure_mecha_cassy_registration(
-            MECHA_CASSY_MCP_URL,
-            "MECHA_SLACK_TOKEN_LAPTOP",
-            MECHA_CASSY_DEFAULT_BYPASS_ENV,
-        ));
-        // Second identical call must be a no-op so the command can report
-        // "already configured" instead of rewriting a machine file.
-        assert!(!config.ensure_mecha_cassy_registration(
-            MECHA_CASSY_MCP_URL,
-            "MECHA_SLACK_TOKEN_LAPTOP",
-            MECHA_CASSY_DEFAULT_BYPASS_ENV,
-        ));
-
-        assert_eq!(
-            config.servers.get(MECHA_CASSY_SERVER),
-            Some(&ServerConfig::Http {
-                url: MECHA_CASSY_MCP_URL.to_string(),
-                auth: Some("env:MECHA_SLACK_TOKEN_LAPTOP".to_string()),
-                headers: HashMap::from([(
-                    MECHA_CASSY_BYPASS_HEADER.to_string(),
-                    format!("env:{MECHA_CASSY_DEFAULT_BYPASS_ENV}"),
-                )]),
-                oauth: false,
-            })
-        );
-        assert_eq!(config.mecha_cassy_allowlisted_tools(), MECHA_CASSY_TOOLS);
-        assert_eq!(
-            config.mecha_cassy_env_names(),
-            Some((
-                Some("MECHA_SLACK_TOKEN_LAPTOP".to_string()),
-                Some(MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string())
-            ))
-        );
-
-        // The serialized machine file names variables and never holds a value.
-        let serialized = toml::to_string(&config).unwrap();
-        assert!(serialized.contains("env:MECHA_SLACK_TOKEN_LAPTOP"));
-        assert!(serialized.contains("mecha-cassy.mecha_read"));
-        assert!(!serialized.contains("xoxb-"));
-    }
-
-    /// GH #963: the registration also names the hub `violet` and allowlists
-    /// its `violet_*` tools, with the same env-referenced credentials, and
-    /// stays idempotent. The `mecha-cassy` contract is untouched.
-    #[test]
-    fn mecha_cassy_registration_also_registers_the_violet_name() {
-        let mut config = Config::default();
-        assert!(config.ensure_mecha_cassy_registration(
-            MECHA_CASSY_MCP_URL,
-            MECHA_CASSY_DEFAULT_TOKEN_ENV,
-            MECHA_CASSY_DEFAULT_BYPASS_ENV,
-        ));
-        assert_eq!(
-            config.servers.get(VIOLET_SERVER),
-            config.servers.get(MECHA_CASSY_SERVER)
-        );
-        assert!(config.servers.contains_key(VIOLET_SERVER));
-        let violet_tools: Vec<&str> = config
-            .allowlist
-            .iter()
-            .filter(|route| route.server == VIOLET_SERVER)
-            .map(|route| route.tool.as_str())
-            .collect();
-        assert_eq!(violet_tools, VIOLET_TOOLS);
-        assert_eq!(config.mecha_cassy_allowlisted_tools(), MECHA_CASSY_TOOLS);
-        assert!(!config.ensure_mecha_cassy_registration(
-            MECHA_CASSY_MCP_URL,
-            MECHA_CASSY_DEFAULT_TOKEN_ENV,
-            MECHA_CASSY_DEFAULT_BYPASS_ENV,
-        ));
-        let serialized = toml::to_string(&config).unwrap();
-        assert!(serialized.contains("violet.violet_read"), "{serialized}");
-        assert!(
-            serialized.contains("mecha-cassy.mecha_read"),
-            "{serialized}"
-        );
-    }
-
-    #[test]
-    fn mecha_cassy_registration_evicts_the_retired_slack_tool_routes() {
-        let mut config: Config = toml::from_str(
-            r#"
-allowlist = [
-  "mecha-cassy.slack_post_message",
-  "mecha-cassy.slack_read_channel",
-  "github.list_issues",
-]
-
-[servers.mecha-cassy]
-transport = "http"
-url = "https://mecha-cassy.vercel.app/mcp/slack"
-auth = "env:MECHA_SLACK_TOKEN_CASSY_PROXY"
-"#,
-        )
-        .unwrap();
-
-        assert!(config.ensure_mecha_cassy_registration(
-            MECHA_CASSY_MCP_URL,
-            MECHA_CASSY_DEFAULT_TOKEN_ENV,
-            MECHA_CASSY_DEFAULT_BYPASS_ENV,
-        ));
-        assert_eq!(config.mecha_cassy_allowlisted_tools(), MECHA_CASSY_TOOLS);
-        // An unrelated route belonging to another server is never disturbed.
-        assert!(
-            config
-                .allowlist
-                .iter()
-                .any(|route| route.server == "github" && route.tool == "list_issues")
-        );
-    }
-
-    #[test]
-    fn user_level_mecha_cassy_registration_reaches_a_project_without_its_own_proxy_file() {
+    fn user_level_violet_registration_reaches_a_project_without_its_own_proxy_file() {
         let dir = tempfile::tempdir().unwrap();
         let user = dir.path().join("user.toml");
         let mut user_config = Config::default();
-        user_config.ensure_mecha_cassy_registration(
-            MECHA_CASSY_MCP_URL,
-            MECHA_CASSY_DEFAULT_TOKEN_ENV,
-            MECHA_CASSY_DEFAULT_BYPASS_ENV,
+        user_config.ensure_violet_registration(
+            violet_hub_url(),
+            VIOLET_DEFAULT_TOKEN_ENV,
+            VIOLET_DEFAULT_BYPASS_ENV,
         );
         user_config.save_to(&user).unwrap();
 
         // No project `.cas/proxy.toml`: the machine registration is the whole
         // policy, so any project on this machine can dispatch both hub tools.
         let (merged, sources) = Config::load_merged_with_sources_from(Some(&user), None).unwrap();
-        assert!(merged.servers.contains_key(MECHA_CASSY_SERVER));
-        assert_eq!(merged.mecha_cassy_allowlisted_tools(), MECHA_CASSY_TOOLS);
-        assert_eq!(sources.get(MECHA_CASSY_SERVER), Some(&user));
+        assert!(
+            !merged
+                .servers
+                .contains_key(&violet_compatibility().retired_server)
+        );
+        assert_eq!(merged.violet_allowlisted_tools(), VIOLET_TOOLS);
+        assert_eq!(sources.get(VIOLET_SERVER), Some(&user));
     }
 
     #[test]
@@ -1484,10 +1317,10 @@ auth = "env:MECHA_SLACK_TOKEN_CASSY_PROXY"
         let user = dir.path().join("user.toml");
         let project = dir.path().join("project.toml");
         let mut user_config = Config::default();
-        user_config.ensure_mecha_cassy_registration(
-            MECHA_CASSY_MCP_URL,
-            MECHA_CASSY_DEFAULT_TOKEN_ENV,
-            MECHA_CASSY_DEFAULT_BYPASS_ENV,
+        user_config.ensure_violet_registration(
+            violet_hub_url(),
+            VIOLET_DEFAULT_TOKEN_ENV,
+            VIOLET_DEFAULT_BYPASS_ENV,
         );
         user_config.save_to(&user).unwrap();
         std::fs::write(
@@ -1501,12 +1334,16 @@ allowlist = ["neon.run_sql"]
         let (merged, sources) =
             Config::load_merged_with_sources_from(Some(&user), Some(&project)).unwrap();
         // The upstream itself is machine-wide: the project inherits it.
-        assert!(merged.servers.contains_key(MECHA_CASSY_SERVER));
-        assert_eq!(sources.get(MECHA_CASSY_SERVER), Some(&user));
+        assert!(
+            !merged
+                .servers
+                .contains_key(&violet_compatibility().retired_server)
+        );
+        assert_eq!(sources.get(VIOLET_SERVER), Some(&user));
         // Dispatch policy is not widened by a machine file — a project that
         // declares its own allowlist must name the hub routes itself. This is
-        // the exact condition `cas doctor`'s mecha-cassy row has to report.
-        assert!(merged.mecha_cassy_allowlisted_tools().is_empty());
+        // the exact condition `cas doctor`'s Violet row has to report.
+        assert!(merged.violet_allowlisted_tools().is_empty());
     }
 
     #[test]

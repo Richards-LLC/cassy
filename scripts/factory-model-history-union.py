@@ -28,7 +28,7 @@ print('union rows',len(rows),'added from other homes',added,'horizon',len(H)); p
 cols=list(main[0].keys())
 with open('docs/factory/data/factory-model-history-2026-09-06-allhomes-horizon.csv','w',newline='') as fh:
     w=csv.DictWriter(fh,fieldnames=cols); w.writeheader(); w.writerows(sorted(H,key=lambda r:(r['project'],d(r))))
-PROJECTS=['cas-src','gabber-studio','ozer','abundant-mines','rocketship-template','Penguinz','Woodworking','pulse-card','petra-stella-cloud','mecha_cassy']
+PROJECTS=['cas-src','gabber-studio','ozer','abundant-mines','rocketship-template','Penguinz','Woodworking','pulse-card','petra-stella-cloud','violet_ps']
 def f(x):
     try: return float(x)
     except: return None

@@ -454,11 +454,7 @@ impl CasCore {
     ) -> Result<CallToolResult, McpError> {
         let store = self.open_store()?;
 
-        let mut entry = store.get(&req.id).map_err(|e| McpError {
-            code: ErrorCode::INVALID_PARAMS,
-            message: Cow::from(format!("Entry not found: {e}")),
-            data: None,
-        })?;
+        let mut entry = Self::resolve_memory_entry(store.as_ref(), &req.id)?;
 
         let tier = match req.tier.to_lowercase().as_str() {
             "cold" => MemoryTier::Cold,

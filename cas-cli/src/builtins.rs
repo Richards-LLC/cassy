@@ -5438,39 +5438,55 @@ This is the body content."#;
         }
     }
 
-    /// Every harness removes an installed managed redirect, and preserves an
-    /// operator-owned skill with the same retired name.
+    /// Every installed project and user skill tree removes a managed redirect
+    /// and preserves an operator-owned skill with the same retired name.
     #[test]
     fn test_violet_sync_retires_legacy_skill_for_every_harness() {
         let retired = &cas_types::violet_compatibility::violet_compatibility().retired_server;
-        for harness in [
-            SupervisorCli::Claude,
-            SupervisorCli::Codex,
-            SupervisorCli::Grok,
-            SupervisorCli::OpenCode,
+        for (harness, dir, project_scope) in [
+            (SupervisorCli::Claude, ".claude", true),
+            (SupervisorCli::Codex, ".codex", true),
+            (SupervisorCli::Grok, ".grok", true),
+            (SupervisorCli::OpenCode, ".opencode", true),
+            // OpenCode's user catalog is process-local; only its project
+            // catalog is installed on disk. The other user trees also sync.
+            (SupervisorCli::Claude, ".claude", false),
+            (SupervisorCli::Codex, ".codex", false),
+            (SupervisorCli::Grok, ".grok", false),
         ] {
             let temp = tempfile::tempdir().unwrap();
-            let legacy = temp.path().join("skills").join(retired);
+            let target = temp.path().join(dir);
+            let sync = || {
+                if project_scope {
+                    sync_all_builtins_for_project(harness, temp.path())
+                } else {
+                    sync_all_builtins_for_harness(harness, &target)
+                }
+            };
+            let legacy = target.join("skills").join(retired);
             std::fs::create_dir_all(&legacy).unwrap();
             std::fs::write(
                 legacy.join("SKILL.md"),
                 "---\nmetadata:\n  managed_by: cas\n---\nOld redirect\n",
             )
             .unwrap();
-            sync_all_builtins_for_harness(harness, temp.path()).unwrap();
+            sync().unwrap();
             assert!(
                 !legacy.exists(),
-                "{harness:?} left the retired managed skill"
+                "{harness:?} (project={project_scope}) left the retired managed skill"
             );
-            assert!(temp.path().join("skills/violet/SKILL.md").exists());
+            assert!(target.join("skills/violet/SKILL.md").exists());
             std::fs::create_dir_all(&legacy).unwrap();
             std::fs::write(
                 legacy.join("SKILL.md"),
                 "---\nname: personal\n---\nOperator notes\n",
             )
             .unwrap();
-            sync_all_builtins_for_harness(harness, temp.path()).unwrap();
-            assert!(legacy.exists(), "{harness:?} removed an operator skill");
+            sync().unwrap();
+            assert!(
+                legacy.exists(),
+                "{harness:?} (project={project_scope}) removed an operator skill"
+            );
         }
     }
 

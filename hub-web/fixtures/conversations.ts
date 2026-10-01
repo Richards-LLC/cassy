@@ -66,10 +66,33 @@ export function fixtureSessionRows(): ConversationRow[] {
   ]);
 }
 
+/**
+ * cas-d6bf: seven live sessions of one project on one machine, as the list a
+ * phone opens on. Each can be ended; one has unread turns and one is waiting.
+ */
+export function fixtureManySessionRows(): ConversationRow[] {
+  const base = { connection: 'Live', attention: 0, unread: 0, selected: false, projectDir: '/projects/gabber-studio', machineId: 'atlas-linux', host: 'Atlas · Linux', canEnd: true };
+  const now = Date.now();
+  const names = ['calm-puma-34', 'wild-shark-68', 'noble-cheetah-84', 'quiet-otter-12', 'brave-lynx-7', 'swift-heron-51', 'amber-fox-29'];
+  const previews = ['Stem export is at 60%.', 'Mixdown preview rendered: 3 stems.', 'Waiting on your approval for the mastering chain.', 'Nothing waiting on you.', 'Re-rendered the vocal bus.', 'Live', 'Live'];
+  return groupConversationRows(names.map((supervisor, index) => ({
+    ...base,
+    key: `atlas-linux:${supervisor}`,
+    session: `gabber-studio-${supervisor}`,
+    supervisor,
+    when: `${(index + 1) * 7}m`,
+    freshness: `Last activity ${(index + 1) * 7}m ago`,
+    activityAt: now - (index + 1) * 420_000,
+    preview: previews[index],
+    ...(index === 1 ? { unread: 2 } : {}),
+    ...(index === 2 ? { attention: 1 } : {}),
+  })));
+}
+
 export function renderConversationFixture(app: HTMLElement, state: string): void {
   const sessions = state === 'conversation-sessions' || state === 'conversation-earlier';
   const supervisor = sessions ? 'calm-puma-34' : FIXTURE_SUPERVISOR;
-  const selected = !['conversations-list', 'conversations-loading', 'conversations-unpaired', 'paired-machines'].includes(state);
+  const selected = !['conversations-list', 'conversations-sessions', 'conversations-loading', 'conversations-unpaired', 'paired-machines'].includes(state);
   // Catalog loading: nothing is known yet, so no machine, no row, no pairing offer.
   const loading = state === 'conversations-loading';
   // First run: the catalog is loaded and empty, so the welcome offers pairing.
@@ -85,7 +108,7 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
         ? { id: 'atlas-linux', label: 'Atlas', host: 'Atlas · Linux', projectDir: '/projects/gabber-studio', project: 'gabber-studio' }
       : { id: 'atlas-linux', label: 'Atlas', host: 'Atlas · Linux', projectDir: '/projects/cas-src', project: 'cas-src' };
   app.innerHTML = conversationShellMarkup({ selected, supervisor, projectDir: machine.projectDir, host: machine.host, machineId: machine.id, loaded: !loading, paired: !loading && !unpaired });
-  const listRows = loading || unpaired ? [] : sessions ? fixtureSessionRows() : fixtureConversationRows(selected);
+  const listRows = loading || unpaired ? [] : sessions ? fixtureSessionRows() : state === 'conversations-sessions' ? fixtureManySessionRows() : fixtureConversationRows(selected);
   new ConversationList().render(app.querySelector('#conversation-list')!, listRows, () => {}, async () => {});
   // The End session confirmation, open on the idle session (cas-55a4).
   if (state === 'conversation-sessions') app.querySelectorAll<HTMLButtonElement>('#conversation-list .conversation-end-ask')[1]?.click();

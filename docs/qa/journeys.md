@@ -493,3 +493,28 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - A notice from another session never appears here, in the thread or its earlier sections.
 - A dismissed notice stays dismissed when history replays it.
 - A session that leaves the catalog retires its open notices.
+
+### HUB-J16 · End a session from my phone
+
+- **Entry:** `/commander/` on a phone (390×844, touch), one project with seven live sessions on one machine, and a device that may end sessions
+- **Goal:** see at least six of the sessions at once, and end one with a confirmation that appears immediately, is focused and is fully visible
+- **Touches:** `hub-web/src/conversation-list.ts`, `hub-web/src/styles.css`, `hub-web/src/main.ts`
+- **Suite:** `hub-web/e2e/journeys/end-session.journey.ts`
+- **Gaps:** the hub double ends the session; that the daemon stops its supervisor and workers is covered by the hub's Rust tests
+
+#### Steps
+
+1. See six sessions at once — under "gabber-studio · 7 sessions on Atlas", each row leads with its codename, End session is a glyph button in the row's corner, and at least six rows are fully in view
+2. Open a session and come back to the list — the list is rebuilt and still holds all seven
+3. End session asks at once, focused on Cancel — on the last row the confirmation is present in the same task as the tap, Cancel has focus, both buttons are fully in view, and no row leaves the list
+4. Cancel, then end it — Cancel returns focus to End session; confirming ends the session, and the heading reads 6 sessions
+
+#### Expected experience
+
+- A phone shows the sessions, not a column of End session lines.
+- Ending a session is a deliberate two-step that never blanks the list or loses focus.
+
+#### Edge paths
+
+- A desktop keeps the worded End session line under each row (HUB-J14 covers it, including the last row's confirmation in view).
+- A failed end shows its error under the row and offers End session again.

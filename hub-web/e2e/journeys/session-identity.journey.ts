@@ -113,6 +113,10 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     const end = list.locator(".conversation-end").nth(2);
     await end.getByRole("button", { name: "End session noble-cheetah-84 on Atlas" }).click();
     await expect(end.locator(".conversation-end-question")).toHaveText("End noble-cheetah-84 on Atlas? Its supervisor and workers stop.");
+    // cas-d6bf: the last row's confirmation is in view and focused, and the list stays whole.
+    await expect(end.getByRole("button", { name: "Cancel" })).toBeFocused();
+    await expect(end.getByRole("button", { name: "End session", exact: true })).toBeInViewport({ ratio: 1 });
+    await expect(list.locator(".conversation-row")).toHaveCount(3);
     expect(hub.ends).toEqual([]);
     await end.getByRole("button", { name: "End session", exact: true }).click();
     await expect(row("noble-cheetah-84")).toHaveCount(0);

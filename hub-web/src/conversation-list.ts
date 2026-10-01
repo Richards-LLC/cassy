@@ -99,7 +99,7 @@ export function filterConversationRows<T extends Pick<ConversationRow, "projectD
  * two distinct affordances — waiting (ochre dot, hot time) and unread (accent
  * count pill). Users think in projects (journey F7): the project is the title,
  * the machine follows it, and the generated codename is tertiary text. */
-export function conversationRowMarkup(row: ConversationRow): string {
+export function conversationRowMarkup(row: ConversationRow, endable = false): string {
   const waiting = row.attention > 0;
   const unread = row.unread ?? 0;
   const preview = truncateConversationPreview(plainTextMarkdown(row.unreachable || row.interrupted ? row.connection : row.preview || row.connection));
@@ -108,7 +108,10 @@ export function conversationRowMarkup(row: ConversationRow): string {
   const time = row.when ? `<span class="conversation-when${waiting ? " hot" : ""}" title="${escapeHtml(row.freshness)}">${escapeHtml(row.when)}</span>` : "";
   const count = unread > 0 ? `<span class="conversation-unread" aria-label="${unread} unread">${unread}</span>` : "";
   const flag = waiting ? `<span class="conversation-flag" role="img" aria-label="${row.attention === 1 ? "Waiting for you" : `${row.attention} waiting for you`}"></span>` : "";
-  const marks = count || flag ? `<span class="conversation-marks">${count}${flag}</span>` : "";
+  // cas-d6bf: on a phone, End session is a small button laid over the row's
+  // corner instead of a line under it; this slot keeps that corner free.
+  const slot = endable ? `<span class="conversation-end-slot" aria-hidden="true"></span>` : "";
+  const marks = count || flag || slot ? `<span class="conversation-marks">${count}${flag}${slot}</span>` : "";
   // No project named: the codename is the title (cas-1ca1 F03), not a status phrase.
   const project = projectTitle(row.projectDir);
   // The title is "project · machine": the project leads, never a dot (P13);
@@ -127,6 +130,9 @@ export function conversationRowMarkup(row: ConversationRow): string {
     + marks;
 }
 
+/** A power glyph: End session's face on a phone, where the words would crowd the row (cas-d6bf). */
+const END_ICON = `<svg class="conversation-end-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M10 3v6"/><path d="M6.2 5.6a6 6 0 1 0 7.6 0"/></svg>`;
+
 /** Keyed buttons: a catalog heartbeat must never steal keyboard focus. */
 export class ConversationList {
   private nodes = new Map<string, HTMLButtonElement>();
@@ -134,7 +140,16 @@ export class ConversationList {
   private extras = new Map<string, HTMLElement>();
   /** Rows whose End session is asking for confirmation, or ending. */
   private ending = new Map<string, "confirm" | "ending" | { error: string }>();
+  /**
+   * The newest render's arguments (cas-d6bf). An End session control is kept
+   * across renders, so its own repaint must use these, never the container and
+   * rows of the render that first built it: the shell rebuilds the list when a
+   * conversation opens, and repainting into that detached list emptied the
+   * live one until the next catalog poll.
+   */
+  private latest?: { container: HTMLElement; rows: readonly ConversationRow[]; open: (row: ConversationRow, event?: MouseEvent) => void; end?: (row: ConversationRow) => Promise<void> };
   render(container: HTMLElement, rows: readonly ConversationRow[], open: (row: ConversationRow, event?: MouseEvent) => void, end?: (row: ConversationRow) => Promise<void>): void {
+    this.latest = { container, rows, open, end };
     const document = container.ownerDocument;
     const ordered: HTMLElement[] = [];
     const current = new Set(rows.map((row) => row.key));
@@ -171,12 +186,12 @@ export class ConversationList {
       if (row.group) node.dataset.mostRecent = String(row.group.active); else delete node.dataset.mostRecent;
       node.setAttribute("aria-current", String(row.selected));
       node.onclick = (event) => open(row, event);
-      const markup = conversationRowMarkup(row);
+      const markup = conversationRowMarkup(row, Boolean(row.canEnd && end));
       if (node.innerHTML !== markup) node.innerHTML = markup;
       ordered.push(node);
       if (row.canEnd && end) {
         const control = extra(`end:${row.key}`, () => { const node = document.createElement("div"); node.className = "conversation-end"; return node; });
-        this.renderEnd(control, row, container, rows, open, end);
+        this.renderEnd(control, row, end);
         ordered.push(control);
       }
     }
@@ -192,18 +207,34 @@ export class ConversationList {
    * End session, then a confirmation that names what stops (cas-55a4). Only
    * the confirmation's own button ends anything.
    */
-  private renderEnd(control: HTMLElement, row: ConversationRow, container: HTMLElement, rows: readonly ConversationRow[], open: (row: ConversationRow, event?: MouseEvent) => void, end: (row: ConversationRow) => Promise<void>): void {
+  private renderEnd(control: HTMLElement, row: ConversationRow, end: (row: ConversationRow) => Promise<void>): void {
     const state = this.ending.get(row.key);
     const signature = JSON.stringify([row.supervisor, row.host, state]);
     if (control.dataset.signature === signature) return;
     control.dataset.signature = signature;
+    control.dataset.state = state === undefined ? "idle" : typeof state === "object" ? "error" : state;
     const document = control.ownerDocument;
-    const rerender = (): void => this.render(container, rows, open, end);
+    const rerender = (): void => {
+      const latest = this.latest;
+      if (!latest) return;
+      // A list rebuilt since the newest render is found again by its id.
+      const container = latest.container.isConnected || !latest.container.id
+        ? latest.container
+        : latest.container.ownerDocument.getElementById(latest.container.id) ?? latest.container;
+      this.render(container, latest.rows, latest.open, latest.end);
+    };
     const button = (text: string, className: string, onclick: () => void): HTMLButtonElement => {
       const node = document.createElement("button"); node.type = "button"; node.className = className; node.textContent = text; node.onclick = onclick; return node;
     };
     if (state === undefined || typeof state === "object") {
-      const ask = button("End session", "conversation-end-ask", () => { this.ending.set(row.key, "confirm"); rerender(); control.querySelector<HTMLButtonElement>(".conversation-end-cancel")?.focus(); });
+      const ask = button("", "conversation-end-ask", () => {
+        this.ending.set(row.key, "confirm");
+        rerender();
+        // The confirmation opens under the row: keep its buttons in view, focus on Cancel.
+        control.scrollIntoView?.({ block: "nearest" });
+        control.querySelector<HTMLButtonElement>(".conversation-end-cancel")?.focus({ preventScroll: true });
+      });
+      ask.innerHTML = `${END_ICON}<span class="conversation-end-label">End session</span>`;
       ask.setAttribute("aria-label", `End session ${row.supervisor} on ${machineName(row.host)}`);
       const children: Node[] = [ask];
       if (typeof state === "object") { const error = document.createElement("span"); error.className = "conversation-end-error"; error.setAttribute("role", "alert"); error.textContent = state.error; children.push(error); }
@@ -223,7 +254,11 @@ export class ConversationList {
         rerender();
       });
     });
-    const cancel = button("Cancel", "conversation-end-cancel", () => { this.ending.delete(row.key); rerender(); });
+    const cancel = button("Cancel", "conversation-end-cancel", () => {
+      this.ending.delete(row.key);
+      rerender();
+      control.querySelector<HTMLButtonElement>(".conversation-end-ask")?.focus({ preventScroll: true });
+    });
     control.replaceChildren(question, confirm, cancel);
   }
 }

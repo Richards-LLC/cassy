@@ -156,6 +156,37 @@ describe("grouped project sessions (cas-55a4)", () => {
     resolve();
   });
 
+  it("opens the confirmation at once in a list rebuilt since the control was made, focused on Cancel (cas-d6bf)", () => {
+    // The shell rebuilds #conversation-list when a conversation opens; the
+    // End control is kept across that render. Its repaint once went to the
+    // detached list and emptied the live one until the next catalog poll.
+    const list = new ConversationList();
+    const rows = groupConversationRows([row("calm-puma-34", 300, { canEnd: true }), row("noble-cheetah-84", 100, { canEnd: true })]);
+    const before = document.createElement("nav"); before.id = "conversation-list"; document.body.replaceChildren(before);
+    list.render(before, rows, vi.fn(), vi.fn(async () => {}));
+    const live = document.createElement("nav"); live.id = "conversation-list"; document.body.replaceChildren(live);
+    list.render(live, rows, vi.fn(), vi.fn(async () => {}));
+    const control = live.querySelectorAll<HTMLElement>(".conversation-end")[1]!;
+    expect(control.dataset.state).toBe("idle");
+    control.querySelector<HTMLButtonElement>(".conversation-end-ask")!.click();
+    expect(live.querySelectorAll(".conversation-row")).toHaveLength(2);
+    expect(before.children).toHaveLength(0);
+    expect(control.parentElement).toBe(live);
+    expect(control.dataset.state).toBe("confirm");
+    expect(control.querySelector(".conversation-end-question")?.textContent).toBe("End noble-cheetah-84 on Atlas? Its supervisor and workers stop.");
+    expect(document.activeElement).toBe(control.querySelector(".conversation-end-cancel"));
+    // Cancel hands focus back to End session.
+    control.querySelector<HTMLButtonElement>(".conversation-end-cancel")!.click();
+    expect(live.querySelectorAll(".conversation-row")).toHaveLength(2);
+    expect(document.activeElement).toBe(control.querySelector(".conversation-end-ask"));
+  });
+
+  it("reserves the phone End corner only on rows that can end (cas-d6bf)", () => {
+    const [first] = groupConversationRows([row("calm-puma-34", 300, { canEnd: true }), row("noble-cheetah-84", 100)]);
+    expect(conversationRowMarkup(first!, true)).toContain('<span class="conversation-end-slot" aria-hidden="true"></span>');
+    expect(conversationRowMarkup(first!)).not.toContain("conversation-end-slot");
+  });
+
   it("offers no End session without the callback or the scope", () => {
     const container = document.createElement("nav"); document.body.replaceChildren(container);
     new ConversationList().render(container, groupConversationRows([row("a-b-1", 2), row("c-d-2", 1)]), vi.fn(), vi.fn());

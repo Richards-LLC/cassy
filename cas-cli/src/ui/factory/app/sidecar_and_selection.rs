@@ -77,8 +77,9 @@ pub fn alt_screen_wheel_bytes(cli: cas_mux::SupervisorCli, up: bool) -> Vec<u8> 
 
 /// SGR 1006 left-button press+release at 1-based terminal coordinates.
 ///
-/// Used to forward factory mouse clicks into an already-focused Grok alt-screen
-/// pane so the on-screen **Stop** control receives the click (cas-7f6f). Factory
+/// Used to forward factory mouse clicks into an already-focused alt-screen pane
+/// so in-TUI controls receive the click: Grok's on-screen **Stop** (cas-7f6f)
+/// and the ✕ of Claude Code's fullscreen diff sidebar (cas-4cd6). Factory
 /// mouse capture otherwise steals clicks for pane-focus only.
 pub fn sgr_left_click_bytes(col: u16, row: u16) -> Vec<u8> {
     let col = col.max(1);
@@ -92,7 +93,8 @@ pub fn sgr_left_click_bytes(col: u16, row: u16) -> Vec<u8> {
 pub enum ClickAction {
     /// Click was handled by factory chrome (tabs, focus change, dialogs).
     Handled,
-    /// Forward an SGR click into the named pane (already focused, alt-screen Grok).
+    /// Forward an SGR click into the named pane (already focused, alt-screen,
+    /// and either Grok or a child that enabled SGR mouse reporting).
     ForwardSgr {
         pane: String,
         /// 1-based PTY column
@@ -284,10 +286,14 @@ impl FactoryApp {
     /// Resolves which pane was clicked and focuses it. Also handles clicks
     /// on the worker tab bar to switch worker tabs.
     ///
-    /// When the click is inside an **already-focused** Grok alt-screen pane,
-    /// returns [`ClickAction::ForwardSgr`] so the caller can inject an SGR
-    /// click into the PTY — this is what makes Grok's on-screen **Stop**
-    /// control work under factory mouse capture (cas-7f6f). First click on an
+    /// When the click is inside an **already-focused** alt-screen pane that is
+    /// Grok, or whose child enabled SGR mouse reporting
+    /// ([`cas_mux::Pane::wants_sgr_mouse_clicks`]), returns
+    /// [`ClickAction::ForwardSgr`] so the caller can inject an SGR click into
+    /// the PTY. That makes Grok's on-screen **Stop** (cas-7f6f) and Claude
+    /// Code's fullscreen diff-sidebar ✕ (cas-4cd6) work under factory mouse
+    /// capture. Panes whose child never asked for mouse reports keep
+    /// focus-only clicks, so no SGR bytes leak in as typed input. First click on an
     /// unfocused pane still only focuses (no forward), so idle clicks stay
     /// harmless.
     ///
@@ -380,11 +386,18 @@ impl FactoryApp {
                 }
             }
 
-            // cas-7f6f: forward click into already-focused Grok alt-screen so
-            // Stop (and other in-TUI controls) receive the event.
+            // cas-7f6f: forward click into an already-focused Grok alt-screen
+            // so Stop (and other in-TUI controls) receive the event.
+            // cas-4cd6: the same applies to any alt-screen child that asked
+            // for SGR mouse reports. Claude Code's fullscreen TUI does
+            // (?1000/1002/1003/1006h), and its auto-opened diff sidebar ✕ is
+            // only closable by click.
             if already_focused
-                && self.harness_for(&pane_name) == cas_mux::SupervisorCli::Grok
-                && self.mux.get(&pane_name).is_some_and(|p| p.is_in_alt_screen())
+                && self.mux.get(&pane_name).is_some_and(|p| {
+                    p.is_in_alt_screen()
+                        && (self.harness_for(&pane_name) == cas_mux::SupervisorCli::Grok
+                            || p.wants_sgr_mouse_clicks())
+                })
             {
                 if let Some((pty_col, pty_row)) =
                     self.screen_to_pty_coords(&pane_name, col, row, geometry)
@@ -1593,6 +1606,275 @@ mod tests {
             ClickAction::Handled,
             "border click must not forward SGR"
         );
+    }
+
+    // =========================================================================
+    // cas-4cd6: clicks reach mouse-reporting Claude panes (fullscreen diff ✕)
+    // =========================================================================
+
+    /// App with an unfocused placeholder plus a Claude supervisor pane of
+    /// `rows`×`cols` whose full-mode content rect starts at screen (1,1).
+    fn app_with_claude_supervisor(rows: u16, cols: u16) -> FactoryApp {
+        let mut app = FactoryApp::for_test();
+        app.mux.add_pane(Pane::director("other", rows, cols).unwrap());
+        let mut pane = Pane::director("test-supervisor", rows, cols).unwrap();
+        pane.set_harness(cas_mux::SupervisorCli::Claude);
+        app.mux.add_pane(pane);
+        app.supervisor_name = "test-supervisor".to_string();
+        app.supervisor_cli = cas_mux::SupervisorCli::Claude;
+        let outer = Rect::new(0, 0, cols + 2, rows + 2);
+        app.supervisor_area = Some(outer);
+        app.full_pty_content_areas
+            .insert("test-supervisor".to_string(), full_mode_pty_content(outer));
+        app
+    }
+
+    /// Claude Code fullscreen enables `?1000/1002/1003/1006h` (captured from a
+    /// live 2.1.287 PTY). A click inside the already-focused pane must forward
+    /// SGR so its diff sidebar ✕ can be clicked; a Claude pane that never
+    /// asked for mouse reports (classic, non-fullscreen TUI) keeps
+    /// focus-only clicks.
+    #[test]
+    fn mouse_click_forwards_sgr_to_mouse_reporting_claude_pane_cas_4cd6() {
+        let mut app = app_with_claude_supervisor(20, 40);
+        app.mux
+            .get_mut("test-supervisor")
+            .unwrap()
+            .feed(b"\x1b[?1049h")
+            .unwrap();
+
+        // Alt-screen alone (no mouse modes): focus, then still Handled.
+        assert_eq!(
+            app.handle_mouse_click(40, 1, ClientGeometryMode::Full),
+            ClickAction::Handled
+        );
+        assert_eq!(app.mux.focused_id(), Some("test-supervisor"));
+        assert_eq!(
+            app.handle_mouse_click(40, 1, ClientGeometryMode::Full),
+            ClickAction::Handled,
+            "a child that never enabled mouse reports must not get SGR bytes"
+        );
+
+        // Claude fullscreen turns mouse reporting on.
+        app.mux
+            .get_mut("test-supervisor")
+            .unwrap()
+            .feed(b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h")
+            .unwrap();
+        assert_eq!(
+            app.handle_mouse_click(40, 1, ClientGeometryMode::Full),
+            ClickAction::ForwardSgr {
+                pane: "test-supervisor".to_string(),
+                col: 40,
+                row: 1,
+            },
+            "top-right content cell (the ✕) maps to PTY (40,1)"
+        );
+
+        // Main screen (Claude left fullscreen): back to focus-only.
+        app.mux
+            .get_mut("test-supervisor")
+            .unwrap()
+            .feed(b"\x1b[?1049l")
+            .unwrap();
+        assert_eq!(
+            app.handle_mouse_click(40, 1, ClientGeometryMode::Full),
+            ClickAction::Handled
+        );
+    }
+
+    /// Stand-in for Claude Code's fullscreen diff sidebar: a real PTY child
+    /// that enables SGR mouse, opens a right-hand overlay with a ✕ unprompted
+    /// (as Claude does after an edit at ≥144 cols), narrows its transcript
+    /// while the overlay is open, closes on a left click at the ✕ or on Esc,
+    /// reopens on an explicit `o`, and repaints the full-width transcript.
+    const FAKE_DIFF_SIDEBAR_TUI: &str = r#"
+import os, sys, tty, select
+fd = sys.stdin.fileno()
+tty.setraw(fd)
+cols, rows = os.get_terminal_size(fd)
+half = cols // 2
+def w(s): os.write(1, s.encode())
+w('\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h')
+def draw(overlay):
+    buf = '\x1b[2J'
+    width = half if overlay else cols
+    for r in range(1, rows):
+        text = ('T%02d ' % r) + 'x' * cols
+        buf += '\x1b[%d;1H' % r + text[:width - 1] + '|'
+    if overlay:
+        for r in range(1, 7):
+            buf += '\x1b[%d;%dH' % (r, half + 1) + ' ' * (cols - half)
+        buf += '\x1b[1;%dH1 file changed' % (half + 2)
+        buf += '\x1b[1;%dH✕' % cols
+    buf += '\x1b[%d;1Hstate:%s' % (rows, 'open' if overlay else 'closed')
+    w(buf)
+overlay = True
+draw(overlay)
+pending = b''
+while True:
+    ready, _, _ = select.select([fd], [], [], 0.05)
+    if ready:
+        pending += os.read(fd, 1024)
+        continue
+    if not pending:
+        continue
+    data, pending, i = pending, b'', 0
+    while i < len(data):
+        if data.startswith(b'\x1b[<', i):
+            end = i + 3
+            while end < len(data) and data[end:end + 1] not in (b'M', b'm'):
+                end += 1
+            fields = data[i + 3:end].decode().split(';')
+            kind = data[end:end + 1]
+            i = end + 1
+            b, x, y = (int(v) for v in fields)
+            if kind == b'M' and b == 0 and overlay and (x, y) == (cols, 1):
+                overlay = False
+                draw(overlay)
+        elif data[i:i + 1] == b'\x1b':
+            i += 1
+            if overlay:
+                overlay = False
+                draw(overlay)
+        elif data[i:i + 1] == b'o':
+            i += 1
+            overlay = True
+            draw(overlay)
+        elif data[i:i + 1] == b'q':
+            w('\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1049l')
+            sys.exit(0)
+        else:
+            i += 1
+"#;
+
+    /// Feed any new child output into the factory pane, then poll until the
+    /// rendered pane rows satisfy `done`.
+    fn pump_until(
+        runner: &mut cas_tui_test::PtyRunner,
+        app: &mut FactoryApp,
+        what: &str,
+        done: impl Fn(&[String]) -> bool,
+    ) -> Vec<String> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            let out = runner.read_available().expect("read child output");
+            if !out.is_empty() {
+                app.mux
+                    .get_mut("test-supervisor")
+                    .unwrap()
+                    .feed(out.as_bytes())
+                    .unwrap();
+            }
+            let pane = app.mux.get("test-supervisor").unwrap();
+            let rows: Vec<String> = (0..pane.rows())
+                .map(|r| pane.dump_row(r).unwrap_or_default())
+                .collect();
+            if done(&rows) {
+                return rows;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {what}; pane rows:\n{}",
+                rows.join("\n")
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    fn overlay_open(rows: &[String]) -> bool {
+        rows.last().is_some_and(|r| r.starts_with("state:open"))
+            && rows[0].contains('\u{2715}')
+    }
+
+    /// After close the pane must hold the full-width transcript again: no ✕,
+    /// no overlay text, and every transcript row repainted edge to edge.
+    fn assert_transcript_intact(rows: &[String], cols: usize, how: &str) {
+        assert!(
+            rows.last().is_some_and(|r| r.starts_with("state:closed")),
+            "{how}: overlay must report closed"
+        );
+        for (i, row) in rows[..rows.len() - 1].iter().enumerate() {
+            let row = row.trim_end();
+            assert!(
+                !row.contains('\u{2715}') && !row.contains("file changed"),
+                "{how}: row {i} still shows overlay: {row:?}"
+            );
+            assert!(
+                row.starts_with(&format!("T{:02} ", i + 1))
+                    && row.chars().count() == cols
+                    && row.ends_with('|'),
+                "{how}: row {i} not repainted full width: {row:?}"
+            );
+        }
+    }
+
+    /// cas-4cd6 TUI proof (cas-tui-test real PTY): the factory's click path
+    /// closes a mouse-reporting child's overlay via its ✕, Esc closes it, an
+    /// explicit key reopens it, and the pane underneath is intact after each
+    /// close.
+    #[test]
+    fn diff_sidebar_overlay_open_close_by_click_and_esc_repaints_cas_4cd6() {
+        const ROWS: u16 = 16;
+        const COLS: u16 = 60;
+        let mut app = app_with_claude_supervisor(ROWS, COLS);
+        let mut runner =
+            cas_tui_test::PtyRunner::with_config(cas_tui_test::PtyRunnerConfig::with_size(
+                COLS, ROWS,
+            ));
+        runner
+            .spawn("python3", &["-c", FAKE_DIFF_SIDEBAR_TUI])
+            .expect("spawn fake fullscreen TUI (python3)");
+
+        // Open: unprompted overlay with ✕ in the top-right cell.
+        let rows = pump_until(&mut runner, &mut app, "overlay open", overlay_open);
+        assert_eq!(
+            rows[0].trim_end().chars().last(),
+            Some('\u{2715}'),
+            "✕ sits in the last column of row 1"
+        );
+        assert!(
+            app.mux
+                .get("test-supervisor")
+                .unwrap()
+                .wants_sgr_mouse_clicks(),
+            "pane must register the child's SGR mouse request"
+        );
+
+        // Close by mouse: first click focuses only; the second, on the ✕,
+        // goes through the factory decision and reaches the child as SGR.
+        let x_screen = (COLS, 1); // content origin (1,1) → PTY (COLS, 1)
+        assert_eq!(
+            app.handle_mouse_click(x_screen.0, x_screen.1, ClientGeometryMode::Full),
+            ClickAction::Handled,
+            "first click on an unfocused pane only focuses"
+        );
+        match app.handle_mouse_click(x_screen.0, x_screen.1, ClientGeometryMode::Full) {
+            ClickAction::ForwardSgr { pane, col, row } => {
+                assert_eq!(pane, "test-supervisor");
+                runner
+                    .send_bytes(&sgr_left_click_bytes(col, row))
+                    .expect("forward click");
+            }
+            other => panic!("expected ForwardSgr for the ✕ click, got {other:?}"),
+        }
+        let rows = pump_until(&mut runner, &mut app, "close by click", |r| {
+            r.last().is_some_and(|l| l.starts_with("state:closed"))
+        });
+        assert_transcript_intact(&rows, COLS as usize, "close by click");
+
+        // Reopen only on an explicit action, then close by key (Esc goes to a
+        // Claude pane raw; see client_input.rs standalone-Esc branch).
+        runner.send_bytes(b"o").unwrap();
+        pump_until(&mut runner, &mut app, "explicit reopen", overlay_open);
+        runner.send_bytes(b"\x1b").unwrap();
+        let rows = pump_until(&mut runner, &mut app, "close by Esc", |r| {
+            r.last().is_some_and(|l| l.starts_with("state:closed"))
+        });
+        assert_transcript_intact(&rows, COLS as usize, "close by Esc");
+
+        runner.send_bytes(b"q").unwrap();
+        let _ = runner.kill();
     }
 
     /// Full and compact geometry maps coexist — compact render must not

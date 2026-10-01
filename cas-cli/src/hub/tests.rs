@@ -3704,6 +3704,10 @@ fn last_activity_names_parties_without_device_labels() {
         "relay-watchdog → Commander"
     );
     assert_eq!(
+        super::activity_label("lifecycle-wake:worker-died:8290", "supervisor"),
+        "lifecycle-wake → supervisor"
+    );
+    assert_eq!(
         super::activity_label("terminal", "terminal-history"),
         "terminal → supervisor"
     );

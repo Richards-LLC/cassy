@@ -697,7 +697,8 @@ pub(crate) fn activity_label(source: &str, target: &str) -> String {
             // Input typed at the supervisor's terminal, recorded for history.
             "supervisor"
         } else {
-            name
+            // `lifecycle-wake:worker-died:8290` reads as its kind.
+            name.split(':').next().unwrap_or(name)
         }
     }
     format!("{} → {}", party(source), party(target))

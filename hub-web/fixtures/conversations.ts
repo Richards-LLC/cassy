@@ -180,6 +180,8 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     history.submit('later', supervisor, 'Looking at the gate now.', at(9, 30));
     history.acknowledge({ client_ref: 'later', notification_id: 60, target: supervisor, stamped: true });
     reply(61, 60, 'The lint warning is the only failure.', 'answer', at(9, 33));
+    // An answer to a question from yesterday's ended session stays here and names it.
+    history.reply({ notification_id: 62, reply_to: 3196200, reply_to_session: 'gabber-studio-noble-cheetah-84', message: 'The mixdown preview you asked about yesterday is in renders/.', summary: '', device_id: 'fixture', kind: 'answer' }, at(9, 35));
   } else if (state === 'conversation-evidence') {
     history.submit('flake', supervisor, 'Did pass two clear the flake?', at(9, 28));
     history.acknowledge({ client_ref: 'flake', notification_id: 61, target: supervisor, stamped: true });

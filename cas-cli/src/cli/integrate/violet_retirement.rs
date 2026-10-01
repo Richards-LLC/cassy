@@ -179,9 +179,14 @@ impl ProfileRetirement {
     }
 }
 
+fn warn_skipped(path: &Path, error: impl std::fmt::Display) {
+    ProfileRetirement::default().warn(path, error);
+}
+
 /// Resolve profile links before using the generic symlink-refusing readers
-/// and writers. Both files and linked parent directories must stay in HOME.
-fn profile_target(home: &Path, path: &Path) -> Result<Option<PathBuf>> {
+/// and writers. Both files and linked parent directories must stay inside
+/// HOME or an explicit profile directory (CLAUDE_CONFIG_DIR, CODEX_HOME).
+fn profile_target(roots: &[PathBuf], path: &Path) -> Result<Option<PathBuf>> {
     match std::fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error).with_context(|| format!("statting {}", path.display())),
@@ -191,25 +196,32 @@ fn profile_target(home: &Path, path: &Path) -> Result<Option<PathBuf>> {
         .canonicalize()
         .with_context(|| format!("dangling or inaccessible profile path {}", path.display()))?;
     anyhow::ensure!(
-        target.starts_with(home),
-        "target {} is outside HOME {}",
-        target.display(),
-        home.display()
+        roots.iter().any(|root| target.starts_with(root)),
+        "target {} is outside HOME and explicit profile directories",
+        target.display()
     );
     Ok(Some(target))
 }
 
 /// Enumerate installed machine profiles, including alternate Claude/Codex
-/// accounts. One inaccessible profile never interrupts the remaining sync.
+/// accounts. Explicit profile directories are included even outside HOME.
+/// One inaccessible profile never interrupts the remaining sync.
 fn retire_machine_profiles(home: &Path, extra: &[(&str, PathBuf)]) -> ProfileRetirement {
     let mut report = ProfileRetirement::default();
-    let canonical_home = match home.canonicalize() {
-        Ok(home) => home,
+    let mut roots = match home.canonicalize() {
+        Ok(home) => vec![home],
         Err(error) => {
             report.warn(home, error);
             return report;
         }
     };
+    // Explicit profile directories are trusted even outside HOME; a missing
+    // one has nothing to migrate.
+    roots.extend(
+        extra
+            .iter()
+            .filter_map(|(_, directory)| directory.canonicalize().ok()),
+    );
     let mut profiles = vec![("claude", home.to_path_buf())];
     match std::fs::read_dir(home) {
         Ok(entries) => {
@@ -250,7 +262,7 @@ fn retire_machine_profiles(home: &Path, extra: &[(&str, PathBuf)]) -> ProfileRet
             } else {
                 "config.toml"
             });
-            match profile_target(&canonical_home, &path) {
+            match profile_target(&roots, &path) {
                 Ok(Some(target)) if visited_files.insert(target.clone()) => {
                     report.inspected += 1;
                     match retire_file(&target, format) {
@@ -268,7 +280,7 @@ fn retire_machine_profiles(home: &Path, extra: &[(&str, PathBuf)]) -> ProfileRet
         } else {
             directory.join("skills")
         };
-        match profile_target(&canonical_home, &skills_dir) {
+        match profile_target(&roots, &skills_dir) {
             Ok(Some(target)) if visited_skills.insert(target.clone()) => {
                 if let Err(error) = crate::builtins::prune_retired_hub_skills(&target) {
                     report.warn(&skills_dir, error);
@@ -298,12 +310,12 @@ pub fn retire_installed_hub(project_proxy: Option<&Path>) -> Result<()> {
     }
     if let Ok(user) = Scope::User.config_path() {
         if let Err(error) = retire_project_proxy(&user) {
-            ProfileRetirement::default().warn(&user, error);
+            warn_skipped(&user, error);
         }
     }
     if let Some(project) = project_proxy {
         if let Err(error) = retire_project_proxy(project) {
-            ProfileRetirement::default().warn(project, error);
+            warn_skipped(project, error);
         }
     }
     Ok(())
@@ -488,6 +500,19 @@ mod tests {
             document["mcpServers"]["violet"]["headers"]["Authorization"],
             "Bearer ${VIOLET_ACCOUNT_TOKEN}"
         );
+    }
+
+    #[test]
+    fn explicit_profile_directory_outside_home_still_migrates() {
+        let home = tempfile::tempdir().unwrap();
+        let codex_home = tempfile::tempdir().unwrap();
+        let config = codex_home.path().join("config.toml");
+        codex_fixture(&config);
+        let report =
+            retire_machine_profiles(home.path(), &[("codex", codex_home.path().to_path_buf())]);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert_eq!(report.migrated, 1);
+        assert_codex_migrated(&config);
     }
 
     #[cfg(unix)]

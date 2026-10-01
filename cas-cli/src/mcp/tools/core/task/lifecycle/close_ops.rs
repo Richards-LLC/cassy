@@ -2066,26 +2066,28 @@ struct SnapshotGateRange {
 /// demanded approval for every snapshot in that range. A merged tip adds
 /// nothing beyond the target, so it has nothing unattributed to approve.
 ///
-/// A no-code task declares that it delivers no code. With no attributed
-/// paths it has no snapshot change to approve, so the gate is skipped
-/// (`None`). A no-code task whose attributed commits did change a snapshot
-/// is still gated.
+/// No diff is attributed (`None`, gate skipped) when the close has no
+/// delivery of its own: a no-code task declares that it delivers no code,
+/// and a close with no commit receipt, no merged anchor and no worker
+/// checkout would otherwise measure whatever the closing checkout's HEAD
+/// happens to carry (for example a supervisor on the epic branch closing an
+/// ops chore whose target is `main`).
 fn snapshot_gate_range(
     repo: &std::path::Path,
     target_branch: &str,
     attributed_base: Option<&str>,
     delivered_tip: Option<&str>,
-    changed_paths: &[String],
     no_code: bool,
+    tip_is_task_delivery: bool,
 ) -> Option<SnapshotGateRange> {
+    if no_code || !tip_is_task_delivery {
+        return None;
+    }
     if let Some(base) = attributed_base {
         return Some(SnapshotGateRange {
             base: Some(base.to_string()),
             tip: delivered_tip.map(str::to_string),
         });
-    }
-    if no_code && changed_paths.is_empty() {
-        return None;
     }
     let base = delivered_tip.and_then(|tip| {
         let target = preferred_diff_target_ref(repo, target_branch);
@@ -8133,13 +8135,17 @@ impl CasCore {
                     None
                 },
             );
+            let tip_is_task_delivery = req.commit_receipt.is_some()
+                || (supervisor_closing_merged_anchor
+                    && task.deliverables.factory_branch_anchor.is_some())
+                || worker_worktree_path.is_some();
             if let Some(range) = snapshot_gate_range(
                 proof_repo,
                 &resolved_parent_branch,
                 attributed_delivery_base.as_deref(),
                 delivered_tip.as_deref(),
-                &changed_paths,
                 task.execution_note.as_deref() == Some("no-code"),
+                tip_is_task_delivery,
             ) && let Some(error) = snapshot_approval::rejection(
                 proof_repo,
                 range.base.as_deref(),
@@ -25521,7 +25527,7 @@ mod merge_state_gate_tests {
             .expect("anchor attribution");
         assert_eq!(paths, vec!["hub.ts".to_string()]);
         let base = task_attribution::delivery_base(p, "epic", &window, Some(&anchor));
-        let range = snapshot_gate_range(p, "epic", base.as_deref(), Some(&anchor), &paths, false)
+        let range = snapshot_gate_range(p, "epic", base.as_deref(), Some(&anchor), false, true)
             .expect("code delivery is gated");
         assert_eq!(
             snapshot_approval::rejection(p, range.base.as_deref(), range.tip.as_deref(), &paths, "", "cas-test1", "mcp__cas__"),
@@ -25530,7 +25536,7 @@ mod merge_state_gate_tests {
 
         // Even with no attribution at all, a merged tip adds nothing beyond
         // its target, so there is nothing unattributed to approve.
-        let range = snapshot_gate_range(p, "epic", None, Some(&anchor), &[], false)
+        let range = snapshot_gate_range(p, "epic", None, Some(&anchor), false, true)
             .expect("code delivery is gated");
         assert_eq!(range.base.as_deref(), Some(anchor.as_str()));
         assert_eq!(
@@ -25553,7 +25559,7 @@ mod merge_state_gate_tests {
         let tip = rev_parse_local(p, "HEAD");
 
         // Unmerged tip, no attribution: its own range carries the snapshot.
-        let range = snapshot_gate_range(p, "epic", None, Some(&tip), &[], false).unwrap();
+        let range = snapshot_gate_range(p, "epic", None, Some(&tip), false, true).unwrap();
         let error = snapshot_approval::rejection(p, range.base.as_deref(), range.tip.as_deref(), &[], "", "cas-test1", "mcp__cas__")
             .expect("an unapproved snapshot change must be refused");
         assert!(error.contains("view.snap"), "{error}");
@@ -25566,15 +25572,48 @@ mod merge_state_gate_tests {
         let paths = task_attribution::paths(p, "epic", &window, Some(&tip)).unwrap();
         assert_eq!(paths, vec!["view.snap".to_string()]);
         let base = task_attribution::delivery_base(p, "epic", &window, Some(&tip));
-        let range = snapshot_gate_range(p, "epic", base.as_deref(), Some(&tip), &paths, false).unwrap();
+        let range = snapshot_gate_range(p, "epic", base.as_deref(), Some(&tip), false, true).unwrap();
         let error = snapshot_approval::rejection(p, range.base.as_deref(), range.tip.as_deref(), &paths, "", "cas-test1", "mcp__cas__")
             .expect("a merged anchor that changed a snapshot still needs approval");
         assert!(error.contains("view.snap"), "{error}");
 
-        // No-code with nothing attributed: no code delivery, no gate.
-        assert_eq!(snapshot_gate_range(p, "epic", None, Some(&tip), &[], true), None);
-        // No-code whose attributed commits changed a snapshot: still gated.
-        assert!(snapshot_gate_range(p, "epic", base.as_deref(), Some(&tip), &paths, true).is_some());
+    }
+
+    /// cas-f0a6 (cas-5c7a repro): a no-code close, or a close with no
+    /// receipt, no merged anchor and no worker checkout, attributes no diff.
+    /// The supervisor checkout here sits on `epic`, whose snapshot differs
+    /// from the task's `main` target; the old fallback demanded approval.
+    #[test]
+    fn no_code_or_anchorless_close_attributes_no_snapshot_diff_cas_f0a6() {
+        let (dir, _) = merged_anchor_with_foreign_snapshot_change();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "epic"]);
+        std::fs::write(p.join("view.snap"), "epic-only\n").unwrap();
+        git(p, &["add", "view.snap"]);
+        git(p, &["commit", "-q", "-m", "epic snapshot change by another task"]);
+        let head = rev_parse_local(p, "HEAD");
+
+        // The old fallback measured the supervisor HEAD against `main`.
+        let old_base = git_merge_base(p, "HEAD", "main").expect("merge base");
+        assert!(
+            snapshot_approval::rejection(p, Some(&old_base), Some(&head), &[], "", "cas-5c7a", "mcp__cas__")
+                .is_some_and(|error| error.contains("view.snap")),
+            "fixture must reproduce the cas-5c7a false SNAPSHOT APPROVAL REQUIRED"
+        );
+
+        // No-code: never gated, even with an attributable-looking base.
+        assert_eq!(snapshot_gate_range(p, "main", None, Some(&head), true, true), None);
+        assert_eq!(snapshot_gate_range(p, "main", Some(&old_base), Some(&head), true, true), None);
+        // Code task closed with no receipt, anchor or worker checkout: the
+        // HEAD is not this task's delivery, so nothing is attributed.
+        assert_eq!(snapshot_gate_range(p, "main", None, Some(&head), false, false), None);
+        assert_eq!(snapshot_gate_range(p, "main", Some(&old_base), Some(&head), false, false), None);
+        // The same HEAD as a real task delivery is still gated.
+        let range = snapshot_gate_range(p, "main", None, Some(&head), false, true).unwrap();
+        assert!(
+            snapshot_approval::rejection(p, range.base.as_deref(), range.tip.as_deref(), &[], "", "cas-5c7a", "mcp__cas__")
+                .is_some()
+        );
     }
 
     /// cas-b412 / cas-f2eb: a fix committed inside a merge resolution has no

@@ -47,7 +47,7 @@ pub trait LoopStore: Send + Sync {
     /// Initialize the store (create tables)
     fn init(&self) -> Result<()>;
 
-    /// Generate a new unique loop ID (e.g., loop-a1b2)
+    /// Generate a new random loop ID that is not already stored.
     fn generate_id(&self) -> Result<String>;
 
     /// Add a new loop
@@ -92,6 +92,25 @@ impl SqliteLoopStore {
         Ok(store)
     }
 
+    /// Keep the random source injectable while checking the real database.
+    fn generate_id_with_random(&self, mut random: impl FnMut() -> u64) -> Result<String> {
+        let conn = self.conn.lock().map_err(lock_err)?;
+        for _ in 0..16 {
+            let id = format!("loop-{:016x}", random());
+            let exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM loops WHERE id = ?1)",
+                params![&id],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                return Ok(id);
+            }
+        }
+        Err(StoreError::Other(
+            "could not generate an unused loop ID after 16 attempts".into(),
+        ))
+    }
+
     fn parse_loop(row: &rusqlite::Row) -> rusqlite::Result<Loop> {
         let status_str: String = row.get(6)?;
         let status = LoopStatus::from_str(&status_str).unwrap_or_default();
@@ -131,20 +150,7 @@ impl LoopStore for SqliteLoopStore {
     }
 
     fn generate_id(&self) -> Result<String> {
-        use std::time::{SystemTime, UNIX_EPOCH};
-
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|error| {
-                StoreError::Other(format!("system clock predates Unix epoch: {error}"))
-            })?
-            .as_millis();
-
-        // Generate a short hash from timestamp
-        let hash = format!("{timestamp:x}");
-        let short_hash = &hash[hash.len().saturating_sub(4)..];
-
-        Ok(format!("loop-{short_hash}"))
+        self.generate_id_with_random(rand::random::<u64>)
     }
 
     fn add(&self, loop_state: &Loop) -> Result<()> {
@@ -489,6 +495,60 @@ mod tests {
             assert_eq!(legacy.status, LoopStatus::Completed);
             assert_eq!(legacy.cwd, "/legacy");
         }
+    }
+
+    #[test]
+    fn generated_loop_id_skips_existing_random_candidates_without_overwriting() {
+        let (store, _dir) = create_test_store();
+        let mut existing = Loop::new(
+            "loop-000000000000beef".into(),
+            "old-session".into(),
+            "Keep this completed loop".into(),
+            "/old".into(),
+        );
+        existing.complete("DONE");
+        store.add(&existing).unwrap();
+
+        // Only entropy is controlled: collision detection and persistence use
+        // the actual store, including completed rows from earlier sessions.
+        let mut entropy = [0xbeef, 0xbeef, 0xcafe].into_iter();
+        let id = store
+            .generate_id_with_random(|| entropy.next().expect("unused candidate available"))
+            .unwrap();
+        assert_eq!(id, "loop-000000000000cafe");
+        let state = Loop::new(
+            id.clone(),
+            "new-session".into(),
+            "New loop".into(),
+            "/new".into(),
+        );
+        store.add(&state).unwrap();
+
+        let retrieved = store.get(&id).unwrap();
+        assert_eq!(retrieved.session_id, "new-session");
+        assert_eq!(retrieved.prompt, "New loop");
+        let old = store.get(&existing.id).unwrap();
+        assert_eq!(old.session_id, existing.session_id);
+        assert_eq!(old.prompt, existing.prompt);
+        assert_eq!(old.status, LoopStatus::Completed);
+        assert_eq!(old.end_reason, existing.end_reason);
+    }
+
+    #[test]
+    fn generated_loop_id_returns_error_when_random_candidates_keep_colliding() {
+        let (store, _dir) = create_test_store();
+        let existing = Loop::new(
+            "loop-000000000000beef".into(),
+            "old-session".into(),
+            "Keep this loop".into(),
+            "/old".into(),
+        );
+        store.add(&existing).unwrap();
+
+        let error = store.generate_id_with_random(|| 0xbeef).unwrap_err();
+        assert!(matches!(error, StoreError::Other(_)));
+        assert_eq!(store.get(&existing.id).unwrap().prompt, existing.prompt);
+        assert_eq!(store.list_recent(2).unwrap().len(), 1);
     }
 
     #[test]

@@ -228,7 +228,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 #### Steps
 
 1. Open the conversation — the thread is live
-2. A question from an ended session does not wait — the previous session's unanswered question reads quietly in the thread with "No longer waiting: the session that asked has ended." and no choices; nothing is pinned and the context rail lists only the live blocker
+2. A question from an ended session does not wait — the previous session's unanswered question is not in this session's thread: it sits in a collapsed "Earlier session patient-pelican-8" section with no choices; nothing is pinned and the context rail lists only the live blocker
 3. The supervisor asks a question — it is pinned above the composer with its choices, and the thread keeps a one-line reference to it; the machine's earlier blocker, stamped by a clock that runs ahead, sits above the session line at its arrival time and is marked "machine clock ahead"
 4. Answer with one tap — the pin clears, the thread records the chosen answer, and nothing is left waiting in the context rail, even when the machine's clock runs ahead; the answer shows the time it was sent, under today
 5. See the supervisor act on the answer — the reply follows, and a new blocker after the answer waits
@@ -435,3 +435,32 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - A machine without launch folders hides Browse.
 - The machine can't list a CLI's accounts: the step says so with Try again, and the launch uses the machine's default account.
 - The chosen account was removed or logged out before Start (400 invalid_profile / 422 not_logged_in): plain advice, and the list refreshes.
+
+### HUB-J14 · Tell a project's live sessions apart
+
+- **Entry:** `/commander/` on a desktop paired with `factory:manage`, one machine running three live sessions of one project
+- **Goal:** each session opens onto its own conversation, or an honest empty state with its live activity, never another session's old thread; I can retire a stale one
+- **Touches:** `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/conversation-list.ts`, `hub-web/src/connection.ts`
+- **Suite:** `hub-web/e2e/journeys/session-identity.journey.ts`
+- **Gaps:** the daemon's session-bound history page, the catalog's last activity and the hub's End session are doubled; that ending a session stops its daemon is proven on a real machine at epic assembly
+
+#### Steps
+
+1. See a project's live sessions together — the project's rows sit under one heading naming the session count, the most recently active one is marked "Most recent", and each row's time is its own last activity
+2. Open a session that has not written yet — the thread says "No Commander messages from this session yet", shows its last activity, and the older session's thread is only a collapsed "Earlier session noble-cheetah-84, Yesterday" section
+3. Read an earlier session's messages — the section opens to its turns, each with its day and time, and offers no actions
+4. Open the Terminal from the empty session — "Open Terminal" switches to the session's Terminal view and back
+5. Each session shows its own conversation — another session's turns, even from a daemon that still sends project-wide history, appear only in its earlier section
+6. End a stale session — End session asks first, names what stops, and only the confirmation ends it; the row leaves the group
+
+#### Expected experience
+
+- Several live sessions of one project never read as copies: they are grouped, the active one is marked, and each shows its own time.
+- A session's thread holds only its own turns; another session's question never pins, waits or reads as answered here.
+- Earlier turns always carry a date once they are not today's.
+
+#### Edge paths
+
+- A turn with no session recorded is filed under "Earlier messages with no session recorded".
+- A device without `factory:manage` sees no End session; the hub refuses the call with 403 `scope_denied`.
+- Ending a session whose daemon PID now belongs to another process only cleans up its metadata.

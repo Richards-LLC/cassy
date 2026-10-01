@@ -128,6 +128,43 @@ pub fn execute_kill(name: Option<&str>, force: bool) -> Result<()> {
     Ok(())
 }
 
+/// What ending a session from Commander did (cas-55a4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EndSessionOutcome {
+    /// The session's daemon was sent SIGTERM and its metadata removed.
+    Ended,
+    /// No daemon of this session was running: only its metadata was removed.
+    CleanedStale,
+    /// No session of that name exists.
+    NotFound,
+}
+
+/// End one factory session by name, the way `cas kill <name> --force` does,
+/// for an authenticated Commander device. A daemon PID whose recorded start
+/// time no longer matches belongs to another process now: it is never
+/// signalled, and the session is cleaned up as stale.
+pub(crate) fn end_session_by_name(name: &str) -> Result<EndSessionOutcome> {
+    let manager = SessionManager::new();
+    let Some(session) = manager.find_session(Some(name))? else {
+        return Ok(EndSessionOutcome::NotFound);
+    };
+    if session.name != name {
+        return Ok(EndSessionOutcome::NotFound);
+    }
+    let pid = session.metadata.daemon_pid;
+    let same_daemon = match session.metadata.daemon_pid_starttime {
+        Some(expected) => crate::mcp::daemon::read_pid_starttime(pid) == Some(expected),
+        None => true,
+    };
+    if !session.is_running || !same_daemon {
+        manager.remove_metadata(name)?;
+        return Ok(EndSessionOutcome::CleanedStale);
+    }
+    terminate_process(pid)?;
+    manager.remove_metadata(name)?;
+    Ok(EndSessionOutcome::Ended)
+}
+
 /// Kill all factory sessions
 pub fn execute_kill_all(force: bool) -> Result<()> {
     let manager = SessionManager::new();

@@ -16,6 +16,9 @@ pub const PROTOCOL_VERSION: u32 = 3;
 pub(crate) const COMMANDER_REPLAY_BYTES_PER_PANE: usize = 64 * 1024;
 /// Default bounded page of durable Commander conversation turns.
 pub const COMMANDER_HISTORY_PAGE_SIZE: u16 = 50;
+/// How many of other sessions' newest Commander turns ride with a session's
+/// newest history page, for its collapsed earlier-session section (cas-55a4).
+pub const COMMANDER_EARLIER_SESSIONS_LIMIT: usize = 30;
 
 /// Independently negotiable daemon protocol features.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -460,6 +463,13 @@ pub enum DaemonMessage {
         has_earlier: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         next_before: Option<i64>,
+        /// Other sessions' recent Commander turns (cas-55a4), sent only with
+        /// the newest page. They are not this session's thread: Commander
+        /// shows them in a labelled, collapsed earlier-session section.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        earlier_messages: Vec<ConversationHistoryMessage>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        earlier_replies: Vec<ConversationHistoryReply>,
     },
 
     /// A newly queued operator send visible to other paired viewers.
@@ -1229,9 +1239,24 @@ mod tests {
             replies: Vec::new(),
             has_earlier: false,
             next_before: None,
+            earlier_messages: Vec::new(),
+            earlier_replies: Vec::new(),
         };
         let json = serde_json::to_value(&page).unwrap();
         assert_eq!(json["ConversationHistory"]["request_id"], "history-1");
+        // cas-55a4: the earlier-session section is additive. An empty one is
+        // not on the wire, and an older page without it still decodes.
+        assert!(json["ConversationHistory"].get("earlier_messages").is_none());
+        assert!(json["ConversationHistory"].get("earlier_replies").is_none());
+        let legacy: DaemonMessage = serde_json::from_value(serde_json::json!({
+            "ConversationHistory": {"request_id": "h", "messages": [], "replies": [], "has_earlier": false}
+        }))
+        .unwrap();
+        assert!(matches!(
+            legacy,
+            DaemonMessage::ConversationHistory { ref earlier_messages, ref earlier_replies, .. }
+                if earlier_messages.is_empty() && earlier_replies.is_empty()
+        ));
         assert!(
             json["ConversationHistory"]["messages"][0]
                 .get("prompt")

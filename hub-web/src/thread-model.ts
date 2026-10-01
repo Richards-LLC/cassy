@@ -63,6 +63,11 @@ export interface ThreadModelOptions {
   now?: number;
   /** The oldest loaded page is complete; paint its explicit end marker. */
   historyEnd?: boolean;
+  /**
+   * The session the thread belongs to (cas-55a4). Its own turns need no
+   * "session … started" divider: the thread is that session.
+   */
+  session?: string;
 }
 
 export function eventKey(event: ConversationEvent): string {
@@ -187,6 +192,8 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
     }
 
     const session = event.session;
+    // The thread's own session opening the thread needs no line (cas-55a4).
+    if (session && index === 0 && session === options.session) lastSession = session;
     if (session && session !== lastSession) {
       closeGroup(); coalesce = undefined;
       lastSession = session;

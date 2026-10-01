@@ -35,6 +35,7 @@ use clap::{Args, Subcommand};
 use std::io::IsTerminal;
 
 pub use lifecycle::{execute_kill, execute_kill_all};
+pub(crate) use lifecycle::{EndSessionOutcome, end_session_by_name};
 pub use queries::execute_list;
 
 /// Name the Codex account home at the last decision point before a factory

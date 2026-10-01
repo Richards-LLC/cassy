@@ -70,13 +70,18 @@ test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
   });
 
   await journey.stage("A question from an ended session does not wait", async () => {
-    // cas-16eed: the previous session's release question is history, not a
-    // pinned demand. It reads quietly in the thread, says why, and offers no
-    // choices; nothing is pinned and the rail lists only the live blocker.
-    const stale = page.getByRole("log").locator('.obj.t-a[data-retired="session-ended"]');
-    await expect(stale).toContainText("open the PR to main and cut a release?");
-    await expect(stale.locator(".ask-retired")).toHaveText("No longer waiting: the session that asked has ended.");
-    await expect(stale.getByRole("button")).toHaveCount(0);
+    // cas-16eed, cas-55a4: the previous session's release question is
+    // history, not a pinned demand and not this session's thread. It sits in
+    // the collapsed "Earlier session" section, offers no choices; nothing is
+    // pinned and the rail lists only the live blocker.
+    await expect(page.getByRole("log")).not.toContainText("open the PR to main and cut a release?");
+    const earlier = page.getByRole("region", { name: "Earlier sessions" }).locator("details");
+    await expect(earlier.locator("summary")).toContainText("Earlier session patient-pelican-8");
+    await expect(earlier).not.toHaveAttribute("open", /.*/);
+    await earlier.locator("summary").click();
+    await expect(earlier).toContainText("open the PR to main and cut a release?");
+    await expect(earlier.getByRole("button")).toHaveCount(0);
+    await earlier.locator("summary").click();
     await expect(pinned).toBeHidden();
     await expect(waiting.locator("li")).toHaveCount(1);
     await expect(waiting.locator('.context-jump[data-kind="ask"]')).toHaveCount(0);
@@ -190,7 +195,7 @@ test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
     await expect(pinned.getByRole("button", { name: "Yes, go ahead" })).toBeVisible();
     await expect(pinned.getByRole("button", { name: "Hold" })).toBeVisible();
     await expect(page.getByRole("log").locator(`.obj.t-a[data-notification-id="${release}"]`)).not.toHaveAttribute("data-retired", /.+/);
-    await expect(page.getByRole("log").locator(".ask-retired")).toHaveText(["No longer waiting: the session that asked has ended."]);
+    await expect(page.getByRole("log").locator(".ask-retired")).toHaveCount(0);
     // Desktop, light: Collapse and Dismiss sit on the card; the bar opens it
     // again; writing in the composer leaves it open (there is room for both).
     await pinned.getByRole("button", { name: "Collapse question" }).click();

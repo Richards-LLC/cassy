@@ -4099,7 +4099,8 @@ button.chip:disabled { cursor: default; }
   .conversation-end[data-state="idle"] .conversation-end-ask::before { content: ""; position: absolute; inset: -4px; }
   .conversation-end[data-state="idle"] .conversation-end-ask:hover { background: var(--bg-hover); color: var(--state-crit); }
   .conversation-end[data-state="idle"] .conversation-end-icon { display: block; }
-  .conversation-end[data-state="idle"] .conversation-end-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  /* The button's aria-label names it; the glyph is its face. */
+  .conversation-end[data-state="idle"] .conversation-end-label { display: none; }
   .conversation-end:not([data-state="idle"]) { margin: 0 12px var(--space-2) 12px; }
   .conversation-end .conversation-end-confirm, .conversation-end .conversation-end-cancel { min-height: 36px; padding-inline: 14px; }
 }

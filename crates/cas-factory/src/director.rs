@@ -13,7 +13,7 @@ use cas_store::{
     SqliteTaskStore, SqliteWorktreeStore, WorktreeStore,
 };
 use cas_types::{
-    AgentRole, AgentStatus, Event, EventType, Priority, Task, TaskStatus, TaskType, WorktreeStatus,
+    Agent, AgentRole, AgentStatus, Event, EventType, Priority, Task, TaskStatus, TaskType, WorktreeStatus,
 };
 
 use crate::changes::{FileChangeInfo, GitFileStatus, SourceChangesInfo};
@@ -447,6 +447,28 @@ impl DirectorData {
         };
         let activity = event_store.list_recent(50)?; // Load more to find worker activities
 
+        // Load agents
+        let owned_agent;
+        let agent_store: &SqliteAgentStore = if let Some(s) = stores {
+            &s.agent_store
+        } else {
+            owned_agent = SqliteAgentStore::open(cas_dir)?;
+            &owned_agent
+        };
+        let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
+        let (agents_list, foreign_agents): (Vec<_>, Vec<_>) =
+            AgentStore::list(agent_store, None)?
+                .into_iter()
+                .partition(|a| a.visible_to_factory_session(factory_session.as_deref()));
+
+        // cas-1829: the event store is project-wide. Keep ACTIVITY and the
+        // per-agent status line to this factory session's agents.
+        let activity = retain_factory_session_events(activity, &agents_list, &foreign_agents);
+        let agent_name_to_id: HashMap<&str, &str> = agents_list
+            .iter()
+            .map(|a| (a.name.as_str(), a.id.as_str()))
+            .collect();
+
         // Build map of agent_id -> latest worker activity
         let worker_activity_types = [
             EventType::WorkerSubagentSpawned,
@@ -464,11 +486,11 @@ impl DirectorData {
             HashMap::new();
         for event in &activity {
             if worker_activity_types.contains(&event.event_type)
-                && let Some(session_id) = &event.session_id
+                && let Some(owner_id) = activity_owner_id(event, &agent_name_to_id)
             {
                 // Only keep the latest (first encountered since list is sorted by time desc)
                 agent_latest_activity
-                    .entry(session_id.clone())
+                    .entry(owner_id.to_string())
                     .or_insert_with(|| (event.summary.clone(), event.created_at));
             }
         }
@@ -501,19 +523,6 @@ impl DirectorData {
             }
         }
 
-        // Load agents
-        let owned_agent;
-        let agent_store: &SqliteAgentStore = if let Some(s) = stores {
-            &s.agent_store
-        } else {
-            owned_agent = SqliteAgentStore::open(cas_dir)?;
-            &owned_agent
-        };
-        let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
-        let agents_list: Vec<_> = AgentStore::list(agent_store, None)?
-            .into_iter()
-            .filter(|a| a.visible_to_factory_session(factory_session.as_deref()))
-            .collect();
 
         // Compute per-agent delivery-eligible message counts (best-effort,
         // non-fatal).
@@ -837,6 +846,61 @@ impl DirectorData {
                 })
             })
     }
+}
+
+/// Keep only the events that belong to this factory session (cas-1829).
+///
+/// The event store is project-wide, so it also holds events from other
+/// factory sessions in the same project and from anything else that wrote to
+/// this `.cas` (for example a test whose pre-push hook inherited the operator's
+/// `CAS_ROOT`). An event is dropped only when it is positively foreign:
+///
+/// - a `WorkerPushBlocked` event names its worker in `entity_id` (the guard
+///   records `CAS_AGENT_NAME`), so it is kept only when that worker is one of
+///   `session_agents`;
+/// - any other event is dropped when its `session_id` belongs to a registered
+///   agent outside this session (`foreign_agents`).
+///
+/// Events with no session, or with a session id that matches no registered
+/// agent (system events, harness sessions whose id differs from the agent
+/// id), are kept.
+pub(crate) fn retain_factory_session_events(
+    activity: Vec<Event>,
+    session_agents: &[Agent],
+    foreign_agents: &[Agent],
+) -> Vec<Event> {
+    let session_names: HashSet<&str> = session_agents.iter().map(|a| a.name.as_str()).collect();
+    let foreign_sessions: HashSet<&str> = foreign_agents
+        .iter()
+        .flat_map(|a| std::iter::once(a.id.as_str()).chain(a.cc_session_id.as_deref()))
+        .collect();
+    activity
+        .into_iter()
+        .filter(|event| {
+            if event.event_type == EventType::WorkerPushBlocked {
+                return session_names.contains(event.entity_id.as_str());
+            }
+            !event
+                .session_id
+                .as_deref()
+                .is_some_and(|session| foreign_sessions.contains(session))
+        })
+        .collect()
+}
+
+/// The agent whose FACTORY row an activity event describes (cas-1829).
+///
+/// A push block is about the worker the guard named, not about whichever
+/// session's environment recorded it. Every other event belongs to the
+/// session that caused it.
+fn activity_owner_id<'a>(
+    event: &'a Event,
+    agent_name_to_id: &HashMap<&str, &'a str>,
+) -> Option<&'a str> {
+    if event.event_type == EventType::WorkerPushBlocked {
+        return agent_name_to_id.get(event.entity_id.as_str()).copied();
+    }
+    event.session_id.as_deref()
 }
 
 /// Newest `updated_at` across an epic group (the epic row and all of its
@@ -1184,6 +1248,118 @@ mod tests {
             activity_age < crate::config::DEFAULT_STALL_THRESHOLD_SECS as i64,
             "recent task-note activity must keep the stall predicate below threshold"
         );
+    }
+
+    /// cas-1829: a push-block event for a worker that is not in this factory
+    /// session must not reach ACTIVITY, and must not be pinned on the
+    /// supervisor row just because the supervisor's session recorded it. The
+    /// live case was a test pre-push hook inheriting the operator's CAS_ROOT
+    /// and CAS_SESSION_ID: worker 'credit-repairs', session = supervisor id.
+    #[test]
+    fn foreign_worker_push_block_stays_out_of_activity_and_supervisor_row_cas_1829() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let stores = DirectorStores::open(temp_dir.path()).unwrap();
+        stores.task_store.init().unwrap();
+        stores.agent_store.init().unwrap();
+        stores.event_store.init().unwrap();
+
+        let now = Utc::now();
+        let mut supervisor = Agent::new_with_role(
+            "sup-session".to_string(),
+            "bright-octopus-92".to_string(),
+            AgentRole::Supervisor,
+        );
+        supervisor.last_heartbeat = now;
+        stores.agent_store.register(&supervisor).unwrap();
+        let mut worker = Agent::new_with_role(
+            "worker-session".to_string(),
+            "cosmic-swan-27".to_string(),
+            AgentRole::Worker,
+        );
+        worker.last_heartbeat = now;
+        stores.agent_store.register(&worker).unwrap();
+
+        let push_block = |worker_name: &str, session: &str, minutes_ago: i64| {
+            let mut event = Event::new(
+                EventType::WorkerPushBlocked,
+                EventEntityType::Agent,
+                worker_name,
+                format!("worker push blocked: not your branch — worker '{worker_name}'"),
+            )
+            .with_session(session);
+            event.created_at = now - Duration::minutes(minutes_ago);
+            stores.event_store.record(&event).unwrap();
+        };
+        // Our own worker's refusal, recorded from the supervisor's
+        // environment, and a newer foreign one in the same session id.
+        push_block("cosmic-swan-27", "sup-session", 3);
+        push_block("credit-repairs", "sup-session", 1);
+
+        let data =
+            DirectorData::load_with_stores(temp_dir.path(), None, false, Some(&stores)).unwrap();
+
+        assert!(
+            data.activity
+                .iter()
+                .all(|e| !e.summary.contains("credit-repairs")),
+            "a foreign worker's push block must not appear in ACTIVITY: {:?}",
+            data.activity.iter().map(|e| &e.summary).collect::<Vec<_>>()
+        );
+        assert!(
+            data.activity
+                .iter()
+                .any(|e| e.entity_id == "cosmic-swan-27"),
+            "this session's worker push block stays visible"
+        );
+
+        let row = |id: &str| {
+            data.agents
+                .iter()
+                .find(|a| a.id == id)
+                .expect("agent row")
+                .latest_activity
+                .clone()
+        };
+        assert_eq!(
+            row("sup-session"),
+            None,
+            "a push block is attributed to the worker it names, never the supervisor"
+        );
+        let (summary, _) = row("worker-session").expect("worker row shows its push block");
+        assert!(summary.contains("cosmic-swan-27"), "{summary}");
+    }
+
+    /// cas-1829: events caused by an agent registered to another factory
+    /// session are dropped; system events, unknown harness sessions and this
+    /// session's events stay.
+    #[test]
+    fn retain_factory_session_events_drops_only_positively_foreign_events_cas_1829() {
+        let ours = Agent::new_with_role("ours-id".into(), "ours".into(), AgentRole::Worker);
+        let mut theirs =
+            Agent::new_with_role("theirs-id".into(), "theirs".into(), AgentRole::Worker);
+        theirs.cc_session_id = Some("theirs-harness".into());
+        let event = |event_type: EventType, entity: &str, session: Option<&str>| {
+            let e = Event::new(event_type, EventEntityType::Agent, entity, entity.to_string());
+            match session {
+                Some(s) => e.with_session(s),
+                None => e,
+            }
+        };
+        let activity = vec![
+            event(EventType::WorkerGitCommit, "ours-commit", Some("ours-id")),
+            event(EventType::WorkerGitCommit, "theirs-commit", Some("theirs-id")),
+            event(EventType::TaskNoteAdded, "theirs-note", Some("theirs-harness")),
+            event(EventType::SupervisorInjected, "system", None),
+            event(EventType::WorkerGitCommit, "codex-commit", Some("unregistered-uuid")),
+            event(EventType::WorkerPushBlocked, "ours", Some("theirs-id")),
+            event(EventType::WorkerPushBlocked, "credit-repairs", Some("ours-id")),
+            event(EventType::WorkerPushBlocked, "theirs", Some("ours-id")),
+        ];
+        let kept: Vec<String> = retain_factory_session_events(activity, &[ours], &[theirs])
+            .into_iter()
+            .map(|e| e.entity_id)
+            .collect();
+        assert_eq!(kept, ["ours-commit", "system", "codex-commit", "ours"]);
     }
 
     /// cas-0c98 (GH #995): a pulse-card factory session was nudged to assign

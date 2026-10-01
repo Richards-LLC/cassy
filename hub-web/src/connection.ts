@@ -616,6 +616,14 @@ export class HubConnectionSupervisor {
     return this.acquireLease(session, force);
   }
 
+  /**
+   * End a session (cas-55a4): the hub stops its daemon the way `cas kill`
+   * does. Needs factory-manage; a refusal throws like any other request.
+   */
+  async endSession(session: string): Promise<{ session: string; outcome: "ended" | "cleaned_stale" }> {
+    return this.request("DELETE", `/v1/sessions/${encodeURIComponent(session)}`);
+  }
+
   async releaseLease(session: string): Promise<void> {
     await this.request("DELETE", `/v1/sessions/${encodeURIComponent(session)}/lease`);
   }

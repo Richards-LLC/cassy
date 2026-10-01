@@ -13,7 +13,7 @@ use axum::http::{HeaderMap, HeaderValue, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, options, post};
+use axum::routing::{delete, get, options, post};
 use futures_util::{SinkExt, StreamExt, stream};
 use serde::{Deserialize, Serialize};
 
@@ -132,6 +132,10 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
         )
         .route("/v1/events", get(events::<R>).options(preflight::<R>))
         .route("/v1/attach", get(machine_attach::<R>))
+        .route(
+            "/v1/sessions/{session}",
+            delete(end_session::<R>).options(preflight::<R>),
+        )
         .route(
             "/v1/sessions/{session}/status",
             get(status::<R>).options(preflight::<R>),
@@ -713,6 +717,67 @@ async fn launch_session<R: SessionReadModel>(
         Err(error) => launch_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "launch_failed",
+            &error.to_string(),
+        ),
+    };
+    with_cors(response, &headers)
+}
+
+/// End one factory session from Commander (cas-55a4): the operator's way to
+/// retire a stale session that still looks live. It needs `factory:manage`,
+/// as spawning and shutting down workers does, and stops the session's daemon
+/// the way `cas kill <name>` does.
+async fn end_session<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    Path(session): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let uri = format!("/v1/sessions/{session}");
+    let context = match authorize(
+        &state,
+        HubAction::Mutation,
+        Scope::FactoryManage,
+        &headers,
+        "DELETE",
+        &uri,
+    ) {
+        Ok(context) => context,
+        Err(error) if error.to_string() == "scope denied" => {
+            return with_cors((StatusCode::FORBIDDEN, Json(serde_json::json!({"error":"scope_denied", "required_scope":"factory:manage"}))).into_response(), &headers);
+        }
+        Err(error) => return with_cors(unauthorized_for(&error), &headers),
+    };
+    if !valid_launch_name(&session) {
+        return with_cors(generic_not_found(), &headers);
+    }
+    let device = context
+        .as_ref()
+        .map(|context| context.device_id.clone())
+        .unwrap_or_else(|| "local".to_string());
+    let name = session.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        crate::cli::factory::end_session_by_name(&name)
+    })
+    .await;
+    let response = match outcome {
+        Ok(Ok(crate::cli::factory::EndSessionOutcome::NotFound)) => generic_not_found(),
+        Ok(Ok(outcome)) => {
+            let ended = outcome == crate::cli::factory::EndSessionOutcome::Ended;
+            tracing::info!(session = %session, device = %device, ended, "Commander ended a factory session");
+            Json(serde_json::json!({
+                "session": session,
+                "outcome": if ended { "ended" } else { "cleaned_stale" },
+            }))
+            .into_response()
+        }
+        Ok(Err(error)) => launch_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "end_failed",
+            &error.to_string(),
+        ),
+        Err(error) => launch_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "end_failed",
             &error.to_string(),
         ),
     };

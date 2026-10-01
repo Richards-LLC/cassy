@@ -2,11 +2,11 @@ import { cloudBrand, projectTitle } from "./cloud-brand";
 import { CANT_REACH_RETRYING, machineFooterMarkup, pairedMachinesDialogMarkup, renderPairedMachines, type PairedMachineRow } from "./paired-machines";
 import { retainPendingSessions, visibleCatalog } from "./worker-visibility";
 import "./styles.css";
-import { ConversationList, filterConversationRows, type ConversationRow } from "./conversation-list";
+import { ConversationList, filterConversationRows, groupConversationRows, type ConversationRow } from "./conversation-list";
 import { controlCommandCopy, sessionJumpCommandMarkup } from "./palette-commands";
 import { ConversationHistory } from "./conversation-history";
 import { loadDismissedAsks, saveDismissedAsks, type DismissedAsksStorage } from "./dismissed-asks";
-import { ConversationView } from "./conversation-view";
+import { ConversationView, emptyActivityText } from "./conversation-view";
 import { REFUSED_SEE_ABOVE, refusalSentence, refusal } from "./refusal";
 import { installAttentionObjects } from "./attention-objects";
 import { clearTransientAttachmentNotes, installAttachmentSheet, setAttachmentNote } from "./attachment-sheet";
@@ -277,6 +277,8 @@ let messageDelivery: { session: string; target: string; clientRef: string } | un
  * composer send in that thread is its edited version and retires it. */
 let editingRefused: { threadKey: string; id: string } | undefined;
 const operatorReplies = new Map<string, OperatorReply[]>();
+/** Sessions this page ended (cas-55a4): they leave the list instead of reading "Unreachable". */
+const endedSessions = new Set<string>();
 // Why a send did not happen has to survive the render that follows it, and has
 // to sit beside the composer: a toast is gone before a phone operator has
 // finished reading it, and a disabled button says nothing at all.
@@ -399,6 +401,11 @@ function mountConversation(key: string, mount: HTMLElement): void {
         renderConversationList();
         syncConversationContext();
       },
+      // cas-55a4: a session that has not written to Commander shows what it
+      // is doing (its newest queue row, else its panes' last output) and a
+      // way into its Terminal view, instead of another session's thread.
+      activity: () => sessionActivity(threadMachineId, threadSession),
+      openTerminal: () => { document.querySelector<HTMLButtonElement>("#conversation-terminal")?.click(); },
       hasEarlier: () => conversationHistoryPage(threadKey).hasEarlier,
       loadingEarlier: () => conversationHistoryPage(threadKey).loading,
       loadingHistory: () => {
@@ -754,7 +761,8 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       catalogExpiresAt.set(machine.id, Date.now() + ttl);
       window.clearTimeout(catalogExpiryTimers.get(machine.id));
       if (Number.isFinite(ttl)) catalogExpiryTimers.set(machine.id, window.setTimeout(() => render(), ttl));
-      sessions.set(machine.id, retainPendingSessions(sessions.get(machine.id) ?? [], items, name => conversationHistories.get(sessionKey(machine.id, name))?.hasPending() ?? false));
+      // A session the operator ended is gone, not unreachable: it is never retained (cas-55a4).
+      sessions.set(machine.id, retainPendingSessions(sessions.get(machine.id) ?? [], items, name => !endedSessions.has(sessionKey(machine.id, name)) && (conversationHistories.get(sessionKey(machine.id, name))?.hasPending() ?? false)));
       if (!openPairedSession(machine.id, visibleSessions(machine.id))) restoreLastSession(machine.id, visibleSessions(machine.id));
       render();
     },
@@ -869,11 +877,15 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       cursor.hasEarlier = page.has_earlier;
       cursor.nextBefore = page.next_before;
       const history = conversationHistory(key, session);
-      for (const message of page.messages) history.hydrateSend(message);
+      // cas-55a4: the thread is this session's own turns. Other sessions'
+      // turns (the page's earlier_* section, or a project-wide page from an
+      // older daemon) are filed beside it by session, never into it.
+      for (const message of [...page.messages, ...(page.earlier_messages ?? [])]) history.hydrateSend(message);
       const replies = operatorReplies.get(key) ?? [];
-      for (const reply of page.replies) {
+      for (const reply of [...page.replies, ...(page.earlier_replies ?? [])]) {
         history.hydrateReply(reply);
-        if (!replies.some((item) => item.notification_id === reply.notification_id)) replies.push(reply);
+        const own = reply.session === undefined || reply.session === session;
+        if (own && !replies.some((item) => item.notification_id === reply.notification_id)) replies.push(reply);
       }
       replies.sort((a, b) => a.notification_id - b.notification_id);
       operatorReplies.set(key, replies.slice(-100));
@@ -3314,6 +3326,32 @@ function renderMachineNavigation(): void {
  * board is rebuilt when a machine or session actually changes state and a
  * button the operator is on is never pulled out from under a thumb.
  */
+/**
+ * When a session last did anything, and between whom (cas-55a4): the hub's
+ * newest queue row for it, or this page's last pane output when that is
+ * newer. Undefined when neither is known.
+ */
+function sessionActivity(machineId: string, session: string): { at?: number; label?: string } | undefined {
+  const hubSession = sessions.get(machineId)?.find((item) => item.name === session);
+  const listed = hubSession?.last_activity_at ? Date.parse(hubSession.last_activity_at) : NaN;
+  const prefix = `${sessionKey(machineId, session)}:`;
+  const pane = Math.max(-Infinity, ...[...paneLastActivity].flatMap(([key, at]) => key.startsWith(prefix) ? [at] : []));
+  if (Number.isFinite(pane) && (!Number.isFinite(listed) || pane > listed)) return { at: pane, label: "terminal output" };
+  if (Number.isFinite(listed)) return { at: listed, ...(hubSession?.last_activity ? { label: hubSession.last_activity } : {}) };
+  return undefined;
+}
+
+/** End a session from its row (cas-55a4), then read the catalog again. */
+async function endConversationSession(row: ConversationRow): Promise<void> {
+  const connection = connections.get(row.machineId);
+  if (!connection) throw new Error("this machine is not connected");
+  await connection.endSession(row.session);
+  endedSessions.add(sessionKey(row.machineId, row.session));
+  if (selectedMachineId === row.machineId && selectedSession === row.session) commitSelection({ machineId: row.machineId });
+  await connection.refreshSessions().catch(() => undefined);
+  render();
+}
+
 function renderConversationList(): void {
   renderMachineRegister();
   const container = document.querySelector<HTMLElement>("#conversation-list");
@@ -3329,11 +3367,24 @@ function renderConversationList(): void {
     if (selected) readReplies.set(key, replies);
     // Waiting (ochre dot, hot time) is driven by asks and blockers the operator has not answered.
     const waiting = conversationHistories.get(key)?.waiting().length ?? 0;
-    return { key, machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, freshness: updated ? `Catalog checked ${relativeTimestamp(Date.parse(updated))}` : "Catalog not yet checked", when: updated ? relativeTimestamp(Date.parse(updated)) : undefined, preview: conversationHistories.get(key)?.preview(), unreachable: Boolean(session.unreachable), connection: session.unreachable ? "Unreachable · message pending" : session.dormant ? "Dormant" : session.liveness === "live" ? fleetConnectionLabel(conversationConnection(machine.id, session.name), machine.id) : "Session unavailable", interrupted: session.liveness === "live" && INTERRUPTED_LABELS.has(fleetConnectionLabel(conversationConnection(machine.id, session.name), machine.id)), attention: waiting, unread: Math.max(0, replies - (readReplies.get(key) ?? 0)), selected };
+    // cas-55a4: each row's time is its own session's last activity (its
+    // newest turn here, its newest queue row, or its panes' output), so
+    // several sessions of one project never show one shared catalog time.
+    const activity = sessionActivity(machine.id, session.name);
+    const lastTurn = Math.max(-Infinity, ...events.flatMap((event) => event.at !== undefined && Number.isFinite(event.at) ? [event.at] : []));
+    const activityAt = Math.max(activity?.at ?? -Infinity, lastTurn);
+    const active = Number.isFinite(activityAt) ? activityAt : undefined;
+    const activityLabel = active === undefined ? undefined : emptyActivityText({ at: active, ...(active === activity?.at && activity?.label ? { label: activity.label } : {}) }, Date.now());
+    return { key, machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, canEnd: machine.scopes.includes("factory-manage"), freshness: activityLabel ?? (updated ? `Catalog checked ${relativeTimestamp(Date.parse(updated))}` : "Catalog not yet checked"), when: active !== undefined ? relativeTimestamp(active) : updated ? relativeTimestamp(Date.parse(updated)) : undefined, preview: conversationHistories.get(key)?.preview(), unreachable: Boolean(session.unreachable), connection: session.unreachable ? "Unreachable · message pending" : session.dormant ? "Dormant" : session.liveness === "live" ? fleetConnectionLabel(conversationConnection(machine.id, session.name), machine.id) : "Session unavailable", interrupted: session.liveness === "live" && INTERRUPTED_LABELS.has(fleetConnectionLabel(conversationConnection(machine.id, session.name), machine.id)), attention: waiting, unread: Math.max(0, replies - (readReplies.get(key) ?? 0)), selected };
   }));
   conversationRows = rows;
-  const shown = filterConversationRows(rows, conversationSearchQuery);
-  conversationList.render(container, shown, (row, event) => { landAfterOpen(openSession(row.machineId, row.session), event); });
+  // cas-55a4: a project's live sessions on one machine sit together, most
+  // recent first and marked; End session is offered there and on dormant rows.
+  const shown = groupConversationRows(filterConversationRows(rows, conversationSearchQuery)).map((row) => ({
+    ...row,
+    canEnd: row.canEnd === true && (row.group !== undefined || sessions.get(row.machineId)?.find((item) => item.name === row.session)?.dormant === true),
+  }));
+  conversationList.render(container, shown, (row, event) => { landAfterOpen(openSession(row.machineId, row.session), event); }, endConversationSession);
   const empty = document.querySelector<HTMLElement>("#conversation-empty");
   if (empty) {
     empty.hidden = shown.length > 0;

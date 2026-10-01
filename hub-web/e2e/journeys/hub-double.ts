@@ -18,6 +18,9 @@ export type Session = {
   workers: string[];
   liveness: "live";
   dormant?: boolean;
+  /** The session's newest queue row (cas-55a4), as the hub catalog reports it. */
+  last_activity_at?: string;
+  last_activity?: string;
 };
 
 export type Machine = { id: string; label: string; sessions: Session[] };
@@ -36,6 +39,9 @@ export type HistoryPage = {
   replies: Array<Record<string, unknown>>;
   has_earlier: boolean;
   next_before?: number;
+  /** Other sessions' turns beside the newest page (cas-55a4). */
+  earlier_messages?: Array<Record<string, unknown>>;
+  earlier_replies?: Array<Record<string, unknown>>;
 };
 
 export type ProtocolTime = {
@@ -144,6 +150,8 @@ export class HubDouble {
   readonly upstreamRefusals: string[] = [];
   /** Refusal frames actually delivered, distinct from sends received/refused. */
   readonly deliveredRefusals: string[] = [];
+  /** DELETE /v1/sessions/<name> calls, in order, with the scopes they carried (cas-55a4). */
+  readonly ends: Array<{ machine: string; session: string; scopes: string[] }> = [];
   /** POST /v1/sessions bodies, in order (cas-0f51). */
   readonly launches: LaunchCall[] = [];
   /** Sessions started but still booting: listed after this many more session fetches. */
@@ -486,6 +494,19 @@ export class HubDouble {
       return route.fulfill({ json: { scopes: this.options.scopes![machineId] } });
     }
     if (path === "/v1/sessions" && method === "POST") return this.launch(route, machineId);
+    // cas-55a4: End session, as hub/server.rs `end_session` answers it.
+    const ending = /^\/v1\/sessions\/([^/]+)$/.exec(path);
+    if (ending && method === "DELETE") {
+      const session = decodeURIComponent(ending[1]!);
+      const scopes = this.scopesFor(machineId);
+      this.ends.push({ machine: machineId, session, scopes });
+      if (!scopes.includes("factory-manage")) return route.fulfill({ status: 403, json: { error: "scope_denied", required_scope: "factory:manage" } });
+      const sessions = this.machine(machineId).sessions;
+      const index = sessions.findIndex((candidate) => candidate.name === session);
+      if (index < 0) return route.fulfill({ status: 404 });
+      sessions.splice(index, 1);
+      return route.fulfill({ json: { session, outcome: "ended" } });
+    }
     if (path === "/v1/sessions") {
       this.tickBooting(machineId);
       return route.fulfill({ json: { freshness_threshold_secs: 30, sessions: this.sessionsFor(machineId) } });

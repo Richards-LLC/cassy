@@ -379,7 +379,7 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     // codename never breaks at its hyphens, in the sentence or the meta line,
     // at desktop or on a phone (journey F13).
     const said = page.locator(".thread .empty .said");
-    await expect(said).toHaveText(`Nothing waiting on you. The supervisor (${LONG_NAME}) will write here when it needs a decision.`);
+    await expect(said).toHaveText(`No Commander messages from this session yet. The supervisor (${LONG_NAME}) will write here when it needs a decision.`);
     const oneLineCodename = (selector: string) => page.locator(selector).evaluate((element) => {
       const lineHeight = parseFloat(getComputedStyle(element).lineHeight);
       return { lines: element.getClientRects().length, oneLine: element.getBoundingClientRect().height < lineHeight * 1.5, ellipsised: element.scrollWidth > element.clientWidth, title: element.getAttribute("title") };

@@ -4327,50 +4327,31 @@ impl FactoryDaemon {
         // while retaining the durable id as its dedupe key.
         let next_before = rows.last().map(|row| row.id);
         rows.reverse();
-        let mut messages = Vec::new();
-        let mut replies = Vec::new();
-        for row in rows {
-            if row.target.eq_ignore_ascii_case("operator") {
-                let Ok(payload) =
-                    serde_json::from_str::<crate::ui::factory::OperatorReplyPayload>(&row.prompt)
-                else {
-                    tracing::warn!(
-                        prompt_id = row.id,
-                        "skipping malformed operator reply in Commander history"
-                    );
-                    continue;
-                };
-                if !matches!(payload.schema_version, 1 | 2) {
-                    continue;
-                }
-                replies.push(crate::ui::factory::ConversationHistoryReply {
-                    notification_id: row.id,
-                    reply_to: payload.reply_to,
-                    message: payload.message,
-                    summary: payload.summary,
-                    device_id: payload.device_id,
-                    operator_label: payload.operator_label,
-                    kind: payload.kind,
-                    attachments: payload.attachments,
-                    session: row
-                        .factory_session
-                        .clone()
-                        .unwrap_or_else(|| self.session_name.clone()),
-                    at: row.created_at.to_rfc3339(),
-                });
-                continue;
-            }
-
-            if let Some(message) = commander_history_send(row, &self.session_name) {
-                messages.push(message);
-            }
-        }
+        let (messages, replies) = commander_history_turns(rows, &self.session_name);
+        // cas-55a4: other sessions' Commander turns travel beside the page,
+        // never in it, so Commander can show them only as a labelled, collapsed
+        // earlier-session section. They come once, with the newest page.
+        let (earlier_messages, earlier_replies) = if before.is_none() {
+            let mut earlier = queue.earlier_session_history(
+                &self.session_name,
+                device_id,
+                crate::ui::factory::protocol::COMMANDER_EARLIER_SESSIONS_LIMIT,
+            )?;
+            earlier.reverse();
+            // A row with no session recorded keeps an empty session: it is
+            // not this session's turn.
+            commander_history_turns(earlier, "")
+        } else {
+            (Vec::new(), Vec::new())
+        };
         Ok(crate::ui::factory::DaemonMessage::ConversationHistory {
             request_id,
             messages,
             replies,
             has_earlier,
             next_before,
+            earlier_messages,
+            earlier_replies,
         })
     }
 
@@ -8055,6 +8036,55 @@ impl FactoryDaemon {
 }
 
 /// Project the same durable send shape for history pages and live broadcasts.
+/// Project oldest-first Commander-lane rows onto the history wire shapes.
+/// `fallback_session` names a row that carries no session of its own.
+fn commander_history_turns(
+    rows: Vec<cas_store::QueuedPrompt>,
+    fallback_session: &str,
+) -> (
+    Vec<crate::ui::factory::ConversationHistoryMessage>,
+    Vec<crate::ui::factory::ConversationHistoryReply>,
+) {
+    let mut messages = Vec::new();
+    let mut replies = Vec::new();
+    for row in rows {
+        if row.target.eq_ignore_ascii_case("operator") {
+            let Ok(payload) =
+                serde_json::from_str::<crate::ui::factory::OperatorReplyPayload>(&row.prompt)
+            else {
+                tracing::warn!(
+                    prompt_id = row.id,
+                    "skipping malformed operator reply in Commander history"
+                );
+                continue;
+            };
+            if !matches!(payload.schema_version, 1 | 2) {
+                continue;
+            }
+            replies.push(crate::ui::factory::ConversationHistoryReply {
+                notification_id: row.id,
+                reply_to: payload.reply_to,
+                message: payload.message,
+                summary: payload.summary,
+                device_id: payload.device_id,
+                operator_label: payload.operator_label,
+                kind: payload.kind,
+                attachments: payload.attachments,
+                session: row
+                    .factory_session
+                    .clone()
+                    .unwrap_or_else(|| fallback_session.to_string()),
+                at: row.created_at.to_rfc3339(),
+            });
+            continue;
+        }
+        if let Some(message) = commander_history_send(row, fallback_session) {
+            messages.push(message);
+        }
+    }
+    (messages, replies)
+}
+
 fn commander_history_send(
     row: cas_store::QueuedPrompt,
     fallback_session: &str,
@@ -8356,6 +8386,45 @@ mod tests {
     use std::io::Write;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
+
+    /// cas-55a4: an earlier-session row keeps the session it was written in,
+    /// and a row with no session never borrows the session asking for history.
+    #[test]
+    fn commander_history_turns_keep_each_rows_own_session() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
+        cas_store::PromptQueueStore::init(&store).unwrap();
+        let reply = |message: &str| {
+            format!(
+                r#"{{"schema_version":2,"reply_to":null,"message":"{message}","summary":"","device_id":"*","kind":"status","attachments":[]}}"#
+            )
+        };
+        let queue: &dyn cas_store::PromptQueueStore = &store;
+        queue
+            .enqueue_with_session("supervisor", "operator", &reply("old"), "acct-wise-lion-31")
+            .unwrap();
+        queue
+            .enqueue("relay-watchdog", "operator", &reply("unbound"))
+            .unwrap();
+        queue
+            .record_terminal_operator_turn("acct-wise-lion-31", "typed")
+            .unwrap();
+        let mut rows = queue
+            .earlier_session_history("acct-rapid-gazelle-52", "phone", 10)
+            .unwrap();
+        rows.reverse();
+        let (messages, replies) = super::commander_history_turns(rows, "");
+        assert_eq!(
+            replies
+                .iter()
+                .map(|reply| (reply.message.as_str(), reply.session.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("old", "acct-wise-lion-31"), ("unbound", "")]
+        );
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session, "acct-wise-lion-31");
+        assert_eq!(messages[0].operator_label.as_deref(), Some("Terminal"));
+    }
 
     #[test]
     fn external_wake_delivery_is_durable_and_not_repeated_after_restart() {

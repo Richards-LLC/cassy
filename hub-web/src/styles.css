@@ -4048,3 +4048,39 @@ button.chip:disabled { cursor: default; }
   .launch-choice.is-checked, .launch-cli-option.is-checked { border: 2px solid Highlight; }
 }
 /* == End New session == */
+
+/* cas-55a4: other sessions' turns are history beside the thread, never in it:
+ * one quiet collapsed row per session, read-only when opened. */
+.thread .earlier-sessions { display: flex; flex-direction: column; gap: var(--space-1); margin: 12px 30px 0; min-width: 0; }
+.thread .earlier-sessions[hidden] { display: none; }
+.thread .earlier-session { border: var(--line-width) solid var(--line-subtle); border-radius: 14px; background: var(--bg-panel); color: var(--ink-mid); min-width: 0; }
+.thread .earlier-session summary { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; padding: 9px 14px; cursor: pointer; font: var(--weight-medium) 12px/1.35 var(--font-ui); }
+.thread .earlier-session summary:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; border-radius: 14px; }
+.thread .earlier-count { color: var(--ink-soft); font-weight: var(--weight-regular); }
+.thread .earlier-turns { list-style: none; margin: 0; padding: 0 14px 12px; display: flex; flex-direction: column; gap: 10px; }
+.thread .earlier-turn { min-width: 0; font: var(--weight-regular) 13px/1.45 var(--font-ui); color: var(--ink-mid); }
+.thread .earlier-turn b { font-weight: var(--weight-semibold); color: var(--ink); }
+.thread .earlier-turn time { color: var(--ink-soft); font: var(--weight-regular) 11px/1.3 var(--font-mono); }
+.thread .earlier-turn p { margin: 2px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.thread .empty .empty-activity { margin: 0; color: var(--ink-mid); font: var(--weight-regular) 12px/1.4 var(--font-mono); overflow-wrap: anywhere; }
+.thread .empty .empty-terminal { padding: 7px 16px; border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-pill); background: var(--bg-panel); color: var(--ink); font: var(--weight-medium) 13px/1.2 var(--font-ui); }
+@media (max-width: 720px) {
+  .thread .earlier-sessions { margin: 10px 14px 0; }
+}
+
+/* cas-55a4: one project's live sessions on one machine, together. */
+.conversation-group-head { margin: var(--space-2) 14px 0; color: var(--ink-mid); font: var(--weight-medium) var(--fs-xs)/1.35 var(--font-ui); }
+.conversation-row.grouped { padding-left: 22px; }
+.conversation-row[aria-current="true"] .conversation-session-mark { background: var(--bg-panel); }
+.conversation-session-mark { margin-left: 8px; padding: 1px 7px; border-radius: var(--radius-pill); background: var(--accent-soft); color: var(--ink); font: var(--weight-medium) 10px/1.4 var(--font-ui); white-space: nowrap; }
+.conversation-end { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); margin: -6px 14px var(--space-1) 73px; font-size: var(--fs-xs); color: var(--ink-mid); }
+.conversation-end button { padding: 2px 4px; border: 0; border-radius: 6px; background: var(--color-transparent); color: var(--ink-soft); font: var(--weight-medium) var(--fs-xs)/1.3 var(--font-ui); text-decoration: underline; text-underline-offset: 2px; }
+.conversation-end button:hover { color: var(--ink); }
+.conversation-end .conversation-end-confirm, .conversation-end .conversation-end-cancel { padding: 3px 10px; border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-pill); text-decoration: none; color: var(--ink-mid); }
+.conversation-end .conversation-end-confirm { color: var(--state-crit); border-color: currentColor; }
+.conversation-end-question { flex-basis: 100%; color: var(--ink); }
+.conversation-end-error { flex-basis: 100%; color: var(--state-crit); }
+@media (forced-colors: active) {
+  /* The mark keeps its text on any system palette: an outline, no fill. */
+  .conversation-session-mark, .conversation-row[aria-current="true"] .conversation-session-mark { background: transparent; border: 1px solid currentColor; }
+}

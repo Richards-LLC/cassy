@@ -173,6 +173,13 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     history.acknowledge({ client_ref: 'directive', notification_id: 41, target: supervisor, stamped: true });
     reply(42, 41, 'Gate is running.', 'answer', at(9, 44));
     reply(51, null, BLOCKER_TEXT, 'blocker', at(9, 58));
+  } else if (state === 'conversation-dated') {
+    // cas-e829: yesterday's blocker shows its date; a later message that does
+    // not answer it says only that the operator has written since.
+    reply(51, null, BLOCKER_TEXT, 'blocker', at(17, 20) - 86_400_000);
+    history.submit('later', supervisor, 'Looking at the gate now.', at(9, 30));
+    history.acknowledge({ client_ref: 'later', notification_id: 60, target: supervisor, stamped: true });
+    reply(61, 60, 'The lint warning is the only failure.', 'answer', at(9, 33));
   } else if (state === 'conversation-evidence') {
     history.submit('flake', supervisor, 'Did pass two clear the flake?', at(9, 28));
     history.acknowledge({ client_ref: 'flake', notification_id: 61, target: supervisor, stamped: true });

@@ -1,5 +1,6 @@
 //! Remove only registrations for the retired production hub. Custom upstreams,
 //! credentials, restrictive policy, comments and unrelated settings survive.
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -158,50 +159,131 @@ pub fn retire_project_proxy(path: &Path) -> Result<bool> {
     retire_file(path, "proxy")
 }
 
+#[derive(Default)]
+struct ProfileRetirement {
+    inspected: usize,
+    migrated: usize,
+    warnings: Vec<(PathBuf, String)>,
+}
+
+impl ProfileRetirement {
+    fn warn(&mut self, path: &Path, error: impl std::fmt::Display) {
+        // Display only the outer error context: parser chains may contain
+        // credential values from the file being parsed.
+        let reason = error.to_string();
+        eprintln!(
+            "warning: Violet migration skipped {}: {reason}",
+            path.display()
+        );
+        self.warnings.push((path.to_path_buf(), reason));
+    }
+}
+
+/// Resolve profile links before using the generic symlink-refusing readers
+/// and writers. Both files and linked parent directories must stay in HOME.
+fn profile_target(home: &Path, path: &Path) -> Result<Option<PathBuf>> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("statting {}", path.display())),
+        Ok(_) => {}
+    }
+    let target = path
+        .canonicalize()
+        .with_context(|| format!("dangling or inaccessible profile path {}", path.display()))?;
+    anyhow::ensure!(
+        target.starts_with(home),
+        "target {} is outside HOME {}",
+        target.display(),
+        home.display()
+    );
+    Ok(Some(target))
+}
+
 /// Enumerate installed machine profiles, including alternate Claude/Codex
-/// accounts. Explicit profile directories are included even outside HOME.
-fn retire_machine_profiles(home: &Path, extra: &[(&str, PathBuf)]) -> Result<()> {
+/// accounts. One inaccessible profile never interrupts the remaining sync.
+fn retire_machine_profiles(home: &Path, extra: &[(&str, PathBuf)]) -> ProfileRetirement {
+    let mut report = ProfileRetirement::default();
+    let canonical_home = match home.canonicalize() {
+        Ok(home) => home,
+        Err(error) => {
+            report.warn(home, error);
+            return report;
+        }
+    };
     let mut profiles = vec![("claude", home.to_path_buf())];
-    if home.is_dir() {
-        for entry in std::fs::read_dir(home)? {
-            let entry = entry?;
-            if !entry.file_type()?.is_dir() {
-                continue;
-            }
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with(".claude") {
-                profiles.push(("claude", entry.path()));
-            }
-            if name.starts_with(".codex") {
-                profiles.push(("codex", entry.path()));
+    match std::fs::read_dir(home) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        report.warn(home, error);
+                        continue;
+                    }
+                };
+                if !entry.path().is_dir() {
+                    continue;
+                }
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with(".claude") {
+                    profiles.push(("claude", entry.path()));
+                }
+                if name.starts_with(".codex") {
+                    profiles.push(("codex", entry.path()));
+                }
             }
         }
+        Err(error) => report.warn(home, error),
     }
     profiles.push(("skills", home.join(".agents")));
     profiles.push(("skills", home.join(".grok")));
     profiles.extend(extra.iter().cloned());
     profiles.sort();
     profiles.dedup();
+    let mut visited_files = HashSet::new();
+    let mut visited_skills = HashSet::new();
     for (format, directory) in profiles {
         if format != "skills" {
-            retire_file(
-                &directory.join(if format == "claude" {
-                    ".claude.json"
-                } else {
-                    "config.toml"
-                }),
-                format,
-            )?;
+            let path = directory.join(if format == "claude" {
+                ".claude.json"
+            } else {
+                "config.toml"
+            });
+            match profile_target(&canonical_home, &path) {
+                Ok(Some(target)) if visited_files.insert(target.clone()) => {
+                    report.inspected += 1;
+                    match retire_file(&target, format) {
+                        Ok(true) => report.migrated += 1,
+                        Ok(false) => {}
+                        Err(error) => report.warn(&path, error),
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => report.warn(&path, error),
+            }
         }
         let skills_dir = if directory == home {
             home.join(".claude/skills")
         } else {
             directory.join("skills")
         };
-        crate::builtins::prune_retired_hub_skills(&skills_dir)?;
+        match profile_target(&canonical_home, &skills_dir) {
+            Ok(Some(target)) if visited_skills.insert(target.clone()) => {
+                if let Err(error) = crate::builtins::prune_retired_hub_skills(&target) {
+                    report.warn(&skills_dir, error);
+                }
+            }
+            Ok(_) => {}
+            Err(error) => report.warn(&skills_dir, error),
+        }
     }
-    Ok(())
+    tracing::debug!(
+        inspected = report.inspected,
+        migrated = report.migrated,
+        "Violet profile migration"
+    );
+    report
 }
 
 pub fn retire_installed_hub(project_proxy: Option<&Path>) -> Result<()> {
@@ -212,13 +294,17 @@ pub fn retire_installed_hub(project_proxy: Option<&Path>) -> Result<()> {
                 std::env::var_os(name).map(|path| (format, PathBuf::from(path)))
             })
             .collect();
-        retire_machine_profiles(&home, &extra)?;
+        retire_machine_profiles(&home, &extra);
     }
     if let Ok(user) = Scope::User.config_path() {
-        retire_project_proxy(&user)?;
+        if let Err(error) = retire_project_proxy(&user) {
+            ProfileRetirement::default().warn(&user, error);
+        }
     }
     if let Some(project) = project_proxy {
-        retire_project_proxy(project)?;
+        if let Err(error) = retire_project_proxy(project) {
+            ProfileRetirement::default().warn(project, error);
+        }
     }
     Ok(())
 }
@@ -226,6 +312,228 @@ pub fn retire_installed_hub(project_proxy: Option<&Path>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn codex_fixture(path: &Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!(
+            "# keep account settings\n[mcp_servers.{}]\nurl = {:?}\nbearer_token_env_var = \"VIOLET_ACCOUNT_TOKEN\"\n",
+            violet_compatibility().retired_server, violet_hub_url()
+        )).unwrap();
+    }
+
+    fn assert_codex_migrated(path: &Path) {
+        let raw = std::fs::read_to_string(path).unwrap();
+        let document: toml::Value = toml::from_str(&raw).unwrap();
+        assert!(raw.contains("# keep account settings"));
+        assert!(
+            document["mcp_servers"]
+                .get(&violet_compatibility().retired_server)
+                .is_none()
+        );
+        assert_eq!(
+            document["mcp_servers"]["violet"]["url"].as_str(),
+            Some(violet_hub_url())
+        );
+        assert_eq!(
+            document["mcp_servers"]["violet"]["bearer_token_env_var"].as_str(),
+            Some("VIOLET_ACCOUNT_TOKEN")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_profile_symlink_migrates_target_and_preserves_link_and_permissions() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let home = tempfile::tempdir().unwrap();
+        let target = home.path().join("shared/config.toml");
+        codex_fixture(&target);
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = home.path().join(".codex-account/config.toml");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        symlink(&target, &link).unwrap();
+        let report = retire_machine_profiles(home.path(), &[]);
+        assert!(report.warnings.is_empty());
+        assert_eq!(report.inspected, 1);
+        assert_eq!(report.migrated, 1);
+        assert_eq!(std::fs::read_link(&link).unwrap(), target);
+        assert_codex_migrated(&link);
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::read_dir(target.parent().unwrap()).unwrap().count(),
+            1
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_codex_profile_target_is_inspected_and_written_once() {
+        let home = tempfile::tempdir().unwrap();
+        let target = home.path().join("shared/config.toml");
+        codex_fixture(&target);
+        for (profile, destination) in [
+            (".codex-a", target.clone()),
+            (".codex-b", PathBuf::from("../shared/config.toml")),
+        ] {
+            let link = home.path().join(profile).join("config.toml");
+            std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(&destination, &link).unwrap();
+        }
+        let report = retire_machine_profiles(home.path(), &[]);
+        assert!(report.warnings.is_empty());
+        assert_eq!(
+            report.inspected, 1,
+            "aliases must not even reread their shared target"
+        );
+        assert_eq!(report.migrated, 1);
+        for profile in [".codex-a", ".codex-b"] {
+            let link = home.path().join(profile).join("config.toml");
+            assert!(link.is_symlink());
+            assert_codex_migrated(&link);
+        }
+        let again = retire_machine_profiles(home.path(), &[]);
+        assert_eq!(again.inspected, 1);
+        assert_eq!(again.migrated, 0);
+        assert!(again.warnings.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unsafe_and_invalid_profiles_warn_and_other_accounts_still_migrate() {
+        use std::os::unix::fs::symlink;
+        let home = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_target = outside.path().join("config.toml");
+        codex_fixture(&outside_target);
+        let outside_before = std::fs::read(&outside_target).unwrap();
+        let dangling = home.path().join(".codex-dangling/config.toml");
+        let escaped = home.path().join(".codex-outside/config.toml");
+        let cycle = home.path().join(".codex-cycle/config.toml");
+        for path in [&dangling, &escaped, &cycle] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        }
+        symlink("missing.toml", &dangling).unwrap();
+        symlink(&outside_target, &escaped).unwrap();
+        symlink("config.toml", &cycle).unwrap();
+        let invalid = home.path().join(".codex-invalid/config.toml");
+        std::fs::create_dir_all(invalid.parent().unwrap()).unwrap();
+        let invalid_text = "token = \"dont-log-this-credential\"\ninvalid }\n";
+        std::fs::write(&invalid, invalid_text).unwrap();
+        let directory = home.path().join(".codex-directory/config.toml");
+        std::fs::create_dir_all(&directory).unwrap();
+        let good = home.path().join(".codex-valid/config.toml");
+        codex_fixture(&good);
+        let report = retire_machine_profiles(home.path(), &[]);
+        assert_eq!(report.warnings.len(), 5);
+        for path in [&dangling, &escaped, &cycle, &invalid, &directory] {
+            assert!(
+                report
+                    .warnings
+                    .iter()
+                    .any(|(warning_path, _)| warning_path == path),
+                "no warning for {}",
+                path.display()
+            );
+        }
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|(_, reason)| reason.contains("outside HOME"))
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|(_, reason)| reason.contains("dangling"))
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .all(|(_, reason)| !reason.contains("dont-log-this-credential"))
+        );
+        assert_codex_migrated(&good);
+        assert_eq!(std::fs::read(outside_target).unwrap(), outside_before);
+        assert_eq!(std::fs::read_to_string(invalid).unwrap(), invalid_text);
+        assert!(dangling.is_symlink());
+        assert!(escaped.is_symlink());
+        assert!(cycle.is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_profile_symlink_migrates_without_replacing_link() {
+        let home = tempfile::tempdir().unwrap();
+        let target = home.path().join("shared.json");
+        let contract = violet_compatibility();
+        std::fs::write(&target, serde_json::json!({"mcpServers":{(contract.retired_server.as_str()):{"url":violet_hub_url(), "headers":{"Authorization":"Bearer ${VIOLET_ACCOUNT_TOKEN}"}}}}).to_string()).unwrap();
+        let link = home.path().join(".claude-account/.claude.json");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let report = retire_machine_profiles(home.path(), &[]);
+        assert_eq!(report.migrated, 1);
+        assert!(report.warnings.is_empty());
+        assert_eq!(std::fs::read_link(&link).unwrap(), target);
+        let document: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&link).unwrap()).unwrap();
+        assert!(
+            document["mcpServers"]
+                .get(&contract.retired_server)
+                .is_none()
+        );
+        assert_eq!(
+            document["mcpServers"]["violet"]["headers"]["Authorization"],
+            "Bearer ${VIOLET_ACCOUNT_TOKEN}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_and_proxy_failures_do_not_abort_unrelated_project_sync() {
+        use clap::Parser;
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let project = temp.path().join("project");
+        let bad = home.join(".codex-bad/config.toml");
+        std::fs::create_dir_all(bad.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink("missing.toml", &bad).unwrap();
+        let good = home.join(".codex/config.toml");
+        codex_fixture(&good);
+        std::fs::create_dir_all(project.join(".cas")).unwrap();
+        std::fs::write(project.join(".cas/proxy.toml"), "invalid }\n").unwrap();
+        std::fs::write(
+            project.join("CLAUDE.md"),
+            "# Fixture\n\nProject-specific guidance.\n",
+        )
+        .unwrap();
+        let mut env = crate::TestEnvGuard::new();
+        env.set("HOME", &home);
+        env.set("XDG_CONFIG_HOME", home.join(".config"));
+        env.set("CAS_ROOT", project.join(".cas"));
+        env.set_current_dir(&project);
+        let cli = crate::cli::Cli::parse_from(["cas", "sync", "agents-md", "--write"]);
+        crate::cli::sync::execute(
+            &crate::cli::sync::SyncCommands::AgentsMd(crate::cli::sync::AgentsMdArgs {
+                check: false,
+                write: true,
+            }),
+            &cli,
+        )
+        .unwrap();
+        assert!(
+            std::fs::read_to_string(project.join("AGENTS.md"))
+                .unwrap()
+                .contains("Project-specific guidance.")
+        );
+        assert!(bad.is_symlink());
+        assert_codex_migrated(&good);
+        crate::builtins::sync_all_builtins_for_project(cas_mux::SupervisorCli::Codex, &project)
+            .unwrap();
+        assert!(project.join(".codex/skills/cas-worker/SKILL.md").is_file());
+    }
 
     #[test]
     fn all_machine_profiles_retire_production_entries_preserving_credentials_and_custom_upstreams()
@@ -270,7 +578,11 @@ mod tests {
             "---\nmetadata:\n  managed_by: cas\n---\nWorker\n",
         )
         .unwrap();
-        retire_machine_profiles(temp.path(), &[]).unwrap();
+        assert!(
+            retire_machine_profiles(temp.path(), &[])
+                .warnings
+                .is_empty()
+        );
         assert!(!retired_skill.exists());
         assert!(unrelated_skill.exists());
         for profile in ["", ".claude", ".claude-alt", ".claude-work"] {
@@ -301,7 +613,11 @@ mod tests {
         std::fs::write(&custom, &original).unwrap();
         assert!(!retire_file(&custom, "claude").unwrap());
         assert_eq!(std::fs::read_to_string(custom).unwrap(), original);
-        retire_machine_profiles(temp.path(), &[]).unwrap();
+        assert!(
+            retire_machine_profiles(temp.path(), &[])
+                .warnings
+                .is_empty()
+        );
     }
 
     #[test]

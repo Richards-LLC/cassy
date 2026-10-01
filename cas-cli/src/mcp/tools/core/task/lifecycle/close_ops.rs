@@ -29375,7 +29375,7 @@ mod epic_status_gate_tests {
         let req = base_req(&task.id);
         match run_epic_close_merge_gate(&task, &req, "main", p, std::slice::from_ref(&landed)) {
             EpicCloseGateOutcome::Proceed | EpicCloseGateOutcome::ProceedWithNote(_) => {}
-            EpicCloseGateOutcome::Reject(message) => {
+            EpicCloseGateOutcome::Reject(message) | EpicCloseGateOutcome::Incomplete(message) => {
                 assert!(
                     !message.contains("git merge --no-ff"),
                     "a stale local ref must not resurrect the destructive instruction: {message}"

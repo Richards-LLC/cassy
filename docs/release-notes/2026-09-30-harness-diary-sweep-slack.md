@@ -46,3 +46,12 @@ Source gaps: none in 2.1.281–2.1.285.
 
 Source gaps: 0.157.1 has a stable release but upstream could not determine its highlights. All other reviewed stables have release notes; alpha releases remain outside the stable diary.
 ```
+
+## POSTED
+
+- **Posted at (UTC):** `2026-09-30T18:40:58Z`
+- **Channel:** `#cas-internal` (`C0B44GUKDK2`)
+- **Parent:** `message_id=1790793658.990779` · https://petra-stella.slack.com/archives/C0B44GUKDK2/p1790793658990779
+- **Grok reply:** `message_id=1790793665.295549` · https://petra-stella.slack.com/archives/C0B44GUKDK2/p1790793665295549?thread_ts=1790793658.990779&cid=C0B44GUKDK2
+- **Claude reply:** `message_id=1790793669.584699` · https://petra-stella.slack.com/archives/C0B44GUKDK2/p1790793669584699?thread_ts=1790793658.990779&cid=C0B44GUKDK2
+- **Codex reply:** `message_id=1790793673.707749` · https://petra-stella.slack.com/archives/C0B44GUKDK2/p1790793673707749?thread_ts=1790793658.990779&cid=C0B44GUKDK2

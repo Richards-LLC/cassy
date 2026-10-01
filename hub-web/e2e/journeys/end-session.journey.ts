@@ -35,10 +35,19 @@ test("HUB-J16 end a session from my phone", async ({ page, journey }) => {
     expect(await rowsInView(), "at least six sessions fit the phone list").toBeGreaterThanOrEqual(6);
     // End session is in each row's corner, not a line of its own.
     await expect(list.getByRole("button", { name: "End session calm-puma-34 on Atlas" })).toBeVisible();
+    // cas-339a: each row's time belongs to the row, and End is its own 44px column.
+    const hits = await list.evaluate((nav) => [...nav.querySelectorAll<HTMLElement>(".conversation-row")].map((node) => {
+      const time = node.querySelector(".conversation-when")!.getBoundingClientRect();
+      const end = node.nextElementSibling!.querySelector(".conversation-end-ask")!.getBoundingClientRect();
+      const atTime = document.elementFromPoint(time.left + time.width / 2, time.top + time.height / 2);
+      const atEnd = document.elementFromPoint(end.left + end.width / 2, end.top + end.height / 2);
+      return { time: atTime?.closest(".conversation-row") === node, end: Boolean(atEnd?.closest(".conversation-end-ask")), tall: end.height >= 44, apart: end.left >= time.right };
+    }));
+    expect(hits.slice(0, 6)).toEqual(Array(6).fill({ time: true, end: true, tall: true, apart: true }));
   });
 
-  await journey.stage("Open a session and come back to the list", async () => {
-    await row("swift-heron-51").tap();
+  await journey.stage("Tap a session's time to open it, then come back", async () => {
+    await row("swift-heron-51").locator(".conversation-when").tap();
     await expect(page.locator("#conversation-back")).toBeVisible();
     await page.locator("#conversation-back").tap();
     await expect(list.locator(".conversation-row")).toHaveCount(7);

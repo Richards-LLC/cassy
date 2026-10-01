@@ -99,7 +99,7 @@ export function filterConversationRows<T extends Pick<ConversationRow, "projectD
  * two distinct affordances — waiting (ochre dot, hot time) and unread (accent
  * count pill). Users think in projects (journey F7): the project is the title,
  * the machine follows it, and the generated codename is tertiary text. */
-export function conversationRowMarkup(row: ConversationRow, endable = false): string {
+export function conversationRowMarkup(row: ConversationRow): string {
   const waiting = row.attention > 0;
   const unread = row.unread ?? 0;
   const preview = truncateConversationPreview(plainTextMarkdown(row.unreachable || row.interrupted ? row.connection : row.preview || row.connection));
@@ -108,10 +108,7 @@ export function conversationRowMarkup(row: ConversationRow, endable = false): st
   const time = row.when ? `<span class="conversation-when${waiting ? " hot" : ""}" title="${escapeHtml(row.freshness)}">${escapeHtml(row.when)}</span>` : "";
   const count = unread > 0 ? `<span class="conversation-unread" aria-label="${unread} unread">${unread}</span>` : "";
   const flag = waiting ? `<span class="conversation-flag" role="img" aria-label="${row.attention === 1 ? "Waiting for you" : `${row.attention} waiting for you`}"></span>` : "";
-  // cas-d6bf: on a phone, End session is a small button laid over the row's
-  // corner instead of a line under it; this slot keeps that corner free.
-  const slot = endable ? `<span class="conversation-end-slot" aria-hidden="true"></span>` : "";
-  const marks = count || flag || slot ? `<span class="conversation-marks">${count}${flag}${slot}</span>` : "";
+  const marks = count || flag ? `<span class="conversation-marks">${count}${flag}</span>` : "";
   // No project named: the codename is the title (cas-1ca1 F03), not a status phrase.
   const project = projectTitle(row.projectDir);
   // The title is "project · machine": the project leads, never a dot (P13);
@@ -128,6 +125,19 @@ export function conversationRowMarkup(row: ConversationRow, endable = false): st
     + time
     + `<span class="conversation-preview${row.unreachable ? " unreachable" : row.interrupted ? " interrupted" : waiting || unread > 0 ? " bold" : ""}">${escapeHtml(preview)}</span>`
     + marks;
+}
+
+/**
+ * After scrollIntoView, a sub-pixel remainder could leave the last row's
+ * buttons a fraction past the list's edge (cas-339a: 0.44px on a desktop).
+ * Scroll the list by the whole remainder.
+ */
+function revealWhole(control: HTMLElement): void {
+  const list = control.parentElement;
+  if (!list) return;
+  const edge = list.getBoundingClientRect().bottom;
+  const lowest = Math.max(...[...control.querySelectorAll("button")].map((button) => button.getBoundingClientRect().bottom));
+  if (Number.isFinite(lowest) && lowest > edge) list.scrollTop += Math.ceil(lowest - edge) + 1;
 }
 
 /** A power glyph: End session's face on a phone, where the words would crowd the row (cas-d6bf). */
@@ -177,7 +187,9 @@ export class ConversationList {
         this.nodes.set(row.key, node);
       }
       // The accent class rides on the row itself so both of a machine's projects share its colour.
-      const className = `conversation-row ${machineAccentClass(row.machineId)}${row.group ? " grouped" : ""}`;
+      // cas-339a: a row End session sits beside keeps a column of its own for
+      // it on a phone, so the row's time and marks are never under the button.
+      const className = `conversation-row ${machineAccentClass(row.machineId)}${row.group ? " grouped" : ""}${row.canEnd && end ? " endable" : ""}`;
       if (node.className !== className) node.className = className;
       node.dataset.threadKey = row.key;
       node.dataset.machineId = row.machineId;
@@ -186,7 +198,7 @@ export class ConversationList {
       if (row.group) node.dataset.mostRecent = String(row.group.active); else delete node.dataset.mostRecent;
       node.setAttribute("aria-current", String(row.selected));
       node.onclick = (event) => open(row, event);
-      const markup = conversationRowMarkup(row, Boolean(row.canEnd && end));
+      const markup = conversationRowMarkup(row);
       if (node.innerHTML !== markup) node.innerHTML = markup;
       ordered.push(node);
       if (row.canEnd && end) {
@@ -232,6 +244,7 @@ export class ConversationList {
         rerender();
         // The confirmation opens under the row: keep its buttons in view, focus on Cancel.
         control.scrollIntoView?.({ block: "nearest" });
+        revealWhole(control);
         control.querySelector<HTMLButtonElement>(".conversation-end-cancel")?.focus({ preventScroll: true });
       });
       ask.innerHTML = `${END_ICON}<span class="conversation-end-label">End session</span>`;

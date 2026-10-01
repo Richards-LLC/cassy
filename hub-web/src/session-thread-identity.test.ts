@@ -181,10 +181,14 @@ describe("grouped project sessions (cas-55a4)", () => {
     expect(document.activeElement).toBe(control.querySelector(".conversation-end-ask"));
   });
 
-  it("reserves the phone End corner only on rows that can end (cas-d6bf)", () => {
-    const [first] = groupConversationRows([row("calm-puma-34", 300, { canEnd: true }), row("noble-cheetah-84", 100)]);
-    expect(conversationRowMarkup(first!, true)).toContain('<span class="conversation-end-slot" aria-hidden="true"></span>');
-    expect(conversationRowMarkup(first!)).not.toContain("conversation-end-slot");
+  it("gives End session its own column only on rows that can end (cas-339a)", () => {
+    const container = document.createElement("nav"); document.body.replaceChildren(container);
+    const rows = groupConversationRows([row("calm-puma-34", 300, { canEnd: true }), row("noble-cheetah-84", 100)]);
+    new ConversationList().render(container, rows, vi.fn(), vi.fn(async () => {}));
+    expect([...container.querySelectorAll(".conversation-row")].map((node) => node.classList.contains("endable"))).toEqual([true, false]);
+    const plain = document.createElement("nav"); document.body.replaceChildren(plain);
+    new ConversationList().render(plain, rows, vi.fn());
+    expect(plain.querySelector(".conversation-row.endable")).toBeNull();
   });
 
   it("offers no End session without the callback or the scope", () => {

@@ -4095,21 +4095,19 @@ button.chip:disabled { cursor: default; }
 .conversation-end .conversation-end-confirm { color: var(--state-crit); border-color: currentColor; }
 .conversation-end-question { flex-basis: 100%; color: var(--ink); }
 .conversation-end-error { flex-basis: 100%; color: var(--state-crit); }
-/* cas-d6bf: desktop keeps the words; the glyph and the corner slot are the phone's. */
+/* cas-d6bf: desktop keeps the words; the glyph is the phone's. */
 .conversation-end-icon { display: none; width: 16px; height: 16px; }
-.conversation-end-slot { display: none; }
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
   /* Under the group heading that names the project and machine, a session row
      leads with its codename, so a phone shows twice as many of them. */
   .conversation-row.grouped .conversation-title:has(+ .conversation-supervisor) { display: none; }
   .conversation-row.grouped .conversation-supervisor { font-size: var(--fs-meta); color: var(--ink); }
-  /* End session sits in the row's corner, not on a line of its own. The slot
-     reserves that corner inside the row, so nothing runs under the button. */
-  .conversation-end-slot { display: block; width: 28px; height: 0; }
+  /* End session is a trailing column of the row, not a line of its own
+     (cas-d6bf). The row gives that column up (cas-339a), so its 44px target
+     sits beside the time and marks, never over them. */
+  .conversation-row.endable { padding-right: 56px; }
   .conversation-end[data-state="idle"] { position: relative; height: 0; margin: calc(-1 * var(--space-1)) 0 0; }
-  .conversation-end[data-state="idle"] .conversation-end-ask { position: absolute; right: 14px; bottom: 6px; display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; border-radius: var(--radius-pill); color: var(--ink-mid); }
-  /* A 36px touch target around the 28px glyph button. */
-  .conversation-end[data-state="idle"] .conversation-end-ask::before { content: ""; position: absolute; inset: -4px; }
+  .conversation-end[data-state="idle"] .conversation-end-ask { position: absolute; right: 6px; bottom: 11px; display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; min-height: 44px; padding: 0; border-radius: var(--radius-pill); color: var(--ink-mid); }
   .conversation-end[data-state="idle"] .conversation-end-ask:hover { background: var(--bg-hover); color: var(--state-crit); }
   .conversation-end[data-state="idle"] .conversation-end-icon { display: block; }
   /* The button's aria-label names it; the glyph is its face. */

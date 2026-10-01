@@ -1,14 +1,16 @@
 import { fitMachineLine } from "./conversation-shell";
 import { machineMonogram } from "./machine-accent";
-import { renderMarkdown } from "./markdown-renderer";
+import { plainTextMarkdown, renderMarkdown } from "./markdown-renderer";
 import { refusal } from "./refusal";
 import { shouldFollowTail } from "./transcript";
 import { bindSwipeDismiss } from "./swipe-dismiss";
-import type { ConversationEvent, ConversationHistory, ConversationSend } from "./conversation-history";
+import { sessionCodename, type ConversationEvent, type ConversationHistory, type ConversationSend, type EarlierSession } from "./conversation-history";
 import type { ArtifactRef, OperatorReply, OperatorTurnKind } from "./types";
 import {
   cellTone,
+  clockLabel,
   coalesceText,
+  dayLabel,
   messageBlocks,
   threadModel,
   type ThreadCoalesce,
@@ -134,6 +136,14 @@ export interface ConversationViewOptions {
    * in the history with the same replyTo, which is what marks the ask answered.
    */
   respond?: (ask: OperatorReply, text: string) => void;
+  /**
+   * What the session is doing while it has said nothing to Commander
+   * (cas-55a4): when it last did anything and between whom. The empty
+   * thread shows it, so a live session never reads as idle or as a copy.
+   */
+  activity?: () => { at?: number; label?: string } | undefined;
+  /** The empty thread offers the session's Terminal view (cas-55a4). */
+  openTerminal?: () => void;
   /** Requests the next older durable page when history has more turns. */
   loadEarlier?: () => void;
   /** Whether the daemon reported an older page still available. */
@@ -194,6 +204,55 @@ function landFocusIn(bubble: HTMLElement, className: string): void {
   bubble.focus({ preventScroll: true });
 }
 
+/** "Last activity 3m ago · supervisor → worker-1" for the empty thread (cas-55a4). */
+export function emptyActivityText(activity: { at?: number; label?: string }, now: number): string {
+  const when = activity.at === undefined ? undefined : relativeAgo(activity.at, now);
+  return ["Last activity", when, activity.label ? `· ${activity.label}` : undefined].filter(Boolean).join(" ");
+}
+
+function relativeAgo(at: number, now: number): string {
+  const elapsed = Math.max(0, now - at);
+  if (elapsed < 60_000) return "just now";
+  if (elapsed < 3_600_000) return `${Math.floor(elapsed / 60_000)}m ago`;
+  if (elapsed < 86_400_000) return `${Math.floor(elapsed / 3_600_000)}h ago`;
+  return `${Math.floor(elapsed / 86_400_000)}d ago`;
+}
+
+/** "Earlier session calm-puma-34, Yesterday" (cas-55a4). */
+export function earlierSessionLabel(entry: Pick<EarlierSession, "session" | "lastAt">, now: number): string {
+  const when = entry.lastAt === undefined ? undefined : dayLabel(entry.lastAt, now);
+  if (!entry.session) return `Earlier messages with no session recorded${when ? `, ${when}` : ""}`;
+  return `Earlier session ${sessionCodename(entry.session)}${when ? `, ${when}` : ""}`;
+}
+
+/** One collapsed earlier session: its label, then its turns with their day and time. */
+function earlierSessionNode(document: Document, entry: EarlierSession, now: number, open: boolean): HTMLElement {
+  const details = document.createElement("details"); details.className = "earlier-session";
+  details.dataset.session = entry.session;
+  details.open = open;
+  const summary = document.createElement("summary");
+  const label = document.createElement("span"); label.className = "earlier-label"; label.textContent = earlierSessionLabel(entry, now);
+  const count = document.createElement("span"); count.className = "earlier-count";
+  count.textContent = `${entry.events.length} message${entry.events.length === 1 ? "" : "s"}`;
+  summary.append(label, count);
+  const list = document.createElement("ol"); list.className = "earlier-turns";
+  for (const event of entry.events) {
+    const item = document.createElement("li"); item.className = `earlier-turn ${event.kind === "send" ? "you" : "supervisor"}`;
+    const who = document.createElement("b"); who.textContent = event.kind === "send" ? (event.value.deviceLabel ? `You · ${event.value.deviceLabel}` : "You") : "Supervisor";
+    const time = document.createElement("time");
+    if (event.at !== undefined && Number.isFinite(event.at)) {
+      time.dateTime = new Date(event.at).toISOString();
+      time.textContent = `${dayLabel(event.at, now)} ${clockLabel(event.at)}`;
+    }
+    const text = document.createElement("p");
+    text.textContent = plainTextMarkdown(event.kind === "send" ? event.value.text : event.value.message);
+    item.append(who, " ", time, text);
+    list.append(item);
+  }
+  details.append(summary, list);
+  return details;
+}
+
 export class ConversationView {
   readonly element: HTMLElement;
   /**
@@ -206,6 +265,8 @@ export class ConversationView {
   private readonly loadEarlier: HTMLButtonElement;
   private readonly msgs: HTMLElement;
   private readonly empty: HTMLElement;
+  /** Other sessions' turns, collapsed and labelled (cas-55a4); never part of the log. */
+  private readonly earlier: HTMLElement;
   /**
    * "Jump to latest", shown while the reader is scrolled away from the tail.
    * Mount it above the composer (as main.ts does), outside the scrolling
@@ -281,7 +342,9 @@ export class ConversationView {
     this.unsent = document.createElement("button"); this.unsent.type = "button";
     this.unsent.className = "conversation-unsent"; this.unsent.hidden = true;
     this.unsent.onclick = () => this.restoreUnsent();
-    this.element.append(...(this.options.header === false ? [] : [this.head]), this.loadEarlier, this.msgs, this.empty, this.jump);
+    this.earlier = document.createElement("section"); this.earlier.className = "earlier-sessions"; this.earlier.hidden = true;
+    this.earlier.setAttribute("aria-label", "Earlier sessions");
+    this.element.append(...(this.options.header === false ? [] : [this.head]), this.earlier, this.loadEarlier, this.msgs, this.empty, this.jump);
     this.pinned = document.createElement("div"); this.pinned.className = "pinned-ask"; this.pinned.hidden = true;
     bindSwipeDismiss(this.pinned, { onDismiss: () => { const ask = this.history.pinnedAsk(); if (ask) this.dismissAsk(ask.notification_id, false); } });
     if (this.options.accentClass) this.pinned.classList.add(this.options.accentClass);
@@ -344,6 +407,7 @@ export class ConversationView {
     this.renderPinned(document);
     this.renderUnsent();
     this.renderEmpty(model.length === 0, this.options.loadingHistory?.() === true);
+    this.renderEarlier(model.length === 0);
     const held = anchor && this.anchorNode(anchor);
     if (anchor && held) {
       // The button sits above every turn, so the browser's own scroll
@@ -615,7 +679,10 @@ export class ConversationView {
     }
     delete this.empty.dataset.state;
     const echo = this.options.echo?.()?.trim() || "";
-    const signature = JSON.stringify([supervisor, machine, project, echo]);
+    const activity = this.options.activity?.();
+    const activityText = activity?.at !== undefined || activity?.label ? emptyActivityText(activity, Date.now()) : "";
+    const terminal = this.options.openTerminal !== undefined;
+    const signature = JSON.stringify([supervisor, machine, project, echo, activityText, terminal]);
     if (this.empty.dataset.signature === signature) return;
     this.empty.dataset.signature = signature;
     const document = this.element.ownerDocument;
@@ -644,11 +711,42 @@ export class ConversationView {
     const codename = document.createElement("span"); codename.className = "codename"; codename.textContent = supervisor; codename.title = supervisor;
     // The brackets travel with it: no line break between "(" and the name.
     const who = document.createElement("span"); who.className = "said-who"; who.append("(", codename, ")");
-    said.append("Nothing waiting on you. The supervisor ", who, " will write here when it needs a decision.");
+    // cas-55a4: an honest empty state. This session has said nothing here
+    // yet; another session's thread is never shown in its place.
+    said.append("No Commander messages from this session yet. The supervisor ", who, " will write here when it needs a decision.");
     const children: HTMLElement[] = [mono, name, where, said];
+    if (activityText) { const live = document.createElement("p"); live.className = "empty-activity"; live.textContent = activityText; children.push(live); }
+    if (this.options.openTerminal) {
+      const open = document.createElement("button"); open.type = "button"; open.className = "empty-terminal";
+      open.textContent = "Open Terminal";
+      open.onclick = () => this.options.openTerminal?.();
+      children.push(open);
+    }
     if (echo) { const quiet = document.createElement("div"); quiet.className = "quiet"; quiet.textContent = echo; children.push(quiet); }
     this.empty.replaceChildren(...children);
     if (typeof requestAnimationFrame !== "undefined") requestAnimationFrame(() => this.fitEmptyMeta());
+  }
+
+  /**
+   * Other sessions' Commander turns (cas-55a4): one collapsed, labelled
+   * section per session, "Earlier session calm-puma-34, Yesterday". They are
+   * read-only history: nothing in them waits, pins or answers. Above the
+   * thread when it has turns; under the empty card when it has none, so the
+   * card says first that this session has not written yet.
+   */
+  private renderEarlier(threadEmpty: boolean): void {
+    const sessions = this.history.earlierSessions();
+    this.earlier.hidden = sessions.length === 0;
+    // Jump to latest is mounted outside the thread, so place by the card and the button.
+    if (threadEmpty) { if (this.empty.nextElementSibling !== this.earlier) this.empty.after(this.earlier); }
+    else if (this.earlier.nextElementSibling !== this.loadEarlier) this.loadEarlier.before(this.earlier);
+    const now = Date.now();
+    const signature = JSON.stringify(sessions.map((entry) => [entry.session, entry.lastAt, entry.events.map((event) => event.kind === "send" ? [event.value.notificationId, event.value.text] : [event.value.notification_id, event.value.message])]).concat([dayLabel(now, now)]));
+    if (this.earlier.dataset.signature === signature) return;
+    this.earlier.dataset.signature = signature;
+    const document = this.element.ownerDocument;
+    const open = new Set([...this.earlier.querySelectorAll<HTMLDetailsElement>("details[open]")].map((node) => node.dataset.session));
+    this.earlier.replaceChildren(...sessions.map((entry) => earlierSessionNode(document, entry, now, open.has(entry.session))));
   }
 
   /** The empty card's machine · codename line, fitted like the header's (cas-71af). */

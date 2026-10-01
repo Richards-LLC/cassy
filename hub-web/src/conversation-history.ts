@@ -83,9 +83,33 @@ export function durableSeq(event: ConversationEvent): number | undefined {
 /** A machine stamp this far past the browser's clock means the machine's clock runs ahead. */
 const CLOCK_AHEAD_MS = 60_000;
 
+/**
+ * The short codename of a factory session (cas-55a4): `gabber-studio-calm-puma-34`
+ * reads `calm-puma-34`. A name without the generated `word-word-number` tail
+ * is its own codename.
+ */
+export function sessionCodename(session: string): string {
+  return /([a-z]+-[a-z]+-\d+)$/i.exec(session)?.[1] ?? session;
+}
+
+/**
+ * Another session's Commander turns (cas-55a4), kept beside the thread and
+ * never in it: Commander shows them only as a labelled, collapsed section.
+ * `session` is empty for turns written with no session recorded.
+ */
+export interface EarlierSession {
+  session: string;
+  /** Oldest first, by the machine's durable sequence. */
+  events: ConversationEvent[];
+  /** The newest turn's stamp (ms epoch), when any carries one. */
+  lastAt?: number;
+}
+
 /** In-memory per-thread evidence. A submitted socket frame is never a receipt. */
 export class ConversationHistory {
   readonly events: ConversationEvent[] = [];
+  /** Other sessions' turns, by session (cas-55a4). Never waiting, pinned or previewed. */
+  private readonly others = new Map<string, ConversationEvent[]>();
   /**
    * The supervisor session this thread is attached to now. A question stamped
    * with another session was asked by one that has since ended (cas-16eed).
@@ -186,8 +210,43 @@ export class ConversationHistory {
     return this.events.reduce((max, event) => (event.at !== undefined && Number.isFinite(event.at) && event.at > max ? event.at : max), Number.NEGATIVE_INFINITY);
   }
 
+  /**
+   * Whether a durable turn stamped with `session` belongs to another session
+   * than the one this thread is attached to (cas-55a4). A turn with no session
+   * field predates session stamps and stays in the thread; an empty one was
+   * written with no session recorded and does not.
+   */
+  private foreign(session: string | undefined): boolean {
+    return session !== undefined && this.currentSession !== undefined && session !== this.currentSession;
+  }
+
+  /** File another session's durable turn beside the thread, once, in its sequence. */
+  private keepEarlier(event: ConversationEvent, session: string): void {
+    let events = this.others.get(session);
+    if (!events) this.others.set(session, (events = []));
+    const seq = durableSeq(event);
+    if (seq !== undefined && events.some((existing) => durableSeq(existing) === seq)) return;
+    const later = seq === undefined ? -1 : events.findIndex((existing) => (durableSeq(existing) ?? Number.POSITIVE_INFINITY) > seq);
+    if (later < 0) events.push(event); else events.splice(later, 0, event);
+  }
+
+  /**
+   * Other sessions' turns (cas-55a4), the most recently active session first.
+   * They are history from those sessions, not this one's conversation.
+   */
+  earlierSessions(): EarlierSession[] {
+    return [...this.others].map(([session, events]) => {
+      const stamps = events.flatMap((event) => event.at !== undefined && Number.isFinite(event.at) ? [event.at] : []);
+      return { session, events: [...events], ...(stamps.length ? { lastAt: Math.max(...stamps) } : {}) };
+    }).sort((a, b) => (b.lastAt ?? 0) - (a.lastAt ?? 0));
+  }
+
   /** Merge one durable operator message without duplicating a live ack. */
   hydrateSend(message: ConversationHistoryMessage, now: number = Date.now()): void {
+    if (this.foreign(message.session)) {
+      this.keepEarlier({ kind: "send", value: { id: `history:${message.notification_id}`, target: message.target, text: message.text, state: message.state, notificationId: message.notification_id, stamped: message.stamped, deviceLabel: message.operator_label, ...(message.reply_to === undefined ? {} : { replyTo: message.reply_to }) }, at: ConversationHistory.timestamp(message.at), session: message.session }, message.session!);
+      return;
+    }
     const existing = this.events.find((event) => event.kind === "send" && event.value.notificationId === message.notification_id);
     if (existing?.kind === "send") {
       existing.value.target = message.target;
@@ -472,6 +531,10 @@ export class ConversationHistory {
   hydrateReply(reply: ConversationHistoryReply, now: number = Date.now()): void {
     const { at, ...live } = reply;
     const stamped = ConversationHistory.timestamp(at);
+    if (this.foreign(reply.session)) {
+      this.keepEarlier({ kind: "reply", value: { ...live, reply_to: live.reply_to ?? null, kind: live.kind ?? "answer", attachments: live.attachments ?? [] }, at: stamped, session: reply.session }, reply.session!);
+      return;
+    }
     this.observeStamp(stamped, now);
     this.reply(live, stamped, reply.session, undefined, now, "durable");
   }

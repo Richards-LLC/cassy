@@ -40,6 +40,10 @@ export interface HubSession {
   dormant?: boolean;
   /** Browser-only retention of a destination with an in-flight message. */
   unreachable?: boolean;
+  /** When the session last did anything: its newest queue row (cas-55a4). */
+  last_activity_at?: string;
+  /** Who that row was between, e.g. "supervisor → worker-1"; never its content. */
+  last_activity?: string;
 }
 
 export interface PaneInfo {
@@ -110,6 +114,9 @@ export interface ConversationHistoryPage {
   replies: ConversationHistoryReply[];
   has_earlier: boolean;
   next_before?: number;
+  /** Other sessions' recent turns, with the newest page only (cas-55a4). Not this session's thread. */
+  earlier_messages?: ConversationHistoryMessage[];
+  earlier_replies?: ConversationHistoryReply[];
 }
 
 /** Durable acknowledgment for a Commander SendMessage submission. */

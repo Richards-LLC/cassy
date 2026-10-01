@@ -29,6 +29,43 @@ export interface ConversationRow {
   /** Supervisor turns the operator has not opened: filled count pill in the machine accent. */
   unread?: number;
   selected: boolean;
+  /** When the session last did anything (ms epoch), for grouping and its time (cas-55a4). */
+  activityAt?: number;
+  /**
+   * One of several live sessions of a project on one machine (cas-55a4). The
+   * rows sit together under one heading; the most recently active one is
+   * marked, so the others never read as copies of it.
+   */
+  group?: { key: string; label: string; size: number; first: boolean; active: boolean };
+  /** This device may end the session (factory-manage), offered on grouped and dormant rows. */
+  canEnd?: boolean;
+}
+
+/**
+ * Put the rows of one project's live sessions on one machine together, most
+ * recently active first, at the place of the group's first row; mark the most
+ * recent one (cas-55a4). Rows of a project with one session are unchanged.
+ */
+export function groupConversationRows<T extends ConversationRow>(rows: readonly T[]): T[] {
+  const groupKey = (row: T): string => `${row.machineId}\u0000${row.projectDir ?? `session:${row.session}`}`;
+  const members = new Map<string, T[]>();
+  for (const row of rows) {
+    const key = groupKey(row);
+    members.set(key, [...(members.get(key) ?? []), row]);
+  }
+  const out: T[] = [];
+  const placed = new Set<string>();
+  for (const row of rows) {
+    const key = groupKey(row);
+    if (placed.has(key)) continue;
+    placed.add(key);
+    const group = members.get(key)!;
+    if (group.length < 2) { out.push({ ...row, group: undefined }); continue; }
+    const ordered = [...group].sort((a, b) => (b.activityAt ?? -Infinity) - (a.activityAt ?? -Infinity));
+    const label = `${projectTitle(row.projectDir) ?? row.supervisor} · ${group.length} sessions on ${machineName(row.host)}`;
+    ordered.forEach((member, index) => out.push({ ...member, group: { key, label, size: group.length, first: index === 0, active: index === 0 && member.activityAt !== undefined } }));
+  }
+  return out;
 }
 
 export const CONVERSATION_PREVIEW_MAX_CHARS = 160;
@@ -81,8 +118,10 @@ export function conversationRowMarkup(row: ConversationRow): string {
   // monogram and accent alone do not name it. A long machine name ellipsises
   // inside the title column (its title attribute carries it whole) instead of
   // running under the time stamp (cas-1ca1). The codename sits beneath.
+  // cas-55a4: among one project's sessions, the most recently active one says so.
+  const mark = row.group?.active ? `<span class="conversation-session-mark">Most recent</span>` : "";
   return `<span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(row.host))}</span>`
-    + `<span class="conversation-who"><span class="conversation-title"><strong class="conversation-project${project ? "" : " codename"}">${escapeHtml(project ?? row.supervisor)}</strong><span class="conversation-machine" title="${escapeHtml(machineName(row.host))}"><span class="conversation-sep" aria-hidden="true"></span><span class="conversation-machine-name">${escapeHtml(machineName(row.host))}</span></span></span>${project ? `<span class="conversation-supervisor codename">${escapeHtml(row.supervisor)}</span>` : ""}</span>`
+    + `<span class="conversation-who"><span class="conversation-title"><strong class="conversation-project${project ? "" : " codename"}">${escapeHtml(project ?? row.supervisor)}</strong><span class="conversation-machine" title="${escapeHtml(machineName(row.host))}"><span class="conversation-sep" aria-hidden="true"></span><span class="conversation-machine-name">${escapeHtml(machineName(row.host))}</span></span></span>${project ? `<span class="conversation-supervisor codename">${escapeHtml(row.supervisor)}${mark}</span>` : mark}</span>`
     + time
     + `<span class="conversation-preview${row.unreachable ? " unreachable" : row.interrupted ? " interrupted" : waiting || unread > 0 ? " bold" : ""}">${escapeHtml(preview)}</span>`
     + marks;
@@ -91,30 +130,100 @@ export function conversationRowMarkup(row: ConversationRow): string {
 /** Keyed buttons: a catalog heartbeat must never steal keyboard focus. */
 export class ConversationList {
   private nodes = new Map<string, HTMLButtonElement>();
-  render(container: HTMLElement, rows: readonly ConversationRow[], open: (row: ConversationRow, event?: MouseEvent) => void): void {
+  /** Group headings and End session controls, keyed beside the rows (cas-55a4). */
+  private extras = new Map<string, HTMLElement>();
+  /** Rows whose End session is asking for confirmation, or ending. */
+  private ending = new Map<string, "confirm" | "ending" | { error: string }>();
+  render(container: HTMLElement, rows: readonly ConversationRow[], open: (row: ConversationRow, event?: MouseEvent) => void, end?: (row: ConversationRow) => Promise<void>): void {
+    const document = container.ownerDocument;
+    const ordered: HTMLElement[] = [];
     const current = new Set(rows.map((row) => row.key));
     for (const [key, node] of this.nodes) {
       if (!current.has(key) || node.parentElement !== container) { node.remove(); this.nodes.delete(key); }
     }
-    rows.forEach((row, index) => {
+    for (const key of this.ending.keys()) if (!current.has(key)) this.ending.delete(key);
+    const extrasKept = new Set<string>();
+    const extra = (key: string, make: () => HTMLElement): HTMLElement => {
+      let node = this.extras.get(key);
+      if (!node) { node = make(); this.extras.set(key, node); }
+      extrasKept.add(key);
+      return node;
+    };
+    for (const row of rows) {
+      if (row.group?.first) {
+        const head = extra(`group:${row.group.key}`, () => { const node = document.createElement("p"); node.className = "conversation-group-head"; return node; });
+        if (head.textContent !== row.group.label) head.textContent = row.group.label;
+        ordered.push(head);
+      }
       let node = this.nodes.get(row.key);
       if (!node) {
-        node = container.ownerDocument.createElement("button");
+        node = document.createElement("button");
         node.type = "button";
         this.nodes.set(row.key, node);
       }
       // The accent class rides on the row itself so both of a machine's projects share its colour.
-      const className = `conversation-row ${machineAccentClass(row.machineId)}`;
+      const className = `conversation-row ${machineAccentClass(row.machineId)}${row.group ? " grouped" : ""}`;
       if (node.className !== className) node.className = className;
       node.dataset.threadKey = row.key;
       node.dataset.machineId = row.machineId;
       node.dataset.waiting = String(row.attention > 0);
       node.dataset.unread = String(row.unread ?? 0);
+      if (row.group) node.dataset.mostRecent = String(row.group.active); else delete node.dataset.mostRecent;
       node.setAttribute("aria-current", String(row.selected));
       node.onclick = (event) => open(row, event);
       const markup = conversationRowMarkup(row);
       if (node.innerHTML !== markup) node.innerHTML = markup;
+      ordered.push(node);
+      if (row.canEnd && end) {
+        const control = extra(`end:${row.key}`, () => { const node = document.createElement("div"); node.className = "conversation-end"; return node; });
+        this.renderEnd(control, row, container, rows, open, end);
+        ordered.push(control);
+      }
+    }
+    for (const [key, node] of this.extras) {
+      if (!extrasKept.has(key)) { node.remove(); this.extras.delete(key); }
+    }
+    ordered.forEach((node, index) => {
       if (container.children[index] !== node) container.insertBefore(node, container.children[index] ?? null);
     });
+  }
+
+  /**
+   * End session, then a confirmation that names what stops (cas-55a4). Only
+   * the confirmation's own button ends anything.
+   */
+  private renderEnd(control: HTMLElement, row: ConversationRow, container: HTMLElement, rows: readonly ConversationRow[], open: (row: ConversationRow, event?: MouseEvent) => void, end: (row: ConversationRow) => Promise<void>): void {
+    const state = this.ending.get(row.key);
+    const signature = JSON.stringify([row.supervisor, row.host, state]);
+    if (control.dataset.signature === signature) return;
+    control.dataset.signature = signature;
+    const document = control.ownerDocument;
+    const rerender = (): void => this.render(container, rows, open, end);
+    const button = (text: string, className: string, onclick: () => void): HTMLButtonElement => {
+      const node = document.createElement("button"); node.type = "button"; node.className = className; node.textContent = text; node.onclick = onclick; return node;
+    };
+    if (state === undefined || typeof state === "object") {
+      const ask = button("End session", "conversation-end-ask", () => { this.ending.set(row.key, "confirm"); rerender(); control.querySelector<HTMLButtonElement>(".conversation-end-cancel")?.focus(); });
+      ask.setAttribute("aria-label", `End session ${row.supervisor} on ${machineName(row.host)}`);
+      const children: Node[] = [ask];
+      if (typeof state === "object") { const error = document.createElement("span"); error.className = "conversation-end-error"; error.setAttribute("role", "alert"); error.textContent = state.error; children.push(error); }
+      control.replaceChildren(...children);
+      return;
+    }
+    const question = document.createElement("span"); question.className = "conversation-end-question";
+    question.textContent = state === "ending"
+      ? `Ending ${row.supervisor}…`
+      : `End ${row.supervisor} on ${machineName(row.host)}? Its supervisor and workers stop.`;
+    if (state === "ending") { question.setAttribute("role", "status"); control.replaceChildren(question); return; }
+    const confirm = button("End session", "conversation-end-confirm danger", () => {
+      this.ending.set(row.key, "ending");
+      rerender();
+      void end(row).then(() => { this.ending.delete(row.key); }, (error: unknown) => {
+        this.ending.set(row.key, { error: `Could not end ${row.supervisor}: ${error instanceof Error ? error.message : String(error)}` });
+        rerender();
+      });
+    });
+    const cancel = button("Cancel", "conversation-end-cancel", () => { this.ending.delete(row.key); rerender(); });
+    control.replaceChildren(question, confirm, cancel);
   }
 }

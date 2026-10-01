@@ -523,6 +523,16 @@ impl Pane {
         (self.rows, self.cols)
     }
 
+    /// The kernel window size of this pane's PTY as `(rows, cols)`, or `None`
+    /// for a PTY-less pane or when the query fails. Unlike [`Pane::size`],
+    /// which is bookkeeping, this is what the child process sees (cas-06a2).
+    pub fn pty_winsize(&self) -> Option<(u16, u16)> {
+        match &self.backend {
+            PaneBackend::Pty(pty) => pty.winsize().ok(),
+            PaneBackend::None => None,
+        }
+    }
+
     pub fn cursor_position(&self) -> (u16, u16) {
         self.terminal.cursor_position()
     }

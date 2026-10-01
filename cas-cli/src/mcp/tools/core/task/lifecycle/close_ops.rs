@@ -23765,6 +23765,47 @@ mod merge_state_gate_tests {
         );
     }
 
+    /// cas-2664 (7), the cas-ef5e shape: lane commit → merge of the epic tip
+    /// into the lane (as the supervisor asked, to resolve overlap) → lane
+    /// commit. The merged-in epic content is other tasks' delivery; only the
+    /// lane's own commits are attributed, for paths, base and diff stat.
+    #[test]
+    fn target_merged_into_lane_is_not_attributed_to_the_task_cas_2664() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        commit_file_with_message_at(p, "own-a.rs", "feat: first half (cas-test1)", "2026-08-04T12:00:00Z");
+        git(p, &["checkout", "-q", "main"]);
+        // Other tasks' deliveries land on the epic (target) meanwhile; one
+        // names no task at all.
+        commit_file_with_message_at(p, "epic-gate.rs", "fix(close): gate (cas-b412)", "2026-08-04T12:10:00Z");
+        commit_file_with_message_at(p, "epic-hook.rs", "hook policy", "2026-08-04T12:20:00Z");
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git_at(
+            p,
+            &["merge", "-q", "--no-ff", "main", "-m", "Merge epic tip into factory/worker"],
+            "2026-08-04T12:30:00Z",
+        );
+        commit_file_with_message_at(p, "own-b.rs", "feat: second half (cas-test1)", "2026-08-04T12:40:00Z");
+
+        let task = worker_task("worker");
+        let mut window = window_at(0, "task work cycle");
+        window.identity = task_commit_identity(&task, None);
+        let paths = task_attribution::paths(p, "main", &window, None).expect("attribution");
+        assert_eq!(paths, vec!["own-a.rs".to_string(), "own-b.rs".to_string()]);
+        let stat = task_attribution::diff_stat(p, "main", &window, None).expect("diff stat");
+        assert!(!stat.stat.contains("epic-"), "{}", stat.stat);
+        assert!(stat.stat.contains("own-a.rs") && stat.stat.contains("own-b.rs"), "{}", stat.stat);
+
+        // A merge of a branch that is NOT on the target is still attributed.
+        git(p, &["checkout", "-q", "-b", "side", "main"]);
+        commit_file_with_message_at(p, "side.rs", "side work", "2026-08-04T12:50:00Z");
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git_at(p, &["merge", "-q", "--no-ff", "side", "-m", "merge side"], "2026-08-04T12:55:00Z");
+        let paths = task_attribution::paths(p, "main", &window, None).expect("attribution");
+        assert!(paths.contains(&"side.rs".to_string()), "{paths:?}");
+        assert!(!paths.iter().any(|path| path.starts_with("epic-")), "{paths:?}");
+    }
+
     #[test]
     fn message_claims_other_task_matches_only_foreign_task_ids_cas_2664() {
         assert!(message_claims_other_task("fix (cas-f0a6)", Some("cas-b412")));

@@ -7,6 +7,42 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.42.0] - 2026-10-01
+
+### Fixed
+
+- `loop_start` no longer fails with `UNIQUE constraint failed: loops.id`.
+  Loop IDs were the last four hex digits of the millisecond clock, so two
+  loops started in the same millisecond, or a multiple of about 65.5 seconds
+  apart, collided. New loops get random 64-bit IDs checked against existing
+  rows; existing IDs keep working.
+- Commander's footer says "Needs pairing", not "Reconnecting", when the only
+  paired machine's pairing is revoked. Footer, header, machine rows and
+  context now share one connection-label helper.
+
+### Testing
+
+- Tests that could pass without proving anything now fail when the behaviour
+  breaks: six semantic-search tests that returned before asserting, the cloud
+  sync CLI journeys (now wired into a harness, with required HTTP requests and
+  durable read-back), PTY and no-ANSI smoke tests that matched the echoed
+  command, and 41 ignored tests for removed CLI commands (replaced by 16
+  current-seam tests).
+- Environment-mutation hygiene: the MCP tool tests, hook handler tests,
+  `cas-pty` and `cas-mux` hold the canonical `TestEnvGuard`. The rule-026
+  baseline drops from 1,066 to 143 recorded sites, and `check-test-env`
+  flags raw `set_var`/`remove_var` even while a guard is held.
+- The consolidated scoped-proof inventory flake is fixed: its stub checker
+  exited before reading stdin, so the resolver's write failed and it fell
+  back to a wider target set.
+- hub-web: source-order assertions are replaced with DOM and built-bundle
+  journey assertions; the network-switch journey runs on one protocol clock
+  with no fixed waits (121 s to 60 s); a draft-mismatch diagnostic attaches
+  composer node identity to failing traces.
+- `scripts/test-ci-test-tiers.sh` is split into parsed CI policy, executable
+  contracts and reasoned prose pins. PyYAML is pinned and installed into an
+  isolated venv only when it is missing.
+
 ## [3.41.0] - 2026-09-30
 
 ### Added

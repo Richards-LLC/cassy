@@ -3755,7 +3755,12 @@ function syncConversationAttention(count: number): void {
     const text = badge.querySelector(".conversation-attention-count");
     if (text && text.textContent !== view.text) text.textContent = view.text;
   }
-  if (count < 1 && attentionSheetOpen) closeAttentionSheet();
+  // Nothing left (the last item dismissed in the sheet) closes it with focus
+  // back in the conversation; leaving the conversation closes it quietly.
+  if (count < 1 && attentionSheetOpen) {
+    if (hubPresentation === "conversation" && selectedSession) closeAttentionSheet();
+    else attentionSheetOpen = false;
+  }
   applyAttentionSheet();
 }
 function applyAttentionSheet(): void {

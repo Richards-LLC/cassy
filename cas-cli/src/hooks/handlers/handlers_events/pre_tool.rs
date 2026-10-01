@@ -20,6 +20,14 @@ pub fn handle_pre_tool_use(
         None => return Ok(HookOutput::empty()),
     };
 
+    // Run before factory auto-approval and the missing-root early return.
+    // Slack transport is an operator policy for every session.
+    if let Some(reason) =
+        super::slack_transport::denial(tool_name, input.tool_input.as_ref(), cas_root)
+    {
+        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+    }
+
     let is_factory_agent = crate::harness_policy::is_factory_agent(input);
 
     // ========================================================================

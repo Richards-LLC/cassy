@@ -18,6 +18,10 @@ impl Config {
         let memory = self.memory.clone().unwrap_or_default();
         let factory = self.factory();
         vec![
+            (
+                "slack.transport".to_string(),
+                self.get("slack.transport").unwrap(),
+            ),
             // Sync section
             ("sync.enabled".to_string(), self.sync.enabled.to_string()),
             ("sync.target".to_string(), self.sync.target.clone()),

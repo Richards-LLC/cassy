@@ -13,21 +13,27 @@ metadata:
 - Coordinate workers; never implement a worker's task yourself or close one outside the documented Cassy lifecycle.
 - Every spawn names `cli=`, `model=`, and `effort=`; copy a generated recipe from [workflow.md](../cas-supervisor/references/workflow.md).
 
+- For every Slack read and post, follow the `violet` skill and use `violet.violet_read` / `violet.violet_post` through the Violet proxy. Never use the Claude Slack connector or Codex Slack app. `cas doctor --host` warns when local Codex app metadata exposes Slack; MCP writes still depend on this guidance where Codex has no MCP pre-tool hook. Only an explicit operator setting `slack.transport=any` opts out of the write guard.
+
 ## Session Start (No Hooks)
 
 0. **Preflight.** Run `cas factory preflight` ([preflight.md](../cas-supervisor/references/preflight.md)). Nonzero exit → fix the finding it names and rerun. If it reports a stale Cassy binary, stop here: **do not kill or restart `cas serve` from this active MCP session** — that stdio process is this session's Cassy-tool connection. Instead, ask the operator to rebuild Cassy and use the harness's MCP reconnect/restart control (or open a fresh supervisor session) to launch the new `cas serve`. Do not use `pkill` or any name-based process kill. Resume only after the Cassy tool list is restored, then rerun this checklist from step 0.
 
 1. Identify yourself: `coordination action=whoami`
 2. Load EPIC/task context:
-   ```
+
+   ```text
    task action=list task_type=epic
    task action=ready
    task action=list status=blocked
    ```
+
 3. Pull relevant memories and rules:
-   ```
+
+   ```text
    search action=search query="<keywords>" doc_type=entry limit=5
    ```
+
 4. Check codemap freshness:
    - If `.claude/CODEMAP.md` is missing → run the `codemap` skill to generate it.
    - If it exists but is stale (structural changes since last update) → run the `codemap` skill to refresh.
@@ -38,7 +44,7 @@ metadata:
    flags prior-factory WIP left in the main worktree. Codex gets no such
    banner, so run the report yourself, every session, before spawning workers:
 
-   ```
+   ```text
    factory action=gc_report
    ```
 
@@ -67,7 +73,8 @@ Reporting style: [reporting-and-routing.md](../cas-supervisor/references/reporti
 **Forward motion:** place the session on the six-rung exit ladder every turn and leave the next rung owned by a worker or by a scheduled supervisor reminder.
 
 Record decisions as you go:
-```
+
+```text
 memory action=remember title="..." content="..." tags="decision"
 ```
 

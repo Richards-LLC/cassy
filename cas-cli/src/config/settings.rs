@@ -1,6 +1,21 @@
 use cas_factory::AutoPromptConfig;
 use serde::{Deserialize, Serialize};
 
+/// Slack writes use Violet unless the operator explicitly opts out.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SlackTransport {
+    #[default]
+    Violet,
+    Any,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SlackConfig {
+    #[serde(default)]
+    pub transport: SlackTransport,
+}
+
 /// Hub origin configuration. Lives at `[hub]` in `.cas/config.toml`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HubConfig {

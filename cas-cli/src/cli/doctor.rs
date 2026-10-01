@@ -261,12 +261,9 @@ impl CheckGroup {
             | "mcp upstream reachability"
             | "sync target"
             | "models"
-            | "sessionstart budget" =>
-            {
-                Self::Config
-            }
+            | "sessionstart budget" => Self::Config,
             "issue repositories" => Self::Config,
-            "integrations" | "violet" | "mecha-cassy" => Self::Integrations,
+            "integrations" | "violet" => Self::Integrations,
             name if name.starts_with("integration") => Self::Integrations,
             _ => Self::Store,
         }
@@ -358,9 +355,17 @@ const EXPECTED_TABLES: &[&str] = &[
 /// [`crate::builtins::SHIPPED_NON_CAS_SKILL_DIRS`], so any other
 /// hand-installed skill is never written by `cas update` **and** never pruned by it —
 /// it simply persists forever, unreachable by any test in this repo. That is
-/// exactly how `mecha-cassy-post` kept documenting a retired hub tool contract
+/// exactly how `retired posting skill` kept documenting a retired hub tool contract
 /// after every in-repo copy had been corrected.
-const RETIRED_USER_SKILLS: &[(&str, &str)] = &[("mecha-cassy-post", "violet")];
+static RETIRED_USER_SKILLS: std::sync::LazyLock<Vec<(&'static str, &'static str)>> =
+    std::sync::LazyLock::new(|| {
+        vec![(
+            cas_types::violet_compatibility::violet_compatibility()
+                .retired_post_skill
+                .as_str(),
+            "violet",
+        )]
+    });
 
 /// Why a user-level skill directory should not be on this machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -552,9 +557,7 @@ fn is_embedded_skill_projection(name: &str, content: &str) -> bool {
     .into_iter()
     .flat_map(|catalog| catalog.iter())
     .filter(|builtin| builtin.path == expected_path)
-    .any(|builtin| {
-        crate::builtins::normalize_harness_skill_content(builtin.content) == normalized
-    })
+    .any(|builtin| crate::builtins::normalize_harness_skill_content(builtin.content) == normalized)
 }
 
 /// Group `SKILL.md` files by skill name across `dirs` (canonical-path
@@ -566,7 +569,9 @@ fn find_divergent_user_skills(dirs: &[PathBuf], canonical_dir: &Path) -> Vec<Div
         std::collections::BTreeMap::new();
     let mut seen = std::collections::HashSet::new();
     for dir in dirs {
-        let Ok(entries) = fs::read_dir(dir) else { continue };
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             let skill_file = path.join("SKILL.md");
@@ -577,8 +582,12 @@ fn find_divergent_user_skills(dirs: &[PathBuf], canonical_dir: &Path) -> Vec<Div
             if !seen.insert(canonical) {
                 continue;
             }
-            let Some(name) = path.file_name().and_then(|s| s.to_str()) else { continue };
-            let Ok(content) = fs::read_to_string(&skill_file) else { continue };
+            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let Ok(content) = fs::read_to_string(&skill_file) else {
+                continue;
+            };
             // Namespace normalization is a Cassy-owned projection rule, not
             // permission to disregard arbitrary user-authored content. An
             // unmarked skill that happens to use two harness prefixes remains
@@ -1006,29 +1015,35 @@ fn host_checks(current: Option<&Path>) -> Vec<Check> {
     // Keep one result per CLI so a missing provider is easy to identify. A CLI
     // that is not installed at all is informational: most machines run only
     // some providers. An installed CLI that cannot launch is a warning.
-    checks.extend(crate::hub::launch_env::readiness().into_iter().map(|(cli, result)| {
-        let provider = match cli {
-            "claude" => cas_mux::SupervisorCli::Claude,
-            "codex" => cas_mux::SupervisorCli::Codex,
-            _ => cas_mux::SupervisorCli::Grok,
-        };
-        let profile = crate::hub::launch_env::default_profile_name(provider)
-            .unwrap_or_else(|_| "unknown".into());
-        let name = format!("hub launch {cli}");
-        match result {
-            Ok(path) => Check::new(
-                name,
-                CheckStatus::Ok,
-                format!("ready: profile {profile}, {}", path.display()),
-            ),
-            Err(crate::hub::launch_env::LaunchError::MissingBinary { .. }) => {
-                Check::new(name, CheckStatus::Ok, "not installed")
-            }
-            Err(error) => {
-                Check::new(name, CheckStatus::Warning, format!("profile {profile}: {error}"))
-            }
-        }
-    }));
+    checks.extend(
+        crate::hub::launch_env::readiness()
+            .into_iter()
+            .map(|(cli, result)| {
+                let provider = match cli {
+                    "claude" => cas_mux::SupervisorCli::Claude,
+                    "codex" => cas_mux::SupervisorCli::Codex,
+                    _ => cas_mux::SupervisorCli::Grok,
+                };
+                let profile = crate::hub::launch_env::default_profile_name(provider)
+                    .unwrap_or_else(|_| "unknown".into());
+                let name = format!("hub launch {cli}");
+                match result {
+                    Ok(path) => Check::new(
+                        name,
+                        CheckStatus::Ok,
+                        format!("ready: profile {profile}, {}", path.display()),
+                    ),
+                    Err(crate::hub::launch_env::LaunchError::MissingBinary { .. }) => {
+                        Check::new(name, CheckStatus::Ok, "not installed")
+                    }
+                    Err(error) => Check::new(
+                        name,
+                        CheckStatus::Warning,
+                        format!("profile {profile}: {error}"),
+                    ),
+                }
+            }),
+    );
     #[cfg(feature = "mcp-proxy")]
     checks.push(host_proxy_check());
     #[cfg(not(feature = "mcp-proxy"))]
@@ -1322,9 +1337,24 @@ fn host_autofix() -> Option<Check> {
 
 fn root_projection_check(root: &Path) -> Check {
     let mut stale = 0;
-    for (harness, dir) in [(cas_mux::SupervisorCli::Claude, ".claude"), (cas_mux::SupervisorCli::Codex, ".codex"), (cas_mux::SupervisorCli::Grok, ".grok")] {
-        if !root.join(dir).is_dir() { continue; }
-        match crate::builtins::preview_all_builtins_for_project(harness, root) { Ok(changes) => stale += changes.len(), Err(error) => return Check::new("root projections", CheckStatus::Warning, format!("cannot inspect {dir}: {error}")) }
+    for (harness, dir) in [
+        (cas_mux::SupervisorCli::Claude, ".claude"),
+        (cas_mux::SupervisorCli::Codex, ".codex"),
+        (cas_mux::SupervisorCli::Grok, ".grok"),
+    ] {
+        if !root.join(dir).is_dir() {
+            continue;
+        }
+        match crate::builtins::preview_all_builtins_for_project(harness, root) {
+            Ok(changes) => stale += changes.len(),
+            Err(error) => {
+                return Check::new(
+                    "root projections",
+                    CheckStatus::Warning,
+                    format!("cannot inspect {dir}: {error}"),
+                );
+            }
+        }
     }
     if stale == 0 { Check::new("root projections", CheckStatus::Ok, "managed projections are current") }
     else { Check::new("root projections", CheckStatus::Warning, format!("{stale} stale projection file(s); run `cas doctor --fix`")) }
@@ -2553,7 +2583,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     }
 
     recorder.mark("integrations", &checks);
-    // Check 13b: MechaCassy hub reachability (cas-8fad). Machine-scoped, so
+    // Check 13b: Violet hub reachability (cas-8fad). Machine-scoped, so
     // it is not part of `integration_checks` (which walks per-project keep
     // blocks). Unlike the platform rows this one *can* be an Error: a missing
     // variable, a rejected bearer, or a drifted tool contract each mean the
@@ -2665,9 +2695,8 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
                 .map(Clone::clone)
                 .map_err(|error| anyhow::anyhow!(error.to_string()));
             run_cloud_row_quarantine(&cas_root, report_for_quarantine, &row_args, cli)?;
-            (report, _) = crate::cloud::collect_sync_warnings(|| {
-                crate::cli::foreign_rows::scan(&cas_root)
-            });
+            (report, _) =
+                crate::cloud::collect_sync_warnings(|| crate::cli::foreign_rows::scan(&cas_root));
             (purge_analysis, purge_analysis_error) = match (
                 report.as_ref(),
                 crate::cloud::resolve_canonical_id(&cas_root),
@@ -8360,27 +8389,38 @@ mod tests {
 
     /// A retired skill is named even though it carries no `managed_by: cas`
     /// marker — which is the whole point, since the marker-based pruner is
-    /// exactly what failed to see `mecha-cassy-post` for its entire life.
+    /// exactly what failed to see `retired posting skill` for its entire life.
     #[test]
     fn retired_user_skill_is_reported_with_the_builtin_that_replaced_it() {
         let dir = TempDir::new().unwrap();
         let skills = dir.path().join("skills");
         let retired = write_skill(
             &skills,
-            "mecha-cassy-post",
-            "---\nname: mecha-cassy-post\n---\n\nPost release notes.\n",
+            cas_types::violet_compatibility::violet_compatibility()
+                .retired_post_skill
+                .as_str(),
+            "---\nname: retired-poster\n---\n\nPost release notes.\n",
         );
 
         let strays = scan_user_skill_dirs(&[(skills, claude_names())]);
         assert_eq!(strays.len(), 1);
-        assert_eq!(strays[0].name, "mecha-cassy-post");
+        assert_eq!(
+            strays[0].name,
+            cas_types::violet_compatibility::violet_compatibility()
+                .retired_post_skill
+                .as_str()
+        );
         assert_eq!(strays[0].path, retired);
         assert_eq!(strays[0].reason, StrayReason::RetiredBy("violet"));
 
         let check = stray_user_skills_check(&strays);
         assert!(matches!(check.status, CheckStatus::Warning));
         assert!(
-            check.message.contains("mecha-cassy-post"),
+            check.message.contains(
+                cas_types::violet_compatibility::violet_compatibility()
+                    .retired_post_skill
+                    .as_str()
+            ),
             "{}",
             check.message
         );
@@ -8480,13 +8520,17 @@ mod tests {
         let user_root = dir.path().join("user-skills");
         let managed = write_skill(
             &managed_root,
-            "mecha-cassy-post",
-            "---\nname: mecha-cassy-post\nmanaged_by: cas\n---\n\nold\n",
+            cas_types::violet_compatibility::violet_compatibility()
+                .retired_post_skill
+                .as_str(),
+            "---\nname: retired-poster\nmanaged_by: cas\n---\n\nold\n",
         );
         let user = write_skill(
             &user_root,
-            "mecha-cassy-post",
-            "---\nname: mecha-cassy-post\n---\n\noperator notes\n",
+            cas_types::violet_compatibility::violet_compatibility()
+                .retired_post_skill
+                .as_str(),
+            "---\nname: retired-poster\n---\n\noperator notes\n",
         );
         let targets = vec![
             (managed_root.clone(), claude_names()),
@@ -8504,7 +8548,14 @@ mod tests {
         assert!(message.contains("manual review"), "{message}");
 
         let removed = remove_stale_managed_user_skills(&strays, &targets).unwrap();
-        assert_eq!(removed, vec!["mecha-cassy-post"]);
+        assert_eq!(
+            removed,
+            vec![
+                cas_types::violet_compatibility::violet_compatibility()
+                    .retired_post_skill
+                    .as_str()
+            ]
+        );
         assert!(!managed.parent().unwrap().exists());
         assert!(user.parent().unwrap().exists());
     }
@@ -8651,8 +8702,10 @@ mod tests {
         let real = dir.path().join("real-account").join("skills");
         write_skill(
             &real,
-            "mecha-cassy-post",
-            "---\nname: mecha-cassy-post\n---\n",
+            cas_types::violet_compatibility::violet_compatibility()
+                .retired_post_skill
+                .as_str(),
+            "---\nname: retired-poster\n---\n",
         );
         let linked = dir.path().join("linked-account-skills");
         #[cfg(unix)]
@@ -8669,16 +8722,16 @@ mod tests {
         );
     }
 
-    /// `cas-8fad`: the machine-scoped MechaCassy row must land in the
+    /// `cas-8fad`: the machine-scoped Violet row must land in the
     /// Integrations group (not the Store catch-all) and its "Run `cas integrate
-    /// mecha-cassy`" guidance must split into doctor's remediation column
+    /// violet`" guidance must split into doctor's remediation column
     /// rather than staying buried in the diagnostic text.
     #[test]
-    fn mecha_cassy_row_groups_under_integrations_and_exposes_its_remedy() {
+    fn violet_row_groups_under_integrations_and_exposes_its_remedy() {
         let check = Check::new(
-            "mecha-cassy",
+            "violet",
             CheckStatus::Warning,
-            "not registered on this machine (/tmp/config.toml has no mecha-cassy server). \
+            "not registered on this machine (/tmp/config.toml has no violet server). \
              Run `cas integrate violet`",
         );
         assert_eq!(check.group(), CheckGroup::Integrations);

@@ -39,8 +39,8 @@ use url::Url;
 
 use cmcp_core::config::{
     Config as ProxyConfig, ExternalToolConfig, ServerConfig, VIOLET_BYPASS_HEADER,
-    VIOLET_DEFAULT_BYPASS_ENV, VIOLET_MCP_URL, VIOLET_SERVER, VIOLET_TOOLS,
-    violet_credential_value,
+    VIOLET_DEFAULT_BYPASS_ENV, VIOLET_SERVER, VIOLET_TOOLS, violet_compatibility,
+    violet_credential_value, violet_hub_url,
 };
 
 use crate::cloud::{CloudConfig, DeviceConfig};
@@ -75,7 +75,7 @@ pub struct VioletArgs {
     #[arg(long, value_name = "LABEL")]
     pub label: Option<String>,
     /// Hub MCP endpoint. Only needed against a staging hub.
-    #[arg(long, value_name = "URL", default_value = VIOLET_MCP_URL)]
+    #[arg(long, value_name = "URL", default_value = violet_hub_url())]
     pub url: String,
     /// Leave the Claude Code and Codex MCP registrations alone.
     #[arg(long)]
@@ -1213,13 +1213,16 @@ fn sorted_unique(values: &[String]) -> Vec<&str> {
 /// admits. Order-insensitive, so re-ordering a file is never reported as drift.
 pub fn tool_drift(allowlisted: &[String], live: &[String]) -> ToolDrift {
     let expected = sorted_unique(allowlisted);
-    // Production serves the deprecated mecha aliases alongside Violet. An
-    // alias is harmless when its canonical counterpart is admitted.
+    // Only the canonical hub contract determines dispatch health. Deprecated
+    // upstream aliases can disappear independently without affecting callers.
+    let contract = violet_compatibility();
     let actual: Vec<_> = sorted_unique(live)
         .into_iter()
         .filter(|tool| {
-            !matches!(*tool, "mecha_read" if expected.contains(&"violet_read"))
-                && !matches!(*tool, "mecha_post" if expected.contains(&"violet_post"))
+            !contract
+                .retired_tools
+                .iter()
+                .any(|retired| retired == *tool)
         })
         .collect();
     ToolDrift {
@@ -1326,53 +1329,7 @@ fn plan_project_proxy(
         .parse()
         .with_context(|| format!("parsing {}", path.display()))?;
 
-    let mut migrated_legacy = false;
-    if let Some(servers) = document
-        .get_mut("servers")
-        .and_then(|item| item.as_table_like_mut())
-        && !servers.contains_key(VIOLET_SERVER)
-        && let Some(legacy) = servers.get("mecha-cassy").cloned()
-    {
-        servers.insert(VIOLET_SERVER, legacy);
-        migrated_legacy = true;
-    }
-    if let Some(access) = document
-        .get_mut("worker_access")
-        .and_then(|item| item.as_table_like_mut())
-        && !access.contains_key(VIOLET_SERVER)
-        && let Some(legacy) = access.get("mecha-cassy").cloned()
-    {
-        access.insert(VIOLET_SERVER, legacy);
-        migrated_legacy = true;
-    }
-    for key in ["allowlist", "worker_read_routes"] {
-        if let Some(array) = document.get_mut(key).and_then(|item| item.as_array_mut()) {
-            let legacy_routes: Vec<_> = array
-                .iter()
-                .filter_map(entry_route)
-                .filter(|route| route.server == "mecha-cassy")
-                .map(|mut route| {
-                    route.server = VIOLET_SERVER.to_string();
-                    route.tool = match route.tool.as_str() {
-                        "mecha_read" => "violet_read".to_string(),
-                        "mecha_post" => "violet_post".to_string(),
-                        _ => route.tool,
-                    };
-                    route
-                })
-                .collect();
-            for route in legacy_routes {
-                if !array
-                    .iter()
-                    .filter_map(entry_route)
-                    .any(|current| current.server == route.server && current.tool == route.tool)
-                {
-                    array.push(route.canonical_entry());
-                    migrated_legacy = true;
-                }
-            }
-        }
-    }
+    let migrated_legacy = super::violet_retirement::retire_proxy_document(&mut document);
 
     let declares_server = document
         .get("servers")
@@ -1901,7 +1858,9 @@ fn apply_claude(
     if !servers.is_object() {
         anyhow::bail!("{}: mcpServers is not an object", path.display());
     }
-    if servers.get(VIOLET_SERVER) == Some(&desired) {
+    let migrated = super::violet_retirement::retire_claude_entry(&mut document);
+    let servers = document.get_mut("mcpServers").expect("checked above");
+    if !migrated && servers.get(VIOLET_SERVER) == Some(&desired) {
         return Ok(WriteState::AlreadyCurrent);
     }
     if dry_run {
@@ -1968,6 +1927,7 @@ fn apply_codex(
         .parse()
         .with_context(|| format!("parsing {}", path.display()))?;
 
+    let migrated = super::violet_retirement::retire_codex_entry(&mut document);
     let existing = document
         .get("mcp_servers")
         .and_then(|servers| servers.get(VIOLET_SERVER));
@@ -1980,7 +1940,7 @@ fn apply_codex(
                 .and_then(|v| v.as_str())
                 == Some(bypass_env)
     });
-    if current_matches {
+    if current_matches && !migrated {
         return Ok(WriteState::AlreadyCurrent);
     }
     if dry_run {
@@ -2106,7 +2066,12 @@ pub fn doctor_row(
         };
     }
 
-    match probe.list_tools(VIOLET_MCP_URL, &token_env, &bypass_env) {
+    match probe.list_tools(
+        violet_hub_url,
+        violet_compatibility,
+        &token_env,
+        &bypass_env,
+    ) {
         ProbeOutcome::Tools { tools } => {
             let drift = tool_drift(&allowlist, &tools);
             if drift.is_empty() {
@@ -2192,7 +2157,72 @@ fn project_proxy_path() -> Option<PathBuf> {
     ifs::is_regular_file(&path).then_some(path)
 }
 
+/// A default integration refresh keeps this machine's credential references.
+/// Explicit --label/--token-env select a new registration intentionally.
+fn existing_machine_env_names(paths: &MachinePaths, url: &str) -> Result<Option<(String, String)>> {
+    let mut config = ProxyConfig::load_from(&paths.user_proxy)?;
+    config.retire_legacy_hub_registration();
+    if config
+        .servers
+        .get(VIOLET_SERVER)
+        .is_some_and(|server| server_endpoint(server) == url)
+        && let Some((Some(token), Some(bypass))) = config.violet_env_names()
+    {
+        return Ok(Some((token, bypass)));
+    }
+    if let Some(path) = paths
+        .claude_json
+        .as_deref()
+        .filter(|path| ifs::is_regular_file(path))
+    {
+        let mut doc: serde_json::Value = serde_json::from_str(&ifs::read_capped(path)?)?;
+        super::violet_retirement::retire_claude_entry(&mut doc);
+        let entry = &doc["mcpServers"][VIOLET_SERVER];
+        if entry["url"].as_str() == Some(url) {
+            let token = entry["headers"]["Authorization"]
+                .as_str()
+                .and_then(|text| text.strip_prefix("Bearer ${"))
+                .and_then(|text| text.strip_suffix('}'));
+            let bypass = entry["headers"][VIOLET_BYPASS_HEADER]
+                .as_str()
+                .and_then(|text| text.strip_prefix("${"))
+                .and_then(|text| text.strip_suffix('}'));
+            if let (Some(token), Some(bypass)) = (token, bypass) {
+                return Ok(Some((token.into(), bypass.into())));
+            }
+        }
+    }
+    if let Some(path) = paths
+        .codex_config
+        .as_deref()
+        .filter(|path| ifs::is_regular_file(path))
+    {
+        let mut doc: toml_edit::DocumentMut = ifs::read_capped(path)?.parse()?;
+        super::violet_retirement::retire_codex_entry(&mut doc);
+        if let Some(entry) = doc
+            .get("mcp_servers")
+            .and_then(|servers| servers.get(VIOLET_SERVER))
+            && entry.get("url").and_then(|value| value.as_str()) == Some(url)
+        {
+            let token = entry
+                .get("bearer_token_env_var")
+                .and_then(|value| value.as_str());
+            let bypass = entry
+                .get("env_http_headers")
+                .and_then(|headers| headers.get(VIOLET_BYPASS_HEADER))
+                .and_then(|value| value.as_str());
+            if let (Some(token), Some(bypass)) = (token, bypass) {
+                return Ok(Some((token.into(), bypass.into())));
+            }
+        }
+    }
+    Ok(None)
+}
+
 pub fn execute(args: &VioletArgs, json: bool) -> Result<IntegrationOutcome> {
+    if !args.dry_run && !args.no_harness {
+        super::violet_retirement::retire_installed_hub(project_proxy_path().as_deref())?;
+    }
     let env = ProcessEnv;
     let paths = MachinePaths::from_env(&env)?;
     let project_proxy = project_proxy_path();
@@ -2200,6 +2230,15 @@ pub fn execute(args: &VioletArgs, json: bool) -> Result<IntegrationOutcome> {
     let label = resolve_label(args.label.as_deref(), device.hostname().as_deref());
     let mut effective_args = args.clone();
     effective_args.label = Some(label);
+    if args.token_env.is_none()
+        && args.label.is_none()
+        && let Some((token, bypass)) = existing_machine_env_names(&paths, &args.url)?
+    {
+        effective_args.token_env = Some(token);
+        if args.bypass_env == VIOLET_DEFAULT_BYPASS_ENV {
+            effective_args.bypass_env = bypass;
+        }
+    }
     let credentials = if args.dry_run {
         Some((
             effective_args
@@ -2567,8 +2606,14 @@ mod tests {
             device_id: None,
         };
         let mut env = FakeEnv::with(&[
-            ("MECHA_SLACK_TOKEN_SOUNDWAVE", "legacy-token"),
-            ("MECHA_VERCEL_BYPASS", "legacy-bypass"),
+            (
+                cmcp_core::config::violet_credential_names(TEST_TOKEN_ENV)[1].as_str(),
+                "legacy-token",
+            ),
+            (
+                violet_compatibility().legacy_bypass_env.as_str(),
+                "legacy-bypass",
+            ),
         ]);
         for expected in [
             ("legacy-token", "legacy-bypass"),
@@ -2595,9 +2640,15 @@ mod tests {
     #[test]
     fn production_alias_tools_do_not_report_contract_drift() {
         let allowlisted = VIOLET_TOOLS.map(str::to_string);
-        let live = ["violet_read", "violet_post", "mecha_read", "mecha_post"].map(str::to_string);
+        let live: Vec<_> = VIOLET_TOOLS
+            .iter()
+            .map(|tool| (*tool).to_owned())
+            .chain(violet_compatibility().retired_tools.iter().cloned())
+            .collect();
         assert!(tool_drift(&allowlisted, &live).is_empty());
-        let missing_read = ["violet_post", "mecha_read", "mecha_post"].map(str::to_string);
+        let missing_read: Vec<_> = std::iter::once("violet_post".to_owned())
+            .chain(violet_compatibility().retired_tools.iter().cloned())
+            .collect();
         assert_eq!(
             tool_drift(&allowlisted, &missing_read).retired,
             ["violet_read"]
@@ -2605,22 +2656,29 @@ mod tests {
     }
 
     #[test]
-    fn legacy_project_registration_migrates_without_losing_endpoint_or_alias() {
+    fn legacy_project_registration_retires_alias_and_preserves_credentials() {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths_in(dir.path());
         let project = write_project_proxy(
             dir.path(),
-            r#"
-# Legacy project endpoint is an intentional override.
-allowlist = ["mecha-cassy.mecha_read", "mecha-cassy.mecha_post", "neon.run_sql"]
-worker_read_routes = ["mecha-cassy.mecha_read"]
+            &format!(
+                r#"
+# Legacy project registration is retired.
+allowlist = ["{retired}.{read}", "{retired}.{post}", "neon.run_sql"]
+worker_read_routes = ["{retired}.{read}"]
 [worker_access]
-mecha-cassy = "read-only"
-[servers.mecha-cassy]
+{retired} = "read-only"
+[servers.{retired}]
 transport = "http"
-url = "https://staging.example.test/mcp"
-auth = "env:MECHA_SLACK_TOKEN_SOUNDWAVE"
+url = "{url}"
+auth = "env:{token}"
 "#,
+                retired = violet_compatibility().retired_server,
+                read = violet_compatibility().retired_tools[0],
+                post = violet_compatibility().retired_tools[1],
+                url = violet_hub_url(),
+                token = cmcp_core::config::violet_credential_names(TEST_TOKEN_ENV)[1]
+            ),
         );
         let args = VioletArgs {
             no_harness: true,
@@ -2636,13 +2694,14 @@ auth = "env:MECHA_SLACK_TOKEN_SOUNDWAVE"
         .unwrap();
         assert!(report.is_green(), "{report:?}");
         let config = ProxyConfig::load_from(&project).unwrap();
-        assert_eq!(
-            config.servers.get(VIOLET_SERVER),
-            config.servers.get("mecha-cassy")
+        assert!(
+            !config
+                .servers
+                .contains_key(&violet_compatibility().retired_server)
         );
         assert_eq!(
             server_endpoint(config.servers.get(VIOLET_SERVER).unwrap()),
-            "https://staging.example.test/mcp"
+            violet_hub_url()
         );
         assert_eq!(config.violet_allowlisted_tools(), VIOLET_TOOLS);
         assert_eq!(
@@ -2675,11 +2734,59 @@ auth = "env:MECHA_SLACK_TOKEN_SOUNDWAVE"
         );
     }
 
+    #[test]
+    fn default_refresh_keeps_installed_machine_credential_references() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let c = violet_compatibility();
+        let token = format!("{}_LAPTOP", c.legacy_token_prefix);
+        let expected = Some((token.clone(), c.legacy_bypass_env.clone()));
+        let mut config = ProxyConfig::default();
+        config.add_server(
+            c.retired_server.clone(),
+            ServerConfig::Http {
+                url: violet_hub_url().to_owned(),
+                auth: Some(format!("env:{token}")),
+                headers: HashMap::from([(
+                    VIOLET_BYPASS_HEADER.into(),
+                    format!("env:{}", c.legacy_bypass_env),
+                )]),
+                oauth: false,
+            },
+        );
+        config.save_to(&paths.user_proxy).unwrap();
+        assert_eq!(
+            existing_machine_env_names(&paths, violet_hub_url()).unwrap(),
+            expected
+        );
+        std::fs::remove_file(&paths.user_proxy).unwrap();
+        let path = paths.claude_json.as_deref().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, serde_json::json!({"mcpServers":{(c.retired_server.as_str()):{"url":violet_hub_url(),"headers":{"Authorization":format!("Bearer ${{{token}}}"), VIOLET_BYPASS_HEADER:format!("${{{}}}",c.legacy_bypass_env)}}}}).to_string()).unwrap();
+        assert_eq!(
+            existing_machine_env_names(&paths, violet_hub_url()).unwrap(),
+            expected
+        );
+        std::fs::remove_file(path).unwrap();
+        let path = paths.codex_config.as_deref().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("[mcp_servers.{}]\nurl = {:?}\nbearer_token_env_var = {:?}\nenv_http_headers = {{ {} = {:?} }}\n", c.retired_server, violet_hub_url(), token, VIOLET_BYPASS_HEADER, c.legacy_bypass_env)).unwrap();
+        assert_eq!(
+            existing_machine_env_names(&paths, violet_hub_url()).unwrap(),
+            expected
+        );
+        assert!(
+            existing_machine_env_names(&paths, "https://custom.example/mcp")
+                .unwrap()
+                .is_none()
+        );
+    }
+
     fn test_args() -> VioletArgs {
         VioletArgs {
             label: Some(TEST_LABEL.to_string()),
             bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
-            url: VIOLET_MCP_URL.to_string(),
+            url: violet_hub_url().to_string(),
             ..Default::default()
         }
     }
@@ -2740,7 +2847,7 @@ auth = "env:MECHA_SLACK_TOKEN_SOUNDWAVE"
     fn provisioning_mints_with_cloud_login_and_hostname_label() {
         let args = VioletArgs {
             bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
-            url: VIOLET_MCP_URL.to_string(),
+            url: violet_hub_url().to_string(),
             ..test_args()
         };
         let hub = FakeHub {
@@ -2789,7 +2896,7 @@ auth = "env:MECHA_SLACK_TOKEN_SOUNDWAVE"
         let args = VioletArgs {
             label: Some("Daniel-laptop".to_string()),
             bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
-            url: VIOLET_MCP_URL.to_string(),
+            url: violet_hub_url().to_string(),
             ..test_args()
         };
         let hub = FakeHub {
@@ -2835,7 +2942,7 @@ auth = "env:MECHA_SLACK_TOKEN_SOUNDWAVE"
     fn missing_hub_mint_route_fails_closed_without_local_mint() {
         let args = VioletArgs {
             bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
-            url: VIOLET_MCP_URL.to_string(),
+            url: violet_hub_url().to_string(),
             ..test_args()
         };
         let hub = FakeHub {
@@ -2879,7 +2986,7 @@ auth = "env:MECHA_SLACK_TOKEN_SOUNDWAVE"
     fn missing_hub_bypass_uses_read_only_vercel_then_hidden_prompt_once() {
         let args = VioletArgs {
             bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
-            url: VIOLET_MCP_URL.to_string(),
+            url: violet_hub_url().to_string(),
             ..test_args()
         };
         let env = FakeEnv::with(&[
@@ -2942,7 +3049,7 @@ auth = "env:MECHA_SLACK_TOKEN_SOUNDWAVE"
         let args = VioletArgs {
             label: Some("laptop".to_string()),
             bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
-            url: VIOLET_MCP_URL.to_string(),
+            url: violet_hub_url().to_string(),
             ..Default::default()
         };
         let env = FakeEnv::with(&[
@@ -3011,7 +3118,7 @@ auth = "env:MECHA_SLACK_TOKEN_SOUNDWAVE"
         let args = VioletArgs {
             label: Some("laptop".to_string()),
             bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
-            url: VIOLET_MCP_URL.to_string(),
+            url: violet_hub_url().to_string(),
             no_harness: true,
             ..Default::default()
         };
@@ -3066,7 +3173,7 @@ auth = "env:MECHA_SLACK_TOKEN_SOUNDWAVE"
         let args = VioletArgs {
             label: Some("laptop".to_string()),
             bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
-            url: VIOLET_MCP_URL.to_string(),
+            url: violet_hub_url().to_string(),
             no_harness: true,
             ..Default::default()
         };
@@ -3100,7 +3207,7 @@ auth = "env:MECHA_SLACK_TOKEN_SOUNDWAVE"
         let paths = paths_in(dir.path());
         let args = VioletArgs {
             bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
-            url: VIOLET_MCP_URL.to_string(),
+            url: violet_hub_url().to_string(),
             ..test_args()
         };
         let mut values = HashMap::new();
@@ -3128,7 +3235,7 @@ auth = "env:MECHA_SLACK_TOKEN_SOUNDWAVE"
         let paths = paths_in(dir.path());
         let args = VioletArgs {
             bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
-            url: VIOLET_MCP_URL.to_string(),
+            url: violet_hub_url().to_string(),
             ..test_args()
         };
 
@@ -3153,7 +3260,7 @@ auth = "env:MECHA_SLACK_TOKEN_SOUNDWAVE"
         let paths = paths_in(dir.path());
         let args = VioletArgs {
             bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
-            url: VIOLET_MCP_URL.to_string(),
+            url: violet_hub_url().to_string(),
             dry_run: true,
             ..test_args()
         };
@@ -3179,7 +3286,7 @@ auth = "env:MECHA_SLACK_TOKEN_SOUNDWAVE"
 
         let args = VioletArgs {
             bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
-            url: VIOLET_MCP_URL.to_string(),
+            url: violet_hub_url().to_string(),
             ..test_args()
         };
         run(&args, None, &paths, &ready_env(), &FakeProbe(live_tools())).unwrap();
@@ -3216,7 +3323,7 @@ auth = "env:MECHA_SLACK_TOKEN_SOUNDWAVE"
 
         let args = VioletArgs {
             bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
-            url: VIOLET_MCP_URL.to_string(),
+            url: violet_hub_url().to_string(),
             ..test_args()
         };
         run(&args, None, &paths, &ready_env(), &FakeProbe(live_tools())).unwrap();
@@ -3286,7 +3393,7 @@ auth = "env:MECHA_SLACK_TOKEN_SOUNDWAVE"
 
         let args = VioletArgs {
             bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
-            url: VIOLET_MCP_URL.to_string(),
+            url: violet_hub_url().to_string(),
             no_harness: true,
             ..test_args()
         };
@@ -3304,7 +3411,7 @@ auth = "env:MECHA_SLACK_TOKEN_SOUNDWAVE"
         let paths = paths_in(dir.path());
         let args = VioletArgs {
             bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
-            url: VIOLET_MCP_URL.to_string(),
+            url: violet_hub_url().to_string(),
             no_harness: true,
             ..test_args()
         };
@@ -3329,7 +3436,7 @@ auth = "env:MECHA_SLACK_TOKEN_SOUNDWAVE"
         let env = ready_env();
         let args = VioletArgs {
             bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
-            url: VIOLET_MCP_URL.to_string(),
+            url: violet_hub_url().to_string(),
             no_harness: true,
             ..test_args()
         };
@@ -3356,7 +3463,7 @@ auth = "env:MECHA_SLACK_TOKEN_SOUNDWAVE"
         let env = ready_env();
         let args = VioletArgs {
             bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
-            url: VIOLET_MCP_URL.to_string(),
+            url: violet_hub_url().to_string(),
             no_harness: true,
             ..test_args()
         };
@@ -3367,11 +3474,11 @@ auth = "env:MECHA_SLACK_TOKEN_SOUNDWAVE"
             &paths,
             &env,
             &FakeProbe(ProbeOutcome::Tools {
-                tools: vec!["violet_read".to_string(), "mecha_broadcast".to_string()],
+                tools: vec!["violet_read".to_string(), "violet_broadcast".to_string()],
             }),
         );
         assert_eq!(row.severity, DoctorSeverity::Error);
-        assert!(row.message.contains("mecha_broadcast"), "{row:?}");
+        assert!(row.message.contains("violet_broadcast"), "{row:?}");
         assert!(row.message.contains("cas integrate violet"), "{row:?}");
     }
 
@@ -3386,7 +3493,7 @@ auth = "env:MECHA_SLACK_TOKEN_SOUNDWAVE"
         let env = ready_env();
         let args = VioletArgs {
             bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
-            url: VIOLET_MCP_URL.to_string(),
+            url: violet_hub_url().to_string(),
             no_harness: true,
             ..test_args()
         };
@@ -3424,6 +3531,7 @@ auth = "env:MECHA_SLACK_TOKEN_SOUNDWAVE"
     /// `cas doctor` kept warning after every re-run.
     fn shadowing_project_proxy() -> String {
         let token_env = TEST_TOKEN_ENV;
+        let hub_url = violet_hub_url();
         format!(
             "# project dispatch policy — keep the neon route\n\
          allowlist = [\n\
@@ -3442,7 +3550,7 @@ auth = "env:MECHA_SLACK_TOKEN_SOUNDWAVE"
          \n\
          [servers.violet]\n\
          transport = \"http\"\n\
-         url = \"https://mecha-cassy.vercel.app/mcp/slack\"\n\
+         url = \"{hub_url}\"\n\
          auth = \"env:{token_env}\"\n\
          \n\
          [servers.violet.headers]\n\
@@ -3456,9 +3564,10 @@ auth = "env:MECHA_SLACK_TOKEN_SOUNDWAVE"
     /// only one safe to drop.
     fn duplicate_server_block() -> String {
         let token_env = TEST_TOKEN_ENV;
+        let hub_url = violet_hub_url();
         format!(
             "[servers.violet]\ntransport = \"http\"\n\
-             url = \"{VIOLET_MCP_URL}\"\n\
+             url = \"{hub_url}\"\n\
              auth = \"env:{token_env}\"\n\
              \n\
              [servers.violet.headers]\n\
@@ -3480,7 +3589,7 @@ auth = "env:MECHA_SLACK_TOKEN_SOUNDWAVE"
         let env = ready_env();
         let args = VioletArgs {
             bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
-            url: VIOLET_MCP_URL.to_string(),
+            url: violet_hub_url().to_string(),
             no_harness: true,
             ..test_args()
         };
@@ -3572,7 +3681,7 @@ auth = "env:MECHA_SLACK_TOKEN_SOUNDWAVE"
         let env = ready_env();
         let args = VioletArgs {
             bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
-            url: VIOLET_MCP_URL.to_string(),
+            url: violet_hub_url().to_string(),
             no_harness: true,
             ..test_args()
         };
@@ -3612,11 +3721,11 @@ auth = "env:MECHA_SLACK_TOKEN_SOUNDWAVE"
         let env = ready_env();
         let args = VioletArgs {
             bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
-            url: VIOLET_MCP_URL.to_string(),
+            url: violet_hub_url().to_string(),
             no_harness: true,
             ..test_args()
         };
-        const STAGING: &str = "https://mecha-cassy-staging.vercel.app/mcp/slack";
+        const STAGING: &str = "https://staging.example.test/mcp/slack";
         let project = write_project_proxy(
             dir.path(),
             &format!(
@@ -3688,7 +3797,7 @@ auth = "env:MECHA_SLACK_TOKEN_SOUNDWAVE"
         let env = ready_env();
         let args = VioletArgs {
             bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
-            url: VIOLET_MCP_URL.to_string(),
+            url: violet_hub_url().to_string(),
             no_harness: true,
             ..test_args()
         };
@@ -3734,7 +3843,7 @@ auth = "env:MECHA_SLACK_TOKEN_SOUNDWAVE"
         let env = ready_env();
         let args = VioletArgs {
             bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
-            url: VIOLET_MCP_URL.to_string(),
+            url: violet_hub_url().to_string(),
             no_harness: true,
             ..test_args()
         };
@@ -3768,7 +3877,7 @@ auth = "env:MECHA_SLACK_TOKEN_SOUNDWAVE"
         let paths = paths_in(dir.path());
         let args = VioletArgs {
             bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
-            url: VIOLET_MCP_URL.to_string(),
+            url: violet_hub_url().to_string(),
             no_harness: true,
             dry_run: true,
             ..test_args()
@@ -3799,7 +3908,7 @@ auth = "env:MECHA_SLACK_TOKEN_SOUNDWAVE"
         let paths = paths_in(dir.path());
         let args = VioletArgs {
             bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
-            url: VIOLET_MCP_URL.to_string(),
+            url: violet_hub_url().to_string(),
             no_harness: true,
             ..test_args()
         };
@@ -3832,7 +3941,7 @@ auth = "env:MECHA_SLACK_TOKEN_SOUNDWAVE"
         let env = ready_env();
         let args = VioletArgs {
             bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
-            url: VIOLET_MCP_URL.to_string(),
+            url: violet_hub_url().to_string(),
             no_harness: true,
             ..test_args()
         };
@@ -3858,7 +3967,7 @@ auth = "env:MECHA_SLACK_TOKEN_SOUNDWAVE"
         let env = ready_env();
         let args = VioletArgs {
             bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
-            url: VIOLET_MCP_URL.to_string(),
+            url: violet_hub_url().to_string(),
             no_harness: true,
             ..test_args()
         };

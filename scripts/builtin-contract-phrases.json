@@ -2436,7 +2436,7 @@
           "reason": "Retain the load-bearing policy term from builtin skills contains violet transport."
         },
         {
-          "text": "https://mecha-cassy.vercel.app/mcp/slack",
+          "text": "cas integrate violet",
           "reason": "Preserve a command, schema, receipt or markup token consumed by builtin skills contains violet transport."
         },
         {
@@ -2610,14 +2610,6 @@
           "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains violet transport."
         },
         {
-          "text": "mecha_read",
-          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains violet transport."
-        },
-        {
-          "text": "mecha_post",
-          "reason": "Exclude the unsafe, unavailable or retired instruction guarded by builtin skills contains violet transport."
-        },
-        {
           "text": "xoxb-",
           "reason": "Prevent embedded credentials or personal account identifiers from reaching installed guidance."
         },
@@ -2631,10 +2623,6 @@
         },
         {
           "text": "Bearer sk-",
-          "reason": "Prevent embedded credentials or personal account identifiers from reaching installed guidance."
-        },
-        {
-          "text": "MECHA_CLIENT_TOKENS=",
           "reason": "Prevent embedded credentials or personal account identifiers from reaching installed guidance."
         },
         {
@@ -2709,10 +2697,6 @@
         },
         {
           "text": "Bearer sk-",
-          "reason": "Prevent embedded credentials or personal account identifiers from reaching installed guidance."
-        },
-        {
-          "text": "MECHA_CLIENT_TOKENS=",
           "reason": "Prevent embedded credentials or personal account identifiers from reaching installed guidance."
         },
         {

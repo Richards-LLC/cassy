@@ -669,12 +669,7 @@ impl Config {
                     Some(value.trim().to_string())
                 };
             }
-            // GH #963: the deprecated key writes the canonical `violet` field
-            // and retires the old one, so the two can never disagree.
-            "issues.components.violet" | "issues.components.mecha_cassy" => {
-                if key == "issues.components.mecha_cassy" {
-                    super::warn_deprecated_issue_key();
-                }
+            "issues.components.violet" => {
                 let issues = self.issues.get_or_insert_with(IssuesConfig::default);
                 let components = issues
                     .components
@@ -684,7 +679,6 @@ impl Config {
                 } else {
                     Some(value.trim().to_string())
                 };
-                components.mecha_cassy = None;
             }
             "issues.components.cloud" => {
                 let issues = self.issues.get_or_insert_with(IssuesConfig::default);

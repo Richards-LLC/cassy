@@ -212,6 +212,8 @@ test-scoped-selftest:
 # migration-snapshot suite went stale for five days (cas-66ee). Keep this list
 # exhaustive — if you add a scripts/test-*.sh, wire it into a lane here.
 test-ci-tiers:
+	cd .. && bash scripts/test-no-mecha-references.sh
+	cd .. && python3 scripts/test-violet-reference-guard.py
 	cd .. && python3 scripts/test-assembly-proof.py
 	cd .. && python3 scripts/test-review-pr-body.py
 	cd .. && python3 scripts/test-builtin-contract-phrases.py

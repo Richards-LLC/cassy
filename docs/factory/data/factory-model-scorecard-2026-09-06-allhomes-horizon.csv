@@ -34,8 +34,8 @@ project,petra-stella-cloud,,,68,0,1.0,59,12,0.2034,0,,,,,,0
 project,petra-stella-cloud,claude-opus-5,high,5,5,0.0,5,1,0.2,0,91.58,417503,234,329.56,65.91,5
 project,petra-stella-cloud,gpt-5.6-luna,xhigh,36,35,0.0278,30,10,0.3333,0,30.49,57731,37,19.03,0.63,30
 project,petra-stella-cloud,gpt-5.6-sol,high,10,8,0.2,7,0,0.0,0,17.79,25480,26,42.89,6.13,7
-project,mecha_cassy,,,31,0,1.0,27,1,0.037,0,,,,,,0
-project,mecha_cassy,gpt-5.6-luna,xhigh,19,9,0.5263,14,1,0.0714,0,26.44,71381,48,4.31,0.54,8
+project,violet_ps,,,31,0,1.0,27,1,0.037,0,,,,,,0
+project,violet_ps,gpt-5.6-luna,xhigh,19,9,0.5263,14,1,0.0714,0,26.44,71381,48,4.31,0.54,8
 overall,,,,837,0,1.0,703,120,0.1707,2,,,,,,0
 overall,,<synthetic>,high,3,3,0.0,3,0,0.0,0,,77373,116,,,0
 overall,,claude-fable-5,high,14,14,0.0,7,11,1.5714,0,35.37,5456,9,,,0

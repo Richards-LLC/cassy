@@ -54,12 +54,6 @@ pub mod integrations;
 pub mod keep_block;
 pub mod lock;
 pub mod md;
-/// Machine-scoped Violet setup. Gated on `mcp-proxy` because the whole
-/// point of the command is to write a proxy registration and prove it with an
-/// authenticated `tools/list`; without that feature there is nothing to write
-/// against, so the subcommand reports the rebuild instead of half-working.
-#[cfg(feature = "mcp-proxy")]
-pub mod violet;
 pub mod neon;
 #[cfg(test)]
 mod neon_parsers_test;
@@ -67,6 +61,14 @@ mod neon_parsers_test;
 pub mod proxy;
 pub mod types;
 pub mod vercel;
+/// Machine-scoped Violet setup. Gated on `mcp-proxy` because the whole
+/// point of the command is to write a proxy registration and prove it with an
+/// authenticated `tools/list`; without that feature there is nothing to write
+/// against, so the subcommand reports the rebuild instead of half-working.
+#[cfg(feature = "mcp-proxy")]
+pub mod violet;
+#[cfg(feature = "mcp-proxy")]
+pub mod violet_retirement;
 
 use clap::Subcommand;
 
@@ -95,7 +97,7 @@ pub enum IntegrateCommands {
         #[command(subcommand)]
         action: github::GithubAction,
     },
-    /// Set this machine up for the Violet (formerly MechaCassy) Slack hub: one
+    /// Set this machine up for the Violet Slack hub: one
     /// user-level proxy registration (every project inherits it), the Claude
     /// Code and Codex MCP entries, and an authenticated `tools/list` as the
     /// receipt.
@@ -105,15 +107,7 @@ pub enum IntegrateCommands {
     #[cfg(feature = "mcp-proxy")]
     #[command(name = "violet")]
     Violet(violet::VioletArgs),
-    /// Deprecated name of `cas integrate violet`, accepted for one release
-    /// (GH #963).
-    #[cfg(feature = "mcp-proxy")]
-    #[command(name = "mecha-cassy", hide = true)]
-    MechaCassy(violet::VioletArgs),
 }
-
-/// GH #963: the warning `cas integrate mecha-cassy` prints before it runs.
-pub const MECHA_CASSY_COMMAND_DEPRECATION: &str = "warning: `cas integrate mecha-cassy` is deprecated; use `cas integrate violet`. The old name is accepted for one release.";
 
 /// `cas integrate <platform> <action>` — pick an action.
 #[derive(Subcommand, Debug, Clone, Copy)]
@@ -145,11 +139,6 @@ pub fn execute(cmd: &IntegrateCommands, _cli: &Cli) -> anyhow::Result<()> {
         IntegrateCommands::Github { action } => github::execute(action.clone())?,
         #[cfg(feature = "mcp-proxy")]
         IntegrateCommands::Violet(args) => violet::execute(args, _cli.json)?,
-        #[cfg(feature = "mcp-proxy")]
-        IntegrateCommands::MechaCassy(args) => {
-            eprintln!("{MECHA_CASSY_COMMAND_DEPRECATION}");
-            violet::execute(args, _cli.json)?
-        }
     };
     render_outcome(&outcome);
     Ok(())
@@ -201,7 +190,7 @@ mod tests {
             // in this module must never execute it. Its behaviour is covered
             // against a tempdir + fake environment in `violet::tests`.
             #[cfg(feature = "mcp-proxy")]
-            IntegrateCommands::Violet(_) | IntegrateCommands::MechaCassy(_) => {
+            IntegrateCommands::Violet(_) => {
                 anyhow::bail!("violet is exercised in violet::tests, not via dispatch")
             }
         }
@@ -299,22 +288,23 @@ mod tests {
         }
     }
 
-    /// GH #963: `cas integrate violet` is canonical; `mecha-cassy` still
-    /// parses (hidden, deprecated) with the same arguments for one release.
+    /// Only the canonical integration command is accepted.
     #[cfg(feature = "mcp-proxy")]
     #[test]
-    fn violet_is_canonical_and_mecha_cassy_still_parses() {
+    fn violet_is_canonical_and_retired_command_is_rejected() {
         match parse(&["violet", "--label", "laptop"]) {
             IntegrateCommands::Violet(args) => assert_eq!(args.label.as_deref(), Some("laptop")),
             other => panic!("unexpected variant: {other:?}"),
         }
-        match parse(&["mecha-cassy", "--label", "laptop"]) {
-            IntegrateCommands::MechaCassy(args) => {
-                assert_eq!(args.label.as_deref(), Some("laptop"))
-            }
-            other => panic!("unexpected variant: {other:?}"),
-        }
-        assert!(MECHA_CASSY_COMMAND_DEPRECATION.contains("cas integrate violet"));
+        assert!(
+            TestCli::try_parse_from([
+                "cas integrate",
+                cas_types::violet_compatibility::violet_compatibility()
+                    .retired_server
+                    .as_str()
+            ])
+            .is_err()
+        );
         assert_eq!(types::Platform::Violet.as_str(), "violet");
     }
 }

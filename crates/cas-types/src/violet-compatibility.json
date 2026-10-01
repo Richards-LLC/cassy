@@ -1,0 +1,16 @@
+{
+  "purpose": "Only compatibility data: retire the former production registration and skill; prefer canonical credentials and fall back for installed machines. No legacy tool is registered.",
+  "hub_url": "https://mecha-cassy.vercel.app/mcp/slack",
+  "retired_server": "mecha-cassy",
+  "retired_tools": [
+    "mecha_read",
+    "mecha_post"
+  ],
+  "retired_post_skill": "mecha-cassy-post",
+  "retired_issue_key": "issues.components.mecha_cassy",
+  "legacy_token_prefix": "MECHA_SLACK_TOKEN",
+  "legacy_bypass_env": "MECHA_VERCEL_BYPASS",
+  "legacy_token_selector_env": "MECHA_SLACK_TOKEN_ENV",
+  "legacy_train_selector_env": "CAS_RELEASE_TRAIN_MECHA_TOKEN_ENV",
+  "retired_reference_pattern": "mecha[-_ ]?cassy|mechacassy|mecha_|MECHA_"
+}

@@ -14,10 +14,9 @@ use anyhow::Context;
 use clap::Args;
 
 use crate::builtins::{
-    SyncResult, ensure_builtin_gitignore, mark_missing_owned_references_for_replacement,
-    harness_installed_for_user, prune_stale_user_skills_for_harness,
-    sync_all_builtins_for_harness,
-    sync_all_builtins_for_project,
+    SyncResult, ensure_builtin_gitignore, harness_installed_for_user,
+    mark_missing_owned_references_for_replacement, prune_stale_user_skills_for_harness,
+    sync_all_builtins_for_harness, sync_all_builtins_for_project,
 };
 use crate::cli::Cli;
 use crate::cli::cloud::{
@@ -1816,6 +1815,10 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
         }
     };
 
+    #[cfg(feature = "mcp-proxy")]
+    crate::cli::integrate::violet_retirement::retire_installed_hub(Some(
+        &cas_root.join("proxy.toml"),
+    ))?;
     let project_root = cas_root.parent().unwrap_or(&cas_root);
     let claude_dir = project_root.join(".claude");
     let codex_dir = project_root.join(".codex");
@@ -2214,6 +2217,8 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
 /// existing Codex install, its global MCP configuration and trusted hook state.
 /// It never writes project-scoped settings, CLAUDE.md, or db-backed rules/skills.
 fn sync_user_builtins(cli: &Cli) -> anyhow::Result<()> {
+    #[cfg(feature = "mcp-proxy")]
+    crate::cli::integrate::violet_retirement::retire_installed_hub(None)?;
     let home = dirs::home_dir().ok_or_else(|| {
         anyhow::anyhow!("could not resolve user home directory; set $HOME and retry")
     })?;
@@ -2715,9 +2720,13 @@ fn check_for_updates(
             current_version,
             latest_version,
             binary_update_available,
-            schema: schema_status
-                .as_ref()
-                .map(|status| (status.current_version, status.latest_version, pending_migrations)),
+            schema: schema_status.as_ref().map(|status| {
+                (
+                    status.current_version,
+                    status.latest_version,
+                    pending_migrations,
+                )
+            }),
         },
     )?;
     fmt.flush()?;

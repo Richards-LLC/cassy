@@ -202,7 +202,7 @@ fn render_issue_repo_registry(registry: &IssueRepoRegistry) -> String {
         "## Where to file bugs\n\
 - project: {} — the current project's own issue tracker\n\
 - cassy: {} — Cassy runtime, hooks, MCP, factory, and skills\n\
-- violet: {} — Violet (formerly MechaCassy) Slack hub and message delivery\n\
+- violet: {} — Violet Slack hub and message delivery\n\
 - cloud: {} — Cassy Cloud sync, hub relay, and pairing\n\
 If you hit a bug during operation, file a ticket in the matching repo before moving on.",
         registry.project.as_deref().unwrap_or("<unset>"),

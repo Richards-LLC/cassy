@@ -601,7 +601,7 @@ fn release_slack_routes_are_violet_only() {
             "slack_complete_file_upload",
             "supervisor-owned Claude",
             "approved Claude route",
-            "MechaCassy fallback",
+            "legacy hub fallback",
             "Codex when its Slack plugin",
             "This skill only decides which CLI runs the post",
             "for example Slack",
@@ -625,26 +625,19 @@ fn release_slack_routes_are_violet_only() {
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
-/// Live skill instructions must use the primary hub tools. Dated failure logs
-/// and explicitly separated historical evidence retain the names they recorded.
+/// Every installed skill uses Violet, including references and failure logs.
 #[test]
 fn live_builtin_skills_use_violet_tool_names() {
     let mut problems = Vec::new();
     for (label, flavor) in FLAVORS {
         for builtin in builtin_catalog::skills(flavor) {
-            if builtin.path.ends_with("/failure-log.md") {
-                continue;
-            }
-            let active = builtin
-                .content
-                .split("## Historical transport evidence")
-                .next()
-                .unwrap();
+            let active = builtin.content;
+            let c = cas_types::violet_compatibility::violet_compatibility();
             for retired in [
-                "mecha_read",
-                "mecha_post",
-                "../mecha-cassy/",
-                "skills/mecha-cassy/",
+                &c.retired_tools[0],
+                &c.retired_tools[1],
+                &c.retired_server,
+                &c.retired_issue_key,
             ] {
                 if active.contains(retired) {
                     problems.push(format!(

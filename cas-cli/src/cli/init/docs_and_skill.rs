@@ -723,13 +723,18 @@ mod tests {
 
     /// GH #963: the managed block names the current registry key only.
     #[test]
-    fn template_names_violet_not_deprecated_mecha_cassy_key() {
+    fn template_names_violet_not_retired_issue_key() {
         let section = build_agents_section();
         assert!(
             section.contains("issues.components.{cassy,violet,cloud}"),
             "{section}"
         );
-        assert!(!section.contains("mecha_cassy"), "{section}");
+        assert!(
+            !section.contains(
+                &cas_types::violet_compatibility::violet_compatibility().retired_issue_key
+            ),
+            "{section}"
+        );
     }
 
     /// A symlinked project path doesn't cause an infinite loop during ancestor walk.

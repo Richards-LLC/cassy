@@ -102,7 +102,7 @@ mod tests {
         "cas-worker",
         "cas-supervisor",
         "release-notes",
-        "mecha-cassy",
+        "violet",
     ];
 
     #[test]

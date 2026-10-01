@@ -7,18 +7,18 @@
 We reviewed all 24 skills in scope, and **14 P0s mislead an agent today**. Each P0 is a small text fix, and each was checked against source, `--help` or a live run. Their causes fall into three groups:
 
 - **The runtime has changed but the text has not:** the required `risk` on task creates, `cas integrate violet`, the QA evidence gate being triggered by paths, the `mcp_execute` call shape, and Viktor's `message` schema.
-- **Procedures contradict themselves:** fallow's `|| true` rule, brainstorm's one-question-at-a-time rule against its whole-frontier rounds, and the release-notes template's Markdown against mecha-cassy's lint.
+- **Procedures contradict themselves:** fallow's `|| true` rule, brainstorm's one-question-at-a-time rule against its whole-frontier rounds, and the release-notes template's Markdown against violet's lint.
 - **The session-learn prompt breaks its own Stop-hook parser.**
 
 Since 2026-09-02 most of the older findings are **fixed**: the `disallowed-tools` contradiction, the `/plan` handoff, operator e-mails, `../../../../` links, NestJS leakage, twin drift, and opt-in sync for fallow. Two regressions came from over-correcting:
 
 - **fallow:** its examples now obey a rule that is itself wrong.
-- **release-notes → mecha-cassy:** the reply-count hard rule moved into mecha-cassy.
+- **release-notes → violet:** the reply-count hard rule moved into violet.
 
 The largest token savings come from a few places:
 
 | Where | Saving |
-|---|---|
+| --- | --- |
 | cas-cut-release reading `failure-log.md` in full | −5.7 k per cut |
 | fallow body | −4.9 k per invoke |
 | fallow `cli-reference.md` | −20 k per read |
@@ -27,7 +27,7 @@ The largest token savings come from a few places:
 | session-learn Stop prompt | −1.1 k per auto-extracting Stop |
 
 | Severity | A fallow | B release | C QA | D ideation/docs | E tooling/method | Total |
-|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- |
 | P0 | 1 | 3 | 2 | 5 | 3 | **14** |
 | P1 | 7 | 6 | 6 | 8 | 8 | **35** |
 | P2 | 9 | 10 | 23 | 20 | 21 | **83** |
@@ -35,7 +35,7 @@ The largest token savings come from a few places:
 
 ## Scope and method
 
-- **Skills (24):** fallow, cas-cut-release, cas-qa-craft, cas-nuxt-playwright, cas-playwright-debug, cas-brainstorm, cas-ideate, cas-to-questionnaire, mecha-cassy, release-notes, codemap, project-overview, session-learn, cas-github-issues, mcp-integration, cli-routing, cas-codex-exec, cas-viktor, cas-codebase-design, cas-servers, cas-tdd, cas-wizard, cas-diagnosing-bugs, cas-resolving-merge-conflicts. We read every file under `cas-cli/src/builtins/skills/<skill>/`, including `references/` and `scripts/`, about 430 KB in total.
+- **Skills (24):** fallow, cas-cut-release, cas-qa-craft, cas-nuxt-playwright, cas-playwright-debug, cas-brainstorm, cas-ideate, cas-to-questionnaire, violet, release-notes, codemap, project-overview, session-learn, cas-github-issues, mcp-integration, cli-routing, cas-codex-exec, cas-viktor, cas-codebase-design, cas-servers, cas-tdd, cas-wizard, cas-diagnosing-bugs, cas-resolving-merge-conflicts. We read every file under `cas-cli/src/builtins/skills/<skill>/`, including `references/` and `scripts/`, about 430 KB in total.
 - **Tools checked against (read-only `--help` or live runs):**
   - cas 3.31.0
   - codex-cli 0.156.0
@@ -57,11 +57,11 @@ The largest token savings come from a few places:
 Axis 1 is capped at 4 for every skill by the top-level `managed_by` key.
 
 | Skill | 1 FM | 2 Trigger | 3 Disclosure | 4 Wording | 5 Procedure | 6 Accuracy | 7 Parity | 8 Tokens | Verdict |
-|---|---|---|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | fallow | 4 | 4 | 2 | 3 | 2 | 2 | 4 | 2 | revise M |
 | cas-cut-release | 4 | 4 | 2 | 3 | 4 | 5 | 5 | 2 | revise S (tier the failure log) |
 | release-notes | 4 | 3 | 4 | 4 | 3 | 3 | 5 | 4 | revise S (Grok name collision, template leak) |
-| mecha-cassy | 4 | 3 | 3 | 3 | 4 | 2 | 5 | 3 | revise M |
+| violet | 4 | 3 | 3 | 3 | 4 | 2 | 5 | 3 | revise M |
 | cas-qa-craft | 4 | 2 | 3 | 4 | 3 | 2 | 5 | 3 | revise M (trigger vs gate) |
 | cas-nuxt-playwright | 3 | 4 | 2 | 3 | 2 | 3 | 3 | 2 | revise M |
 | cas-playwright-debug | 4 | 5 | 5 | 5 | 4 | 4 | 5 | 4 | keep, fix one version claim |
@@ -86,9 +86,9 @@ Axis 1 is capped at 4 for every skill by the top-level `managed_by` key.
 ## Prior-review delta (2026-09-02 → 2026-09-25)
 
 | Status | Items |
-|---|---|
+| --- | --- |
 | **Fixed** | `disallowed-tools` contradiction (brainstorm, ideate); `/plan` handoff; `codemap:187` gate claim; project-overview commit step; doc-family boilerplate moved to `codemap/references/doc-hygiene.md`; `pending_supervisor_review` in cas-github-issues; session-learn `include_str!` (the claim is now true, `handlers_session.rs:1678`); release-notes transport policy and `pippenz@gmail.com`; cli-routing operator e-mail (now `release.claude_account_allowlist`) and `../../../../` links; `-m gpt-5.5` pin and the second codex recipe; mcp-integration now teaches `cas mcp` and `proxy_*`; cas-viktor shows the call shape (but with wrong args, P0 below); NestJS leakage (cas-tdd, cas-codebase-design); tiny references inlined; `cas-wizard/template.sh` twin drift and `set -e` confirm; `note_type` in diagnosing-bugs and merge-conflicts; cas-nuxt-playwright opt-in is now `disable-model-invocation`, it names Firebase + Quasar, and the redundant `user-invocable` is gone; fallow procedure front-loaded and synced only into JS/TS projects (`builtins.rs:2782`) |
-| **Regressed** | fallow `\|\| true`: the examples were made to match the rule, but the rule itself now contradicts Procedure step 2, and upstream reversed it (P0-1). The reply-count hard rule left release-notes but reappeared as `mecha-cassy/SKILL.md:76` "one reply", which contradicts the diary's 1+3 contract (P1-9). |
+| **Regressed** | fallow `\|\| true`: the examples were made to match the rule, but the rule itself now contradicts Procedure step 2, and upstream reversed it (P0-1). The reply-count hard rule left release-notes but reappeared as `violet/SKILL.md:76` "one reply", which contradicts the diary's 1+3 contract (P1-9). |
 | **Still open (carry-over)** | fallow plugin count (now wrong everywhere: 127 on 3.28.0) and its MCP/Node sections (now also stale); the universal CLAUDE.md release-notes directive (`cli/init/docs_and_skill.rs:23`); content rules copied into 6 places; AskUserQuestion boilerplate (the hook enforces it, `pre_tool.rs:146-160`); ideate "v1" narration; to-questionnaire's undefined output location; codemap exit-status prose; cas-nuxt-playwright has no `Done when`, no cas-servers pointer and no stack-gated sync; cas-servers "never background" stated 3×; release-note posting restated in cli-routing |
 
 ## P0 — misleads an agent today
@@ -96,11 +96,11 @@ Axis 1 is capped at 4 for every skill by the top-level `managed_by` key.
 All 14 re-verified against source for this report. Δ is tokens (bytes ÷ 4). Surface: `always` = description, `per-invoke` = SKILL.md body, `on-demand` = references/scripts.
 
 | # | Surface | file:line | Defect | Evidence | Fix | Δ |
-|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- |
 | 1 | per-invoke | `fallow/SKILL.md:21-24`, `:67-68` (rule 2), `:192-195` | Step 2 requires `2>/dev/null \|\| true` on every command, then says "exit 1 means findings; exit 2 means failure". `\|\| true` forces status 0, so neither code is ever visible. A missing binary or npx failure gives empty stdout and rc 0, a silent pass. | `nosuchfallowbin --format json --quiet 2>/dev/null \|\| true` → rc 0, empty. `fallow fix` without `--yes` → `{"error":true,"exit_code":2}`, rc 2 (3.28.0). Upstream Agent Rule 2 now says "Preserve and interpret the exit status". | `fallow <cmd> --format json --quiet 2>"$err"; echo "exit=$?"`. Treat 0 and 1 as a finished analysis; any other code, or `"error": true`, is a stop. Drop `\|\| true` from rules and examples. | ≈0 |
-| 2 | per-invoke / on-demand | `mecha-cassy/SKILL.md:65,78`; `references/registration.md:14,90` | Teaches `cas integrate mecha-cassy`. In 3.31.0 that is a hidden, deprecated alias of `cas integrate violet`, accepted for one release. | `cli/integrate/mod.rs:106-116` (`#[command(name = "mecha-cassy", hide = true)]`, "Deprecated name of `cas integrate violet`, accepted for one release (GH #963)"); doctor already says `cas integrate violet` | Replace with `cas integrate violet` in all 4 places and in both twins | ≈0 |
-| 3 | on-demand | `mecha-cassy/references/registration.md:71` | Call shape `mcp__cas__mcp_execute server=mecha-cassy tool=mecha_read args={…}`; `mcp_execute` has only `code` and `max_length` | `crates/cas-mcp/src/types/ops_secondary.rs:1256-1272` (`ExecuteRequest { code, max_length }`); JSON dispatch is parsed from `code` (`crates/cas-mcp-proxy/src/lib.rs` `parse_dispatch`) | `mcp__cas__mcp_execute code='{"server":"mecha-cassy","tool":"mecha_read","args":{"channel":"<name>","since":"<RFC3339>","max_messages":50}}'` | +5 |
-| 4 | per-invoke / on-demand | `release-notes/references/RUBRIC-template.md:33-45,88-95` vs `mecha-cassy/SKILL.md:36-37` | The template's example and shape use Markdown `**bold**`; mecha-cassy (release-notes step 5) lint-refuses any `**` and requires the two-line `*… — …*` header and `• *Label* — Was: … Now: …` bullets. A project following the template produces drafts the transport refuses. | Quoted lines; `release-train-announce.py` lint | Rewrite the template example in Slack mrkdwn and keep the lint in mecha-cassy format-agnostic (see the overlap map) | ≈0 |
+| 2 | per-invoke / on-demand | `violet/SKILL.md:65,78`; `references/registration.md:14,90` | Teaches `cas integrate violet`. In 3.31.0 that is a hidden, deprecated alias of `cas integrate violet`, accepted for one release. | `cli/integrate/mod.rs:106-116` (`#[command(name = "violet", hide = true)]`, "Deprecated name of `cas integrate violet`, accepted for one release (GH #963)"); doctor already says `cas integrate violet` | Replace with `cas integrate violet` in all 4 places and in both twins | ≈0 |
+| 3 | on-demand | `violet/references/registration.md:71` | Call shape `mcp__cas__mcp_execute server=violet tool=violet_read args={…}`; `mcp_execute` has only `code` and `max_length` | `crates/cas-mcp/src/types/ops_secondary.rs:1256-1272` (`ExecuteRequest { code, max_length }`); JSON dispatch is parsed from `code` (`crates/cas-mcp-proxy/src/lib.rs` `parse_dispatch`) | `mcp__cas__mcp_execute code='{"server":"violet","tool":"violet_read","args":{"channel":"<name>","since":"<RFC3339>","max_messages":50}}'` | +5 |
+| 4 | per-invoke / on-demand | `release-notes/references/RUBRIC-template.md:33-45,88-95` vs `violet/SKILL.md:36-37` | The template's example and shape use Markdown `**bold**`; violet (release-notes step 5) lint-refuses any `**` and requires the two-line `*… — …*` header and `• *Label* — Was: … Now: …` bullets. A project following the template produces drafts the transport refuses. | Quoted lines; `release-train-announce.py` lint | Rewrite the template example in Slack mrkdwn and keep the lint in violet format-agnostic (see the overlap map) | ≈0 |
 | 5 | always + per-invoke | `cas-qa-craft/SKILL.md:3`, `:24-25` (and `cas-worker.md:24`) | The trigger and step 1 scope QA to a non-empty `demo_statement` ("skip otherwise"). The close gate also demands the full evidence bundle when the diff touches a `qa.user_facing_paths` glob or a catalog journey, so an agent following the skill has its close refused. | `qa_pass.rs:100-108` builds reasons `journeys:`, `path:`, `demo_statement`; `qa_evidence_gate.rs:81-93` maps `path:`/`journeys:` → `EvidenceTier::Bundle`; seed default in `config/meta/seed/qa.rs:90-105` | Description: "Use when a factory delivery needs QA evidence before close: a non-empty demo_statement, a changed user-facing path, or a touched journey." Step 1 runs the eligibility check instead of "skip if empty". Same fix in `cas-worker.md:24`. | +10 |
 | 6 | on-demand | `cas-qa-craft/references/evidence-bundle.md:157-160` | Fallback "no `scripts/visual-qa.mjs` → set `visual_qa_status: "unavailable"`". The gate refuses anything but `"pass"` without a supervisor override, and no builtin ships the script, so every downstream web project hits a refused close. | `qa_evidence.rs:474-483` ("only \"pass\" closes without a supervisor override"); `find cas-cli/src/builtins -name 'visual-qa*'` → 0 | Either ship `visual-qa.mjs` as a qa-craft script, or say plainly: "without the script, `unavailable` needs a supervisor override; request it with blocker=true before closing". | +20 |
 | 7 | per-invoke | `cas-github-issues/SKILL.md:122-126` | The per-issue `task_type=bug` create omits `risk`, so every create in the sweep is rejected | `mcp/tools/types/task.rs:124-140` ("TASK CREATE REJECTED: risk is required for task, bug, and feature tasks"), called from `core/task/lifecycle.rs:811` | Add `risk=<none\|platform\|concurrency\|blast-radius>` (+ `proof_targets` when blast-radius) | +10 |
@@ -117,13 +117,13 @@ All 14 re-verified against source for this report. Δ is tokens (bytes ÷ 4). Su
 Condensed; full evidence is in the appendix rows.
 
 | # | Surface | file:line | Defect → fix | Δ |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | 1 | per-invoke | `cas-cut-release/SKILL.md:13` | "Read `references/failure-log.md` in full": 31.9 KB (≈8 k tokens) per cut, append-only, and 63 of 88 entries are already enforced by `release-gate.sh`. Read only the 25 `manual:*` entries (≈9.1 KB); update the pin `builtins.rs:8315`. | −5,700/cut |
 | 2 | always | `release-notes` (Grok twin) | Name collides with Grok's built-in `/release-notes`; Grok exposes it only as `user:release-notes` (`grok inspect --json`). Rename to `cas-release-notes`, update `docs_and_skill.rs:23` and the pins. | 0 |
 | 3 | on-demand | `release-notes/references/RUBRIC-template.md:62-76` | cas-src release-train receipt rules (`release-report.receipt`, Slack file ids) shipped to every project as "may add, never relax". Reduce to "after a published version run cas-release-report and link its artifacts". | −200 |
 | 4 | always | `cli/init/docs_and_skill.rs:23` | Carry-over: universal staging/main Slack duty. Use "Release-note duties, if any, are defined by `docs/release-notes/RUBRIC.md`." | −10 |
-| 5 | per-invoke | `mecha-cassy/SKILL.md:9` vs `:35-37` | "Owns only transport", yet carries ≈1.8 KB of cas-src content policy (forbidden words, `Cassy vX.Y.Z` label, reply grammar), so downstream posts are labelled "Cassy". Keep only the mrkdwn lint and move the content policy to the rubric. | −450 |
-| 6 | always / per-invoke | `mecha-cassy/SKILL.md:3` vs `:39,76` | Description promises diary posts; the procedure is runtime-only and hard-codes one reply per thread (diary is 1+3, Grok→Claude→Codex, `RELEASE_SLACK_RUBRIC.md:227-247`). Generalise to "parent → replies in rubric order". Regression of the older reply-count item. | −20 |
+| 5 | per-invoke | `violet/SKILL.md:9` vs `:35-37` | "Owns only transport", yet carries ≈1.8 KB of cas-src content policy (forbidden words, `Cassy vX.Y.Z` label, reply grammar), so downstream posts are labelled "Cassy". Keep only the mrkdwn lint and move the content policy to the rubric. | −450 |
+| 6 | always / per-invoke | `violet/SKILL.md:3` vs `:39,76` | Description promises diary posts; the procedure is runtime-only and hard-codes one reply per thread (diary is 1+3, Grok→Claude→Codex, `RELEASE_SLACK_RUBRIC.md:227-247`). Generalise to "parent → replies in rubric order". Regression of the older reply-count item. | −20 |
 | 7 | per-invoke | `cas-qa-craft/SKILL.md:86-104` vs `:20-31` | The telemetry sweep says "first QA step", but it sits after the procedure; journeys are also outside it. Fold both into the numbered steps and delete the restatements. | −150 |
 | 8 | per-invoke | `cas-nuxt-playwright/SKILL.md:276` | `cli attach` then bare `step-over`; every command after attach needs `-s=<session>` (live: "browser 'default' is not open"). Point to cas-playwright-debug §2. | −40 |
 | 9 | per-invoke | `cas-nuxt-playwright/SKILL.md:211,297` | Claims `<q-btn>` breaks `getByRole('button')` and recommends `getByText`. It does not (live run); the real case is q-btn with `to`/`href` → role link. | 0 |
@@ -142,7 +142,7 @@ Condensed; full evidence is in the appendix rows.
 | 22 | per-invoke / on-demand | `codemap/SKILL.md:104`; `doc-hygiene.md:25-32` | "Update the pointer if it exists" has no find call; codemap's title adds `.md`; cas-src has 4 duplicate codemap pointers. Specify search-then-update and drop the suffix. | +30 |
 | 23 | runtime | `session-learn/SKILL.md:44` | Hook mode runs with `max_turns(1)` (`handlers_session.rs:1758-1766`), so it cannot "scan memory via `mcp__cas__search`". Mark this step interactive-only. | +10 |
 | 24 | per-invoke | `session-learn/SKILL.md:3` vs `:19-21` | When the user invokes it, no step stores the drafts ("the caller writes", but the agent is the caller). Add a store step and `Done when`. | +30 |
-| 25 | per-invoke | `cas-github-issues/SKILL.md:45` (and cas-worker, cas-supervisor, CLAUDE.md snippet) | `issues.components.mecha_cassy` is deprecated in favour of `issues.components.violet` for one release (`config/access/mod.rs:9-12`). | 0 |
+| 25 | per-invoke | `cas-github-issues/SKILL.md:45` (and cas-worker, cas-supervisor, CLAUDE.md snippet) | `issues.components.violet` is deprecated in favour of `issues.components.violet` for one release (`config/access/mod.rs:9-12`). | 0 |
 | 26 | on-demand | `cli-routing/references/routing.md:14-16` + `cas-codex-exec/SKILL.md:17,34` | Claims cas-codex-exec's recipe closes stdin; it does not. `codex exec` appends piped stdin (`--help`). Add `< /dev/null` at the owner. | +3 |
 | 27 | on-demand | `cli-routing/references/routing.md:18-21` | Recommends `--dangerously-bypass-approvals-and-sandbox` for a small write; codex 0.156 has `-s workspace-write` + `--add-dir`. | +10 |
 | 28 | always | `cli-routing/SKILL.md:3` vs `cas-codex-exec/SKILL.md:3` | Both trigger on "one-shot `codex exec`", so both fire. Narrow cli-routing to capacity/auth fallback and the Claude gate. | +5 |
@@ -156,11 +156,11 @@ The remaining P1 rows are in Appendix B (release trio) and Appendix C (QA). They
 ## Overlap map — who should own what
 
 | Cluster | Topic | Current copies (file:lines) | Owner | Others |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | **codex-exec vs cli-routing** | Trigger "one-shot `codex exec`" | codex-exec `:3`; cli-routing `:3` | cas-codex-exec | cli-routing narrows to capacity/auth fallback + Claude account gate |
 | | Codex flags (sandbox, `-C`, `-o`, stdin, write mode, `--output-schema`, reasoning effort) | codex-exec `:11-35`; routing.md `:12-32` | cas-codex-exec | Move routing.md `:18-32` to codex-exec (≈ +80 there, −500 across both) |
 | | Claude `claude -p` + account gate | cli-routing `:20-27`; routing.md `:34-79` | cli-routing | — |
-| | Release-note posting | cli-routing `:32-40`, routing.md `:81-96` | release-notes + mecha-cassy | Delete from cli-routing |
+| | Release-note posting | cli-routing `:32-40`, routing.md `:81-96` | release-notes + violet | Delete from cli-routing |
 | **brainstorm vs ideate vs to-questionnaire** | Routing / pipeline position | brainstorm `:9-15`; ideate `:9-15,23`; cas-supervisor `intake.md:29-47` | cas-supervisor intake.md | Each skill keeps a one-line output contract (−400) |
 | | Question mechanics (frontier, one-at-a-time) | brainstorm `:28-43,165-178`; ideate `:26-28`; handoff.md `:13,19` | cas-brainstorm (after P0-10) | ideate links; drop the AskUserQuestion sentences (hook enforces them) |
 | | Divergent idea generation | ideate `:137-140`; brainstorm `:184-187` | cas-ideate | brainstorm keeps "2–3 approaches, one non-obvious" |
@@ -172,10 +172,10 @@ The remaining P1 rows are in Appendix B (release trio) and Appendix C (QA). They
 | | QA close gate + bundle file list | qa SKILL `:41-53,62-75`; evidence-bundle `:17-49`; independent-pass `:101-115`; journeys `:43-50`; cas-worker close-gate.md `:68-74` | `evidence-bundle.md` (the code's `CONTRACT_REFERENCE`, `qa_evidence.rs:23`) | One line + pointer elsewhere |
 | | Matrix quotas | qa SKILL `:26-31`; matrix-builder `:9-25`; independent-pass `:51-61`; epic-flow-walk `:21-27` | matrix-builder.md | "per matrix-builder" + local override |
 | | webServer lifecycle | cas-servers `:3,23` (advertised, 1 sentence); nuxt template `:234-242` (`reuseExistingServer:true`); qa `:35-36`; journeys `:35-39` = independent-pass `:29-34` | cas-servers (new 5-line subsection) | Template and qa-craft point to it |
-| **release-notes vs cut-release vs mecha-cassy (vs release-report)** | Content rules (Was→Now, no tickets, one punch, forbidden words) | release-notes `:34-40`; template `:47-60`; mecha-cassy `:35-37,76`; cut-release `:37-39`; `RELEASE_SLACK_RUBRIC.md:184-225` | project rubric | Six copies → one; three different forbidden-word lists today |
-| | Format / mrkdwn lint | template `:33-45,88-95` (Markdown); mecha-cassy `:36-37` | rubric (format), mecha-cassy (format-agnostic lint) | Fixes P0-4 |
-| | Thread order / reply count | template `:29-31`; mecha-cassy `:39,76`; cut-release `:55-56,72` | rubric | mecha-cassy runs a generic parent→replies loop |
-| | Transport, preflight, `## POSTED` receipt | mecha-cassy `:9-72` (owner); release-notes `:24-32`; release-report `:57-58` (wrongly credits release-notes) | mecha-cassy | release-notes hands off; release-report fixes `:57-58` |
+| **release-notes vs cut-release vs violet (vs release-report)** | Content rules (Was→Now, no tickets, one punch, forbidden words) | release-notes `:34-40`; template `:47-60`; violet `:35-37,76`; cut-release `:37-39`; `RELEASE_SLACK_RUBRIC.md:184-225` | project rubric | Six copies → one; three different forbidden-word lists today |
+| | Format / mrkdwn lint | template `:33-45,88-95` (Markdown); violet `:36-37` | rubric (format), violet (format-agnostic lint) | Fixes P0-4 |
+| | Thread order / reply count | template `:29-31`; violet `:39,76`; cut-release `:55-56,72` | rubric | violet runs a generic parent→replies loop |
+| | Transport, preflight, `## POSTED` receipt | violet `:9-72` (owner); release-notes `:24-32`; release-report `:57-58` (wrongly credits release-notes) | violet | release-notes hands off; release-report fixes `:57-58` |
 | | Release mechanics (PR, queue, tag, publish) | cut-release `:19-79`; `RELEASE_SLACK_RUBRIC.md:38-91,132-177` (manual `gh pr merge --merge`, contradicts the merge-queue enqueue in `release-train.sh:531-535`) | cas-cut-release | Rubric points to train stages (doc fix, P1) |
 | **mcp-integration vs cas-viktor** | Proxy ladder, credentials, retry classes, allowlist | mcp-integration `:53-70` (allowlist missing); viktor `:13-54`; gateway.md `:5-53` | mcp-integration | cas-viktor keeps its call shape, 9 routes, watch/cost |
 | **other** | Printed-output critique | codebase-design `:83-123`; cas-cli-craft `:17-44` | cas-cli-craft | codebase-design points |
@@ -187,7 +187,7 @@ The remaining P1 rows are in Appendix B (release trio) and Appendix C (QA). They
 1. **Codex opt-in parity.** `disable-model-invocation` has no Codex mapping. CAS never generates `agents/openai.yaml` (`policy.allow_implicit_invocation: false`), so cas-nuxt-playwright and cas-to-questionnaire are model-invocable in Codex. This belongs to the parity lane.
 2. **`mcp_search`/`mcp_execute` schema text.** `ops_secondary.rs:1260-1262` describes `code` as "TypeScript code…", while the tool descriptions and proxy `parse_dispatch` accept JSON dispatch. Agents copy the wrong form (the root cause of P0-3 and P0-12). This is a code fix in cas-mcp.
 3. **`SessionLearnDraft` fragility.** Adding `#[serde(default)]` in `hooks/handlers.rs:207-227` would make P0-11 non-fatal regardless of prompt wording.
-4. **Deprecated names ahead of removal:** `cas integrate mecha-cassy` and `issues.components.mecha_cassy`. Both expire next release, so sweep every builtin (cas-worker.md `:72`, cas-supervisor.md `:67`, `filing-cas-bugs.md:19,33`, the CLAUDE.md snippet) before the alias is removed.
+4. **Deprecated names ahead of removal:** `cas integrate violet` and `issues.components.violet`. Both expire next release, so sweep every builtin (cas-worker.md `:72`, cas-supervisor.md `:67`, `filing-cas-bugs.md:19,33`, the CLAUDE.md snippet) before the alias is removed.
 5. **`cas-worker.md:24`** repeats the demo_statement-only QA trigger (P0-5). This is the always-loaded worker guidance, so it belongs to the L2/L3 lane.
 6. **`docs/RELEASE_SLACK_RUBRIC.md`** has 8 contradictions with the release train (Appendix B §Contradictions). The main one is the manual `gh pr merge --merge` vs merge-queue enqueue.
 7. **Claude-only content in twins.** AskUserQuestion, Glob, `.claude/scheduled_tasks.json`, `claude --resume` (D) and "Bash tool cancels parallel commands" / `$ARGUMENTS` (fallow) ship unadapted to Codex and Grok.
@@ -195,7 +195,7 @@ The remaining P1 rows are in Appendix B (release trio) and Appendix C (QA). They
 ## Token economy — ranked by delta × multiplier
 
 | Rank | Change | Surface | Δ per use | Multiplier |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | 1 | cas-cut-release reads only `manual:*` failure-log entries | per-invoke | −5,700 | every release cut (and the log grows) |
 | 2 | session-learn runtime prompt trimmed to the hook contract | runtime | −1,100 | every auto-extracting Stop hook |
 | 3 | fallow body → procedure + pointers to `fallow schema` / `--help` | per-invoke | −4,900 | JS/TS projects only (synced by stack) |
@@ -219,7 +219,7 @@ Repo HEAD 4836e56f7 (v3.31.0). Read-only. Third-party baseline: fallow **3.28.0*
 #### Size
 
 | File | Bytes | Lines | ≈tokens | Surface |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | SKILL.md (frontmatter description, 172 chars) | 172 | 1 | 43 | always |
 | SKILL.md body | 27,032 | 396 | 6,760 | per-invoke |
 | references/cli-reference.md | 81,980 | 1,605 | 20,500 | on-demand |
@@ -233,9 +233,9 @@ Upstream for comparison (fetched 2026-09-25): SKILL.md 30,188 B; references 325 
 
 #### Scores (1–5)
 
-| Skill | 1 Frontmatter | 2 Trigger | 3 Disclosure/size | 4 Wording | 5 Procedure/completion | 6 Accuracy | 7 Parity | 8 Tokens |
-|---|---|---|---|---|---|---|---|---|
-| fallow | 4 | 4 | 2 | 3 | 2 | 2 | 4 | 2 |
+| Skill  | 1 Frontmatter | 2 Trigger | 3 Disclosure/size | 4 Wording | 5 Procedure/completion | 6 Accuracy | 7 Parity | 8 Tokens |
+| ------ | ------------- | --------- | ----------------- | --------- | ---------------------- | ---------- | -------- | -------- |
+| fallow | 4             | 4         | 2                 | 3         | 2                      | 2          | 4        | 2        |
 
 #### Prior-review status (docs/analysis/2026-09-02-builtin-skills-review.md :67, :108 #22, :153, :168, :178, :407, :466, :495)
 
@@ -249,7 +249,7 @@ Upstream for comparison (fetched 2026-09-25): SKILL.md 30,188 B; references 325 
 #### Findings
 
 | Sev | Surface | file:line | Defect | Evidence | Fix | Δ tokens |
-|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- |
 | P0 | per-invoke | SKILL.md:21-24, :67-68 | Procedure contradicts itself. Step 2 mandates `2>/dev/null \|\| true`, then says "exit code 1 means findings; exit code 2 means the command failed". `\|\| true` forces status 0, so the agent can never see 1 or 2. With `2>/dev/null` a missing binary or npx failure yields empty stdout and rc 0, which fails silently. | `nosuchfallowbin --format json --quiet 2>/dev/null \|\| true` gives rc=0 and empty output. `fallow fix` without `--yes` gives `{"error":true,…,"exit_code":2}`, rc=2 (measured on 3.28.0). Upstream Agent Rule 2 now reads: "Preserve and interpret the exit status… Do not force a successful status, because that hides validation, license, setup, network, and security-gate outcomes". Upstream Rule 1 also says keep stderr separate, not `/dev/null`. | Replace both rules and step 2 with `fallow <cmd> --format json --quiet 2>/tmp/fallow.err; echo "exit=$?"`. `echo` keeps the Bash call successful, so parallel calls are not cancelled, and the code stays visible. 0/1 = analysis OK; any other code, or `"error": true` on stdout, means read /tmp/fallow.err and stop. Then drop `\|\| true` from all 31 examples. | −120 |
 | P1 | per-invoke | SKILL.md:192-195 | Example pairs `--fail-on-issues` with `\|\| true`, then claims "Exit code 1 if new dead code is introduced". The exit code is swallowed, so the example cannot do what the prose says. | Line text. Root help: `--fail-on-issues  Exit with code 1 if issues are found`. | Covered by the F1 rewrite, or drop `--fail-on-issues` (the JSON `total_issues` is the agent signal). | −5 |
 | P1 | per-invoke | SKILL.md:114-143 | MCP tool table is stale: it lists 22 tools. The skill never tells the agent to register or call `fallow-mcp`. | 3.28.0 `fallow schema` → `mcp_tools.tools` = 38 (new: `code_execute`, `security_candidates`, `find_similar_code`, `inspect_similar_code`, `inspect_target`, `guard`, `get_cloud_runtime_context`, `get_token_blast_radius`, `decision_surface`, `recommend`, `list_suppressions`, `impact`, `impact_all`, `trace_symbol`, `symbol_impact`, `trace_import_path`, `trace_error`, `impact_closure`). 3.15.0 = 33. Upstream moved MCP to references/mcp.md. | Delete the section. Add one line: "If a `fallow-mcp` server is registered, prefer its tools; the list is in `fallow schema` → `mcp_tools`." | −1,300 |
@@ -287,7 +287,7 @@ Net if all per-invoke fixes land: body ≈27 KB → ≈8 KB, **≈ −4,900 toke
 #### Search manifest
 
 | Command | Hits / result |
-|---|---|
+| --- | --- |
 | `find cas-cli/src/builtins -path '*fallow*' -type f \| xargs wc -c -l` | 12 files (4 × 3 catalogs) |
 | `grep -n -i fallow docs/analysis/2026-09-02-builtin-skills-review.md` | 9 lines (:67,:108,:117,:153,:168,:178,:407,:466,:495) |
 | `diff -q` canonical vs codex / grok (4 files each) | 0 differences |
@@ -311,7 +311,7 @@ Net if all per-invoke fixes land: body ≈27 KB → ≈8 KB, **≈ −4,900 toke
 | upstream `api.github.com/repos/fallow-rs/fallow-skills` commits/contents | last commit 2026-09-24; skill at `fallow/skills/fallow/`, 7 reference files, 325 KB |
 | `npm view fallow version` / `@fallow-cli/fallow-node` / crates.io `fallow-cli` | 3.28.0 / 3.28.0 / 3.28.0 |
 
-### Appendix B — B-release — cas-cut-release · release-notes · mecha-cassy (+ overlap with cas-release-report)
+### Appendix B — B-release — cas-cut-release · release-notes · violet (+ overlap with cas-release-report)
 
 Auditor: sub-reviewer B-release, task cas-9233. Repo HEAD 4836e56f7 (v3.31.0). Read-only. Rubric: `~/.cas/artifacts/cas-63c5/rubric.md` v1.
 Paths below are relative to `cas-cli/src/builtins/skills/` unless they start with `docs/`, `scripts/`, `crates/` or `cas-cli/`.
@@ -319,52 +319,52 @@ Paths below are relative to `cas-cli/src/builtins/skills/` unless they start wit
 #### Sizes
 
 | File | Lines | Bytes | ≈ tokens |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | cas-cut-release/SKILL.md | 79 | 5,184 | 1,296 |
 | cas-cut-release/references/failure-log.md | 88 | 31,930 | 7,983 |
 | release-notes/SKILL.md | 40 | 2,161 | 540 |
 | release-notes/references/RUBRIC-template.md | 95 | 4,699 | 1,175 |
-| mecha-cassy/SKILL.md | 80 | 12,029 | 3,007 |
-| mecha-cassy/references/registration.md | 170 | 7,611 | 1,903 |
+| violet/SKILL.md | 80 | 12,029 | 3,007 |
+| violet/references/registration.md | 170 | 7,611 | 1,903 |
 | (overlap only) cas-release-report/SKILL.md | 58 | 3,688 | 922 |
 
-Descriptions: cas-cut-release 64 chars, release-notes 137, mecha-cassy 209 (all ≤ 250). None of the reference files has frontmatter. No retired vocabulary, no `/home/<user>`, no e-mail addresses, no `../../../../` links (see manifest). None of the skills has `disallowed-tools`.
+Descriptions: cas-cut-release 64 chars, release-notes 137, violet 209 (all ≤ 250). None of the reference files has frontmatter. No retired vocabulary, no `/home/<user>`, no e-mail addresses, no `../../../../` links (see manifest). None of the skills has `disallowed-tools`.
 
 #### Scores (1–5; A1 frontmatter · A2 description · A3 disclosure/size · A4 wording · A5 procedure/completion · A6 accuracy · A7 parity · A8 token economy)
 
 | Skill | A1 | A2 | A3 | A4 | A5 | A6 | A7 | A8 | Verdict |
-|---|---|---|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | cas-cut-release | 4 | 4 | 2 | 3 | 4 | 5 | 5 | 2 | revise S: tier the failure log |
 | release-notes | 4 | 3 | 4 | 4 | 3 | 3 | 5 | 4 | revise S: Grok collision, template leak |
-| mecha-cassy | 4 | 3 | 3 | 3 | 4 | 2 | 5 | 3 | revise M: stale command, wrong call shape, content-policy leak |
+| violet | 4 | 3 | 3 | 3 | 4 | 2 | 5 | 3 | revise M: stale command, wrong call shape, content-policy leak |
 
 #### Twin parity (A7)
 
-`diff` of canonical against the codex/ and grok/ twins for all six files: cas-cut-release/SKILL.md has 1 hunk (`:15` `mcp__cas__memory` → `mcp__cs__memory` / `cas__memory`). failure-log.md has 0. release-notes SKILL and template have 0. mecha-cassy/SKILL.md has 1 hunk (`:78` `mcp__cas__mcp_execute` prefix). registration.md has 2 hunks (`:71`, `:83` prefix). **All of it is tool-prefix substitution, so there is no drift.** The installed copies in `~/.grok/skills/` and `~/.claude/skills/` are byte-identical to the source for all six files. Known cross-lane P0s (a) and (b) are not re-reported.
+`diff` of canonical against the codex/ and grok/ twins for all six files: cas-cut-release/SKILL.md has 1 hunk (`:15` `mcp__cas__memory` → `mcp__cs__memory` / `cas__memory`). failure-log.md has 0. release-notes SKILL and template have 0. violet/SKILL.md has 1 hunk (`:78` `mcp__cas__mcp_execute` prefix). registration.md has 2 hunks (`:71`, `:83` prefix). **All of it is tool-prefix substitution, so there is no drift.** The installed copies in `~/.grok/skills/` and `~/.claude/skills/` are byte-identical to the source for all six files. Known cross-lane P0s (a) and (b) are not re-reported.
 
 ---
 
 #### Prior-review status (docs/analysis/2026-09-02-builtin-skills-review.md)
 
 | Prior item | Status | Evidence |
-|---|---|---|
-| P0 #16 / §release-notes P0: `release-notes/SKILL.md:18-30` cas-src transport policy (`pippenz@gmail.com` profile, `docs/SLACK_POSTING_RUNBOOK.md`, "Default Codex workers") | **FIXED** in the skill | `grep -rn "SLACK_POSTING_RUNBOOK\|pippenz@gmail" cas-cli/src/builtins/skills/{release-notes,mecha-cassy,cas-cut-release}` returns 0. The skill now points to mecha-cassy (`:24-30`). Residual: `docs/SLACK_POSTING_RUNBOOK.md:110-119` still has a "Historical" table whose Decision cell reads **"Canonical route."** for the `pippenz@gmail.com` Claude.ai Slack profile. This is a doc, not a builtin, so it is P3. |
-| P1: reply-count hard rule (`:43,75`, template `:21`) vs `docs/RELEASE_SLACK_RUBRIC.md` | **FIXED in release-notes; carry-over moved to mecha-cassy** | `release-notes/SKILL.md:19` "reply-count default". `RUBRIC-template.md:29-31` "Default: one threaded reply … A project may explicitly document a different reply count". The hard rule now lives in `mecha-cassy/SKILL.md:76` "one punch per top-level message with its detail in one reply" and in the 4-write-only steps `:39`. cas-src's own `docs/release-notes/RUBRIC.md:40` still says "**exactly one** threaded reply", while `RELEASE_SLACK_RUBRIC.md:234` requires three for a diary (its `:6-7` says RELEASE_SLACK wins). |
-| P2: five content rules restated 4× | **STILL OPEN (carry-over), now 6 copies** | `release-notes/SKILL.md:34-40`, `RUBRIC-template.md:47-56`, `mecha-cassy/SKILL.md:35-37,76`, `docs/RELEASE_SLACK_RUBRIC.md:184-225,257-262`, `docs/release-notes/RUBRIC.md:55-63`, and the CLAUDE.md user-level block. |
+| --- | --- | --- |
+| P0 #16 / §release-notes P0: `release-notes/SKILL.md:18-30` cas-src transport policy (`pippenz@gmail.com` profile, `docs/SLACK_POSTING_RUNBOOK.md`, "Default Codex workers") | **FIXED** in the skill | `grep -rn "SLACK_POSTING_RUNBOOK\|pippenz@gmail" cas-cli/src/builtins/skills/{release-notes,violet,cas-cut-release}` returns 0. The skill now points to violet (`:24-30`). Residual: `docs/SLACK_POSTING_RUNBOOK.md:110-119` still has a "Historical" table whose Decision cell reads **"Canonical route."** for the `pippenz@gmail.com` Claude.ai Slack profile. This is a doc, not a builtin, so it is P3. |
+| P1: reply-count hard rule (`:43,75`, template `:21`) vs `docs/RELEASE_SLACK_RUBRIC.md` | **FIXED in release-notes; carry-over moved to violet** | `release-notes/SKILL.md:19` "reply-count default". `RUBRIC-template.md:29-31` "Default: one threaded reply … A project may explicitly document a different reply count". The hard rule now lives in `violet/SKILL.md:76` "one punch per top-level message with its detail in one reply" and in the 4-write-only steps `:39`. cas-src's own `docs/release-notes/RUBRIC.md:40` still says "**exactly one** threaded reply", while `RELEASE_SLACK_RUBRIC.md:234` requires three for a diary (its `:6-7` says RELEASE_SLACK wins). |
+| P2: five content rules restated 4× | **STILL OPEN (carry-over), now 6 copies** | `release-notes/SKILL.md:34-40`, `RUBRIC-template.md:47-56`, `violet/SKILL.md:35-37,76`, `docs/RELEASE_SLACK_RUBRIC.md:184-225,257-262`, `docs/release-notes/RUBRIC.md:55-63`, and the CLAUDE.md user-level block. |
 | P3: `git log <last-release>..HEAD` unresolvable for staging | **FIXED** (command removed) | `:15-17` now "Read the commits and merged change set since the last release". It is still vague for a staging merge (see R-4). |
 | P1: CLAUDE.md directive (`docs_and_skill.rs:22`) ships a Petrastella Slack policy to every project | **STILL OPEN (carry-over)** | `cas-cli/src/cli/init/docs_and_skill.rs:23` is unchanged: "Release notes: when a merge reaches `staging` or `main`, use the `release-notes` skill and follow docs/release-notes/RUBRIC.md." It is pinned by the test at `:314-323`. Combined with `release-notes/SKILL.md:11-14` (create the rubric if it is missing), every downstream project gets a mandatory Slack duty. |
-| cas-cut-release, mecha-cassy | not in prior review | Both skills were added after 2026-09-02. |
+| cas-cut-release, violet | not in prior review | Both skills were added after 2026-09-02. |
 
 ---
 
 #### cas-cut-release
 
 | Sev | Surface | file:line | Defect | Evidence | Fix | Δ tokens |
-|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- |
 | P1 | per-invoke → on-demand | cas-cut-release/SKILL.md:13; references/failure-log.md (all) | "Read `references/failure-log.md in full`" costs about 8k tokens per invoke, and the log only grows (88 entries, append-only via `--learn`). 63 of the 88 entries name a gate `check-id` that `release-gate.sh` already enforces mechanically. Only the 25 `manual:*` entries (about 9.1 KB) describe hazards that no row catches. Some entries run to 1,431 chars on a single line. | `grep -c '^- '` → 88; `grep manual: \| wc -c` → 9,099 B; non-manual → 22,831 B; `awk length` max 1,431. The marker is pinned by `cas-cli/src/builtins.rs:8315` (`"references/failure-log.md in full"`). | Change step 1 to: "Read the `manual:*` entries in `references/failure-log.md`. On a gate failure, grep the log for the failing row id." Update the pin at `builtins.rs:8315`. Optionally split into `failure-log.md` (automated rows) and `manual-hazards.md`. | −5,700 per invoke |
 | P2 | per-invoke | cas-cut-release/SKILL.md:13-18 | Step 1 tells the agent to "mirror the entry" and to "regenerate [the ledger] again after the final merge as the last prep step". Both are already automatic: `--learn` appends to all three mirrors and regenerates the ledger, and `--cut` runs a `ledger` stage. The manual instructions invite double edits. | `scripts/release-gate.sh:44-63` loops over the canonical, codex and grok logs and runs `gen-builtin-reference-history.sh`. `scripts/release-train.d/ledger.sh:129` and `release-train.sh:131` include `ledger` in the cut stages. | Reword to: "`--learn` writes all three mirrors and the ledger; commit them with the new check. Then store the same text with `mcp__cas__memory action=remember entry_type=learning tags=release`." Keep the pinned substrings `release-gate.sh --learn` and `ledger is the last prep step` (`:52`). | −40 |
 | P2 | per-invoke | cas-cut-release/SKILL.md:24-46 | Step 3 is a 23-line run-on (1,655 B) that asks the agent to "confirm" about ten prerequisites which the `preflight` stage checks and blocks on by name: competing release, merge queue, scratch base, `CAS_RELEASE_ENV_FILE`, Zig/toolchain, cut date. It mixes lane rules (fixture `9.99.x`, `runtime_fixture_parent`, snapshot policy) with operator steps. There is no first-read ordering. | `scripts/release-train.d/preflight.sh:36-72` (competing-release, GraphQL mergeQueue), `:78` (release.env), `:110-137` (scratch-space); `prep.sh:72-74` (journey-evaluation). | Split into (a) "Before `--cut`: start a clean detached or `release/` worktree from `origin/main`. If hub-web/dist changed, commit a journey evaluation. `preflight` names any other missing prerequisite." and (b) move the fixture/snapshot/version rules into a short "Lane rules" list, or into the failure log where they already exist (`failure-log.md:51-53`). Keep the pinned markers. | −200 |
-| P2 | per-invoke | cas-cut-release/SKILL.md:37-39 | The User-thread forbidden-word list is a third, divergent copy: `agent, worker, supervisor, daemon, factory`. mecha-cassy `:35` and RELEASE_SLACK_RUBRIC `:200-202` omit `daemon`. The enforced list is the union. | `scripts/release-train-announce.py:19-38` `USER_FORBIDDEN` includes `daemon`, `harness`, `lane`, `epic` and 15 more. | Replace with: "`announce` lint (`scripts/release-train-announce.py`) is the authority for User-thread wording; preflight runs the same lint." Delete the word list. | −25 |
+| P2 | per-invoke | cas-cut-release/SKILL.md:37-39 | The User-thread forbidden-word list is a third, divergent copy: `agent, worker, supervisor, daemon, factory`. violet `:35` and RELEASE_SLACK_RUBRIC `:200-202` omit `daemon`. The enforced list is the union. | `scripts/release-train-announce.py:19-38` `USER_FORBIDDEN` includes `daemon`, `harness`, `lane`, `epic` and 15 more. | Replace with: "`announce` lint (`scripts/release-train-announce.py`) is the authority for User-thread wording; preflight runs the same lint." Delete the word list. | −25 |
 | P2 | always | cas-cut-release/SKILL.md:1-5 | Top-level `managed_by: cas` (all three skills). | Rubric Axis 1. `is_managed_by_cas` is a substring check. | Use `metadata: { managed_by: cas }`. This is a cross-skill mechanical change. | 0 |
 | P3 | always | cas-cut-release/SKILL.md:3 | The skill ships to every project (`builtins.rs:174-180`, no gate), but every step drives cas-src-only `scripts/release-train.sh` and `release-gate.sh`. The description is correctly scoped ("Cassy runtime release"), so the only cost is a listing line in downstream projects. | `ls scripts/release-train.sh` exists only in cas-src. No `cas-cut-release` gating in `builtins.rs`. | Accept, or gate installation to the CAS source repo, like other cas-src-only surfaces. | −16 always (downstream) |
 | P3 | per-invoke | cas-cut-release/SKILL.md:13 | Backticks wrap the prose "in full" (`references/failure-log.md in full`) only to satisfy a substring pin. | `builtins.rs:8315`. | This goes away with the P1 fix. | 0 |
@@ -375,46 +375,46 @@ Verified OK (A6): `--check-lane`, `--cut [--resume]`, `--status`, `--gate --only
 #### release-notes
 
 | Sev | Surface | file:line | Defect | Evidence | Fix | Δ tokens |
-|---|---|---|---|---|---|---|
-| P1 | always | release-notes/SKILL.md:2 (grok twin) | The name collides with Grok's built-in `/release-notes` command ("View release notes for the current version"). In Grok the skill is advertised only as `user:release-notes`. The universal CLAUDE.md directive says "use the `release-notes` skill", so a Grok agent or user typing `/release-notes` gets Grok's own changelog. | `grok inspect --json` → `{"name":"release-notes","collidesWith":"release-notes","invocableAs":"user:release-notes"}`. `~/.grok/docs/user-guide/08-skills.md:172`. Grok 1.0.41. | Rename to `cas-release-notes` in all three catalogs, update the directive (`docs_and_skill.rs:23`) and the pin at `:314-323`, and keep a doctor retired-name mapping (as for `mecha-cassy-post`, `doctor.rs:361`). | +2 always |
-| P0 | per-invoke / on-demand | release-notes/references/RUBRIC-template.md:33-45,88-95 vs mecha-cassy/SKILL.md:36-37 | The procedures contradict each other on message format. The template's example and shape use Markdown bold (`**User**`, `` `Live on production` · **User** — … ``) and a free-form reply. mecha-cassy, which release-notes step 5 requires, has a lint that **refuses to post** any body containing `**`. It also requires exactly two lines `*Live on production — User — Cassy vX.Y.Z*` + a punch of 25 words or fewer, and `• *Label* — Was: … Now: …` bullets. A downstream project that copies the template drafts text the transport then rejects. | `RUBRIC-template.md:90-95`; `mecha-cassy/SKILL.md:36-37`; enforced for cas-src by `scripts/release-train-announce.py:58` and the `TOP_LEVEL_LABEL` regex `…— Cassy(?: vX.Y.Z)?\*`. | Pick one owner for format. Recommended: the template owns format and gets a mrkdwn example (single `*bold*`, `•` bullets). mecha-cassy lints only transport-level hazards (`**`, `#` headings, `-` (dash-space) bullets) and defers label and shape to the rubric. | ±0 (rewrite) |
+| --- | --- | --- | --- | --- | --- | --- |
+| P1 | always | release-notes/SKILL.md:2 (grok twin) | The name collides with Grok's built-in `/release-notes` command ("View release notes for the current version"). In Grok the skill is advertised only as `user:release-notes`. The universal CLAUDE.md directive says "use the `release-notes` skill", so a Grok agent or user typing `/release-notes` gets Grok's own changelog. | `grok inspect --json` → `{"name":"release-notes","collidesWith":"release-notes","invocableAs":"user:release-notes"}`. `~/.grok/docs/user-guide/08-skills.md:172`. Grok 1.0.41. | Rename to `cas-release-notes` in all three catalogs, update the directive (`docs_and_skill.rs:23`) and the pin at `:314-323`, and keep a doctor retired-name mapping (as for `violet-post`, `doctor.rs:361`). | +2 always |
+| P0 | per-invoke / on-demand | release-notes/references/RUBRIC-template.md:33-45,88-95 vs violet/SKILL.md:36-37 | The procedures contradict each other on message format. The template's example and shape use Markdown bold (`**User**`, `` `Live on production` · **User** — … ``) and a free-form reply. violet, which release-notes step 5 requires, has a lint that **refuses to post** any body containing `**`. It also requires exactly two lines `*Live on production — User — Cassy vX.Y.Z*` + a punch of 25 words or fewer, and `• *Label* — Was: … Now: …` bullets. A downstream project that copies the template drafts text the transport then rejects. | `RUBRIC-template.md:90-95`; `violet/SKILL.md:36-37`; enforced for cas-src by `scripts/release-train-announce.py:58` and the `TOP_LEVEL_LABEL` regex `…— Cassy(?: vX.Y.Z)?\*`. | Pick one owner for format. Recommended: the template owns format and gets a mrkdwn example (single `*bold*`, `•` bullets). violet lints only transport-level hazards (`**`, `#` headings, `-` (dash-space) bullets) and defers label and shape to the rubric. | ±0 (rewrite) |
 | P1 | on-demand | release-notes/references/RUBRIC-template.md:62-76 | The universal template carries cas-src release-train mechanics: "Save `release-report.receipt` in the release-train run directory with both report paths, both SHA-256 values, both Slack file ids …" and "Carry these post-publication artifacts into the next release-prep commit". Downstream projects have no release train. The rules are also presented as framework rules a project "may add to, never relax" (`:4-5`). | `scripts/release-train.sh:806-900` is the only consumer of `release-report.receipt`. No downstream equivalent exists. | Reduce to 3 lines: "After a published version, run `cas-release-report` and link its HTML/PDF from the Dev/User threads." Move the receipt field list to `docs/RELEASE_SLACK_RUBRIC.md`, which already has it at `:104-128,299-303`. | −170 |
-| P1 | always | cas-cli/src/cli/init/docs_and_skill.rs:23 | Carry-over: every `cas init` project gets a mandatory staging/main Slack duty via the MechaCassy hub (release-notes `:24-27` "Use only the MechaCassy hub/bot"), even when it has no hub registration. | Prior review #22. The line is unchanged. | Use the prior proposal: "Release-note duties, if any, are defined by `docs/release-notes/RUBRIC.md`." Make step 1 create a rubric only on request. | −10 always |
-| P2 | per-invoke | release-notes/SKILL.md:24-32 | Step 5 restates mecha-cassy transport rules (preflight, dedupe, integrity, parent id, failure handling). Step 6 restates the `## POSTED` block with fewer fields than mecha-cassy `:41-54` (no `message_id`). The two receipt contracts differ. | `mecha-cassy/SKILL.md:41-54` requires `message_id` + permalink. release-notes `:31-32` requires only timestamp, channel and permalink. | Step 5: "Post through [mecha-cassy](../mecha-cassy/SKILL.md) steps 3–6. They own preflight, order, integrity and the `## POSTED` receipt." Delete step 6. | −110 |
+| P1 | always | cas-cli/src/cli/init/docs_and_skill.rs:23 | Carry-over: every `cas init` project gets a mandatory staging/main Slack duty via the Violet hub (release-notes `:24-27` "Use only the Violet hub/bot"), even when it has no hub registration. | Prior review #22. The line is unchanged. | Use the prior proposal: "Release-note duties, if any, are defined by `docs/release-notes/RUBRIC.md`." Make step 1 create a rubric only on request. | −10 always |
+| P2 | per-invoke | release-notes/SKILL.md:24-32 | Step 5 restates violet transport rules (preflight, dedupe, integrity, parent id, failure handling). Step 6 restates the `## POSTED` block with fewer fields than violet `:41-54` (no `message_id`). The two receipt contracts differ. | `violet/SKILL.md:41-54` requires `message_id` + permalink. release-notes `:31-32` requires only timestamp, channel and permalink. | Step 5: "Post through [violet](../violet/SKILL.md) steps 3–6. They own preflight, order, integrity and the `## POSTED` receipt." Delete step 6. | −110 |
 | P2 | per-invoke | release-notes/SKILL.md:34-40 | The "Quality bar" duplicates the rubric hard rules (`RUBRIC-template.md:47-56`), which step 1 already made the contract. | Carry-over of prior P2. | Delete. Step 3 already says "Draft the messages from the rubric". | −75 |
 | P3 | per-invoke | release-notes/SKILL.md:15-17 | "since the last release" is undefined for a staging merge, and no command is given. | Prior P3, partly fixed. | "Read the merged PR (`gh pr view <n> --json title,body,commits,files`)". | +10 |
-| P3 | per-invoke | release-notes/SKILL.md (end) | There is no `Done when`, and no stop condition of its own (it relies on mecha-cassy). | Rubric Axis 5. | "Done when the draft is saved and has a `## POSTED` block from mecha-cassy, or a blocked report with partial receipts." | +20 |
+| P3 | per-invoke | release-notes/SKILL.md (end) | There is no `Done when`, and no stop condition of its own (it relies on violet). | Rubric Axis 5. | "Done when the draft is saved and has a `## POSTED` block from violet, or a blocked report with partial receipts." | +20 |
 
-#### mecha-cassy
+#### violet
 
 | Sev | Surface | file:line | Defect | Evidence | Fix | Δ tokens |
-|---|---|---|---|---|---|---|
-| P0 | per-invoke / on-demand | mecha-cassy/SKILL.md:65,78; references/registration.md:14,18,90 | Tells the agent to run `cas integrate mecha-cassy`. In 3.31.0 that is a deprecated alias of `cas integrate violet`, "accepted for one release", and it prints a deprecation warning. Next release it is gone. Doctor remediation already prints `Run \`cas integrate violet\``. | `cas integrate mecha-cassy --help` → "Deprecated name of `cas integrate violet`, accepted for one release (GH #963)". `cas-cli/src/cli/integrate/mod.rs:106-116`. `doctor.rs:8283-8296`. Merge 41c4b0593. | Replace with `cas integrate violet` in the five places (and in the three twins). Add one line saying the proxy server/tools are still `mecha-cassy` / `mecha_read` / `mecha_post` until the hub serves `violet_read` / `violet_post` (`crates/cas-mcp-proxy/src/config.rs:39-46`). | +15 |
-| P0 | on-demand | mecha-cassy/references/registration.md:71 (+ twins) | Wrong call shape: `mcp__cas__mcp_execute server=mecha-cassy tool=mecha_read args={…}`. `mcp_execute` has no `server`/`tool`/`args` parameters. Its only parameters are `code` (string) and `max_length`. The JSON dispatch goes inside `code`. The tool description mitigates this, but an agent copying the example sends invalid params. | `crates/cas-mcp/src/types/ops_secondary.rs:1256-1272` (`ExecuteRequest { code, max_length }`). `crates/cas-mcp-proxy/src/lib.rs:844-851,2040-2061` (JSON `{"server","tool","args"}` parsed from `code`). | `mcp__cas__mcp_execute code='{"server":"mecha-cassy","tool":"mecha_read","args":{"channel":"<name>","since":"<RFC3339>","max_messages":50}}'` | +8 |
-| P1 | per-invoke | mecha-cassy/SKILL.md:9 vs :35-37,76 | Says "this skill owns only transport", then spends about 1.8 KB on content policy: the User-thread forbidden-word list, the read-aloud test, the two-line top-level format hard-coded to **`Cassy vX.Y.Z`**, reply-bullet grammar, install trailer and ~12-bullet grouping. This is cas-src's `RELEASE_SLACK_RUBRIC.md:194-225` copied into a universal builtin, so a downstream project's announcement would be labelled "Cassy vX.Y.Z". | `RELEASE_SLACK_RUBRIC.md:196-222` is near-verbatim. `release-train-announce.py:19-45` regex pins "Cassy". | Keep only the mrkdwn transport lint (no `**`, no `#` lines, no `-` (dash-space) bullets, bullets ≤ 2 lines). Move wording and label rules to the project rubric. Step 2 becomes: "Draft per the project rubric and save the exact fenced bodies to `docs/release-notes/<date>-<topic>-slack.md`." | −330 |
-| P1 | always / per-invoke | mecha-cassy/SKILL.md:3 vs :39,76 | The description promises "a diary update", but the procedure only covers the runtime 4-write order. `:76` hard-codes "its detail in one reply". The cas-src diary contract is 1 parent + exactly 3 replies ordered Grok → Claude → Codex. An agent posting a diary via this skill follows the wrong order and count. | `docs/RELEASE_SLACK_RUBRIC.md:227-247`. `docs/SLACK_POSTING_RUNBOOK.md:50-51` knows about the diary; the skill does not. | Generalise step 4: "Post each thread in the rubric's order: parent → save `message_id` → each reply with `reply_to=<parent>`; ≥ 1 s between writes." Delete `:76`, or change it to "Content rules come from the rubric." Drop "diary update" from the description, or keep it and have the rubric supply the order. | −40 |
-| P2 | per-invoke | mecha-cassy/SKILL.md:18,30,40 | cas-src release-adapter detail lives in the per-invoke body. `:18` names `scripts/release-report-post.py`, a cas-src-only script. `:40` is a 1,609-byte single-line step 5 covering download origin rules, bearer/bypass forwarding, loopback exception, PIL verify and PDF page count. `:30` repeats the PDF-to-User / HTML-to-Dev rule, which appears again in RUBRIC-template `:67-68` and RELEASE_SLACK_RUBRIC `:106-108`. | `wc -c` of line 40 is 1,609 and of line 18 is 958. `scripts/release-report-post.py:34,453` exists only in cas-src. | Move file-upload verification to `references/file-upload.md` (on-demand, read only when posting a file). Keep a 2-line pointer. Drop the release-report specifics from `:18,30`. | −600 per invoke |
-| P2 | per-invoke | mecha-cassy/SKILL.md:38 | Step 3 (1,366 B) folds the read-outage fallback, a write-safe exception and envelope redaction into one line. The same fallback is restated at `:64`. | `:38`, `:64`. | Split into 3a preflight, 3b bounded read (`since`, 3×10 s), 3c outage fallback. Delete the `:64` restatement and keep a pointer. | −60 |
-| P2 | on-demand | mecha-cassy/references/registration.md:20,44,143 | Points to cas-src/hub-only artifacts that are not shipped: `docs/MECHA_CASSY_ONBOARDING.md` (only in cas-src), `mecha-cassy#5` (hub issue), and the hub project's `scripts/slack-post.sh`, which cannot be verified from this repo. | `ls docs/MECHA_CASSY_ONBOARDING.md` exists only in cas-src. `integrate/mecha_cassy.rs:55` (`HUB_CLIENT_ISSUE`). | Replace with the command-level facts (`cas integrate violet --help`). Name the proxy-less script by its hub repo URL, or drop it. | −30 |
-| P2 | per-invoke | mecha-cassy/SKILL.md:34 | The channel rule `^[a-z0-9-]+-internal$` is enforced (hub/`slack-post.sh` "same channel rule", `registration.md:144`), but `RUBRIC-template.md:9` offers a free `<#channel-name>` and never mentions the constraint. A downstream rubric naming `#releases` fails only at post time. | `RUBRIC-template.md:9`. | Add "must match `*-internal` or be allowlisted by the hub" to the template's Channel line. | +12 |
-| P3 | per-invoke | mecha-cassy/SKILL.md:40 | Step 5 is indented one space (a leading space before `5.`), which breaks the ordered list in some renderers. | `cat -n` line 40. | Remove the leading space. | 0 |
-| P3 | per-invoke | mecha-cassy/SKILL.md:80 | A maintenance note ("If a machine still carries a separate user-level `mecha-cassy-post` skill … delete it") is already enforced by doctor. | `doctor.rs:361` `RETIRED_USER_SKILLS`. | Delete. | −45 |
+| --- | --- | --- | --- | --- | --- | --- |
+| P0 | per-invoke / on-demand | violet/SKILL.md:65,78; references/registration.md:14,18,90 | Tells the agent to run `cas integrate violet`. In 3.31.0 that is a deprecated alias of `cas integrate violet`, "accepted for one release", and it prints a deprecation warning. Next release it is gone. Doctor remediation already prints `Run \`cas integrate violet\``. | `cas integrate violet --help` → "Deprecated name of `cas integrate violet`, accepted for one release (GH #963)". `cas-cli/src/cli/integrate/mod.rs:106-116`. `doctor.rs:8283-8296`. Merge 41c4b0593. | Replace with `cas integrate violet` in the five places (and in the three twins). Add one line saying the proxy server/tools are still `violet` / `violet_read` / `violet_post` until the hub serves `violet_read` / `violet_post` (`crates/cas-mcp-proxy/src/config.rs:39-46`). | +15 |
+| P0 | on-demand | violet/references/registration.md:71 (+ twins) | Wrong call shape: `mcp__cas__mcp_execute server=violet tool=violet_read args={…}`. `mcp_execute` has no `server`/`tool`/`args` parameters. Its only parameters are `code` (string) and `max_length`. The JSON dispatch goes inside `code`. The tool description mitigates this, but an agent copying the example sends invalid params. | `crates/cas-mcp/src/types/ops_secondary.rs:1256-1272` (`ExecuteRequest { code, max_length }`). `crates/cas-mcp-proxy/src/lib.rs:844-851,2040-2061` (JSON `{"server","tool","args"}` parsed from `code`). | `mcp__cas__mcp_execute code='{"server":"violet","tool":"violet_read","args":{"channel":"<name>","since":"<RFC3339>","max_messages":50}}'` | +8 |
+| P1 | per-invoke | violet/SKILL.md:9 vs :35-37,76 | Says "this skill owns only transport", then spends about 1.8 KB on content policy: the User-thread forbidden-word list, the read-aloud test, the two-line top-level format hard-coded to **`Cassy vX.Y.Z`**, reply-bullet grammar, install trailer and ~12-bullet grouping. This is cas-src's `RELEASE_SLACK_RUBRIC.md:194-225` copied into a universal builtin, so a downstream project's announcement would be labelled "Cassy vX.Y.Z". | `RELEASE_SLACK_RUBRIC.md:196-222` is near-verbatim. `release-train-announce.py:19-45` regex pins "Cassy". | Keep only the mrkdwn transport lint (no `**`, no `#` lines, no `-` (dash-space) bullets, bullets ≤ 2 lines). Move wording and label rules to the project rubric. Step 2 becomes: "Draft per the project rubric and save the exact fenced bodies to `docs/release-notes/<date>-<topic>-slack.md`." | −330 |
+| P1 | always / per-invoke | violet/SKILL.md:3 vs :39,76 | The description promises "a diary update", but the procedure only covers the runtime 4-write order. `:76` hard-codes "its detail in one reply". The cas-src diary contract is 1 parent + exactly 3 replies ordered Grok → Claude → Codex. An agent posting a diary via this skill follows the wrong order and count. | `docs/RELEASE_SLACK_RUBRIC.md:227-247`. `docs/SLACK_POSTING_RUNBOOK.md:50-51` knows about the diary; the skill does not. | Generalise step 4: "Post each thread in the rubric's order: parent → save `message_id` → each reply with `reply_to=<parent>`; ≥ 1 s between writes." Delete `:76`, or change it to "Content rules come from the rubric." Drop "diary update" from the description, or keep it and have the rubric supply the order. | −40 |
+| P2 | per-invoke | violet/SKILL.md:18,30,40 | cas-src release-adapter detail lives in the per-invoke body. `:18` names `scripts/release-report-post.py`, a cas-src-only script. `:40` is a 1,609-byte single-line step 5 covering download origin rules, bearer/bypass forwarding, loopback exception, PIL verify and PDF page count. `:30` repeats the PDF-to-User / HTML-to-Dev rule, which appears again in RUBRIC-template `:67-68` and RELEASE_SLACK_RUBRIC `:106-108`. | `wc -c` of line 40 is 1,609 and of line 18 is 958. `scripts/release-report-post.py:34,453` exists only in cas-src. | Move file-upload verification to `references/file-upload.md` (on-demand, read only when posting a file). Keep a 2-line pointer. Drop the release-report specifics from `:18,30`. | −600 per invoke |
+| P2 | per-invoke | violet/SKILL.md:38 | Step 3 (1,366 B) folds the read-outage fallback, a write-safe exception and envelope redaction into one line. The same fallback is restated at `:64`. | `:38`, `:64`. | Split into 3a preflight, 3b bounded read (`since`, 3×10 s), 3c outage fallback. Delete the `:64` restatement and keep a pointer. | −60 |
+| P2 | on-demand | violet/references/registration.md:20,44,143 | Points to cas-src/hub-only artifacts that are not shipped: `docs/VIOLET_ONBOARDING.md` (only in cas-src), `violet#5` (hub issue), and the hub project's `scripts/slack-post.sh`, which cannot be verified from this repo. | `ls docs/VIOLET_ONBOARDING.md` exists only in cas-src. `integrate/violet_ps.rs:55` (`HUB_CLIENT_ISSUE`). | Replace with the command-level facts (`cas integrate violet --help`). Name the proxy-less script by its hub repo URL, or drop it. | −30 |
+| P2 | per-invoke | violet/SKILL.md:34 | The channel rule `^[a-z0-9-]+-internal$` is enforced (hub/`slack-post.sh` "same channel rule", `registration.md:144`), but `RUBRIC-template.md:9` offers a free `<#channel-name>` and never mentions the constraint. A downstream rubric naming `#releases` fails only at post time. | `RUBRIC-template.md:9`. | Add "must match `*-internal` or be allowlisted by the hub" to the template's Channel line. | +12 |
+| P3 | per-invoke | violet/SKILL.md:40 | Step 5 is indented one space (a leading space before `5.`), which breaks the ordered list in some renderers. | `cat -n` line 40. | Remove the leading space. | 0 |
+| P3 | per-invoke | violet/SKILL.md:80 | A maintenance note ("If a machine still carries a separate user-level `violet-post` skill … delete it") is already enforced by doctor. | `doctor.rs:361` `RETIRED_USER_SKILLS`. | Delete. | −45 |
 | P3 | (source comment) | cas-cli/src/builtins.rs:529-530 | The comment still says the hub "exposes four tools". | `crates/cas-mcp-proxy/src/config.rs:39` has 2 tools. | Fix the comment. | 0 |
 
-Verified OK (A6): the `mecha_read` input schema matches `SKILL.md:15` exactly (live schema: `channel` required; `since` date-time; `max_messages` ≤ 500 default 200; `max_files` ≤ 50; `max_file_bytes` ≤ 4,194,304; `max_bytes` ≤ 8,388,608; `mentions_only`, `include_threads`, `include_files`). `MECHA_CASSY_TOOLS = ["mecha_read","mecha_post"]` (`config.rs:39`). The `supervisor:` allowlist prefix (`config.rs:135`). `callable tools: [...]` log line (`cas-mcp-proxy/src/lib.rs:975`). `mcp__cas__system action=proxy_health` (`types/ops_secondary.rs:252`). `--label`, `--token-env`, `--bypass-env`, `/api/clients`, `/api/bypass`, `label_taken` (`integrate/mecha_cassy.rs:53-56,383`). 1 MiB file limit and `file_too_large` (`scripts/release-report-post.py:40,453`). Observation only: this Claude session's direct `mecha-cassy` registration exposes only `mcp__mecha-cassy__mecha_read` (no `mecha_post`), consistent with posting via the proxy.
+Verified OK (A6): the `violet_read` input schema matches `SKILL.md:15` exactly (live schema: `channel` required; `since` date-time; `max_messages` ≤ 500 default 200; `max_files` ≤ 50; `max_file_bytes` ≤ 4,194,304; `max_bytes` ≤ 8,388,608; `mentions_only`, `include_threads`, `include_files`). `VIOLET_CASSY_TOOLS = ["violet_read","violet_post"]` (`config.rs:39`). The `supervisor:` allowlist prefix (`config.rs:135`). `callable tools: [...]` log line (`cas-mcp-proxy/src/lib.rs:975`). `mcp__cas__system action=proxy_health` (`types/ops_secondary.rs:252`). `--label`, `--token-env`, `--bypass-env`, `/api/clients`, `/api/bypass`, `label_taken` (`integrate/violet_ps.rs:53-56,383`). 1 MiB file limit and `file_too_large` (`scripts/release-report-post.py:40,453`). Observation only: this Claude session's direct `violet` registration exposes only `mcp__violet__violet_read` (no `violet_post`), consistent with posting via the proxy.
 
 ---
 
 #### Overlap map: who owns what
 
-| Concern | release-notes | mecha-cassy | cas-cut-release | cas-release-report | docs/RELEASE_SLACK_RUBRIC.md (cas-src) | Should own |
-|---|---|---|---|---|---|---|
+| Concern | release-notes | violet | cas-cut-release | cas-release-report | docs/RELEASE_SLACK_RUBRIC.md (cas-src) | Should own |
+| --- | --- | --- | --- | --- | --- | --- |
 | Content rules (Was→Now, no tickets, no process talk, one punch) | SKILL :34-40; template :47-60 | :76; :35 (User wording) | :37-39 (word list) | :15 (Was→Now in report) | :184-203, :257-262 | project rubric (template) |
 | Message format / mrkdwn / label | template :33-45, :88-95 (Markdown `**`) | :36-37 (mrkdwn, `Cassy vX.Y.Z`, lint) | — (announce lint runs it) | — | :205-225 | rubric. The lint lives in the transport, shape-agnostic |
-| Thread order / reply count | SKILL :18-19 (defers to rubric); template :29-31, :45 | :39 (4-write runtime only), :76 (one reply) | :55-56, :72 ("four Slack POSTED") | — | :31-36 runtime; :227-247 diary 1+3 | rubric states order and count; mecha-cassy executes a generic parent→replies loop |
-| Transport (hub only, preflight, dedupe, pacing, failures, credentials) | SKILL :24-30 (restated) | :9-18, :32-72 (owner) | :72-73, :78-79 | :57-58 ("release-notes owns … posting authorization": wrong, release-notes delegates it) | :15-29 + SLACK_POSTING_RUNBOOK :13-51 (second authority) | mecha-cassy alone |
-| `## POSTED` receipt | SKILL :31-32 (ts, channel, permalink) | :41-54 (+ message_id) | :55-58 (announce stage writes it) | — | :264-269 (ts, channel, permalink) | mecha-cassy (single field list) |
-| Report PDF/HTML delivery + `release-report.receipt` | template :62-76 | :18, :30, :40 | :74 | :50-58 (artifacts only) | :93-130, :296-303 | cas-release-report makes the artifacts; RELEASE_SLACK_RUBRIC owns the cas-src receipt; mecha-cassy owns upload integrity only |
+| Thread order / reply count | SKILL :18-19 (defers to rubric); template :29-31, :45 | :39 (4-write runtime only), :76 (one reply) | :55-56, :72 ("four Slack POSTED") | — | :31-36 runtime; :227-247 diary 1+3 | rubric states order and count; violet executes a generic parent→replies loop |
+| Transport (hub only, preflight, dedupe, pacing, failures, credentials) | SKILL :24-30 (restated) | :9-18, :32-72 (owner) | :72-73, :78-79 | :57-58 ("release-notes owns … posting authorization": wrong, release-notes delegates it) | :15-29 + SLACK_POSTING_RUNBOOK :13-51 (second authority) | violet alone |
+| `## POSTED` receipt | SKILL :31-32 (ts, channel, permalink) | :41-54 (+ message_id) | :55-58 (announce stage writes it) | — | :264-269 (ts, channel, permalink) | violet (single field list) |
+| Report PDF/HTML delivery + `release-report.receipt` | template :62-76 | :18, :30, :40 | :74 | :50-58 (artifacts only) | :93-130, :296-303 | cas-release-report makes the artifacts; RELEASE_SLACK_RUBRIC owns the cas-src receipt; violet owns upload integrity only |
 | Draft path `docs/release-notes/<date>-<topic>-slack.md` | SKILL :22-23; template :78-81 | :36 | :35-36 (cut-date pinning) | :53 | :73-81 (runtime template) | rubric |
 | Release mechanics (PR, queue, tag, publish) | — | — | :19-79 (owner, "only release procedure") | — | :38-64, :66-91, :132-177 (manual procedure) | cas-cut-release; RELEASE_SLACK_RUBRIC should point to it, not restate it |
 
@@ -423,18 +423,18 @@ Verified OK (A6): the `mecha_read` input schema matches `SKILL.md:15` exactly (l
 1. **Merge path:** RELEASE_SLACK_RUBRIC `:46-51` says "`gh pr merge "$PR_URL" --merge`. Do not use `--auto`". cas-cut-release `:62-64`, and `release-train.sh:531-535`, enqueue through the merge queue with a GraphQL `enqueuePullRequest` and call themselves "the supervisor's only release procedure" (`:9`). An agent reading the rubric merges by hand, and the merge queue is bypassed or refused. **P1** (doc).
 2. **Report timing:** RELEASE_SLACK_RUBRIC `:95-110` says to run `cas release report --pdf` *before* announcements, then export `CAS_RELEASE_TRAIN_REPORT_{USER,DEV}_THREAD_TS` by hand and run `--report`. The `--cut` stage order is `announce` → `report`, and the report stage reads the parent id from the announce receipt automatically (`release-train.sh:996-1014`). It is the same end state but describes two procedures. **P2**.
 3. **Draft fill:** RELEASE_SLACK_RUBRIC `:73-81` has you `cp` the runtime template and run `release-published-receipt.sh --write-draft` by hand. The `post-publication` stage does this (`release-train.d/post-publication.sh:67-94`). **P2**.
-4. **Transport authority:** RELEASE_SLACK_RUBRIC `:6-9` sends transport to `SLACK_POSTING_RUNBOOK.md`, while `:17-23` says mecha-cassy owns it. `docs/release-notes/RUBRIC.md:16-17,21-22` cites both. The runbook `:117` still labels the Claude.ai Slack `pippenz@gmail.com` profile "Canonical route" in a table marked historical. **P3**.
-5. **Diary vs transport:** the diary thread is 1 parent + 3 replies (Grok, Claude, Codex) (`:227-247`). mecha-cassy (`:3` claims diary coverage; `:39`, `:76` one reply) and cas-src `docs/release-notes/RUBRIC.md:40` ("exactly one") disagree. **P1** (mecha-cassy row above).
-6. **Forbidden User words:** there are three lists. RELEASE_SLACK_RUBRIC `:200-202` (+`registrations`, −`daemon`), mecha-cassy `:35` (−`daemon`), and cas-cut-release `:38-39` (5 words, +`daemon`). The enforced list in `release-train-announce.py:19-38` has `daemon`. **P2**.
+4. **Transport authority:** RELEASE_SLACK_RUBRIC `:6-9` sends transport to `SLACK_POSTING_RUNBOOK.md`, while `:17-23` says violet owns it. `docs/release-notes/RUBRIC.md:16-17,21-22` cites both. The runbook `:117` still labels the Claude.ai Slack `pippenz@gmail.com` profile "Canonical route" in a table marked historical. **P3**.
+5. **Diary vs transport:** the diary thread is 1 parent + 3 replies (Grok, Claude, Codex) (`:227-247`). violet (`:3` claims diary coverage; `:39`, `:76` one reply) and cas-src `docs/release-notes/RUBRIC.md:40` ("exactly one") disagree. **P1** (violet row above).
+6. **Forbidden User words:** there are three lists. RELEASE_SLACK_RUBRIC `:200-202` (+`registrations`, −`daemon`), violet `:35` (−`daemon`), and cas-cut-release `:38-39` (5 words, +`daemon`). The enforced list in `release-train-announce.py:19-38` has `daemon`. **P2**.
 7. **"Two distinct top-level posts (not threaded replies)"** (`:33`) reads as if replies are forbidden. `:101` and every skill post 4 writes (2 parents + 2 replies). **P3**: reword to "two top-level posts, each with its reply".
-8. **POSTED fields:** RELEASE_SLACK_RUBRIC `:266-269` and release-notes `:31-32` omit `message_id`, which mecha-cassy `:41-54` requires. **P3**.
+8. **POSTED fields:** RELEASE_SLACK_RUBRIC `:266-269` and release-notes `:31-32` omit `message_id`, which violet `:41-54` requires. **P3**.
 
 ##### Recommended single-owner split (≈ −1,500 tokens per announce across the three skills)
 
-- **release-notes:** procedure only. Ensure the rubric exists, gather the merge, draft per the rubric, save, then hand off to mecha-cassy. The template owns format (mrkdwn example), order and reply count, and has no release-train receipts.
-- **mecha-cassy:** transport only. Channel rule, preflight/read, a generic parent→replies loop with pacing, a format-agnostic mrkdwn lint, `## POSTED` (the only field list), failure classes and credentials. Upload integrity moves to `references/file-upload.md`.
+- **release-notes:** procedure only. Ensure the rubric exists, gather the merge, draft per the rubric, save, then hand off to violet. The template owns format (mrkdwn example), order and reply count, and has no release-train receipts.
+- **violet:** transport only. Channel rule, preflight/read, a generic parent→replies loop with pacing, a format-agnostic mrkdwn lint, `## POSTED` (the only field list), failure classes and credentials. Upload integrity moves to `references/file-upload.md`.
 - **cas-cut-release:** train only. Announce, report and receipts are stages, and it points to RELEASE_SLACK_RUBRIC for content.
-- **cas-release-report:** artifacts only. Fix `:57-58` to "mecha-cassy owns posting; the project rubric owns wording".
+- **cas-release-report:** artifacts only. Fix `:57-58` to "violet owns posting; the project rubric owns wording".
 - **RELEASE_SLACK_RUBRIC.md:** cas-src content (runtime + diary) and the receipt field list. Replace `:38-64`, `:73-81` and `:95-130` with pointers to cas-cut-release stages.
 
 ---
@@ -442,20 +442,20 @@ Verified OK (A6): the `mecha_read` input schema matches `SKILL.md:15` exactly (l
 #### Search manifest
 
 | Command | Hits |
-|---|---|
-| `grep -n -i -E "release-notes\|cut-release\|mecha\|release-report" docs/analysis/2026-09-02-builtin-skills-review.md` | 8 relevant (release-notes only; 0 for cas-cut-release/mecha-cassy) |
+| --- | --- |
+| `grep -n -i -E "release-notes\|cut-release\|mecha\|release-report" docs/analysis/2026-09-02-builtin-skills-review.md` | 8 relevant (release-notes only; 0 for cas-cut-release/violet) |
 | `grep -rn "SLACK_POSTING_RUNBOOK\|pippenz@gmail" cas-cli/src/builtins/` | 0 in the B skills (hits only in cas-html-reports example HTML) |
-| `grep -n -E "pending_supervisor_review\|bypass_code_review\|/epic-spec\|/plan\b\|cas-code-review\|Phase [12]\|verified on this machine\|/home/\|@gmail\|\.\./\.\./\.\./" -r cas-cut-release release-notes mecha-cassy` | 0 |
-| `grep -n -E "\b(NEVER\|MUST\|ALWAYS\|CRITICAL\|IMPORTANT\|ONLY)\b" -r cas-cut-release release-notes mecha-cassy` | 0 |
+| `grep -n -E "pending_supervisor_review\|bypass_code_review\|/epic-spec\|/plan\b\|cas-code-review\|Phase [12]\|verified on this machine\|/home/\|@gmail\|\.\./\.\./\.\./" -r cas-cut-release release-notes violet` | 0 |
+| `grep -n -E "\b(NEVER\|MUST\|ALWAYS\|CRITICAL\|IMPORTANT\|ONLY)\b" -r cas-cut-release release-notes violet` | 0 |
 | `head -c4 <3 reference files> \| grep -c -- ---` (frontmatter in references) | 0 |
 | `diff` canonical vs codex/grok twins (6 files × 2) | 10 changed lines, all prefix substitution |
 | `diff -q` installed `~/.grok/skills`, `~/.claude/skills` vs source (6 files) | 0 differences |
 | `grok inspect --json` (B skills) | 1 collision: `release-notes` → `user:release-notes` |
 | `strings ~/.grok/bin/grok \| grep release-notes` | built-in `/release-notes` "View release notes for the current version" |
-| `cas integrate mecha-cassy --help` | "Deprecated name of `cas integrate violet`, accepted for one release (GH #963)" |
+| `cas integrate violet --help` | "Deprecated name of `cas integrate violet`, accepted for one release (GH #963)" |
 | `cas release --help` / `cas release report --help` | `report <VERSION> [--out] [--pdf] [--refresh-sources]`. The only subcommand is `report`. No B skill uses it (`grep -rn "cas release report" skills/` → 0) |
 | `grep -n "struct ExecuteRequest" -A20 crates/cas-mcp/src/types/ops_secondary.rs` | fields `code`, `max_length` only |
-| `grep -n "MECHA_CASSY_TOOLS\|VIOLET_TOOLS" crates/cas-mcp-proxy/src/config.rs` | 2 (`:39`, `:46`) |
+| `grep -n "VIOLET_CASSY_TOOLS\|VIOLET_TOOLS" crates/cas-mcp-proxy/src/config.rs` | 2 (`:39`, `:46`) |
 | `sed -n 21,58p scripts/release-train.sh` (usage) | all skill flags present |
 | `grep -n "cut_stages\|for stage in" scripts/release-train.d/ledger.sh` | 1 (`:129`, 13 stages match the skill) |
 | `grep -n -- "--learn" scripts/release-gate.sh` | 4 (`:29,36,63,68`); writes 3 mirrors (`:44-58`) |
@@ -465,7 +465,7 @@ Verified OK (A6): the `mecha_read` input schema matches `SKILL.md:15` exactly (l
 | `grep -n "write-draft" scripts/release-train.d/post-publication.sh` | 1 (`:86`) |
 | `grep -n "cas-cut-release" cas-cli/src/builtins.rs` (install gating) | registrations + test only, no cas-src gate |
 | `sed -n 1,23p cas-cli/src/cli/init/docs_and_skill.rs` | directive `:23` unchanged |
-| `ToolSearch select:mcp__mecha-cassy__mecha_read` (schema only, not called) | schema matches SKILL.md:15 |
+| `ToolSearch select:mcp__violet__violet_read` (schema only, not called) | schema matches SKILL.md:15 |
 
 ### Appendix C — C-qa — cas-qa-craft · cas-nuxt-playwright · cas-playwright-debug
 
@@ -474,7 +474,7 @@ HEAD 4836e56f7 (v3.31.0). Read-only audit. Playwright claims checked against `pl
 #### Scores (1–5; axes: 1 frontmatter · 2 description · 3 disclosure/size · 4 wording · 5 procedure/completion · 6 accuracy · 7 parity · 8 token economy)
 
 | skill | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
-|---|---|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | cas-qa-craft | 4 | 2 | 3 | 4 | 3 | 2 | 5 | 3 |
 | cas-nuxt-playwright | 3 | 4 | 2 | 3 | 2 | 3 | 3 | 2 |
 | cas-playwright-debug | 4 | 5 | 5 | 5 | 4 | 4 | 5 | 4 |
@@ -487,7 +487,7 @@ Size: SKILL.md 110 lines / 6,321 B (≈1.6k tok per-invoke). refs: evidence-bund
 Prior review (2026-09-02): the skill is not mentioned there (it is new or was restructured since). No carry-overs.
 
 | Sev | Surface | file:line | Defect | Evidence | Fix | Δ tokens |
-|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- |
 | P0 | always | SKILL.md:3, :24-25 | The trigger is scoped to a "non-empty demo_statement", and step 1 says to skip the skill when it is empty. The close gate still demands the **full web bundle** when a diff touches a `qa.user_facing_paths` glob (default `**/*.vue,*.tsx,*.html,*.css…`) or a catalog journey, even when there is no demo_statement. An agent following the skill skips it, then gets its close refused. | `qa_pass.rs:100-108` (reasons `journeys:` / `path:` / `demo_statement`); `qa_evidence_gate.rs:81-93` (`path:`/`journeys:` → `EvidenceTier::Bundle`); `config/meta/seed/qa.rs:90-105` | Description: "Use when a factory delivery needs QA evidence before close: a non-empty demo_statement, a diff touching user-facing paths or catalog journeys, or a `qa-pass` review task." Replace :24-25 with "If the gate names no reason (see `task action=show`), stop." | +25 always |
 | P0 | on-demand | references/evidence-bundle.md:157-160 (with SKILL.md:50-51) | The fallback "no `scripts/visual-qa.mjs` → set `visual_qa_status: "unavailable"`" always fails the implementer's close. The gate accepts only `"pass"` (anything else needs a supervisor override) and needs `visual-qa.mjs`'s own JSON report. The script is not shipped by any builtin skill, so every downstream web project hits this. gabber-studio and gabber-qa-epic carry hand-copied scripts; other projects have none. | `qa_evidence.rs:475-483` ("only \"pass\" closes without a supervisor override"), `:512-526`, `:616-660`; `find cas-cli/src/builtins -name 'visual-qa*'` → 0; `ls ~/Petrastella/*/scripts/visual-qa.mjs` → only cas-src, gabber-studio, gabber-qa-epic | Say it plainly: without the script, close is refused until the supervisor overrides it, so message the supervisor with the four renders attached. Longer term, ship `visual-qa.mjs` as `cas-qa-craft/scripts/visual-qa.mjs` (it is subject to cross-lane P0 (a): bundled files never refresh) and point `<repo>/scripts/…` at the installed skill path. | +40 on-demand |
 | P1 | per-invoke | SKILL.md:86-104 vs :20-31 | The telemetry sweep says "Before building the matrix … run it as the first QA step", but it sits after Procedure and Close gate, and the numbered steps never include it. An agent working in step order builds the matrix first. User journeys (:106-110) likewise sit outside the procedure, although journeys.md:25 makes them matrix rows. | Line order in SKILL.md | Fold both into the Procedure: step 1b "Run `cas config get qa.telemetry_sweep`; if set, run it per references/telemetry-sweep.md", and step 2 "add touched journeys (references/journeys.md) as rows". Delete the two trailing sections: :96-104 restate telemetry-sweep.md:10-30, and :108-110 restate journeys.md. | −230 per-invoke |
@@ -524,7 +524,7 @@ Prior-review status (docs/analysis/2026-09-02-builtin-skills-review.md:68, :126,
 - Stack-specific skill synced universally (opt-in tier, review #16): **STILL OPEN** (carry-over). `grep -rn nuxt cas-cli/src/sync` → 0. The Claude listing cost is now nil; sync bytes and the Codex listing remain.
 
 | Sev | Surface | file:line | Defect | Evidence | Fix | Δ tokens |
-|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- |
 | P1 | per-invoke | SKILL.md:276 | The debugging table says "`npx playwright cli attach` and `step-over` / `resume`" without the session flag. Every command after attach needs `-s=<session>`. | Live run: bare `npx playwright cli step-over` → "The browser 'default' is not open, please run open first"; `-s=tw-1c6c89 step-over` worked | Delete the row and point to cas-playwright-debug §2, which already has the correct `-s=` form. | −40 |
 | P1 | per-invoke | SKILL.md:211, :297 | The claim "`<q-btn>` nested `<span>` breaks `getByRole('button')`" is wrong, and the recommended fix (`getByText`) contradicts :185 and cas-playwright-debug:87. The real failure is a q-btn with `to`/`href`, which renders `<a>` with role **link**. | Live run with Quasar-2-shaped markup (approximated): `getByRole('button',{name:'Save'})` → 1; for the `<a class="q-btn">` variant, button → 0 and link → 1 | Row: "`<q-btn>` with `to`/`href` renders a link → `getByRole('link', { name })`; otherwise `getByRole('button', { name })`." Fix the :297 symptom row the same way. | 0 |
 | P1 | always (Codex) | SKILL.md:5 (Codex twin identical) | The opt-in uses `disable-model-invocation`, which only Claude Code and Grok read. Codex controls implicit invocation through `agents/openai.yaml` `policy.allow_implicit_invocation: false`, which CAS never generates. In Codex the skill therefore stays model-invocable, and its description competes with cas-playwright-debug. | developers.openai.com/codex/skills; `grep -rn "openai.yaml\|allow_implicit_invocation" cas-cli/src --include=*.rs` → 0 | Generate `agents/openai.yaml` with that policy for Codex twins of every `disable-model-invocation` skill. This is cross-cutting, so raise it once in the parity lane. | 0 |
@@ -555,7 +555,7 @@ Size: SKILL.md 142 lines / 6,715 B (≈1.7k tok per-invoke). No references. Desc
 Every trace subcommand and flag in §1 was verified live: `open`, `actions --errors-only/--grep`, `action <id>`, `snapshot <id> --phase before|after`, `snapshot <id> -- eval "…"` (returned `"Saved!"`), `requests --failed`, `console --errors-only`, `errors`, and `close`. `error-context.md` is written beside the trace. The `--debug=cli` log format matches `Run "playwright-cli attach tw-XXXXXX"` exactly. `pause-at`, `snapshot`, `eval`, `console`, and `resume` work with `-s=`. Stale refs error out, as the skill says ("Ref e6 not found … capture new snapshot"). The `--repeat-each`, `--workers`, and `--last-failed` flags and the 1.63 config keys exist.
 
 | Sev | Surface | file:line | Defect | Evidence | Fix | Δ tokens |
-|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- |
 | P1 | per-invoke | SKILL.md:13-15, :61-67 | The skill says "the trace CLI and `--debug=cli` need 1.59+", but its attach commands use `npx playwright cli …`, which only ships from **1.62**. On 1.59–1.61 the attach step fails, because the separate `playwright-cli` was needed. | Release notes 1.62 "Command line & MCP: Playwright now bundles … `playwright-cli`, runnable via `npx playwright mcp` and `npx playwright cli`". The v1.59.0 release introduced `--debug=cli` "over `playwright-cli`". | "`trace` CLI and `--debug=cli`: 1.59+. `npx playwright cli attach`: 1.62+ (on 1.59–1.61 use `npx @playwright/cli attach`)." Alternatively, make 1.62 the floor. | +20 |
 | P2 | per-invoke | SKILL.md:59, :76 | Under `--debug=cli`, a config with `retries>0` re-pauses the failed test on its retry with a **new** session id after `resume`, so the background run never ends. The skill's own §4 config uses `retries: process.env.CI ? 2 : 0`, which hits this under CI env. | Live run: after `resume`, the log printed a second `attach tw-640f8c`, and the process had to be killed | Add `--retries=0` to the :59 command. | +3 |
 | P2 | per-invoke | SKILL.md:24-35, :58-68 | Both `trace open` and `cli attach` write `.playwright-cli/` into the **current directory**: `trace close` leaves an empty directory, and attach leaves `page-*.yml`. In a worktree this is untracked litter that can get committed. evidence-bundle.md:139-140 knows this; this skill does not. | Live run: `/tmp/pwq/.playwright-cli/page-2026-09-25T13-44-04-470Z.yml` persisted | Add: "Both write `./.playwright-cli/`; remove it (`rm -rf .playwright-cli`) before committing." | +20 |
@@ -568,7 +568,7 @@ Every trace subcommand and flag in §1 was verified live: `open`, `actions --err
 #### Overlap map and proposed ownership
 
 | Topic | Occurrences (file:lines) | Owner | Action for the others |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Trace-CLI triage | debug:18-51 · nuxt:268-279 · evidence-bundle:167-182 (supervisor review) · independent-pass:128 | **cas-playwright-debug** | nuxt: delete and point here. evidence-bundle: keep its 4-step review, since that is review rather than diagnosis, but link §1. |
 | `--debug=cli` stepping | debug:53-77 · nuxt:217, :276, :339 | **cas-playwright-debug** | nuxt: one pointer line (its :276 is currently wrong). |
 | Flake control (retries, retryStrategy, failOnFlakyTests, lock, trace retain) | debug:93-123 · nuxt:259-266, :301-302, :321 · auth-fixture-template:203-221 · frontend-eng:100-101 (mis-attributes it to nuxt) | **cas-playwright-debug** | nuxt: keep only the lock example for the shared account in the template. frontend-eng: repoint. |
@@ -591,7 +591,7 @@ Every trace subcommand and flag in §1 was verified live: `open`, `actions --err
 #### Search manifest
 
 | Command | Hits |
-|---|---|
+| --- | --- |
 | `grep -n -i -E "qa-craft\|nuxt-playwright\|playwright-debug" docs/analysis/2026-09-02-builtin-skills-review.md` | 10 (all nuxt, plus the "playwright-debug never built" line) |
 | `npx -y playwright@1.63.0 --help` / `test --help` / `show-trace --help` / `trace --help` / `trace {actions,action,requests,console,errors,snapshot,screenshot,open,close} --help` / `cli --help` | all commands and flags the skills cite exist; `--debug [mode]` choices `inspector,cli` |
 | `grep` in `playwright/types/test.d.ts`: retryStrategy / failOnFlakyTests / `lock?:` / reuseContext / retain-on-failure-and-retries / `snapshots?:` / subtitle / mount | 2 / 4 / 1 / 2 / 4 / 1 / 2 / 30 |
@@ -623,7 +623,7 @@ Axes: FM=frontmatter, Desc=description, PD=progressive disclosure, Word=wording,
 
 - **P0: three task-create examples omit `risk`.** A task/bug/feature create without `risk` is rejected. Evidence: `cas-cli/src/mcp/tools/types/task.rs:124-140` (`TASK CREATE REJECTED: risk is required…`), called unconditionally from `mcp/tools/core/task/lifecycle.rs:811` and `service/core.rs:249`, with a pin test at `lifecycle.rs:2790`. Affected: `cas-github-issues/SKILL.md:122-126`, `cas-brainstorm/references/handoff.md:60`, `cas-ideate/references/post-ideation-workflow.md:172`. Epic creates are exempt.
 - **P0: `session-learn` breaks its own runtime parser.** The skill body is now the live Stop-hook prompt (`include_str!` at `hooks/handlers/handlers_session.rs:1678`). `:70` tells the model to omit the body when `dedup_hits` is non-empty. But `SessionLearnDraft.content/signal/entry_type/scope` have no `serde(default)` (`hooks/handlers.rs:207-227`). One such draft makes `serde_json::from_str::<Vec<_>>` fail (`handlers_session.rs:1778-1779`), and the whole batch is dropped with an error log (`stop_flow.rs:491`).
-- **Cross-lane P1: deprecated config key.** `issues.components.mecha_cassy` is deprecated in favour of `issues.components.violet` and is accepted for one more release only (`config/access/mod.rs:9-12`; `cas config get` prints the warning). It appears in `cas-github-issues:45`, `cas-worker.md:72`, `cas-supervisor.md:67`, `cas-supervisor/references/filing-cas-bugs.md:19,33` and the project CLAUDE.md snippet.
+- **Cross-lane P1: deprecated config key.** `issues.components.violet` is deprecated in favour of `issues.components.violet` and is accepted for one more release only (`config/access/mod.rs:9-12`; `cas config get` prints the warning). It appears in `cas-github-issues:45`, `cas-worker.md:72`, `cas-supervisor.md:67`, `cas-supervisor/references/filing-cas-bugs.md:19,33` and the project CLAUDE.md snippet.
 - **Twins:** all 7 skills are byte-identical to their Codex and Grok twins after tool-prefix normalisation, so there is no textual drift. Parity defects are Claude-only content shipped unadapted (AskUserQuestion, Glob, `.claude/scheduled_tasks.json`, `claude --resume`, `disable-model-invocation`).
 - **All 7 skills:** top-level `managed_by: cas` (rubric P2; portable form is `metadata: {managed_by: cas}`). Reported once here, not per skill. `name` equals the directory name in all 7. No reference file carries `name:`/`description:`.
 - **Known cross-lane P0 (a):** `references/*` never refresh after first install. This applies to `doc-hygiene.md`, `handoff.md`, `requirements-capture.md` and `post-ideation-workflow.md`. Not re-reported.
@@ -631,7 +631,7 @@ Axes: FM=frontmatter, Desc=description, PD=progressive disclosure, Word=wording,
 #### Scores
 
 | Skill | FM | Desc | PD | Word | Proc | Acc | Par | Tok |
-|---|---|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | cas-brainstorm | 4 | 4 | 3 | 2 | 3 | 2 | 3 | 2 |
 | cas-ideate | 4 | 4 | 4 | 3 | 3 | 2 | 3 | 3 |
 | cas-to-questionnaire | 4 | 3 | 5 | 4 | 3 | 4 | 3 | 5 |
@@ -656,7 +656,7 @@ Prior review:
 - **STILL OPEN:** `task action=list status=closed` with no query (`:129`).
 
 | Sev | Surface | file:line | Defect | Evidence | Fix | Δ tokens |
-|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- |
 | P0 | on-demand | references/handoff.md:58-61 | The "Proceed directly to work" create has no `risk`, so it is rejected. | `types/task.rs:134-138`; the create defaults to task_type=task, which requires risk | Add `risk=<none\|platform\|…>` (plus `proof_targets` if blast-radius). | +8 |
 | P0 | per-invoke | SKILL.md:32 vs :41 | The procedure contradicts itself. "Ask ONE question at a time… Never batch" conflicts with the frontier round: "ask the full frontier… Number every frontier question". | text | Pick one. Suggested: "Each round, ask only the questions whose prerequisites are settled, numbered, each with a recommended answer. Usually that is one." Delete the other rule. | −60 |
 | P1 | on-demand | references/handoff.md:33 vs :46-53 | Epic ownership conflicts. `:33` says to hand off to cas-supervisor "to create an epic". Step 2 then creates the epic itself. cas-supervisor `intake.md:23` also creates the EPIC, so the result is duplicate epics. | `cas-supervisor/references/intake.md:23,42-47`; `planning.md:56,75` consumes R-IDs from the doc | Drop the brainstorm epic create. Hand cas-supervisor the doc path. Store only the memory pointer. | −60 |
@@ -682,7 +682,7 @@ Prior review:
 - **STILL OPEN:** volume math stated twice (`:79` and `:123`).
 
 | Sev | Surface | file:line | Defect | Evidence | Fix | Δ tokens |
-|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- |
 | P0 | on-demand | references/post-ideation-workflow.md:170-173 | The task create has no `risk`, so it is rejected. It also creates a "Brainstorm: X" task that nothing ever closes, while brainstorm's handoff creates its own task or epic. | `types/task.rs:134-138`; `handoff.md:49-61` | Delete the task create. The memory pointer (`post:98-101`) and the `Explored` marker already record the handoff. | −45 |
 | P1 | per-invoke | SKILL.md:90 | "light lane… e.g. GPT-6 Luna/xhigh" is a factory `spawn_workers` lane, not something a Claude Agent-tool subagent can run. Claude's canonical text names a Codex model. | `cas-supervisor.md:23`; `model-selection.md:13` | "dispatch a cheap read-only subagent (the harness's smallest model)". | −5 |
 | P2 | per-invoke | SKILL.md:88-109 | The grounding scan re-derives what `.claude/CODEMAP.md` and `docs/PRODUCT_OVERVIEW.md` already hold, via a subagent. | codemap:9; project-overview:9 | Step 1: read CODEMAP and PRODUCT_OVERVIEW if present (and `cas knowledge search`). Dispatch the scan agent only when both are missing. | −80 |
@@ -703,7 +703,7 @@ Prior review:
 - The prior "keep" verdict stands.
 
 | Sev | Surface | file:line | Defect | Evidence | Fix | Δ tokens |
-|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- |
 | P2 | always (Codex) | SKILL.md:3-4 | `disable-model-invocation` is honoured only by Claude and Grok. Codex gets it verbatim with no implicit-invocation mapping, so it is model-invocable there, and its description does not lead with "Use when". | `sync/skills.rs:119-121` is Claude-only; grep `allow_implicit_invocation` = 0 hits | Use "Use when a decision needs input from a third party the user can name; drafts a discovery questionnaire." Add Codex projection of the flag. | +5 |
 | P2 | per-invoke | SKILL.md:12-16 | No entry point from cas-brainstorm. Brainstorm's `Resolve Before Planning` items that need a third party have no route here. | grep `questionnaire` in brainstorm = 0 | Add a handoff option in `handoff.md` 4.1: "Needs someone else's answer → /cas-to-questionnaire". | +25 |
 | P3 | per-invoke | SKILL.md:14 | "user-approved output location" is undefined (carry-over). | text | "Propose `docs/questionnaires/YYYY-MM-DD-<recipient>-<topic>.md`; write after the user confirms." | +10 |
@@ -721,7 +721,7 @@ Prior review:
 - **STILL OPEN:** exit-status capture prose (`:112-122`).
 
 | Sev | Surface | file:line | Defect | Evidence | Fix | Δ tokens |
-|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- |
 | P1 | per-invoke | SKILL.md:110,122 | Two build claims are false when the ledger is not current: "one build turns the doc you just wrote into a knowledge page" and "costs at most one model call". Pending sources are truncated in path order to `--max-sources`. In cas-src the ledger has 2 sources and a dry run shows 1,120 pending, so CODEMAP may be deferred. | `knowledge/pipeline.rs:276-279`; `cas knowledge build --dry-run --max-sources 5` gave "would distill: 1120"; `cas knowledge status` shows sources: 2 | "Run `cas knowledge build --dry-run`; if more than a handful of sources are pending, skip seeding (the doc is the artifact) and note it." Delete the one-call claim. | −40 |
 | P1 | per-invoke / on-demand | SKILL.md:104; doc-hygiene.md:25-32 | Pointer-memory dedupe has no mechanism. "If a pointer with that title already exists, update it" gives no find/update call. The codemap title adds a `.md` suffix; project-overview and design-spec do not. | `search query="project_cas_codemap…" doc_type=entry` returns 4 cas-src pointers (2026-05-14-12, 07-01-4, 08-03-1, 09-14-1). The knowledge store holds both `project_cas_codemap.md` and `project_cas_codemap` pages. | Title `project_<slug>_codemap`. In doc-hygiene: "`search action=search query=<title> doc_type=entry`; if a hit, `memory action=update id=<id>`, else `remember`." | +30 |
 | P2 | per-invoke | SKILL.md:112-122 | 11 lines of shell exit capture plus Rust internals ("terminates/reaps the active provider process group"). project-overview uses the plain command, so the doc family is inconsistent. | text; `cas knowledge build --help` (timeout default 90) | Use the prior-review "Worst" rewrite; the same two lines in both skills (move them into doc-hygiene §5). | −200 |
@@ -742,7 +742,7 @@ Prior review:
 - **Verified:** `clear` is still required. `check_freshness` reads `project-overview-pending.json` before git (`handlers_events/project_overview.rs:520-527`). This matches `cas project-overview --help`.
 
 | Sev | Surface | file:line | Defect | Evidence | Fix | Δ tokens |
-|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- |
 | P1 | per-invoke | SKILL.md:117-123 | Same `--max-sources 5` false claims as codemap. `docs/…` sorts late, so PRODUCT_OVERVIEW is the source most likely deferred. | `pipeline.rs:276-279`; dry run gave 1,120 pending | Same as codemap (dry-run gate). | −30 |
 | P2 | always | SKILL.md:3 | "Use when asked what a project is" over-triggers. A one-line "what is this repo?" question fires a doc-write-commit workflow. | description text | "Use when asked to create or refresh docs/PRODUCT_OVERVIEW.md, or when SessionStart reports it missing or stale; not for answering a quick 'what is this project'." | +10 |
 | P3 | per-invoke | SKILL.md:106-111 | The commit block duplicates doc-hygiene §3. | `doc-hygiene.md:34-39` | Keep only the sentence about why the commit matters. | −30 |
@@ -762,7 +762,7 @@ Prior review:
 - **STILL OPEN:** "You do NOT write" (`:21`) conflicts with the user-invoked path.
 
 | Sev | Surface | file:line | Defect | Evidence | Fix | Δ tokens |
-|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- |
 | P0 | per-invoke + runtime | SKILL.md:70 | "omit the rest of the body" when `dedup_hits` is non-empty fails the parse. `content`, `signal`, `entry_type` and `scope` are required, so one omitted draft drops the entire batch. | `hooks/handlers.rs:207-227` (no `serde(default)` on those fields); `handlers_session.rs:1778-1779`; `stop_flow.rs:491` | "When `dedup_hits` is non-empty, still emit `signal`, `entry_type`, `scope`, and a one-line `content`." Or default the fields in Rust. | +10 |
 | P1 | runtime | SKILL.md:44 | Hook mode cannot perform "scan the existing memory store via `mcp__cas__search`". The hook calls `traced_prompt(... .max_turns(1))`, which leaves no turn to call a tool and read the result. Dedup in hook mode is really `find_similar_entry` (BM25). | `handlers_session.rs:1758-1766`; `stop_flow.rs:430-439` | "Interactive only: search first. Hook mode: leave `dedup_hits` empty; Rust dedupes." | +10 |
 | P1 | per-invoke | SKILL.md:3 vs :19-21 | The user-invoked path has no store step. The description says it "hands each accepted draft to cas-memory-management". The body says "You do NOT write… the caller writes", but when the user invokes it the agent is the caller. | text | Use the prior-review "Worst" rewrite, and add `Done when every draft is stored, corroborated, or dropped`. | +30 |
@@ -784,9 +784,9 @@ Prior review:
 - **STILL OPEN, P3:** the scheduled-task expiry claim (`:218-221`). It is now verified as Claude behaviour: the claude 2.1.282 binary contains "Recurring tasks auto-expire after" and `scheduled_tasks.json`.
 
 | Sev | Surface | file:line | Defect | Evidence | Fix | Δ tokens |
-|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- |
 | P0 | per-invoke | SKILL.md:122-126 | The per-issue `task_type=bug` create has no `risk`, so every create in step 4 is rejected. | `types/task.rs:124-140`; `lifecycle.rs:811` | Add `risk=<none\|blast-radius…> proof_targets=<when blast-radius>` to the template. | +10 |
-| P1 | per-invoke | SKILL.md:45 | `issues.components.mecha_cassy` is deprecated in favour of `issues.components.violet` and accepted for one release only. | `config/access/mod.rs:9-12`; `cas config get` prints the deprecation warning | Rename it here and in the cross-lane copies. | 0 |
+| P1 | per-invoke | SKILL.md:45 | `issues.components.violet` is deprecated in favour of `issues.components.violet` and accepted for one release only. | `config/access/mod.rs:9-12`; `cas config get` prints the deprecation warning | Rename it here and in the cross-lane copies. | 0 |
 | P2 | per-invoke | SKILL.md:78-80,92-94 | Two commands where gh 2.101 needs one. `gh issue close --duplicate-of <keeper>` links the issues natively. `-c` adds the comment. | `gh issue close --help`: `--duplicate-of`, `-r {completed\|not planned\|duplicate}`, `-c` | `gh issue close <dup> --duplicate-of <keeper> -c "Same defect, tracking there."` and `gh issue close <n> -r completed -c "<evidence>"`. | −30 |
 | P2 | per-invoke | SKILL.md:201 | Operator-specific fact in a universal builtin ("Richards-LLC team's issue board"). | rubric Axis 6 | "the receiving team's configured tracker (`issues.*`)". | −5 |
 | P2 | per-invoke (twins) | SKILL.md:216-226 | Parity: `.claude/scheduled_tasks.json` cron and `lastFiredAt` are Claude Code only. They ship verbatim to Codex and Grok, which have no such file. | normalised twin diff = identical | Say "Claude Code: …; other harnesses: whatever scheduler armed the sweep." | +15 |
@@ -797,7 +797,7 @@ Prior review:
 #### Overlap map and ownership
 
 | Topic | Where it lives (lines) | Owner | Others should |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Pipeline positioning (ideate → brainstorm → plan) | brainstorm:9-15; ideate:9-15, :23; `cas-supervisor/references/intake.md:29-47` | **cas-supervisor intake.md** (routing). The skill descriptions already route. | Cut each skill to a one-line output contract (−400 total). |
 | When to brainstorm or skip | brainstorm:84-94 (0.2), :96-114 (scope); intake.md:39-47 | brainstorm 0.2 for the "skip" test; intake.md for the trigger | intake.md keeps the trigger bullets only; drop its Output/Handoff restatements. |
 | Pressure test / request challenge | brainstorm:142-163; intake.md:11-21 (Intake Gate: goal clarity, assumption surfacing, "why now") | Split by stage: intake.md for requests going straight to EPIC; brainstorm 1.2 once brainstorm fires | intake.md: "if brainstorm fires, its 1.2 replaces gates 3, 4 and 7". |
@@ -814,7 +814,7 @@ Prior review:
 #### Search manifest
 
 | Command | Result |
-|---|---|
+| --- | --- |
 | `grep -n <7 skill names> docs/analysis/2026-09-02-builtin-skills-review.md` | 24 hits |
 | `wc -c -l` on all files of the 7 skills | 11 files |
 | `grep "pub struct TaskRequest" crates/cas-mcp/src/types.rs` | 1 hit (actions and params incl. `risk`, `labels`, `external_ref`, `epic`, `to_id`, `acceptance_criteria`) |
@@ -843,8 +843,8 @@ Prior review:
 | `grep -c AskUserQuestion` | brainstorm 3 + 2; ideate 2 + 1 |
 | `gh issue close --help` | `--duplicate-of`, reason `duplicate` exist |
 | `gh issue list`, `gh pr list`, `gh issue create`, `gh repo view --help` | all used flags valid (`--json comments`/`createdAt`/`labels` valid) |
-| `cas config get` for issues.* and history.github_repo | `mecha_cassy` deprecation warning shown |
-| `grep mecha_cassy cas-cli/src/builtins` | 10 hits (cross-lane) |
+| `cas config get` for issues.* and history.github_repo | `violet_ps` deprecation warning shown |
+| `grep violet_ps cas-cli/src/builtins` | 10 hits (cross-lane) |
 | `strings claude-2.1.282 \| grep auto-expire` | 5 hits; `scheduled_tasks.json` 2 hits |
 | Twin diff (prefix-normalised) for 7 skills × codex/grok | 0 residual drift |
 | grep `GPT-6 Luna` in skills | supervisor lane registry only; ideate:90 is the misuse |
@@ -862,7 +862,7 @@ Repo HEAD 4836e56f7 (v3.31.0). Canonical: `cas-cli/src/builtins/skills/<skill>/`
 #### Sizes (bytes / lines)
 
 | Skill | SKILL.md | references / scripts |
-|---|---|---|
+| --- | --- | --- |
 | mcp-integration | 4032 / 81 | references/diagnosis.md 4260 / 53 |
 | cli-routing | 2417 / 46 | references/routing.md 4346 / 96 |
 | cas-codex-exec | 2883 / 69 | — |
@@ -879,7 +879,7 @@ Description lengths (chars, always surface): mcp-integration 241, cli-routing 23
 #### Per-skill scores (1–5): FM · Desc · PD · Wording · Proc · Accuracy · Parity · Tokens
 
 | Skill | FM | Desc | PD | Word | Proc | Acc | Par | Tok |
-|---|---|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | mcp-integration | 4 | 4 | 4 | 4 | 4 | 2 | 5 | 4 |
 | cli-routing | 4 | 3 | 3 | 4 | 4 | 3 | 4 | 3 |
 | cas-codex-exec | 4 | 4 | 5 | 4 | 4 | 3 | 5 | 4 |
@@ -900,7 +900,7 @@ All 10 skills, every file: after normalising `mcp__cas__`→`mcp__cs__` (codex) 
 #### Group-wide
 
 | Sev | Surface | file:line | Defect | Evidence | Fix | Δ tokens |
-|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- |
 | P2 | always | all 10 `SKILL.md:4-5` | Top-level `managed_by: cas` (non-standard key) | rubric Axis 1; grep `^managed_by` = 10/10 | Move to `metadata: {managed_by: cas}` (merge into existing `metadata` in codebase-design/diagnosing-bugs/merge-conflicts) | ~0 |
 | P2 | per-invoke | 9 of 10 (all but codebase-design, diagnosing-bugs) | No `Done when …` criterion | grep -ci "done when" = 0 in mcp-integration, cli-routing, cas-codex-exec, cas-viktor, cas-servers, cas-tdd, cas-wizard, cas-resolving-merge-conflicts | Add one closing `Done when …` line per skill (proposed text in each skill's rows) | +25 each |
 
@@ -911,10 +911,10 @@ All 10 skills, every file: after normalising `mcp__cas__`→`mcp__cs__` (codex) 
 Prior-review status: teaches only `claude mcp` (P0 #17) — **FIXED** (`:11-52` uses `cas mcp list/add/import` + `proxy_*`). Stance-before-procedure (ladder at :87) — **FIXED** (step 1 at `:11`). Body/diagnosis duplication — **FIXED** (`diagnosis.md:3-5` declares split). Viktor scopes/run handles in diagnosis.md — **FIXED** (0 viktor hits). `--show-secrets` mention — **FIXED** (`:13`).
 
 | Sev | Surface | file:line | Defect | Evidence | Fix | Δ tokens |
-|---|---|---|---|---|---|---|
-| P0 | per-invoke | `SKILL.md:39-57` (+ whole skill) | Never mentions the proxy **allowlist**. `cas mcp add` and `proxy_add` do not write it; it is fail-closed and a project `.cas/proxy.toml` list *replaces* the user list. Step 5's "one cheap read-only call through `mcp_execute`" is therefore denied by policy after every fresh add, and creating a project `proxy.toml` silently removes any user-allowlisted route. | `crates/cas-mcp-proxy/src/config.rs:53-59` ("An empty list is intentionally fail-closed"), `:421-425` (project allowlist authoritative); grep `allowlist` in `cas-cli/src/cli/mcp_cmd.rs` and `agent_search_system/system.rs` = 0; live `.cas/proxy.toml` carries `allowlist = ["mecha-cassy.mecha_read", …]` | Add step 4b: "Admit each route you need as `"<server>.<tool>"` in `allowlist` of the same config file; an empty list denies every call, and a project list replaces the user list. For factory workers set `[servers.<name>] worker_access = "read-only"` when appropriate." | +90 |
+| --- | --- | --- | --- | --- | --- | --- |
+| P0 | per-invoke | `SKILL.md:39-57` (+ whole skill) | Never mentions the proxy **allowlist**. `cas mcp add` and `proxy_add` do not write it; it is fail-closed and a project `.cas/proxy.toml` list *replaces* the user list. Step 5's "one cheap read-only call through `mcp_execute`" is therefore denied by policy after every fresh add, and creating a project `proxy.toml` silently removes any user-allowlisted route. | `crates/cas-mcp-proxy/src/config.rs:53-59` ("An empty list is intentionally fail-closed"), `:421-425` (project allowlist authoritative); grep `allowlist` in `cas-cli/src/cli/mcp_cmd.rs` and `agent_search_system/system.rs` = 0; live `.cas/proxy.toml` carries `allowlist = ["violet.violet_read", …]` | Add step 4b: "Admit each route you need as `"<server>.<tool>"` in `allowlist` of the same config file; an empty list denies every call, and a project list replaces the user list. For factory workers set `[servers.<name>] worker_access = "read-only"` when appropriate." | +90 |
 | P0 | per-invoke | `SKILL.md:24-28` | Claude's `-s local` semantics applied to `cas mcp`: "A local registration is keyed by its directory, so it does not follow a Cassy worktree. Choose `user` for workers…". For `cas mcp add`, `local` (default) and `project` both write `<cas_root>/proxy.toml`, and `cas_root` in a worktree resolves to the main `.cas` — so local *is* fleet-visible; `user` needlessly publishes a project server to every project on the machine (`~/.config/code-mode-mcp/config.toml`). | `cas-cli/src/cli/mcp_cmd.rs:54-55` (default "local"), `:118-124` (`_ => cas_root.join("proxy.toml")`); `cas-cli/src/store/detect.rs:50-70` (CAS_ROOT/worktree → main store); this worktree: `CAS_ROOT=/home/pippenz/Petrastella/cas-src/.cas` | Replace with: "`local`/`project` write `.cas/proxy.toml` (git-ignored, shared by every Cassy worktree of the repo); `user` writes `~/.config/code-mode-mcp/config.toml` for all projects. Prefer the project file." | −10 |
-| P2 | per-invoke | `SKILL.md:24,50` | Creating `.cas/proxy.toml` also stops the managed Viktor default refresh; not mentioned here (only in cas-viktor `gateway.md:20-21`) | `cas-cli/src/mcp/server/runtime.rs:319-332` | One sentence: "A project `.cas/proxy.toml` opts out of managed defaults (Viktor, MechaCassy); configure them explicitly — see cas-viktor / mecha-cassy." | +35 |
+| P2 | per-invoke | `SKILL.md:24,50` | Creating `.cas/proxy.toml` also stops the managed Viktor default refresh; not mentioned here (only in cas-viktor `gateway.md:20-21`) | `cas-cli/src/mcp/server/runtime.rs:319-332` | One sentence: "A project `.cas/proxy.toml` opts out of managed defaults (Viktor, Violet); configure them explicitly — see cas-viktor / violet." | +35 |
 | P3 | per-invoke | `SKILL.md:72-77` | "When MCP is unavailable" mixes a harness-degradation rule with a design opinion (script vs MCP) | — | Keep the degradation rule; drop the script-vs-MCP stance (belongs in codebase-design) | −40 |
 | P3 | per-invoke | end of SKILL.md | No completion line | — | "Done when `cas mcp list --json` shows the server connected with the expected tool count, the routes are allowlisted, and one read-only `mcp_execute` call returned data." | +40 |
 
@@ -925,11 +925,11 @@ Verified OK: `cas mcp add` flags `-s/-t/-e/-H/--auth` (`cas mcp add --help`); `c
 Prior-review status: operator e-mail — **FIXED** (config key `release.claude_account_allowlist`, registered `cas-cli/src/config/meta/seed/release.rs:6`, pinned by `builtin_skill_description_test.rs:215,340-388`). Source-tree-only `../../../../` / dossier links — **FIXED** (0 hits; only sibling `../<skill>/SKILL.md` links remain). "Verified on this machine … 2.1.231" — **FIXED** (0 hits). Two competing codex recipes — **mostly FIXED** (`routing.md:14-16` defers to cas-codex-exec) but see P1 below. Release-note posting in three places — **STILL OPEN (carry-over)**. Description rewrite — **FIXED**.
 
 | Sev | Surface | file:line | Defect | Evidence | Fix | Δ tokens |
-|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- |
 | P1 | on-demand | `references/routing.md:14-16` | Claims cas-codex-exec owns "closing stdin, and redirecting long output to a file"; the canonical recipe (`cas-codex-exec/SKILL.md:17,34`) has no `< /dev/null`. `codex exec` appends piped stdin to the prompt and waits for EOF. | `codex exec --help`: "If stdin is piped and a prompt is also provided, stdin is appended as a `<stdin>` block". Claude Code's Bash stdin is `/dev/null` (checked), but tmux/Codex/Grok panes are not guaranteed | Fix at the owner: add `< /dev/null` to both cas-codex-exec recipes; keep this sentence | 0 here |
 | P1 | on-demand | `references/routing.md:18-21` | For "a narrowly scoped write" recommends `--dangerously-bypass-approvals-and-sandbox`; codex 0.156 offers `-s workspace-write` (+ `--add-dir`) and `--approve-for-me` for exactly this | `codex exec --help` (`-s … workspace-write`, `--add-dir`, `--approve-for-me`; bypass flag "EXTREMELY DANGEROUS … solely for … externally sandboxed") | "A write uses `-s workspace-write` (add `--add-dir <DIR>` for paths outside `-C`); use the bypass flag only inside an external sandbox." Move to cas-codex-exec (see overlap) | +10 |
 | P1 | always | `SKILL.md:3` vs `cas-codex-exec/SKILL.md:3` | Both descriptions trigger on "a one-shot `codex exec` subprocess" → double-fire for any Codex one-shot | both descriptions | cli-routing: "Use when a one-shot `codex exec` failed for capacity/auth or a bounded write/structured-output one-shot is needed and a `claude -p` fallback may be required; the Claude account gate in references/routing.md decides." | +5 |
-| P2 | per-invoke | `SKILL.md:32-40` + `routing.md:81-96` | Release-note posting restated twice here and again in `release-notes/SKILL.md:24-30` and `mecha-cassy/SKILL.md:9,30` (carry-over) | quotes: "never use Claude.ai Slack or a personal connector" ×4 files | Delete both sections; one line in Do-not-trigger: "Slack posting is release-notes + mecha-cassy, never a CLI one-shot." | −380 |
+| P2 | per-invoke | `SKILL.md:32-40` + `routing.md:81-96` | Release-note posting restated twice here and again in `release-notes/SKILL.md:24-30` and `violet/SKILL.md:9,30` (carry-over) | quotes: "never use Claude.ai Slack or a personal connector" ×4 files | Delete both sections; one line in Do-not-trigger: "Slack posting is release-notes + violet, never a CLI one-shot." | −380 |
 | P2 | per-invoke | `SKILL.md:20-25` vs `routing.md:52-66` | Account-gate conditions stated in full twice | — | Body keeps "only after the account gate in routing.md passes"; conditions live in the reference | −90 |
 | P2 | on-demand | `references/routing.md:40,71` | Example profile `$HOME/.claude-alt` is this operator's directory; models copy example literals | `ls -d ~/.claude-alt` exists on this box | Use `CLAUDE_CONFIG_DIR="<profile dir>"` | 0 |
 | P2 | on-demand | `references/routing.md:29-32` | Strict `--output-schema` note omits `additionalProperties: false`, which strict mode also requires | OpenAI strict structured-output rules; flag exists in `codex exec --help` | "…and every object sets `additionalProperties: false`." Move to cas-codex-exec | +12 |
@@ -944,7 +944,7 @@ Verified OK: `claude -p/--print`, `--output-format text|json|stream-json` (`clau
 Prior-review status: `-m gpt-5.5` pin — **FIXED** (`:24-26` "Omit `-m/--model`"; current default `gpt-6-sol`). "Verified on this machine" — **FIXED** (0 hits). Competing recipe — **FIXED** (declared canonical `:13-14`).
 
 | Sev | Surface | file:line | Defect | Evidence | Fix | Δ tokens |
-|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- |
 | P1 | per-invoke | `SKILL.md:17,34` | Canonical recipe does not close stdin; a harness with a live stdin pipe blocks/appends | `codex exec --help` PROMPT arg text; `routing.md:15` promises it | `… codex exec -s read-only -C "$PWD" -o "$out" "<prompt>" < /dev/null` | +3 |
 | P2 | per-invoke | `SKILL.md:30-35` | Long sweep uses shell `&`, contradicting cas-servers rule 1 (`cas-servers/SKILL.md:85-87` "If you catch yourself typing `&` …") and bypassing the harness's own background runner; 1800 s exceeds Claude Code's 600 s Bash cap so a background mechanism is needed | cas-servers rule text; Bash tool max 600000 ms | "Run it with the harness's background execution (Claude Code `run_in_background`), not `&`; poll `$out`." | +5 |
 | P2 | per-invoke | `SKILL.md:17,34` | `/usr/bin/timeout` is GNU coreutils; macOS has no `/usr/bin/timeout` (Homebrew `gtimeout`) — Mac agents fail at exec | macOS base system lacks `timeout` (not verified on a Mac here) | `timeout 600 …` and a failure-mode line "no `timeout` on macOS → `gtimeout` or omit and rely on the harness timeout" | +15 |
@@ -961,7 +961,7 @@ Verified OK: `-s/--sandbox read-only`, `-C/--cd`, `-m/--model`, `-o/--output-las
 Prior-review status: never shows the `mcp_execute` call shape — **FIXED in form** (`:23-29`) but the shown args are wrong (new P0). Allowlist and cadence — still verified. Key procedure duplicated body vs `gateway.md` — **STILL OPEN (carry-over)**.
 
 | Sev | Surface | file:line | Defect | Evidence | Fix | Δ tokens |
-|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- |
 | P0 | per-invoke | `SKILL.md:28` | Example `ask_viktor` args `{"question":…,"cas_task_id":…}`: Viktor's schema requires `message` (no `question`), and `cas_task_id` is not a parameter; the proxy does no mapping. Copying the example fails validation or starts a run without the message. | live `mcp__viktor__ask_viktor` schema: `required: ["message"]`, props `message, metadata, idempotency_key, response_format, speed, timeout_seconds`; grep `cas_task_id`/`"question"` in `crates/cas-mcp-proxy/src` and `viktor_watch.rs` = 0 | `"args":{"message":"<bounded question>","metadata":{"cas_task_id":"<task-id>"},"idempotency_key":"<task-id>-<n>"}` | +10 |
 | P1 | per-invoke | `SKILL.md:35-39`, `gateway.md:49-50` | "Never automatically retry an uncertain start" but never uses the provider's `idempotency_key`, which makes a retry safe (same key → same thread/run) | ask_viktor schema `idempotency_key` description | "Always pass `idempotency_key`; a retry with the same key and args returns the original run." | +25 |
 | P2 | per-invoke | `SKILL.md:13-21` vs `gateway.md:30-38`; `SKILL.md:35-46` vs `gateway.md:34-38,47-53`; `SKILL.md:48-54` vs `gateway.md:5-11,52-53` | Procedure, watch/notification and credential rules each stated in both files (carry-over) | side-by-side | Body = steps + call shape + boundary; gateway.md = provisioning, opt-out, inbound-thread mechanics only | −300 |
@@ -969,14 +969,14 @@ Prior-review status: never shows the `mcp_execute` call shape — **FIXED in for
 | P3 | per-invoke | `SKILL.md:31-32` | "equivalent to the proxy's dot-call form when that route advertises it" — dot-call syntax never shown; adds a second form to choose | `mod.rs:1329` | Drop the sentence; one form | −20 |
 | P3 | per-invoke | end | No Done-when | — | "Done when the run is registered (thread/run id noted on the task) or the reply has been received and recorded." | +25 |
 
-Context (code, not skill): the `mcp_search`/`mcp_execute` `code` schema says "TypeScript code to execute…" (`crates/cas-mcp/src/types/ops_secondary.rs:1262`) while the tool descriptions say keyword/`server:name` and JSON dispatch (`mod.rs:1285,1329`) — schema drift the skill has to fight; file against cas-mcp types. Verified OK: allowlist = 9 tools exactly (`crates/cas-mcp-proxy/src/config.rs:13-23` = `gateway.md:17-18`); `https://api.viktor.com/mcp`, `env:VIKTOR_API_KEY` (`config.rs:10-11`); `cas viktor`, `cas viktor key` (`cas viktor --help`); project `.cas/proxy.toml` opt-out (`runtime.rs:319-332`); 30 s cadence (`viktor_watch.rs:13`). Live `mcp_search server:viktor` here → "upstream 'viktor' is absent" (project proxy.toml exists and allowlists only mecha-cassy), consistent with gateway.md:20-28.
+Context (code, not skill): the `mcp_search`/`mcp_execute` `code` schema says "TypeScript code to execute…" (`crates/cas-mcp/src/types/ops_secondary.rs:1262`) while the tool descriptions say keyword/`server:name` and JSON dispatch (`mod.rs:1285,1329`) — schema drift the skill has to fight; file against cas-mcp types. Verified OK: allowlist = 9 tools exactly (`crates/cas-mcp-proxy/src/config.rs:13-23` = `gateway.md:17-18`); `https://api.viktor.com/mcp`, `env:VIKTOR_API_KEY` (`config.rs:10-11`); `cas viktor`, `cas viktor key` (`cas viktor --help`); project `.cas/proxy.toml` opt-out (`runtime.rs:319-332`); 30 s cadence (`viktor_watch.rs:13`). Live `mcp_search server:viktor` here → "upstream 'viktor' is absent" (project proxy.toml exists and allowlists only violet), consistent with gateway.md:20-28.
 
 #### cas-servers
 
 Prior-review status: "keep, every param verified" — still true. Nit "never background yourself" stated 3× — **STILL OPEN (carry-over, P3)**.
 
 | Sev | Surface | file:line | Defect | Evidence | Fix | Δ tokens |
-|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- |
 | P2 | per-invoke | `SKILL.md:9,20,85,88` | Bold/absolute emphasis on non-safety rules ("**Never background a server yourself.**", "**Registered servers are the only ones…**", rules 1–2 bold) | rubric Axis 4 | Plain imperatives + reason; state "don't `&`/`nohup`/`setsid`" once (rule 1) | −60 |
 | P3 | per-invoke | `SKILL.md:89-90` | "Starting a second one usually just fails to bind" — same `id` is refused explicitly | `cas-cli/src/mcp/tools/service/server_ops.rs:127-140` ("a server named '…' is already running … Stop it first") | "A duplicate `id` is refused; a duplicate port fails to bind." | 0 |
 | P3 | per-invoke | end | No Done-when | — | "Done when `server_list task_id=<task>` shows nothing you started still running, or each survivor is named in the handoff." | +30 |
@@ -988,7 +988,7 @@ Verified OK: `server_start command/cwd/port/id/shared/task_id` (`crates/cas-mcp/
 Prior-review status: tiny references `DEEPENING.md`/`DESIGN-IT-TWICE.md` — **FIXED** (inlined `:64-81`). NestJS leakage `:32-34` — **FIXED** (generalised "framework vocabulary wins"). `cas-domain-modeling` merge — **FIXED** (`:37-50`). Completion criterion — **FIXED** (`:125-133`). Generic `mcp__cas__spec` — **FIXED** (`action=create`).
 
 | Sev | Surface | file:line | Defect | Evidence | Fix | Δ tokens |
-|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- |
 | P1 | per-invoke | `SKILL.md:106-107` | "Follow the `cas-update-and-doctor-read-like-reports` precedent" — unresolvable name (no skill, rule, doc or reference by that name) | `grep -rl cas-update-and-doctor-read-like-reports` → only the 3 twin copies of this file | Replace with "use cas-cli-craft for CLI/TUI output" | −10 |
 | P2 | per-invoke | `SKILL.md:83-123` | "API and DX taste" + a second 3-axis critique rubric duplicates cas-cli-craft (`cas-cli-craft/SKILL.md:17-44`, its `references/critique-rubric.md`) and cas-ui-craft's rubric; three competing public-surface rubrics | description of cas-cli-craft ("Owns … the scored critique") | Keep Names/Errors/Receipts bullets (API contract, `:89-103`); replace `:104-123` with "For printed output, apply cas-cli-craft." | −330 |
 | P2 | per-invoke | whole file (133 lines) | Over the ~80-line house budget for methodology skills; no numbered procedure — first imperative is `:39` inside prose | rubric Axis 3/5 | After the cut above (~110 lines), add a 5-step procedure at top: vocabulary check → design it twice → deletion test → record decision → Done-when | −100 net |
@@ -1001,7 +1001,7 @@ Verified: `mcp__cas__memory action=remember` with `scope`/`tags` (`crates/cas-mc
 Prior-review status: identity-first description — **FIXED** (`:3`). NestJS carve-out in `:32` + `mocking.md` — **FIXED** (`:36` generalised; `mocking.md` inlined/removed in source — stale copy survives in `~/.claude/skills`, known P0 (a)). `mocking.md`/`tests.md` restating body — **FIXED** (inlined). Worst-line "record red and green run with note_type=progress" — **PARTIAL** (`:18,43` ask for the result but not the red run).
 
 | Sev | Surface | file:line | Defect | Evidence | Fix | Δ tokens |
-|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- |
 | P1 | per-invoke | `SKILL.md:18,40,43` | Requires running the red and the green test before handoff; a factory worker on a Rust lane is denied every `cargo`/`run-scoped-tests.sh` call and must park without building. No carve-out → worker loops on a denied command or skips the skill | `cas-worker/references/discipline.md:8-26`, `close-gate.md:128`; CLAUDE.md "Factory workers never run Rust builds" | Add: "In a factory Rust lane, write the failing test, commit, and park; the supervisor's `ASSEMBLY_PROOF` is the red→green evidence (cas-worker)." | +35 |
 | P2 | per-invoke | `SKILL.md:18` vs `:43` | Same rule twice (scoped command, nonzero count, record in task) | text | Keep loop rule 4; drop `:18` | −30 |
 | P3 | per-invoke | `SKILL.md:40-43` | No explicit Done-when / note type | — | "Done when the red run and the green run (command, test count, exit) are recorded with `mcp__cas__task action=notes note_type=progress`." | +20 |
@@ -1011,7 +1011,7 @@ Prior-review status: identity-first description — **FIXED** (`:3`). NestJS car
 Prior-review status: identity-first description — **FIXED**. `template.sh` twin drift — **FIXED** in source (parity 0). `set -e` + bare `confirm` — **FIXED** (`template.sh:21-22,26` documents and demonstrates `if confirm`).
 
 | Sev | Surface | file:line | Defect | Evidence | Fix | Δ tokens |
-|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- |
 | P1 | on-demand | `template.sh:9` | `open_url` chains `A && B \|\| C && D \|\| E`; bash evaluates left-to-right, so after a successful `xdg-open` it *also* runs `open "$1"`, and prints "Open manually" when that fails. On this box `/usr/bin/open → xdg-open` (URL opens twice); on Debian `open` is `openvt` | reproduced: `A && B \|\| C && D \|\| E` with A,B true → runs D and E; `readlink -f $(command -v open)` = `/usr/bin/xdg-open` | `open_url() { if command -v xdg-open >/dev/null; then xdg-open "$1"; elif command -v open >/dev/null; then open "$1"; else printf 'Open manually: %s\n' "$1"; fi; }` | +10 |
 | P2 | per-invoke | `SKILL.md:11-15` | Procedure is three prose paragraphs; no numbered steps or Done-when; "task's approved output area" (`:13`) undefined | rubric Axis 5 | Steps: 1 enumerate manual steps (URL, destination, secret?) 2 confirm stage plan with user 3 copy template, edit after STAGES 4 `bash -n` + static trace 5 record path in task note. "Done when `bash -n` passes and the user approved the stage list." Name the location ("the task's artifact dir or a path the user names") | +30 |
 | P3 | on-demand | `template.sh:16` | `write_env` persists secrets to `.env` in plaintext without checking it is git-ignored | code | Add `git check-ignore -q "$ENV_FILE" \|\| say "WARNING: $ENV_FILE is not ignored"` | +15 |
@@ -1023,7 +1023,7 @@ Note: `bash -n template.sh` passes.
 Prior-review status: names no Cassy tool / "task note" → `note_type=discovery` — **FIXED** (`:42,64`).
 
 | Sev | Surface | file:line | Defect | Evidence | Fix | Δ tokens |
-|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- |
 | P2 | per-invoke | `SKILL.md:21,54-57` | Preferred loop is "a failing scoped test" and Phase 5 requires making the regression fail/pass — same factory-Rust-worker conflict as cas-tdd | `cas-worker/references/discipline.md:8-26` | One line: "In a factory Rust lane, use a non-cargo loop (CLI fixture, log replay) and park the regression test for assembly." | +25 |
 | P3 | per-invoke | `SKILL.md:18,33,39,46,52,59` | "Phase 1…6" headings trip the retired "Phase 1/2" vocabulary lint although they are procedure, not ticket narration | rubric Axis 6 list | Rename to "Step 1 — …" or numbered list | 0 |
 
@@ -1032,7 +1032,7 @@ Prior-review status: names no Cassy tool / "task note" → `note_type=discovery`
 Prior-review status: `note_type=decision` — **FIXED** (`:16`). Provenance line dead context — **FIXED** (moved to `metadata.provenance`).
 
 | Sev | Surface | file:line | Defect | Evidence | Fix | Δ tokens |
-|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- |
 | P2 | per-invoke | `SKILL.md:14,17` | No concrete commands; "inspect state" / "finish" leave the agent to guess (merge vs rebase continue) | — | `git status`, `git diff --name-only --diff-filter=U`, `git log --merge --oneline`; finish with `git add` + `git merge --continue` / `git rebase --continue` | +40 |
 | P3 | per-invoke | `SKILL.md:18` | Factory Rust worker cannot "run the project's affected checks" | as cas-tdd | "(factory Rust lanes: park for assembly)" | +10 |
 | P3 | per-invoke | end | No Done-when | — | "Done when `git status` shows no unmerged paths, the merge/rebase is complete, and any trade-off is noted." | +25 |
@@ -1044,13 +1044,13 @@ Prior-review status: `note_type=decision` — **FIXED** (`:16`). Provenance line
 ##### cas-codex-exec ↔ cli-routing
 
 | Topic | cas-codex-exec | cli-routing | Owner → action |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Trigger ("one-shot `codex exec`") | `SKILL.md:3` | `SKILL.md:3` | cas-codex-exec owns any Codex one-shot; cli-routing's description narrows to capacity fallback + Claude gate (P1 row above) |
 | Invocation recipe (sandbox, `-C`, model default, `-o`, stdin) | `:11-35` | `SKILL.md:15-17` (pointer), `routing.md:12-16` (pointer) | cas-codex-exec; add `< /dev/null` there |
 | Write-mode flags, `-c model_reasoning_effort`, `--output-schema` strictness | — | `routing.md:18-23,29-32` | Move to cas-codex-exec as a "Write / structured output" subsection (Codex flag knowledge in one place); cli-routing keeps nothing Codex-specific |
 | Failure → fallback policy | `:65-69` ("investigate directly") | `SKILL.md:18-27`, `routing.md:3-10,77-79` (evidence, Claude gate) | cli-routing owns capacity/auth routing; cas-codex-exec failure section points to it |
 | Evidence capture (output file + exit) | `:27,34,69` | `SKILL.md:18-19`, `routing.md:22-23` | cas-codex-exec (mechanics); cli-routing references "the receipt" |
-| Release-note posting | — | `SKILL.md:32-40`, `routing.md:81-96` | Neither — release-notes (`SKILL.md:24-30`) + mecha-cassy (`SKILL.md:9,30`) own it; delete from cli-routing |
+| Release-note posting | — | `SKILL.md:32-40`, `routing.md:81-96` | Neither — release-notes (`SKILL.md:24-30`) + violet (`SKILL.md:9,30`) own it; delete from cli-routing |
 | Claude one-shot + account gate | — | `SKILL.md:20-27`, `routing.md:34-79` | cli-routing (sole owner) |
 
 Net: cli-routing shrinks to ~30-line body + ~55-line reference (≈ −500 tokens across both), cas-codex-exec grows ≈ +80.
@@ -1058,7 +1058,7 @@ Net: cli-routing shrinks to ~30-line body + ~55-line reference (≈ −500 token
 ##### mcp-integration ↔ cas-viktor
 
 | Topic | mcp-integration | cas-viktor | Owner → action |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Discover + execute through proxy | `SKILL.md:53-57` | `SKILL.md:13-29`, `gateway.md:32-34` | mcp-integration owns the generic ladder; cas-viktor keeps only the Viktor call shape (fixed args) |
 | Credential boundary | `SKILL.md:59-62` | `SKILL.md:48-54`, `gateway.md:5-11,52-53` | mcp-integration owns the generic rule; cas-viktor keeps `cas viktor key` provisioning only |
 | Retry/idempotency of side-effecting calls | `SKILL.md:68-70`, `diagnosis.md:38-40` | `SKILL.md:35-46`, `gateway.md:49-50` | mcp-integration owns the generic classification; cas-viktor states the Viktor specifics (`idempotency_key`, daemon watch) |
@@ -1073,12 +1073,12 @@ Net: cli-routing shrinks to ~30-line body + ~55-line reference (≈ −500 token
 - cas-codebase-design `:45-50` ↔ cas-memory-management (`SKILL.md:20-47`) → acceptable (one concrete call); no action.
 - cas-tdd `:18,40-43`, cas-diagnosing-bugs `:21,54-57`, cas-resolving-merge-conflicts `:18` ↔ cas-worker `references/discipline.md:8-26` → cas-worker owns the Rust no-build rule; each method skill needs a one-line carve-out pointer.
 - cas-codex-exec `:30-35` (`&`) ↔ cas-servers `:9,85-87` (never `&`) → cas-servers owns long-lived processes; codex one-shots use the harness background runner.
-- cli-routing `:32-40` ↔ release-notes `:24-30` ↔ mecha-cassy `:9,30` → covered above.
+- cli-routing `:32-40` ↔ release-notes `:24-30` ↔ violet `:9,30` → covered above.
 
 #### Search manifest
 
 | Command | Hits |
-|---|---|
+| --- | --- |
 | `grep -n` group skill names / codex / viktor / NestJS / template.sh / note_type in `docs/analysis/2026-09-02-builtin-skills-review.md` | 49 lines |
 | `grep -rnE "pippenz\|@gmail\|\.\./\.\./\.\./\|cas-1c67\|SLACK_POSTING\|NestJS\|\.service\.ts\|verified on this machine\|2\.1\.[0-9]{3}\|gpt-5\|gpt-6"` over the 10 skills + codex/grok twins of cli-routing, cas-codex-exec, cas-tdd, cas-codebase-design | **0** |
 | `grep -c '^name:'` in heads of all `references/*.md` in group | **0** |

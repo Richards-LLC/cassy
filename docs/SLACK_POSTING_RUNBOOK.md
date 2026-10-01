@@ -1,8 +1,9 @@
 # Slack posting runbook — publish through Violet
 
 `docs/RELEASE_SLACK_RUBRIC.md` owns content and thread shape. Use only the
-Violet hub/bot for Slack. Never use Claude.ai Slack or a personal connector,
-including during an outage. A supervisor handoff uses the same hub.
+Violet hub/bot for Slack reads and writes: `violet.violet_read` and
+`violet.violet_post`. Never write through Claude.ai Slack, the Claude Slack
+connector, the Codex Slack app, or a personal connector, including during an outage. A supervisor handoff uses the same hub.
 
 **Target:** `#cas-internal` (`C0B44GUKDK2`); pass the name `cas-internal`.
 Never use a production post as a transport probe. During an operational embargo,
@@ -16,10 +17,9 @@ Use the builtin [violet](../cas-cli/src/builtins/skills/violet/SKILL.md)
 for the live transport contract and its registration reference for setup.
 
 1. Require authenticated `tools/list` to include `violet_read` and
-   `violet_post`; the deprecated `mecha_read` / `mecha_post` aliases may also
-   appear during the compatibility release. An unauthenticated list or server
+   `violet_post`. An unauthenticated list or server
    status is insufficient.
-2. Call `violet_read` on the rubric channel with explicit RFC3339 `since` and
+2. Call `violet.violet_read` on the rubric channel with explicit RFC3339 `since` and
    bounded `max_messages` to prove membership and deduplicate. Allow at most
    three attempts with a 10-second timeout each; retry only `error.retryable`.
 3. Preserve full redacted error envelopes (`code`, `message`, `retryable`, and
@@ -62,7 +62,7 @@ HTTP output. Record statuses, tool names and redacted failures only.
 The report is a required publication artifact. After
 `cas release report <version> --pdf` produces the committed Markdown, brief,
 HTML, PDF and QA receipt, attach the exact PDF bytes to the User top-level
-thread through `violet_post` with `kind: file`, `reply_to=user_thread_id` and
+thread through `violet.violet_post` with `kind: file`, `reply_to=user_thread_id` and
 `content_encoding: base64`. Read/encode the bytes programmatically from disk;
 never transcribe base64 through agent context. Link HTML from the Dev thread.
 
@@ -115,7 +115,7 @@ Their route decisions are superseded by the Violet-only policy above and
 must never be used as current posting authorization.
 
 | Transport | Measured state on 2026-08-27 | Decision |
-|---|---|---|
-| Claude `claude.ai Slack` MCP on the approved `pippenz@gmail.com` profile (`~/.claude-alt`) | `claude auth status --json` passed the exact account gate and `claude mcp list` reported the Slack server connected. A normal noninteractive read was permission-blocked, while the explicit one-shot mode completed a read and a smoke DM write; receipt: `D076VR4ATTK`, ts `1787836424.011069`, https://petra-stella.slack.com/archives/D076VR4ATTK/p1787836424011069. | **Canonical route.** |
+| --- | --- | --- |
+| Claude `claude.ai Slack` MCP on the approved `pippenz@gmail.com` profile (`~/.claude-alt`) | `claude auth status --json` passed the exact account gate and `claude mcp list` reported the Slack server connected. A normal noninteractive read was permission-blocked, while the explicit one-shot mode completed a read and a smoke DM write; receipt: `D076VR4ATTK`, ts `1787836424.011069`, <https://petra-stella.slack.com/archives/D076VR4ATTK/p1787836424011069>. | **Canonical route.** |
 | Codex `codex_apps` Slack plugin | A bounded `codex exec` probe called `list_mcp_resources(server="codex_apps")` and returned no Slack resource, plugin name, or callable Slack tools. | Not available to default Codex workers; do not spend a turn searching for it. |
 | CAS Slack bridge (`cas-bridge-router`) | The router was inactive/not installed; `/etc/cas-bridge/config.json`, `/etc/cas-bridge/router.env`, its systemd unit, and `/opt/cas-bridge` were absent. | Not a configured route. |

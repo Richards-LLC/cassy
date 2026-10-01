@@ -38,6 +38,19 @@ impl Config {
         };
 
         match key {
+            "slack.transport" => {
+                self.slack
+                    .get_or_insert_with(SlackConfig::default)
+                    .transport = match value {
+                    "violet" => SlackTransport::Violet,
+                    "any" => SlackTransport::Any,
+                    _ => {
+                        return Err(MemError::Parse(format!(
+                            "Invalid Slack transport: {value}; use violet or any"
+                        )));
+                    }
+                };
+            }
             // Factory build contention
             "factory.max_concurrent_builders" => {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);

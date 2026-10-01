@@ -24,6 +24,8 @@ use crate::ui::theme::{ActiveTheme, Icons};
 
 use crate::cli::Cli;
 
+mod slack_transport;
+
 #[derive(Args, Debug, Clone)]
 pub struct DoctorArgs {
     /// Apply safe fixes and run consent-fix dry runs (config repair, cloud
@@ -236,7 +238,8 @@ impl CheckGroup {
             | "hub supervised but not publishable"
             | "registered project roots"
             | "host user skills"
-            | "host install parity" => Self::Host,
+            | "host install parity"
+            | "slack transport" => Self::Host,
             "user skills" | "scratchpad policy" => Self::Config,
             "legacy search index"
             | "pre-versioned search index"
@@ -1050,6 +1053,7 @@ fn host_checks(current: Option<&Path>) -> Vec<Check> {
     checks.push(Check::new("host proxy", CheckStatus::Ok, "proxy integration unavailable in this build"));
     checks.extend(registered_project_root_checks(current.unwrap_or_else(|| Path::new(""))));
     checks.push(scratchpad_policy_check());
+    checks.push(slack_transport::check());
     let targets = user_skill_scan_targets();
     let mut skills = stray_user_skills_check(&scan_user_skill_dirs(&targets));
     skills.name = "host user skills".into();

@@ -141,6 +141,10 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemoryConfig>,
 
+    /// Slack transport policy, enabled for every session by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slack: Option<SlackConfig>,
+
     /// `[release]` — operator policy for release-note routing (cas-37f6).
     /// Currently the account allowlist consulted before the one-shot
     /// `claude -p` route documented by the `cli-routing` skill. Absent by
@@ -211,6 +215,7 @@ impl Config {
         merge_option!(hub);
         merge_option!(project);
         merge_option!(release);
+        merge_option!(slack);
         changed
     }
 

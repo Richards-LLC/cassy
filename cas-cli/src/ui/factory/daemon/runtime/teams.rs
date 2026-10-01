@@ -750,7 +750,12 @@ impl TeamsManager {
     /// intercept-only so supervisor worktree spawns can be denied without
     /// auto-approving the call.
     pub(crate) fn factory_pre_tool_intercept_list() -> &'static [&'static str] {
-        &["SendMessage", "AskUserQuestion", "Agent"]
+        &[
+            "SendMessage",
+            "AskUserQuestion",
+            "Agent",
+            crate::config::hooks::SLACK_POLICY_MATCHER,
+        ]
     }
 
     /// `hooks` block for per-role settings files. Wires `PreToolUse` (belt
@@ -3013,6 +3018,11 @@ mod tests {
                     "{role} PreToolUse matcher must cover {tool}, got {matcher:?}"
                 );
             }
+
+            assert!(
+                matcher.contains(crate::config::hooks::SLACK_POLICY_MATCHER),
+                "{role} factory hook must reach Slack tools and CAS proxy dispatches"
+            );
 
             let perm = hooks
                 .get("PermissionRequest")

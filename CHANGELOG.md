@@ -7,6 +7,25 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.43.1] - 2026-10-01
+
+### Fixed
+
+- `cas update` refreshes skills in every project again when a Claude or Codex
+  account profile's config file is a symlink to a shared file. The Violet
+  migration edits the link's target in place, keeps the link and the file's
+  permissions, and edits a target shared by several profiles once. A dangling
+  link, a link leaving HOME and the explicit profile directories, or an
+  unreadable profile file is skipped with a warning naming the file, and the
+  rest of the update continues.
+- Commander shows each session's own conversation. Messages from earlier
+  sessions of the same project appear in a labelled, collapsed "Earlier
+  session" section instead of as the current thread. A session that hasn't
+  messaged Commander yet shows an honest empty state with its latest
+  activity. Several live sessions of one project are grouped, with the most
+  recent one marked, and a paired device can end a session after
+  confirming.
+
 ## [3.43.0] - 2026-10-01
 
 ### Changed

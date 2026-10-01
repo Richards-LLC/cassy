@@ -545,6 +545,29 @@ const PROMPT_QUEUE_RECIPIENT_TRANSPORT_DEVICE_MIGRATION: &str = r#"
 ALTER TABLE prompt_queue_recipient_transport ADD COLUMN device_id TEXT;
 "#;
 
+/// Columns `prompt_from_row` reads, in its order.
+const COMMANDER_HISTORY_COLUMNS: &str = "id, source, target, prompt, created_at, processed_at,
+                    summary, priority, acked_at, urgent, factory_session,
+                    origin_agent_id, origin_kind, operator_label,
+                    operator_device_id, operator_device_label, operator_scopes,
+                    operator_verified, recipient_device_id, kind, attachments";
+
+/// The rows a Commander thread is made of: verified Commander sends,
+/// terminal input recorded for history, and operator-lane replies.
+const COMMANDER_HISTORY_LANE: &str = "((source LIKE 'commander:%' AND operator_verified = 1)
+                    OR (source = 'terminal' AND target = 'terminal-history'
+                        AND processed_at IS NOT NULL)
+                    OR lower(target) = 'operator')";
+
+/// One session's queue rows by id (cas-55a4): its Commander thread page and
+/// its last activity read the newest rows of one session without scanning
+/// every other session's traffic.
+const PROMPT_QUEUE_SESSION_HISTORY_INDEX: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_prompt_queue_session_history
+    ON prompt_queue(factory_session, id)
+    WHERE factory_session IS NOT NULL;
+"#;
+
 /// Indexes supporting two-lane `peek_for_targets` selection (cas-2bcb).
 /// Partial indexes keep the path bounded to pending rows only.
 const PROMPT_QUEUE_TWO_LANE_INDEXES: &str = r#"
@@ -2031,19 +2054,38 @@ pub trait PromptQueueStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<QueuedPrompt>>;
 
-    /// Read a bounded, project-scoped Commander conversation page without
-    /// consuming delivery state. The result is newest-first and may contain
-    /// one extra row so callers can determine whether an earlier page exists.
-    /// Verified Commander sends from every device, terminal input, and all
-    /// operator-lane replies are eligible. `device_id` must be nonempty; the
-    /// hub authenticates it before the daemon requests the page.
+    /// Read a bounded Commander conversation page for one factory session
+    /// without consuming delivery state (cas-55a4). `factory_session` is the
+    /// binding key: a row belongs to a session's thread only when it carries
+    /// that session, so a live session never opens onto another session's
+    /// thread. The result is newest-first by queue id (the cursor key) and may
+    /// contain one extra row so callers can determine whether an earlier page
+    /// exists. Verified Commander sends from every device, terminal input,
+    /// and operator-lane replies are eligible. `device_id` must be nonempty;
+    /// the hub authenticates it before the daemon requests the page.
     fn conversation_history(
         &self,
-        _factory_session: &str,
+        factory_session: &str,
         device_id: &str,
         before: Option<i64>,
         limit: usize,
     ) -> Result<Vec<QueuedPrompt>>;
+
+    /// The newest Commander-lane rows of this project that belong to any
+    /// session other than `factory_session` (including rows with no session
+    /// recorded), newest-first (cas-55a4). Commander shows them only in a
+    /// labelled, collapsed earlier-session section, never as the session's
+    /// own thread.
+    fn earlier_session_history(
+        &self,
+        factory_session: &str,
+        device_id: &str,
+        limit: usize,
+    ) -> Result<Vec<QueuedPrompt>>;
+
+    /// The newest queue row of any kind written for `factory_session`: the
+    /// session's last activity, whether or not it talked to Commander.
+    fn latest_session_activity(&self, factory_session: &str) -> Result<Option<QueuedPrompt>>;
 
     /// Most recent verified Commander device for a factory session. This is
     /// the recipient affinity for unprompted supervisor turns.
@@ -2991,6 +3033,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             conn.execute_batch(PROMPT_QUEUE_TWO_LANE_INDEXES)?;
             conn.execute_batch(PROMPT_QUEUE_DEDUPE_KEY_INDEX)?;
             conn.execute_batch(PROMPT_QUEUE_MESSAGE_HOT_PATH_INDEXES_MIGRATION)?;
+            conn.execute_batch(PROMPT_QUEUE_SESSION_HISTORY_INDEX)?;
             Ok(())
         })
     }
@@ -4765,46 +4808,75 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
     fn conversation_history(
         &self,
-        _factory_session: &str,
+        factory_session: &str,
         device_id: &str,
         before: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<QueuedPrompt>> {
+        if limit == 0 || device_id.trim().is_empty() || factory_session.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let before_clause = if before.is_some() { " AND id < ?3 " } else { "" };
+        let sql = format!(
+            "SELECT {COMMANDER_HISTORY_COLUMNS}
+             FROM prompt_queue
+             WHERE factory_session = ?1
+               AND {COMMANDER_HISTORY_LANE}
+               {before_clause}
+             ORDER BY id DESC
+             LIMIT ?2"
+        );
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let rows = match before {
+            Some(before) => stmt.query_map(
+                params![factory_session, limit as i64, before],
+                Self::prompt_from_row,
+            )?,
+            None => stmt.query_map(params![factory_session, limit as i64], Self::prompt_from_row)?,
+        };
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    fn earlier_session_history(
+        &self,
+        factory_session: &str,
+        device_id: &str,
         limit: usize,
     ) -> Result<Vec<QueuedPrompt>> {
         if limit == 0 || device_id.trim().is_empty() {
             return Ok(Vec::new());
         }
         let conn = crate::shared_db::lock_connection(&self.conn)?;
-        let (before_clause, limit_parameter) = before
-            .map(|_| (" AND id < ?1 ", "?2"))
-            .unwrap_or(("", "?1"));
         let sql = format!(
-            "SELECT id, source, target, prompt, created_at, processed_at,
-                    summary, priority, acked_at, urgent, factory_session,
-                    origin_agent_id, origin_kind, operator_label,
-                    operator_device_id, operator_device_label, operator_scopes,
-                    operator_verified, recipient_device_id, kind, attachments
+            "SELECT {COMMANDER_HISTORY_COLUMNS}
              FROM prompt_queue
-             WHERE (
-                    (source LIKE 'commander:%'
-                     AND operator_verified = 1)
-                    OR (source = 'terminal' AND target = 'terminal-history'
-                        AND processed_at IS NOT NULL)
-                    OR
-                    lower(target) = 'operator'
-               )
-               {before_clause}
-               ORDER BY created_at DESC, id DESC
-               LIMIT {limit_parameter}"
+             WHERE (factory_session IS NULL OR factory_session <> ?1)
+               AND {COMMANDER_HISTORY_LANE}
+             ORDER BY id DESC
+             LIMIT ?2"
         );
         let mut stmt = conn.prepare_cached(&sql)?;
-        let mut values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        if let Some(before) = before {
-            values.push(Box::new(before));
-        }
-        values.push(Box::new(limit as i64));
-        let params = values.iter().map(|value| value.as_ref());
-        stmt.query_map(rusqlite::params_from_iter(params), Self::prompt_from_row)?
+        stmt.query_map(params![factory_session, limit as i64], Self::prompt_from_row)?
             .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    fn latest_session_activity(&self, factory_session: &str) -> Result<Option<QueuedPrompt>> {
+        if factory_session.trim().is_empty() {
+            return Ok(None);
+        }
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let sql = format!(
+            "SELECT {COMMANDER_HISTORY_COLUMNS}
+             FROM prompt_queue
+             WHERE factory_session = ?1
+             ORDER BY id DESC
+             LIMIT 1"
+        );
+        conn.query_row(&sql, params![factory_session], Self::prompt_from_row)
+            .optional()
             .map_err(Into::into)
     }
 
@@ -6222,7 +6294,7 @@ mod tests {
     }
 
     #[test]
-    fn conversation_history_is_project_scoped_and_shared_across_devices() {
+    fn conversation_history_is_session_scoped_and_shared_across_devices() {
         let (_temp, store) = create_test_store();
         let daniel = OperatorStamp {
             operator: "Daniel".into(),
@@ -6308,18 +6380,40 @@ mod tests {
         let terminal_id = store.record_terminal_operator_turn("factory-7", "typed at terminal").unwrap();
         assert!(store.queued_prompt(terminal_id).unwrap().unwrap().processed_at.is_some());
 
+        // A row with no session recorded never joins a session's thread.
+        store
+            .enqueue_urgent_with_outcome(
+                "supervisor",
+                "operator",
+                r#"{"schema_version":2,"reply_to":null,"message":"sessionless reply","summary":"","device_id":"phone-7","kind":"answer","attachments":[]}"#,
+                None,
+                None,
+                None,
+                false,
+                Some(&QueueOrigin::Daemon),
+            )
+            .unwrap();
+        // Supervisor-to-worker traffic is session activity, not conversation.
+        let worker_id = store
+            .enqueue_with_session("supervisor", "worker-1", "do the thing", "factory-7")
+            .unwrap();
+
+        // cas-55a4: factory-7's thread is only factory-7's rows.
         let history = store
             .conversation_history("factory-7", "phone-7", None, 20)
             .unwrap();
-        assert_eq!(history.len(), 6);
+        assert_eq!(history.len(), 4, "{history:#?}");
+        assert!(history.iter().all(|row| row.factory_session.as_deref() == Some("factory-7")));
         assert!(history.iter().any(|row| row.prompt == "typed at terminal"));
         assert!(history.iter().any(|row| row.prompt == "operator message"));
-        assert!(history
-            .iter()
-            .any(|row| row.prompt == "older project session message"));
-        assert!(history.iter().any(|row| row.prompt.contains("older project session reply")));
         assert!(history.iter().any(|row| row.target == "operator"));
         assert!(history.iter().any(|row| row.prompt == "other device message"));
+        assert!(!history.iter().any(|row| row.prompt.contains("older project session")));
+        assert!(!history.iter().any(|row| row.prompt.contains("sessionless reply")));
+        assert!(
+            history.windows(2).all(|pair| pair[0].id > pair[1].id),
+            "newest-first by queue id, the cursor key"
+        );
         let computer_history = store
             .conversation_history("factory-7", "computer-9", None, 20)
             .unwrap();
@@ -6327,13 +6421,65 @@ mod tests {
             history.iter().map(|row| row.id).collect::<Vec<_>>(),
             computer_history.iter().map(|row| row.id).collect::<Vec<_>>()
         );
-
         let newest = history.first().unwrap().id;
         let earlier = store
             .conversation_history("factory-7", "phone-7", Some(newest), 20)
             .unwrap();
-        assert_eq!(earlier.len(), 5, "the cursor excludes only the newest row");
+        assert_eq!(earlier.len(), 3, "the cursor excludes only the newest row");
         assert!(!earlier.iter().any(|row| row.id == newest));
+
+        // Other sessions' rows (and rows with no session) are the earlier
+        // section, newest first, and never include this session's rows.
+        let others = store
+            .earlier_session_history("factory-7", "phone-7", 20)
+            .unwrap();
+        assert_eq!(
+            others.iter().map(|row| row.factory_session.as_deref()).collect::<Vec<_>>(),
+            vec![None, Some("factory-6"), Some("factory-6")]
+        );
+        assert!(store
+            .earlier_session_history("factory-7", "", 20)
+            .unwrap()
+            .is_empty());
+        let new_session = store
+            .conversation_history("factory-8", "phone-7", None, 20)
+            .unwrap();
+        assert!(new_session.is_empty(), "a new session opens onto an empty thread");
+
+        let activity = store.latest_session_activity("factory-7").unwrap().unwrap();
+        assert_eq!(activity.id, worker_id);
+        assert!(store.latest_session_activity("factory-8").unwrap().is_none());
+    }
+
+    /// cas-55a4: a session's thread page and its last activity read through
+    /// the session index instead of scanning every session's traffic.
+    #[test]
+    fn session_history_and_activity_use_the_session_index() {
+        let (_temp, store) = create_test_store();
+        let conn = store.conn.lock().unwrap();
+        let plan = |sql: &str| -> String {
+            let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            stmt.query_map([], |row| row.get::<_, String>(3))
+                .unwrap()
+                .map(|row| row.unwrap())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        for sql in [
+            format!(
+                "SELECT {COMMANDER_HISTORY_COLUMNS} FROM prompt_queue
+                 WHERE factory_session = 'factory-7' AND {COMMANDER_HISTORY_LANE}
+                   AND id < 99 ORDER BY id DESC LIMIT 51"
+            ),
+            format!(
+                "SELECT {COMMANDER_HISTORY_COLUMNS} FROM prompt_queue
+                 WHERE factory_session = 'factory-7' ORDER BY id DESC LIMIT 1"
+            ),
+        ] {
+            let plan = plan(&sql);
+            assert!(plan.contains("idx_prompt_queue_session_history"), "{plan}");
+            assert!(!plan.to_lowercase().contains("temp b-tree"), "{plan}");
+        }
     }
 
     /// A stamp survives the round trip through SQLite and comes back on the

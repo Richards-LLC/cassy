@@ -446,6 +446,8 @@ mod tests {
             ws_port: Some(1),
             liveness: DaemonLiveness::Live,
             dormant: false,
+            last_activity_at: None,
+            last_activity: None,
             daemon_identity: None,
         }];
         let projects = projects_from_rows(rows, &sessions, false);

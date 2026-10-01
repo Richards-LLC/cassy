@@ -1,21 +1,27 @@
 # Brief: Cassy Cloud supervisor conversations
 
 ## Single idea
+
 Daniel should recognize the project, read the supervisor's actual words and send an addressed instruction in one continuous view.
 
 ## Hero form
+
 A conversation list with prominent project labels leads directly into one readable thread; desktop keeps that same list beside the thread and a quieter context rail. The first meaningful content is the work and its supervisor, not a fleet metric figure.
 
 ## Emotional register
+
 Recognizable, calm, direct — Cassy Cloud's system-serif wordmark, warm paper and one indigo mark, with clear sender/source labels instead of terminal chrome.
 
 ## Distinctive move
+
 The project badge remains the visual anchor from the first thread row through the conversation header to the addressed Send action.
 
 ## Deliberately omitted
+
 No synthesized replies, new message transport, worker-first overview, decorative dashboard, anonymous Send button, external fonts or status expressed by color alone. The authentic terminal stays an explicit alternate view.
 
 ## Component and state boundaries
+
 - `cloud-brand.ts`: reusable inline mark + wordmark and project-badge label/markup. It owns presentation and safe catalog-path labeling only.
 - `conversation-list.ts`: keyed supervisor-row DOM, preserving focus while freshness and connection fields update. Inputs are derived rows; selecting emits machine ID and session. Main remains the owner of catalog, selected thread and transport.
 - Existing `TranscriptView` / `surface.transcript`: the evidence source for real pane text and scrollback. Do not reimplement terminal decoding or invent turns from text patterns.
@@ -23,6 +29,7 @@ No synthesized replies, new message transport, worker-first overview, decorative
 - New conversation presentation must separate actual server data, local drafts and derived display state. No 'acknowledged' state until a correlated receipt arrives; a reply is a separate event.
 
 ## Verification and budgets
+
 - Exact pane text and operator messages/replies in scoped component/integration tests.
 - Real default Hub build in Playwright: project badges; full-width phone thread; addressed Send; sent/acknowledged/replied distinction; terminal alternate; keyboard/draft preservation.
 - 390×844, 844×390 and 1280×800, light/dark, plus reduced motion. Review each screenshot and record the verdict/change in `/home/pippenz/.cas/artifacts/cas-11b01/element-review.md`.
@@ -54,3 +61,24 @@ labelled evidence is in `LEDGER.md` beside it. Native paired-device delivery is
 supervisor-owned integration verification (notification 28848), not claimed by
 these browser fixtures. No new runtime dependency; bundle ~72.5KB JS / 12.5KB CSS
 gzip. Physical-device interaction timings remain unmeasured.
+
+## Thread identity (cas-55a4)
+
+One key binds a Commander turn to a conversation: the prompt-queue row's
+`factory_session`, which is also the hub catalog's session name.
+
+| Step | Where | What carries the key |
+| --- | --- | --- |
+| Operator send | daemon enqueue | the receiving daemon's own session |
+| Supervisor reply | `coordination` message to `operator` | the sending supervisor's registered `factory_session` |
+| Live delivery | `peek_operator_replies` | filters on the daemon's session |
+| History page | `PromptQueueStore::conversation_history` | filters on the session, newest-first by queue id |
+| Earlier sessions | `earlier_session_history` | every other session, and rows with none, beside the newest page only |
+| Browser | `ConversationHistory` | keeps turns stamped with its own session; files the rest by session |
+
+A thread therefore shows only its own session's turns. Other sessions' turns
+render as collapsed, dated "Earlier session <codename>, <day>" sections that
+never wait, pin or count as answered. A turn with no session recorded is
+labelled as such, and never borrows the session that asked for history.
+History rows without a `session` field come from daemons that predate session
+stamps; the browser keeps them in the thread.

@@ -19,6 +19,13 @@ impl Config {
         let memory = self.memory.clone().unwrap_or_default();
         let factory = self.factory();
         match key {
+            "slack.transport" => Some(
+                match self.slack.as_ref().map(|s| s.transport).unwrap_or_default() {
+                    SlackTransport::Violet => "violet",
+                    SlackTransport::Any => "any",
+                }
+                .to_string(),
+            ),
             // Sync section
             "sync.enabled" => Some(self.sync.enabled.to_string()),
             "sync.target" => Some(self.sync.target.clone()),

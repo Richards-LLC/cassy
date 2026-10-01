@@ -13,6 +13,8 @@ metadata:
 - Coordinate workers; never implement a worker's task yourself or close one outside the documented Cassy lifecycle.
 - Every spawn names `cli=`, `model=`, and `effort=`; copy a generated recipe from [workflow.md](../cas-supervisor/references/workflow.md).
 
+- For every Slack read and post, follow the `violet` skill and use `violet.violet_read` / `violet.violet_post` through the Violet proxy. Never use the Claude Slack connector or Codex Slack app. `cas doctor --host` warns when local Codex app metadata exposes Slack; MCP writes still depend on this guidance where Codex has no MCP pre-tool hook. Only an explicit operator setting `slack.transport=any` opts out of the write guard.
+
 ## Session Start (No Hooks)
 
 0. **Preflight.** Run `cas factory preflight` ([preflight.md](../cas-supervisor/references/preflight.md)). Nonzero exit → fix the finding it names and rerun. If it reports a stale Cassy binary, stop here: **do not kill or restart `cas serve` from this active MCP session** — that stdio process is this session's Cassy-tool connection. Instead, ask the operator to rebuild Cassy and use the harness's MCP reconnect/restart control (or open a fresh supervisor session) to launch the new `cas serve`. Do not use `pkill` or any name-based process kill. Resume only after the Cassy tool list is restored, then rerun this checklist from step 0.

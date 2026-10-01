@@ -398,8 +398,19 @@ pub(crate) fn get_cas_hooks_config(config: &crate::config::HookConfig) -> serde_
         );
     }
 
-    if config.pre_tool_use.enabled {
-        let matcher = config.pre_tool_use.matcher.join("|");
+    {
+        // Slack policy is independent of ordinary rule auto-approval. Preserve
+        // it with custom/old matchers and when other pre-tool features are off.
+        let policy = crate::config::hooks::SLACK_POLICY_MATCHER;
+        let mut matchers = if config.pre_tool_use.enabled {
+            config.pre_tool_use.matcher.clone()
+        } else {
+            Vec::new()
+        };
+        if !matchers.iter().any(|matcher| matcher == policy) {
+            matchers.push(policy.into());
+        }
+        let matcher = matchers.join("|");
         hooks.insert(
             "PreToolUse".to_string(),
             serde_json::json!([
@@ -415,7 +426,9 @@ pub(crate) fn get_cas_hooks_config(config: &crate::config::HookConfig) -> serde_
                 }
             ]),
         );
+    }
 
+    if config.pre_tool_use.enabled {
         // Sealed verifier handoff lifecycle — ONE atomic installation unit
         // (cas-fda1). PreToolUse (immediately above) is the only route that can
         // issue a sealed task-verifier handoff, so every terminal route for that

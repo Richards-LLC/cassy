@@ -944,7 +944,16 @@ fn sealed_handoff_lifecycle_is_atomic_across_full_flag_matrix() {
                          post_tool_use={post_tool_use} permission_request={permission_request}"
                     );
 
-                    let issuance = event_installed(&config, "PreToolUse");
+                    // The Slack-only policy hook persists when rule hooks are
+                    // disabled; handoff issuance requires Task/Agent coverage.
+                    let issuance = config
+                        .pointer("/hooks/PreToolUse/0/matcher")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|matcher| matcher.split('|').any(|entry| entry == "Agent"));
+                    assert!(
+                        config.pointer("/hooks/PreToolUse/0/matcher").unwrap()
+                            .as_str().unwrap().contains(crate::config::hooks::SLACK_POLICY_MATCHER)
+                    );
                     assert_eq!(
                         issuance, pre_tool_use,
                         "[{combo}] PreToolUse issuance must track pre_tool_use.enabled"
@@ -1028,8 +1037,11 @@ fn issuance_without_stop_still_installs_binding_and_cleanup() {
 fn disabled_issuance_installs_no_handoff_lifecycle_hooks() {
     let config = get_cas_hooks_config(&matrix_config(false, true, true, true));
 
+    assert_eq!(
+        config.pointer("/hooks/PreToolUse/0/matcher").and_then(|value| value.as_str()),
+        Some(crate::config::hooks::SLACK_POLICY_MATCHER)
+    );
     for event in [
-        "PreToolUse",
         "SubagentStart",
         "PostToolUseFailure",
         "PermissionDenied",
@@ -1252,4 +1264,30 @@ fn configure_project_hooks_converge_across_config_dirs() {
         .unwrap();
     let second = std::fs::read(project.path().join(".claude/settings.json")).unwrap();
     assert_eq!(first, second, "config-dir changes must not churn project settings");
+}
+
+#[test]
+fn slack_policy_reaches_mcp_tools_with_custom_and_disabled_rule_matchers() {
+    for enabled in [true, false] {
+        let mut hook_config = HookConfig::default();
+        hook_config.pre_tool_use.enabled = enabled;
+        hook_config.pre_tool_use.matcher = vec!["Read".into()];
+        let config = get_cas_hooks_config(&hook_config);
+        let matcher = config.pointer("/hooks/PreToolUse/0/matcher")
+            .unwrap().as_str().unwrap();
+        let regex = regex::Regex::new(matcher).unwrap();
+        for tool in [
+            "mcp__claude_ai_Slack__slack_send_message",
+            "mcp__other_slack__send_message",
+            "mcp__cs__mcp_execute",
+            "slack_send_message",
+        ] {
+            assert!(regex.is_match(tool), "{enabled}: {tool}");
+        }
+        if !enabled {
+            assert!(!regex.is_match("Agent"));
+            assert!(!regex.is_match("Read"));
+            assert!(!regex.is_match("mcp__cas__task"));
+        }
+    }
 }

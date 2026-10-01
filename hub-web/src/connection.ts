@@ -19,7 +19,7 @@ import {
   type ConnectionStage,
   type AttachSnapshot,
 } from "./connection-state";
-import type { ConversationHistoryMessage, ConversationHistoryPage, HubSession, LeaseState, MessageQueued, OperatorReply, PaneInfo, SessionCardSummary, SessionState, StoredMachine } from "./types";
+import type { ConversationHistoryMessage, ConversationHistoryPage, HubSession, LeaseState, MessageQueued, OperatorNoticeResolved, OperatorReply, PaneInfo, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
 import { sessionsPath, workersRevealed } from "./worker-visibility";
 import { dormantRevealed } from "./dormant-visibility";
@@ -83,6 +83,8 @@ export interface HubCallbacks {
   onOperatorMessage?(session: string, message: ConversationHistoryMessage): void;
   onMessageRejected?(session: string, clientRef: string, detail: string, rejection?: MessageRejection): void;
   onOperatorReply?(session: string, reply: OperatorReply): void;
+  /** A system notice delivered earlier is over (cas-e829): retire its attention item. */
+  onOperatorNoticeResolved?(session: string, resolved: OperatorNoticeResolved): void;
   onConversationHistory?(session: string, page: ConversationHistoryPage): void;
   /** The first history page was requested on attach; its answer is onConversationHistory. */
   onConversationHistoryRequested?(session: string): void;
@@ -1514,6 +1516,8 @@ export class HubConnectionSupervisor {
       if (queued) this.callbacks.onMessageQueued?.(session, queued);
     } else if (message.OperatorReply) {
       this.callbacks.onOperatorReply?.(session, message.OperatorReply as OperatorReply);
+    } else if (message.OperatorNoticeResolved) {
+      this.callbacks.onOperatorNoticeResolved?.(session, message.OperatorNoticeResolved as OperatorNoticeResolved);
     } else if (message.OperatorMessage) {
       this.callbacks.onOperatorMessage?.(session, message.OperatorMessage as ConversationHistoryMessage);
     } else if (message.ConversationHistory) {

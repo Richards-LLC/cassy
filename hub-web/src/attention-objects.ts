@@ -125,15 +125,27 @@ export function renderBlockerObject(reply: OperatorReply, context: TurnRenderCon
   if (waiting) {
     const hint = document.createElement("p"); hint.className = "blk-hint"; hint.textContent = BLOCKER_HINT;
     body.append(hint);
-  } else if (context.history?.events.some((event) => event.kind === "reply" && event.value.notification_id === reply.notification_id)) {
+  } else if (context.history?.answered(reply.notification_id)) {
     // cas-71af (aac8 QA F01): a blocker the operator replied to is handled.
     // It quiets to the supervisor's colour, as an answered ask does, and says
     // so with a tick, instead of staying a red alarm with no sign of it.
+    // cas-e829: only a reply bound to THIS blocker (in_reply_to) says so.
+    // The check used to find the blocker itself in the history, which is
+    // always true, so every blocker that stopped waiting claimed a reply.
     object.dataset.acknowledged = "true";
     object.setAttribute("aria-label", `Blocker from ${context.supervisor}, acknowledged`);
     const handled = document.createElement("p"); handled.className = "blk-handled";
     handled.append(tick(document), document.createTextNode("Acknowledged — you replied"));
     body.append(handled);
+  } else if (!context.history?.retirement(reply.notification_id) && context.history?.writtenSince(reply.notification_id)) {
+    // A later message from the operator, not bound to this blocker: it no
+    // longer waits, and the line says only what is true.
+    // It quiets like a handled blocker (it no longer waits), without a tick.
+    object.dataset.acknowledged = "true";
+    object.setAttribute("aria-label", `Blocker from ${context.supervisor}, you've written since`);
+    const later = document.createElement("p"); later.className = "blk-handled blk-later";
+    later.textContent = "You've written since this";
+    body.append(later);
   }
   // cas-16eed: a blocker from a session that has ended no longer waits, and says so.
   const retired = waiting ? undefined : context.history?.retirement(reply.notification_id);

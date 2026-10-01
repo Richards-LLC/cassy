@@ -293,6 +293,15 @@ export class ConversationHistory {
     return undefined;
   }
   /**
+   * Whether the operator sent anything that went out (not refused) after the
+   * turn with this notification id (cas-e829). That is what stops a blocker
+   * waiting; it is not a reply to it unless the send carries its id.
+   */
+  writtenSince(notificationId: number): boolean {
+    const index = this.events.findIndex((event) => event.kind === "reply" && event.value.notification_id === notificationId);
+    return index >= 0 && this.events.slice(index + 1).some((later) => later.kind === "send" && later.value.state !== "error" && later.value.state !== "unconfirmed");
+  }
+  /**
    * Asks and blockers still waiting on the operator, oldest first. An ask is
    * answered by a send carrying its id; a blocker is acknowledged by any
    * operator send after it that was not refused. A refused send never reached

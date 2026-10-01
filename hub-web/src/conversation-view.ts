@@ -8,9 +8,9 @@ import { sessionCodename, type ConversationEvent, type ConversationHistory, type
 import type { ArtifactRef, OperatorReply, OperatorTurnKind } from "./types";
 import {
   cellTone,
-  clockLabel,
   coalesceText,
   dayLabel,
+  stampLabel,
   messageBlocks,
   threadModel,
   type ThreadCoalesce,
@@ -242,7 +242,7 @@ function earlierSessionNode(document: Document, entry: EarlierSession, now: numb
     const time = document.createElement("time");
     if (event.at !== undefined && Number.isFinite(event.at)) {
       time.dateTime = new Date(event.at).toISOString();
-      time.textContent = `${dayLabel(event.at, now)} ${clockLabel(event.at)}`;
+      time.textContent = stampLabel(event.at, now) ?? "";
     }
     const text = document.createElement("p");
     text.textContent = plainTextMarkdown(event.kind === "send" ? event.value.text : event.value.message);

@@ -76,10 +76,104 @@ fn is_gh(token: &str) -> bool {
     token == "gh" || token.ends_with("/gh")
 }
 
+/// Programs whose here-document is data, not shell: text in their bodies is
+/// never executed by the shell, so it cannot be a merge. Shells, `ssh`,
+/// `sudo` and anything unknown keep their bodies (fail closed).
+const HEREDOC_DATA_CONSUMERS: [&str; 20] = [
+    "cat", "tee", "python", "python3", "python2", "node", "deno", "ruby", "perl", "git", "jq",
+    "sed", "awk", "grep", "wc", "diff", "patch", "psql", "sqlite3", "rustfmt",
+];
+
+/// The command with here-document bodies removed when the program reading
+/// them is a known data consumer (cas-0169: a Python edit script whose body
+/// quoted a merge command was refused as a merge). A body whose terminator
+/// never appears is kept, because the shell may not read it as a heredoc.
+fn strip_data_heredoc_bodies(command: &str) -> String {
+    let lines: Vec<&str> = command.lines().collect();
+    let mut kept = Vec::with_capacity(lines.len());
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index];
+        kept.push(line);
+        index += 1;
+        for (delimiter, strip_tabs, data) in heredocs_opened_by(line) {
+            let terminator = lines[index..].iter().position(|body| {
+                let body = if strip_tabs {
+                    body.trim_start_matches('\t')
+                } else {
+                    body
+                };
+                body.trim_end() == delimiter
+            });
+            match terminator {
+                Some(offset) if data => {
+                    // Drop the body; keep the terminator line.
+                    index += offset;
+                }
+                Some(offset) => {
+                    kept.extend(&lines[index..index + offset]);
+                    index += offset;
+                }
+                None => break,
+            }
+            if index < lines.len() {
+                kept.push(lines[index]);
+                index += 1;
+            }
+        }
+    }
+    kept.join("\n")
+}
+
+/// `(delimiter, <<- strips tabs, body is data)` for each `<<WORD` on a line,
+/// in order. `<<<` here-strings open nothing.
+fn heredocs_opened_by(line: &str) -> Vec<(String, bool, bool)> {
+    let mut opened = Vec::new();
+    let mut rest = line;
+    let mut consumed = 0;
+    while let Some(at) = rest.find("<<") {
+        let before = &line[..consumed + at];
+        let after = &rest[at + 2..];
+        consumed += at + 2;
+        rest = after;
+        if after.starts_with('<') {
+            rest = &after[1..];
+            consumed += 1;
+            continue;
+        }
+        let (strip_tabs, after) = match after.strip_prefix('-') {
+            Some(after) => (true, after),
+            None => (false, after),
+        };
+        let word: String = after
+            .trim_start()
+            .chars()
+            .take_while(|ch| {
+                !ch.is_whitespace() && !matches!(ch, ';' | '|' | '&' | '<' | '>' | ')')
+            })
+            .filter(|ch| !matches!(ch, '\'' | '"' | '\\'))
+            .collect();
+        if word.is_empty() {
+            continue;
+        }
+        let program = before
+            .rsplit([';', '|', '&', '('])
+            .next()
+            .unwrap_or_default()
+            .split_whitespace()
+            .find(|token| !token.contains('='))
+            .map(|token| token.rsplit('/').next().unwrap_or(token))
+            .unwrap_or_default();
+        opened.push((word, strip_tabs, HEREDOC_DATA_CONSUMERS.contains(&program)));
+    }
+    opened
+}
+
 /// Raw GitHub merges a shell command would perform (cas-2ee2 pre-tool guard).
 /// `gh pr merge --disable-auto` merges nothing and is not reported.
 pub fn github_merges_in(command: &str) -> Vec<GithubMerge> {
     let mut merges = Vec::new();
+    let command = strip_data_heredoc_bodies(command);
     for statement in command.split(['\n', ';', '|', '&']) {
         let tokens: Vec<&str> = statement
             .split_whitespace()
@@ -891,6 +985,39 @@ mod tests {
                 "-f",
                 "description=round open",
             ]
+        );
+    }
+
+    #[test]
+    fn data_heredoc_bodies_are_not_merges_but_shell_heredocs_are() {
+        // cas-0169 live repro: an edit script's body quoted a merge command.
+        let edit = "python3 - <<'EOF'\nrefusal = run(\"gh pr merge 77 --squash\")\nEOF\necho done";
+        assert!(github_merges_in(edit).is_empty(), "{edit}");
+        let tabbed = "cat > notes.md <<-EOF\n\tgh pr merge 12 --squash\n\tEOF\n";
+        assert!(github_merges_in(tabbed).is_empty());
+        let two = "git commit -F - <<A && cat <<B\ngh pr merge 1\nA\ngh pr merge 2\nB\n";
+        assert!(github_merges_in(two).is_empty());
+
+        // A merge after the body, a shell-fed body, an unknown consumer, and
+        // an unterminated body are still merges (fail closed).
+        let after = "python3 - <<'EOF'\nprint(1)\nEOF\ngh pr merge 5 --squash";
+        assert_eq!(only(after).selector, MergeSelector::Number(5));
+        for command in [
+            "bash <<'EOF'\ngh pr merge 6 --squash\nEOF",
+            "ssh host <<EOF\ngh pr merge 6 --squash\nEOF",
+            "sudo tee x <<EOF\ngh pr merge 6 --squash\nEOF",
+            "python3 - <<'EOF'\ngh pr merge 6 --squash\n",
+        ] {
+            assert_eq!(
+                only(command).selector,
+                MergeSelector::Number(6),
+                "{command}"
+            );
+        }
+        // A here-string opens no body.
+        assert_eq!(
+            only("cat <<< x\ngh pr merge 7").selector,
+            MergeSelector::Number(7)
         );
     }
 

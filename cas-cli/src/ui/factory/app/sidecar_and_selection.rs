@@ -2114,8 +2114,10 @@ while True:
         );
     }
 
-    /// Claude focused alt-screen must NOT forward SGR clicks (Stop path is
-    /// Grok-only; Claude keeps Esc cancel).
+    /// Claude focused alt-screen must NOT forward SGR clicks when the child
+    /// never enabled mouse reporting (Claude keeps Esc cancel). A Claude
+    /// child that did enable SGR mouse (fullscreen TUI) does get clicks —
+    /// see `mouse_click_forwards_sgr_to_mouse_reporting_claude_pane_cas_4cd6`.
     #[test]
     fn mouse_click_does_not_forward_sgr_for_claude_cas_7f6f() {
         let mut app = FactoryApp::for_test();

@@ -7,6 +7,7 @@ import { controlCommandCopy, sessionJumpCommandMarkup } from "./palette-commands
 import { ConversationHistory } from "./conversation-history";
 import { loadDismissedAsks, saveDismissedAsks, type DismissedAsksStorage } from "./dismissed-asks";
 import { ConversationView, emptyActivityText } from "./conversation-view";
+import { applySheetSemantics, sheetFocusables, sheetKeydown } from "./attention-sheet";
 import { isOperatorNotice, NOTICE_KIND, noticeFingerprint, noticeTime, planNotice } from "./operator-notices";
 import { REFUSED_SEE_ABOVE, refusalSentence, refusal } from "./refusal";
 import { installAttentionObjects } from "./attention-objects";
@@ -3756,21 +3757,34 @@ function syncConversationAttention(count: number): void {
     if (text && text.textContent !== view.text) text.textContent = view.text;
   }
   // Nothing left (the last item dismissed in the sheet) closes it with focus
-  // back in the conversation; leaving the conversation closes it quietly.
-  if (count < 1 && attentionSheetOpen) {
-    if (hubPresentation === "conversation" && selectedSession) closeAttentionSheet();
-    else attentionSheetOpen = false;
+  // back in the conversation; leaving the conversation, or the viewport
+  // becoming a desktop where the rail is a side panel again (cas-a5c6),
+  // closes it quietly.
+  if (attentionSheetOpen && (count < 1 || !phoneLayout())) {
+    if (count < 1 && hubPresentation === "conversation" && selectedSession) closeAttentionSheet();
+    else { attentionSheetOpen = false; badge?.setAttribute("aria-expanded", "false"); }
   }
   applyAttentionSheet();
 }
 function applyAttentionSheet(): void {
-  const shell = document.querySelector<HTMLElement>(".conversation-shell");
-  const rail = shell?.querySelector<HTMLElement>(".conversation-context");
-  shell?.classList.toggle("attention-sheet-open", attentionSheetOpen);
-  if (!rail) return;
-  if (attentionSheetOpen) { rail.setAttribute("role", "dialog"); rail.setAttribute("aria-modal", "true"); rail.setAttribute("aria-label", "Attention for this session"); }
-  else { rail.removeAttribute("role"); rail.removeAttribute("aria-modal"); rail.setAttribute("aria-label", "Conversation context"); }
+  applySheetSemantics(document.querySelector<HTMLElement>(".conversation-shell"), attentionSheetOpen);
 }
+// cas-a5c6: while the sheet is modal, Escape closes it from anywhere and Tab
+// stays inside it; focus that lands behind it is brought back.
+document.addEventListener("keydown", (event) => {
+  if (!attentionSheetOpen) return;
+  const sheet = document.querySelector<HTMLElement>(".conversation-shell.attention-sheet-open > .conversation-context");
+  if (sheet && sheetKeydown(event, sheet, document.activeElement, closeAttentionSheet)) {
+    event.preventDefault();
+    // Escape is the sheet's alone while it is open.
+    if (event.key === "Escape") event.stopPropagation();
+  }
+}, true);
+document.addEventListener("focusin", (event) => {
+  if (!attentionSheetOpen) return;
+  const sheet = document.querySelector<HTMLElement>(".conversation-shell.attention-sheet-open > .conversation-context");
+  if (sheet && event.target instanceof Node && !sheet.contains(event.target)) sheetFocusables(sheet)[0]?.focus();
+});
 function openAttentionSheet(): void {
   attentionSheetOpen = true;
   applyAttentionSheet();
@@ -3998,8 +4012,6 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   if (attentionBadge) attentionBadge.onclick = openAttentionSheet;
   const sheetClose = document.querySelector<HTMLButtonElement>(".conversation-context .context-sheet-close");
   if (sheetClose) sheetClose.onclick = closeAttentionSheet;
-  const conversationRail = document.querySelector<HTMLElement>(".conversation-context");
-  if (conversationRail) conversationRail.onkeydown = (event) => { if (event.key === "Escape" && attentionSheetOpen) { event.preventDefault(); closeAttentionSheet(); } };
   const conversationBack = document.querySelector<HTMLButtonElement>("#conversation-back");
   if (conversationBack) conversationBack.onclick = () => { attentionSheetOpen = false; if (selectedMachineId) commitSelection({ machineId: selectedMachineId }); render(); queueMicrotask(() => document.querySelector<HTMLButtonElement>(".conversation-row")?.focus()); };
   const terminal = document.querySelector<HTMLButtonElement>("#conversation-terminal");

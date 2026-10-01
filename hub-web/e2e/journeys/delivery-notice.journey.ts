@@ -79,12 +79,43 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await expect(sheet.locator("article", { hasText: NOTICE_SUMMARY }).locator("time")).toHaveText("Sep 29, 17:49");
   });
 
+  await journey.stage("Keyboard stays in the sheet", async () => {
+    const sheet = page.getByRole("dialog", { name: "Attention for this session" });
+    // cas-a5c6: the modal sheet holds Tab and Shift+Tab; nothing behind it is reachable.
+    const inSheet = () => page.evaluate(() => Boolean(document.activeElement?.closest(".conversation-context[role='dialog']")));
+    await page.keyboard.press("Shift+Tab");
+    expect(await inSheet(), "Shift+Tab from Close stays in the sheet").toBe(true);
+    for (let step = 0; step < 8; step += 1) {
+      await page.keyboard.press("Tab");
+      expect(await inSheet(), `Tab ${step + 1} stays in the sheet`).toBe(true);
+    }
+    await expect(page.locator(".conversation-main")).toHaveAttribute("inert", "");
+    await expect(sheet).toBeVisible();
+  });
+
   await journey.stage("Close it and keep reading", async () => {
     const sheet = page.getByRole("dialog", { name: "Attention for this session" });
+    // Escape closes it from anywhere, even with focus dropped to the page.
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
     await page.keyboard.press("Escape");
     await expect(sheet).toBeHidden();
     await expect(page.getByRole("button", { name: "Attention: 1 item for this session" })).toBeFocused();
     await expect(log).toContainText("The ledger import is red");
+  });
+
+  await journey.stage("A sheet left open on a phone is a plain rail on a desktop", async () => {
+    const badge = page.getByRole("button", { name: "Attention: 1 item for this session" });
+    await badge.click();
+    await expect(page.getByRole("dialog", { name: "Attention for this session" })).toBeVisible();
+    // cas-a5c6: the phone turns into a desktop (rotation, or a window resize).
+    await page.setViewportSize(desktop);
+    const rail = page.locator(".conversation-context");
+    await expect(rail).not.toHaveAttribute("role", "dialog");
+    await expect(rail).not.toHaveAttribute("aria-modal", "true");
+    await expect(rail).toHaveAttribute("aria-label", "Conversation context");
+    await expect(page.locator("#conversation-attention")).toHaveAttribute("aria-expanded", "false");
+    await expect(page.locator("[inert]")).toHaveCount(0);
+    await expect(attentionItems).toHaveCount(1);
   });
 
   await journey.stage("It retires once the update gets through", async () => {

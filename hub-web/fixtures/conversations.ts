@@ -1,5 +1,5 @@
 import { machineFooterMarkup, pairedMachinesDialogMarkup, renderPairedMachines } from '../src/paired-machines';
-import { ConversationList, type ConversationRow } from '../src/conversation-list';
+import { ConversationList, groupConversationRows, type ConversationRow } from '../src/conversation-list';
 import { ConversationHistory } from '../src/conversation-history';
 import { ConversationView } from '../src/conversation-view';
 import { applyKeyboardViewport, conversationListState, conversationShellMarkup, conversationSkeletonMarkup, dressComposer, keyboardViewportHeight } from '../src/conversation-shell';
@@ -51,6 +51,21 @@ export function fixtureConversationRows(selected: boolean): ConversationRow[] {
   ];
 }
 
+/**
+ * cas-55a4: three live gabber-studio sessions on one machine, grouped under
+ * one heading with the most recent marked; this device may end them.
+ */
+export function fixtureSessionRows(): ConversationRow[] {
+  const base = { connection: 'Live', attention: 0, unread: 0, selected: false, projectDir: '/projects/gabber-studio', machineId: 'atlas-linux', host: 'Atlas · Linux', canEnd: true };
+  const now = Date.now();
+  return groupConversationRows([
+    { ...base, key: 'atlas-linux:noble', session: 'gabber-studio-noble-cheetah-84', supervisor: 'noble-cheetah-84', when: '14h', freshness: 'Last activity 14h ago · relay-watchdog → Commander', activityAt: now - 14 * 3_600_000, preview: 'Mixdown preview rendered: 3 stems.' },
+    { ...base, key: 'atlas-linux:puma', session: 'gabber-studio-calm-puma-34', supervisor: 'calm-puma-34', when: '2m', freshness: 'Last activity 2m ago · supervisor → bright-robin-85', activityAt: now - 120_000, connection: 'Live', selected: true },
+    { ...base, key: 'atlas-linux:shark', session: 'gabber-studio-wild-shark-68', supervisor: 'wild-shark-68', when: '40m', freshness: 'Last activity 40m ago · Commander → supervisor', activityAt: now - 2_400_000, preview: 'Stem export is at 60%.' },
+    ...fixtureConversationRows(false).slice(0, 1).map((row) => ({ ...row, canEnd: false })),
+  ]);
+}
+
 export function renderConversationFixture(app: HTMLElement, state: string): void {
   const supervisor = FIXTURE_SUPERVISOR;
   const selected = !['conversations-list', 'conversations-loading', 'conversations-unpaired', 'paired-machines'].includes(state);
@@ -65,10 +80,15 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     ? { id: 'studio-mac', label: 'Studio Mac', host: 'Studio Mac · macOS', projectDir: '/projects/gabber-studio', project: 'gabber-studio' }
     : state === 'conversation-empty'
       ? { id: 'bench-1', label: 'Bench', host: 'Bench · Linux', projectDir: '/projects/cas-hub-static', project: 'cas-hub-static' }
+      : state === 'conversation-sessions' || state === 'conversation-earlier'
+        ? { id: 'atlas-linux', label: 'Atlas', host: 'Atlas · Linux', projectDir: '/projects/gabber-studio', project: 'gabber-studio' }
       : { id: 'atlas-linux', label: 'Atlas', host: 'Atlas · Linux', projectDir: '/projects/cas-src', project: 'cas-src' };
   app.innerHTML = conversationShellMarkup({ selected, supervisor, projectDir: machine.projectDir, host: machine.host, machineId: machine.id, loaded: !loading, paired: !loading && !unpaired });
-  const listRows = loading || unpaired ? [] : fixtureConversationRows(selected);
-  new ConversationList().render(app.querySelector('#conversation-list')!, listRows, () => {});
+  const sessions = state === 'conversation-sessions' || state === 'conversation-earlier';
+  const listRows = loading || unpaired ? [] : sessions ? fixtureSessionRows() : fixtureConversationRows(selected);
+  new ConversationList().render(app.querySelector('#conversation-list')!, listRows, () => {}, async () => {});
+  // The End session confirmation, open on the idle session (cas-55a4).
+  if (state === 'conversation-sessions') app.querySelectorAll<HTMLButtonElement>('#conversation-list .conversation-end-ask')[2]?.click();
   const machines = loading || unpaired ? [] : FIXTURE_MACHINES;
   // The list's empty line, exactly as main.ts renderConversationList sets it.
   const empty = app.querySelector<HTMLElement>('#conversation-empty')!;
@@ -167,6 +187,18 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
   } else if (state === 'conversation-empty') {
     // empty.html: nothing in the thread, the last thing said as a faint echo.
     echo = 'Promoted the hub to production on Monday.';
+  } else if (state === 'conversation-sessions' || state === 'conversation-earlier') {
+    // cas-55a4: other sessions' turns, beside the thread and never in it.
+    const own = 'gabber-studio-calm-puma-34';
+    history.currentSession = own;
+    const stamp = (daysAgo: number, hh: number, mm: number) => new Date(at(hh, mm) - daysAgo * 86_400_000).toISOString();
+    history.hydrateSend({ notification_id: 101, target: 'supervisor', text: 'Render the mixdown preview.', state: 'acknowledged', stamped: true, device_id: 'fixture', operator_label: 'Pixel 10', session: 'gabber-studio-noble-cheetah-84', at: stamp(1, 21, 30) });
+    history.hydrateReply({ notification_id: 102, reply_to: null, message: 'Mixdown preview rendered: 3 stems.', summary: '', device_id: 'fixture', kind: 'answer', attachments: [], session: 'gabber-studio-noble-cheetah-84', at: stamp(1, 21, 41) });
+    history.hydrateReply({ notification_id: 103, reply_to: null, message: 'The supervisor (sharp-stork-98) was told 9 minutes ago that cas-c3f1 is in progress — worker died: daring-robin-43.', summary: '', device_id: 'fixture', kind: 'blocker', attachments: [], session: 'gabber-studio-wise-lion-31', at: stamp(2, 17, 20) });
+    if (state === 'conversation-earlier') {
+      history.hydrateSend({ notification_id: 201, target: 'supervisor', text: 'Status on the stem export?', state: 'acknowledged', stamped: true, device_id: 'fixture', operator_label: 'Pixel 10', session: own, at: new Date(at(9, 30)).toISOString() });
+      history.hydrateReply({ notification_id: 202, reply_to: 201, message: 'Stem export is at 60%; the bass stem is next.', summary: '', device_id: 'fixture', kind: 'answer', attachments: [], session: own, at: new Date(at(9, 33)).toISOString() });
+    }
   } else if (state === 'conversation-composer') {
     // A phone composer mid-draft: the field holds text, the send pill is in the accent.
     reply(80, null, 'Rebased and pushed; nothing waiting.', 'answer', at(9, 30));
@@ -180,8 +212,11 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     }
   }
   // Fixture respond: record the chip as an operator send answering the ask, exactly as main.ts does after the hub accepts it.
-  const view = new ConversationView(document, history, { supervisor, machine: machine.label, project: machine.project, header: false, working: () => working, echo: () => echo, hasEarlier: () => loadingEarlier, loadingEarlier: () => loadingEarlier, editMessage: () => {}, retryMessage: (send) => { history.discardRefused(send.id); history.submit(`retry-${send.id}`, supervisor, send.text, Date.now(), send.replyTo); view.update(); }, respond: (ask, text) => { history.submit(`quick-${ask.notification_id}`, supervisor, text, Date.now(), ask.notification_id); view.update(); syncContextRail(app, { history, progress: false, attention: 0 }); } });
+  const sessionFixture = state === 'conversation-sessions';
+  const view = new ConversationView(document, history, { supervisor: sessions ? 'calm-puma-34' : supervisor, machine: machine.label, project: machine.project, header: false, working: () => working, echo: () => echo, ...(sessionFixture ? { activity: () => ({ at: Date.now() - 120_000, label: 'supervisor → bright-robin-85' }), openTerminal: () => {} } : {}), hasEarlier: () => loadingEarlier, loadingEarlier: () => loadingEarlier, editMessage: () => {}, retryMessage: (send) => { history.discardRefused(send.id); history.submit(`retry-${send.id}`, supervisor, send.text, Date.now(), send.replyTo); view.update(); }, respond: (ask, text) => { history.submit(`quick-${ask.notification_id}`, supervisor, text, Date.now(), ask.notification_id); view.update(); syncContextRail(app, { history, progress: false, attention: 0 }); } });
   app.querySelector('#conversation-pane-slot')!.append(view.element); view.update();
+  // The earlier session the operator opened to read (cas-55a4).
+  if (sessionFixture) { const open = view.element.querySelector<HTMLDetailsElement>('details.earlier-session'); if (open) open.open = true; }
   // The app's own composer region, dressed the way arrangeConversationShell dresses it; the pinned ask mounts above it.
   const slot = app.querySelector<HTMLElement>('#conversation-composer-slot')!;
   // Dictation writes interim words into the field while the mic listens.

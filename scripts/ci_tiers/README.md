@@ -50,5 +50,5 @@ and standalone mutations. New policy entries intentionally have no legacy line.
 
 The additional provisioning case executes the real step body with isolated tool
 fixtures: importable YAML performs no install; missing YAML selects venv pip and
-venv Python; venv/install failures stop before make. Real installation on both
+venv Python; venv/install failures stop before make. Real provisioning on both
 Python paths is recorded separately in the task delivery proof.

@@ -4,6 +4,7 @@ import copy
 import itertools
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -96,6 +97,74 @@ class PolicyTests(unittest.TestCase):
         result = subprocess.run([sys.executable, '-S', str(policy.HERE / 'policy.py'), 'check'], text=True, capture_output=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('requires pyyaml==6.0.3', result.stderr)
+
+    def test_real_parser_provisioning_step_reuses_yaml_or_isolates_installation(self):
+        step = next(s for s in self.ci()['jobs']['fast-validation-preflight']['steps']
+                    if 'make -C cas-cli test-ci-tiers' in s.get('run', ''))
+        # Isolate tool orchestration and the pip network boundary. The make
+        # fixture runs the actual parsed-policy suite, without recursive make.
+        interpreter = shlex.quote(sys.executable)
+        parser = shlex.quote(str(policy.HERE / 'policy.py'))
+        for mode in ['present', 'absent', 'venv-failure', 'install-failure']:
+            with self.subTest(mode=mode):
+                fixture = self.root / mode;fixture.mkdir()
+                bin_dir = fixture / 'bin';bin_dir.mkdir()
+                runner_temp = fixture / 'runner';runner_temp.mkdir()
+                log = fixture / 'calls'
+                log.write_text('')
+                (bin_dir / 'python3').write_text('''#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$1" == -c ]]; then
+  echo import >> "$CALLS"
+  [[ "$MODE" == present ]]
+elif [[ "$1 $2" == '-m venv' ]]; then
+  echo venv >> "$CALLS"
+  [[ "$MODE" != venv-failure ]] || exit 1
+  mkdir -p "$3/bin"
+  cp "$FIXTURE/pip" "$3/bin/pip"
+  cp "$FIXTURE/venv-python" "$3/bin/python3"
+else
+  printf 'unexpected python %s\\n' "$*" >> "$CALLS"
+  exit 2
+fi
+''')
+                (fixture / 'pip').write_text('''#!/usr/bin/env bash
+set -euo pipefail
+printf 'pip %s\\n' "$*" >> "$CALLS"
+[[ "$MODE" != install-failure ]]
+''')
+                (fixture / 'venv-python').write_text(f'#!/usr/bin/env bash\nexec {interpreter} "$@"\n')
+                (bin_dir / 'make').write_text(f'''#!/usr/bin/env bash
+set -euo pipefail
+[[ "$*" == '-C cas-cli test-ci-tiers' ]]
+echo make >> "$CALLS"
+command -v python3 >> "$CALLS"
+if [[ "$MODE" == present ]]; then
+  {interpreter} {parser} check
+else
+  python3 {parser} check
+fi
+''')
+                for child in [*bin_dir.iterdir(), fixture / 'pip', fixture / 'venv-python']:
+                    child.chmod(0o755)
+                result = self.run_body(step['run'], dict(
+                    PATH=f'{bin_dir}:/usr/bin:/bin', RUNNER_TEMP=str(runner_temp),
+                    CALLS=str(log), MODE=mode, FIXTURE=str(fixture)))
+                calls = log.read_text().splitlines()
+                if mode in ['venv-failure', 'install-failure']:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertNotIn('make', calls)
+                    if mode == 'venv-failure': self.assertEqual(calls, ['import', 'venv'])
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn('parsed policy/prose: 709 passed; 0 failed', result.stdout)
+                    if mode == 'present':
+                        self.assertEqual(calls, ['import', 'make', str(bin_dir / 'python3')])
+                        self.assertFalse((runner_temp / 'ci-tiers-venv').exists())
+                    else:
+                        self.assertEqual(calls, ['import', 'venv',
+                            'pip install --disable-pip-version-check --quiet -r scripts/ci_tiers/requirements.txt',
+                            'make', str(runner_temp / 'ci-tiers-venv/bin/python3')])
 
     def test_parsed_archive_fail_open_contract_and_all_four_mutations(self):
         job = self.ci()['jobs']['fast-validation-suite-build']

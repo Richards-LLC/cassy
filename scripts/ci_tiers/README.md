@@ -21,7 +21,10 @@ live in this registry; their wording in comments is not executable evidence.
 
 The parser requires `pyyaml==6.0.3` from `requirements.txt`. Missing PyYAML is a
 hard failure, with an installation message. The existing publication-guard step
-installs this dependency before `make -C cas-cli test-ci-tiers`; its triggers,
+reuses importable YAML; otherwise it creates a venv under `RUNNER_TEMP`, installs
+the pinned dependency there and puts that venv first on `PATH` before
+`make -C cas-cli test-ci-tiers`. System Python packages are never modified. Its
+triggers,
 runner selection, gates, jobs and required contexts are unchanged.
 
 ## Preservation ledger
@@ -37,10 +40,15 @@ checks, 33 remain there; 4 archive, 15 heavy-concurrency and 1 skew-guard checks
 move to parsed positive-control/mutation cases; the copied Markdown filter moves
 to an actual step-body subprocess case. Thus the shell suite reports **104**.
 The parsed/prose phase reports **709** (693 + 14 + 2 dependency checks), and Python
-reports **13 test cases**. The combined report is **826 counted checks/cases**;
+reports **14 test cases**. The combined report is **827 counted checks/cases**;
 Python groups the original mutations and adds independent negative/positive
 controls, so the counting unit differs from the old individual shell assertions.
 
 Each preserved registry entry carries its original line. The task's durable
 832-row before/after matrix records individual instances, including loop arms
 and standalone mutations. New policy entries intentionally have no legacy line.
+
+The additional provisioning case executes the real step body with isolated tool
+fixtures: importable YAML performs no install; missing YAML selects venv pip and
+venv Python; venv/install failures stop before make. Real installation on both
+Python paths is recorded separately in the task delivery proof.

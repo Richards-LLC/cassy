@@ -2736,6 +2736,17 @@ impl Pty {
             .map_err(|e| Error::pty(format!("Resize failed: {e}")))
     }
 
+    /// The window size the kernel currently holds for this PTY, as
+    /// `(rows, cols)` (TIOCGWINSZ on the master). This is what the child sees
+    /// from `stty size`, so tests can assert geometry against the real PTY
+    /// rather than against the pane's bookkeeping (cas-06a2).
+    pub fn winsize(&self) -> Result<(u16, u16)> {
+        self.master
+            .get_size()
+            .map(|size| (size.rows, size.cols))
+            .map_err(|e| Error::pty(format!("Get size failed: {e}")))
+    }
+
     /// Send Ctrl+C to the process
     pub async fn interrupt(&self) -> Result<()> {
         self.write(&[0x03]).await

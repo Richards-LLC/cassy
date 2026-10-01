@@ -574,7 +574,6 @@ impl DaemonInitPhase {
             ws_clients: HashMap::new(),
             terminal_exchange: Default::default(),
             next_ws_client_id: 0,
-            tui_pane_sizes: HashMap::new(),
             web_pane_sizes: HashMap::new(),
             teams,
             notify_rx,

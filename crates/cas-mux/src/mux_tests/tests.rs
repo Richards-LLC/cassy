@@ -2493,3 +2493,29 @@ async fn interrupt_and_inject_keeps_flat_floor_for_textbox_submit_harnesses() {
          quiescence poll leaked into a harness that must not use it"
     );
 }
+
+// ── cas-06a2: Pane::resize must reach the kernel PTY winsize ────────────────
+
+#[test]
+fn pane_resize_sets_kernel_pty_winsize() {
+    let Some(mut pane) = cat_pane("winsize") else {
+        eprintln!("skipping: PTY spawn unavailable in this environment");
+        return;
+    };
+    assert_eq!(pane.pty_winsize(), Some((24, 80)), "spawn size");
+    for (rows, cols) in [(56, 177), (56, 74), (10, 40), (56, 74)] {
+        pane.resize(rows, cols).expect("resize");
+        assert_eq!(pane.size(), (rows, cols));
+        assert_eq!(
+            pane.pty_winsize(),
+            Some((rows, cols)),
+            "the child's `stty size` must follow every resize"
+        );
+    }
+}
+
+#[test]
+fn pty_less_pane_reports_no_winsize() {
+    let pane = Pane::director("d", 24, 80).unwrap();
+    assert_eq!(pane.pty_winsize(), None);
+}

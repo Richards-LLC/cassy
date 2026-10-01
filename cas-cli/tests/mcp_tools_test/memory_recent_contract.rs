@@ -25,7 +25,8 @@ fn remember_request(content: &str, title: &str) -> RememberRequest {
 
 #[tokio::test]
 async fn recent_declares_and_applies_stable_id_tie_break() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
 
     let first = service
         .cas_remember(Parameters(remember_request(

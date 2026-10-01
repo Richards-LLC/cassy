@@ -4,7 +4,8 @@ use rmcp::handler::server::wrapper::Parameters;
 
 #[tokio::test]
 async fn test_empty_content_rejected() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let req = RememberRequest {
         scope: "project".to_string(),
@@ -35,7 +36,8 @@ async fn test_empty_content_rejected() {
 
 #[tokio::test]
 async fn test_very_long_content() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let long_content = "a".repeat(10000);
     let req = RememberRequest {
@@ -66,7 +68,8 @@ async fn test_very_long_content() {
 
 #[tokio::test]
 async fn test_special_characters_in_content() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let special_content = "Content with émojis 🎉 and special chars: <>&\"'";
     let req = RememberRequest {
@@ -97,7 +100,8 @@ async fn test_special_characters_in_content() {
 
 #[tokio::test]
 async fn test_invalid_entry_type() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let req = RememberRequest {
         scope: "project".to_string(),
@@ -130,7 +134,8 @@ async fn test_invalid_entry_type() {
 
 #[tokio::test]
 async fn test_importance_clamping() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Test importance > 1.0
     let req = RememberRequest {
@@ -161,7 +166,8 @@ async fn test_importance_clamping() {
 
 #[tokio::test]
 async fn test_negative_priority() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Negative priority should be handled
     let req = TaskCreateRequest {
@@ -194,7 +200,8 @@ async fn test_negative_priority() {
 
 #[tokio::test]
 async fn test_duplicate_dependency() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create tasks
     let req1 = TaskCreateRequest {
@@ -284,7 +291,8 @@ async fn test_duplicate_dependency() {
 
 #[tokio::test]
 async fn test_self_dependency() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let req = TaskCreateRequest {
         depth: None,

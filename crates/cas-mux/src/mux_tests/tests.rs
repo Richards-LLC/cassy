@@ -2,48 +2,8 @@ use crate::harness::SupervisorCli;
 use crate::mux::*;
 use crate::pane::UserInputKind;
 use crate::spec::{Effort, WorkerSpec};
-use std::ffi::OsString;
+use crate::test_env_guard::TestEnvGuard;
 use std::path::PathBuf;
-use std::sync::Mutex;
-
-// cas-mux tests mutate these process-wide launch probes to make assertions
-// independent of the host's installed harness binaries.
-static TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
-
-struct RestoreEnv {
-    key: &'static str,
-    previous: Option<OsString>,
-}
-
-impl RestoreEnv {
-    fn set(key: &'static str, value: impl Into<OsString>) -> Self {
-        let previous = std::env::var_os(key);
-        // SAFETY: callers hold `TEST_ENV_LOCK` for the lifetime of the guard,
-        // serializing process-wide test environment mutation in this binary.
-        unsafe { std::env::set_var(key, value.into()) };
-        Self { key, previous }
-    }
-
-    fn remove(key: &'static str) -> Self {
-        let previous = std::env::var_os(key);
-        // SAFETY: callers hold `TEST_ENV_LOCK` for the lifetime of the guard,
-        // serializing process-wide test environment mutation in this binary.
-        unsafe { std::env::remove_var(key) };
-        Self { key, previous }
-    }
-}
-
-impl Drop for RestoreEnv {
-    fn drop(&mut self) {
-        // SAFETY: this guard is only constructed while `TEST_ENV_LOCK` is held.
-        unsafe {
-            match &self.previous {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-}
 
 fn env_value<'a>(config: &'a crate::pty::PtyConfig, key: &str) -> Option<&'a str> {
     config
@@ -59,7 +19,7 @@ fn shell_quote(value: &str) -> String {
 
 #[test]
 fn factory_pane_configs_propagates_configured_proxy_credentials() {
-    let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut env = TestEnvGuard::temp_home();
     let config_home = tempfile::tempdir().expect("temporary config home");
     let config_path = config_home.path().join("code-mode-mcp/config.toml");
     std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
@@ -78,10 +38,10 @@ auth = "env:UNRELATED_CREDENTIAL_MUST_NOT_PROPAGATE"
 "#,
     )
     .unwrap();
-    let _config_home = RestoreEnv::set("XDG_CONFIG_HOME", config_home.path());
-    let _token = RestoreEnv::set("VIOLET_SLACK_TOKEN_TEST_WORKER", "token-value");
-    let _bypass = RestoreEnv::set("VIOLET_VERCEL_BYPASS_TEST_WORKER", "bypass-value");
-    let _unrelated = RestoreEnv::set("UNRELATED_CREDENTIAL_MUST_NOT_PROPAGATE", "unrelated");
+    env.set("XDG_CONFIG_HOME", config_home.path());
+    env.set("VIOLET_SLACK_TOKEN_TEST_WORKER", "token-value");
+    env.set("VIOLET_VERCEL_BYPASS_TEST_WORKER", "bypass-value");
+    env.set("UNRELATED_CREDENTIAL_MUST_NOT_PROPAGATE", "unrelated");
 
     let config = MuxConfig {
         cwd: PathBuf::from("/tmp/test"),
@@ -112,9 +72,9 @@ auth = "env:UNRELATED_CREDENTIAL_MUST_NOT_PROPAGATE"
 
 #[test]
 fn factory_pane_configs_propagates_project_proxy_credentials() {
-    let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut env = TestEnvGuard::temp_home();
     let config_home = tempfile::tempdir().expect("temporary config home");
-    let _config_home = RestoreEnv::set("XDG_CONFIG_HOME", config_home.path());
+    env.set("XDG_CONFIG_HOME", config_home.path());
     let project = tempfile::tempdir().expect("temporary project root");
     let cas_root = project.path().join(".cas");
     std::fs::create_dir_all(&cas_root).unwrap();
@@ -127,7 +87,7 @@ auth = "env:NEON_API_KEY_TEST_WORKER"
 "#,
     )
     .unwrap();
-    let _neon = RestoreEnv::set("NEON_API_KEY_TEST_WORKER", "neon-value");
+    env.set("NEON_API_KEY_TEST_WORKER", "neon-value");
 
     let config = MuxConfig {
         cwd: project.path().to_path_buf(),
@@ -150,31 +110,51 @@ auth = "env:NEON_API_KEY_TEST_WORKER"
 
 #[test]
 fn factory_panes_forward_both_violet_credential_generations() {
-    let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut env = TestEnvGuard::temp_home();
     let config_home = tempfile::tempdir().unwrap();
     let path = config_home.path().join("code-mode-mcp/config.toml");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let _config_home = RestoreEnv::set("XDG_CONFIG_HOME", config_home.path());
-    let _home = RestoreEnv::set("HOME", config_home.path());
-    let _old_token = RestoreEnv::set("MECHA_SLACK_TOKEN_COMPAT_TEST", "legacy-token");
-    let _old_bypass = RestoreEnv::set("MECHA_VERCEL_BYPASS", "legacy-bypass");
-    let _new_token = RestoreEnv::set("VIOLET_SLACK_TOKEN_COMPAT_TEST", "new-token");
-    let _new_bypass = RestoreEnv::set("VIOLET_VERCEL_BYPASS", "new-bypass");
+    env.set("XDG_CONFIG_HOME", config_home.path());
+    env.set("HOME", config_home.path());
+    env.set("MECHA_SLACK_TOKEN_COMPAT_TEST", "legacy-token");
+    env.set("MECHA_VERCEL_BYPASS", "legacy-bypass");
     for prefix in ["VIOLET", "MECHA"] {
+        env.set("VIOLET_SLACK_TOKEN_COMPAT_TEST", "new-token");
+        env.set("VIOLET_VERCEL_BYPASS", "new-bypass");
         std::fs::write(&path, format!("[servers.violet]\ntransport = \"http\"\nauth = \"env:{prefix}_SLACK_TOKEN_COMPAT_TEST\"\n[servers.violet.headers]\nx-vercel-protection-bypass = \"env:{prefix}_VERCEL_BYPASS\"\n")).unwrap();
-        let config = MuxConfig { cwd: PathBuf::from("/tmp/test"), workers: 1, include_director: false, ..MuxConfig::default() };
+        let config = MuxConfig {
+            cwd: PathBuf::from("/tmp/test"),
+            workers: 1,
+            include_director: false,
+            ..MuxConfig::default()
+        };
         let configs = Mux::factory_pane_configs(&config);
         let (_, pane) = configs.iter().find(|(name, _)| name == "worker-1").unwrap();
-        assert_eq!(env_value(pane, "MECHA_SLACK_TOKEN_COMPAT_TEST"), Some("legacy-token"));
-        assert_eq!(env_value(pane, "VIOLET_SLACK_TOKEN_COMPAT_TEST"), Some("new-token"));
-        assert_eq!(env_value(pane, "MECHA_VERCEL_BYPASS"), Some("legacy-bypass"));
+        assert_eq!(
+            env_value(pane, "MECHA_SLACK_TOKEN_COMPAT_TEST"),
+            Some("legacy-token")
+        );
+        assert_eq!(
+            env_value(pane, "VIOLET_SLACK_TOKEN_COMPAT_TEST"),
+            Some("new-token")
+        );
+        assert_eq!(
+            env_value(pane, "MECHA_VERCEL_BYPASS"),
+            Some("legacy-bypass")
+        );
         assert_eq!(env_value(pane, "VIOLET_VERCEL_BYPASS"), Some("new-bypass"));
-        let _no_new_token = RestoreEnv::remove("VIOLET_SLACK_TOKEN_COMPAT_TEST");
-        let _no_new_bypass = RestoreEnv::remove("VIOLET_VERCEL_BYPASS");
+        env.remove("VIOLET_SLACK_TOKEN_COMPAT_TEST");
+        env.remove("VIOLET_VERCEL_BYPASS");
         let configs = Mux::factory_pane_configs(&config);
         let (_, pane) = configs.iter().find(|(name, _)| name == "worker-1").unwrap();
-        assert_eq!(env_value(pane, "MECHA_SLACK_TOKEN_COMPAT_TEST"), Some("legacy-token"));
-        assert_eq!(env_value(pane, "MECHA_VERCEL_BYPASS"), Some("legacy-bypass"));
+        assert_eq!(
+            env_value(pane, "MECHA_SLACK_TOKEN_COMPAT_TEST"),
+            Some("legacy-token")
+        );
+        assert_eq!(
+            env_value(pane, "MECHA_VERCEL_BYPASS"),
+            Some("legacy-bypass")
+        );
         assert_eq!(env_value(pane, "VIOLET_SLACK_TOKEN_COMPAT_TEST"), None);
         assert_eq!(env_value(pane, "VIOLET_VERCEL_BYPASS"), None);
     }
@@ -186,7 +166,7 @@ fn factory_panes_forward_both_violet_credential_generations() {
 /// forwards only its read routes.
 #[test]
 fn read_only_worker_access_grants_the_user_level_server_credential() {
-    let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut env = TestEnvGuard::temp_home();
     let config_home = tempfile::tempdir().expect("temporary config home");
     let global_config = config_home.path().join("code-mode-mcp/config.toml");
     std::fs::create_dir_all(global_config.parent().unwrap()).unwrap();
@@ -206,11 +186,11 @@ auth = "env:NEON_API_KEY"
     )
     .unwrap();
     let home = tempfile::tempdir().expect("temporary home");
-    let _home = RestoreEnv::set("HOME", home.path());
-    let _config_home = RestoreEnv::set("XDG_CONFIG_HOME", config_home.path());
-    let _credentials_file = RestoreEnv::remove("CAS_CREDENTIALS_FILE");
-    let _vercel = RestoreEnv::set("VERCEL_TOKEN", "vercel-fixture");
-    let _neon = RestoreEnv::set("NEON_API_KEY", "neon-fixture");
+    env.set("HOME", home.path());
+    env.set("XDG_CONFIG_HOME", config_home.path());
+    env.remove("CAS_CREDENTIALS_FILE");
+    env.set("VERCEL_TOKEN", "vercel-fixture");
+    env.set("NEON_API_KEY", "neon-fixture");
 
     let worker_config_for = |proxy_toml: &str| {
         let project = tempfile::tempdir().expect("temporary project root");
@@ -271,7 +251,7 @@ allowlist = ["vercel.get_runtime_errors"]
 
 #[test]
 fn factory_worker_configs_isolate_operator_credentials_for_every_harness() {
-    let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut env = TestEnvGuard::temp_home();
     let home = tempfile::tempdir().expect("temporary home");
     let config_home = tempfile::tempdir().expect("temporary config home");
     let global_config = config_home.path().join("code-mode-mcp/config.toml");
@@ -301,18 +281,18 @@ auth = "env:CONTEXT7_API_KEY"
 "#,
     )
     .unwrap();
-    let _home = RestoreEnv::set("HOME", home.path());
-    let _config_home = RestoreEnv::set("XDG_CONFIG_HOME", config_home.path());
-    let _credentials_file = RestoreEnv::remove("CAS_CREDENTIALS_FILE");
-    let _absent_capawesome = RestoreEnv::remove("CAPAWESOME_TOKEN");
-    let _absent_cloud = RestoreEnv::remove("CAS_CLOUD_TOKEN");
-    let _absent_context7 = RestoreEnv::remove("CONTEXT7_API_KEY");
-    let _absent_gh = RestoreEnv::remove("GH_TOKEN");
-    let _inherited_token = RestoreEnv::set("GITHUB_TOKEN", "inherited-fixture");
-    let _scoped_provider = RestoreEnv::set("NEON_API_KEY", "scoped-fixture");
-    let _scoped_context7 = RestoreEnv::set("CONTEXT7_API_KEY", "scoped-fixture");
-    let _absent_vercel = RestoreEnv::remove("VERCEL_TOKEN");
-    let _absent_browserless = RestoreEnv::remove("BROWSERLESS_API_KEY");
+    env.set("HOME", home.path());
+    env.set("XDG_CONFIG_HOME", config_home.path());
+    env.remove("CAS_CREDENTIALS_FILE");
+    env.remove("CAPAWESOME_TOKEN");
+    env.remove("CAS_CLOUD_TOKEN");
+    env.remove("CONTEXT7_API_KEY");
+    env.remove("GH_TOKEN");
+    env.set("GITHUB_TOKEN", "inherited-fixture");
+    env.set("NEON_API_KEY", "scoped-fixture");
+    env.set("CONTEXT7_API_KEY", "scoped-fixture");
+    env.remove("VERCEL_TOKEN");
+    env.remove("BROWSERLESS_API_KEY");
 
     for worker_cli in [
         SupervisorCli::Claude,
@@ -423,16 +403,16 @@ auth = "env:CONTEXT7_API_KEY"
 /// changes.
 #[test]
 fn worker_gets_the_read_only_github_token_and_never_the_operators() {
-    let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut env = TestEnvGuard::temp_home();
     let home = tempfile::tempdir().expect("temporary home");
     let project = tempfile::tempdir().expect("temporary project root");
     let cas_root = project.path().join(".cas");
     std::fs::create_dir_all(&cas_root).unwrap();
-    let _home = RestoreEnv::set("HOME", home.path());
-    let _config_home = RestoreEnv::set("XDG_CONFIG_HOME", home.path());
-    let _credentials_file = RestoreEnv::remove("CAS_CREDENTIALS_FILE");
-    let _operator_gh = RestoreEnv::set("GH_TOKEN", "operator-write-token");
-    let _operator_github = RestoreEnv::set("GITHUB_TOKEN", "operator-write-token");
+    env.set("HOME", home.path());
+    env.set("XDG_CONFIG_HOME", home.path());
+    env.remove("CAS_CREDENTIALS_FILE");
+    env.set("GH_TOKEN", "operator-write-token");
+    env.set("GITHUB_TOKEN", "operator-write-token");
     let config = MuxConfig {
         cwd: project.path().to_path_buf(),
         cas_root: Some(cas_root),
@@ -462,15 +442,21 @@ fn worker_gets_the_read_only_github_token_and_never_the_operators() {
     assert_eq!(env_value(&plain, "GH_TOKEN"), None);
     assert!(removed(&plain, "GH_TOKEN") && removed(&plain, "GITHUB_TOKEN"));
 
-    let _read = RestoreEnv::set(crate::WORKER_GITHUB_READ_TOKEN_ENV, "github_pat_readonly");
+    env.set(crate::WORKER_GITHUB_READ_TOKEN_ENV, "github_pat_readonly");
     let granted = worker(&config);
     assert_eq!(
         env_value(&granted, "GH_TOKEN").as_deref(),
         Some("github_pat_readonly"),
         "the worker's gh authenticates with the read-only token"
     );
-    assert!(!removed(&granted, "GH_TOKEN"), "the explicit read token survives spawn");
-    assert!(removed(&granted, "GITHUB_TOKEN"), "the operator's GITHUB_TOKEN stays stripped");
+    assert!(
+        !removed(&granted, "GH_TOKEN"),
+        "the explicit read token survives spawn"
+    );
+    assert!(
+        removed(&granted, "GITHUB_TOKEN"),
+        "the operator's GITHUB_TOKEN stays stripped"
+    );
     assert!(
         removed(&granted, crate::WORKER_GITHUB_READ_TOKEN_ENV),
         "the provisioning variable itself is not passed on"
@@ -486,7 +472,7 @@ fn worker_gets_the_read_only_github_token_and_never_the_operators() {
 
 #[tokio::test]
 async fn machine_global_protected_proxy_credentials_do_not_reach_worker_descendants() {
-    let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut env = TestEnvGuard::temp_home();
     let home = tempfile::tempdir().expect("temporary home");
     let config_home = tempfile::tempdir().expect("temporary config home");
     let global_config = config_home.path().join("code-mode-mcp/config.toml");
@@ -511,12 +497,12 @@ auth = "env:CAS_FACTORY_WORKER_CREDENTIAL_GRANT"
     let project = tempfile::tempdir().expect("temporary project root");
     let cas_root = project.path().join(".cas");
     std::fs::create_dir_all(&cas_root).unwrap();
-    let _home = RestoreEnv::set("HOME", home.path());
-    let _config_home = RestoreEnv::set("XDG_CONFIG_HOME", config_home.path());
-    let _credentials_file = RestoreEnv::remove("CAS_CREDENTIALS_FILE");
-    let _github = RestoreEnv::set("GITHUB_TOKEN", "machine-global-fixture");
-    let _neon = RestoreEnv::set("NEON_API_KEY", "machine-global-fixture");
-    let _forged_grant = RestoreEnv::set(
+    env.set("HOME", home.path());
+    env.set("XDG_CONFIG_HOME", config_home.path());
+    env.remove("CAS_CREDENTIALS_FILE");
+    env.set("GITHUB_TOKEN", "machine-global-fixture");
+    env.set("NEON_API_KEY", "machine-global-fixture");
+    env.set(
         "CAS_FACTORY_WORKER_CREDENTIAL_GRANT",
         "NEON_API_KEY:operator-fixture",
     );
@@ -594,15 +580,15 @@ auth = "env:CAS_FACTORY_WORKER_CREDENTIAL_GRANT"
 
 #[test]
 fn factory_pane_configs_reads_proxy_credentials_from_cas_credentials_file() {
-    let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut env = TestEnvGuard::temp_home();
     let config_home = tempfile::tempdir().expect("temporary config home");
-    let _config_home = RestoreEnv::set("XDG_CONFIG_HOME", config_home.path());
+    env.set("XDG_CONFIG_HOME", config_home.path());
     // `CAS_CREDENTIALS_FILE` controls the primary credentials source, but the
     // resolver also scans the login profile as a fallback. Keep that profile
     // under the fixture too, so a developer's real credentials cannot replace
     // the file value asserted below.
     let home = tempfile::tempdir().expect("temporary home");
-    let _home = RestoreEnv::set("HOME", home.path());
+    env.set("HOME", home.path());
     let config_path = config_home.path().join("code-mode-mcp/config.toml");
     std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
     std::fs::write(
@@ -624,9 +610,9 @@ x-vercel-protection-bypass = "env:VIOLET_VERCEL_BYPASS"
         "export VIOLET_SLACK_TOKEN_CREDENTIALS_FILE='token-from-file'\nexport VIOLET_VERCEL_BYPASS='bypass-from-file'\n",
     )
     .unwrap();
-    let _credentials_file = RestoreEnv::set("CAS_CREDENTIALS_FILE", &credentials);
-    let _token = RestoreEnv::remove("VIOLET_SLACK_TOKEN_CREDENTIALS_FILE");
-    let _bypass = RestoreEnv::remove("VIOLET_VERCEL_BYPASS");
+    env.set("CAS_CREDENTIALS_FILE", &credentials);
+    env.remove("VIOLET_SLACK_TOKEN_CREDENTIALS_FILE");
+    env.remove("VIOLET_VERCEL_BYPASS");
 
     let config = MuxConfig {
         cwd: PathBuf::from("/tmp/test"),
@@ -662,13 +648,13 @@ x-vercel-protection-bypass = "env:VIOLET_VERCEL_BYPASS"
 
 #[test]
 fn factory_pane_configs_reads_proxy_credentials_from_login_profile_source() {
-    let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut env = TestEnvGuard::temp_home();
     let config_home = tempfile::tempdir().expect("temporary config home");
-    let _config_home = RestoreEnv::set("XDG_CONFIG_HOME", config_home.path());
+    env.set("XDG_CONFIG_HOME", config_home.path());
     let home = tempfile::tempdir().expect("temporary home");
-    let _home = RestoreEnv::set("HOME", home.path());
-    let _shell = RestoreEnv::set("SHELL", "/bin/bash");
-    let _credentials_override = RestoreEnv::remove("CAS_CREDENTIALS_FILE");
+    env.set("HOME", home.path());
+    env.set("SHELL", "/bin/bash");
+    env.remove("CAS_CREDENTIALS_FILE");
     let config_path = config_home.path().join("code-mode-mcp/config.toml");
     std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
     std::fs::write(
@@ -699,8 +685,8 @@ x-vercel-protection-bypass = "env:VIOLET_VERCEL_BYPASS_PROFILE_SOURCE"
         ),
     )
     .unwrap();
-    let _token = RestoreEnv::remove("VIOLET_SLACK_TOKEN_PROFILE_SOURCE");
-    let _bypass = RestoreEnv::remove("VIOLET_VERCEL_BYPASS_PROFILE_SOURCE");
+    env.remove("VIOLET_SLACK_TOKEN_PROFILE_SOURCE");
+    env.remove("VIOLET_VERCEL_BYPASS_PROFILE_SOURCE");
 
     let config = MuxConfig {
         cwd: PathBuf::from("/tmp/test"),
@@ -769,8 +755,8 @@ fn codex_factory_session_arg(config: &crate::pty::PtyConfig) -> Option<&str> {
 
 #[test]
 fn factory_pane_configs_supervisor_effort_reaches_pty_args() {
-    let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let _effort_support = RestoreEnv::set("CAS_FACTORY_EFFORT_SUPPORTED", "1");
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_EFFORT_SUPPORTED", "1");
     let config = MuxConfig {
         cwd: PathBuf::from("/tmp/test"),
         workers: 1,
@@ -804,8 +790,8 @@ fn factory_pane_configs_supervisor_effort_reaches_pty_args() {
 
 #[test]
 fn factory_pane_configs_worker_effort_reaches_pty_args() {
-    let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let _effort_support = RestoreEnv::set("CAS_FACTORY_EFFORT_SUPPORTED", "1");
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_EFFORT_SUPPORTED", "1");
     let config = MuxConfig {
         cwd: PathBuf::from("/tmp/test"),
         workers: 1,
@@ -1290,7 +1276,7 @@ fn effective_worker_spec_uses_worker_specs_map() {
 fn add_worker_persists_explicit_spec_so_effective_resolves_codex() {
     use std::os::unix::fs::PermissionsExt;
 
-    let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut env = TestEnvGuard::temp_home();
     let bin_dir =
         std::env::temp_dir().join(format!("cas-mux-add-worker-test-{}", std::process::id()));
     std::fs::create_dir_all(&bin_dir).expect("fake-bin directory must be creatable");
@@ -1312,7 +1298,7 @@ fn add_worker_persists_explicit_spec_so_effective_resolves_codex() {
     }
     let test_path = std::env::join_paths(path_entries)
         .expect("test PATH entries must be representable on this platform");
-    let _path = RestoreEnv::set("PATH", test_path);
+    env.set("PATH", test_path);
 
     let mut mux = Mux::new(24, 80);
     // Session default is Claude — the explicit per-spawn spec must persist and win.
@@ -1401,8 +1387,8 @@ fn add_worker_effort_propagates_to_pty_args() {
     // Uses the config-only build_add_worker_config helper (no PTY spawn).
     use crate::spec::Effort;
 
-    let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let _effort_support = RestoreEnv::set("CAS_FACTORY_EFFORT_SUPPORTED", "1");
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_EFFORT_SUPPORTED", "1");
     let mut mux = Mux::new(24, 80);
     mux.set_default_worker_spec(crate::spec::WorkerSpec {
         name: None,

@@ -50,25 +50,18 @@ fn create_req(title: &str, depth: Option<&str>) -> TaskCreateRequest {
     }
 }
 
-/// RAII guard that installs factory-worker env vars and clears them on drop.
+/// Borrowed factory-worker override; prior values are restored on drop.
 struct FactoryWorkerGuard;
 
 impl FactoryWorkerGuard {
-    fn enter() -> Self {
-        unsafe {
-            std::env::set_var("CAS_AGENT_ROLE", "worker");
-            std::env::set_var("CAS_FACTORY_MODE", "1");
-        }
-        Self
-    }
-}
-
-impl Drop for FactoryWorkerGuard {
-    fn drop(&mut self) {
-        unsafe {
-            std::env::remove_var("CAS_AGENT_ROLE");
-            std::env::remove_var("CAS_FACTORY_MODE");
-        }
+    fn enter(env: &mut TestEnvGuard) -> ScopedFactoryEnv<'_> {
+        ScopedFactoryEnv::apply(
+            env,
+            &[
+                ("CAS_AGENT_ROLE", Some("worker")),
+                ("CAS_FACTORY_MODE", Some("1")),
+            ],
+        )
     }
 }
 
@@ -134,8 +127,8 @@ fn init_git_repo_with_staged_changes(project_root: &std::path::Path) {
 /// the skip.
 #[tokio::test]
 async fn test_light_depth_solo_close_skips_verification_jail() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let task_store = open_task_store(&cas_dir).unwrap();
 
@@ -203,8 +196,8 @@ async fn test_light_depth_solo_close_skips_verification_jail() {
 /// only the explicit cross-session/task-close opt-in.
 #[tokio::test]
 async fn task_close_quarantines_linked_reminders_unless_explicitly_kept() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     let created = core
@@ -263,8 +256,8 @@ async fn task_close_quarantines_linked_reminders_unless_explicitly_kept() {
 /// Fails if the light-skip leaks to deep.
 #[tokio::test]
 async fn test_deep_depth_solo_close_still_arms_verification_jail() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let task_store = open_task_store(&cas_dir).unwrap();
 
@@ -323,8 +316,8 @@ async fn test_deep_depth_solo_close_still_arms_verification_jail() {
 /// deep — the jail arms. Proves the default reads as Deep at the close gate.
 #[tokio::test]
 async fn test_unset_depth_solo_close_still_arms_verification_jail() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let task_store = open_task_store(&cas_dir).unwrap();
 
@@ -381,18 +374,18 @@ async fn test_unset_depth_solo_close_still_arms_verification_jail() {
 /// verification jail and closes immediately, with the decision note recorded.
 #[tokio::test]
 async fn test_light_depth_factory_close_skips_p0_gate_and_closes() {
-    let (temp, _core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, _core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     write_supervisor_review_config(&cas_dir);
     init_git_repo_with_staged_changes(temp.path());
 
-    let core = core_with_test_agent(&cas_dir);
+    let core = core_with_test_agent(&mut test_env, &cas_dir);
     let task_store = open_task_store(&cas_dir).unwrap();
     let service = CasService::new(core, None);
 
-    let _worker_guard = FactoryWorkerGuard::enter();
+    let _worker_guard = FactoryWorkerGuard::enter(&mut test_env);
 
     let created = service
         .task(Parameters(task_req(serde_json::json!({
@@ -460,18 +453,18 @@ async fn test_light_depth_factory_close_skips_p0_gate_and_closes() {
 /// changes does not use the retired supervisor review queue.
 #[tokio::test]
 async fn test_deep_depth_factory_close_does_not_use_review_queue() {
-    let (temp, _core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, _core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     write_supervisor_review_config(&cas_dir);
     init_git_repo_with_staged_changes(temp.path());
 
-    let core = core_with_test_agent(&cas_dir);
+    let core = core_with_test_agent(&mut test_env, &cas_dir);
     let task_store = open_task_store(&cas_dir).unwrap();
     let service = CasService::new(core, None);
 
-    let _worker_guard = FactoryWorkerGuard::enter();
+    let _worker_guard = FactoryWorkerGuard::enter(&mut test_env);
 
     let created = service
         .task(Parameters(task_req(serde_json::json!({
@@ -578,8 +571,8 @@ async fn create_started_and_closed_light_task(core: &CasCore, title: &str) -> St
 /// the caller at the supervisor instead of performing the reopen.
 #[tokio::test]
 async fn test_worker_cannot_reopen_closed_task() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let task_store = open_task_store(&cas_dir).unwrap();
 
@@ -619,18 +612,15 @@ async fn test_worker_cannot_reopen_closed_task() {
 /// Closed task — the guard is a role check, not a blanket ban.
 #[tokio::test]
 async fn test_supervisor_can_reopen_closed_task() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let task_store = open_task_store(&cas_dir).unwrap();
 
     let id = create_started_and_closed_light_task(&core, "supervisor reopen happy path").await;
 
     let reopen_text = {
-        // SAFETY: held under env_test_lock() for the whole scope.
-        unsafe {
-            std::env::set_var("CAS_AGENT_ROLE", "supervisor");
-        }
+        test_env.set("CAS_AGENT_ROLE", "supervisor");
         let text = extract_text(
             core.cas_task_reopen(Parameters(TaskReopenRequest {
                 id: id.clone(),
@@ -639,9 +629,7 @@ async fn test_supervisor_can_reopen_closed_task() {
             .await
             .expect("supervisor reopen should succeed"),
         );
-        unsafe {
-            std::env::remove_var("CAS_AGENT_ROLE");
-        }
+        test_env.remove("CAS_AGENT_ROLE");
         text
     };
 
@@ -666,15 +654,13 @@ async fn test_supervisor_can_reopen_closed_task() {
 
 #[tokio::test]
 async fn test_supervisor_reopen_terminal_task_requires_non_empty_reason() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let task_store = open_task_store(&cas_dir).unwrap();
     let id = create_started_and_closed_light_task(&core, "terminal reopen reason required").await;
 
-    unsafe {
-        std::env::set_var("CAS_AGENT_ROLE", "supervisor");
-    }
+    test_env.set("CAS_AGENT_ROLE", "supervisor");
     let error = core
         .cas_task_reopen(Parameters(TaskReopenRequest {
             id: id.clone(),
@@ -682,9 +668,7 @@ async fn test_supervisor_reopen_terminal_task_requires_non_empty_reason() {
         }))
         .await
         .expect_err("terminal reopen without a reason must be rejected");
-    unsafe {
-        std::env::remove_var("CAS_AGENT_ROLE");
-    }
+    test_env.remove("CAS_AGENT_ROLE");
 
     assert!(
         error.message.contains("non-empty reason"),
@@ -701,8 +685,8 @@ async fn test_supervisor_reopen_terminal_task_requires_non_empty_reason() {
 /// task, and needs a documented way to put it back in play).
 #[tokio::test]
 async fn test_cd24_supervisor_can_reopen_blocked_task_with_reason() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let task_store = open_task_store(&cas_dir).unwrap();
 
@@ -727,10 +711,7 @@ async fn test_cd24_supervisor_can_reopen_blocked_task_with_reason() {
     }
 
     let reopen_text = {
-        // SAFETY: held under env_test_lock() for the whole scope.
-        unsafe {
-            std::env::set_var("CAS_AGENT_ROLE", "supervisor");
-        }
+        test_env.set("CAS_AGENT_ROLE", "supervisor");
         let text = extract_text(
             core.cas_task_reopen(Parameters(TaskReopenRequest {
                 id: id.clone(),
@@ -742,9 +723,7 @@ async fn test_cd24_supervisor_can_reopen_blocked_task_with_reason() {
             .await
             .expect("supervisor reopen of a blocked task should succeed"),
         );
-        unsafe {
-            std::env::remove_var("CAS_AGENT_ROLE");
-        }
+        test_env.remove("CAS_AGENT_ROLE");
         text
     };
     assert!(
@@ -775,8 +754,8 @@ async fn test_cd24_supervisor_can_reopen_blocked_task_with_reason() {
 /// blocked-task support — `closed_at` still clears on reopen.
 #[tokio::test]
 async fn test_cd24_closed_reopen_still_clears_closed_at() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let task_store = open_task_store(&cas_dir).unwrap();
 
@@ -788,19 +767,14 @@ async fn test_cd24_closed_reopen_still_clears_closed_at() {
     );
 
     {
-        // SAFETY: held under env_test_lock() for the whole scope.
-        unsafe {
-            std::env::set_var("CAS_AGENT_ROLE", "supervisor");
-        }
+        test_env.set("CAS_AGENT_ROLE", "supervisor");
         core.cas_task_reopen(Parameters(TaskReopenRequest {
             id: id.clone(),
             reason: Some("preserve close metadata regression coverage".to_string()),
         }))
         .await
         .expect("supervisor reopen should succeed");
-        unsafe {
-            std::env::remove_var("CAS_AGENT_ROLE");
-        }
+        test_env.remove("CAS_AGENT_ROLE");
     }
 
     let reopened = task_store.get(&id).expect("task should exist");
@@ -817,8 +791,8 @@ async fn test_cd24_closed_reopen_still_clears_closed_at() {
 /// "only closed tasks can be reopened" dead end.
 #[tokio::test]
 async fn test_cd24_reopen_rejects_other_statuses_and_names_alternative() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
 
     let created = core
         .cas_task_create(Parameters(create_req(
@@ -835,19 +809,14 @@ async fn test_cd24_reopen_rejects_other_statuses_and_names_alternative() {
         .expect("task_start should succeed");
 
     let result = {
-        // SAFETY: held under env_test_lock() for the whole scope.
-        unsafe {
-            std::env::set_var("CAS_AGENT_ROLE", "supervisor");
-        }
+        test_env.set("CAS_AGENT_ROLE", "supervisor");
         let r = core
             .cas_task_reopen(Parameters(TaskReopenRequest {
                 id: id.clone(),
                 reason: Some("exercise nonterminal reopen rejection".to_string()),
             }))
             .await;
-        unsafe {
-            std::env::remove_var("CAS_AGENT_ROLE");
-        }
+        test_env.remove("CAS_AGENT_ROLE");
         let _ = temp;
         r
     };
@@ -873,8 +842,8 @@ async fn test_cd24_reopen_rejects_other_statuses_and_names_alternative() {
 /// to the supervisor without reopening.
 #[tokio::test]
 async fn test_start_on_closed_message_is_worker_appropriate() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
 
     let id = create_started_and_closed_light_task(&core, "start-on-closed worker message").await;
 
@@ -908,23 +877,18 @@ async fn test_start_on_closed_message_is_worker_appropriate() {
 /// variant that does not carry the worker refusal wording.
 #[tokio::test]
 async fn test_start_on_closed_message_is_supervisor_appropriate() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
 
     let id =
         create_started_and_closed_light_task(&core, "start-on-closed supervisor message").await;
 
     let result = {
-        // SAFETY: held under env_test_lock() for the whole scope.
-        unsafe {
-            std::env::set_var("CAS_AGENT_ROLE", "supervisor");
-        }
+        test_env.set("CAS_AGENT_ROLE", "supervisor");
         let r = core
             .cas_task_start(Parameters(IdRequest { id: id.clone() }))
             .await;
-        unsafe {
-            std::env::remove_var("CAS_AGENT_ROLE");
-        }
+        test_env.remove("CAS_AGENT_ROLE");
         r
     };
 

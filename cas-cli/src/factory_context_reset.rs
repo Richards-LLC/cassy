@@ -368,18 +368,36 @@ mod tests {
 
     #[test]
     fn confirmation_timeout_is_overridable() {
-        let _lock = crate::hooks::test_env_lock();
-        let previous = std::env::var("CAS_CONTEXT_RESET_TIMEOUT_SECS").ok();
-        unsafe {
-            std::env::set_var("CAS_CONTEXT_RESET_TIMEOUT_SECS", "2");
-        }
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_CONTEXT_RESET_TIMEOUT_SECS",
+            "2",
+        )]);
         assert_eq!(confirmation_timeout(), std::time::Duration::from_secs(2));
-        unsafe {
-            match previous {
-                Some(value) => std::env::set_var("CAS_CONTEXT_RESET_TIMEOUT_SECS", value),
-                None => std::env::remove_var("CAS_CONTEXT_RESET_TIMEOUT_SECS"),
-            }
-        }
+    }
+
+    #[test]
+    fn confirmation_timeout_override_is_restored_on_panic() {
+        let _ambient =
+            crate::test_env_guard::AmbientEnvRestore::set("CAS_CONTEXT_RESET_TIMEOUT_SECS", "7");
+        let panic = std::panic::catch_unwind(|| {
+            let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+                "CAS_CONTEXT_RESET_TIMEOUT_SECS",
+                "2",
+            )]);
+            assert_eq!(confirmation_timeout(), std::time::Duration::from_secs(2));
+            panic!("simulated assertion failure after timeout override");
+        })
+        .expect_err("the override fixture must unwind");
+
+        // Reacquire the shared lock before inspecting the restored ambient
+        // value; sibling tests may use their own overrides between scopes.
+        // This lock drops before the ambient restore fixture does.
+        let _lock = crate::hooks::test_env_lock();
+        assert_eq!(
+            panic.downcast_ref::<&str>(),
+            Some(&"simulated assertion failure after timeout override")
+        );
+        assert_eq!(confirmation_timeout(), std::time::Duration::from_secs(7));
     }
 
     #[test]
@@ -388,9 +406,7 @@ mod tests {
         let transcript = tmp.path().join("failed-session.jsonl");
         std::fs::write(
             &transcript,
-            format!(
-                "{{\"idleReason\":\"failed\",\"failureReason\":\"Prompt is too long\"}}\n"
-            ),
+            format!("{{\"idleReason\":\"failed\",\"failureReason\":\"Prompt is too long\"}}\n"),
         )
         .unwrap();
         assert!(transcript_has_prompt_overflow_failure(&transcript));

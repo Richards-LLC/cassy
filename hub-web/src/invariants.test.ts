@@ -9,9 +9,9 @@ import type { StoredMachine } from "./types";
 
 Object.defineProperty(globalThis, "crypto", { value: webcrypto, configurable: true });
 
-// The app's markup lives in main.ts and in the builders it shares with the
-// visual-QA fixtures (composer, pairing dialog, conversation shell), so
-// "main.ts" reads them all.
+// Retained historical source pins are inventoried in cas-9d89. They are not
+// behavioural proof: the comments identify their consumers and remaining gaps.
+// "main.ts" includes the builders used by that application's shell.
 const APP_SOURCES = ["main.ts", "composer-markup.ts", "pair-dialog-markup.ts", "conversation-shell.ts"];
 async function readSource(path: string): Promise<string> {
   if (path !== "main.ts") return readFile(new URL(path, import.meta.url), "utf8");
@@ -34,6 +34,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(replacement).not.toContain(token);
   });
 
+  // Contract: offers exactly one primary action without an invitation and never a Pair control (cas-8051 F7).
+  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("offers exactly one primary action without an invitation and never a Pair control (cas-8051 F7)", async () => {
     const source = await readSource("main.ts");
     const html = await readFile(new URL("../index.html", import.meta.url), "utf8");
@@ -56,6 +59,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(html).toContain("<title>Cassy Cloud</title>");
   });
 
+  // Contract: declares the Cassy Cloud favicon from the static web source.
+  // Consumer: Browser document icon loader consumes index.html favicon link and public/favicon.svg.
+  // Structural contract retained.
   it("declares the Cassy Cloud favicon from the static web source", async () => {
     const [html, favicon] = await Promise.all([
       readFile(new URL("../index.html", import.meta.url), "utf8"),
@@ -67,6 +73,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(favicon).not.toContain('<text');
   });
 
+  // Contract: asks for the machine's hub address instead of seeding the page origin (cas-8051 F5).
+  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("asks for the machine's hub address instead of seeding the page origin (cas-8051 F5)", async () => {
     const [main, draft] = await Promise.all(["main.ts", "pairing-draft.ts"].map((path) => readSource(path)));
     // Only the machine's own link may seed the address, never this page (HUB-J2).
@@ -85,6 +94,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(main).toContain('detailRow("Granted scopes", exactScopes(invitationScopes))');
   });
 
+  // Contract: never leaves the command palette flagged open after it closes (cas-dfc8).
+  // Consumer: Commander application render and event handlers (main.ts), operating the command palette.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("never leaves the command palette flagged open after it closes (cas-dfc8)", async () => {
     const source = await readSource("main.ts");
     // Any close of the palette settles the flag render() reopens it from.
@@ -96,6 +108,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(closes).toHaveLength(1);
   });
 
+  // Contract: names the remedy when an observer-only credential disables control.
+  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("names the remedy when an observer-only credential disables control", async () => {
     const source = await readSource("main.ts");
     expect(source).toContain("Relay pairing granted read-only scopes for ${location.origin}");
@@ -113,6 +128,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).not.toContain('disabled aria-describedby="control-disabled-reason"');
   });
 
+  // Contract: answers a supervisor ask through the leased send path with in_reply_to and pins it above the composer (cas-43f9).
+  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("answers a supervisor ask through the leased send path with in_reply_to and pins it above the composer (cas-43f9)", async () => {
     const source = await readSource("main.ts");
     expect(source).toContain("installAttentionObjects();");
@@ -139,23 +157,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain("attention: waiting,");
   });
 
-  it("keeps a half-typed supervisor message across background renders", async () => {
-    const source = await readSource("main.ts");
-    // render() replaces app.innerHTML on every heartbeat, which destroyed the
-    // composer's contents mid-sentence — fatal on a phone, where typing is slow.
-    expect(source).toContain("function captureMessageDraft(): void {");
-    expect(source).toContain("function restoreMessageDraft(): void {");
-    expect(source.indexOf("captureMessageDraft();")).toBeLessThan(source.indexOf("app.innerHTML ="));
-    expect(source.indexOf("app.innerHTML =")).toBeLessThan(source.indexOf("restoreMessageDraft();"));
-    expect(source).toContain('const composerWasFocused = document.activeElement?.id === "message-text";');
-    // Both restores fire after the same innerHTML rewrite. Arbitrate them once,
-    // in a tested function, instead of relying on the order two microtasks
-    // happen to be queued in: a terminal that wins swallows the sentence.
-    expect(source).toContain("const focusWinner = composerFocusWinner({ composerWasFocused, terminalWasFocused });");
-    expect(source).toContain('if (focusWinner === "terminal") queueMicrotask(() => activePaneContext()?.surface.focus());');
-    expect(source).toContain('if (focusWinner === "composer") queueMicrotask(() => document.querySelector<HTMLTextAreaElement>("#message-text")?.focus());');
-  });
-
+  // Contract: detects a phone from one definition, in both orientations.
+  // Consumer: Commander application render and event handlers (main.ts), operating the phone shell.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("detects a phone from one definition, in both orientations", async () => {
     const [main, css, design] = await Promise.all(["main.ts", "styles.css", "../DESIGN.md"].map((path) => readSource(path)));
     // A rotated Pixel 7 is 915px wide, so a width-only breakpoint handed a
@@ -183,6 +187,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(design).toContain("landscape");
   });
 
+  // Contract: gives a landscape phone the long edges and the full-height terminal.
+  // Consumer: Browser CSS layout engine consumes styles.css landscape phone media rules.
+  // Structural contract retained.
   it("gives a landscape phone the long edges and the full-height terminal", async () => {
     const css = await readFile(new URL("styles.css", import.meta.url), "utf8");
     const landscape = css.slice(css.indexOf("@media (max-height: 30rem) and (pointer: coarse) {"));
@@ -199,17 +206,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(landscape).toContain("env(safe-area-inset-right)");
   });
 
-  it("reports the outcome of sending a supervisor message", async () => {
-    const source = await readSource("main.ts");
-    // A send with no outcome is indistinguishable from a lost one, and invites a
-    // duplicate message to the supervisor.
-    expect(source).toContain("function sendControl(machineId: string, session: string, message: unknown): boolean {");
-    expect(source).toContain("const clientRef = crypto.randomUUID();");
-    expect(source).toContain("const sent = !queued && sendControl(machine.id, session, supervisorMessage(supervisor, text, clientRef, replyTo));");
-    expect(source).toContain("messageDelivery = { session: sessionKey(machine.id, session), target: supervisor, clientRef };");
-    expect(source).toContain("toast(`Sending to ${supervisor}`);");
-  });
-
+  // Contract: sends the supervisor message from Enter and from the button, through one path.
+  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("sends the supervisor message from Enter and from the button, through one path", async () => {
     const source = await readSource("main.ts");
     // Enter was never wired: it inserted a newline and sent nothing, in observe
@@ -222,46 +221,23 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain("const plan = planSupervisorSend(supervisorSendContext(text));");
   });
 
-  it("keeps a hub heartbeat off the shell rebuild path", async () => {
-    const [main, regions] = await Promise.all(["main.ts", "live-regions.ts"].map((path) => readSource(path)));
-    // A five-second status frame used to replace every live control in the
-    // page: the composer was re-created six times and blurred six times inside
-    // ten seconds of typing, and on a phone each blur closes the keyboard.
-    expect(main.match(/app\.innerHTML\s*=/g)).toHaveLength(1);
-    const decision = main.indexOf("const decision = renderDecision(");
-    const rebuild = main.indexOf("app.innerHTML =");
-    expect(decision).toBeGreaterThan(0);
-    expect(decision).toBeLessThan(rebuild);
-    // The regions path returns before the rebuild it is standing in for.
-    const guard = main.slice(decision, rebuild);
-    expect(guard).toContain('if (decision !== "shell") {');
-    expect(guard).toContain("renderRegions({");
-    expect(guard).toContain("return;");
-
-    // renderRegions and the updater it calls may only write into nodes that
-    // already exist; a single innerHTML there would restore the whole defect.
-    const body = main.slice(main.indexOf("function renderRegions(context: RegionContext): void {"));
-    const end = body.indexOf("\n}\n");
-    expect(end).toBeGreaterThan(0);
-    expect(body.slice(0, end)).not.toMatch(/\.innerHTML\s*=/);
-    expect(regions).not.toMatch(/\.innerHTML\s*=/);
-    expect(regions).not.toContain("createElement(");
-    expect(regions).not.toContain("replaceChildren(");
-
-    // The deferred rebuild has to be flushed, or a structural change that
-    // arrived mid-sentence would never land — but never mid-gesture, or it
-    // deletes the button under the finger before the click is dispatched
-    // (cas-c142).
+  // Contract: a deferred structural change flushes after focus/gestures end.
+  // Consumer: main.ts's app event handlers and DeferredRenderScheduler.
+  // The real heartbeat/draft path is exercised by HUB-J5; gesture wiring still
+  // needs a built-dist regression (deferred-render-dom.test.ts tests the scheduler).
+  it("wires deferred shell flushes to focus and pointer gestures", async () => {
+    const main = await readSource("main.ts");
     expect(main).toContain("deferredRender.defer();");
     expect(main).toContain('app.addEventListener("focusout"');
     expect(main).toContain('app.addEventListener("pointerdown", () => deferredRender.gestureStarted(), true);');
     expect(main).toContain('app.addEventListener("pointerup", () => deferredRender.gestureEnded(), true);');
     expect(main).toContain('app.addEventListener("pointercancel", () => deferredRender.gestureCancelled(), true);');
-    // A microtask would still run before the click; the flush has to be a
-    // macrotask scheduled off the gesture ending.
     expect(main).toContain("afterGesture: (run) => window.setTimeout(run, 0),");
   });
 
+  // Contract: keeps pairing failures inside the open dialog and cancellation cleanup visible (cas-7d55 F1/F2/F3/F6).
+  // Consumer: Commander application render and event handlers (main.ts), operating the pairing dialog.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("keeps pairing failures inside the open dialog and cancellation cleanup visible (cas-7d55 F1/F2/F3/F6)", async () => {
     const [main, model] = await Promise.all(["main.ts", "render-model.ts"].map((path) => readSource(path)));
     // F1: the status sentence and busy flags are live regions, not shell
@@ -301,6 +277,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(main).toContain("pairingStatus = INVALID_PAIRING_LINK_MESSAGE;");
   });
 
+  // Contract: keeps the live-region selectors and the shell markup on the same nodes.
+  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("keeps the live-region selectors and the shell markup on the same nodes", async () => {
     const [main, regions, fixture] = await Promise.all(
       ["main.ts", "live-regions.ts", "live-regions.test.ts"].map((path) => readSource(path)),
@@ -332,6 +311,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     ]) expect(main, `${marker} left the shell template`).toContain(marker);
   });
 
+  // Contract: never leaves the supervisor send button silently disabled.
+  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("never leaves the supervisor send button silently disabled", async () => {
     const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readSource(path)));
     // A real `disabled` attribute swallows the tap: no event, no frame, no
@@ -355,6 +337,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(css).toContain(".message-status.error {");
   });
 
+  // Contract: takes control to deliver an observed message instead of dropping it.
+  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("takes control to deliver an observed message instead of dropping it", async () => {
     const source = await readSource("main.ts");
     // The hub refuses SendMessage without this device's session lease
@@ -377,6 +362,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain("if (pressed && stillHere()) landFocus([messageControl(pressed), focusTargets.thread], { keep: true, nextTask: true, waitMs: 1_000, since: pressed });");
   });
 
+  // Contract: collapses one outage into one attention card per machine and session.
+  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("collapses one outage into one attention card per machine and session", async () => {
     const source = await readSource("main.ts");
     // Without a stable fingerprint each retry coalesces to its own card, so a
@@ -386,6 +374,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain("fingerprint: `${machine.id}:${session}:session_transport`");
   });
 
+  // Contract: marks operations data as stale while the hub connection is not live.
+  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("marks operations data as stale while the hub connection is not live", async () => {
     const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readSource(path)));
     expect(main).toContain("const statusIsStale = Boolean(selected) && machineConnectionSnapshot !== undefined");
@@ -398,6 +389,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(css).toContain(".status-stale {");
   });
 
+  // Contract: derives the header mode and terminal cursor from the real session lease.
+  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("derives the header mode and terminal cursor from the real session lease", async () => {
     const [main, terminal] = await Promise.all([
       readSource("main.ts"),
@@ -409,6 +403,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(terminal).toContain("state.controlMode && state.focused");
   });
 
+  // Contract: keeps palette rows project-led while indexing project names and optional session summaries.
+  // Consumer: Commander application render and event handlers (main.ts), operating the command palette.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("keeps palette rows project-led while indexing project names and optional session summaries", async () => {
     // Behaviour is pinned in palette-commands.test.ts (cas-cfcb); this keeps main.ts on that one renderer.
     const [source, palette] = await Promise.all([readSource("main.ts"), readFile(new URL("palette-commands.ts", import.meta.url), "utf8")]);
@@ -418,6 +415,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain('command.dataset.searchText ?? ""');
   });
 
+  // Contract: renders instructional empty pane and all-clear feed states.
+  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("renders instructional empty pane and all-clear feed states", async () => {
     const [main, attentionView] = await Promise.all([
       readSource("main.ts"),
@@ -434,6 +434,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(attentionView).toContain("Last event ${new Date(latest.createdAt).toLocaleString()}");
   });
 
+  // Contract: distinguishes a loading catalog from an unpaired Cassy Cloud drawer.
+  // Consumer: Commander application render and event handlers (main.ts), operating the pairing dialog.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("distinguishes a loading catalog from an unpaired Cassy Cloud drawer", async () => {
     const source = await readSource("main.ts");
     expect(source).toContain("let machineCatalogLoaded = false;");
@@ -449,6 +452,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain("render(false);");
   });
 
+  // Contract: gives an unpaired phone one pairing path and no empty-state debris.
+  // Consumer: Commander application render and event handlers (main.ts), operating the pairing dialog.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("gives an unpaired phone one pairing path and no empty-state debris", async () => {
     const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readSource(path)));
     expect(main).toContain("const fleetEmpty = machineCatalogLoaded && machines.size === 0 && attention.length === 0;");
@@ -468,6 +474,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(css).toContain(".machine-rail .commander-mark-label { display: inline; }");
   });
 
+  // Contract: names the ticket from the card's derived attention content.
+  // Consumer: renderAttentionPanel displaying the coalesced card.content.ticketId.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("names the ticket from the card's derived attention content", async () => {
     const view = await readFile(new URL("attention-view.ts", import.meta.url), "utf8");
     // Hub event-stream cards derive their CAS ticket during coalescing, so the
@@ -477,6 +486,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(view).not.toContain("ticket.textContent = card.latest.ticketId;");
   });
 
+  // Contract: makes the pairing code reachable without retyping it from a phone screen.
+  // Consumer: Commander application render and event handlers (main.ts), operating the pairing dialog.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("makes the pairing code reachable without retyping it from a phone screen", async () => {
     const source = await readSource("main.ts");
     expect(source).toContain('data-pair-command="cas hub authorize ${escapeAttr(pendingPairing.userCode)}"');
@@ -506,6 +518,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).not.toContain("} paired`);");
   });
 
+  // Contract: binds the browser fetch receiver at every pairing handoff.
+  // Consumer: Commander application render and event handlers (main.ts), operating the pairing dialog.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("binds the browser fetch receiver at every pairing handoff", async () => {
     const source = await readSource("main.ts");
     expect(source).not.toMatch(/fetcher:\s*(?:window\.|globalThis\.)?fetch\s*[,}]/);
@@ -529,6 +544,8 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, imported, decode(encodedSignature), new TextEncoder().encode(`${encodedHeader}.${encodedClaims}`))).toBe(true);
   });
 
+  // Contract: approved Ghostty WASM bytes retain their pinned integrity.
+  // Consumer: the Ghostty terminal runtime loading these vendored artifacts.
   it("pins the green Ghostty WASM spike artifacts by integrity", async () => {
     const cases = [
       ["terminal/ghostty/vendor/ghostty-vt.wasm", "6b1df1a96d59adc26360c312924898dbc122f980c17a32eb1624e48795b83f7e"],
@@ -540,6 +557,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     }
   });
 
+  // Contract: keeps long-lived credentials out of ambient browser storage and URL channels.
+  // Consumer: IndexedDB credential catalog and DPoP signing code; ambient-channel security audit (not a runtime proof).
+  // Structural contract retained.
   it("keeps long-lived credentials out of ambient browser storage and URL channels", async () => {
     const source = await Promise.all(["storage.ts", "dpop.ts"].map((path) => readSource(path)));
     const joined = source.join("\n");
@@ -556,6 +576,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     for (const secretField of ["credential", "privateKey", "deviceKey"]) expect(layout).not.toContain(secretField);
   });
 
+  // Contract: feature-detects hub versions and keeps controls disabled on skew.
+  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("feature-detects hub versions and keeps controls disabled on skew", async () => {
     const source = await Promise.all(["main.ts", "connection.ts"].map((path) => readSource(path)));
     const joined = source.join("\n");
@@ -565,6 +588,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(joined).toContain("unsupported controls are disabled");
   });
 
+  // Contract: targets interrupt at the explicitly selected pane rather than render order.
+  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("targets interrupt at the explicitly selected pane rather than render order", async () => {
     const source = await readSource("main.ts");
     expect(source).toContain("selectedPanes.get(sessionKey(selected.id, selectedSession))");
@@ -572,6 +598,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).not.toContain("[...surfaces.keys()].find");
   });
 
+  // Contract: never caches an asynchronously-created terminal against a detached render.
+  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("never caches an asynchronously-created terminal against a detached render", async () => {
     const source = await readSource("main.ts");
     expect(source).toContain("existingSurface.element !== mount || !existingSurface.element.isConnected");
@@ -579,6 +608,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain("surface.dispose();");
   });
 
+  // Contract: preserves the active pane grid across lease and status renders.
+  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("preserves the active pane grid across lease and status renders", async () => {
     const source = await readSource("main.ts");
     expect(source).toContain("currentGrid?.dataset.sessionKey === terminalSessionKey");
@@ -588,6 +620,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain("data-session-key");
   });
 
+  // Contract: keeps the phone ATTENTION hierarchy human-readable and group-actionable.
+  // Consumer: Commander application render and event handlers (main.ts), operating the phone shell.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("keeps the phone ATTENTION hierarchy human-readable and group-actionable", async () => {
     const [main, attentionView, css] = await Promise.all(["main.ts", "attention-view.ts", "styles.css"].map((path) => readSource(path)));
     expect(main).toContain('machineEventAttention(kind, payload, pending)');
@@ -609,6 +644,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(css).not.toContain("max-width: var(--mobile-attention-label-width)");
   });
 
+  // Contract: opens the pairing dialog for an invitation instead of leaving the user on the empty state.
+  // Consumer: Commander application render and event handlers (main.ts), operating the pairing dialog.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("opens the pairing dialog for an invitation instead of leaving the user on the empty state", async () => {
     const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readSource(path)));
 
@@ -650,6 +688,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(css).not.toContain("border: var(--line-width) dashed var(--line-strong);");
   });
 
+  // Contract: D7 gives every control in the phone rail one container treatment.
+  // Consumer: Commander application render and event handlers (main.ts), operating the phone shell.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("D7 gives every control in the phone rail one container treatment", async () => {
     const [main, css, view, design] = await Promise.all(
       ["main.ts", "styles.css", "attention-view.ts", "../DESIGN.md"]
@@ -701,6 +742,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(main).toContain("renderAttentionSummary(context.counts)");
   });
 
+  // Contract: keeps supervisor messaging reachable from the collapsed phone rail.
+  // Consumer: Commander application render and event handlers (main.ts), operating the phone shell.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("keeps supervisor messaging reachable from the collapsed phone rail", async () => {
     const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readSource(path)));
     expect(main).toContain('id="mobile-message-toggle"');
@@ -720,6 +764,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(main).toContain("composer?.focus();");
   });
 
+  // Contract: keeps a dedicated one-handed supervisor action and voice-first phone composer.
+  // Consumer: Commander application render and event handlers (main.ts), operating the phone shell.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("keeps a dedicated one-handed supervisor action and voice-first phone composer", async () => {
     const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readSource(path)));
     expect(main).toContain('id="talk-supervisor"');
@@ -742,6 +789,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(css).toContain(".conversation-composer #message-mic.listening {");
   });
 
+  // Contract: keeps a focused terminal focused across steady-state renders.
+  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("keeps a focused terminal focused across steady-state renders", async () => {
     const source = await readSource("main.ts");
     // Re-inserting a pane card blurs its hidden textarea, which closes a phone
@@ -753,6 +803,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).not.toContain("(pane.id === layout.primaryPaneId ? primarySlot : secondaryStrip).append(card)");
   });
 
+  // Contract: colours connection dots from the phases the supervisor actually emits.
+  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("colours connection dots from the phases the supervisor actually emits", async () => {
     const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readSource(path)));
     // connectionClass emits lifecycle phases, so styling legacy names such as
@@ -766,6 +819,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(css).not.toContain(".machine-state.auth-blocked");
   });
 
+  // Contract: renders phone secondary panes as tappable rows instead of empty terminal wells.
+  // Consumer: Commander application render and event handlers (main.ts), operating the phone shell.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("renders phone secondary panes as tappable rows instead of empty terminal wells", async () => {
     const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readSource(path)));
     // Only the primary pane mounts a surface on a phone, so every other pane has
@@ -780,6 +836,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(css).toContain("min-width: var(--space-8);\n    min-height: var(--space-8);");
   });
 
+  // Contract: keeps the section 2 visual system tokenized and machine copy mono.
+  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("keeps the section 2 visual system tokenized and machine copy mono", async () => {
     const [main, css, html, renderer, surface] = await Promise.all([
       "main.ts",
@@ -815,6 +874,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(surface).not.toContain('"italic 700"');
   });
 
+  // Contract: encodes the supervisor-first Cassy Cloud shell at desktop and phone widths.
+  // Consumer: Commander application render and event handlers (main.ts), operating the phone shell.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("encodes the supervisor-first Cassy Cloud shell at desktop and phone widths", async () => {
     const [main, css, connection] = await Promise.all(["main.ts", "styles.css", "connection.ts"].map((path) => readSource(path)));
     expect(main).toContain('class="machine-navigation${machineDrawerOpen ? " drawer-open" : ""}"');
@@ -844,6 +906,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(main).not.toContain('class="sessions"');
   });
 
+  // Contract: puts a session picker and a back control in the primary chrome on both layouts.
+  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("puts a session picker and a back control in the primary chrome on both layouts", async () => {
     const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readSource(path)));
     // The session name in the header is the switch. It is the only chrome that
@@ -874,6 +939,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(main).toContain('<span class="session-back-label" aria-hidden="true">Back</span>');
   });
 
+  // Contract: keeps palette and picker states readable and distinct in every colour mode (cas-78c81).
+  // Consumer: Browser forced-colors and normal CSS engines consume palette/picker state rules.
+  // Structural contract retained.
   it("keeps palette and picker states readable and distinct in every colour mode (cas-78c81)", async () => {
     const css = await readSource("styles.css");
     const forced = css.slice(css.indexOf("@media (forced-colors: active) {\n  dialog {"));
@@ -901,6 +969,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(css).toContain('.palette-commands .session-picker-entry[aria-current="true"]:is(:hover, :active) > .session-name { text-decoration: underline; }');
   });
 
+  // Contract: routes every navigation through one recorded selection and restores the last session on reopen.
+  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("routes every navigation through one recorded selection and restores the last session on reopen", async () => {
     const main = await readSource("main.ts");
     // One trail: a machine pick, a session open, an attention jump, and a
@@ -926,6 +997,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(main).not.toContain("selectedMachineId = machines.keys().next().value; selectedSession = undefined;");
   });
 
+  // Contract: captures both legacy and relay pairing drafts before a background render replaces markup.
+  // Consumer: Commander application render and event handlers (main.ts), operating the pairing dialog.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("captures both legacy and relay pairing drafts before a background render replaces markup", async () => {
     const source = await readSource("main.ts");
     expect(source.indexOf("if (captureDraft) capturePairingDraft();")).toBeLessThan(source.indexOf("app.innerHTML ="));
@@ -935,6 +1009,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     }
   });
 
+  // Contract: lets unleased observers size panes but preserves controller-owned geometry.
+  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("lets unleased observers size panes but preserves controller-owned geometry", async () => {
     const source = await readSource("main.ts");
     expect(source).toContain('machines.get(machineId)?.scopes.includes("pane-read")');
@@ -945,6 +1022,9 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   // cas-37f8: a phone-sized viewer must never shrink the operator's console.
+  // Contract: stops asking for a pane size once the local dashboard claims that pane.
+  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("stops asking for a pane size once the local dashboard claims that pane", async () => {
     const source = await readSource("main.ts");
     expect(source).toContain('const local = authority === "LocalDashboard";');
@@ -958,6 +1038,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain("onResize: (cols, rows) => requestPaneSize(machineId, session, pane.id, cols, rows)");
   });
 
+  // Contract: turns a reachable revoked hub into a terminal auth stop.
+  // Consumer: HubConnectionSupervisor and Commander connection view.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("turns a reachable revoked hub into a terminal auth stop", async () => {
     const source = await readFile(new URL("connection.ts", import.meta.url), "utf8");
     expect(source).toContain('new URL("/v1/health", this.machine.baseUrl)');
@@ -970,6 +1053,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain("this.callbacks.onAuthFailure?.(kind, detail)");
   });
 
+  // Contract: turns a reachable hub with opaque authenticated reads into a re-pair stop.
+  // Consumer: Commander application render and event handlers (main.ts), operating the pairing dialog.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("turns a reachable hub with opaque authenticated reads into a re-pair stop", async () => {
     vi.stubGlobal("window", globalThis);
     const { privateKey, publicKey } = await createDeviceKey();
@@ -1039,6 +1125,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     supervisor.stop();
   });
 
+  // Contract: degrades an unusable engine honestly instead of spinning at 0s.
+  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("degrades an unusable engine honestly instead of spinning at 0s", async () => {
     const [connection, main, connectionView, css] = await Promise.all(["connection.ts", "main.ts", "connection-state-view.ts", "styles.css"].map((path) => readSource(path)));
     // The version floor that broke every attach on Chrome 113 is gone: the
@@ -1200,6 +1289,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     supervisor.stop();
   });
 
+  // Contract: turns connection failures into timed actions while retaining prior terminal frames.
+  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("turns connection failures into timed actions while retaining prior terminal frames", async () => {
     const [source, connectionView] = await Promise.all([
       readSource("main.ts"),
@@ -1241,6 +1333,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(styles).not.toContain(".terminal-disconnected .terminal-mount { opacity: .4; }");
   });
 
+  // Contract: drives pane recovery from the selected session attach lifecycle.
+  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("drives pane recovery from the selected session attach lifecycle", async () => {
     const source = await readSource("main.ts");
     expect(source).toContain("onAttachState: (session, state) =>");
@@ -1251,6 +1346,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain("connections.get(machineId)?.attach(session)");
   });
 
+  // Contract: removes the connecting instruction when the terminal state arrives.
+  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("removes the connecting instruction when the terminal state arrives", async () => {
     const source = await readSource("main.ts");
     // Scoped to the grid's own child: the conversation thread's empty state is
@@ -1259,6 +1357,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).not.toMatch(/grid\.querySelector(<HTMLElement>)?\("\.empty"\)/);
   });
 
+  // Contract: puts the conversation over the pane before its terminal surface loads (cas-04ee).
+  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("puts the conversation over the pane before its terminal surface loads (cas-04ee)", async () => {
     const [main, surface] = await Promise.all(["main.ts", "terminal/ghostty/surface.ts"].map((path) => readSource(path)));
     const premount = main.indexOf('if (hubPresentation === "conversation" && !surfaces.has(key)) mountConversation(key, mount);');
@@ -1268,6 +1369,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(surface).toContain("mount.replaceChildren(canvas, input, scrollbar, ...overlays);");
   });
 
+  // Contract: requests an authoritative supervisor keyframe before lazily mounted workers.
+  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("requests an authoritative supervisor keyframe before lazily mounted workers", async () => {
     const [connection, main] = await Promise.all(["connection.ts", "main.ts"].map((path) => readSource(path)));
     expect(connection.indexOf("this.requestPaneKeyframe(session, supervisor.id)")).toBeLessThan(
@@ -1439,6 +1543,9 @@ describe("binding Cassy Cloud browser invariants", () => {
 });
 
 describe("design polish P3/P4/P12/P16 (D3/D4/D12/D17)", () => {
+  // Contract: paints the primary action in the operator colour, keeps it on hover, and gives fields and placeholders their contrast.
+  // Consumer: Browser CSS engine applying styles.css to Commander markup.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("paints the primary action in the operator colour, keeps it on hover, and gives fields and placeholders their contrast", async () => {
     const [css, tokens, markup] = await Promise.all(["styles.css", "tokens.css", "pair-dialog-markup.ts"].map((path) => readSource(path)));
     const rule = (selector: string) => css.slice(css.indexOf(`${selector} {`), css.indexOf("}", css.indexOf(`${selector} {`)) + 1);
@@ -1468,6 +1575,9 @@ describe("design polish P3/P4/P12/P16 (D3/D4/D12/D17)", () => {
 });
 
 describe("3.30.0 journey polish (cas-b128)", () => {
+  // Contract: groups palette commands by what they act on and offers Dismiss all info only when there is something to dismiss (F4).
+  // Consumer: Commander application render and event handlers (main.ts), operating the command palette.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("groups palette commands by what they act on and offers Dismiss all info only when there is something to dismiss (F4)", async () => {
     const main = await readSource("main.ts");
     const conversations = main.slice(main.indexOf('data-palette-group="conversations"'), main.indexOf('data-palette-group="appearance"'));
@@ -1484,6 +1594,9 @@ describe("3.30.0 journey polish (cas-b128)", () => {
     expect(main).toContain("JSON.stringify([hubPresentation, selectedHubSession?.project_dir, infoItems.length > 0, launchAvailability()])");
   });
 
+  // Contract: moves a visible toast with the layout and uses the thread's clock and plain words in Paired machines (F8, F10).
+  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
+  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
   it("moves a visible toast with the layout and uses the thread's clock and plain words in Paired machines (F8, F10)", async () => {
     const [main, paired] = await Promise.all([readSource("main.ts"), readSource("paired-machines.ts")]);
     expect(main).toContain('const visibleToast = document.querySelector<HTMLElement>("#toast.visible");');

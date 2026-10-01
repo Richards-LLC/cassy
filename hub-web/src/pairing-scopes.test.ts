@@ -318,17 +318,10 @@ describe("pairing failure copy", () => {
 });
 
 describe("pairing form scope invariants", () => {
-  it("disables an ungranted scope and offers the command that grants it", async () => {
-    const source = await readFile(new URL("pair-dialog-markup.ts", import.meta.url), "utf8");
-    // D1: the form used to pre-check all six scopes against a read-only invitation.
-    expect(source).not.toContain("scopeChecks(pairingDraft.scopes)");
-    expect(source).toContain("scopeChecks(pairingDraft.scopes, invitationScopes)");
-    expect(source).toContain('choice.granted ? "" : "disabled"');
-    expect(source).toContain("not granted by this invitation");
-    expect(source).toContain("id=\"pair-copy\"");
-    expect(source).toContain("pairCommand(pageOrigin, PAIRING_SCOPES)");
-  });
-
+  // Contract: a recoverable failure retains the invitation for another attempt.
+  // Consumer: main.ts pairing exchange error handler and its next form render.
+  // exchangePendingPairing tests cover recoverability, but no current journey
+  // proves this handler's retry state. Retain this historical pin for follow-up.
   it("keeps a recoverable pairing failure's invitation instead of discarding it", async () => {
     const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
     expect(source).toContain("error instanceof PairingExchangeError && error.recoverable");

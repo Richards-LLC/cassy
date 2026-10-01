@@ -2240,65 +2240,49 @@ mod tests {
 
     #[test]
     fn test_active_team_id_returns_none_when_no_team_set() {
-        let _guard = TestEnvGuard::new();
+        let mut _guard = TestEnvGuard::new();
         // Ensure no user-level config leaks in from ~/.cas/cloud.json.
-        unsafe {
-            std::env::set_var("CAS_USER_CLOUD_JSON", "/nonexistent/path/cloud.json");
-        }
+        _guard.set("CAS_USER_CLOUD_JSON", "/nonexistent/path/cloud.json");
         let config = CloudConfig::default();
         assert_eq!(config.active_team_id(), None);
-        unsafe {
-            std::env::remove_var("CAS_USER_CLOUD_JSON");
-        }
+        _guard.remove("CAS_USER_CLOUD_JSON");
     }
 
     #[test]
     fn test_active_team_id_returns_team_when_team_id_explicitly_set() {
-        let _guard = TestEnvGuard::new();
+        let mut _guard = TestEnvGuard::new();
         // team_id is explicitly set via `cas cloud team set` → Step 1 returns it
         // regardless of team_auto_promote value (Step 1 precedes Step 1.5 guard).
-        unsafe {
-            std::env::set_var("CAS_USER_CLOUD_JSON", "/nonexistent/path/cloud.json");
-        }
+        _guard.set("CAS_USER_CLOUD_JSON", "/nonexistent/path/cloud.json");
         let mut config = CloudConfig::default();
         config.set_team("team-abc", "my-team");
         assert_eq!(config.active_team_id().as_deref(), Some("team-abc"));
         assert!(config.team_auto_promote.is_none()); // Step 1 fires before Step 1.5
-        unsafe {
-            std::env::remove_var("CAS_USER_CLOUD_JSON");
-        }
+        _guard.remove("CAS_USER_CLOUD_JSON");
     }
 
     #[test]
     fn test_active_team_id_returns_team_when_auto_promote_is_true() {
-        let _guard = TestEnvGuard::new();
-        unsafe {
-            std::env::set_var("CAS_USER_CLOUD_JSON", "/nonexistent/path/cloud.json");
-        }
+        let mut _guard = TestEnvGuard::new();
+        _guard.set("CAS_USER_CLOUD_JSON", "/nonexistent/path/cloud.json");
         let mut config = CloudConfig::default();
         config.set_team("team-abc", "my-team");
         config.team_auto_promote = Some(true);
         assert_eq!(config.active_team_id().as_deref(), Some("team-abc"));
-        unsafe {
-            std::env::remove_var("CAS_USER_CLOUD_JSON");
-        }
+        _guard.remove("CAS_USER_CLOUD_JSON");
     }
 
     #[test]
     fn test_active_team_id_suppressed_by_auto_promote_false() {
-        let _guard = TestEnvGuard::new();
+        let mut _guard = TestEnvGuard::new();
         // The coarse kill-switch from Decision 3 of filter-policy.md —
         // team_id still set, but dual-enqueue is disabled.
-        unsafe {
-            std::env::set_var("CAS_USER_CLOUD_JSON", "/nonexistent/path/cloud.json");
-        }
+        _guard.set("CAS_USER_CLOUD_JSON", "/nonexistent/path/cloud.json");
         let mut config = CloudConfig::default();
         config.set_team("team-abc", "my-team");
         config.team_auto_promote = Some(false);
         assert_eq!(config.active_team_id(), None);
-        unsafe {
-            std::env::remove_var("CAS_USER_CLOUD_JSON");
-        }
+        _guard.remove("CAS_USER_CLOUD_JSON");
     }
 
     // ── cas-ea2f5: resolution-chain unit tests (test-first, added before impl) ──
@@ -2543,19 +2527,17 @@ mod tests {
 
     #[test]
     fn adoption_persists_only_when_it_changed_something() {
-        let _guard = TestEnvGuard::new();
+        let mut _guard = TestEnvGuard::new();
         let project_dir = TempDir::new().unwrap();
         let user_dir = TempDir::new().unwrap();
 
         let user = user_with_teams(&[("solo-team-id", "solo", "Solo")], None);
         user.save_to_cas_dir(user_dir.path()).unwrap();
-        // SAFETY: TestEnvGuard serializes env mutation for this test.
-        unsafe {
-            std::env::set_var(
-                "CAS_USER_CLOUD_JSON",
-                user_dir.path().join("cloud.json").to_str().unwrap(),
-            );
-        }
+
+        _guard.set(
+            "CAS_USER_CLOUD_JSON",
+            user_dir.path().join("cloud.json").to_str().unwrap(),
+        );
 
         logged_in_project()
             .save_to_cas_dir(project_dir.path())
@@ -2579,23 +2561,21 @@ mod tests {
             }
         );
 
-        unsafe {
-            std::env::remove_var("CAS_USER_CLOUD_JSON");
-        }
+        _guard.remove("CAS_USER_CLOUD_JSON");
     }
 
     #[test]
     fn unlinked_project_does_not_gain_cloud_config_from_team_adoption() {
-        let _guard = TestEnvGuard::new();
+        let mut _guard = TestEnvGuard::new();
         let project = TempDir::new().unwrap();
         let user = TempDir::new().unwrap();
         let user_config = user_with_teams(&[("team-id", "team", "Team")], None);
         user_config.save_to_cas_dir(user.path()).unwrap();
-        unsafe { std::env::set_var("CAS_USER_CLOUD_JSON", user.path().join("cloud.json")); }
+        _guard.set("CAS_USER_CLOUD_JSON", user.path().join("cloud.json"));
         let outcome = maybe_adopt_team_scope(project.path()).unwrap();
         assert_eq!(outcome, TeamScopeAdoption::NotLoggedIn);
         assert!(!project.path().join("cloud.json").exists());
-        unsafe { std::env::remove_var("CAS_USER_CLOUD_JSON"); }
+        _guard.remove("CAS_USER_CLOUD_JSON");
     }
 
     #[test]
@@ -2616,7 +2596,7 @@ mod tests {
 
     #[test]
     fn personal_scope_notice_fires_once_for_single_team_user() {
-        let _guard = TestEnvGuard::new();
+        let mut _guard = TestEnvGuard::new();
         let project = TempDir::new().unwrap();
         let user = TempDir::new().unwrap();
 
@@ -2633,9 +2613,7 @@ mod tests {
         user_cfg.save_to_cas_dir(user.path()).unwrap();
 
         let user_cloud_json = user.path().join("cloud.json");
-        unsafe {
-            std::env::set_var("CAS_USER_CLOUD_JSON", &user_cloud_json);
-        }
+        _guard.set("CAS_USER_CLOUD_JSON", &user_cloud_json);
 
         let first = maybe_mark_personal_scope_notice(project.path())
             .unwrap()
@@ -2648,14 +2626,12 @@ mod tests {
 
         let second = maybe_mark_personal_scope_notice(project.path()).unwrap();
         assert!(second.is_none(), "notice must be one-time per project");
-        unsafe {
-            std::env::remove_var("CAS_USER_CLOUD_JSON");
-        }
+        _guard.remove("CAS_USER_CLOUD_JSON");
     }
 
     #[test]
     fn personal_scope_notice_rechecks_fresh_config_before_marking() {
-        let _guard = TestEnvGuard::new();
+        let mut _guard = TestEnvGuard::new();
         let project = TempDir::new().unwrap();
         let user = TempDir::new().unwrap();
 
@@ -2673,9 +2649,7 @@ mod tests {
         user_cfg.save_to_cas_dir(user.path()).unwrap();
 
         let user_cloud_json = user.path().join("cloud.json");
-        unsafe {
-            std::env::set_var("CAS_USER_CLOUD_JSON", &user_cloud_json);
-        }
+        _guard.set("CAS_USER_CLOUD_JSON", &user_cloud_json);
 
         let notice = maybe_mark_personal_scope_notice_with_hook(project.path(), || {
             let mut concurrent = CloudConfig::load_from_cas_dir(project.path()).unwrap();
@@ -2692,9 +2666,7 @@ mod tests {
         assert_eq!(saved.team_id.as_deref(), Some("solo-team-id"));
         assert_eq!(saved.team_slug.as_deref(), Some("solo"));
         assert!(!saved.personal_scope_notice_shown);
-        unsafe {
-            std::env::remove_var("CAS_USER_CLOUD_JSON");
-        }
+        _guard.remove("CAS_USER_CLOUD_JSON");
     }
 
     #[test]
@@ -4111,12 +4083,10 @@ mod tests {
 
     #[test]
     fn f8e3_explicitly_linked_project_still_team_promoted() {
-        let _guard = TestEnvGuard::new();
+        let mut _guard = TestEnvGuard::new();
         // Sanity: a project with `team_id` set (via `cas cloud team set`) still
         // works correctly — Step 1 fires before the Step 1.5 guard.
-        unsafe {
-            std::env::set_var("CAS_USER_CLOUD_JSON", "/nonexistent/path/cloud.json");
-        }
+        _guard.set("CAS_USER_CLOUD_JSON", "/nonexistent/path/cloud.json");
         let mut project_cfg = CloudConfig::default();
         project_cfg.set_team("2a57bec9-5dfa-4a8f-b711-31f9aeb8d6cb", "petra-stella");
         // No user-level config needed — Step 1 is sufficient.
@@ -4126,9 +4096,7 @@ mod tests {
             Some("2a57bec9-5dfa-4a8f-b711-31f9aeb8d6cb"),
             "cas-f8e3: a project with explicit team_id must still be team-linked (Step 1)"
         );
-        unsafe {
-            std::env::remove_var("CAS_USER_CLOUD_JSON");
-        }
+        _guard.remove("CAS_USER_CLOUD_JSON");
     }
 
     #[test]

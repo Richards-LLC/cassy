@@ -4,3 +4,6 @@
 
 mod e2e;
 mod fixtures;
+
+#[path = "../src/test_env_guard.rs"]
+mod test_env_guard;

@@ -727,7 +727,13 @@ jobs:
 
       - name: Test release publication guards
         if: steps.classify-diff.outputs.rust-unaffected != 'true'
-        run: make -C cas-cli test-ci-tiers
+        run: |
+          if ! python3 -c 'import yaml' 2>/dev/null; then
+            python3 -m venv "$RUNNER_TEMP/ci-tiers-venv"
+            "$RUNNER_TEMP/ci-tiers-venv/bin/pip" install --disable-pip-version-check --quiet -r scripts/ci_tiers/requirements.txt
+            export PATH="$RUNNER_TEMP/ci-tiers-venv/bin:$PATH"
+          fi
+          make -C cas-cli test-ci-tiers
 
       - name: Build (without MCP proxy)
         if: steps.classify-diff.outputs.rust-unaffected != 'true'

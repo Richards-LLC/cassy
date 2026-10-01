@@ -33,25 +33,18 @@ fn task_req(value: serde_json::Value) -> cas_mcp::TaskRequest {
     serde_json::from_value(value).expect("TaskRequest should deserialize from test JSON")
 }
 
-/// RAII guard that installs factory-worker env vars and clears them on drop.
+/// Borrowed factory-worker override; prior values are restored on drop.
 struct FactoryWorkerGuard;
 
 impl FactoryWorkerGuard {
-    fn enter() -> Self {
-        unsafe {
-            std::env::set_var("CAS_AGENT_ROLE", "worker");
-            std::env::set_var("CAS_FACTORY_MODE", "1");
-        }
-        Self
-    }
-}
-
-impl Drop for FactoryWorkerGuard {
-    fn drop(&mut self) {
-        unsafe {
-            std::env::remove_var("CAS_AGENT_ROLE");
-            std::env::remove_var("CAS_FACTORY_MODE");
-        }
+    fn enter(env: &mut TestEnvGuard) -> ScopedFactoryEnv<'_> {
+        ScopedFactoryEnv::apply(
+            env,
+            &[
+                ("CAS_AGENT_ROLE", Some("worker")),
+                ("CAS_FACTORY_MODE", Some("1")),
+            ],
+        )
     }
 }
 
@@ -105,8 +98,13 @@ fn init_git_repo_with_staged_changes(project_root: &std::path::Path) {
 
 /// Session-1 create: returns the new task id. Built on its own core/service so
 /// the close runs on a freshly-opened one (session 2).
-async fn create_task(cas_dir: &std::path::Path, title: &str, depth: Option<&str>) -> String {
-    let core = core_with_test_agent(cas_dir);
+async fn create_task(
+    test_env: &mut TestEnvGuard,
+    cas_dir: &std::path::Path,
+    title: &str,
+    depth: Option<&str>,
+) -> String {
+    let core = core_with_test_agent(test_env, cas_dir);
     let service = CasService::new(core, None);
     let mut body = serde_json::json!({
         "action": "create",
@@ -128,10 +126,14 @@ async fn create_task(cas_dir: &std::path::Path, title: &str, depth: Option<&str>
 }
 
 /// Session-2 start+close on a fresh core/service; returns the close output text.
-async fn start_and_close(cas_dir: &std::path::Path, id: &str) -> String {
+async fn start_and_close(
+    test_env: &mut TestEnvGuard,
+    cas_dir: &std::path::Path,
+    id: &str,
+) -> String {
     // Fresh session (second worker process) — must seed agent identity itself
     // (cas-48e6); bare with_daemon has no SessionStart mapping / agent_id.
-    let core = core_with_test_agent(cas_dir);
+    let core = core_with_test_agent(test_env, cas_dir);
     let service = CasService::new(core, None);
     service
         .task(Parameters(task_req(
@@ -156,15 +158,15 @@ async fn start_and_close(cas_dir: &std::path::Path, id: &str) -> String {
 /// with the auditable decision note.
 #[tokio::test]
 async fn test_e2e_light_depth_persists_then_closes_without_gates() {
-    let (temp, _core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, _core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     write_supervisor_review_config(&cas_dir);
     init_git_repo_with_staged_changes(temp.path());
 
     // Session 1 — create the light task.
-    let id = create_task(&cas_dir, "feel-driven UI tweak", Some("light")).await;
+    let id = create_task(&mut test_env, &cas_dir, "feel-driven UI tweak", Some("light")).await;
 
     // Persistence boundary — a fresh store read must see depth=Light.
     let reloaded = open_task_store(&cas_dir)
@@ -178,8 +180,8 @@ async fn test_e2e_light_depth_persists_then_closes_without_gates() {
     );
 
     // Session 2 — a separate worker process closes it.
-    let _worker = FactoryWorkerGuard::enter();
-    let close_text = start_and_close(&cas_dir, &id).await;
+    let mut worker = FactoryWorkerGuard::enter(&mut test_env);
+    let close_text = start_and_close(worker.guard(), &cas_dir, &id).await;
     assert!(
         close_text.contains("Closed task"),
         "deep task close should report a terminal close: {close_text}"
@@ -217,14 +219,14 @@ async fn test_e2e_light_depth_persists_then_closes_without_gates() {
 /// closes without the retired supervisor-review queue.
 #[tokio::test]
 async fn test_e2e_deep_depth_persists_then_closes() {
-    let (temp, _core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, _core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     write_supervisor_review_config(&cas_dir);
     init_git_repo_with_staged_changes(temp.path());
 
-    let id = create_task(&cas_dir, "auth refactor", Some("deep")).await;
+    let id = create_task(&mut test_env, &cas_dir, "auth refactor", Some("deep")).await;
 
     let reloaded = open_task_store(&cas_dir).unwrap().get(&id).unwrap();
     assert_eq!(
@@ -233,8 +235,8 @@ async fn test_e2e_deep_depth_persists_then_closes() {
         "depth=deep must round-trip through SQLite"
     );
 
-    let _worker = FactoryWorkerGuard::enter();
-    let close_text = start_and_close(&cas_dir, &id).await;
+    let mut worker = FactoryWorkerGuard::enter(&mut test_env);
+    let close_text = start_and_close(worker.guard(), &cas_dir, &id).await;
     assert!(
         close_text.contains("Closed task"),
         "deep task close should report a terminal close: {close_text}"
@@ -258,14 +260,14 @@ async fn test_e2e_deep_depth_persists_then_closes() {
 /// (NULL→Deep) across the persistence boundary and still closes normally.
 #[tokio::test]
 async fn test_e2e_unset_depth_reads_as_deep_then_closes() {
-    let (temp, _core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, _core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     write_supervisor_review_config(&cas_dir);
     init_git_repo_with_staged_changes(temp.path());
 
-    let id = create_task(&cas_dir, "legacy task — no depth set", None).await;
+    let id = create_task(&mut test_env, &cas_dir, "legacy task — no depth set", None).await;
 
     let reloaded = open_task_store(&cas_dir).unwrap().get(&id).unwrap();
     assert_eq!(
@@ -274,8 +276,8 @@ async fn test_e2e_unset_depth_reads_as_deep_then_closes() {
         "unset depth must read back as Deep (NULL→Deep)"
     );
 
-    let _worker = FactoryWorkerGuard::enter();
-    let close_text = start_and_close(&cas_dir, &id).await;
+    let mut worker = FactoryWorkerGuard::enter(&mut test_env);
+    let close_text = start_and_close(worker.guard(), &cas_dir, &id).await;
     assert!(
         close_text.contains("Closed task"),
         "unset-depth task close should report a terminal close: {close_text}"
@@ -286,4 +288,21 @@ async fn test_e2e_unset_depth_reads_as_deep_then_closes() {
         TaskStatus::Closed,
         "unset-depth task must close without the retired supervisor-review queue"
     );
+}
+
+#[test]
+fn factory_worker_scope_restores_prior_values_on_panic_cas_6651() {
+    let mut test_env = TestEnvGuard::temp_home();
+    test_env.set("CAS_AGENT_ROLE", "supervisor");
+    test_env.set("CAS_FACTORY_MODE", "0");
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _worker = FactoryWorkerGuard::enter(&mut test_env);
+        assert_eq!(std::env::var("CAS_AGENT_ROLE").as_deref(), Ok("worker"));
+        assert_eq!(std::env::var("CAS_FACTORY_MODE").as_deref(), Ok("1"));
+        panic!("exercise worker scope restoration");
+    }));
+    let panic = result.expect_err("the deliberate fixture panic must unwind");
+    assert_eq!(panic.downcast_ref::<&str>().copied(), Some("exercise worker scope restoration"));
+    assert_eq!(std::env::var("CAS_AGENT_ROLE").as_deref(), Ok("supervisor"));
+    assert_eq!(std::env::var("CAS_FACTORY_MODE").as_deref(), Ok("0"));
 }

@@ -47,7 +47,7 @@ pub trait LoopStore: Send + Sync {
     /// Initialize the store (create tables)
     fn init(&self) -> Result<()>;
 
-    /// Generate a new unique loop ID (e.g., loop-a1b2)
+    /// Generate a new random loop ID that is not already stored.
     fn generate_id(&self) -> Result<String>;
 
     /// Add a new loop
@@ -92,6 +92,25 @@ impl SqliteLoopStore {
         Ok(store)
     }
 
+    /// Keep the random source injectable while checking the real database.
+    fn generate_id_with_random(&self, mut random: impl FnMut() -> u64) -> Result<String> {
+        let conn = self.conn.lock().map_err(lock_err)?;
+        for _ in 0..16 {
+            let id = format!("loop-{:016x}", random());
+            let exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM loops WHERE id = ?1)",
+                params![&id],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                return Ok(id);
+            }
+        }
+        Err(StoreError::Other(
+            "could not generate an unused loop ID after 16 attempts".into(),
+        ))
+    }
+
     fn parse_loop(row: &rusqlite::Row) -> rusqlite::Result<Loop> {
         let status_str: String = row.get(6)?;
         let status = LoopStatus::from_str(&status_str).unwrap_or_default();
@@ -131,20 +150,7 @@ impl LoopStore for SqliteLoopStore {
     }
 
     fn generate_id(&self) -> Result<String> {
-        use std::time::{SystemTime, UNIX_EPOCH};
-
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|error| {
-                StoreError::Other(format!("system clock predates Unix epoch: {error}"))
-            })?
-            .as_millis();
-
-        // Generate a short hash from timestamp
-        let hash = format!("{timestamp:x}");
-        let short_hash = &hash[hash.len().saturating_sub(4)..];
-
-        Ok(format!("loop-{short_hash}"))
+        self.generate_id_with_random(rand::random::<u64>)
     }
 
     fn add(&self, loop_state: &Loop) -> Result<()> {
@@ -418,7 +424,131 @@ mod tests {
 
         assert!(id1.starts_with("loop-"));
         assert!(id2.starts_with("loop-"));
-        // IDs should be unique (though in rapid succession might be same)
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn generated_loop_ids_persist_many_sessions_back_to_back() {
+        let (store, _dir) = create_test_store();
+        // Generate before SQLite writes: uniqueness must not depend on the
+        // time taken to insert the preceding loop or on sleeps between calls.
+        let ids: Vec<_> = (0..1024).map(|_| store.generate_id().unwrap()).collect();
+        let unique: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len(), "rapid generation reused a loop ID");
+
+        for (index, id) in ids.iter().enumerate() {
+            let session = format!("session-{index}");
+            let prompt = format!("Task {index}");
+            let state = Loop::new(
+                id.clone(),
+                session.clone(),
+                prompt.clone(),
+                "/project".into(),
+            );
+            store.add(&state).unwrap();
+            let retrieved = store.get(id).unwrap();
+            assert_eq!(retrieved.session_id, session);
+            assert_eq!(retrieved.prompt, prompt);
+            assert!(retrieved.is_active());
+        }
+        assert_eq!(store.list_recent(ids.len() + 1).unwrap().len(), ids.len());
+    }
+
+    #[test]
+    fn generated_loop_id_can_be_added_when_every_legacy_id_is_already_stored() {
+        let (store, _dir) = create_test_store();
+        // Seed all legacy clock suffixes in one statement, so the next old
+        // candidate MUST collide regardless of clock timing or wraparound.
+        // SQL is only fixture setup; observations use the public store API.
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "WITH RECURSIVE suffix(value) AS (
+                   VALUES (0) UNION ALL SELECT value + 1 FROM suffix WHERE value < 65535
+                 )
+                 INSERT INTO loops (id, session_id, prompt, status, started_at, cwd)
+                 SELECT printf('loop-%04x', value), 'legacy-session', 'Legacy loop',
+                        'completed', '2020-01-01T00:00:00Z', '/legacy' FROM suffix",
+                [],
+            )
+            .unwrap();
+        }
+
+        let id = store.generate_id().unwrap();
+        let state = Loop::new(
+            id.clone(),
+            "new-session".into(),
+            "New loop".into(),
+            "/new".into(),
+        );
+        store
+            .add(&state)
+            .expect("new ID must avoid every existing row");
+        let retrieved = store.get(&id).unwrap();
+        assert_eq!(retrieved.session_id, "new-session");
+        assert_eq!(retrieved.prompt, "New loop");
+
+        for legacy_id in ["loop-0000", "loop-beef", "loop-ffff"] {
+            let legacy = store.get(legacy_id).unwrap();
+            assert_eq!(legacy.id, legacy_id);
+            assert_eq!(legacy.prompt, "Legacy loop");
+            assert_eq!(legacy.status, LoopStatus::Completed);
+            assert_eq!(legacy.cwd, "/legacy");
+        }
+    }
+
+    #[test]
+    fn generated_loop_id_skips_existing_random_candidates_without_overwriting() {
+        let (store, _dir) = create_test_store();
+        let mut existing = Loop::new(
+            "loop-000000000000beef".into(),
+            "old-session".into(),
+            "Keep this completed loop".into(),
+            "/old".into(),
+        );
+        existing.complete("DONE");
+        store.add(&existing).unwrap();
+
+        // Only entropy is controlled: collision detection and persistence use
+        // the actual store, including completed rows from earlier sessions.
+        let mut entropy = [0xbeef, 0xbeef, 0xcafe].into_iter();
+        let id = store
+            .generate_id_with_random(|| entropy.next().expect("unused candidate available"))
+            .unwrap();
+        assert_eq!(id, "loop-000000000000cafe");
+        let state = Loop::new(
+            id.clone(),
+            "new-session".into(),
+            "New loop".into(),
+            "/new".into(),
+        );
+        store.add(&state).unwrap();
+
+        let retrieved = store.get(&id).unwrap();
+        assert_eq!(retrieved.session_id, "new-session");
+        assert_eq!(retrieved.prompt, "New loop");
+        let old = store.get(&existing.id).unwrap();
+        assert_eq!(old.session_id, existing.session_id);
+        assert_eq!(old.prompt, existing.prompt);
+        assert_eq!(old.status, LoopStatus::Completed);
+        assert_eq!(old.end_reason, existing.end_reason);
+    }
+
+    #[test]
+    fn generated_loop_id_returns_error_when_random_candidates_keep_colliding() {
+        let (store, _dir) = create_test_store();
+        let existing = Loop::new(
+            "loop-000000000000beef".into(),
+            "old-session".into(),
+            "Keep this loop".into(),
+            "/old".into(),
+        );
+        store.add(&existing).unwrap();
+
+        let error = store.generate_id_with_random(|| 0xbeef).unwrap_err();
+        assert!(matches!(error, StoreError::Other(_)));
+        assert_eq!(store.get(&existing.id).unwrap().prompt, existing.prompt);
+        assert_eq!(store.list_recent(2).unwrap().len(), 1);
     }
 
     #[test]

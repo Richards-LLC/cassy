@@ -6,11 +6,486 @@
 //! Includes PtyRunner-based tests that verify output in a real terminal.
 
 use assert_cmd::Command;
-use cas_tui_test::{PtyRunner, PtyRunnerConfig, WaitExt, screen, screen_with_size};
+use cas_tui_test::{PtyRunner, PtyRunnerConfig, WaitExt, screen_with_size};
 use predicates::prelude::*;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
+
+#[derive(Clone, Copy, Debug)]
+enum ReportKind {
+    Doctor,
+    Status,
+    Version,
+    Help,
+}
+
+// External report fixtures: doctor ends in its summary/verbose hint, while
+// status reports the entry/rule/high-value counts on one complete row.
+const COMPLETE_DOCTOR_REPORT: &str = "Store  [OK] database  [OK] schema\n29 ok · 3 warnings · 0 errors · 2ms\ncas doctor --verbose for timings and full messages\n";
+const COMPLETE_STATUS_REPORT: &str = "cas: 2 entries, 0 rules (0 proven), 0 high-value\n";
+// Independently authored 80-column rendering of the joined receipt. The split
+// through "full" is the shape observed in the assembly failure (cas-bca0).
+const WRAPPED_DOCTOR_REPORT_80COL: &str = "Store  [OK] database  [OK] schema\n29 ok · 3 warnings · 0 errors · 498ms · cas doctor --verbose for timings and ful\nl messages\n";
+
+// Verbatim captured output, kept alongside the independently authored fixtures.
+// Doctor PTY: daemon nextest log 215ea2978962d1e4516bc8a8918d211fc8af3f3e7a7dcb2af54dc73ccbb7a408,
+// pty_doctor_output (80x24 terminal; 200-row rendered screen), exit Success.
+// Piped doctor/status/help/version: installed cas build ee98022 (2026-09-30),
+// isolated init --yes project, COLUMNS=4000, NO_COLOR=1, all exit 0.
+// Only version tokens use the package version; all other captured bytes,
+// including temporary paths, timings and terminal wraps, remain verbatim.
+const CAPTURED_DOCTOR_PTY_REPORT: &str = concat!(
+    "doctor found safe automatic fixes; apply now? [y/N]\n[WARN] 3 warnings · 29 ok · .tmp1sqccl · ",
+    env!("CARGO_PKG_VERSION"),
+    "\n────────────────────────────────────────────────────────────────────────────────\nHost          [OK] registered project roots\n  [WARN] host  host: 3 findings — see `cas doctor --host`\nStore         [OK] cas directory  [OK] prompt hook  [OK] database  [OK] schema\n[OK] tables  [OK] entry store  [OK] memory stats  [OK] memory decay  [OK] rules\n [OK] tasks  [OK] cloud team-only\nIndexes       [OK] legacy search index  [OK] symbol index  [OK] embedding drain\n [OK] embeddings\n  [WARN] search index        Index not found at /tmp/.tmp1SQCcL/.cas/index/tanti\nvy-v15. Will be created on first search; Run a search to build it\n  [WARN] code history index  cannot check code history index: not a git reposito\nry: /tmp/.tmp1SQCcL (fatal: not a git repository (or any parent up to mount poin\nt /) Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).)\nCloud         [OK] supervisor relay  [OK] delivery retries  [OK] canonical id  [\nOK] cloud sync queue  [OK] cross-project rows\nConfig        [OK] SessionStart budget  [OK] configuration  [OK] issue repositor\nies  [OK] MCP stdio upstreams  [OK] MCP upstream reachability  [OK] sync target\n [OK] mcp config\nIntegrations  [OK] integrations\n\n29 ok · 3 warnings · 0 errors · 498ms · cas doctor --verbose for timings and ful\nl messages\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+);
+const CAPTURED_DOCTOR_PIPED_REPORT: &str = concat!(
+    "[WARN] 3 warnings · 29 ok · cas-bca0-capture-trsxxe38 · ",
+    env!("CARGO_PKG_VERSION"),
+    "\n────────────────────────────────────────────────────────────────────────────────\nHost          [OK] registered project roots\n  [WARN] host  host: 3 findings — see `cas doctor --host`\nStore         [OK] cas directory  [OK] prompt hook  [OK] database  [OK] schema  [OK] tables  [OK] entry store  [OK] memory stats  [OK] memory decay  [OK] rules  [OK] tasks  [OK] cloud team-only\nIndexes       [OK] legacy search index  [OK] symbol index  [OK] embedding drain  [OK] embeddings\n  [WARN] search index        Index not found at /tmp/cas-bca0-capture-trsxxe38/.cas/index/tantivy-v15. Will be created on first search; Run a search to build it\n  [WARN] code history index  cannot check code history index: not a git repository: /tmp/cas-bca0-capture-trsxxe38 (fatal: not a git repository (or any parent up to mount point /) Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).)\nCloud         [OK] supervisor relay  [OK] delivery retries  [OK] canonical id  [OK] cloud sync queue  [OK] cross-project rows\nConfig        [OK] SessionStart budget  [OK] configuration  [OK] issue repositories  [OK] MCP stdio upstreams  [OK] MCP upstream reachability  [OK] sync target  [OK] mcp config\nIntegrations  [OK] integrations\n\n29 ok · 3 warnings · 0 errors · 400ms · cas doctor --verbose for timings and full messages\n"
+);
+const CAPTURED_VERSION_REPORT: &str =
+    concat!("cas ", env!("CARGO_PKG_VERSION"), " (ee98022 2026-09-30)\n");
+const CAPTURED_STATUS_REPORT: &str = "cas: 0 entries, 0 rules (0 proven), 0 high-value\n";
+const CAPTURED_HELP_REPORT: &str = "Cassy\n\nCassy — a multi-agent coding factory with persistent memory and task coordination\n\nUsage: cas [OPTIONS] [COMMAND]\n\nCommands:\n  open              Interactive project picker — scan ~/projects/, select, launch or attach\n  init              Initialize Cassy in current directory\n  setup             Guide a complete machine through installation, login, pairing, and a first project\n  attach            Attach to a running factory session\n  list              List running factory sessions\n  kill              Terminate a factory session\n  kill-all          Terminate all factory sessions\n  factory           Launch factory session (bare `cas` runs factory with defaults)\n  claude            Launch factory with Claude as the supervisor on a chosen account profile\n  codex             Launch factory with Codex as the supervisor on a chosen account profile\n  grok              Launch factory with Grok as the supervisor (shortcut for `cas factory --supervisor-cli=grok`)\n  default           Set the default supervisor provider without launching (persist only)\n  bridge            Local helper server for external orchestration tools\n  hub               Stable machine-local Commander hub\n  serve             Run the CAS MCP server\n  doctor            Run diagnostics\n  viktor            Show credential-safe provisioning status for the managed Viktor gateway\n  config            Manage configuration\n  status            Show session status\n  limits            Show local provider rate-limit and credit availability\n  status-line       Output a status line for agent integrations\n  hook              Handle Claude Code hook events\n  auth              Authentication commands (login, logout, whoami)\n  login             Log in to Cassy Cloud (shortcut for 'auth login')\n  logout            Log out (shortcut for 'auth logout')\n  whoami            Show current user (shortcut for 'auth whoami')\n  update            Update Cassy to the latest version\n  changelog         Show release notes and changelog from GitHub releases\n  release           Release lifecycle helpers\n  mcp               Manage upstream MCP servers\n  queue             Prompt queue operations (poll/ack for native extensions)\n  cloud             Sync data with Cassy Cloud\n  device            Manage registered devices\n  sync              Synchronize generated project files\n  claude-md         Evaluate and optimize CLAUDE.md files for token efficiency\n  codemap           Codemap staleness info and pending changes\n  history           Structural git-history index (backfill/status)\n  index             Build local search indexes on demand (`cas index code`)\n  artifact          Publish and inspect durable task artifacts (publish/show/list)\n  knowledge         Distilled project knowledge wiki (build/status/list)\n  memory-migrate    Migrate the legacy memory store into knowledge pages\n  project-overview  PRODUCT_OVERVIEW.md staleness info and pending changes\n  integrate         Auto-integrate the project with Vercel/Neon/GitHub (writes SKILL files)\n  memory            Share or unshare personal memories with your team (retroactive)\n  known-repos       Inspect and bootstrap the host-scoped known_repos registry\n  worktree          Worktree-scoped diagnostics and maintenance (sweep, ...)\n  sweep-all         Shortcut for `cas worktree sweep --all-repos`\n  help              Print this message or the help of the given subcommand(s)\n\nOptions:\n      --json     Output in JSON format\n      --full     Include full content in JSON output\n  -v, --verbose  Verbose output\n  -h, --help     Print help\n  -V, --version  Print version\n";
+
+#[test]
+fn pty_report_validation_accepts_captured_wrapped_doctor() {
+    assert!(!CAPTURED_DOCTOR_PTY_REPORT.contains(DOCTOR_COMPLETION));
+    assert!(CAPTURED_DOCTOR_PTY_REPORT.contains("for timings and ful\nl messages"));
+    validate_report_text(CAPTURED_DOCTOR_PTY_REPORT, true, ReportKind::Doctor, false)
+        .expect("verbatim successful Doctor output from the 80-column PTY");
+    let error = validate_report_text(CAPTURED_DOCTOR_PTY_REPORT, false, ReportKind::Doctor, false)
+        .expect_err("a real report cannot hide a failed child");
+    assert!(error.contains("child failed"), "{error}");
+}
+
+#[test]
+#[cfg(unix)]
+fn report_validation_accepts_captured_cli_reports() {
+    for (kind, report) in [
+        (ReportKind::Doctor, CAPTURED_DOCTOR_PIPED_REPORT),
+        (ReportKind::Status, CAPTURED_STATUS_REPORT),
+        (ReportKind::Version, CAPTURED_VERSION_REPORT),
+        (ReportKind::Help, CAPTURED_HELP_REPORT),
+    ] {
+        let output = report_fixture(report, "0");
+        let accepted = validate_piped_report(&output, kind).expect("verbatim real CLI report");
+        assert_eq!(accepted, report);
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn report_validation_rejects_failed_children_with_captured_reports() {
+    for (kind, report) in [
+        (ReportKind::Doctor, CAPTURED_DOCTOR_PIPED_REPORT),
+        (ReportKind::Status, CAPTURED_STATUS_REPORT),
+        (ReportKind::Version, CAPTURED_VERSION_REPORT),
+        (ReportKind::Help, CAPTURED_HELP_REPORT),
+    ] {
+        let output = report_fixture(report, "23");
+        let error = validate_piped_report(&output, kind).expect_err("failed real-report child");
+        assert!(error.contains("child failed"), "{error}");
+    }
+}
+
+#[test]
+fn version_report_validation_rejects_incomplete_build_suffixes() {
+    for report in [
+        "cas 9.9.9 (ee98022)\n",
+        "cas 9.9.9 (ee98022 2026-09-30\n",
+        "cas 9.9.9 (ee98022 2026-09-30) extra\n",
+        "$ cas --version (ee98022 2026-09-30)\n",
+    ] {
+        let error = validate_report_text(report, true, ReportKind::Version, true)
+            .expect_err("incomplete build metadata or command echo is not a version report");
+        assert!(error.contains("missing completed"), "{error}");
+    }
+}
+
+#[test]
+fn pty_report_validation_accepts_doctor_footer_wrapped_at_80_columns() {
+    assert_eq!(
+        WRAPPED_DOCTOR_REPORT_80COL
+            .lines()
+            .nth(1)
+            .unwrap()
+            .chars()
+            .count(),
+        80
+    );
+    assert!(!WRAPPED_DOCTOR_REPORT_80COL.contains(DOCTOR_COMPLETION));
+    validate_report_text(WRAPPED_DOCTOR_REPORT_80COL, true, ReportKind::Doctor, false)
+        .expect("a completed terminal report may wrap through a word");
+
+    // Only the PTY interpretation is tolerant of terminal wraps; piped output
+    // must continue to contain the exact completion text.
+    let error = validate_report_text(WRAPPED_DOCTOR_REPORT_80COL, true, ReportKind::Doctor, true)
+        .expect_err("piped completion matching remains exact");
+    assert!(error.contains("missing completed"), "{error}");
+    let error = validate_report_text(
+        WRAPPED_DOCTOR_REPORT_80COL,
+        false,
+        ReportKind::Doctor,
+        false,
+    )
+    .expect_err("wrapped output cannot turn a failed child into success");
+    assert!(error.contains("child failed"), "{error}");
+    let truncated = WRAPPED_DOCTOR_REPORT_80COL.trim_end_matches("l messages\n");
+    let error = validate_report_text(truncated, true, ReportKind::Doctor, false)
+        .expect_err("a truncated completion row is not a completed report");
+    assert!(error.contains("missing completed"), "{error}");
+}
+
+#[test]
+#[cfg(unix)]
+fn pty_report_validation_accepts_real_80_column_wrap() {
+    // Print one logical 90-column receipt into an actual 80-column PTY. The
+    // screen parser must render the same split as the independent fixture.
+    let report = "Store  [OK] database  [OK] schema\n29 ok · 3 warnings · 0 errors · 498ms · cas doctor --verbose for timings and full messages\n";
+    let mut runner = PtyRunner::with_config(PtyRunnerConfig::with_size(80, 24));
+    runner
+        .spawn(
+            "sh",
+            &["-c", "printf '%s' \"$1\"", "report-fixture", report],
+        )
+        .unwrap();
+    let captured = completed_pty_report(&mut runner, ReportKind::Doctor)
+        .expect("a successful report wrapped by the real PTY");
+    assert_eq!(
+        screen_with_size(&captured, 80, 200).text().trim_end(),
+        WRAPPED_DOCTOR_REPORT_80COL.trim_end()
+    );
+}
+
+#[cfg(unix)]
+fn report_fixture(stdout: &str, exit_code: &str) -> std::process::Output {
+    std::process::Command::new("sh")
+        .args([
+            "-c",
+            "printf '%s' \"$1\"; exit \"$2\"",
+            "report-fixture",
+            stdout,
+            exit_code,
+        ])
+        .output()
+        .expect("run report fixture child")
+}
+
+#[test]
+#[cfg(unix)]
+fn report_validation_rejects_command_echo() {
+    for (kind, echo) in [
+        (ReportKind::Doctor, "$ cas doctor\n"),
+        (ReportKind::Status, "$ cas status\n"),
+        (ReportKind::Version, "$ cas --version\n"),
+        (ReportKind::Help, "$ cas --help\n"),
+    ] {
+        let output = report_fixture(echo, "0");
+        let error = validate_piped_report(&output, kind).expect_err("echo is not a report");
+        assert!(error.contains("missing completed"), "{error}");
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn report_validation_rejects_empty_success() {
+    let output = report_fixture("", "0");
+    for kind in [
+        ReportKind::Doctor,
+        ReportKind::Status,
+        ReportKind::Version,
+        ReportKind::Help,
+    ] {
+        let error =
+            validate_piped_report(&output, kind).expect_err("empty success is not a report");
+        assert!(error.contains("missing completed"), "{error}");
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn report_validation_rejects_failed_children_with_completed_output() {
+    for (kind, report) in [
+        (ReportKind::Doctor, COMPLETE_DOCTOR_REPORT),
+        (ReportKind::Status, COMPLETE_STATUS_REPORT),
+        (ReportKind::Version, "cas 1.2.3\n"),
+        (ReportKind::Help, "Cassy\nUsage: cas [OPTIONS] <COMMAND>\n"),
+    ] {
+        let output = report_fixture(report, "23");
+        let error = validate_piped_report(&output, kind).expect_err("failed child is not success");
+        assert!(error.contains("child failed"), "{error}");
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn report_validation_accepts_completed_successful_reports() {
+    for (kind, report) in [
+        (ReportKind::Doctor, COMPLETE_DOCTOR_REPORT),
+        (ReportKind::Status, COMPLETE_STATUS_REPORT),
+        (ReportKind::Version, "cas 1.2.3\n"),
+        (ReportKind::Help, "Cassy\nUsage: cas [OPTIONS] <COMMAND>\n"),
+    ] {
+        let output = report_fixture(report, "0");
+        let accepted = validate_piped_report(&output, kind).expect("completed successful report");
+        assert_eq!(accepted, report);
+    }
+    let ascii = report_fixture(&COMPLETE_DOCTOR_REPORT.replace('·', "-"), "0");
+    validate_piped_report(&ascii, ReportKind::Doctor).expect("completed ASCII doctor report");
+}
+
+#[test]
+#[cfg(unix)]
+fn plain_report_validation_rejects_ansi_in_completed_output() {
+    let output = report_fixture(&format!("\x1b[32m{COMPLETE_STATUS_REPORT}\x1b[0m"), "0");
+    let error = validate_piped_report(&output, ReportKind::Status).expect_err("ANSI is forbidden");
+    assert!(error.contains("ANSI"), "{error}");
+}
+
+#[test]
+#[cfg(unix)]
+fn pty_report_validation_rejects_echo_empty_and_failed_children() {
+    for (kind, stdout, exit_code, cause) in [
+        (
+            ReportKind::Doctor,
+            "$ cas doctor\n",
+            "0",
+            "missing completed",
+        ),
+        (
+            ReportKind::Doctor,
+            "$ cas doctor --verbose for timings and full messages\n",
+            "0",
+            "missing completed",
+        ),
+        (
+            ReportKind::Status,
+            "$ cas status\n",
+            "0",
+            "missing completed",
+        ),
+        (ReportKind::Doctor, "", "0", "missing completed"),
+        (ReportKind::Status, "", "0", "missing completed"),
+        (
+            ReportKind::Doctor,
+            COMPLETE_DOCTOR_REPORT,
+            "23",
+            "child failed",
+        ),
+        (
+            ReportKind::Doctor,
+            WRAPPED_DOCTOR_REPORT_80COL,
+            "23",
+            "child failed",
+        ),
+        (
+            ReportKind::Status,
+            COMPLETE_STATUS_REPORT,
+            "23",
+            "child failed",
+        ),
+    ] {
+        let mut runner = PtyRunner::new();
+        runner
+            .spawn(
+                "sh",
+                &[
+                    "-c",
+                    "printf '%s' \"$1\"; exit \"$2\"",
+                    "report-fixture",
+                    stdout,
+                    exit_code,
+                ],
+            )
+            .unwrap();
+        let error = completed_pty_report(&mut runner, kind).expect_err("invalid PTY report");
+        assert!(error.contains(cause), "{error}");
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn pty_report_validation_accepts_completed_successful_children() {
+    for (kind, report) in [
+        (ReportKind::Doctor, COMPLETE_DOCTOR_REPORT),
+        (ReportKind::Status, COMPLETE_STATUS_REPORT),
+    ] {
+        let mut runner = PtyRunner::new();
+        runner
+            .spawn(
+                "sh",
+                &["-c", "printf '%s' \"$1\"", "report-fixture", report],
+            )
+            .unwrap();
+        let captured = completed_pty_report(&mut runner, kind).expect("completed PTY report");
+        assert!(
+            screen_with_size(&captured, 80, 200)
+                .text()
+                .contains(report.lines().next().unwrap())
+        );
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn pty_report_rejects_completed_output_from_a_running_child() {
+    let mut runner = PtyRunner::new();
+    runner
+        .spawn(
+            "sh",
+            &[
+                "-c",
+                "printf '%s' \"$1\"; exec sleep 30",
+                "report-fixture",
+                COMPLETE_STATUS_REPORT,
+            ],
+        )
+        .unwrap();
+    runner
+        .wait_for_text_timeout("2 entries, 0 rules", Duration::from_secs(2))
+        .unwrap();
+    let error =
+        completed_pty_report_timeout(&mut runner, ReportKind::Status, Duration::from_millis(100))
+            .expect_err("a printed report does not prove child completion");
+    assert!(error.contains("timed out"), "{error}");
+    assert!(
+        !runner.is_running(),
+        "timed-out fixture child must be reaped"
+    );
+}
+
+#[test]
+fn snapshot_redaction_preserves_stable_counts() {
+    let report = "host: 7 findings — see `cas doctor --host`\ncas: 2 entries, 3 rules (1 proven), 4 high-value\nEntries: 2\nTasks: 5\nSchema: 42\n";
+    assert_eq!(
+        redact_dynamic_values(report),
+        "host: [N] finding(s) — see `cas doctor --host`\ncas: 2 entries, 3 rules (1 proven), 4 high-value\nEntries: 2\nTasks: 5\nSchema: 42\n"
+    );
+}
+
+const DOCTOR_COMPLETION: &str = "cas doctor --verbose for timings and full messages";
+const STATUS_REPORT_PATTERN: &str = r"(?m)^\s*cas: \d+ entries, \d+ rules \(\d+ proven\), \d+ high-value(?:, \d+ code symbols)?\s*$";
+
+fn has_doctor_completion(stdout: &str, terminal_wrapped: bool) -> bool {
+    if stdout.contains(DOCTOR_COMPLETION) {
+        return true;
+    }
+    if !terminal_wrapped {
+        return false;
+    }
+    // Screen text inserts newlines even inside a word when a logical receipt
+    // wraps at the PTY's width. Ignore display whitespace only for this hint;
+    // the report's section/summary checks and child exit stay mandatory.
+    let compact: String = stdout.chars().filter(|c| !c.is_whitespace()).collect();
+    let completion: String = DOCTOR_COMPLETION
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    compact.contains(&completion)
+}
+
+/// Shared by real CLI/PTY tests and the negative child fixtures above. A clean
+/// buffer alone cannot prove a successful render: both completion and exit
+/// success are required before the no-ANSI assertion can pass.
+fn validate_report_text(
+    stdout: &str,
+    child_succeeded: bool,
+    report: ReportKind,
+    require_plain: bool,
+) -> Result<(), String> {
+    if !child_succeeded {
+        return Err(format!(
+            "child failed while rendering {report:?}:\n{stdout}"
+        ));
+    }
+    if require_plain && stdout.contains('\x1b') {
+        return Err(format!("unexpected ANSI in {report:?} report:\n{stdout}"));
+    }
+    let completed = match report {
+        ReportKind::Doctor => stdout.contains("Store")
+            && stdout.contains("database")
+            && stdout.contains("schema")
+            && has_doctor_completion(stdout, !require_plain)
+            && regex::Regex::new(
+                r"(?m)^\s*\d+ ok [·-] (?:\d+ info [·-] )?\d+ warnings [·-] \d+ errors [·-] [^\n]+",
+            )
+            .unwrap()
+            .is_match(stdout),
+        ReportKind::Status => regex::Regex::new(STATUS_REPORT_PATTERN)
+            .unwrap()
+            .is_match(stdout),
+        ReportKind::Version => regex::Regex::new(r"(?m)^cas \d+\.\d+\.\d+(?:[-+][^\s]+)?(?: \((?:[0-9a-f]+(?:-dirty)?|unknown(?:-dirty)?) (?:\d{4}-\d{2}-\d{2}|unknown)\))?\r?$")
+            .unwrap()
+            .is_match(stdout),
+        ReportKind::Help => stdout.starts_with("Cassy\n") && stdout.contains("Usage: cas"),
+    };
+    if !completed {
+        return Err(format!("missing completed {report:?} report:\n{stdout}"));
+    }
+    Ok(())
+}
+
+fn validate_piped_report(
+    output: &std::process::Output,
+    report: ReportKind,
+) -> Result<String, String> {
+    let stdout = String::from_utf8(output.stdout.clone()).map_err(|error| error.to_string())?;
+    validate_report_text(&stdout, output.status.success(), report, true).map_err(|error| {
+        format!(
+            "{error}\nexit: {}\nstderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })?;
+    Ok(stdout)
+}
+
+fn completed_pty_report(runner: &mut PtyRunner, report: ReportKind) -> Result<String, String> {
+    completed_pty_report_timeout(runner, report, Duration::from_secs(10))
+}
+
+fn completed_pty_report_timeout(
+    runner: &mut PtyRunner,
+    report: ReportKind,
+    timeout: Duration,
+) -> Result<String, String> {
+    let deadline = Instant::now() + timeout;
+    while runner.is_running() {
+        if Instant::now() >= deadline {
+            let output = runner.get_output().as_str();
+            runner.kill().map_err(|error| error.to_string())?;
+            runner
+                .wait()
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "killed PTY child returned no exit status".to_string())?;
+            return Err(format!(
+                "timed out waiting for {report:?} child completion:\n{output}"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let status = runner
+        .wait()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "PTY child returned no exit status".to_string())?;
+    // Child exit and the reader thread draining the last PTY bytes are separate
+    // events. Collect stable output only after exit, then validate the final row.
+    let output = runner.wait_stable().map_err(|error| error.to_string())?;
+    let rendered = screen_with_size(&output, 80, 200).text();
+    validate_report_text(&rendered, status.success(), report, false)
+        .map_err(|error| format!("{error}\nexit: {status}"))?;
+    Ok(output)
+}
+
+fn decline_doctor_autofix(runner: &mut PtyRunner) {
+    runner
+        .wait_for_text_timeout("doctor found safe automatic fixes", Duration::from_secs(10))
+        .expect("fresh fixture must offer safe doctor fixes");
+    runner.send_input("n").expect("decline automatic fixes");
+}
 
 fn cas_cmd(dir: &Path) -> Command {
     let mut cmd = Command::new(cas::test_paths::cas_binary());
@@ -64,17 +539,7 @@ fn doctor_piped_no_ansi() {
         .output()
         .expect("failed to run cas doctor");
 
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    // Piped output should contain no ANSI escape sequences
-    assert!(
-        !stdout.contains('\x1b'),
-        "Piped output contains ANSI escape codes:\n{stdout}"
-    );
-    // Should contain key doctor output
-    assert!(
-        stdout.contains("Doctor") || stdout.contains("doctor") || stdout.contains("Store"),
-        "Doctor output missing expected content:\n{stdout}"
-    );
+    validate_piped_report(&output, ReportKind::Doctor).expect("successful complete plain report");
 }
 
 #[test]
@@ -88,11 +553,7 @@ fn doctor_no_color_env() {
         .output()
         .expect("failed to run cas doctor");
 
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        !stdout.contains('\x1b'),
-        "NO_COLOR=1 output contains ANSI escape codes:\n{stdout}"
-    );
+    validate_piped_report(&output, ReportKind::Doctor).expect("successful complete plain report");
 }
 
 #[test]
@@ -105,11 +566,7 @@ fn status_piped_no_ansi() {
         .output()
         .expect("failed to run cas status");
 
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        !stdout.contains('\x1b'),
-        "Piped status output contains ANSI escape codes:\n{stdout}"
-    );
+    validate_piped_report(&output, ReportKind::Status).expect("successful complete plain report");
 }
 
 #[test]
@@ -123,11 +580,7 @@ fn status_no_color_env() {
         .output()
         .expect("failed to run cas status");
 
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        !stdout.contains('\x1b'),
-        "NO_COLOR=1 status output contains ANSI escape codes:\n{stdout}"
-    );
+    validate_piped_report(&output, ReportKind::Status).expect("successful complete plain report");
 }
 
 // ============================================================================
@@ -154,15 +607,7 @@ fn version_piped_no_ansi() {
         .output()
         .expect("failed to run cas --version");
 
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        !stdout.contains('\x1b'),
-        "Version output contains ANSI escape codes:\n{stdout}"
-    );
-    assert!(
-        stdout.contains("cas"),
-        "Version output missing 'cas': {stdout}"
-    );
+    validate_piped_report(&output, ReportKind::Version).expect("successful complete plain report");
 }
 
 #[test]
@@ -173,19 +618,7 @@ fn help_piped_no_ansi() {
         .output()
         .expect("failed to run cas --help");
 
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        !stdout.contains('\x1b'),
-        "Help output contains ANSI escape codes:\n{stdout}"
-    );
-    assert!(
-        stdout.starts_with("Cassy\n"),
-        "Piped help must fall back to the plain Cassy wordmark:\n{stdout}"
-    );
-    assert!(
-        stdout.contains("Usage: cas"),
-        "The command usage must remain `cas`:\n{stdout}"
-    );
+    validate_piped_report(&output, ReportKind::Help).expect("successful complete plain report");
 }
 
 // ============================================================================
@@ -203,7 +636,8 @@ fn doctor_snapshot() {
         .output()
         .expect("failed to run cas doctor");
 
-    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stdout = validate_piped_report(&output, ReportKind::Doctor)
+        .expect("successful complete snapshot input");
     // Redact dynamic values (paths, timestamps, sizes)
     let redacted = redact_dynamic_values(&stdout);
     insta::assert_snapshot!(redacted);
@@ -220,7 +654,12 @@ fn status_empty_snapshot() {
         .output()
         .expect("failed to run cas status");
 
-    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stdout = validate_piped_report(&output, ReportKind::Status)
+        .expect("successful complete snapshot input");
+    assert_eq!(
+        stdout.trim(),
+        "cas: 0 entries, 0 rules (0 proven), 0 high-value"
+    );
     let redacted = redact_dynamic_values(&stdout);
     insta::assert_snapshot!(redacted);
 }
@@ -245,6 +684,8 @@ fn pty_cas_in_dir(dir: &TempDir, args: &[&str]) -> PtyRunner {
         .env("XDG_CONFIG_HOME", xdg.to_string_lossy())
         .env("CAS_SKIP_FACTORY_TOOLING", "1")
         .env_remove("CAS_ROOT")
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CODEX_HOME")
         .cwd(dir.path());
     if let Some(host_home) = std::env::var_os("HOME") {
         config = config.env("CAS_TEST_PROTECTED_HOME", host_home.to_string_lossy());
@@ -261,18 +702,13 @@ fn pty_doctor_output() {
 
     let mut runner = pty_cas_in_dir(&temp, &["doctor"]);
 
-    // Wait for doctor output to appear
-    let result = runner.wait_for_text_timeout("doctor", Duration::from_secs(10));
-    assert!(result.is_ok(), "Should find 'doctor' in PTY output");
-
-    let output = runner.get_output().as_str();
-    // Render tall enough to hold the whole report. The default 24-row screen
-    // made this assertion depend on the report's LENGTH, not on whether doctor
-    // rendered: the command echo sits on line 3, so the first check added to
-    // doctor after the report reached 24 lines scrolls the echo off the top and
-    // fails a test that is supposed to be about PTY rendering.
-    let scr = screen_with_size(&output, 80, 200);
-    scr.assert_contains("doctor").unwrap();
+    decline_doctor_autofix(&mut runner);
+    let output = completed_pty_report(&mut runner, ReportKind::Doctor)
+        .expect("doctor must complete successfully with its final report row");
+    assert!(has_doctor_completion(
+        &screen_with_size(&output, 80, 200).text(),
+        true
+    ));
 }
 
 #[test]
@@ -282,13 +718,11 @@ fn pty_status_output() {
 
     let mut runner = pty_cas_in_dir(&temp, &["status"]);
 
-    // Wait for status output
-    let result = runner.wait_for_text_timeout("cas", Duration::from_secs(10));
-    assert!(result.is_ok(), "Should find 'cas' in PTY status output");
-
-    let output = runner.get_output().as_str();
-    let scr = screen(&output);
-    scr.assert_contains("cas").unwrap();
+    let output = completed_pty_report(&mut runner, ReportKind::Status)
+        .expect("status must complete successfully with its count row");
+    screen_with_size(&output, 80, 200)
+        .assert_matches(STATUS_REPORT_PATTERN)
+        .unwrap();
 }
 
 #[test]
@@ -298,21 +732,9 @@ fn pty_doctor_has_expected_sections() {
 
     let mut runner = pty_cas_in_dir(&temp, &["doctor"]);
 
-    // TTY doctor offers the safe auto-fix set before rendering the report.
-    // Decline it so this section test can observe the full report.
-    runner
-        .wait_for_text_timeout("doctor found safe automatic fixes", Duration::from_secs(10))
-        .unwrap();
-    runner.send_input("n").unwrap();
-
-    // Wait for the output to stabilize
-    runner
-        .wait_for_text_timeout("Store", Duration::from_secs(10))
-        .unwrap();
-
-    let output = runner.get_output().as_str();
-    // New migration-accounted doctor checks may extend the report beyond the
-    // default 24-row terminal. This test verifies sections, not scrollback.
+    decline_doctor_autofix(&mut runner);
+    let output = completed_pty_report(&mut runner, ReportKind::Doctor)
+        .expect("doctor sections must belong to a completed successful report");
     let scr = screen_with_size(&output, 80, 200);
 
     // Verify key sections are present
@@ -434,15 +856,11 @@ fn redact_dynamic_values(s: &str) -> String {
         .replace_all(&result, "$1 · [PROJECT] ·")
         .to_string();
 
-    // Redact counts that follow "entries:", "tasks:", etc.
-    let count_re = regex::Regex::new(r":\s+\d+\b").unwrap();
-    result = count_re.replace_all(&result, ": [N]").to_string();
-
-    // The host finding count depends on which provider CLIs the machine has
-    // installed (hub launch readiness), so its plural is machine-specific too.
-    let findings_re = regex::Regex::new(r"\[N\] findings?\b").unwrap();
+    // Host findings depend on which provider CLIs are installed. Entry/task/
+    // rule/schema counts come from the fixture and must remain visible.
+    let findings_re = regex::Regex::new(r"(\bhost:\s+)\d+ findings?\b").unwrap();
     result = findings_re
-        .replace_all(&result, "[N] finding(s)")
+        .replace_all(&result, "${1}[N] finding(s)")
         .to_string();
 
     result

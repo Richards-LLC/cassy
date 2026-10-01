@@ -17,6 +17,7 @@
 //! still covers the env-var legacy path.
 
 use crate::hooks::handlers::handle_pre_tool_use;
+use crate::test_support::TestEnvGuard;
 use cas_core::hooks::types::HookInput;
 
 fn agent_input_with_role(role: Option<&str>, isolation: Option<&str>) -> HookInput {
@@ -73,9 +74,9 @@ fn supervisor_agent_worktree_is_denied() {
     // the way production always does, rather than leaving the prefix to
     // whatever CAS_AGENT_ROLE/CAS_FACTORY_SUPERVISOR_CLI the ambient process
     // happens to have.
-    let _g = env_lock();
-    let _role = set_role_env(Some("supervisor"));
-    let _cli = set_supervisor_cli_env(Some("claude"));
+    let mut env = TestEnvGuard::new();
+    super::set_role_env(&mut env, Some("supervisor"));
+    super::set_supervisor_cli_env(&mut env, Some("claude"));
 
     let input = agent_input_with_role(Some("supervisor"), Some("worktree"));
     let out = handle_pre_tool_use(&input, None).expect("handler ok");
@@ -101,9 +102,9 @@ fn supervisor_agent_worktree_is_denied() {
 /// unconditionally.
 #[test]
 fn grok_supervisor_agent_worktree_is_denied_with_cas_prefix() {
-    let _g = env_lock();
-    let _role = set_role_env(Some("supervisor"));
-    let _cli = set_supervisor_cli_env(Some("grok"));
+    let mut env = TestEnvGuard::new();
+    super::set_role_env(&mut env, Some("supervisor"));
+    super::set_supervisor_cli_env(&mut env, Some("grok"));
 
     let input = agent_input_with_role(Some("supervisor"), Some("worktree"));
     let out = handle_pre_tool_use(&input, None).expect("handler ok");
@@ -159,8 +160,8 @@ fn solo_user_agent_worktree_is_allowed() {
     // No role at all — plain `claude` session outside factory. This test
     // exercises the fallback path (agent_role=None → read env), so it must
     // serialize against the only other env-touching test in this module.
-    let _g = env_lock();
-    let _role = set_role_env(None);
+    let mut env = TestEnvGuard::new();
+    super::set_role_env(&mut env, None);
     let input = agent_input_with_role(None, Some("worktree"));
     let out = handle_pre_tool_use(&input, None).expect("handler ok");
     assert!(
@@ -269,68 +270,11 @@ fn supervisor_role_case_insensitive() {
 // guards the legacy path.
 // ============================================================================
 
-/// Use the shared process-wide mutex from mod.rs so that concurrent tests
-/// across sibling modules don't race on CAS_AGENT_ROLE.
-fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    super::env_lock()
-}
-
-struct RoleGuard(Option<String>);
-
-impl Drop for RoleGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match &self.0 {
-                Some(v) => std::env::set_var("CAS_AGENT_ROLE", v),
-                None => std::env::remove_var("CAS_AGENT_ROLE"),
-            }
-        }
-    }
-}
-
-fn set_role_env(role: Option<&str>) -> RoleGuard {
-    let prev = std::env::var("CAS_AGENT_ROLE").ok();
-    unsafe {
-        match role {
-            Some(v) => std::env::set_var("CAS_AGENT_ROLE", v),
-            None => std::env::remove_var("CAS_AGENT_ROLE"),
-        }
-    }
-    RoleGuard(prev)
-}
-
-/// EPIC cas-8888 (cas-fd9f): pins `CAS_FACTORY_SUPERVISOR_CLI` for tests that
-/// assert a specific tool-prefix in the deny/reminder text (see
-/// `harness_policy::own_tool_prefix`).
-struct SupervisorCliGuard(Option<String>);
-
-impl Drop for SupervisorCliGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match &self.0 {
-                Some(v) => std::env::set_var("CAS_FACTORY_SUPERVISOR_CLI", v),
-                None => std::env::remove_var("CAS_FACTORY_SUPERVISOR_CLI"),
-            }
-        }
-    }
-}
-
-fn set_supervisor_cli_env(cli: Option<&str>) -> SupervisorCliGuard {
-    let prev = std::env::var("CAS_FACTORY_SUPERVISOR_CLI").ok();
-    unsafe {
-        match cli {
-            Some(v) => std::env::set_var("CAS_FACTORY_SUPERVISOR_CLI", v),
-            None => std::env::remove_var("CAS_FACTORY_SUPERVISOR_CLI"),
-        }
-    }
-    SupervisorCliGuard(prev)
-}
-
 #[test]
 fn env_fallback_triggers_when_hook_input_role_absent() {
     // agent_role: None — handlers should fall through to CAS_AGENT_ROLE.
-    let _g = env_lock();
-    let _role = set_role_env(Some("supervisor"));
+    let mut env = TestEnvGuard::new();
+    super::set_role_env(&mut env, Some("supervisor"));
 
     let input = HookInput {
         session_id: "test".into(),

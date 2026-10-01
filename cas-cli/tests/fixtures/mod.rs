@@ -8,6 +8,8 @@ mod cas_instance;
 mod hook_instance;
 mod mock_server;
 
+pub use mock_server::CloudMockServer;
+
 #[cfg(any(target_os = "macos", feature = "claude_rs_e2e"))]
 pub use cas_instance::new_cas_instance;
 #[cfg(feature = "claude_rs_e2e")]

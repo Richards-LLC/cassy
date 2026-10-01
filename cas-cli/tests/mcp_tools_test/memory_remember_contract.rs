@@ -46,7 +46,8 @@ fn base_request(content: String, title: &str, tags: &str) -> RememberRequest {
 
 #[tokio::test]
 async fn created_low_overlap_returns_structured_created() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let req = base_request(
         "totally unrelated memory about nothing in particular".to_string(),
@@ -90,7 +91,8 @@ async fn created_low_overlap_returns_structured_created() {
 
 #[tokio::test]
 async fn blocked_high_overlap_returns_structured_blocked() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let body = "sqlite wal hangs on ntfs3 in cas-mcp/src/server.rs because posix_lock is not supported";
     let content = structured_memory("sqlite wal ntfs3", "cas-mcp", body);
@@ -164,7 +166,8 @@ async fn blocked_high_overlap_returns_structured_blocked() {
 
 #[tokio::test]
 async fn mode_interactive_is_equivalent_to_default() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let mut req = base_request(
         "an interactive mode memory with unique content".to_string(),
@@ -183,7 +186,8 @@ async fn mode_interactive_is_equivalent_to_default() {
 
 #[tokio::test]
 async fn mode_autofix_allows_low_overlap_create() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let mut req = base_request(
         "autofix mode attempt".to_string(),
@@ -201,7 +205,8 @@ async fn mode_autofix_allows_low_overlap_create() {
 
 #[tokio::test]
 async fn mode_unknown_value_errors() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let mut req = base_request("unknown mode".to_string(), "x", "x-tag");
     req.mode = Some("yolo".to_string());
@@ -329,13 +334,10 @@ fn recommended_action_surface_for_user_decision_round_trips() {
 /// A handoff of another role is untouched.
 #[tokio::test]
 async fn a_new_handoff_supersedes_the_previous_one_for_its_role_cas_0339() {
-    let (temp, service) = setup_cas();
-    let _env_guard = env_test_lock();
-    // SAFETY: the process-wide env lock is held for the whole test, so no
-    // other test observes this change.
-    unsafe {
-        std::env::remove_var("CAS_AGENT_ROLE");
-    }
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
+
+    test_env.remove("CAS_AGENT_ROLE");
 
     let body = |which: &str| {
         format!(

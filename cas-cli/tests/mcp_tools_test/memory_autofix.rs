@@ -30,7 +30,8 @@ fn request(content: String, title: &str, tags: &str) -> RememberRequest {
 
 #[tokio::test]
 async fn autofix_merges_high_overlap_into_surviving_entry_with_receipt() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
     let title = "sqlite wal ntfs3";
     let tags = "sqlite-wal,ntfs3-fs,mcp-timeout";
 
@@ -78,7 +79,8 @@ async fn autofix_merges_high_overlap_into_surviving_entry_with_receipt() {
 
 #[tokio::test]
 async fn autofix_rejects_a_stale_expected_updated_at_without_mutating() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
     let title = "sqlite wal ntfs3";
     let tags = "sqlite-wal,ntfs3-fs,mcp-timeout";
 
@@ -128,7 +130,8 @@ async fn autofix_rejects_a_stale_expected_updated_at_without_mutating() {
 
 #[tokio::test]
 async fn interactive_high_overlap_remains_blocked() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
     let title = "sqlite wal ntfs3";
     let tags = "sqlite-wal,ntfs3-fs,mcp-timeout";
     let content = structured_memory(

@@ -16,7 +16,7 @@
 
 const LABEL_OPEN = "Attention for this session";
 const LABEL_RAIL = "Conversation context";
-const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])';
+const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]';
 
 /** Give or take the sheet's modal semantics; `modal` false restores the plain rail. */
 export function applySheetSemantics(shell: HTMLElement | null, modal: boolean): void {
@@ -44,7 +44,7 @@ const rendered = (node: HTMLElement): boolean => node.getClientRects().length > 
 
 /** The sheet's focusable controls, in order, skipping hidden ones. */
 export function sheetFocusables(sheet: HTMLElement, visible: (node: HTMLElement) => boolean = rendered): HTMLElement[] {
-  return [...sheet.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((node) => !node.closest("[hidden], [inert]") && visible(node));
+  return [...sheet.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((node) => node.tabIndex >= 0 && !node.closest("[hidden], [inert]") && visible(node));
 }
 
 /**
@@ -56,11 +56,13 @@ export function sheetKeydown(event: Pick<KeyboardEvent, "key" | "shiftKey">, she
   if (event.key !== "Tab") return false;
   const controls = sheetFocusables(sheet, visible);
   if (!controls.length) return true;
-  const first = controls[0]!;
-  const last = controls.at(-1)!;
-  const inside = active !== null && sheet.contains(active);
-  if (!inside) { (event.shiftKey ? last : first).focus(); return true; }
-  if (event.shiftKey && active === first) { last.focus(); return true; }
-  if (!event.shiftKey && active === last) { first.focus(); return true; }
-  return false;
+  // The sheet moves focus itself, in document order with wrap-around: left to
+  // the browser, a Tab from its last stop walked out to the page (a control
+  // the browser skips but a selector counts made "last" ambiguous).
+  const index = controls.indexOf(active as HTMLElement);
+  const next = index < 0
+    ? (event.shiftKey ? controls.at(-1)! : controls[0]!)
+    : controls[(index + (event.shiftKey ? -1 : 1) + controls.length) % controls.length]!;
+  next.focus();
+  return true;
 }

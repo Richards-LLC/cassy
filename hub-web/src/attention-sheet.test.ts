@@ -47,9 +47,11 @@ describe("phone Attention sheet (cas-a5c6)", () => {
     expect(document.activeElement).toBe(close);
     expect(sheetKeydown({ key: "Tab", shiftKey: true }, rail, document.activeElement, shut, all)).toBe(true);
     expect(document.activeElement).toBe(details);
-    // A step between two of its own controls is the browser's, unchanged.
+    // Between its own controls it steps in document order, skipping what Tab cannot reach.
+    rail.querySelector<HTMLButtonElement>(".dismiss")!.tabIndex = -1;
     close.focus();
-    expect(sheetKeydown({ key: "Tab", shiftKey: false }, rail, document.activeElement, shut, all)).toBe(false);
+    expect(sheetKeydown({ key: "Tab", shiftKey: false }, rail, document.activeElement, shut, all)).toBe(true);
+    expect(document.activeElement).toBe(details);
     // Focus behind the sheet (the composer's Send) comes back to it.
     send.focus();
     expect(sheetKeydown({ key: "Tab", shiftKey: true }, rail, document.activeElement, shut, all)).toBe(true);

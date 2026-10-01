@@ -3728,7 +3728,6 @@ function renderAttention(): void {
   if (!container) return;
   const visibleAttention = hubPresentation === "conversation" ? attention.filter((item) => item.machineId === selectedMachineId && (!item.session || item.session === selectedSession)) : attention;
   contextAttention = groupAttention(visibleAttention).length;
-  syncConversationAttention(hubPresentation === "conversation" && selectedSession ? coalesceAttention(visibleAttention).length : 0);
   renderAttentionPanel(container, visibleAttention, {
     dismiss: acknowledgeAttentionGroup,
     act: performAttentionAction,
@@ -3737,6 +3736,8 @@ function renderAttention(): void {
       toast("Event payload copied");
     },
   }, { animateIds: newCriticalAttentionIds, reclassifyIds: reclassifiedAttentionIds, outage: attentionOutage() });
+  // After the panel is drawn, so the sheet can hand focus back into it (cas-a5c6).
+  syncConversationAttention(hubPresentation === "conversation" && selectedSession ? coalesceAttention(visibleAttention).length : 0);
 }
 
 /**
@@ -3766,8 +3767,17 @@ function syncConversationAttention(count: number): void {
   }
   applyAttentionSheet();
 }
+/** The sheet control that last held focus, so a redraw that moves it hands focus back (cas-a5c6). */
+let sheetFocus: HTMLElement | undefined;
 function applyAttentionSheet(): void {
   applySheetSemantics(document.querySelector<HTMLElement>(".conversation-shell"), attentionSheetOpen);
+  if (!attentionSheetOpen) { sheetFocus = undefined; return; }
+  // A redraw (a catalog poll, a new turn) rebuilds the shell and moves the
+  // rail's panel, which drops focus to the page. Put it back where it was.
+  const sheet = document.querySelector<HTMLElement>(".conversation-shell.attention-sheet-open > .conversation-context");
+  if (!sheet || sheet.contains(document.activeElement)) return;
+  const back = sheetFocus?.isConnected && sheet.contains(sheetFocus) ? sheetFocus : sheetFocusables(sheet)[0];
+  back?.focus({ preventScroll: true });
 }
 // cas-a5c6: while the sheet is modal, Escape closes it from anywhere and Tab
 // stays inside it; focus that lands behind it is brought back.
@@ -3783,7 +3793,9 @@ document.addEventListener("keydown", (event) => {
 document.addEventListener("focusin", (event) => {
   if (!attentionSheetOpen) return;
   const sheet = document.querySelector<HTMLElement>(".conversation-shell.attention-sheet-open > .conversation-context");
-  if (sheet && event.target instanceof Node && !sheet.contains(event.target)) sheetFocusables(sheet)[0]?.focus();
+  if (!sheet || !(event.target instanceof HTMLElement)) return;
+  if (sheet.contains(event.target)) sheetFocus = event.target;
+  else sheetFocusables(sheet)[0]?.focus();
 });
 function openAttentionSheet(): void {
   attentionSheetOpen = true;

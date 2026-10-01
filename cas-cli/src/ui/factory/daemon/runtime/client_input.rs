@@ -219,7 +219,8 @@ impl FactoryDaemon {
                                             row: pty_row,
                                         } => {
                                             // cas-7f6f: forward SGR so Grok's on-screen
-                                            // Stop can cancel inside the harness. Do NOT
+                                            // Stop can cancel inside the harness; cas-4cd6:
+                                            // also Claude fullscreen controls. Do NOT
                                             // clear turn_in_flight here — generic clicks
                                             // (non-Stop) must preserve active; Stop
                                             // completion comes from Grok turn_ended.
@@ -229,7 +230,7 @@ impl FactoryDaemon {
                                                 pty_col,
                                                 pty_row,
                                                 ?geometry,
-                                                "forwarding SGR click to focused Grok pane"
+                                                "forwarding SGR click to focused mouse-reporting pane"
                                             );
                                             let _ =
                                                 self.app.mux.send_input_to(&pane, &payload).await;

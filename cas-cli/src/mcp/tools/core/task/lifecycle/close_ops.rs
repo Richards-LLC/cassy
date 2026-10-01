@@ -2,6 +2,7 @@ pub(crate) mod gate_text;
 mod task_attribution;
 mod delivery_evolution;
 mod snapshot_approval;
+mod epic_verdict_cache;
 
 use super::TaskLifecycleGateError;
 use crate::harness_policy::{
@@ -6244,7 +6245,27 @@ impl CasCore {
                 EpicCloseGateOutcome::ProceedWithNote(note) => {
                     append_close_decision_note(task_store.as_ref(), &mut task, &note);
                 }
-                EpicCloseGateOutcome::Reject(msg) => {
+                // cas-b412: the store fact "every child is terminal" is
+                // cheap and checked first. Only then may a live supervisor
+                // (authenticated by validate_supervisor_override above) waive
+                // the children the budget left unproven. Measured stranded
+                // children never reach this arm; they reject below.
+                EpicCloseGateOutcome::Incomplete(msg)
+                    if supervisor_override
+                        && req.stranded_branch_override.is_none()
+                        && subtasks.iter().all(Task::is_terminal) =>
+                {
+                    deferred_epic_override_note = Some(format!(
+                        "decision: supervisor override waived the incomplete epic close \
+                         check for `{epic_id}`. All {count} child task(s) are terminal in \
+                         the task store; no measured child blocked the close. Reason: {reason}\n\
+                         Waived gate output follows verbatim:\n{msg}",
+                        epic_id = req.id,
+                        count = subtasks.len(),
+                        reason = req.reason.as_deref().unwrap_or_default().trim(),
+                    ));
+                }
+                EpicCloseGateOutcome::Reject(msg) | EpicCloseGateOutcome::Incomplete(msg) => {
                     // cas-b192: the gate is legitimately unsatisfiable for an
                     // epic whose lanes all landed by squash and were then
                     // refactored. Without a designed door supervisors improvise
@@ -10950,6 +10971,81 @@ fn validated_delivery_drop_review(
     )))
 }
 
+/// cas-b412: a content proof that cannot decide (for example a fix committed
+/// inside a merge resolution, cas-f2eb) is not evidence of loss, but it
+/// still fails closed. A live registered supervisor who has inspected the
+/// delivery may name the commits that carry it:
+/// `reason="reviewed-content: <SHA>[,<SHA>...] -- <what was inspected>"`.
+/// Each commit must be reachable on the target and be either the anchor
+/// itself or a strict descendant of it (the commit that carried it onto the
+/// target). Each must carry a non-empty first-parent diff. The caller supplies
+/// a reason only after live supervisor authentication.
+fn validated_delivery_content_review(
+    repo: &std::path::Path,
+    anchor: &str,
+    parent: &str,
+    reason: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(review) = reason
+        .and_then(|reason| reason.trim().strip_prefix("reviewed-content:"))
+        .map(str::trim)
+        .filter(|review| !review.is_empty())
+    else {
+        return Ok(None);
+    };
+    let usage = "reviewed-content: <delivery SHA>[,<SHA>...] -- <what was inspected>";
+    let (commits, narrative) = review
+        .split_once(" -- ")
+        .filter(|(_, narrative)| !narrative.trim().is_empty())
+        .ok_or_else(|| format!("content review must name delivery commits: reason=\"{usage}\""))?;
+    let origin = format!("origin/{parent}");
+    let target = if git_ref_exists(repo, &origin) && git_commit_is_ancestor(repo, anchor, &origin) {
+        origin
+    } else {
+        parent.to_string()
+    };
+    let target =
+        resolve_branch_sha(repo, &target).ok_or("content review target does not resolve")?;
+    let anchor = resolve_branch_sha(repo, &format!("{anchor}^{{commit}}"))
+        .ok_or("content review anchor does not resolve to a commit")?;
+    if !git_commit_is_ancestor(repo, &anchor, &target) {
+        return Err("content review anchor is not reachable on the target".into());
+    }
+    let mut resolved = Vec::new();
+    for named in commits.split(',').map(str::trim).filter(|named| !named.is_empty()) {
+        let sha = resolve_task_commit_receipt_sha(repo, named)?;
+        if !git_commit_is_ancestor(repo, &anchor, &sha) || !git_commit_is_ancestor(repo, &sha, &target)
+        {
+            return Err(format!(
+                "delivery commit `{sha}` must be anchor `{anchor}` or a descendant of it, and be \
+                 reachable on target `{target}`"
+            ));
+        }
+        let output = std::process::Command::new("git")
+            .args(["diff", "--name-only", "--no-renames", "-z", &format!("{sha}^1"), &sha, "--"])
+            .current_dir(repo)
+            .output()
+            .map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            return Err(format!("cannot inspect delivery commit `{sha}`"));
+        }
+        if output.stdout.iter().all(|byte| *byte == 0) {
+            return Err(format!("delivery commit `{sha}` has an empty first-parent diff"));
+        }
+        if !resolved.contains(&sha) {
+            resolved.push(sha);
+        }
+    }
+    if resolved.is_empty() {
+        return Err(format!("content review must name delivery commits: reason=\"{usage}\""));
+    }
+    Ok(Some(format!(
+        "anchor={anchor}; target={target}; delivery commits: {}; supervisor review: {}",
+        resolved.join(", "),
+        narrative.trim()
+    )))
+}
+
 fn anchored_delivery_content_gate(
     task: &Task,
     repo_path: &std::path::Path,
@@ -11063,13 +11159,39 @@ fn anchored_delivery_content_gate(
             )))
         }
         DeliveryContentPresence::Unknown { reason } => {
+            match validated_delivery_content_review(
+                repo_path,
+                anchor,
+                parent_branch,
+                supervisor_override_reason,
+            ) {
+                Ok(Some(review)) => {
+                    return Some(MergeStateGateOutcome::ProceedWithNote(format!(
+                        "DECISION: reviewed delivery content accepted for task {task_id} after \
+                         an undecidable content proof ({reason}); {review}"
+                    )));
+                }
+                Err(review_error) => {
+                    return Some(MergeStateGateOutcome::Reject(format!(
+                        "DELIVERY REVIEW REJECTED: {review_error}"
+                    )));
+                }
+                Ok(None) => {}
+            }
             Some(MergeStateGateOutcome::Reject(format!(
                 "⚠️ DELIVERY CONTENT UNVERIFIABLE\n\n\
                  task close rejected: delivery anchor `{anchor}` is reachable from \
                  `{parent_branch}`, but Cassy could not prove its tree effect is still \
                  present: {reason}.\n\n\
                  Reachability alone is not sufficient. Inspect the named delivery \
-                 commit and target tree for task {task_id}, then retry."
+                 commit and target tree for task {task_id}, then retry. If the \
+                 delivery is verifiably on the target (for example a fix committed \
+                 inside a merge resolution), a live registered supervisor may close \
+                 with supervisor_override=true reason=\"reviewed-content: \
+                 <delivery SHA>[,<SHA>...] -- <what was inspected>\". Each named \
+                 commit must be the anchor or a descendant of it, be reachable on \
+                 the target, and carry a non-empty diff. The resolved commits and \
+                 review are recorded."
             )))
         }
     }
@@ -15285,7 +15407,7 @@ pub(crate) fn check_zero_commit_close(
 /// child task this is, who owns it, whether that task's recorded work has
 /// stranded commits relative to the parent epic, and (for unmerged rows)
 /// when that recorded work was last touched.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct EpicChildBranchStatus {
     pub task_id: String,
     pub task_status: TaskStatus,
@@ -15367,6 +15489,9 @@ pub(crate) struct EpicStatusCollection {
     pub requested_limit: Option<usize>,
     pub summary: bool,
     pub budget_exhausted: bool,
+    /// cas-b412: children whose verdict was reused from a previous
+    /// collection with identical Git inputs instead of being re-proven.
+    pub reused_verdicts: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -15567,7 +15692,7 @@ impl EpicGitSnapshot {
 /// the local ref makes that row's number arithmetic about a ref that no longer
 /// exists; reading neither and reporting `0` makes a vanished branch look
 /// merged. Both are recorded explicitly so the table can name its source.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum CheckedRefRead {
     /// The requested commit-ish resolved directly (local branch ref, or a raw
     /// commit id such as a recorded `factory_branch_anchor`).
@@ -15855,12 +15980,22 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
         .flatten();
     let mut statuses = Vec::with_capacity(page_len.min(total_children.saturating_sub(offset)));
     let mut budget_exhausted = false;
+    // cas-b412: full-fidelity verdicts persist across calls, so a large epic
+    // resumes where the previous budget ran out instead of restarting at the
+    // first child. Summary rows are ancestry-only and are never cached.
+    let mut verdict_cache = if options.summary || total_children == 0 {
+        epic_verdict_cache::EpicVerdictCache::disabled()
+    } else {
+        epic_verdict_cache::EpicVerdictCache::load(repo_path)
+    };
+    let mut reused_verdicts = 0;
+    // Children assigned to the same worker share one live lane. Within one
+    // collection the ref snapshot is fixed, so each (branch, target) content
+    // direction is measured once rather than once per child.
+    let mut direction_memo: std::collections::HashMap<(String, String), BranchContentDirection> =
+        std::collections::HashMap::new();
 
     for t in subtasks.iter().skip(offset).take(page_len) {
-        if deadline.is_some_and(|limit| std::time::Instant::now() >= limit) {
-            budget_exhausted = true;
-            break;
-        }
         // GH #1038: retargeting the epic for a follow-up does not retarget
         // children already delivered to their own recorded WorkTarget.
         let parent_branch = child_delivery_target(t, parent_branch);
@@ -15903,6 +16038,31 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
             .chain(additional_factory_branches.iter())
             .cloned()
             .collect::<Vec<_>>();
+        let cache_key = (!options.summary).then(|| {
+            epic_verdict_cache::verdict_key(
+                t,
+                parent_branch,
+                has_delivery,
+                recorded_anchor,
+                resolved_anchor.is_some(),
+                &fallback_branches,
+                &git_snapshot,
+            )
+        });
+        if let Some(cached) = cache_key
+            .as_deref()
+            .and_then(|key| verdict_cache.get(key))
+        {
+            statuses.push(cached);
+            reused_verdicts += 1;
+            continue;
+        }
+        // The deadline bounds proof work only; a reused verdict costs no Git
+        // subprocess, so it is taken even after the budget is spent.
+        if deadline.is_some_and(|limit| std::time::Instant::now() >= limit) {
+            budget_exhausted = true;
+            break;
+        }
         // The table's stranded count is a live Git measurement of the
         // current lane tip, never a historical count from the task's
         // recorded anchor. An anchor is delivery evidence below; it is
@@ -15987,7 +16147,8 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                 .map(|branch| {
                     (
                         branch.clone(),
-                        branch_content_direction_with_snapshot(
+                        memoized_branch_content_direction(
+                            &mut direction_memo,
                             repo_path,
                             branch,
                             parent_branch,
@@ -16182,7 +16343,8 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                 let directions: Vec<BranchContentDirection> = fallback_branches
                     .iter()
                     .map(|branch| {
-                        branch_content_direction_with_snapshot(
+                        memoized_branch_content_direction(
+                            &mut direction_memo,
                             repo_path,
                             branch,
                             parent_branch,
@@ -16245,7 +16407,8 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                 .map(|branch| {
                     (
                         branch.clone(),
-                        branch_content_direction_with_snapshot(
+                        memoized_branch_content_direction(
+                            &mut direction_memo,
                             repo_path,
                             branch,
                             parent_branch,
@@ -16255,7 +16418,7 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                 })
                 .collect();
         }
-        statuses.push(EpicChildBranchStatus {
+        let status = EpicChildBranchStatus {
             task_id: t.id.clone(),
             task_status: t.status,
             assignee: t.assignee.clone(),
@@ -16272,8 +16435,13 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
             checked_ref_reads,
             refs_unresolved,
             content_directions,
-        });
+        };
+        if let Some(key) = cache_key {
+            verdict_cache.record(key, t, &status);
+        }
+        statuses.push(status);
     }
+    verdict_cache.persist();
 
     EpicStatusCollection {
         statuses,
@@ -16282,7 +16450,22 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
         requested_limit: options.limit,
         summary: options.summary,
         budget_exhausted,
+        reused_verdicts,
     }
+}
+
+fn memoized_branch_content_direction(
+    memo: &mut std::collections::HashMap<(String, String), BranchContentDirection>,
+    repo_path: &std::path::Path,
+    branch: &str,
+    target: &str,
+    snapshot: &EpicGitSnapshot,
+) -> BranchContentDirection {
+    memo.entry((branch.to_string(), target.to_string()))
+        .or_insert_with(|| {
+            branch_content_direction_with_snapshot(repo_path, branch, target, snapshot)
+        })
+        .clone()
 }
 
 /// Render the per-child branch statuses as a Markdown report for the
@@ -16367,8 +16550,9 @@ fn render_epic_status_report_with_stack_and_view(
             let checked = view.offset.saturating_add(statuses.len());
             let not_checked = view.total_children.saturating_sub(checked);
             out.push_str(&format!(
-                "⚠️ Partial result: budget guard stopped after {} child task(s); {} child task(s) not checked.\n",
-                checked, not_checked
+                "⚠️ Partial result: budget guard stopped after {} child task(s); {} child task(s) not checked.\n\
+                 Proven verdicts are saved ({} reused this run); re-run to resume from the first unchecked child.\n",
+                checked, not_checked, view.reused_verdicts
             ));
         }
     }
@@ -16590,6 +16774,11 @@ pub(crate) enum EpicCloseGateOutcome {
     Proceed,
     ProceedWithNote(String),
     Reject(String),
+    /// cas-b412: the budget ran out before every child was proven. Nothing
+    /// measured blocks the close, but unchecked children remain. Retrying
+    /// resumes from saved verdicts; a live supervisor may instead waive the
+    /// remainder once the task store shows every child terminal.
+    Incomplete(String),
 }
 
 /// Validate the narrative supplied with a stranded-branch override (cas-b192).
@@ -16653,7 +16842,7 @@ pub(crate) fn validate_stranded_branch_override_reason(reason: &str) -> Result<S
 /// version of a line and a newly written line are indistinguishable by text
 /// alone, and a guard that silently picks a side when it cannot tell is how
 /// this defect class gets rebuilt in a new shape.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum BranchContentDirection {
     /// Every path this branch delivers is byte-identical on the target. Its
     /// content has landed — by whatever route — so merging gains nothing and
@@ -17038,22 +17227,35 @@ fn run_epic_close_merge_gate_with_budget(
             budget,
         },
     );
-    if collection.budget_exhausted {
+    if collection.budget_exhausted
+        && !collection
+            .statuses
+            .iter()
+            .any(EpicChildBranchStatus::blocks_epic_close)
+    {
         let checked = collection.statuses.len();
         let unchecked = subtasks
             .iter()
             .skip(collection.offset + checked)
             .map(|child| format!("  - {}", child.id))
             .collect::<Vec<_>>();
-        return EpicCloseGateOutcome::Reject(format!(
+        let reused = collection.reused_verdicts;
+        let proven = checked.saturating_sub(reused);
+        return EpicCloseGateOutcome::Incomplete(format!(
             "⚠️ EPIC CLOSE CHECK INCOMPLETE\n\n\
              Partial evaluation: checked {checked} of {total} child task(s) in the \
-             {budget:?} close-gate budget. The gate did not proceed and no close \
+             {budget:?} close-gate budget ({reused} verdict(s) reused from earlier \
+             attempts, {proven} proven now). The gate did not proceed and no close \
              mutation was attempted.\n\n\
              Child task(s) not checked:\n{unchecked}\n\n\
-             Retry the close after the repository settles, or run `epic_status` \
-             for a paged diagnostic. This is a bounded fail-closed result, not \
-             an unknown mutation outcome.",
+             The check is resumable: verdicts for closed children are saved, so \
+             retrying the same close continues from the first unchecked child. \
+             Retry until it completes, or run `epic_status` for a paged \
+             diagnostic. When every child is terminal, a live registered \
+             supervisor may instead close with supervisor_override=true and a \
+             reason naming what was inspected; the unchecked children are \
+             recorded in the decision note. This is a bounded fail-closed \
+             result, not an unknown mutation outcome.",
             total = collection.total_children,
             budget = budget,
             unchecked = unchecked.join("\n"),
@@ -25200,6 +25402,80 @@ mod merge_state_gate_tests {
         ));
     }
 
+    /// cas-b412 / cas-f2eb: a fix committed inside a merge resolution has no
+    /// task-attributed non-merge commit, so content proof cannot decide and
+    /// the close fails closed. A live supervisor's `reviewed-content:` review
+    /// naming the delivery commit settles it with an audited decision; a
+    /// review naming an unrelated commit or no commit is refused.
+    #[test]
+    fn reviewed_content_settles_undecidable_merge_resolution_delivery_cas_b412() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::write(p.join("target.rs"), "// target\n").unwrap();
+        git(p, &["add", "target.rs"]);
+        git(p, &["commit", "-q", "-m", "advance integration target"]);
+        let unrelated = rev_parse_local(p, "HEAD");
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git(p, &["merge", "-q", "--no-ff", "--no-commit", "main"]);
+        std::fs::write(p.join("fix.rs"), "// round-2 fix\n").unwrap();
+        git(p, &["add", "fix.rs"]);
+        git(p, &["commit", "-q", "-m", "merge main; round-2 fix in the resolution"]);
+        let merge_tip = rev_parse_local(p, "HEAD");
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/worker", "-m", "ship delivery"]);
+
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(merge_tip.clone());
+        let req = base_req(&task.id);
+        let gate = |reason: Option<String>| {
+            let mut window = window_at(0, "task work cycle");
+            window.supervisor_override_reason = reason;
+            run_factory_branch_merge_gate_with_attribution(
+                &task,
+                &req,
+                "main",
+                p,
+                TaskCommitAttribution {
+                    receipt: None,
+                    window: Some(&window),
+                },
+            )
+        };
+
+        match gate(None) {
+            MergeStateGateOutcome::Reject(message) => {
+                assert!(message.contains("DELIVERY CONTENT UNVERIFIABLE"), "{message}");
+                assert!(message.contains("reviewed-content:"), "{message}");
+            }
+            other => panic!("an undecidable delivery must fail closed, got {other:?}"),
+        }
+        match gate(Some(format!(
+            "reviewed-content: {} -- fix.rs is in the merge resolution and on main",
+            &merge_tip[..12]
+        ))) {
+            MergeStateGateOutcome::ProceedWithNote(note) => {
+                assert!(note.contains("reviewed delivery content accepted"), "{note}");
+                assert!(note.contains(&merge_tip), "{note}");
+                assert!(note.contains("fix.rs is in the merge resolution"), "{note}");
+            }
+            other => panic!("a reviewed merge-resolution delivery must close, got {other:?}"),
+        }
+        match gate(Some(format!("reviewed-content: {unrelated} -- wrong commit"))) {
+            MergeStateGateOutcome::Reject(message) => {
+                assert!(message.contains("DELIVERY REVIEW REJECTED"), "{message}");
+            }
+            other => panic!("a commit outside the delivery must be refused, got {other:?}"),
+        }
+        match gate(Some("reviewed-content: looked at it, fine".to_string())) {
+            MergeStateGateOutcome::Reject(message) => {
+                assert!(message.contains("DELIVERY REVIEW REJECTED"), "{message}");
+            }
+            other => panic!("a narrative without commits must be refused, got {other:?}"),
+        }
+    }
+
     /// GH #1018: the task's unnamed content commit becomes target-reachable
     /// after the worker's target-sync merge ships. The recorded merge tip and
     /// current work window must still prove its non-merge content.
@@ -27769,7 +28045,7 @@ mod epic_status_gate_tests {
             "50-child close gate exceeded the budget plus scheduling slack: {elapsed:?}"
         );
         match outcome {
-            EpicCloseGateOutcome::Reject(message) => {
+            EpicCloseGateOutcome::Reject(message) | EpicCloseGateOutcome::Incomplete(message) => {
                 assert!(
                     message.contains("MERGE REQUIRED")
                         || message.contains("Partial evaluation:")
@@ -27806,7 +28082,7 @@ mod epic_status_gate_tests {
         );
 
         match outcome {
-            EpicCloseGateOutcome::Reject(message) => {
+            EpicCloseGateOutcome::Incomplete(message) => {
                 assert!(message.contains("Partial evaluation: checked 0 of 3"));
                 assert!(message.contains("cas-partial-child-0"));
                 assert!(message.contains("cas-partial-child-1"));
@@ -27815,6 +28091,199 @@ mod epic_status_gate_tests {
             }
             other => panic!("expired close budget must fail closed, got {other:?}"),
         }
+    }
+
+    /// Build `count` closed children spread over `lanes` worker lanes, each
+    /// with its own delivery commit as anchor, and merge every lane to main.
+    fn merged_epic_children(p: &std::path::Path, count: usize, lanes: usize) -> Vec<Task> {
+        let mut subtasks = Vec::new();
+        for lane in 0..lanes {
+            let worker = format!("lane-{lane}");
+            git(p, &["checkout", "-q", "-b", &format!("factory/{worker}"), "main"]);
+            for index in (lane..count).step_by(lanes) {
+                let file = format!("child-{index:03}.txt");
+                std::fs::write(p.join(&file), format!("child {index}\n")).unwrap();
+                git(p, &["add", &file]);
+                git(p, &["commit", "-q", "-m", &format!("feat: child {index}")]);
+                let mut task = child(
+                    &format!("cas-big-{index:03}"),
+                    TaskStatus::Closed,
+                    Some(&worker),
+                );
+                task.deliverables.factory_branch_anchor =
+                    Some(epic_git_stdout(p, &["rev-parse", "HEAD"]));
+                subtasks.push(task);
+            }
+            git(p, &["checkout", "-q", "main"]);
+            git(
+                p,
+                &[
+                    "merge",
+                    "-q",
+                    "--no-ff",
+                    "-m",
+                    &format!("merge {worker}"),
+                    &format!("factory/{worker}"),
+                ],
+            );
+        }
+        subtasks.sort_by(|left, right| left.id.cmp(&right.id));
+        subtasks
+    }
+
+    fn full_view(budget: std::time::Duration) -> EpicStatusOptions {
+        EpicStatusOptions {
+            offset: 0,
+            limit: None,
+            summary: false,
+            budget,
+        }
+    }
+
+    /// cas-b412: v34 (cas-459b) had 141 children; every close retry restarted
+    /// at child zero and stopped in the same place, so the shipped epic could
+    /// never close. Verdicts proven by one attempt are reused by the next
+    /// without spending budget, so retries resume and the close completes.
+    #[test]
+    fn epic_close_gate_resumes_across_calls_for_150_children_cas_b412() {
+        let dir = init_epic_repo(&[]);
+        let p = dir.path();
+        let subtasks = merged_epic_children(p, 150, 8);
+        let task = epic("cas-big-epic");
+        let req = base_req(&task.id);
+
+        // A budget far below the full proof cost forces partial attempts,
+        // the same shape as the 8 s budget against the real 141-child epic.
+        let budget = std::time::Duration::from_millis(300);
+        let mut last_checked = 0usize;
+        let mut partial_attempts = 0;
+        let mut completed = false;
+        for _ in 0..200 {
+            match run_epic_close_merge_gate_with_budget(&task, &req, "main", p, &subtasks, budget)
+            {
+                EpicCloseGateOutcome::Incomplete(message) => {
+                    assert!(message.contains("EPIC CLOSE CHECK INCOMPLETE"), "{message}");
+                    assert!(message.contains("The check is resumable"), "{message}");
+                    let checked: usize = message
+                        .split("checked ")
+                        .nth(1)
+                        .and_then(|rest| rest.split(' ').next())
+                        .and_then(|number| number.parse().ok())
+                        .expect("partial message names the checked count");
+                    assert!(
+                        checked >= last_checked,
+                        "a retry must never lose proven progress: {checked} < {last_checked}"
+                    );
+                    // Every child checked by earlier attempts is closed and
+                    // proven, so all of them are reused rather than re-proven.
+                    assert!(
+                        message.contains(&format!("({last_checked} verdict(s) reused")),
+                        "{message}"
+                    );
+                    last_checked = checked;
+                    partial_attempts += 1;
+                }
+                EpicCloseGateOutcome::Proceed | EpicCloseGateOutcome::ProceedWithNote(_) => {
+                    completed = true;
+                    break;
+                }
+                EpicCloseGateOutcome::Reject(message) => {
+                    panic!("merged children must never reject: {message}")
+                }
+            }
+        }
+        assert!(
+            completed,
+            "150 merged children must close within bounded retries (stopped at {last_checked})"
+        );
+        assert!(partial_attempts >= 1, "the budget must force at least one partial attempt");
+
+        // Every verdict is now stored: even a zero budget completes, and the
+        // reused verdicts are identical to a fresh unbounded proof.
+        let reused = collect_epic_branch_statuses_with_options(
+            &subtasks,
+            "main",
+            p,
+            full_view(std::time::Duration::ZERO),
+        );
+        assert!(!reused.budget_exhausted);
+        assert_eq!(reused.reused_verdicts, 150);
+        assert_eq!(reused.statuses.len(), 150);
+        assert!(reused.statuses.iter().all(|status| !status.blocks_epic_close()));
+        assert!(matches!(
+            run_epic_close_merge_gate_with_budget(
+                &task,
+                &req,
+                "main",
+                p,
+                &subtasks,
+                std::time::Duration::ZERO,
+            ),
+            EpicCloseGateOutcome::Proceed | EpicCloseGateOutcome::ProceedWithNote(_)
+        ));
+    }
+
+    /// cas-b412: a stored verdict is reused only for identical Git inputs. A
+    /// moved target, a moved lane or a non-terminal child is re-proven.
+    #[test]
+    fn epic_verdict_cache_invalidates_on_moved_refs_and_skips_active_children_cas_b412() {
+        let dir = init_epic_repo(&[]);
+        let p = dir.path();
+        let mut subtasks = merged_epic_children(p, 6, 2);
+        subtasks[5].status = TaskStatus::InProgress;
+
+        let fresh = collect_epic_branch_statuses_with_options(
+            &subtasks,
+            "main",
+            p,
+            full_view(std::time::Duration::MAX),
+        );
+        assert_eq!(fresh.reused_verdicts, 0);
+        let again = collect_epic_branch_statuses_with_options(
+            &subtasks,
+            "main",
+            p,
+            full_view(std::time::Duration::MAX),
+        );
+        assert_eq!(again.reused_verdicts, 5, "the active child is never cached");
+        assert_eq!(again.statuses, fresh.statuses);
+
+        // Moving lane-0 invalidates exactly the children measured on it.
+        git(p, &["checkout", "-q", "factory/lane-0"]);
+        std::fs::write(p.join("late.txt"), "late\n").unwrap();
+        git(p, &["add", "late.txt"]);
+        git(p, &["commit", "-q", "-m", "late lane work"]);
+        git(p, &["checkout", "-q", "main"]);
+        let after_lane = collect_epic_branch_statuses_with_options(
+            &subtasks,
+            "main",
+            p,
+            full_view(std::time::Duration::MAX),
+        );
+        assert_eq!(after_lane.reused_verdicts, 2, "only lane-1's closed children reuse");
+        // The late lane commit is measured, not served from the cache: each
+        // lane-0 child is re-proven and its own merged anchor excludes it.
+        let lane_zero: Vec<_> = after_lane
+            .statuses
+            .iter()
+            .filter(|status| status.assignee.as_deref() == Some("lane-0"))
+            .collect();
+        assert_eq!(lane_zero.len(), 3);
+        assert!(lane_zero.iter().all(|status| status.merge_evidence_note.is_some()));
+        assert!(lane_zero.iter().all(|status| !status.blocks_epic_close()));
+
+        // Moving the target invalidates every child.
+        std::fs::write(p.join("target.txt"), "target\n").unwrap();
+        git(p, &["add", "target.txt"]);
+        git(p, &["commit", "-q", "-m", "advance target"]);
+        let after_target = collect_epic_branch_statuses_with_options(
+            &subtasks,
+            "main",
+            p,
+            full_view(std::time::Duration::ZERO),
+        );
+        assert_eq!(after_target.reused_verdicts, 0);
+        assert!(after_target.budget_exhausted);
     }
 
     // --- collect_epic_branch_statuses ---------------------------------------
@@ -28906,7 +29375,7 @@ mod epic_status_gate_tests {
         let req = base_req(&task.id);
         match run_epic_close_merge_gate(&task, &req, "main", p, std::slice::from_ref(&landed)) {
             EpicCloseGateOutcome::Proceed | EpicCloseGateOutcome::ProceedWithNote(_) => {}
-            EpicCloseGateOutcome::Reject(message) => {
+            EpicCloseGateOutcome::Reject(message) | EpicCloseGateOutcome::Incomplete(message) => {
                 assert!(
                     !message.contains("git merge --no-ff"),
                     "a stale local ref must not resurrect the destructive instruction: {message}"

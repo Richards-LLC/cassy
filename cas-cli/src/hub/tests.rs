@@ -706,6 +706,27 @@ async fn h4_health_cors_allows_unpaired_trusted_origins_and_preserves_paired_ori
         .unwrap();
     assert_eq!(launch_denied.status(), StatusCode::FORBIDDEN);
 
+    // cas-55a4: ending a session needs factory:manage, which a read-only
+    // pairing does not hold; the refusal names the scope.
+    let end_denied = app
+        .clone()
+        .oneshot(
+            Request::delete("/v1/sessions/factory-a")
+                .header("origin", "http://127.0.0.1:4173")
+                .header("authorization", &authorization)
+                .header("dpop", proof("DELETE", "/v1/sessions/factory-a"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(end_denied.status(), StatusCode::FORBIDDEN);
+    let body = axum::body::to_bytes(end_denied.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["required_scope"], "factory:manage");
+
     let extra_args = app.clone().oneshot(
         Request::post("/v1/sessions")
             .header("origin", "http://127.0.0.1:4173")
@@ -2286,6 +2307,8 @@ fn hub_history_response_is_consumed_by_only_the_requesting_socket() {
         replies: Vec::new(),
         has_earlier: false,
         next_before: None,
+        earlier_messages: Vec::new(),
+        earlier_replies: Vec::new(),
     })
     .unwrap();
     assert!(super::server::correlated_daemon_frame_allowed(
@@ -2323,6 +2346,8 @@ fn hub_history_response_summary_exposes_shape_without_turn_content() {
         replies: Vec::new(),
         has_earlier: true,
         next_before: Some(40),
+        earlier_messages: Vec::new(),
+        earlier_replies: Vec::new(),
     })
     .unwrap();
 
@@ -3659,5 +3684,27 @@ fn e335_catalog_passes_keep_listed_registries_open() {
         Arc::strong_count(&probe),
         while_pinned - 1,
         "a project that is no longer listed must not stay pinned"
+    );
+}
+
+/// cas-55a4: the catalog names who a session's newest row was between,
+/// never a paired device's label or the row's content.
+#[test]
+fn last_activity_names_parties_without_device_labels() {
+    assert_eq!(
+        super::activity_label("supervisor", "worker-1"),
+        "supervisor → worker-1"
+    );
+    assert_eq!(
+        super::activity_label("commander:Daniel@Pixel 10", "supervisor"),
+        "Commander → supervisor"
+    );
+    assert_eq!(
+        super::activity_label("relay-watchdog", "operator"),
+        "relay-watchdog → Commander"
+    );
+    assert_eq!(
+        super::activity_label("terminal", "terminal-history"),
+        "terminal → supervisor"
     );
 }

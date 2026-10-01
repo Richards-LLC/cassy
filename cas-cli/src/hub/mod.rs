@@ -492,6 +492,16 @@ pub struct HubSession {
     /// default, but can be revealed for recovery.
     #[serde(default)]
     pub dormant: bool,
+    /// When the session last did anything (cas-55a4): its newest queue row,
+    /// Commander-facing or not. Lets Commander tell apart several live
+    /// sessions of one project and show activity for a session that has not
+    /// written to Commander yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<String>,
+    /// Who that newest row was from and to, e.g. `supervisor → worker-1`.
+    /// Never the row's content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity: Option<String>,
     #[serde(skip)]
     pub daemon_identity: Option<DaemonIdentity>,
 }
@@ -514,6 +524,19 @@ pub trait SessionReadModel: Clone + Send + Sync + 'static {
 #[derive(Clone, Default)]
 pub struct LocalSessionReadModel {
     registries: Arc<std::sync::Mutex<HashMap<std::path::PathBuf, PinnedRegistry>>>,
+    /// Last activity per session, read at most once per
+    /// [`LAST_ACTIVITY_TTL`] so a device's five-second catalog refresh does
+    /// not query every project's queue each time.
+    activity: Arc<std::sync::Mutex<HashMap<String, CachedActivity>>>,
+}
+
+/// How long a session's last activity is reused before it is read again.
+const LAST_ACTIVITY_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+
+#[derive(Clone)]
+struct CachedActivity {
+    read_at: std::time::Instant,
+    activity: Option<(String, String)>,
 }
 
 impl std::fmt::Debug for LocalSessionReadModel {
@@ -575,7 +598,40 @@ impl LocalSessionReadModel {
     /// being listed.
     fn project(&self, sessions: &[SessionInfo]) -> Vec<HubSession> {
         self.pin_registries(sessions);
-        sessions.iter().map(hub_session).collect()
+        sessions
+            .iter()
+            .map(|session| {
+                let mut projected = hub_session(session);
+                if let Some((at, label)) = self.last_activity(session) {
+                    projected.last_activity_at = Some(at);
+                    projected.last_activity = Some(label);
+                }
+                projected
+            })
+            .collect()
+    }
+
+    fn last_activity(&self, session: &SessionInfo) -> Option<(String, String)> {
+        let mut cache = self
+            .activity
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(cached) = cache.get(&session.name)
+            && cached.read_at.elapsed() < LAST_ACTIVITY_TTL
+        {
+            return cached.activity.clone();
+        }
+        let activity = session_cas_root(session).and_then(|cas_root| {
+            read_last_activity(&cas_root, &session.name)
+        });
+        cache.insert(
+            session.name.clone(),
+            CachedActivity {
+                read_at: std::time::Instant::now(),
+                activity: activity.clone(),
+            },
+        );
+        activity
     }
 
     fn pin_registries(&self, sessions: &[SessionInfo]) {
@@ -618,6 +674,35 @@ impl LocalSessionReadModel {
     }
 }
 
+/// A session's newest queue row as `(rfc3339, "from → to")`. The store is
+/// opened without its schema pass: the catalog only reads, and a project whose
+/// queue predates the session index still answers, just more slowly.
+fn read_last_activity(cas_root: &std::path::Path, session: &str) -> Option<(String, String)> {
+    use cas_store::PromptQueueStore;
+    let store = cas_store::SqlitePromptQueueStore::open(cas_root).ok()?;
+    let row = store.latest_session_activity(session).ok()??;
+    Some((
+        row.created_at.to_rfc3339(),
+        activity_label(&row.source, &row.target),
+    ))
+}
+
+/// `from → to` for a queue row, naming Commander instead of the operator's
+/// device label so the catalog never carries a paired device's name.
+pub(crate) fn activity_label(source: &str, target: &str) -> String {
+    fn party(name: &str) -> &str {
+        if name.starts_with("commander:") || name.eq_ignore_ascii_case("operator") {
+            "Commander"
+        } else if name == "terminal-history" {
+            // Input typed at the supervisor's terminal, recorded for history.
+            "supervisor"
+        } else {
+            name
+        }
+    }
+    format!("{} → {}", party(source), party(target))
+}
+
 /// Project one discovered session onto the wire shape Commander consumes.
 ///
 /// The roster comes from `SessionInfo::worker_names()` — the live agent
@@ -640,6 +725,8 @@ fn hub_session(session: &SessionInfo) -> HubSession {
             DaemonLiveness::Live
         },
         dormant: !has_live_supervisor(session),
+        last_activity_at: None,
+        last_activity: None,
         daemon_identity: session
             .metadata
             .daemon_pid_starttime
@@ -821,6 +908,8 @@ pub fn fixture_session(name: &str) -> HubSession {
         ws_port: Some(12345),
         liveness: DaemonLiveness::Live,
         dormant: false,
+        last_activity_at: None,
+        last_activity: None,
         daemon_identity: None,
     }
 }

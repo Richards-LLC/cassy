@@ -4080,3 +4080,7 @@ button.chip:disabled { cursor: default; }
 .conversation-end .conversation-end-confirm { color: var(--state-crit); border-color: currentColor; }
 .conversation-end-question { flex-basis: 100%; color: var(--ink); }
 .conversation-end-error { flex-basis: 100%; color: var(--state-crit); }
+@media (forced-colors: active) {
+  /* The mark keeps its text on any system palette: an outline, no fill. */
+  .conversation-session-mark, .conversation-row[aria-current="true"] .conversation-session-mark { background: transparent; border: 1px solid currentColor; }
+}

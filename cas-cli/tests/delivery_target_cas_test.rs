@@ -595,12 +595,9 @@ async fn red_ci_worktree_merge_accepts_supervisor_override_end_to_end_cas_4150()
     }
     let mut env = TestEnvGuard::new();
     env.set("HOME", home.path());
-    let path = format!(
-        "{}:{}",
-        fake_bin.path().display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
-    env.set("PATH", &path);
+    // cas-9790: select the fake through Cassy's `CAS_GH_BIN` seam; process
+    // PATH stays untouched (factory_mcp_ops_test PATH-isolation lint).
+    env.set(cas::github_issue_attach::GH_BIN_ENV, &gh);
     let fixture = arm_delivery("redcioverride", "red-ci-override").await;
     let supervisor_service = delivery_service(&fixture.cas_root, &fixture.supervisor_id);
     let merge_with = |supervisor_override: Option<bool>, reason: Option<&str>| {

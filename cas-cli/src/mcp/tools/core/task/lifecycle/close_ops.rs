@@ -2,6 +2,7 @@ pub(crate) mod gate_text;
 mod task_attribution;
 mod delivery_evolution;
 mod snapshot_approval;
+mod epic_verdict_cache;
 
 use super::TaskLifecycleGateError;
 use crate::harness_policy::{
@@ -10950,6 +10951,87 @@ fn validated_delivery_drop_review(
     )))
 }
 
+/// cas-b412: a content proof that cannot decide (for example a fix committed
+/// inside a merge resolution, cas-f2eb) is not evidence of loss, but it
+/// still fails closed. A live registered supervisor who has inspected the
+/// delivery may name the commits that carry it:
+/// `reason="reviewed-content: <SHA>[,<SHA>...] -- <what was inspected>"`.
+/// Each commit must be reachable on the target and be part of this delivery:
+/// the anchor itself, a commit the anchor merges in (reachable from the
+/// anchor but not from its first parent), or a strict descendant of the
+/// anchor. Each must carry a non-empty first-parent diff. The caller supplies
+/// a reason only after live supervisor authentication.
+fn validated_delivery_content_review(
+    repo: &std::path::Path,
+    anchor: &str,
+    parent: &str,
+    reason: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(review) = reason
+        .and_then(|reason| reason.trim().strip_prefix("reviewed-content:"))
+        .map(str::trim)
+        .filter(|review| !review.is_empty())
+    else {
+        return Ok(None);
+    };
+    let usage = "reviewed-content: <delivery SHA>[,<SHA>...] -- <what was inspected>";
+    let (commits, narrative) = review
+        .split_once(" -- ")
+        .filter(|(_, narrative)| !narrative.trim().is_empty())
+        .ok_or_else(|| format!("content review must name delivery commits: reason=\"{usage}\""))?;
+    let origin = format!("origin/{parent}");
+    let target = if git_ref_exists(repo, &origin) && git_commit_is_ancestor(repo, anchor, &origin) {
+        origin
+    } else {
+        parent.to_string()
+    };
+    let target =
+        resolve_branch_sha(repo, &target).ok_or("content review target does not resolve")?;
+    let anchor = resolve_branch_sha(repo, &format!("{anchor}^{{commit}}"))
+        .ok_or("content review anchor does not resolve to a commit")?;
+    if !git_commit_is_ancestor(repo, &anchor, &target) {
+        return Err("content review anchor is not reachable on the target".into());
+    }
+    let anchor_first_parent = resolve_branch_sha(repo, &format!("{anchor}^1"));
+    let mut resolved = Vec::new();
+    for named in commits.split(',').map(str::trim).filter(|named| !named.is_empty()) {
+        let sha = resolve_task_commit_receipt_sha(repo, named)?;
+        let merged_by_anchor = git_commit_is_ancestor(repo, &sha, &anchor)
+            && anchor_first_parent
+                .as_deref()
+                .is_none_or(|first| !git_commit_is_ancestor(repo, &sha, first));
+        let descends = sha != anchor && git_commit_is_ancestor(repo, &anchor, &sha);
+        if !(merged_by_anchor || descends) || !git_commit_is_ancestor(repo, &sha, &target) {
+            return Err(format!(
+                "delivery commit `{sha}` must be anchor `{anchor}`, a commit it merges in, or a \
+                 descendant of it, and be reachable on target `{target}`"
+            ));
+        }
+        let output = std::process::Command::new("git")
+            .args(["diff", "--name-only", "--no-renames", "-z", &format!("{sha}^1"), &sha, "--"])
+            .current_dir(repo)
+            .output()
+            .map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            return Err(format!("cannot inspect delivery commit `{sha}`"));
+        }
+        if output.stdout.iter().all(|byte| *byte == 0) {
+            return Err(format!("delivery commit `{sha}` has an empty first-parent diff"));
+        }
+        if !resolved.contains(&sha) {
+            resolved.push(sha);
+        }
+    }
+    if resolved.is_empty() {
+        return Err(format!("content review must name delivery commits: reason=\"{usage}\""));
+    }
+    Ok(Some(format!(
+        "anchor={anchor}; target={target}; delivery commits: {}; supervisor review: {}",
+        resolved.join(", "),
+        narrative.trim()
+    )))
+}
+
 fn anchored_delivery_content_gate(
     task: &Task,
     repo_path: &std::path::Path,
@@ -11063,13 +11145,39 @@ fn anchored_delivery_content_gate(
             )))
         }
         DeliveryContentPresence::Unknown { reason } => {
+            match validated_delivery_content_review(
+                repo_path,
+                anchor,
+                parent_branch,
+                supervisor_override_reason,
+            ) {
+                Ok(Some(review)) => {
+                    return Some(MergeStateGateOutcome::ProceedWithNote(format!(
+                        "DECISION: reviewed delivery content accepted for task {task_id} after \
+                         an undecidable content proof ({reason}); {review}"
+                    )));
+                }
+                Err(review_error) => {
+                    return Some(MergeStateGateOutcome::Reject(format!(
+                        "DELIVERY REVIEW REJECTED: {review_error}"
+                    )));
+                }
+                Ok(None) => {}
+            }
             Some(MergeStateGateOutcome::Reject(format!(
                 "⚠️ DELIVERY CONTENT UNVERIFIABLE\n\n\
                  task close rejected: delivery anchor `{anchor}` is reachable from \
                  `{parent_branch}`, but Cassy could not prove its tree effect is still \
                  present: {reason}.\n\n\
                  Reachability alone is not sufficient. Inspect the named delivery \
-                 commit and target tree for task {task_id}, then retry."
+                 commit and target tree for task {task_id}, then retry. If the \
+                 delivery is verifiably on the target (for example a fix committed \
+                 inside a merge resolution), a live registered supervisor may close \
+                 with supervisor_override=true reason=\"reviewed-content: \
+                 <delivery SHA>[,<SHA>...] -- <what was inspected>\". Each named \
+                 commit must be the anchor, a commit it merges in, or a descendant \
+                 of it, be reachable on the target, and carry a non-empty diff. The \
+                 resolved commits and review are recorded."
             )))
         }
     }
@@ -15285,7 +15393,7 @@ pub(crate) fn check_zero_commit_close(
 /// child task this is, who owns it, whether that task's recorded work has
 /// stranded commits relative to the parent epic, and (for unmerged rows)
 /// when that recorded work was last touched.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct EpicChildBranchStatus {
     pub task_id: String,
     pub task_status: TaskStatus,
@@ -15367,6 +15475,9 @@ pub(crate) struct EpicStatusCollection {
     pub requested_limit: Option<usize>,
     pub summary: bool,
     pub budget_exhausted: bool,
+    /// cas-b412: children whose verdict was reused from a previous
+    /// collection with identical Git inputs instead of being re-proven.
+    pub reused_verdicts: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -15567,7 +15678,7 @@ impl EpicGitSnapshot {
 /// the local ref makes that row's number arithmetic about a ref that no longer
 /// exists; reading neither and reporting `0` makes a vanished branch look
 /// merged. Both are recorded explicitly so the table can name its source.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum CheckedRefRead {
     /// The requested commit-ish resolved directly (local branch ref, or a raw
     /// commit id such as a recorded `factory_branch_anchor`).
@@ -15855,12 +15966,22 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
         .flatten();
     let mut statuses = Vec::with_capacity(page_len.min(total_children.saturating_sub(offset)));
     let mut budget_exhausted = false;
+    // cas-b412: full-fidelity verdicts persist across calls, so a large epic
+    // resumes where the previous budget ran out instead of restarting at the
+    // first child. Summary rows are ancestry-only and are never cached.
+    let mut verdict_cache = if options.summary || total_children == 0 {
+        epic_verdict_cache::EpicVerdictCache::disabled()
+    } else {
+        epic_verdict_cache::EpicVerdictCache::load(repo_path)
+    };
+    let mut reused_verdicts = 0;
+    // Children assigned to the same worker share one live lane. Within one
+    // collection the ref snapshot is fixed, so each (branch, target) content
+    // direction is measured once rather than once per child.
+    let mut direction_memo: std::collections::HashMap<(String, String), BranchContentDirection> =
+        std::collections::HashMap::new();
 
     for t in subtasks.iter().skip(offset).take(page_len) {
-        if deadline.is_some_and(|limit| std::time::Instant::now() >= limit) {
-            budget_exhausted = true;
-            break;
-        }
         // GH #1038: retargeting the epic for a follow-up does not retarget
         // children already delivered to their own recorded WorkTarget.
         let parent_branch = child_delivery_target(t, parent_branch);
@@ -15903,6 +16024,31 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
             .chain(additional_factory_branches.iter())
             .cloned()
             .collect::<Vec<_>>();
+        let cache_key = (!options.summary).then(|| {
+            epic_verdict_cache::verdict_key(
+                t,
+                parent_branch,
+                has_delivery,
+                recorded_anchor,
+                resolved_anchor.is_some(),
+                &fallback_branches,
+                &git_snapshot,
+            )
+        });
+        if let Some(cached) = cache_key
+            .as_deref()
+            .and_then(|key| verdict_cache.get(key))
+        {
+            statuses.push(cached);
+            reused_verdicts += 1;
+            continue;
+        }
+        // The deadline bounds proof work only; a reused verdict costs no Git
+        // subprocess, so it is taken even after the budget is spent.
+        if deadline.is_some_and(|limit| std::time::Instant::now() >= limit) {
+            budget_exhausted = true;
+            break;
+        }
         // The table's stranded count is a live Git measurement of the
         // current lane tip, never a historical count from the task's
         // recorded anchor. An anchor is delivery evidence below; it is
@@ -15987,7 +16133,8 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                 .map(|branch| {
                     (
                         branch.clone(),
-                        branch_content_direction_with_snapshot(
+                        memoized_branch_content_direction(
+                            &mut direction_memo,
                             repo_path,
                             branch,
                             parent_branch,
@@ -16182,7 +16329,8 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                 let directions: Vec<BranchContentDirection> = fallback_branches
                     .iter()
                     .map(|branch| {
-                        branch_content_direction_with_snapshot(
+                        memoized_branch_content_direction(
+                            &mut direction_memo,
                             repo_path,
                             branch,
                             parent_branch,
@@ -16245,7 +16393,8 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                 .map(|branch| {
                     (
                         branch.clone(),
-                        branch_content_direction_with_snapshot(
+                        memoized_branch_content_direction(
+                            &mut direction_memo,
                             repo_path,
                             branch,
                             parent_branch,
@@ -16255,7 +16404,7 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                 })
                 .collect();
         }
-        statuses.push(EpicChildBranchStatus {
+        let status = EpicChildBranchStatus {
             task_id: t.id.clone(),
             task_status: t.status,
             assignee: t.assignee.clone(),
@@ -16272,8 +16421,13 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
             checked_ref_reads,
             refs_unresolved,
             content_directions,
-        });
+        };
+        if let Some(key) = cache_key {
+            verdict_cache.record(key, t, &status);
+        }
+        statuses.push(status);
     }
+    verdict_cache.persist();
 
     EpicStatusCollection {
         statuses,
@@ -16282,7 +16436,22 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
         requested_limit: options.limit,
         summary: options.summary,
         budget_exhausted,
+        reused_verdicts,
     }
+}
+
+fn memoized_branch_content_direction(
+    memo: &mut std::collections::HashMap<(String, String), BranchContentDirection>,
+    repo_path: &std::path::Path,
+    branch: &str,
+    target: &str,
+    snapshot: &EpicGitSnapshot,
+) -> BranchContentDirection {
+    memo.entry((branch.to_string(), target.to_string()))
+        .or_insert_with(|| {
+            branch_content_direction_with_snapshot(repo_path, branch, target, snapshot)
+        })
+        .clone()
 }
 
 /// Render the per-child branch statuses as a Markdown report for the
@@ -16367,8 +16536,9 @@ fn render_epic_status_report_with_stack_and_view(
             let checked = view.offset.saturating_add(statuses.len());
             let not_checked = view.total_children.saturating_sub(checked);
             out.push_str(&format!(
-                "⚠️ Partial result: budget guard stopped after {} child task(s); {} child task(s) not checked.\n",
-                checked, not_checked
+                "⚠️ Partial result: budget guard stopped after {} child task(s); {} child task(s) not checked.\n\
+                 Proven verdicts are saved ({} reused this run); re-run to resume from the first unchecked child.\n",
+                checked, not_checked, view.reused_verdicts
             ));
         }
     }
@@ -16653,7 +16823,7 @@ pub(crate) fn validate_stranded_branch_override_reason(reason: &str) -> Result<S
 /// version of a line and a newly written line are indistinguishable by text
 /// alone, and a guard that silently picks a side when it cannot tell is how
 /// this defect class gets rebuilt in a new shape.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum BranchContentDirection {
     /// Every path this branch delivers is byte-identical on the target. Its
     /// content has landed — by whatever route — so merging gains nothing and
@@ -17045,15 +17215,20 @@ fn run_epic_close_merge_gate_with_budget(
             .skip(collection.offset + checked)
             .map(|child| format!("  - {}", child.id))
             .collect::<Vec<_>>();
+        let reused = collection.reused_verdicts;
+        let proven = checked.saturating_sub(reused);
         return EpicCloseGateOutcome::Reject(format!(
             "⚠️ EPIC CLOSE CHECK INCOMPLETE\n\n\
              Partial evaluation: checked {checked} of {total} child task(s) in the \
-             {budget:?} close-gate budget. The gate did not proceed and no close \
+             {budget:?} close-gate budget ({reused} verdict(s) reused from earlier \
+             attempts, {proven} proven now). The gate did not proceed and no close \
              mutation was attempted.\n\n\
              Child task(s) not checked:\n{unchecked}\n\n\
-             Retry the close after the repository settles, or run `epic_status` \
-             for a paged diagnostic. This is a bounded fail-closed result, not \
-             an unknown mutation outcome.",
+             The check is resumable: verdicts for closed children are saved, so \
+             retrying the same close continues from the first unchecked child. \
+             Retry until it completes, or run `epic_status` for a paged \
+             diagnostic. This is a bounded fail-closed result, not an unknown \
+             mutation outcome.",
             total = collection.total_children,
             budget = budget,
             unchecked = unchecked.join("\n"),

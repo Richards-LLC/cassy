@@ -1616,11 +1616,22 @@ fn scoped_proof_note_receipt(notes: &str) -> Option<ScopedProofReceipt> {
     notes
         .lines()
         .filter_map(|line| {
+            if let Some(receipt) = scoped_proof_receipt_file(line) {
+                return Some(receipt);
+            }
             let lower = line.to_ascii_lowercase();
             if !lower.contains("scoped_proof") || !lower.contains("result=pass") {
                 return None;
             }
-            let targets = line.split_once("targets=")?.1;
+            // cas-2664: `run-scoped-tests.sh --proof` prints two passing
+            // lines: the surface checker's `targets=` line and its own
+            // `command=… result=PASS base=… head=…` line. Accept either; the
+            // command's `--test` arguments name the targets it ran, and the
+            // script prints it only after surface validation passed.
+            let targets = line
+                .split_once("targets=")
+                .or_else(|| line.split_once("command="))?
+                .1;
             let targets = targets
                 .split_once("result=")
                 .map_or(targets, |(value, _)| value);
@@ -1641,6 +1652,47 @@ fn scoped_proof_note_receipt(notes: &str) -> Option<ScopedProofReceipt> {
             })
         })
         .last()
+}
+
+/// cas-2664: a receipt for many targets is longer than one task note allows,
+/// so a note may cite the file `run-scoped-tests.sh --proof` writes instead:
+/// `SCOPED_PROOF_RECEIPT: id=sp-<sha256> path=<file>`. The file is accepted
+/// only when its `receipt_id` matches the cited id and the SHA-256 of its
+/// payload, so an edited file or a mismatched citation proves nothing.
+fn scoped_proof_receipt_file(line: &str) -> Option<ScopedProofReceipt> {
+    use sha2::Digest;
+
+    let rest = &line[line.find("SCOPED_PROOF_RECEIPT:")? + "SCOPED_PROOF_RECEIPT:".len()..];
+    let cited_id = scoped_proof_receipt_field(rest, "id=")?;
+    let path = scoped_proof_receipt_field(rest, "path=")?;
+    let content = std::fs::read_to_string(&path).ok()?;
+    let id_line_start = content.find("\nreceipt_id=")? + 1;
+    let payload = &content[..id_line_start];
+    let file_id = content[id_line_start + "receipt_id=".len()..].lines().next()?.trim();
+    let digest = sha2::Sha256::digest(payload.as_bytes());
+    let computed = format!(
+        "sp-{}",
+        digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+    );
+    if file_id != cited_id || computed != cited_id {
+        return None;
+    }
+    let field = |name: &str| {
+        payload
+            .lines()
+            .find_map(|entry| entry.strip_prefix(name))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    if field("result=").as_deref() != Some("PASS") {
+        return None;
+    }
+    Some(ScopedProofReceipt {
+        targets: field("targets=")?,
+        base: field("base_sha="),
+        head: field("head_sha="),
+    })
 }
 
 fn scoped_proof_note_targets(notes: &str) -> Option<String> {
@@ -2121,6 +2173,19 @@ enum BuildProofs {
     DeferredToAssembly,
 }
 
+/// cas-4cbb / cas-2664: which closes carry their own Rust build proofs.
+fn close_build_proofs(
+    is_factory_worker: bool,
+    epic_assembly_proof_covers_delivery: bool,
+    merged_epic_child: bool,
+) -> BuildProofs {
+    if is_factory_worker || epic_assembly_proof_covers_delivery || merged_epic_child {
+        BuildProofs::DeferredToAssembly
+    } else {
+        BuildProofs::Required
+    }
+}
+
 fn validate_risk_close_proofs(
     task: &Task,
     changed_paths: &[String],
@@ -2279,7 +2344,7 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
         let missing = scoped_proof_note_covers(&task.notes, &required_targets);
         if !missing.is_empty() {
             return Err(format!(
-                "TASK CLOSE REJECTED: task {} changed a module with integration-test proof targets that were not run or recorded as passing; missing targets: {}. Run `{}` and add its `SCOPED_PROOF: targets=<complete target set> result=PASS base=<sha> head=<sha>` line to a progress note before retrying close. If the scoped command cannot run, a registered supervisor may record an equivalent full `cargo nextest run -p cas` receipt with its durable log path in the note; every real required target must be covered.",
+                "TASK CLOSE REJECTED: task {} changed a module with integration-test proof targets that were not run or recorded as passing; missing targets: {}. Run `{}` and add its `SCOPED_PROOF: targets=<complete target set> result=PASS base=<sha> head=<sha>` line (or, when that exceeds the note limit, the short `SCOPED_PROOF_RECEIPT: id=… path=…` line it prints) to a progress note before retrying close. If the scoped command cannot run, a registered supervisor may record an equivalent full `cargo nextest run -p cas` receipt with its durable log path in the note; every real required target must be covered.",
                 task.id,
                 missing.join(", "),
                 suggested_scoped_proof_command(
@@ -2315,6 +2380,98 @@ mod risk_proof_tests {
             failed.len()
         ));
         log
+    }
+
+    /// cas-2664: a supervisor closing an epic child whose delivery is merged
+    /// defers build proofs to the epic's assembly, like a worker close.
+    #[test]
+    fn merged_epic_child_close_defers_build_proofs_cas_2664() {
+        assert_eq!(close_build_proofs(false, false, true), BuildProofs::DeferredToAssembly);
+        assert_eq!(close_build_proofs(true, false, false), BuildProofs::DeferredToAssembly);
+        assert_eq!(close_build_proofs(false, true, false), BuildProofs::DeferredToAssembly);
+        assert_eq!(close_build_proofs(false, false, false), BuildProofs::Required);
+
+        let task = Task {
+            id: "cas-2664".into(),
+            risk: vec![TaskRisk::Concurrency],
+            ..Default::default()
+        };
+        let repo = tempfile::tempdir().unwrap();
+        let mut cache = ScopedProofTargetCache::default();
+        assert!(validate_risk_close_proofs_with_base_and_target_and_cache(
+            &task,
+            &["cas-cli/src/lib.rs".into()],
+            repo.path(),
+            repo.path(),
+            None,
+            None,
+            BuildProofs::DeferredToAssembly,
+            &mut cache,
+        )
+        .is_ok());
+        let error = validate_risk_close_proofs_with_base_and_target_and_cache(
+            &task,
+            &["cas-cli/src/lib.rs".into()],
+            repo.path(),
+            repo.path(),
+            None,
+            None,
+            BuildProofs::Required,
+            &mut cache,
+        )
+        .unwrap_err();
+        assert!(error.contains("loaded_proof"), "{error}");
+    }
+
+    /// cas-2664: the runner's `command=… result=PASS base=… head=…` line is a
+    /// receipt too; it used to be ignored, reading as "base None".
+    #[test]
+    fn scoped_proof_command_line_is_a_receipt_cas_2664() {
+        let notes = "[2026-10-01 18:00] SCOPED_PROOF: command=scripts/run-scoped-tests.sh --proof -p cas --lib --test close_ops --test epic_verdict_cache result=PASS base=aaaa1111 head=bbbb2222";
+        let receipt = scoped_proof_note_receipt(notes).expect("command line receipt");
+        assert_eq!(receipt.base.as_deref(), Some("aaaa1111"));
+        assert_eq!(receipt.head.as_deref(), Some("bbbb2222"));
+        assert!(scoped_proof_note_covers(notes, &["close_ops".into(), "epic_verdict_cache".into()]).is_empty());
+        assert_eq!(scoped_proof_note_covers(notes, &["other_module".into()]), vec!["other_module".to_string()]);
+    }
+
+    /// cas-2664: a long receipt is cited by its short file line; the file is
+    /// accepted only when its digest matches the cited id.
+    #[test]
+    fn scoped_proof_receipt_file_is_read_and_verified_cas_2664() {
+        use sha2::Digest;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("proof.receipt");
+        let targets = (0..40).map(|i| format!("lib:module_{i}")).collect::<Vec<_>>().join(",");
+        let payload = format!(
+            "version=1\nresult=PASS\nhead_sha=bbbb2222\nbase_sha=aaaa1111\nchanged_files=3\ntargets={targets}\nworktree=/w\n"
+        );
+        let id = format!(
+            "sp-{}",
+            sha2::Sha256::digest(payload.as_bytes())
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+        std::fs::write(&path, format!("{payload}receipt_id={id}\n")).unwrap();
+        let note = format!("[2026-10-01 18:00] SCOPED_PROOF_RECEIPT: id={id} path={}", path.display());
+        assert!(note.len() < 1500 && targets.len() > 500);
+        let receipt = scoped_proof_note_receipt(&note).expect("receipt file");
+        assert_eq!(receipt.base.as_deref(), Some("aaaa1111"));
+        assert_eq!(receipt.head.as_deref(), Some("bbbb2222"));
+        assert!(scoped_proof_note_covers(&note, &["module_7".into(), "module_39".into()]).is_empty());
+
+        // An edited file no longer matches its digest.
+        std::fs::write(
+            &path,
+            format!("{}receipt_id={id}\n", payload.replace("result=PASS", "result=PASS\nextra=1")),
+        )
+        .unwrap();
+        assert_eq!(scoped_proof_note_receipt(&note), None);
+        // A citation naming a different id proves nothing.
+        std::fs::write(&path, format!("{payload}receipt_id={id}\n")).unwrap();
+        let wrong = note.replace(&id, &format!("sp-{}", "0".repeat(64)));
+        assert_eq!(scoped_proof_note_receipt(&wrong), None);
     }
 
     #[test]
@@ -8180,11 +8337,22 @@ impl CasCore {
                     }
                 }
             }
-            let build_proofs = if is_factory_worker || assembly_proof.is_some() {
-                BuildProofs::DeferredToAssembly
-            } else {
-                BuildProofs::Required
-            };
+            // cas-2664: CONTRIBUTING says child closes reference the epic's
+            // assembly proof instead of carrying scoped or loaded proofs. A
+            // supervisor closing an epic child whose delivery is already on
+            // the integration branch therefore defers too, even before the
+            // ASSEMBLY_PROOF exists; the deferral note names the pending
+            // proof. Standalone tasks and undelivered children still owe
+            // their own proofs.
+            let merged_epic_child = parent_epic.is_some()
+                && delivered_tip.as_deref().is_some_and(|tip| {
+                    commit_is_merged_into_parent(proof_repo, tip, &resolved_parent_branch)
+                });
+            let build_proofs = close_build_proofs(
+                is_factory_worker,
+                assembly_proof.is_some(),
+                merged_epic_child,
+            );
             if build_proofs == BuildProofs::DeferredToAssembly {
                 let reference = match (&assembly_proof, parent_epic.as_ref()) {
                     (Some((epic_id, line)), _) => format!("covered by {epic_id}'s {line}"),
@@ -9948,6 +10116,28 @@ pub(crate) fn message_references_task(message: &str, task_id: &str) -> bool {
     false
 }
 
+/// cas-2664: does `message` claim a task other than `own_task_id`? Workers
+/// commit with their task ID, and one worker's lane carries its next task's
+/// commits on top of a parked delivery. A commit naming another task (and not
+/// this one) is that task's work, whatever its timestamp. Matches
+/// `TaskStore::generate_hash_id`'s `cas-<4..8 hex>` form, so crate and path
+/// words such as `cas-cli` are not claims.
+pub(crate) fn message_claims_other_task(message: &str, own_task_id: Option<&str>) -> bool {
+    if own_task_id.is_some_and(|own| message_references_task(message, own)) {
+        return false;
+    }
+    message
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+        .any(|word| {
+            word.get(..4)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("cas-"))
+                && word.get(4..).is_some_and(|id| {
+                    (4..=8).contains(&id.len()) && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+                && own_task_id.is_none_or(|own| !word.eq_ignore_ascii_case(own))
+        })
+}
+
 /// True when `commit` is attributable to the task described by `identity`.
 ///
 /// Two independent signals, either sufficient: a durably recorded task commit
@@ -11489,19 +11679,26 @@ pub(crate) fn count_task_attributable_unmerged_commits(
             let (timestamp, sha, message) = entry?;
             let names_task =
                 task_id.is_some_and(|task_id| message_references_task(message, task_id));
-            let attributable = timestamp >= cutoff
-                || known_commits.contains(sha)
-                || (names_task
-                    && !integrated_patches
-                        .get_or_insert_with(|| {
-                            patch_equivalent_on_targets(
-                                repo_path,
-                                commit_ish,
-                                parent_branch,
-                                origin_parent_exists.then_some(origin_parent.as_str()),
-                            )
-                        })
-                        .contains(sha));
+            // cas-2664: the same worker's next task commits on this lane after
+            // this task parked. Those commits name their own task; they are
+            // not this task's stranded delivery.
+            let next_task_work = !known_commits.contains(sha)
+                && task_id.is_some()
+                && message_claims_other_task(message, task_id);
+            let attributable = !next_task_work
+                && (timestamp >= cutoff
+                    || known_commits.contains(sha)
+                    || (names_task
+                        && !integrated_patches
+                            .get_or_insert_with(|| {
+                                patch_equivalent_on_targets(
+                                    repo_path,
+                                    commit_ish,
+                                    parent_branch,
+                                    origin_parent_exists.then_some(origin_parent.as_str()),
+                                )
+                            })
+                            .contains(sha)));
             Some(count + u32::from(attributable))
         })
 }
@@ -12115,6 +12312,14 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
             .is_some_and(|window| window.supervisor_override_reason.is_some())
             && attribution.receipt.is_none()
             && task.execution_note.as_deref() != Some("no-code")
+            // cas-2664: a recorded delivery anchor already merged into the
+            // target identifies this task's delivery; what remains on the
+            // lane is other work, not pre-task delivery to classify.
+            && !task
+                .deliverables
+                .factory_branch_anchor
+                .as_deref()
+                .is_some_and(|anchor| commit_is_merged_into_parent(repo_path, anchor, parent_branch))
         {
             return MergeStateGateOutcome::Reject(format!(
                 "⚠️ MERGE REQUIRED\n\nTask {} has {stranded} unmerged commit(s) on {factory_branch}, \
@@ -23506,6 +23711,109 @@ mod merge_state_gate_tests {
         std::fs::write(dir.join(name), format!("// {name}\n")).unwrap();
         git_at(dir, &["add", name], date);
         git_at(dir, &["commit", "-q", "-m", message], date);
+    }
+
+    /// cas-2664: after cas-b412 merged, its worker started cas-f0a6 on the
+    /// same lane. Closing cas-b412 then counted cas-f0a6's commits as its own
+    /// stranded delivery. A commit naming another task is that task's work;
+    /// an unlabelled commit inside the window still counts (fail closed).
+    #[test]
+    fn next_task_commits_on_the_same_lane_are_not_attributed_cas_2664() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        commit_file_with_message_at(p, "gate.rs", "fix(close): gate (cas-test1)", "2026-08-04T12:00:00Z");
+        let anchor = rev_parse_local(p, "HEAD");
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/worker", "-m", "merge cas-test1"]);
+        git(p, &["checkout", "-q", "factory/worker"]);
+        commit_file_with_message_at(p, "snap.rs", "fix(close): snapshot gate (cas-f0a6)", "2026-08-04T13:00:00Z");
+        commit_file_with_message_at(p, "more.rs", "test(close): cover it (cas-f0a6)", "2026-08-04T13:05:00Z");
+
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(anchor);
+        let req = base_req(&task.id);
+        let mut window = window_at(1_700_000_000, "task work cycle");
+        window.identity = task_commit_identity(&task, None);
+        assert_eq!(
+            count_task_attributable_unmerged_commits(p, "factory/worker", "main", &window, None),
+            Some(0)
+        );
+        // Also with a supervisor override and no receipt: the merged anchor
+        // identifies the delivery, so the remainder is not pre-task work.
+        window.supervisor_override_reason = Some("supervisor close of merged delivery".into());
+        match run_factory_branch_merge_gate_with_attribution(
+            &task,
+            &req,
+            "main",
+            p,
+            TaskCommitAttribution {
+                receipt: None,
+                window: Some(&window),
+            },
+        ) {
+            MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_) => {}
+            other => panic!("the next task's commits must not block this close, got {other:?}"),
+        }
+
+        // An unlabelled commit inside the window is still attributed.
+        commit_file_with_message_at(p, "anon.rs", "wip", "2026-08-04T13:10:00Z");
+        window.supervisor_override_reason = None;
+        assert_eq!(
+            count_task_attributable_unmerged_commits(p, "factory/worker", "main", &window, None),
+            Some(1)
+        );
+    }
+
+    /// cas-2664 (7), the cas-ef5e shape: lane commit → merge of the epic tip
+    /// into the lane (as the supervisor asked, to resolve overlap) → lane
+    /// commit. The merged-in epic content is other tasks' delivery; only the
+    /// lane's own commits are attributed, for paths, base and diff stat.
+    #[test]
+    fn target_merged_into_lane_is_not_attributed_to_the_task_cas_2664() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        commit_file_with_message_at(p, "own-a.rs", "feat: first half (cas-test1)", "2026-08-04T12:00:00Z");
+        git(p, &["checkout", "-q", "main"]);
+        // Other tasks' deliveries land on the epic (target) meanwhile; one
+        // names no task at all.
+        commit_file_with_message_at(p, "epic-gate.rs", "fix(close): gate (cas-b412)", "2026-08-04T12:10:00Z");
+        commit_file_with_message_at(p, "epic-hook.rs", "hook policy", "2026-08-04T12:20:00Z");
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git_at(
+            p,
+            &["merge", "-q", "--no-ff", "main", "-m", "Merge epic tip into factory/worker"],
+            "2026-08-04T12:30:00Z",
+        );
+        commit_file_with_message_at(p, "own-b.rs", "feat: second half (cas-test1)", "2026-08-04T12:40:00Z");
+
+        let task = worker_task("worker");
+        let mut window = window_at(0, "task work cycle");
+        window.identity = task_commit_identity(&task, None);
+        let paths = task_attribution::paths(p, "main", &window, None).expect("attribution");
+        assert_eq!(paths, vec!["own-a.rs".to_string(), "own-b.rs".to_string()]);
+        let stat = task_attribution::diff_stat(p, "main", &window, None).expect("diff stat");
+        assert!(!stat.stat.contains("epic-"), "{}", stat.stat);
+        assert!(stat.stat.contains("own-a.rs") && stat.stat.contains("own-b.rs"), "{}", stat.stat);
+
+        // A merge of a branch that is NOT on the target is still attributed.
+        git(p, &["checkout", "-q", "-b", "side", "main"]);
+        commit_file_with_message_at(p, "side.rs", "side work", "2026-08-04T12:50:00Z");
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git_at(p, &["merge", "-q", "--no-ff", "side", "-m", "merge side"], "2026-08-04T12:55:00Z");
+        let paths = task_attribution::paths(p, "main", &window, None).expect("attribution");
+        assert!(paths.contains(&"side.rs".to_string()), "{paths:?}");
+        assert!(!paths.iter().any(|path| path.starts_with("epic-")), "{paths:?}");
+    }
+
+    #[test]
+    fn message_claims_other_task_matches_only_foreign_task_ids_cas_2664() {
+        assert!(message_claims_other_task("fix (cas-f0a6)", Some("cas-b412")));
+        assert!(!message_claims_other_task("fix (cas-b412)", Some("cas-b412")));
+        assert!(!message_claims_other_task("fix cas-b412 per cas-f2eb", Some("cas-b412")));
+        assert!(!message_claims_other_task("touch cas-cli and cas-src", Some("cas-b412")));
+        assert!(!message_claims_other_task("wip", Some("cas-b412")));
+        assert!(message_claims_other_task("CAS-F0A6: thing", Some("cas-b412")));
     }
 
     /// cas-08f9: a parked delivery bounced for a merge conflict. The worker

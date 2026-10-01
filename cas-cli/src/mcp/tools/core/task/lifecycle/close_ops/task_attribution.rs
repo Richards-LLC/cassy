@@ -35,6 +35,17 @@ fn references_foreign_task(message: &str, identity: &TaskCommitIdentity) -> bool
         })
 }
 
+fn is_target_sync_merge(repo: &Path, merged_parents: &[String], target: &str) -> bool {
+    !merged_parents.is_empty()
+        && merged_parents.iter().all(|parent| {
+            Command::new("git")
+                .args(["merge-base", "--is-ancestor", parent, target])
+                .current_dir(repo)
+                .status()
+                .is_ok_and(|status| status.success())
+        })
+}
+
 /// Current-cycle commits and durably identified earlier-cycle commits share
 /// the same epoch contract in selection and receipt validation.
 pub(super) fn in_work_window(window: &TaskCommitReceiptWindow, epoch: i64, owned: bool) -> bool {
@@ -99,6 +110,8 @@ fn task_delivery_ranges(
         owned: bool,
         foreign: bool,
         merge: bool,
+        /// Non-first parents of a merge commit.
+        merged_parents: Vec<String>,
     }
     let commits: Vec<Commit> = history
         .split('\u{1e}')
@@ -129,13 +142,15 @@ fn task_delivery_ranges(
                                     && id.bytes().all(|byte| byte.is_ascii_hexdigit())
                             })
                     });
+            let parents: Vec<&str> = fields[1].split_whitespace().collect();
             Some(Commit {
                 sha,
-                parent: fields[1].split_whitespace().next().unwrap_or("").into(),
+                parent: parents.first().copied().unwrap_or("").into(),
                 epoch: fields[2].parse().ok()?,
                 owned,
                 foreign,
-                merge: fields[1].split_whitespace().count() > 1,
+                merge: parents.len() > 1,
+                merged_parents: parents.iter().skip(1).map(|parent| parent.to_string()).collect(),
             })
         })
         .collect();
@@ -150,6 +165,13 @@ fn task_delivery_ranges(
                 && !c.foreign
                 && (c.owned || unmerged.contains(&c.sha))
                 && (in_work_window(window, c.epoch, c.owned) || (historical_receipt && c.owned))
+                // cas-2664 (7): a merge whose every non-first parent is
+                // already on the target only brings the target into the
+                // lane; its tree effect is other tasks' delivered content.
+                // Deselecting it also splits the ranges, so no range spans
+                // the target content it brought in. Checked last, so only
+                // otherwise-selected merges cost a Git call.
+                && !(c.merge && is_target_sync_merge(repo, &c.merged_parents, &target))
         })
         .collect();
     // The end of a delivery is an upper boundary, not its only commit.

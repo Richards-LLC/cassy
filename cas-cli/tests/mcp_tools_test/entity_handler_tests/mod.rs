@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use tempfile::TempDir;
 
 /// Helper to setup CAS with entity store initialized
-fn setup_cas_with_entities() -> (TempDir, CasCore, CasService) {
-    let (temp, core) = setup_cas();
+fn setup_cas_with_entities(test_env: &mut TestEnvGuard) -> (TempDir, CasCore, CasService) {
+    let (temp, core) = setup_cas(test_env);
     let cas_dir = temp.path().join(".cas");
 
     // Initialize entity store
@@ -55,7 +55,8 @@ fn gen_entry_id(store: &dyn cas_store::Store) -> String {
 
 #[tokio::test]
 async fn test_entity_list_query_filter() {
-    let (temp, _core, service) = setup_cas_with_entities();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, _core, service) = setup_cas_with_entities(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let entity_store = open_entity_store(&cas_dir).unwrap();
 
@@ -118,7 +119,8 @@ async fn test_entity_list_query_filter() {
 
 #[tokio::test]
 async fn test_entity_list_sort_by_name() {
-    let (temp, _core, service) = setup_cas_with_entities();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, _core, service) = setup_cas_with_entities(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let entity_store = open_entity_store(&cas_dir).unwrap();
 
@@ -184,7 +186,8 @@ async fn test_entity_list_sort_by_name() {
 
 #[tokio::test]
 async fn test_entity_list_sort_by_mentions() {
-    let (temp, _core, service) = setup_cas_with_entities();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, _core, service) = setup_cas_with_entities(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let entity_store = open_entity_store(&cas_dir).unwrap();
 
@@ -254,7 +257,8 @@ async fn test_entity_list_sort_by_mentions() {
 
 #[tokio::test]
 async fn test_entity_extract_query_filter() {
-    let (temp, _core, service) = setup_cas_with_entities();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, _core, service) = setup_cas_with_entities(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let store = open_store(&cas_dir).unwrap();
 
@@ -290,7 +294,8 @@ async fn test_entity_extract_query_filter() {
 
 #[tokio::test]
 async fn test_entity_extract_scope_filter() {
-    let (temp, _core, service) = setup_cas_with_entities();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, _core, service) = setup_cas_with_entities(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let store = open_store(&cas_dir).unwrap();
 
@@ -329,7 +334,8 @@ async fn test_entity_extract_scope_filter() {
 
 #[tokio::test]
 async fn test_entity_extract_tags_filter() {
-    let (temp, _core, service) = setup_cas_with_entities();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, _core, service) = setup_cas_with_entities(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let store = open_store(&cas_dir).unwrap();
 
@@ -367,7 +373,8 @@ async fn test_entity_extract_tags_filter() {
 
 #[tokio::test]
 async fn test_entity_extract_entity_type_filter() {
-    let (temp, _core, service) = setup_cas_with_entities();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, _core, service) = setup_cas_with_entities(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let store = open_store(&cas_dir).unwrap();
 
@@ -399,7 +406,8 @@ async fn test_entity_extract_entity_type_filter() {
 
 #[tokio::test]
 async fn test_entity_list_combined_filters() {
-    let (temp, _core, service) = setup_cas_with_entities();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, _core, service) = setup_cas_with_entities(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let entity_store = open_entity_store(&cas_dir).unwrap();
 

@@ -1063,23 +1063,15 @@ mod tests {
 
     #[test]
     fn codex_home_prefers_env_override() {
-        // Env mutation is process-global: this is the only test in the crate
-        // that touches CODEX_HOME, and it restores the previous value.
-        let previous = std::env::var_os("CODEX_HOME");
-        unsafe { std::env::set_var("CODEX_HOME", "/tmp/cas-codex-home-test") };
+        let mut env = crate::test_env_guard::TestEnvGuard::new();
+        env.set("CODEX_HOME", "/tmp/cas-codex-home-test");
         assert_eq!(
             codex_home(),
             Some(PathBuf::from("/tmp/cas-codex-home-test"))
         );
-        unsafe {
-            match previous {
-                Some(v) => std::env::set_var("CODEX_HOME", v),
-                None => std::env::remove_var("CODEX_HOME"),
-            }
-        }
     }
 
-    /// Minimal self-cleaning temp dir (cas-pty has no tempfile dev-dependency).
+    /// Minimal self-cleaning temp dir for the Codex trust fixtures.
     struct TempDir(PathBuf);
 
     impl TempDir {

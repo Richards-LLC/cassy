@@ -3289,11 +3289,9 @@ mod risk_proof_tests {
             .expect("a receipt on the delivery's own base closes");
     }
 
-    /// cas-4cbb: a factory worker's close carries no build proof. The same
-    /// diff and risk that refuse a supervisor close without a scoped receipt
-    /// or loaded proof pass when the proofs are deferred to epic assembly.
-    #[test]
-    fn consolidated_inventory_repairs_legacy_checker_and_fallback_targets_cas_d1ee() {
+    fn consolidated_inventory_fixture(
+        _env: &mut crate::test_env_guard::TestEnvGuard,
+    ) -> (tempfile::TempDir, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path();
         let files = [
@@ -3336,8 +3334,24 @@ mod risk_proof_tests {
         initialize_scoped_proof_git_fixture(repo);
         let target = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(target.path().join("scripts")).unwrap();
-        std::fs::write(target.path().join("scripts/check-scoped-test-surface.sh"),
-            "#!/bin/bash\nprintf '%s\\n' 'SCOPED_PROOF_TARGET_ARGS: --test retrieval_eval_test --test distributed_factory_test'\n").unwrap();
+        std::fs::write(
+            target.path().join("scripts/check-scoped-test-surface.sh"),
+            concat!(
+                "#!/bin/bash\n",
+                "printf '%s\\n' 'CHECKER_READY'\n",
+                "while IFS= read -r path; do printf '%s\\n' \"$path\"; done > checker-paths.txt\n",
+                "printf '%s\\n' 'SCOPED_PROOF_TARGET_ARGS: --test retrieval_eval_test --test distributed_factory_test'\n",
+            ),
+        )
+        .unwrap();
+        (dir, target)
+    }
+
+    #[test]
+    fn consolidated_inventory_repairs_legacy_checker_and_fallback_targets_cas_d1ee() {
+        let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (dir, target) = consolidated_inventory_fixture(&mut env);
+        let repo = dir.path();
         let changed = vec![
             "cas-cli/tests/retrieval_eval_test.rs".into(),
             "cas-cli/tests/distributed_factory_test.rs".into(),
@@ -3345,6 +3359,11 @@ mod risk_proof_tests {
         let mut cache = ScopedProofTargetCache::default();
         let required = required_scoped_proof_targets(repo, target.path(), &changed, &mut cache);
         assert_eq!(required, ["integration_cloud", "integration_factory"]);
+        assert_eq!(
+            std::fs::read_to_string(repo.join("checker-paths.txt")).unwrap(),
+            "cas-cli/tests/distributed_factory_test.rs\ncas-cli/tests/retrieval_eval_test.rs\n",
+            "checker must consume the complete path request before returning"
+        );
         let fallback = legacy_required_scoped_proof_targets(repo, &changed);
         assert_eq!(
             fallback,
@@ -3383,6 +3402,64 @@ mod risk_proof_tests {
         );
     }
 
+    #[test]
+    fn draining_checker_returns_consolidated_targets_after_the_child_is_ready() {
+        use std::io::{BufRead, BufReader, Read, Write};
+
+        let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (repo, target) = consolidated_inventory_fixture(&mut env);
+        let mut child = std::process::Command::new("bash")
+            .arg(target.path().join("scripts/check-scoped-test-surface.sh"))
+            .args([
+                "--resolve-targets",
+                "--base",
+                "HEAD",
+                "--paths-from-stdin",
+                "--",
+            ])
+            .current_dir(repo.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        let mut ready = String::new();
+        stdout.read_line(&mut ready).unwrap();
+        assert_eq!(ready, "CHECKER_READY\n");
+        // The handshake deliberately schedules the child first. It retains
+        // its stdin reader until the parent supplies every path and EOF;
+        // no sleep or race-dependent early-exit assumption is needed.
+        let paths = "cas-cli/tests/distributed_factory_test.rs\ncas-cli/tests/retrieval_eval_test.rs\n";
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(paths.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(output.stderr.is_empty(), "{output:?}");
+        let mut response = String::new();
+        stdout.read_to_string(&mut response).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("checker-paths.txt")).unwrap(),
+            paths
+        );
+        let legacy_targets = parse_scoped_proof_target_args(&response).unwrap();
+        assert_eq!(
+            legacy_targets,
+            ["retrieval_eval_test", "distributed_factory_test"]
+        );
+        assert_eq!(
+            canonical_scoped_proof_targets(repo.path(), legacy_targets).unwrap(),
+            ["integration_cloud", "integration_factory"]
+        );
+    }
+
+    /// cas-4cbb: a factory worker's close carries no build proof. The same
+    /// diff and risk that refuse a supervisor close without a scoped receipt
+    /// or loaded proof pass when the proofs are deferred to epic assembly.
     #[test]
     fn worker_close_needs_no_scoped_or_loaded_proof_when_deferred_to_assembly() {
         let dir = scoped_proof_fixture();

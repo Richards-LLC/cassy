@@ -7,7 +7,8 @@ use rmcp::handler::server::wrapper::Parameters;
 
 #[tokio::test]
 async fn test_rule_create() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let req = RuleCreateRequest {
         scope: "project".to_string(),
@@ -33,7 +34,8 @@ async fn test_rule_create() {
 /// while an ordinary draft rule still waits for promotion.
 #[tokio::test]
 async fn operator_hard_rule_is_synced_to_claude_rules_on_create_cas_5372() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let create = |content: &str, tags: Option<&str>| RuleCreateRequest {
         scope: "project".to_string(),
         content: content.to_string(),
@@ -97,7 +99,8 @@ fn synced_rule_files(temp: &tempfile::TempDir) -> Vec<String> {
 /// cas-5372 review: a registered supervisor authorises the fast path too.
 #[tokio::test]
 async fn supervisor_hard_rule_is_authorised_and_synced_cas_5372() {
-    let (temp, service) = setup_cas_as(cas::types::AgentRole::Supervisor);
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas_as(&mut test_env, cas::types::AgentRole::Supervisor);
     let text = extract_text(
         service
             .cas_rule_create(Parameters(hard_rule_request("HARD RULE: ask before touching billing")))
@@ -113,7 +116,8 @@ async fn supervisor_hard_rule_is_authorised_and_synced_cas_5372() {
 /// and nothing reaches `.claude/rules`.
 #[tokio::test]
 async fn worker_hard_rule_text_is_refused_the_fast_path_cas_5372() {
-    let (temp, service) = setup_cas_as(cas::types::AgentRole::Worker);
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas_as(&mut test_env, cas::types::AgentRole::Worker);
     let text = extract_text(
         service
             .cas_rule_create(Parameters(hard_rule_request(
@@ -137,7 +141,8 @@ async fn worker_hard_rule_text_is_refused_the_fast_path_cas_5372() {
 /// overwrites a locally authorised rule's text.
 #[tokio::test]
 async fn pulled_hard_rule_is_refused_the_fast_path_cas_5372() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let rule_store = open_rule_store(&temp.path().join(".cas")).unwrap();
 
     // A foreign project's authorised hard rule, as the wire delivers it.
@@ -177,7 +182,8 @@ async fn pulled_hard_rule_is_refused_the_fast_path_cas_5372() {
 
 #[tokio::test]
 async fn test_rule_show() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create rule
     let req = RuleCreateRequest {
@@ -229,7 +235,8 @@ async fn test_rule_show() {
 
 #[tokio::test]
 async fn test_rule_impact_metrics_are_visible_in_list_and_show() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
     let store = open_rule_store(&_temp.path().join(".cas")).unwrap();
     let mut rule = Rule::new(
         "rule-impact".to_string(),
@@ -273,7 +280,8 @@ async fn test_rule_impact_metrics_are_visible_in_list_and_show() {
 
 #[tokio::test]
 async fn test_rule_list() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create rules
     for i in 0..3 {
@@ -311,7 +319,8 @@ async fn test_rule_list() {
 
 #[tokio::test]
 async fn test_rule_update() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create rule
     let req = RuleCreateRequest {
@@ -387,7 +396,8 @@ async fn test_rule_update() {
 
 #[tokio::test]
 async fn test_rule_helpful_and_harmful() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create rule
     let req = RuleCreateRequest {
@@ -443,7 +453,8 @@ async fn test_rule_helpful_and_harmful() {
 
 #[tokio::test]
 async fn test_rule_helpful_requires_evidence_threshold() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let result = service
         .cas_rule_create(Parameters(RuleCreateRequest {
@@ -474,7 +485,8 @@ async fn test_rule_helpful_requires_evidence_threshold() {
 
 #[tokio::test]
 async fn test_rule_helpful_promotes_draft_to_proven_at_default_threshold() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let result = service
         .cas_rule_create(Parameters(RuleCreateRequest {
@@ -506,7 +518,8 @@ async fn test_rule_helpful_promotes_draft_to_proven_at_default_threshold() {
 
 #[tokio::test]
 async fn test_rule_helpful_promotes_at_configured_threshold() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
     std::fs::write(
         _temp.path().join(".cas/config.toml"),
         "[sync]\npromotion_threshold = 3\n",
@@ -542,7 +555,8 @@ async fn test_rule_helpful_promotes_at_configured_threshold() {
 
 #[tokio::test]
 async fn test_rule_helpful_accepts_configured_retrieval_evidence() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     std::fs::write(
         temp.path().join(".cas/config.toml"),
         "[sync]\npromotion_threshold = 2\npromotion_evidence = [\"retrieval\"]\n",
@@ -618,7 +632,8 @@ async fn test_rule_helpful_accepts_configured_retrieval_evidence() {
 
 #[tokio::test]
 async fn test_rule_retrieval_evidence_requires_distinct_sessions() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     std::fs::write(
         temp.path().join(".cas/config.toml"),
         "[sync]\npromotion_threshold = 2\npromotion_evidence = [\"retrieval\"]\n",
@@ -710,7 +725,8 @@ async fn test_rule_retrieval_evidence_requires_distinct_sessions() {
 
 #[tokio::test]
 async fn test_rule_harmful_demotes_proven_rule_and_removes_injection() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     std::fs::write(
         temp.path().join(".cas/config.toml"),
         "[sync]\ndemotion_threshold = 3\n",
@@ -789,7 +805,8 @@ async fn test_rule_harmful_demotes_proven_rule_and_removes_injection() {
 
 #[tokio::test]
 async fn test_corrected_retrieval_evidence_demotes_on_sync() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     std::fs::write(
         temp.path().join(".cas/config.toml"),
         "[sync]\ndemotion_threshold = 2\n",
@@ -912,7 +929,8 @@ async fn test_corrected_retrieval_evidence_demotes_on_sync() {
 
 #[tokio::test]
 async fn test_existing_proven_rule_is_grandfathered() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     std::fs::write(
         temp.path().join(".cas/config.toml"),
         "[sync]\npromotion_threshold = 5\n",
@@ -939,7 +957,8 @@ async fn test_existing_proven_rule_is_grandfathered() {
 
 #[tokio::test]
 async fn test_rule_delete() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create rule
     let req = RuleCreateRequest {
@@ -988,7 +1007,8 @@ async fn test_rule_delete() {
 /// refused with an actionable message, unless tagged `project:<slug>`.
 #[tokio::test]
 async fn rule_create_refuses_rule_naming_another_registered_project_cas_caae() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
     register_host_project("/nonexistent/zephyr-quokka");
     let create = |tags: Option<&str>| RuleCreateRequest {
         scope: "project".to_string(),
@@ -1025,7 +1045,8 @@ async fn rule_create_refuses_rule_naming_another_registered_project_cas_caae() {
 /// the rule-file sync floor, and refuses rules with harmful reports.
 #[tokio::test]
 async fn rule_promote_is_a_recorded_decision_not_a_vote_cas_228e() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let create = |content: &str| RuleCreateRequest {
         scope: "project".to_string(),
         content: content.to_string(),

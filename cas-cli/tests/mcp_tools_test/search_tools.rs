@@ -79,7 +79,8 @@ async fn provenance_search(
 
 #[tokio::test]
 async fn test_search_empty() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let req = SearchRequest {
         scope: "all".to_string(),
@@ -102,7 +103,8 @@ async fn test_search_empty() {
 
 #[tokio::test]
 async fn test_search_with_content() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create searchable content
     let req = RememberRequest {
@@ -147,10 +149,11 @@ async fn test_search_with_content() {
 
 #[tokio::test]
 async fn skill_impact_reports_surface_rows_and_session_outcomes() {
+    let mut test_env = TestEnvGuard::temp_home();
     use cas_store::{RuleStore, SkillStore, SqliteRuleStore, SqliteSkillStore, SqliteStore};
     use cas_types::{Rule, RuleStatus, Session, SessionOutcome, Skill, SkillStatus};
 
-    let (temp, core) = setup_cas();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     let rule_store = SqliteRuleStore::open(&cas_dir).unwrap();
@@ -225,7 +228,8 @@ async fn skill_impact_reports_surface_rows_and_session_outcomes() {
 
 #[tokio::test]
 async fn cas_57e5_colon_bearing_free_text_queries_return_results() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
     service
         .cas_remember(Parameters(RememberRequest {
             scope: "project".to_string(),
@@ -269,7 +273,8 @@ async fn cas_57e5_colon_bearing_free_text_queries_return_results() {
 
 #[tokio::test]
 async fn artifact_fixture_content_is_searchable_after_backfill() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let artifacts_root = temp.path().join("durable-artifacts");
     let task_id = "cas-artifact-fixture";
     // cas-6ebf: search discovers the project-scoped artifact namespace.
@@ -319,7 +324,8 @@ async fn artifact_fixture_content_is_searchable_after_backfill() {
 
 #[tokio::test]
 async fn cas_4caa_expired_memory_is_excluded_from_search_recall() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
     let request = RememberRequest {
         scope: "project".to_string(),
         content: "expired search recall marker cas4caa".to_string(),
@@ -355,7 +361,8 @@ async fn cas_4caa_expired_memory_is_excluded_from_search_recall() {
 
 #[tokio::test]
 async fn test_search_filter_by_type() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create content
     let req = RememberRequest {
@@ -430,7 +437,8 @@ async fn test_search_filter_by_type() {
 
 #[tokio::test]
 async fn provenance_v1_rejects_unsupported_versions_at_the_public_boundary() {
-    let (_temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, core) = setup_cas(&mut test_env);
     let service = CasService::new(core, None);
 
     let error = provenance_search(&service, "anything", None, 2)
@@ -445,7 +453,8 @@ async fn provenance_v1_rejects_unsupported_versions_at_the_public_boundary() {
 
 #[tokio::test]
 async fn provenance_v1_empty_results_classify_each_query_family() {
-    let (_temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, core) = setup_cas(&mut test_env);
     let service = CasService::new(core, None);
 
     for (query, doc_type, expected_family) in [
@@ -467,7 +476,8 @@ async fn provenance_v1_empty_results_classify_each_query_family() {
 
 #[tokio::test]
 async fn provenance_v1_projects_every_unified_document_type() {
-    let (temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     seed_projection_documents(&temp.path().join(".cas"));
     let service = CasService::new(core, None);
 
@@ -514,7 +524,8 @@ async fn provenance_v1_projects_every_unified_document_type() {
 
 #[tokio::test]
 async fn test_versioned_provenance_feedback_and_offline_metrics_flow() {
-    let (temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
 
     let cas_dir = temp.path().join(".cas");
     let entry_store = SqliteStore::open(&cas_dir).unwrap();
@@ -721,7 +732,8 @@ async fn test_versioned_provenance_feedback_and_offline_metrics_flow() {
 
 #[tokio::test]
 async fn retrieval_metrics_filters_by_session_and_rejects_unsupported_filters() {
-    let (temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let store = SqliteRetrievalStore::open(&cas_dir).expect("retrieval store should open");
     let agent_store = cas::store::open_agent_store(&cas_dir).expect("agent store should open");

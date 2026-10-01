@@ -42,7 +42,8 @@ async fn memory_list(
 
 #[tokio::test]
 async fn cas_1aa3_memory_list_applies_tags_and_reports_the_filtered_total() {
-    let (_temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, core) = setup_cas(&mut test_env);
     let cas_dir = core.project_path().to_path_buf();
     let service = CasService::new(core, None);
 
@@ -122,7 +123,8 @@ async fn cas_1aa3_memory_list_applies_tags_and_reports_the_filtered_total() {
 
 #[tokio::test]
 async fn test_remember_basic() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let req = RememberRequest {
         scope: "project".to_string(),
@@ -152,7 +154,8 @@ async fn test_remember_basic() {
 
 #[tokio::test]
 async fn test_remember_with_defaults() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let req = RememberRequest {
         scope: "project".to_string(),
@@ -181,10 +184,11 @@ async fn test_remember_with_defaults() {
 
 #[tokio::test]
 async fn cas_4caa_remember_derives_valid_until_from_until_deadline() {
+    let mut test_env = TestEnvGuard::temp_home();
     use cas::store::open_store;
     use chrono::{Datelike, Timelike};
 
-    let (_temp, service) = setup_cas();
+    let (_temp, service) = setup_cas(&mut test_env);
     let cas_dir = service.project_path().to_path_buf();
 
     let result = service
@@ -218,7 +222,8 @@ async fn cas_4caa_remember_derives_valid_until_from_until_deadline() {
 
 #[tokio::test]
 async fn test_get_entry() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
     let cas_dir = service.project_path().to_path_buf();
 
     // First create an entry
@@ -267,7 +272,8 @@ async fn test_get_entry() {
 
 #[tokio::test]
 async fn test_get_nonexistent_entry() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let req = IdRequest {
         id: "nonexistent-id".to_string(),
@@ -279,7 +285,8 @@ async fn test_get_nonexistent_entry() {
 
 #[tokio::test]
 async fn test_update_entry() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create entry
     let req = RememberRequest {
@@ -337,7 +344,8 @@ async fn test_update_entry() {
 
 #[tokio::test]
 async fn test_archive_and_unarchive() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create entry
     let req = RememberRequest {
@@ -387,7 +395,8 @@ async fn test_archive_and_unarchive() {
 
 #[tokio::test]
 async fn test_helpful_and_harmful() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create entry
     let req = RememberRequest {
@@ -437,7 +446,8 @@ async fn test_helpful_and_harmful() {
 
 #[tokio::test]
 async fn test_list_entries() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create a few entries
     for i in 0..3 {
@@ -484,7 +494,8 @@ async fn test_list_entries() {
 
 #[tokio::test]
 async fn test_recent_entries() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create entries
     for i in 0..3 {
@@ -522,7 +533,8 @@ async fn test_recent_entries() {
 
 #[tokio::test]
 async fn test_delete_entry() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create entry
     let req = RememberRequest {
@@ -567,7 +579,8 @@ async fn test_delete_entry() {
 
 #[tokio::test]
 async fn test_set_tier() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create entry
     let req = RememberRequest {
@@ -642,7 +655,8 @@ fn learning_request(title: &str, content: &str, tags: &str) -> RememberRequest {
 /// recovery) while keeping the test independent of any active team config.
 #[tokio::test]
 async fn cas_8c16_distinct_session_learnings_store_but_real_duplicate_is_explained() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let backlog = "Two supervisors can collide on a merge-lane backlog. Record the owner before the factory-session handoff and shared-worker review.";
     let branch_ci = "Merge a lane only on its own branch CI. This release policy prevents unverified work from landing after a factory-session handoff and shared-worker review.";
@@ -720,7 +734,8 @@ async fn cas_8c16_distinct_session_learnings_store_but_real_duplicate_is_explain
 
 #[tokio::test]
 async fn test_overlap_blocks_duplicate_insert() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let body =
         "sqlite wal hangs on ntfs3 in cas-mcp/src/server.rs due to posix_lock incompatibility";
@@ -792,7 +807,8 @@ async fn test_overlap_blocks_duplicate_insert() {
 
 #[tokio::test]
 async fn test_bypass_overlap_allows_duplicate() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let content = frontmatter_memory(
         "duplicate memory",
@@ -825,7 +841,8 @@ async fn test_bypass_overlap_allows_duplicate() {
 
 #[tokio::test]
 async fn test_unrelated_memory_inserts_normally() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let first = RememberRequest {
         scope: "project".to_string(),
@@ -891,7 +908,8 @@ async fn test_unrelated_memory_inserts_normally() {
 // ============================================================================
 #[tokio::test]
 async fn test_moderate_overlap_creates_with_crossref() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // First memory: a bug-track entry in cas-mcp. Seed with bypass so we
     // don't race the overlap gate on the first insert.
@@ -994,10 +1012,11 @@ async fn test_moderate_overlap_creates_with_crossref() {
 /// explicit `team_id` must auto-fill `team_id` from `CloudConfig.active_team_id()`.
 #[tokio::test]
 async fn test_remember_team_linked_project_auto_promotes_to_team() {
+    let mut test_env = TestEnvGuard::temp_home();
     use cas::cloud::CloudConfig;
     use cas::store::open_store;
 
-    let (temp, service) = setup_cas();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = service.project_path().to_path_buf();
 
     const TEAM_ID: &str = "auto-promote-team-0000-000000000001";
@@ -1053,10 +1072,11 @@ async fn test_remember_team_linked_project_auto_promotes_to_team() {
 /// `personal=true` opts out of team auto-promote even in a team-linked project.
 #[tokio::test]
 async fn test_remember_personal_flag_opts_out_of_team_auto_promote() {
+    let mut test_env = TestEnvGuard::temp_home();
     use cas::cloud::CloudConfig;
     use cas::store::open_store;
 
-    let (temp, service) = setup_cas();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = service.project_path().to_path_buf();
 
     const TEAM_ID: &str = "personal-opt-out-team-0000-000000000002";
@@ -1107,10 +1127,11 @@ async fn test_remember_personal_flag_opts_out_of_team_auto_promote() {
 /// Explicit `team_id` in the request wins over auto-promote.
 #[tokio::test]
 async fn test_remember_explicit_team_id_wins_over_auto_promote() {
+    let mut test_env = TestEnvGuard::temp_home();
     use cas::cloud::CloudConfig;
     use cas::store::open_store;
 
-    let (temp, service) = setup_cas();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = service.project_path().to_path_buf();
 
     const AUTO_TEAM: &str = "auto-team-0000-000000000003";

@@ -11,6 +11,7 @@
 //! ever reaches the handler — which is exactly how GH #165 hid.
 
 use crate::hooks::handlers::handle_stop;
+use crate::test_support::TestEnvGuard;
 use cas_core::hooks::types::HookInput;
 use std::fs;
 use std::path::Path;
@@ -65,9 +66,9 @@ fn decision_of(out: &cas_core::hooks::types::HookOutput) -> Option<&str> {
 /// would pass for the wrong reason and prove nothing.
 #[test]
 fn stop_hook_active_stops_cas_from_re_blocking_a_continuation() {
-    let _g = super::env_lock();
+    let mut env = TestEnvGuard::new();
     // Exercise the same path for factory and non-factory sessions.
-    unsafe { std::env::remove_var("CAS_AGENT_ROLE") };
+    env.remove("CAS_AGENT_ROLE");
 
     let dir = tempfile::tempdir().unwrap();
     let cas_root = cas_root_that_always_blocks_stop(dir.path());
@@ -93,8 +94,8 @@ fn stop_hook_active_stops_cas_from_re_blocking_a_continuation() {
 /// An absent key still reaches the non-blocking maintenance check.
 #[test]
 fn an_absent_stop_hook_active_key_leaves_blocking_behaviour_unchanged() {
-    let _g = super::env_lock();
-    unsafe { std::env::remove_var("CAS_AGENT_ROLE") };
+    let mut env = TestEnvGuard::new();
+    env.remove("CAS_AGENT_ROLE");
 
     let dir = tempfile::tempdir().unwrap();
     let cas_root = cas_root_that_always_blocks_stop(dir.path());

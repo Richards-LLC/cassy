@@ -18,19 +18,20 @@ mod supervisor_reminder;
 mod tmpfs_guardrail;
 mod unscoped_test_guard;
 
-/// Process-wide mutex for tests that mutate `CAS_AGENT_ROLE` (or any other
-/// env var read by the PreToolUse / PermissionRequest handlers).
-///
-/// All submodules that call `std::env::set_var("CAS_AGENT_ROLE", …)` must
-/// hold this guard for the duration of the test.  Using per-module mutexes
-/// silently fails: they don't coordinate with each other, so two tests in
-/// different modules can race on the same env var.
-///
-/// This delegates to `crate::hooks::test_env_lock()` so that test modules
-/// outside `handlers_tests` (e.g. `pre_tool::worker_commit_guard_tests`)
-/// that also mutate Cassy env vars use the same underlying mutex.
-///
-/// Usage in a submodule: `let _g = super::env_lock();`
-pub(super) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    crate::hooks::test_env_lock()
+use crate::test_support::TestEnvGuard;
+
+/// Reuse the caller's guard so role and harness overrides share one lock and
+/// are restored together, including if a handler assertion unwinds.
+fn set_role_env(env: &mut TestEnvGuard, role: Option<&str>) {
+    match role {
+        Some(role) => env.set("CAS_AGENT_ROLE", role),
+        None => env.remove("CAS_AGENT_ROLE"),
+    }
+}
+
+fn set_supervisor_cli_env(env: &mut TestEnvGuard, cli: Option<&str>) {
+    match cli {
+        Some(cli) => env.set("CAS_FACTORY_SUPERVISOR_CLI", cli),
+        None => env.remove("CAS_FACTORY_SUPERVISOR_CLI"),
+    }
 }

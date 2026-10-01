@@ -9,8 +9,8 @@ use rmcp::handler::server::wrapper::Parameters;
 use tempfile::TempDir;
 
 /// Helper to create CasService for server protocol tests
-fn setup_service() -> (TempDir, CasService) {
-    let (temp, core) = setup_cas();
+fn setup_service(test_env: &mut TestEnvGuard) -> (TempDir, CasService) {
+    let (temp, core) = setup_cas(test_env);
     (temp, CasService::new(core, None))
 }
 
@@ -53,7 +53,8 @@ fn add_exact_supervisor_fixture_verdict(cas_dir: &std::path::Path, mut verificat
 
 #[test]
 fn test_server_info() {
-    let (_temp, service) = setup_service();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_service(&mut test_env);
 
     let info = service.get_info();
 
@@ -75,7 +76,8 @@ fn test_server_info() {
 
 #[test]
 fn test_server_info_version() {
-    let (_temp, service) = setup_service();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_service(&mut test_env);
 
     let info = service.get_info();
 
@@ -85,7 +87,8 @@ fn test_server_info_version() {
 
 #[test]
 fn test_server_capabilities() {
-    let (_temp, service) = setup_service();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_service(&mut test_env);
 
     let info = service.get_info();
 
@@ -97,7 +100,8 @@ fn test_server_capabilities() {
 
 #[test]
 fn test_server_protocol_version() {
-    let (_temp, service) = setup_service();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_service(&mut test_env);
 
     let info = service.get_info();
 
@@ -107,8 +111,9 @@ fn test_server_protocol_version() {
 
 #[tokio::test]
 async fn test_store_operations_work() {
+    let mut test_env = TestEnvGuard::temp_home();
     // Verify the service can open stores (indirectly tests server infrastructure)
-    let (_temp, service) = setup_cas();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create an entry to verify store access works
     let req = RememberRequest {
@@ -138,7 +143,8 @@ async fn test_store_operations_work() {
 
 #[tokio::test]
 async fn test_all_store_types_accessible() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Test entry store
     let req = RememberRequest {
@@ -240,7 +246,8 @@ async fn test_all_store_types_accessible() {
 
 #[tokio::test]
 async fn test_start_allowed_with_other_task_pending_verification() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create and start first task
     let req = TaskCreateRequest {
@@ -354,7 +361,8 @@ async fn test_start_allowed_with_other_task_pending_verification() {
 
 #[tokio::test]
 async fn test_claim_allowed_with_other_task_pending_verification() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     // Create and start first task
@@ -479,7 +487,8 @@ async fn test_claim_allowed_with_other_task_pending_verification() {
 
 #[tokio::test]
 async fn test_start_allowed_after_verification_approved() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     // Create and start first task
     let req = TaskCreateRequest {
@@ -584,7 +593,8 @@ async fn test_start_allowed_after_verification_approved() {
 
 #[tokio::test]
 async fn test_start_same_task_allowed_when_pending() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create and start task
     let req = TaskCreateRequest {
@@ -667,7 +677,8 @@ async fn test_start_same_task_allowed_when_pending() {
 
 #[tokio::test]
 async fn test_task_list_type_filter() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create an epic
     let epic_req = TaskCreateRequest {
@@ -754,7 +765,8 @@ async fn test_task_list_type_filter() {
 
 #[tokio::test]
 async fn test_task_list_epic_filter() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create an epic
     let epic_req = TaskCreateRequest {

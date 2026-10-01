@@ -22,8 +22,8 @@ fn promote_default_test_agent(cas_dir: &std::path::Path) {
 
 #[tokio::test]
 async fn origin_project_move_refuses_unregistered_destination_before_local_write() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     promote_default_test_agent(&cas_dir);
 
@@ -70,8 +70,8 @@ async fn origin_project_move_refuses_unregistered_destination_before_local_write
 
 #[tokio::test]
 async fn origin_project_move_updates_local_row_audit_and_team_queue() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     promote_default_test_agent(&cas_dir);
 
@@ -134,7 +134,8 @@ async fn origin_project_move_updates_local_row_audit_and_team_queue() {
 /// enormous sibling-note payload.
 #[tokio::test]
 async fn test_0447_brief_task_start_returns_only_own_notes_and_is_size_bounded() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
 
     let epic = service
         .cas_task_create(Parameters(TaskCreateRequest {
@@ -231,7 +232,8 @@ async fn test_0447_brief_task_start_returns_only_own_notes_and_is_size_bounded()
 /// exhausted the MCP response budget.
 #[tokio::test]
 async fn epic_override_close_returns_compact_receipt_before_large_note_gh_515() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let task_store = open_task_store(&cas_dir).expect("task store");
     let agent_store = open_agent_store(&cas_dir).expect("agent store");
@@ -373,7 +375,8 @@ async fn epic_override_close_returns_compact_receipt_before_large_note_gh_515() 
 
 #[tokio::test]
 async fn test_task_show() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create task
     let req = TaskCreateRequest {
@@ -424,7 +427,8 @@ async fn test_task_show() {
 
 #[tokio::test]
 async fn task_show_renders_work_target_and_explicit_trunk_fallback_cas_0094() {
-    let (temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let task_store = open_task_store(&temp.path().join(".cas")).expect("task store");
 
     let mut targeted =
@@ -464,7 +468,8 @@ async fn task_show_renders_work_target_and_explicit_trunk_fallback_cas_0094() {
 
 #[tokio::test]
 async fn task_update_persists_structured_state_and_rejects_invalid_patch() {
-    let (_temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, core) = setup_cas(&mut test_env);
     let created = core
         .cas_task_create(Parameters(TaskCreateRequest {
             ..basic_create("Structured state target", None)
@@ -559,7 +564,8 @@ fn basic_create(title: &str, execution_note: Option<String>) -> TaskCreateReques
 /// verify it is persisted + surfaced by `action=show`.
 #[tokio::test]
 async fn test_execution_note_create_and_show_happy_path() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let created = service
         .cas_task_create(Parameters(basic_create(
@@ -590,7 +596,8 @@ async fn test_execution_note_create_and_show_happy_path() {
 /// omits the line entirely.
 #[tokio::test]
 async fn test_execution_note_null_omitted_from_show() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let created = service
         .cas_task_create(Parameters(basic_create(
@@ -621,7 +628,8 @@ async fn test_execution_note_null_omitted_from_show() {
 /// error that lists the allowed values.
 #[tokio::test]
 async fn test_execution_note_invalid_enum_rejected() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let err = service
         .cas_task_create(Parameters(basic_create(
@@ -648,7 +656,8 @@ async fn test_execution_note_invalid_enum_rejected() {
 /// modifies existing values without claiming a new-file-only posture.
 #[tokio::test]
 async fn test_execution_note_value_only_create_and_show() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let created = service
         .cas_task_create(Parameters(basic_create(
@@ -674,7 +683,8 @@ async fn test_execution_note_value_only_create_and_show() {
 /// Update path: create without execution_note, then set it via update.
 #[tokio::test]
 async fn test_execution_note_update_sets_value() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let created = service
         .cas_task_create(Parameters(basic_create("Update target", None)))
@@ -728,7 +738,8 @@ async fn test_execution_note_update_sets_value() {
 /// Unset path: passing an empty string on update clears the field back to None.
 #[tokio::test]
 async fn test_execution_note_update_empty_string_clears() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let created = service
         .cas_task_create(Parameters(basic_create(
@@ -783,7 +794,8 @@ async fn test_execution_note_update_empty_string_clears() {
 
 #[tokio::test]
 async fn test_task_update() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create task
     let req = TaskCreateRequest {
@@ -853,7 +865,8 @@ async fn test_task_update() {
 
 #[tokio::test]
 async fn test_task_update_design_and_acceptance_criteria() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create task
     let req = TaskCreateRequest {
@@ -947,7 +960,8 @@ async fn test_task_update_design_and_acceptance_criteria() {
 
 #[tokio::test]
 async fn test_task_notes() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
 
     // Create task
     let req = TaskCreateRequest {
@@ -1021,7 +1035,8 @@ async fn test_task_notes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn task_notes_flow_waits_through_a_foreign_write_lock() {
-    let (temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let task_store = open_task_store(&cas_dir).expect("open task store");
     let task = Task::new("cas-note-contention-flow".to_string(), "Notes task".to_string());
@@ -1079,7 +1094,8 @@ async fn task_notes_flow_waits_through_a_foreign_write_lock() {
 
 #[tokio::test]
 async fn task_note_cap_rejects_without_mutating_the_task() {
-    let (temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     std::fs::write(&cas_dir.join("config.toml"), "[factory]\nnote_max_chars = 7\n")
         .expect("write test factory config");
@@ -1110,7 +1126,8 @@ async fn task_note_cap_rejects_without_mutating_the_task() {
 
 #[tokio::test]
 async fn supervisor_note_override_preserves_evidence_and_logs_reason() {
-    let (temp, core) = setup_cas_as(cas::types::AgentRole::Supervisor);
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas_as(&mut test_env, cas::types::AgentRole::Supervisor);
     let cas_dir = temp.path().join(".cas");
     std::fs::write(&cas_dir.join("config.toml"), "[factory]\nnote_max_chars = 7\n")
         .expect("write test factory config");
@@ -1160,7 +1177,8 @@ async fn supervisor_note_override_preserves_evidence_and_logs_reason() {
 /// remains the existing append operation when `notes` is present.
 #[tokio::test]
 async fn task_notes_read_and_append_are_disambiguated_by_notes_presence() {
-    let (temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let description_marker = "DESCRIPTION-MUST-NOT-LEAK";
     let acceptance_marker = "ACCEPTANCE-MUST-NOT-LEAK";
     let initial_note = "Initial worker progress";
@@ -1241,7 +1259,8 @@ async fn task_notes_read_and_append_are_disambiguated_by_notes_presence() {
 
 #[tokio::test]
 async fn test_task_notes_succeeds_when_activity_event_recording_fails() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     let req = TaskCreateRequest {
@@ -1317,7 +1336,8 @@ async fn test_task_notes_succeeds_when_activity_event_recording_fails() {
 
 #[tokio::test]
 async fn test_task_list() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create tasks
     for i in 0..3 {
@@ -1373,7 +1393,8 @@ async fn test_task_list() {
 
 #[tokio::test]
 async fn test_task_ready() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create ready tasks
     for i in 0..3 {
@@ -1425,7 +1446,8 @@ async fn test_task_ready() {
 
 #[tokio::test]
 async fn test_task_ready_excludes_foreign_origin_project_and_show_exposes_it() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
 
     let local = service
         .cas_task_create(Parameters(basic_create("Local origin task", None)))
@@ -1487,7 +1509,8 @@ async fn test_task_ready_excludes_foreign_origin_project_and_show_exposes_it() {
 /// first attempt — no "origin project does not match current project" wedge.
 #[tokio::test]
 async fn create_stamps_canonical_origin_and_start_accepts_it_first_try() {
-    let (temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let project = cas::cloud::resolve_canonical_id(&cas_dir).expect("project identity resolves");
 
@@ -1524,7 +1547,8 @@ async fn create_stamps_canonical_origin_and_start_accepts_it_first_try() {
 /// pixel-hive factory with no MCP-exposed repair for a worker.
 #[tokio::test]
 async fn start_adopts_an_unattributed_legacy_row_into_the_current_project() {
-    let (temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let project = cas::cloud::resolve_canonical_id(&cas_dir).expect("project identity resolves");
 
@@ -1562,7 +1586,8 @@ async fn start_adopts_an_unattributed_legacy_row_into_the_current_project() {
 /// names a different project is still refused.
 #[tokio::test]
 async fn start_still_refuses_a_row_owned_by_another_project() {
-    let (temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     let created = core
@@ -1591,7 +1616,8 @@ async fn start_still_refuses_a_row_owned_by_another_project() {
 
 #[tokio::test]
 async fn test_task_board_hides_foreign_rows_by_default_and_supports_include_foreign() {
-    let (temp, core) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     std::fs::write(
         cas_dir.join("config.toml"),
@@ -1746,7 +1772,8 @@ async fn test_task_board_hides_foreign_rows_by_default_and_supports_include_fore
 /// behind P2/P3 work for hours.
 #[tokio::test]
 async fn test_task_ready_is_priority_sorted_and_states_the_true_total() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Ordering of creation is load-bearing: the OLD default was created/DESC
     // (newest first), so the P0s must be the OLDEST tasks for creation order to
@@ -1870,7 +1897,8 @@ async fn test_task_ready_is_priority_sorted_and_states_the_true_total() {
 /// never learn which call shows the rest.
 #[tokio::test]
 async fn test_tasks_available_names_withheld_rows() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
     for i in 0..25 {
         service
             .cas_task_create(Parameters(TaskCreateRequest {
@@ -1932,7 +1960,8 @@ async fn test_tasks_available_names_withheld_rows() {
 /// to tell. The last of the advertised-but-inert family.
 #[tokio::test]
 async fn test_tasks_available_honours_an_explicit_sort() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
     // Priority order and title order disagree, so the assertion can only pass
     // if the requested field is the one actually applied.
     for (priority, title) in [(0u8, "zulu critical"), (3, "alpha low")] {
@@ -2018,7 +2047,8 @@ async fn test_tasks_available_honours_an_explicit_sort() {
 /// — silently wrong.
 #[tokio::test]
 async fn test_tasks_available_sorts_before_truncating() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
     // Creation order is load-bearing and easy to get backwards: `list_ready`
     // returns priority ASC, created_at DESC, so the NEWEST task is already
     // first. Creating "alpha" last would put it at the top before any sorting
@@ -2083,7 +2113,8 @@ async fn test_tasks_available_sorts_before_truncating() {
 /// it does on ready/blocked — keep the priority field, flip the direction.
 #[tokio::test]
 async fn test_tasks_available_sort_order_alone_flips_priority_direction() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
     for (priority, title) in [(0u8, "critical one"), (3, "low one")] {
         service
             .cas_task_create(Parameters(TaskCreateRequest {
@@ -2137,7 +2168,8 @@ async fn test_tasks_available_sort_order_alone_flips_priority_direction() {
 /// on ready/blocked — it must not silently resurrect creation order.
 #[tokio::test]
 async fn test_tasks_available_unparseable_sort_falls_back_to_priority() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
     // Order matters: the P0 is created FIRST, so a fallback to created/desc
     // (the trap #104 fixed) would put "low one" at the top and the row
     // assertion below would catch it — not just the header label.
@@ -2196,7 +2228,8 @@ async fn test_tasks_available_unparseable_sort_falls_back_to_priority() {
 /// ("pass limit=N") a lie.
 #[tokio::test]
 async fn test_tasks_available_footer_tracks_an_explicit_limit() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
     for i in 0..25 {
         service
             .cas_task_create(Parameters(TaskCreateRequest {
@@ -2255,7 +2288,8 @@ async fn test_tasks_available_footer_tracks_an_explicit_limit() {
 /// and must not inflate either the total or the withheld count.
 #[tokio::test]
 async fn test_tasks_available_total_excludes_claimed_tasks() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let mut ids = Vec::new();
     for i in 0..25 {
@@ -2326,7 +2360,8 @@ async fn test_tasks_available_total_excludes_claimed_tasks() {
 /// cas-e163: a list that fits must not claim anything was withheld.
 #[tokio::test]
 async fn test_tasks_available_has_no_footer_when_nothing_is_withheld() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
     for i in 0..3 {
         service
             .cas_task_create(Parameters(TaskCreateRequest {
@@ -2380,7 +2415,8 @@ async fn test_tasks_available_has_no_footer_when_nothing_is_withheld() {
 /// end-to-end coverage, so a revert there would have left the suite green.
 #[tokio::test]
 async fn test_task_blocked_is_priority_sorted_and_states_the_true_total() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // One blocker everything depends on, so every other task is Blocked.
     let blocker_id = extract_task_id(&extract_text(
@@ -2505,7 +2541,8 @@ async fn test_task_blocked_is_priority_sorted_and_states_the_true_total() {
 /// unspecified, and unspecified means priority here.
 #[tokio::test]
 async fn test_task_ready_unparseable_sort_falls_back_to_priority_not_creation_order() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
     for (priority, title) in [(3u8, "low one"), (0, "critical one")] {
         service
             .cas_task_create(Parameters(TaskCreateRequest {
@@ -2563,7 +2600,8 @@ async fn test_task_ready_unparseable_sort_falls_back_to_priority_not_creation_or
 /// name its ordering.
 #[tokio::test]
 async fn test_task_ready_header_is_plain_when_nothing_is_withheld() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
     for i in 0..3 {
         service
             .cas_task_create(Parameters(TaskCreateRequest {
@@ -2615,7 +2653,8 @@ async fn test_task_ready_header_is_plain_when_nothing_is_withheld() {
 /// actually applied rather than always claiming priority order.
 #[tokio::test]
 async fn test_task_ready_explicit_sort_overrides_the_priority_default() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
     for (priority, title) in [(0u8, "critical one"), (3, "low one")] {
         service
             .cas_task_create(Parameters(TaskCreateRequest {
@@ -2677,7 +2716,8 @@ async fn test_task_ready_explicit_sort_overrides_the_priority_default() {
 /// that are children of the specified EPIC; without `epic`, behavior is unchanged.
 #[tokio::test]
 async fn test_task_ready_epic_filter() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create an epic.
     let epic_result = service
@@ -2808,7 +2848,8 @@ async fn test_task_ready_epic_filter() {
 
 #[tokio::test]
 async fn test_task_delete() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create task
     let req = TaskCreateRequest {
@@ -2855,7 +2896,8 @@ async fn test_task_delete() {
 
 #[tokio::test]
 async fn test_task_dependencies() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create two tasks
     let req1 = TaskCreateRequest {
@@ -2950,7 +2992,8 @@ async fn test_task_dependencies() {
 
 #[tokio::test]
 async fn test_task_show_dependency_direction_labels() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let blocker = service
         .cas_task_create(Parameters(TaskCreateRequest {
@@ -3039,7 +3082,8 @@ async fn test_task_show_dependency_direction_labels() {
 
 #[tokio::test]
 async fn test_close_auto_unblocks_blocked_dependents() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let agent_store = open_agent_store(&cas_dir).expect("agent store");
     let session_id = format!("test-session-{}", std::process::id());
@@ -3190,7 +3234,8 @@ async fn test_close_auto_unblocks_blocked_dependents() {
 
 #[tokio::test]
 async fn test_task_update_invalid_epic_keeps_original_parent_dependency() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let epic_1 = service
         .cas_task_create(Parameters(TaskCreateRequest {
@@ -3304,7 +3349,8 @@ async fn test_task_update_invalid_epic_keeps_original_parent_dependency() {
 
 #[tokio::test]
 async fn test_task_update_surfaces_epic_dependency_delete_failure() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
 
     let epic = service
         .cas_task_create(Parameters(TaskCreateRequest {
@@ -3409,7 +3455,8 @@ async fn test_task_update_surfaces_epic_dependency_delete_failure() {
 
 #[tokio::test]
 async fn test_subtask_start_auto_starts_epic() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create an epic
     let epic_req = TaskCreateRequest {
@@ -3544,7 +3591,8 @@ async fn test_subtask_start_auto_starts_epic() {
 
 #[tokio::test]
 async fn test_task_start_sets_assignee_when_unset() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     let create_req = TaskCreateRequest {
@@ -3597,7 +3645,8 @@ async fn test_task_start_sets_assignee_when_unset() {
 
 #[tokio::test]
 async fn test_task_start_preserves_existing_assignee() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     let create_req = TaskCreateRequest {
@@ -3660,7 +3709,8 @@ async fn test_task_start_preserves_existing_assignee() {
 
 #[tokio::test]
 async fn test_worker_cannot_start_task_assigned_to_other_worker() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     // Promote the test session to Worker role.
@@ -3731,7 +3781,8 @@ async fn test_worker_cannot_start_task_assigned_to_other_worker() {
 
 #[tokio::test]
 async fn test_worker_can_start_task_assigned_to_its_agent_uuid() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let agent_store = open_agent_store(&cas_dir).expect("open agent store");
     let caller_id = format!("test-session-{}", std::process::id());
@@ -3762,7 +3813,8 @@ async fn test_worker_can_start_task_assigned_to_its_agent_uuid() {
 
 #[tokio::test]
 async fn test_worker_rejection_names_resolved_assignee_and_caller_identities() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let agent_store = open_agent_store(&cas_dir).expect("open agent store");
     let caller_id = format!("test-session-{}", std::process::id());
@@ -3801,10 +3853,11 @@ async fn test_worker_rejection_names_resolved_assignee_and_caller_identities() {
 
 #[tokio::test]
 async fn test_standard_agent_can_start_task_assigned_to_other_worker() {
+    let mut test_env = TestEnvGuard::temp_home();
     // Standard/interactive sessions (not factory workers) are exempt from
     // the cas-3558 assignee guard — only `AgentRole::Worker` self-dispatch
     // is the problem this guards against.
-    let (temp, service) = setup_cas();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     let create_req = TaskCreateRequest {
@@ -3871,7 +3924,8 @@ async fn test_standard_agent_can_start_task_assigned_to_other_worker() {
 
 #[tokio::test]
 async fn test_task_mine_matches_env_worker_name_during_spawn_race() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Simulate the spawn-race condition: the agent-store row still shows
     // the default "test-agent" name, but the supervisor has already assigned
@@ -3880,13 +3934,10 @@ async fn test_task_mine_matches_env_worker_name_during_spawn_race() {
     // the worker process's env.
     let worker_name = "warm-gopher-85";
 
-    // Acquire the env lock since we're mutating CAS_AGENT_NAME.
-    let _env_guard = env_test_lock();
-    let prev_name = std::env::var("CAS_AGENT_NAME").ok();
-    // SAFETY: env lock is held for the duration of this test body.
-    unsafe {
-        std::env::set_var("CAS_AGENT_NAME", worker_name);
-    }
+    let name_override = ScopedFactoryEnv::apply(
+        &mut test_env,
+        &[("CAS_AGENT_NAME", Some(worker_name))],
+    );
 
     // Create a task, then update its assignee to the worker's friendly name —
     // exactly what a supervisor does via `task update assignee=<worker-name>`.
@@ -3966,14 +4017,7 @@ async fn test_task_mine_matches_env_worker_name_during_spawn_race() {
         .expect("tasks_mine should succeed");
     let text = extract_text(result);
 
-    // Restore env before any assertion to avoid poisoning sibling tests on
-    // panic. SAFETY: still holding env lock.
-    unsafe {
-        match prev_name {
-            Some(v) => std::env::set_var("CAS_AGENT_NAME", v),
-            None => std::env::remove_var("CAS_AGENT_NAME"),
-        }
-    }
+    drop(name_override);
 
     assert!(
         text.contains(&id),
@@ -4000,7 +4044,8 @@ async fn test_task_mine_matches_env_worker_name_during_spawn_race() {
 
 #[tokio::test]
 async fn test_release_active_started_task_resets_status_to_open_and_ready() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let created = service
         .cas_task_create(Parameters(TaskCreateRequest {
@@ -4082,7 +4127,8 @@ async fn test_release_active_started_task_resets_status_to_open_and_ready() {
 
 #[tokio::test]
 async fn test_release_autorecovers_lease_less_in_progress_task() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Seed: create task and move it to InProgress without a live lease
     // (simulating a dead-session orphan where status diverged from lease).
@@ -4179,7 +4225,8 @@ async fn test_release_autorecovers_lease_less_in_progress_task() {
 
 #[tokio::test]
 async fn test_release_still_errors_when_no_lease_and_task_already_open() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Baseline: no lease, status=Open. Release should NOT silently succeed —
     // there's nothing to recover, surface the underlying error.
@@ -4226,7 +4273,8 @@ async fn test_release_still_errors_when_no_lease_and_task_already_open() {
 
 #[tokio::test]
 async fn test_reset_clears_lease_assignee_and_forces_open() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let created = service
         .cas_task_create(Parameters(TaskCreateRequest {
@@ -4318,7 +4366,8 @@ async fn test_reset_clears_lease_assignee_and_forces_open() {
 
 #[tokio::test]
 async fn test_reset_refuses_closed_task() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let created = service
         .cas_task_create(Parameters(TaskCreateRequest {
@@ -4393,7 +4442,8 @@ async fn test_reset_refuses_closed_task() {
 /// the MCP task store path.
 #[tokio::test]
 async fn test_show_after_update_reflects_new_status_without_lag() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let created = service
         .cas_task_create(Parameters(TaskCreateRequest {
@@ -4513,7 +4563,8 @@ async fn test_show_after_update_reflects_new_status_without_lag() {
 
 #[tokio::test]
 async fn test_task_mine_matches_case_insensitive_and_trimmed() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Exercise the defensive matching path: assignee spelled with differing
     // case and surrounding whitespace still matches the current agent.
@@ -4603,16 +4654,8 @@ async fn test_task_mine_matches_case_insensitive_and_trimmed() {
 struct ScopedSupervisorRole;
 
 impl ScopedSupervisorRole {
-    fn enter() -> Self {
-        // SAFETY: held under env_test_lock() in all callers.
-        unsafe { std::env::set_var("CAS_AGENT_ROLE", "supervisor") }
-        Self
-    }
-}
-
-impl Drop for ScopedSupervisorRole {
-    fn drop(&mut self) {
-        unsafe { std::env::remove_var("CAS_AGENT_ROLE") }
+    fn enter(env: &mut TestEnvGuard) -> ScopedFactoryEnv<'_> {
+        ScopedFactoryEnv::apply(env, &[("CAS_AGENT_ROLE", Some("supervisor"))])
     }
 }
 
@@ -4648,9 +4691,9 @@ fn make_task_create_req(title: &str) -> TaskCreateRequest {
 /// AC: Audit-log entry surfaces the override action with the supervisor session ID.
 #[tokio::test]
 async fn test_supervisor_force_transfer_live_worker_task() {
+    let mut test_env = TestEnvGuard::temp_home();
     // setup_cas() creates a "test-agent" (the worker that claims the task).
-    let (temp, worker_core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let (temp, worker_core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let agent_store = open_agent_store(&cas_dir).expect("open agent store");
 
@@ -4713,7 +4756,7 @@ async fn test_supervisor_force_transfer_live_worker_task() {
     supervisor_core.set_agent_id_for_testing(supervisor_id.clone());
 
     // Set the supervisor role env var.
-    let _role_guard = ScopedSupervisorRole::enter();
+    let _role_guard = ScopedSupervisorRole::enter(&mut test_env);
 
     // Supervisor force-transfers the task to the target worker.
     let transfer_req = TaskTransferRequest {
@@ -4779,8 +4822,8 @@ async fn test_supervisor_force_transfer_live_worker_task() {
 /// AC: The override is gated — non-supervisors get an explicit rejection.
 #[tokio::test]
 async fn test_non_supervisor_cannot_force_transfer() {
-    let (temp, worker_core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, worker_core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let agent_store = open_agent_store(&cas_dir).expect("open agent store");
 
@@ -4876,8 +4919,8 @@ async fn create_task_for_transfer(core: &CasCore, title: &str) -> String {
 
 #[tokio::test]
 async fn transfer_accepts_a_worker_name_and_picks_its_live_registration() {
-    let (temp, worker_core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, worker_core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let agent_store = open_agent_store(&cas_dir).expect("open agent store");
     // A stale row from an earlier session with the same name must not win.
@@ -4923,8 +4966,8 @@ async fn transfer_accepts_a_worker_name_and_picks_its_live_registration() {
 
 #[tokio::test]
 async fn a_blocked_task_without_a_lease_transfers_from_its_assignee() {
-    let (temp, worker_core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, worker_core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let agent_store = open_agent_store(&cas_dir).expect("open agent store");
     register_live_worker(&agent_store, "steady-wren-id", "steady-wren-3");
@@ -4967,8 +5010,8 @@ async fn a_blocked_task_without_a_lease_transfers_from_its_assignee() {
 
 #[tokio::test]
 async fn a_task_without_a_lease_needs_its_assignee_or_a_supervisor_override() {
-    let (temp, worker_core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, worker_core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let agent_store = open_agent_store(&cas_dir).expect("open agent store");
     register_live_worker(&agent_store, "steady-wren-id", "steady-wren-3");
@@ -5000,7 +5043,7 @@ async fn a_task_without_a_lease_needs_its_assignee_or_a_supervisor_override() {
 
     let supervisor_core = CasCore::with_daemon(cas_dir.clone(), None, None);
     supervisor_core.set_agent_id_for_testing("supervisor-session-id".to_string());
-    let _role_guard = ScopedSupervisorRole::enter();
+    let _role_guard = ScopedSupervisorRole::enter(&mut test_env);
     supervisor_core
         .cas_task_transfer(Parameters(TaskTransferRequest {
             supervisor_override: Some(true),
@@ -5024,7 +5067,8 @@ async fn a_task_without_a_lease_needs_its_assignee_or_a_supervisor_override() {
 /// existing dep is NOT of the requested type, leaving the dep intact.
 #[tokio::test]
 async fn test_dep_remove_type_mismatch_does_not_delete_existing_dep() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let task_a = make_task_create_req("Task A — dep_type mismatch regression");
     let task_b = make_task_create_req("Task B — dep_type mismatch regression");
@@ -5115,7 +5159,8 @@ async fn test_dep_remove_type_mismatch_does_not_delete_existing_dep() {
 /// Here we add a Related dep and try to remove it as Blocks — must fail.
 #[tokio::test]
 async fn test_dep_remove_wrong_type_returns_error() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     let req_a = make_task_create_req("Task A — no-dep-found error regression");
     let req_b = make_task_create_req("Task B — no-dep-found error regression");
@@ -5193,7 +5238,8 @@ async fn test_dep_remove_wrong_type_returns_error() {
 /// of the silent dep_remove data-loss bug (cas-6009).
 #[tokio::test]
 async fn test_create_rejects_blocked_by_same_as_epic() {
-    let (_temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas(&mut test_env);
 
     // Create an epic first
     let epic_create = TaskCreateRequest {
@@ -5278,10 +5324,11 @@ async fn test_create_rejects_blocked_by_same_as_epic() {
 /// worker_status output.
 #[tokio::test]
 async fn test_task_start_locked_error_includes_worker_name() {
+    let mut test_env = TestEnvGuard::temp_home();
     use cas::store::open_agent_store;
     use cas::types::{Agent, AgentRole};
 
-    let (temp, service) = setup_cas();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = service.project_path().to_path_buf();
 
     // Register a "blocker" worker with a recognizable name.
@@ -5368,7 +5415,8 @@ async fn test_task_start_locked_error_includes_worker_name() {
 /// intended dead-session recovery path.
 #[tokio::test]
 async fn test_reset_orphaned_task_stale_assignee_succeeds() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let agent_store = open_agent_store(&cas_dir).expect("open agent store");
     let task_store = cas::store::open_task_store(&cas_dir).expect("open task store");
@@ -5425,7 +5473,8 @@ async fn test_reset_orphaned_task_stale_assignee_succeeds() {
 /// and must NOT change the task's status or assignee.
 #[tokio::test]
 async fn test_reset_alive_worker_task_without_force_returns_safety_guard() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let agent_store = open_agent_store(&cas_dir).expect("open agent store");
     let task_store = cas::store::open_task_store(&cas_dir).expect("open task store");
@@ -5497,7 +5546,8 @@ async fn test_reset_alive_worker_task_without_force_returns_safety_guard() {
 /// mentions the bypass.
 #[tokio::test]
 async fn test_reset_alive_worker_task_with_force_succeeds_and_logs_audit() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let agent_store = open_agent_store(&cas_dir).expect("open agent store");
     let task_store = cas::store::open_task_store(&cas_dir).expect("open task store");
@@ -5574,8 +5624,8 @@ async fn test_reset_alive_worker_task_with_force_succeeds_and_logs_audit() {
 
 #[tokio::test]
 async fn rejected_assignee_reports_that_the_whole_multi_field_update_was_aborted() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     std::fs::write(
         cas_dir.join("config.toml"),
@@ -5636,7 +5686,7 @@ async fn rejected_assignee_reports_that_the_whole_multi_field_update_was_aborted
         .await
         .unwrap();
     let task_id = extract_task_id(&extract_text(created)).unwrap().to_string();
-    unsafe { std::env::set_var("CAS_FACTORY_MODE", "1") }
+    test_env.set("CAS_FACTORY_MODE", "1");
     let error = service
         .cas_task_update(Parameters(TaskUpdateRequest {
             blocked_by: None,
@@ -5663,7 +5713,7 @@ async fn rejected_assignee_reports_that_the_whole_multi_field_update_was_aborted
         }))
         .await
         .expect_err("stale assignment must reject the batch");
-    unsafe { std::env::remove_var("CAS_FACTORY_MODE") }
+    test_env.remove("CAS_FACTORY_MODE");
 
     let message = error.message.to_string();
     assert!(message.contains("TASK UPDATE BATCH ABORTED"), "{message}");
@@ -5688,8 +5738,8 @@ async fn rejected_assignee_reports_that_the_whole_multi_field_update_was_aborted
 /// display name / CAS_AGENT_NAME, not agent IDs.
 #[tokio::test]
 async fn test_factory_mode_normalizes_session_uuid_assignee_to_display_name() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let agent_store = open_agent_store(&cas_dir).expect("open agent store");
     let task_store = cas::store::open_task_store(&cas_dir).expect("open task store");
@@ -5703,7 +5753,7 @@ async fn test_factory_mode_normalizes_session_uuid_assignee_to_display_name() {
 
     // Set CAS_FACTORY_MODE so the normalization branch activates.
     // SAFETY: we hold the process-wide env lock for the full test body.
-    unsafe { std::env::set_var("CAS_FACTORY_MODE", "1") }
+    test_env.set("CAS_FACTORY_MODE", "1");
 
     // Create a task.
     let created = service
@@ -5746,7 +5796,7 @@ async fn test_factory_mode_normalizes_session_uuid_assignee_to_display_name() {
 
     // Restore env before assertions so a panic doesn't poison sibling tests.
     // SAFETY: still holding env lock.
-    unsafe { std::env::remove_var("CAS_FACTORY_MODE") }
+    test_env.remove("CAS_FACTORY_MODE");
 
     let text = extract_text(update_result);
 
@@ -5787,8 +5837,8 @@ async fn test_factory_mode_normalizes_session_uuid_assignee_to_display_name() {
 /// clear the assignee (None), not assign anyone.
 #[tokio::test]
 async fn test_factory_mode_empty_assignee_clears_without_remapping_to_live_worker() {
-    let (temp, service) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let agent_store = open_agent_store(&cas_dir).expect("open agent store");
     let task_store = cas::store::open_task_store(&cas_dir).expect("open task store");
@@ -5801,7 +5851,7 @@ async fn test_factory_mode_empty_assignee_clears_without_remapping_to_live_worke
     let worker = cas::types::Agent::new(WORKER_SESSION.to_string(), WORKER_NAME.to_string());
     agent_store.register(&worker).expect("register worker");
 
-    unsafe { std::env::set_var("CAS_FACTORY_MODE", "1") }
+    test_env.set("CAS_FACTORY_MODE", "1");
 
     let created = service
         .cas_task_create(Parameters(make_task_create_req(
@@ -5875,7 +5925,7 @@ async fn test_factory_mode_empty_assignee_clears_without_remapping_to_live_worke
         .await
         .expect("empty assignee update must succeed as clear");
 
-    unsafe { std::env::remove_var("CAS_FACTORY_MODE") }
+    test_env.remove("CAS_FACTORY_MODE");
 
     let text = extract_text(clear_result);
     assert!(
@@ -5932,7 +5982,7 @@ async fn test_factory_mode_empty_assignee_clears_without_remapping_to_live_worke
         .await
         .expect("re-seed");
 
-    unsafe { std::env::set_var("CAS_FACTORY_MODE", "1") }
+    test_env.set("CAS_FACTORY_MODE", "1");
     service
         .cas_task_update(Parameters(TaskUpdateRequest {
             blocked_by: None,
@@ -5959,7 +6009,7 @@ async fn test_factory_mode_empty_assignee_clears_without_remapping_to_live_worke
         }))
         .await
         .expect("whitespace assignee must clear");
-    unsafe { std::env::remove_var("CAS_FACTORY_MODE") }
+    test_env.remove("CAS_FACTORY_MODE");
 
     let after_ws = task_store
         .get(&task_id)
@@ -5973,7 +6023,8 @@ async fn test_factory_mode_empty_assignee_clears_without_remapping_to_live_worke
 
 #[tokio::test]
 async fn task_door_create_update_show_and_clear_are_metadata_only() {
-    let (temp, service) = setup_cas();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service) = setup_cas(&mut test_env);
     let mut request = basic_create("Recorded reversibility", None);
     request.door = Some("one-way".into());
     service.cas_task_create(Parameters(request)).await.unwrap();

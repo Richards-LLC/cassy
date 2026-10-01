@@ -18,58 +18,23 @@ use cas_store::{PromptQueueStore, SqlitePromptQueueStore};
 use tempfile::TempDir;
 
 use crate::hooks::handlers::handle_user_prompt_submit;
+use crate::test_support::TestEnvGuard;
 use crate::types::{Entry, EntryType, Task, TaskStatus};
 
 const SESSION: &str = "cas-src-happy-jay-91";
 const WORKER: &str = "ready-cheetah-71";
 
-/// Restores every factory identity var this module sets, whatever the test does.
-struct EnvGuard(Vec<(&'static str, Option<String>)>);
-
-impl EnvGuard {
-    fn set(vars: &[(&'static str, Option<&str>)]) -> Self {
-        let mut saved = Vec::new();
-        for (key, value) in vars {
-            saved.push((*key, std::env::var(key).ok()));
-            unsafe {
-                match value {
-                    Some(v) => std::env::set_var(key, v),
-                    None => std::env::remove_var(key),
-                }
-            }
-        }
-        Self(saved)
-    }
+fn worker_env(env: &mut TestEnvGuard) {
+    env.set("CAS_AGENT_ROLE", "worker");
+    env.set("CAS_AGENT_NAME", WORKER);
+    env.set("CAS_FACTORY_SESSION", SESSION);
 }
 
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        for (key, value) in &self.0 {
-            unsafe {
-                match value {
-                    Some(v) => std::env::set_var(key, v),
-                    None => std::env::remove_var(key),
-                }
-            }
-        }
-    }
-}
-
-fn worker_env() -> EnvGuard {
-    EnvGuard::set(&[
-        ("CAS_AGENT_ROLE", Some("worker")),
-        ("CAS_AGENT_NAME", Some(WORKER)),
-        ("CAS_FACTORY_SESSION", Some(SESSION)),
-    ])
-}
-
-fn supervisor_env() -> EnvGuard {
-    EnvGuard::set(&[
-        ("CAS_AGENT_ROLE", Some("supervisor")),
-        ("CAS_AGENT_NAME", Some("loyal-bear-96")),
-        ("CAS_FACTORY_SESSION", Some(SESSION)),
-        ("CAS_FACTORY_SUPERVISOR_CLI", Some("claude")),
-    ])
+fn supervisor_env(env: &mut TestEnvGuard) {
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    env.set("CAS_AGENT_NAME", "loyal-bear-96");
+    env.set("CAS_FACTORY_SESSION", SESSION);
+    env.set("CAS_FACTORY_SUPERVISOR_CLI", "claude");
 }
 
 fn input(role: &str) -> HookInput {
@@ -117,8 +82,8 @@ fn context_of(output: &cas_core::hooks::types::HookOutput) -> String {
 /// non-urgent message sees it at that turn's start.
 #[test]
 fn a_worker_turn_surfaces_a_delivered_non_urgent_message() {
-    let _lock = super::env_lock();
-    let _env = worker_env();
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
     let temp = TempDir::new().unwrap();
     let store = store_at(&temp);
 
@@ -145,8 +110,8 @@ fn a_worker_turn_surfaces_a_delivered_non_urgent_message() {
 /// next had no path to the worker at all.
 #[test]
 fn a_message_arriving_just_after_a_drain_surfaces_at_the_next_turn() {
-    let _lock = super::env_lock();
-    let _env = worker_env();
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
     let temp = TempDir::new().unwrap();
     let store = store_at(&temp);
 
@@ -172,8 +137,8 @@ fn a_message_arriving_just_after_a_drain_surfaces_at_the_next_turn() {
 /// worker has already been shown must never be injected into a later turn.
 #[test]
 fn a_surfaced_message_does_not_repeat_on_the_next_turn() {
-    let _lock = super::env_lock();
-    let _env = worker_env();
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
     let temp = TempDir::new().unwrap();
     let store = store_at(&temp);
     store
@@ -198,8 +163,8 @@ fn a_surfaced_message_does_not_repeat_on_the_next_turn() {
 /// consecutive supervisor messages, so surfacing one of them is not a fix.
 #[test]
 fn consecutive_messages_all_surface_in_one_turn() {
-    let _lock = super::env_lock();
-    let _env = worker_env();
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
     let temp = TempDir::new().unwrap();
     let store = store_at(&temp);
     store
@@ -220,8 +185,8 @@ fn consecutive_messages_all_surface_in_one_turn() {
 /// The reminder must now APPEND to the mail, not replace it.
 #[test]
 fn the_supervisor_reminder_appends_instead_of_suppressing_mail() {
-    let _lock = super::env_lock();
-    let _env = supervisor_env();
+    let mut env = TestEnvGuard::new();
+    supervisor_env(&mut env);
     let temp = TempDir::new().unwrap();
     let store = store_at(&temp);
     store
@@ -251,8 +216,8 @@ fn the_supervisor_reminder_appends_instead_of_suppressing_mail() {
 /// alias too, so the other inbox reader cannot re-inject it on a later turn.
 #[test]
 fn supervisor_turn_writes_receipts_for_every_inbox_alias() {
-    let _lock = super::env_lock();
-    let _env = supervisor_env();
+    let mut env = TestEnvGuard::new();
+    supervisor_env(&mut env);
     let temp = TempDir::new().unwrap();
     let store = store_at(&temp);
     let aliases = crate::harness_policy::inbox_aliases("loyal-bear-96", true);
@@ -287,8 +252,8 @@ fn supervisor_turn_writes_receipts_for_every_inbox_alias() {
 /// A supervisor with no mail must still get exactly the reminder it always got.
 #[test]
 fn the_supervisor_reminder_is_unchanged_when_there_is_no_mail() {
-    let _lock = super::env_lock();
-    let _env = supervisor_env();
+    let mut env = TestEnvGuard::new();
+    supervisor_env(&mut env);
     let temp = TempDir::new().unwrap();
     let _store = store_at(&temp);
 
@@ -303,8 +268,8 @@ fn the_supervisor_reminder_is_unchanged_when_there_is_no_mail() {
 
 #[test]
 fn supervisor_terminal_input_enters_history_but_harness_envelopes_do_not() {
-    let _lock = super::env_lock();
-    let _env = supervisor_env();
+    let mut env = TestEnvGuard::new();
+    supervisor_env(&mut env);
     let temp = TempDir::new().unwrap();
     let store = store_at(&temp);
     let mut typed = input("supervisor");
@@ -335,10 +300,15 @@ fn supervisor_terminal_input_enters_history_but_harness_envelopes_do_not() {
         delivery: "first-delivery".into(),
     });
     handle_user_prompt_submit(&typed, Some(temp.path())).unwrap();
-    let history = store.conversation_history(SESSION, "paired-device", None, 10).unwrap();
+    let history = store
+        .conversation_history(SESSION, "paired-device", None, 10)
+        .unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].source, "terminal");
-    assert_eq!(history[0].prompt, "Please check the CAS wake: logs and the desktop reply");
+    assert_eq!(
+        history[0].prompt,
+        "Please check the CAS wake: logs and the desktop reply"
+    );
     assert!(history[0].processed_at.is_some());
 }
 
@@ -347,8 +317,8 @@ fn supervisor_terminal_input_enters_history_but_harness_envelopes_do_not() {
 /// Learning whose vocabulary is present in the submitted turn.
 #[test]
 fn supervisor_turn_surfaces_matching_same_day_learnings() {
-    let _lock = super::env_lock();
-    let _env = supervisor_env();
+    let mut env = TestEnvGuard::new();
+    supervisor_env(&mut env);
     let project = TempDir::new().unwrap();
     let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
     let entries = crate::store::open_store_local(&cas_root).unwrap();
@@ -397,17 +367,13 @@ fn supervisor_turn_surfaces_matching_same_day_learnings() {
 /// typed sidecar metadata, never a marker parsed out of rendered display text.
 #[test]
 fn factory_worker_captures_operator_context_but_not_typed_machine_relays() {
-    let _lock = super::env_lock();
+    let mut env = TestEnvGuard::new();
     let project = TempDir::new().unwrap();
     let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
 
     {
-        let _env = EnvGuard::set(&[
-            ("CAS_AGENT_ROLE", Some("worker")),
-            ("CAS_AGENT_NAME", Some(WORKER)),
-            ("CAS_FACTORY_SESSION", Some(SESSION)),
-            ("CAS_ROOT", cas_root.to_str()),
-        ]);
+        worker_env(&mut env);
+        env.set("CAS_ROOT", &cas_root);
         for (source, origin) in [
             ("supervisor", MachinePromptOrigin::AgentAuthored),
             (
@@ -496,8 +462,8 @@ fn factory_worker_captures_operator_context_but_not_typed_machine_relays() {
 /// drain: another factory session's mail is not this worker's mail.
 #[test]
 fn another_sessions_message_is_not_surfaced() {
-    let _lock = super::env_lock();
-    let _env = worker_env();
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
     let temp = TempDir::new().unwrap();
     let store = store_at(&temp);
     store
@@ -520,12 +486,9 @@ fn another_sessions_message_is_not_surfaced() {
 /// injected context. This handler also runs for every solo Claude session.
 #[test]
 fn a_non_factory_session_surfaces_nothing() {
-    let _lock = super::env_lock();
-    let _env = EnvGuard::set(&[
-        ("CAS_AGENT_ROLE", None),
-        ("CAS_AGENT_NAME", Some(WORKER)),
-        ("CAS_FACTORY_SESSION", Some(SESSION)),
-    ]);
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
+    env.remove("CAS_AGENT_ROLE");
     let temp = TempDir::new().unwrap();
     let store = store_at(&temp);
     store
@@ -544,8 +507,8 @@ fn a_non_factory_session_surfaces_nothing() {
 /// cas-b8f6: read-first turns recover mail even when UserPromptSubmit is absent.
 #[test]
 fn post_tool_read_recovers_mail_once_without_prompt_hook() {
-    let _lock = super::env_lock();
-    let _env = worker_env();
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
     let temp = TempDir::new().unwrap();
     let store = store_at(&temp);
     store
@@ -577,10 +540,10 @@ fn post_tool_read_recovers_mail_once_without_prompt_hook() {
 /// Exact 2.1.265 headless payload shape captured during the live investigation.
 #[test]
 fn captured_265_prompt_payload_reaches_handler_and_records_turn() {
-    let _lock = super::env_lock();
-    let _env = worker_env();
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
     let temp = TempDir::new().unwrap();
-    let _root = EnvGuard::set(&[("CAS_ROOT", Some(temp.path().to_str().unwrap()))]);
+    env.set("CAS_ROOT", temp.path());
     let store = store_at(&temp);
     store
         .enqueue_with_session("supervisor", WORKER, "captured payload mail", SESSION)
@@ -609,8 +572,8 @@ fn captured_265_prompt_payload_reaches_handler_and_records_turn() {
 
 #[test]
 fn post_tool_second_prompt_recovers_recall_and_skips_repeated_tools() {
-    let _lock = super::env_lock();
-    let _env = supervisor_env();
+    let mut env = TestEnvGuard::new();
+    supervisor_env(&mut env);
     let project = TempDir::new().unwrap();
     let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
     let entries = crate::store::open_store_local(&cas_root).unwrap();
@@ -663,8 +626,8 @@ fn post_tool_second_prompt_recovers_recall_and_skips_repeated_tools() {
 /// never replay the message that started the turn.
 #[test]
 fn busy_worker_sees_a_mid_turn_message_at_the_next_tool_boundary_cas_b5e4() {
-    let _lock = super::env_lock();
-    let _env = worker_env();
+    let mut env = TestEnvGuard::new();
+    worker_env(&mut env);
     let project = TempDir::new().unwrap();
     let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
     let store = store_at_root(&cas_root);
@@ -718,8 +681,14 @@ fn busy_worker_sees_a_mid_turn_message_at_the_next_tool_boundary_cas_b5e4() {
     else {
         panic!("the mid-turn reply must surface at the next tool boundary");
     };
-    assert!(context.contains("schema agreed: use v2 columns"), "{context}");
-    assert!(context.contains("arrived while you were working"), "{context}");
+    assert!(
+        context.contains("schema agreed: use v2 columns"),
+        "{context}"
+    );
+    assert!(
+        context.contains("arrived while you were working"),
+        "{context}"
+    );
     assert!(!context.contains(turn_prompt), "{context}");
 
     let again = crate::hooks::handle_post_tool_use(&hook, Some(&cas_root)).unwrap();

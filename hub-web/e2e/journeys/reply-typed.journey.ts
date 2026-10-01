@@ -1,5 +1,6 @@
 import { test, expect } from "./journey";
 import type { Machine } from "./hub-double";
+import { expectDraft, installDraftDiagnostic } from "./draft-diagnostic";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
 
 // A machine whose supervisor has a 64-character codename (cas-1334).
@@ -20,10 +21,11 @@ async function swipeAway(locator: import("@playwright/test").Locator, dx: number
   }, dx);
 }
 
-test("HUB-J5 reply by typing", async ({ page, journey }) => {
+test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
   // Eleven stages plus the phone placeholder sweep: past the 60 s budget on a
   // loaded host, so it gets the headroom HUB-J3 has.
   test.setTimeout(120_000);
+  await installDraftDiagnostic(page);
   const hub = await journey.hub({ machines: [ATLAS, STUDIO, FORGE], paired: ["atlas", "studio", "forge"] });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
   const composer = page.getByRole("textbox", { name: "Your message" });
@@ -33,6 +35,37 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
     await journey.open();
     await list.getByRole("button", { name: /cas-src/ }).click();
     await expect(send).toBeVisible();
+  });
+
+  await journey.stage("Keep a half-written reply and its focus through a heartbeat", async () => {
+    await composer.fill("Please verify the gate first.\nKeep this half-written reply.");
+    await composer.evaluate((field: HTMLTextAreaElement) => {
+      field.setSelectionRange(7, 7);
+      (window as unknown as { __draftField: HTMLTextAreaElement }).__draftField = field;
+    });
+    // Observe a real background request, rather than waiting for a string in
+    // main.ts to claim that a render happened.
+    await page.waitForResponse((response) => new URL(response.url()).pathname === "/v1/sessions");
+    await expectDraft(page, composer, "Please verify the gate first.\nKeep this half-written reply.", testInfo);
+    await expect(composer).toBeFocused();
+    expect(await composer.evaluate((field: HTMLTextAreaElement) => ({
+      sameNode: field === (window as unknown as { __draftField: HTMLTextAreaElement }).__draftField,
+      start: field.selectionStart, end: field.selectionEnd, direction: field.selectionDirection,
+    }))).toEqual({ sameNode: true, start: 7, end: 7, direction: "forward" });
+  });
+
+  await journey.stage("Restore the draft and focus after switching conversations rebuilds the shell", async () => {
+    await list.getByRole("button", { name: /gabber-studio/ }).click();
+    await expect(composer).toHaveValue("");
+    await expect(composer).toBeFocused();
+    // Prove a shell replacement, distinct from the steady heartbeat above.
+    expect(await page.evaluate(() =>
+      (window as unknown as { __draftField: HTMLTextAreaElement }).__draftField.isConnected,
+    )).toBe(false);
+    await list.getByRole("button", { name: /cas-src/ }).click();
+    await expectDraft(page, composer, "Please verify the gate first.\nKeep this half-written reply.", testInfo);
+    await expect(composer).toBeFocused();
+    expect(await composer.evaluate((field: HTMLTextAreaElement) => field.selectionStart)).toBe(7);
   });
 
   await journey.stage("Write and send", async () => {

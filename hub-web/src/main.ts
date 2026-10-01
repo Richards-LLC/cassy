@@ -18,7 +18,7 @@ import { applyScheme, markAppearanceCommands, setScheme, type SchemePreference }
 import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionUrl, createAttentionItem, dismissableInfoItems, groupAttention, machineEventAttention, mergeAttentionItem, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
 import { cycleAttentionGroup, renderAttentionPanel, renderAttentionSummary } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
-import { attachElapsedSeconds, elapsedSeconds, headerConnectionChip, type AttachSnapshot } from "./connection-state";
+import { attachElapsedSeconds, elapsedSeconds, headerConnectionChip, machineConnectionLabel, type AttachSnapshot } from "./connection-state";
 import { CONVERSATION_OPENING, disconnectedView, lostConnectionBanner, outageControlsReason, outageRefusal, pairingLostBanner, renderConnectionSurfaceInto, sessionOutageControlsReason, sessionReconnectingBanner, shouldRetainDisconnectedFrame, transportFailureNeedsAttention } from "./connection-state-view";
 import { ensureMachineConnection, replaceMachineConnection } from "./connection-lifecycle";
 import { createDeviceKey } from "./dpop";
@@ -3364,15 +3364,7 @@ function renderConversationList(): void {
  * (journey F14).
  */
 function fleetConnectionLabel(state: ConnectionState | undefined, machineId?: string): string {
-  if (!state) return "Idle";
-  if (state.phase === "live") return state.degraded ? "Degraded" : "Live";
-  // Never live and already failed (cas-b789): not "Connecting…" forever; say
-  // it cannot be reached, as the list does, while retries continue.
-  const retrying = state.phase === "backoff" || (state.phase === "failed" && state.fatal !== true && !state.authFailure);
-  if (retrying && machineId && !lastLiveAt.has(machineId)) return CANT_REACH_RETRYING;
-  if (state.phase === "backoff") return "Reconnecting";
-  if (state.phase === "failed") return state.authFailure ? "Needs pairing" : "Unreachable";
-  return "Connecting";
+  return machineConnectionLabel(state, machineId ? lastLiveAt.has(machineId) : true);
 }
 
 const fleetBoard = new FleetBoardRenderer();
@@ -4315,6 +4307,7 @@ function pairedMachineRows(): PairedMachineRow[] {
       connection: state?.phase === "live" && !state.degraded && fresh ? "Connected" : fleetConnectionLabel(state, machine.id) === "Live" ? "Reconnecting" : fleetConnectionLabel(state, machine.id),
       connected: state?.phase === "live" && !state.degraded && fresh,
       everConnected: lastLiveAt.has(machine.id),
+      connectionState: state,
       lastSeen: updated ? `Last seen ${relativeTimestamp(Date.parse(updated))} · ${clockLabel(Date.parse(updated))}` : 'Not yet seen in this visit',
       runtime: machineInfo.get(machine.id)?.version };
   });

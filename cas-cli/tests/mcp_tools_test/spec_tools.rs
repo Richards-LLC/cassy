@@ -5,8 +5,8 @@ use rmcp::handler::server::wrapper::Parameters;
 use tempfile::TempDir;
 
 /// Helper to setup CAS with CasService for consolidated tools
-fn setup_cas_service() -> (TempDir, CasService) {
-    let (temp, core) = setup_cas();
+fn setup_cas_service(test_env: &mut TestEnvGuard) -> (TempDir, CasService) {
+    let (temp, core) = setup_cas(test_env);
     (temp, CasService::new(core, None))
 }
 
@@ -48,7 +48,8 @@ fn extract_spec_id(text: &str) -> Option<String> {
 
 #[tokio::test]
 async fn test_spec_create_basic() {
-    let (_temp, service) = setup_cas_service();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas_service(&mut test_env);
 
     let mut req = spec_req("create");
     req.title = Some("Test Spec".to_string());
@@ -69,7 +70,8 @@ async fn test_spec_create_basic() {
 
 #[tokio::test]
 async fn test_spec_create_with_fields() {
-    let (_temp, service) = setup_cas_service();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas_service(&mut test_env);
 
     let mut req = spec_req("create");
     req.title = Some("Full Spec".to_string());
@@ -93,7 +95,8 @@ async fn test_spec_create_with_fields() {
 
 #[tokio::test]
 async fn test_spec_show() {
-    let (_temp, service) = setup_cas_service();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas_service(&mut test_env);
 
     // Create a spec
     let mut create_req = spec_req("create");
@@ -127,7 +130,8 @@ async fn test_spec_show() {
 
 #[tokio::test]
 async fn test_spec_list() {
-    let (_temp, service) = setup_cas_service();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas_service(&mut test_env);
 
     // Create specs
     for i in 1..=2 {
@@ -159,7 +163,8 @@ async fn test_spec_list() {
 
 #[tokio::test]
 async fn test_spec_update() {
-    let (_temp, service) = setup_cas_service();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas_service(&mut test_env);
 
     // Create
     let mut create_req = spec_req("create");
@@ -185,7 +190,8 @@ async fn test_spec_update() {
 
 #[tokio::test]
 async fn test_spec_approve() {
-    let (_temp, service) = setup_cas_service();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas_service(&mut test_env);
 
     // Create
     let mut create_req = spec_req("create");
@@ -212,7 +218,8 @@ async fn test_spec_approve() {
 
 #[tokio::test]
 async fn test_spec_delete() {
-    let (_temp, service) = setup_cas_service();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas_service(&mut test_env);
 
     // Create
     let mut create_req = spec_req("create");
@@ -236,7 +243,8 @@ async fn test_spec_delete() {
 
 #[tokio::test]
 async fn test_spec_types() {
-    let (_temp, service) = setup_cas_service();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service) = setup_cas_service(&mut test_env);
 
     for spec_type in ["epic", "feature", "api", "component", "migration"] {
         let mut req = spec_req("create");

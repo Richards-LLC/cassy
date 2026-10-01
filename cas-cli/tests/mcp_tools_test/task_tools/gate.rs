@@ -24,8 +24,8 @@ async fn unified_task(service: &CasService, request: serde_json::Value) -> Strin
 
 #[tokio::test]
 async fn supervisor_gate_closes_on_decision_and_unblocks_dependent_without_commit() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     set_test_agent_role(&cas_dir, AgentRole::Supervisor);
     let service = CasService::new(core.clone(), None);
@@ -142,8 +142,8 @@ async fn supervisor_gate_closes_on_decision_and_unblocks_dependent_without_commi
 
 #[tokio::test]
 async fn gate_start_is_supervisor_only_without_weakening_ordinary_start_protection() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let store = open_task_store(&cas_dir).unwrap();
     let service = CasService::new(core.clone(), None);
@@ -225,8 +225,8 @@ async fn gate_start_is_supervisor_only_without_weakening_ordinary_start_protecti
 
 #[tokio::test]
 async fn supervisor_can_close_worker_assigned_gate_without_worker_branch_validation() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let git = |args: &[&str]| {
         let output = Command::new("git")
@@ -331,12 +331,10 @@ async fn supervisor_can_close_worker_assigned_gate_without_worker_branch_validat
 
 #[tokio::test]
 async fn assigning_gate_to_worker_warns_that_gate_is_supervisor_owned() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
-    unsafe {
-        std::env::set_var("CAS_FACTORY_MODE", "1");
-    }
+    test_env.set("CAS_FACTORY_MODE", "1");
     let worker = Agent::new_with_role(
         "gate-assignment-worker-session".to_string(),
         "gate-assignment-worker".to_string(),
@@ -368,9 +366,7 @@ async fn assigning_gate_to_worker_warns_that_gate_is_supervisor_owned() {
         }),
     )
     .await;
-    unsafe {
-        std::env::remove_var("CAS_FACTORY_MODE");
-    }
+    test_env.remove("CAS_FACTORY_MODE");
 
     assert!(
         updated.contains("Gate task assigned to worker")
@@ -385,8 +381,8 @@ async fn assigning_gate_to_worker_warns_that_gate_is_supervisor_owned() {
 
 #[tokio::test]
 async fn cas525c_supervisor_proof_scope_fix_reopens_with_decision_not_review_failure() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let git = |args: &[&str]| {
         let status = Command::new("git")
@@ -584,8 +580,8 @@ async fn cas525c_supervisor_proof_scope_fix_reopens_with_decision_not_review_fai
 
 #[tokio::test]
 async fn casd86d_supervisor_widens_targets_on_merged_delivery_without_review_failure() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let service = CasService::new(core.clone(), None);
 
@@ -725,8 +721,8 @@ async fn casd86d_supervisor_widens_targets_on_merged_delivery_without_review_fai
 
 #[tokio::test]
 async fn cas8d38_supervisor_corrects_platform_risk_after_close_ready_merge() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let service = CasService::new(core, None);
 
@@ -823,8 +819,8 @@ async fn cas8d38_supervisor_corrects_platform_risk_after_close_ready_merge() {
 
 #[tokio::test]
 async fn cas8d38_supervisor_override_closes_platform_mismatch_with_measurement() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let service = CasService::new(core, None);
     let created = unified_task(
@@ -870,8 +866,8 @@ async fn cas8d38_supervisor_override_closes_platform_mismatch_with_measurement()
 
 #[tokio::test]
 async fn casb123_proof_scope_fix_rejects_immutable_merged_delivery() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let git = |args: &[&str]| {
         let status = Command::new("git")
@@ -1004,8 +1000,8 @@ async fn casb123_proof_scope_fix_rejects_immutable_merged_delivery() {
 /// rewritten the tip under independent QA.
 #[tokio::test]
 async fn start_moves_a_branch_parked_for_another_target_and_keeps_its_tip_gh_1006() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let repo = temp.path();
     let git = |args: &[&str]| -> String {
@@ -1082,8 +1078,8 @@ async fn start_moves_a_branch_parked_for_another_target_and_keeps_its_tip_gh_100
 
 #[tokio::test]
 async fn cas7a69_unified_create_and_update_accept_all_proof_target_wire_forms() {
-    let (temp, core) = setup_cas();
-    let _env_lock = env_test_lock();
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
     let service = CasService::new(core, None);
     let store = open_task_store(&cas_dir).unwrap();

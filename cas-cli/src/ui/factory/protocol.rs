@@ -155,6 +155,11 @@ pub struct OperatorReplyPayload {
     pub kind: OperatorTurnKind,
     #[serde(default)]
     pub attachments: Vec<ArtifactRef>,
+    /// The session of the turn `reply_to` answers, when it is not the
+    /// session this reply belongs to (cas-e829). The reply stays in its own
+    /// thread and only quotes the earlier one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to_session: Option<String>,
 }
 
 /// A durable operator message replayed into the Commander conversation.
@@ -220,6 +225,11 @@ pub struct ConversationHistoryReply {
     /// Set when the row is a system notice, not a supervisor turn (cas-e829).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notice: Option<OperatorNotice>,
+    /// The session of the turn `reply_to` answers, when it is not the
+    /// session this reply belongs to (cas-e829). The reply stays in its own
+    /// thread and only quotes the earlier one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to_session: Option<String>,
 }
 
 impl MessageAttribution {
@@ -475,6 +485,9 @@ pub enum DaemonMessage {
         /// Set when the row is a system notice, not a supervisor turn (cas-e829).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         notice: Option<OperatorNotice>,
+        /// Session of the answered turn when it is another session's (cas-e829).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_to_session: Option<String>,
     },
 
     /// A system notice delivered earlier is over (cas-e829): the relay it
@@ -1109,10 +1122,23 @@ mod tests {
                 size_bytes: 42,
                 sha256: "ab".repeat(32),
             }],
+            reply_to_session: None,
         };
         let encoded = serde_json::to_string(&current).unwrap();
+        assert!(!encoded.contains("reply_to_session"), "{encoded}");
         let decoded: OperatorReplyPayload = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, current);
+        assert_eq!(legacy.reply_to_session, None);
+
+        // cas-e829: a cross-session answer names the session it quotes.
+        let cross = OperatorReplyPayload {
+            reply_to: Some(41),
+            reply_to_session: Some("acct-wise-lion-31".into()),
+            ..current
+        };
+        let decoded: OperatorReplyPayload =
+            serde_json::from_str(&serde_json::to_string(&cross).unwrap()).unwrap();
+        assert_eq!(decoded.reply_to_session.as_deref(), Some("acct-wise-lion-31"));
     }
 
     #[test]

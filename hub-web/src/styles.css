@@ -3604,6 +3604,8 @@ button.chip:disabled { cursor: default; }
 .thread .fnote { display: block; margin-top: 4px; font: var(--weight-medium) 12.5px/1.35 var(--font-ui); color: var(--state-warn); overflow-wrap: anywhere; text-wrap: pretty; }
 /* An attachment-only turn is its sheet alone; the bubble would be a blank pebble. */
 .thread .bub.bub-empty { display: none; }
+/* cas-e829: an answer to another session's turn names it; the bubble's own ink, no tint, so it holds contrast. */
+.thread .reply-quote { margin: 0 0 6px; padding-left: 8px; border-left: 2px solid currentColor; font: var(--weight-medium) 12px/1.35 var(--font-ui); overflow-wrap: anywhere; }
 
 /* Nothing waiting: the machine's monogram in its accent, the supervisor's
    name, one quiet centred line, and the last message as a faint echo. The

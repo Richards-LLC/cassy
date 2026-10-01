@@ -2926,6 +2926,23 @@ impl SqlitePromptQueueStore {
     }
 }
 
+/// cas-e829: a Commander turn (`target = 'operator'`) belongs to the session
+/// that wrote it. Live delivery and history both select on
+/// `factory_session`, so a row without one could never be delivered and
+/// would only surface as an orphan in some later session's view. Refuse it
+/// at the write instead of storing it.
+fn require_operator_session(target: &str, factory_session: Option<&str>) -> Result<()> {
+    if target.trim().eq_ignore_ascii_case("operator")
+        && factory_session.is_none_or(|session| session.trim().is_empty())
+    {
+        return Err(StoreError::Other(
+            "a Commander turn (target='operator') must name the factory session it belongs to"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 impl PromptQueueStore for SqlitePromptQueueStore {
     fn init(&self) -> Result<()> {
         // cas-88d8: concurrent openers race on check-then-ALTER. SQLite
@@ -3334,6 +3351,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         attribution: Option<&serde_json::Value>,
         origin: Option<&QueueOrigin>,
     ) -> Result<EnqueueOutcome> {
+        require_operator_session(target, factory_session)?;
         let outcome = crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
@@ -3409,6 +3427,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         dedupe_key: &str,
         origin: Option<&QueueOrigin>,
     ) -> Result<EnqueueIdempotentResult> {
+        require_operator_session(target, factory_session)?;
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             let now = Utc::now().to_rfc3339();
@@ -6460,17 +6479,19 @@ mod tests {
         let terminal_id = store.record_terminal_operator_turn("factory-7", "typed at terminal").unwrap();
         assert!(store.queued_prompt(terminal_id).unwrap().unwrap().processed_at.is_some());
 
-        // A row with no session recorded never joins a session's thread.
+        // A legacy row with no session recorded never joins a session's
+        // thread. New writes refuse it (cas-e829), so seed it directly.
         store
-            .enqueue_urgent_with_outcome(
-                "supervisor",
-                "operator",
-                r#"{"schema_version":2,"reply_to":null,"message":"sessionless reply","summary":"","device_id":"phone-7","kind":"answer","attachments":[]}"#,
-                None,
-                None,
-                None,
-                false,
-                Some(&QueueOrigin::Daemon),
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO prompt_queue (source, target, prompt, created_at, origin_kind)
+                 VALUES ('supervisor', 'operator', ?1, ?2, 'daemon')",
+                params![
+                    r#"{"schema_version":2,"reply_to":null,"message":"sessionless reply","summary":"","device_id":"phone-7","kind":"answer","attachments":[]}"#,
+                    Utc::now().to_rfc3339()
+                ],
             )
             .unwrap();
         // Supervisor-to-worker traffic is session activity, not conversation.
@@ -6583,6 +6604,57 @@ mod tests {
             store.relay_alert_states("acct-7", &[unseen_alert], 0).unwrap(),
             vec![RelayAlertState { alert_id: unseen_alert, subject_id: unseen, resolved: false }]
         );
+    }
+
+    /// cas-e829: a Commander turn with no session could never be delivered
+    /// (live replies are selected by session) and would only resurface as an
+    /// orphan in another session's view, so the store refuses to write it.
+    #[test]
+    fn operator_turn_without_a_session_is_refused() {
+        let (_temp, store) = create_test_store();
+        for session in [None, Some(""), Some("  ")] {
+            let error = store
+                .enqueue_urgent_with_outcome(
+                    "supervisor",
+                    "operator",
+                    "{}",
+                    session,
+                    None,
+                    None,
+                    false,
+                    Some(&QueueOrigin::Daemon),
+                )
+                .expect_err("a sessionless Commander turn is refused");
+            assert!(error.to_string().contains("factory session"), "{error}");
+            store
+                .enqueue_idempotent(
+                    "relay-watchdog",
+                    "Operator",
+                    "{}",
+                    session,
+                    None,
+                    None,
+                    "relay-escalation:1",
+                    Some(&QueueOrigin::Daemon),
+                )
+                .expect_err("a sessionless watchdog alert is refused");
+        }
+        store
+            .enqueue("relay-watchdog", "operator", "{}")
+            .expect_err("the unattributed legacy enqueue is refused too");
+        let stored: i64 = store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM prompt_queue", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(stored, 0, "nothing was written");
+
+        // Only Commander turns need a session; a bound one is accepted.
+        store.enqueue("supervisor", "worker-1", "x").unwrap();
+        store
+            .enqueue_with_session("supervisor", "operator", "{}", "factory-1")
+            .unwrap();
     }
 
     /// cas-55a4: a session's thread page and its last activity read through

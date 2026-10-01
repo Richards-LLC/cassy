@@ -91,6 +91,11 @@ export interface OperatorReply {
    * supervisor turn (cas-e829): it belongs in attention, never the thread.
    */
   notice?: OperatorNotice | null;
+  /**
+   * The session of the turn `reply_to` answers, when it is another session's
+   * (cas-e829). The reply belongs to this thread and only quotes that one.
+   */
+  reply_to_session?: string | null;
 }
 
 /** protocol.rs OperatorNotice (cas-e829). */

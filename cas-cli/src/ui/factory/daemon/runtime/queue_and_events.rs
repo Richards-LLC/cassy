@@ -1932,6 +1932,7 @@ pub(super) fn escalate_undelivered_supervisor_relays(
             operator_label: None,
             kind: crate::ui::factory::OperatorTurnKind::Blocker,
             attachments: Vec::new(),
+            reply_to_session: None,
         }) {
             Ok(payload) => payload,
             Err(error) => {
@@ -4474,6 +4475,7 @@ impl FactoryDaemon {
                 kind: payload.kind,
                 attachments: payload.attachments,
                 notice,
+                reply_to_session: payload.reply_to_session,
             };
             self.ws_broadcast(&reply);
             tracing::info!(
@@ -8175,6 +8177,7 @@ fn commander_history_turns(
                     .unwrap_or_else(|| fallback_session.to_string()),
                 at: row.created_at.to_rfc3339(),
                 notice: notices.get(&row.id).cloned(),
+                reply_to_session: payload.reply_to_session,
             });
             continue;
         }
@@ -8555,8 +8558,15 @@ mod tests {
         queue
             .enqueue_with_session("supervisor", "operator", &reply("old"), "acct-wise-lion-31")
             .unwrap();
-        queue
-            .enqueue("relay-watchdog", "operator", &reply("unbound"))
+        // A legacy row written before the store required a session
+        // (cas-e829 refuses new ones), seeded directly.
+        rusqlite::Connection::open(temp.path().join("cas.db"))
+            .unwrap()
+            .execute(
+                "INSERT INTO prompt_queue (source, target, prompt, created_at)
+                 VALUES ('relay-watchdog', 'operator', ?1, ?2)",
+                rusqlite::params![reply("unbound"), chrono::Utc::now().to_rfc3339()],
+            )
             .unwrap();
         queue
             .record_terminal_operator_turn("acct-wise-lion-31", "typed")
@@ -10935,6 +10945,7 @@ mod tests {
             operator_label: Some("Pippenz".to_string()),
             kind: crate::ui::factory::OperatorTurnKind::Ask,
             attachments: Vec::new(),
+            reply_to_session: None,
         })
         .unwrap();
         let ask_id = queue

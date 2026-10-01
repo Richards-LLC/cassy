@@ -231,6 +231,20 @@ describe("ConversationView (Pebble thread)", () => {
     expect(ask.classList.contains("bub")).toBe(true); expect(ask.textContent).toBe("Fix in-train or ship?");
     expect(view.element.querySelector<HTMLElement>('[data-kind="blocker"]')?.classList.contains("bub")).toBe(true);
   });
+  it("names the earlier session an answer quotes, and keeps it in this thread (cas-e829)", () => {
+    const history = new ConversationHistory();
+    const view = new ConversationView(document, history, "sup"); document.body.replaceChildren(view.element);
+    history.reply({ ...reply(5, "answer", "The import finished overnight.", 3196243), reply_to_session: "acct-wise-lion-31" }, at(9, 40));
+    history.reply(reply(6, "answer", "Same-session answer.", 5), at(9, 41));
+    view.update();
+    const [cross, same] = [...view.element.querySelectorAll<HTMLElement>('.turn.sup .bub[data-kind="answer"]')];
+    expect(cross!.querySelector(".reply-quote")?.textContent).toBe("re: earlier session wise-lion-31");
+    expect(cross!.querySelector(".reply-quote")?.getAttribute("title")).toBe("acct-wise-lion-31");
+    expect(cross!.dataset.replyTo).toBe("3196243");
+    expect(cross!.textContent).toContain("The import finished overnight.");
+    expect(same!.querySelector(".reply-quote")).toBeNull();
+    expect(view.element.querySelector(".earlier-session")).toBeNull();
+  });
   it("renders a markdown table as an evidence table with toned cells", () => {
     const history = new ConversationHistory();
     const view = new ConversationView(document, history, "sup"); document.body.replaceChildren(view.element);

@@ -106,13 +106,26 @@ export function hostMarkup(host: string): string {
   return match ? `${escapeHtml(match[1])}<span class="host-os">${escapeHtml(match[2])}</span>` : escapeHtml(host);
 }
 
+/**
+ * The phone's way to this session's Attention (cas-5c22). The rail that lists
+ * attention beside the thread on a desktop is not shown on a phone, so a live
+ * delivery problem had no sign there. Hidden until the session has an open
+ * item; main.ts fills the count and opens the rail as a sheet.
+ */
+const CONVERSATION_ATTENTION_BUTTON = `<button id="conversation-attention" class="conversation-attention" type="button" aria-haspopup="dialog" hidden><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M10 3.2 18 17H2z"/><path d="M10 8.5v3.6"/><path d="M10 14.6v.1"/></svg><span class="conversation-attention-count"></span></button>`;
+
+/** Badge text and accessible name for the session's open attention items. */
+export function conversationAttentionBadge(count: number): { hidden: boolean; text: string; label: string } {
+  return { hidden: count < 1, text: String(count), label: `Attention: ${count} item${count === 1 ? "" : "s"} for this session` };
+}
+
 export function conversationHeaderMarkup(model: ConversationShellModel): string {
   const host = model.host || "";
   // No project named: the codename is the title and the host line names only the machine (cas-1ca1 F03).
   const project = projectTitle(model.projectDir);
   const supervisor = model.supervisor || "Supervisor unavailable";
   const title = project ?? supervisor;
-  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button" aria-label="‹ Conversations"><span class="back-glyph">‹</span><span class="back-label"> Conversations</span></button>${cloudBrand()}<button id="conversation-terminal" type="button" aria-label="Terminal view">Terminal<span class="terminal-suffix"> view</span></button></div><div class="conversation-identity"><span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(host || model.supervisor || "?"))}</span><div class="id"><h1><b title="${escapeHtml(title)}"${project ? "" : ' class="codename"'}>${escapeHtml(title)}</b></h1><span class="conversation-host"><span class="host-where" title="${escapeHtml(project ? [host, supervisor].filter(Boolean).join(" · ") : host)}">${project ? `${host ? `<span class="host-machine">${hostMarkup(host)}</span><span class="host-sep"> · </span>` : ""}<span class="codename">${escapeHtml(supervisor)}</span>` : `<span class="host-machine">${hostMarkup(host)}</span>`}</span><span id="conversation-connection" role="status"></span></span></div></div></header>`;
+  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button" aria-label="‹ Conversations"><span class="back-glyph">‹</span><span class="back-label"> Conversations</span></button>${cloudBrand()}${CONVERSATION_ATTENTION_BUTTON}<button id="conversation-terminal" type="button" aria-label="Terminal view">Terminal<span class="terminal-suffix"> view</span></button></div><div class="conversation-identity"><span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(host || model.supervisor || "?"))}</span><div class="id"><h1><b title="${escapeHtml(title)}"${project ? "" : ' class="codename"'}>${escapeHtml(title)}</b></h1><span class="conversation-host"><span class="host-where" title="${escapeHtml(project ? [host, supervisor].filter(Boolean).join(" · ") : host)}">${project ? `${host ? `<span class="host-machine">${hostMarkup(host)}</span><span class="host-sep"> · </span>` : ""}<span class="codename">${escapeHtml(supervisor)}</span>` : `<span class="host-machine">${hostMarkup(host)}</span>`}</span><span id="conversation-connection" role="status"></span></span></div></div></header>`;
 }
 
 /** Attaching files from this browser has no transport yet; the clip stays out of the composer until it does. */
@@ -285,7 +298,8 @@ function contextRailMarkup(selected: boolean): string {
       + '<section class="context-section" data-section="attachments" aria-labelledby="context-attachments-heading" hidden><h2 id="context-attachments-heading">Attachments</h2><ul class="context-list context-attachments"></ul></section>'
       + '<section class="context-section" data-section="attention" hidden><div id="conversation-attention-slot"></div></section>'
     : "";
-  return `<aside class="conversation-context" aria-label="Conversation context" data-open="false" aria-hidden="true">${sections}</aside>`;
+  const close = selected ? '<button class="context-sheet-close" type="button" aria-label="Close attention">×</button>' : "";
+  return `<aside class="conversation-context" aria-label="Conversation context" data-open="false" aria-hidden="true">${close}${sections}</aside>`;
 }
 
 /** Appearance & commands as a header icon button (P13): out of the phone thumb zone, named for assistive tech. */

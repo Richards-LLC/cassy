@@ -7,16 +7,16 @@ import { controlCommandCopy, sessionJumpCommandMarkup } from "./palette-commands
 import { ConversationHistory } from "./conversation-history";
 import { loadDismissedAsks, saveDismissedAsks, type DismissedAsksStorage } from "./dismissed-asks";
 import { ConversationView, emptyActivityText } from "./conversation-view";
-import { isOperatorNotice, NOTICE_KIND, noticeFingerprint, planNotice } from "./operator-notices";
+import { isOperatorNotice, NOTICE_KIND, noticeFingerprint, noticeTime, planNotice } from "./operator-notices";
 import { REFUSED_SEE_ABOVE, refusalSentence, refusal } from "./refusal";
 import { installAttentionObjects } from "./attention-objects";
 import { clearTransientAttachmentNotes, installAttachmentSheet, setAttachmentNote } from "./attachment-sheet";
 import { artifactFailureIsAboutTheFile, artifactIdFromHref, artifactIsLocalOnly, artifactLinkFor, openArtifact } from "./artifact-open";
-import { arrangeConversationShell, bindKeyboardViewport, keyboardViewportHeight, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY, paletteShortcutLabel, fitConversationHost } from "./conversation-shell";
+import { arrangeConversationShell, bindKeyboardViewport, conversationAttentionBadge, keyboardViewportHeight, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY, paletteShortcutLabel, fitConversationHost } from "./conversation-shell";
 import { clockLabel } from "./thread-model";
 import { syncContextRail } from "./context-rail";
 import { applyScheme, markAppearanceCommands, setScheme, type SchemePreference } from "./scheme";
-import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionUrl, createAttentionItem, dismissableInfoItems, groupAttention, machineEventAttention, mergeAttentionItem, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
+import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionUrl, coalesceAttention, createAttentionItem, dismissableInfoItems, groupAttention, machineEventAttention, mergeAttentionItem, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
 import { cycleAttentionGroup, renderAttentionPanel, renderAttentionSummary } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
 import { attachElapsedSeconds, elapsedSeconds, headerConnectionChip, machineConnectionLabel, type AttachSnapshot } from "./connection-state";
@@ -1034,8 +1034,10 @@ function ensureConnection(machine: StoredMachine): HubConnectionSupervisor {
   return ensureMachineConnection(machine, connections, createConnection);
 }
 
-async function addAttention(machine: StoredMachine, session: string | undefined, kind: string, content: string | AttentionContent): Promise<void> {
-  const createdAt = new Date().toISOString();
+async function addAttention(machine: StoredMachine, session: string | undefined, kind: string, content: string | AttentionContent, at?: string): Promise<void> {
+  // An item about something that happened earlier (a replayed notice) keeps
+  // that time, not the moment this browser heard of it (cas-5c22).
+  const createdAt = at ?? new Date().toISOString();
   const item = createAttentionItem({
     id: `${machine.id}:${session ?? "machine"}:${kind}:${createdAt}:${crypto.randomUUID()}`,
     machineId: machine.id,
@@ -1055,10 +1057,24 @@ async function addAttention(machine: StoredMachine, session: string | undefined,
 }
 
 /** Raise, keep or retire the attention item for one system notice (cas-e829). */
-function applyOperatorNotice(machine: StoredMachine, session: string, reply: OperatorReply): void {
+function applyOperatorNotice(machine: StoredMachine, session: string, reply: OperatorReply & { at?: string }): void {
   const plan = planNotice(machine.id, session, reply, (fingerprint) => attention.some((item) => item.fingerprint === fingerprint));
   if (plan.action === "resolve") resolveAttention(plan.fingerprint);
-  else if (plan.action === "raise") void addAttention(machine, session, NOTICE_KIND, plan.content);
+  else if (plan.action === "raise") void addAttention(machine, session, NOTICE_KIND, plan.content, noticeTime(reply.at));
+  else void retimeNotice(plan.fingerprint, noticeTime(reply.at));
+}
+
+/**
+ * A notice that arrived live (no stamp) and is then replayed by history with
+ * its row's own time takes that earlier time (cas-5c22).
+ */
+async function retimeNotice(fingerprint: string, at: string | undefined): Promise<void> {
+  if (at === undefined) return;
+  const changed = attention.filter((item) => item.fingerprint === fingerprint && !item.acknowledgedAt && at < item.createdAt);
+  if (!changed.length) return;
+  attention = attention.map((item) => changed.includes(item) ? { ...item, createdAt: at, ...(item.firstSeenAt === undefined || at < item.firstSeenAt ? { firstSeenAt: at } : {}) } : item);
+  for (const item of attention.filter((candidate) => changed.some((old) => old.id === candidate.id))) await attentionStore.put(item);
+  render();
 }
 
 /** A session that left the catalog takes its open notices with it (cas-e829). */
@@ -3711,6 +3727,7 @@ function renderAttention(): void {
   if (!container) return;
   const visibleAttention = hubPresentation === "conversation" ? attention.filter((item) => item.machineId === selectedMachineId && (!item.session || item.session === selectedSession)) : attention;
   contextAttention = groupAttention(visibleAttention).length;
+  syncConversationAttention(hubPresentation === "conversation" && selectedSession ? coalesceAttention(visibleAttention).length : 0);
   renderAttentionPanel(container, visibleAttention, {
     dismiss: acknowledgeAttentionGroup,
     act: performAttentionAction,
@@ -3719,6 +3736,49 @@ function renderAttention(): void {
       toast("Event payload copied");
     },
   }, { animateIds: newCriticalAttentionIds, reclassifyIds: reclassifiedAttentionIds, outage: attentionOutage() });
+}
+
+/**
+ * The phone's Attention badge and sheet for the open session (cas-5c22). The
+ * badge shows while the session has an open item; tapping it lays the context
+ * rail over the thread with only its Attention section. It closes on Close,
+ * Escape or once nothing is left, and focus returns to the badge or thread.
+ */
+let attentionSheetOpen = false;
+function syncConversationAttention(count: number): void {
+  const badge = document.querySelector<HTMLButtonElement>("#conversation-attention");
+  if (badge) {
+    const view = conversationAttentionBadge(count);
+    badge.hidden = view.hidden;
+    badge.setAttribute("aria-label", view.label);
+    badge.setAttribute("aria-expanded", String(attentionSheetOpen && count > 0));
+    const text = badge.querySelector(".conversation-attention-count");
+    if (text && text.textContent !== view.text) text.textContent = view.text;
+  }
+  if (count < 1 && attentionSheetOpen) closeAttentionSheet();
+  applyAttentionSheet();
+}
+function applyAttentionSheet(): void {
+  const shell = document.querySelector<HTMLElement>(".conversation-shell");
+  const rail = shell?.querySelector<HTMLElement>(".conversation-context");
+  shell?.classList.toggle("attention-sheet-open", attentionSheetOpen);
+  if (!rail) return;
+  if (attentionSheetOpen) { rail.setAttribute("role", "dialog"); rail.setAttribute("aria-modal", "true"); rail.setAttribute("aria-label", "Attention for this session"); }
+  else { rail.removeAttribute("role"); rail.removeAttribute("aria-modal"); rail.setAttribute("aria-label", "Conversation context"); }
+}
+function openAttentionSheet(): void {
+  attentionSheetOpen = true;
+  applyAttentionSheet();
+  document.querySelector<HTMLButtonElement>("#conversation-attention")?.setAttribute("aria-expanded", "true");
+  document.querySelector<HTMLButtonElement>(".conversation-context .context-sheet-close")?.focus();
+}
+function closeAttentionSheet(): void {
+  if (!attentionSheetOpen) return;
+  attentionSheetOpen = false;
+  applyAttentionSheet();
+  const badge = document.querySelector<HTMLButtonElement>("#conversation-attention");
+  badge?.setAttribute("aria-expanded", "false");
+  if (badge && !badge.hidden) badge.focus(); else landFocus([focusTargets.thread]);
 }
 
 /**
@@ -3929,10 +3989,16 @@ function globalShortcut(event: KeyboardEvent): void {
 }
 
 function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | undefined): void {
+  const attentionBadge = document.querySelector<HTMLButtonElement>("#conversation-attention");
+  if (attentionBadge) attentionBadge.onclick = openAttentionSheet;
+  const sheetClose = document.querySelector<HTMLButtonElement>(".conversation-context .context-sheet-close");
+  if (sheetClose) sheetClose.onclick = closeAttentionSheet;
+  const conversationRail = document.querySelector<HTMLElement>(".conversation-context");
+  if (conversationRail) conversationRail.onkeydown = (event) => { if (event.key === "Escape" && attentionSheetOpen) { event.preventDefault(); closeAttentionSheet(); } };
   const conversationBack = document.querySelector<HTMLButtonElement>("#conversation-back");
-  if (conversationBack) conversationBack.onclick = () => { if (selectedMachineId) commitSelection({ machineId: selectedMachineId }); render(); queueMicrotask(() => document.querySelector<HTMLButtonElement>(".conversation-row")?.focus()); };
+  if (conversationBack) conversationBack.onclick = () => { attentionSheetOpen = false; if (selectedMachineId) commitSelection({ machineId: selectedMachineId }); render(); queueMicrotask(() => document.querySelector<HTMLButtonElement>(".conversation-row")?.focus()); };
   const terminal = document.querySelector<HTMLButtonElement>("#conversation-terminal");
-  if (terminal) terminal.onclick = (event) => { hubPresentation = "terminal"; const storage = paneLayoutStorage(); if (storage && selectedMachineId && selectedSession) saveTranscriptView(storage, sessionKey(selectedMachineId, selectedSession), "terminal"); render(); landInTerminalView(event); };
+  if (terminal) terminal.onclick = (event) => { attentionSheetOpen = false; hubPresentation = "terminal"; const storage = paneLayoutStorage(); if (storage && selectedMachineId && selectedSession) saveTranscriptView(storage, sessionKey(selectedMachineId, selectedSession), "terminal"); render(); landInTerminalView(event); };
   const returning = document.querySelector<HTMLButtonElement>("#conversation-return");
   if (returning) returning.onclick = (event) => {
     hubPresentation = "conversation";

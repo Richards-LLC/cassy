@@ -56,3 +56,15 @@ export function planNotice(machineId: string, session: string, reply: OperatorRe
     },
   };
 }
+
+/**
+ * A notice row's own time as an ISO stamp (cas-5c22): history replays carry
+ * it, a live frame does not (undefined: it is happening now). A machine clock
+ * ahead of this browser never dates a notice in the future.
+ */
+export function noticeTime(at: string | undefined, now: number = Date.now()): string | undefined {
+  if (!at) return undefined;
+  const parsed = Date.parse(at);
+  if (!Number.isFinite(parsed)) return undefined;
+  return new Date(Math.min(parsed, now)).toISOString();
+}

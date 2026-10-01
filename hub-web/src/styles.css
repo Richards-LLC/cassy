@@ -3726,6 +3726,8 @@ button.chip:disabled { cursor: default; }
 .conversation-context .context-meta { grid-area: meta; color: var(--ink-mid); font-size: 12px; }
 .conversation-context .context-meta:empty { display: none; }
 .conversation-context .context-tab { padding: 0; }
+/* cas-5c22: the badge and the sheet's Close belong to the phone. */
+#conversation-attention, .conversation-context .context-sheet-close { display: none; }
 .conversation-context .workers { display: none; }
 .conversation-welcome { margin: auto; padding: var(--space-8); max-width: 60ch; }
 .conversation-welcome h2 { font: var(--weight-medium) var(--fs-verdict)/1.2 var(--font-display); }
@@ -3773,7 +3775,16 @@ button.chip:disabled { cursor: default; }
   #conversation-back .back-label, #conversation-terminal .terminal-suffix { display: none; } /* aria-label keeps the full name */
   .conversation-identity { grid-column: 2; grid-row: 1; gap: 10px; }
   .conversation-identity .conversation-avatar { width: 36px; height: 36px; font-size: 15px; }
-  #conversation-terminal { grid-column: 3; grid-row: 1; min-height: 44px; padding: 0 var(--space-2); background: var(--color-transparent); color: var(--ink-mid); font-size: var(--fs-xs); }
+  #conversation-terminal { grid-column: 4; grid-row: 1; min-height: 44px; padding: 0 var(--space-2); background: var(--color-transparent); color: var(--ink-mid); font-size: var(--fs-xs); }
+  /* cas-5c22: the session's open Attention, one tap from the thread. */
+  .conversation-heading { grid-template-columns: 40px minmax(0, 1fr) auto auto; }
+  #conversation-attention:not([hidden]) { grid-column: 3; grid-row: 1; display: inline-flex; align-items: center; gap: 4px; min-height: 36px; min-width: 44px; justify-content: center; padding: 0 10px; border: var(--line-width) solid currentColor; border-radius: var(--radius-pill); background: var(--color-transparent); color: var(--warn-text); font: var(--weight-semibold) var(--fs-xs)/1 var(--font-ui); }
+  #conversation-attention svg { width: 16px; height: 16px; flex: none; }
+  #conversation-attention:hover:not(:disabled) { background: var(--bg-hover); }
+  /* The rail, laid over the thread as a sheet holding only Attention. */
+  .conversation-shell.thread-open.attention-sheet-open > .conversation-context { display: block; position: fixed; inset: 0; z-index: 20; padding: var(--space-4) var(--space-4) max(var(--space-6), env(safe-area-inset-bottom)); border: 0; background: var(--bg-root); overflow-y: auto; }
+  .attention-sheet-open > .conversation-context .context-section:not([data-section="attention"]) { display: none; }
+  .attention-sheet-open > .conversation-context .context-sheet-close { display: flex; align-items: center; justify-content: center; margin: 0 0 var(--space-2) auto; width: 44px; height: 44px; padding: 0; border-radius: var(--radius-pill); background: var(--color-transparent); color: var(--ink); font: var(--weight-regular) 26px/1 var(--font-ui); }
   #conversation-back:hover:not(:disabled), #conversation-terminal:hover:not(:disabled) { background: var(--bg-hover); }
   .conversation-identity h1 { flex-wrap: nowrap; }
   .conversation-identity h1 b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 22px; }

@@ -61,6 +61,27 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await page.waitForTimeout(300);
     await expect(attentionItems).toHaveCount(1);
     await expect(log).not.toContainText("never reached it");
+    // cas-5c22: the item carries the notice's own time, not when this page heard of it.
+    await expect(attentionItems.locator("time")).toHaveText("Sep 29, 17:49");
+  });
+
+  await journey.stage("On a phone, the delivery problem is one tap from the conversation", async () => {
+    const desktop = page.viewportSize()!;
+    await page.setViewportSize({ width: 390, height: 844 });
+    const badge = page.getByRole("button", { name: "Attention: 1 item for this session" });
+    await expect(badge).toBeVisible();
+    await expect(badge).toHaveText("1");
+    await badge.click();
+    const sheet = page.getByRole("dialog", { name: "Attention for this session" });
+    await expect(sheet).toBeVisible();
+    await expect(sheet.getByRole("button", { name: "Close attention" })).toBeFocused();
+    await expect(sheet.locator("article", { hasText: NOTICE_SUMMARY })).toBeVisible();
+    await expect(sheet.locator("article", { hasText: NOTICE_SUMMARY }).locator("time")).toHaveText("Sep 29, 17:49");
+    await page.keyboard.press("Escape");
+    await expect(sheet).toBeHidden();
+    await expect(badge).toBeFocused();
+    await expect(log).toContainText("The ledger import is red");
+    await page.setViewportSize(desktop);
   });
 
   await journey.stage("It retires once the update gets through", async () => {

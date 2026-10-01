@@ -1,4 +1,5 @@
 import type { AttentionItem } from "./types";
+import { stampLabel } from "./thread-model";
 
 export type AttentionSeverity = "critical" | "warning" | "info";
 export type AttentionAction = "repair" | "view_pane" | "retry" | "open_pr" | "none";
@@ -428,6 +429,19 @@ export function attentionSummary(counts: AttentionCounts): AttentionSummary {
 
 export function dismissableInfoItems(items: readonly AttentionItem[]): AttentionItem[] {
   return items.filter((item) => !item.acknowledgedAt && severityForEvent(item.kind, item.severity) === "info");
+}
+
+/**
+ * An Attention card's time (cas-5c22): its age today ("now", "23m", "4h"),
+ * and its date and time on any earlier day ("Sep 30, 17:49"), as conversation
+ * turns read (cas-e829). "1d" told the operator nothing about when.
+ */
+export function attentionTimeLabel(createdAt: string, now = Date.now()): string {
+  const at = Date.parse(createdAt);
+  if (!Number.isFinite(at)) return relativeTime(createdAt, now);
+  const date = new Date(at); const today = new Date(now);
+  const sameDay = date.getFullYear() === today.getFullYear() && date.getMonth() === today.getMonth() && date.getDate() === today.getDate();
+  return sameDay ? relativeTime(createdAt, now) : stampLabel(at, now) ?? relativeTime(createdAt, now);
 }
 
 export function relativeTime(createdAt: string, now = Date.now()): string {

@@ -3,7 +3,7 @@ import {
   attentionPayload,
   attentionSummary,
   groupAttention,
-  relativeTime,
+  attentionTimeLabel,
   type AttentionAction,
   type AttentionCard,
   type AttentionCounts,
@@ -179,7 +179,7 @@ function renderCard(card: AttentionCard, callbacks: AttentionPanelCallbacks, opt
   }
   const time = document.createElement("time");
   time.dateTime = card.latest.createdAt;
-  time.textContent = relativeTime(card.latest.createdAt, options.now);
+  time.textContent = attentionTimeLabel(card.latest.createdAt, options.now);
   time.title = absoluteTimestamp(card.latest.createdAt);
   time.className = "attention-time";
   eyebrow.append(time, identity);

@@ -72,4 +72,14 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await expect(log).toContainText("The ledger import is red");
     await expect(attentionItems).toHaveCount(0);
   });
+
+  await journey.stage("An answer to an earlier session's question stays here", async () => {
+    // The supervisor answers a question asked in yesterday's ended session:
+    // it arrives in this thread, naming the session it answers.
+    hub.supervisorSays(SESSION, "The bank feed reconciled overnight.", { reply_to: 3196200, reply_to_session: "Accounting-wise-lion-31" });
+    const answer = log.locator(".bub", { hasText: "The bank feed reconciled overnight." });
+    await expect(answer.locator(".reply-quote")).toHaveText("re: earlier session wise-lion-31");
+    await expect(answer).toHaveAttribute("data-reply-to", "3196200");
+    await expect(page.getByRole("region", { name: "Earlier sessions" })).toBeHidden();
+  });
 });

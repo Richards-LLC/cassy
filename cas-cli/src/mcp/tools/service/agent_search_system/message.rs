@@ -1212,11 +1212,13 @@ impl CasService {
                     ));
                 }
             }
-            let factory_session = prior
-                .as_ref()
-                .and_then(|prior| prior.factory_session.as_deref())
-                .filter(|session| !session.trim().is_empty())
-                .or(factory_session.as_deref())
+            // cas-e829: a turn belongs to the session it is sent from. The
+            // answered row may come from another session, including one that
+            // has ended; `in_reply_to` then only refers to it. Inheriting its
+            // session would write into a thread nobody is viewing, or queue
+            // to a dead session that can never deliver.
+            let factory_session = factory_session
+                .as_deref()
                 .filter(|session| !session.trim().is_empty())
                 .ok_or_else(|| {
                     Self::error(
@@ -1224,6 +1226,12 @@ impl CasService {
                         "target='operator' requires an active factory session",
                     )
                 })?;
+            let reply_to_session = prior
+                .as_ref()
+                .and_then(|prior| prior.factory_session.as_deref())
+                .map(str::trim)
+                .filter(|session| !session.is_empty() && *session != factory_session)
+                .map(str::to_owned);
             let device_id = if let Some(prior) = prior.as_ref() {
                 prior
                     .origin
@@ -1302,6 +1310,7 @@ impl CasService {
                 operator_label,
                 kind,
                 attachments: attachments.clone(),
+                reply_to_session,
             })
             .map_err(|error| {
                 Self::error(
@@ -4660,6 +4669,150 @@ mod cas_89e1_post_merge_message_type_tests {
         assert_eq!(payload.schema_version, 2);
         assert_eq!(payload.kind, crate::ui::factory::OperatorTurnKind::Answer);
         assert!(payload.attachments.is_empty());
+        assert_eq!(payload.reply_to_session, None, "same-session answer quotes nothing");
+    }
+
+    /// cas-e829: an answer belongs to the session it is sent from. A row from
+    /// an earlier, ended session is only referenced; nothing queues to it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn supervisor_answer_to_an_earlier_session_stays_in_its_own_session() {
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", None),
+            ("CAS_AGENT_NAME", None),
+            ("CAS_FACTORY_SESSION", None),
+            ("CAS_SUPERVISOR_NAME", None),
+        ]);
+        let temp = tempfile::tempdir().expect("temporary Cassy root");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).expect("Cassy root");
+        let agents = crate::store::open_agent_store(&cas_root).expect("agent store");
+        let mut ended = Agent::new("old-supervisor-id".to_string(), "wise-lion-31".to_string());
+        ended.role = AgentRole::Supervisor;
+        ended.status = cas_types::AgentStatus::Shutdown;
+        ended.factory_session = Some("acct-wise-lion-31".to_string());
+        agents.register(&ended).expect("register ended supervisor");
+        let mut supervisor = Agent::new("supervisor-id".to_string(), "rapid-gazelle-52".to_string());
+        supervisor.role = AgentRole::Supervisor;
+        supervisor.factory_session = Some("acct-rapid-gazelle-52".to_string());
+        agents.register(&supervisor).expect("register supervisor");
+
+        let queue = crate::store::open_prompt_queue_store(&cas_root).expect("prompt queue");
+        let earlier = queue
+            .enqueue_urgent_with_outcome(
+                "commander:Daniel@phone-7",
+                "supervisor",
+                "Did the import finish?",
+                Some("acct-wise-lion-31"),
+                Some("import"),
+                Some(cas_store::NotificationPriority::Normal),
+                false,
+                Some(&cas_store::QueueOrigin::PairedDevice {
+                    device_id: "phone-7".to_string(),
+                }),
+            )
+            .expect("queue earlier-session Commander message")
+            .id();
+
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+        core.set_agent_id_for_testing(supervisor.id);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let request: AgentRequest = serde_json::from_value(serde_json::json!({
+            "action": "message",
+            "target": "operator",
+            "in_reply_to": earlier,
+            "summary": "import finished",
+            "message": "The import finished overnight.",
+        }))
+        .expect("operator reply request");
+        service
+            .message_send(request)
+            .await
+            .expect("cross-session answer queues in the sender's session");
+
+        assert!(
+            queue
+                .peek_operator_replies("acct-wise-lion-31", 10)
+                .expect("ended session replies")
+                .is_empty(),
+            "nothing queues to the ended session"
+        );
+        let rows = queue
+            .peek_operator_replies("acct-rapid-gazelle-52", 10)
+            .expect("current session replies");
+        let reply = rows.first().expect("answer in the sender's session");
+        assert_eq!(reply.factory_session.as_deref(), Some("acct-rapid-gazelle-52"));
+        assert_eq!(reply.recipient_device_id.as_deref(), Some("phone-7"));
+        let payload: crate::ui::factory::OperatorReplyPayload =
+            serde_json::from_str(&reply.prompt).expect("operator reply payload");
+        assert_eq!(payload.reply_to, Some(earlier), "the earlier turn is still referenced");
+        assert_eq!(payload.reply_to_session.as_deref(), Some("acct-wise-lion-31"));
+    }
+
+    /// cas-e829: a supervisor with no session of its own cannot borrow the
+    /// answered row's session; the answer is refused rather than queued to a
+    /// session it was not sent from.
+    #[tokio::test(flavor = "current_thread")]
+    async fn sessionless_supervisor_answer_does_not_borrow_the_answered_session() {
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", None),
+            ("CAS_AGENT_NAME", None),
+            ("CAS_FACTORY_SESSION", None),
+            ("CAS_SUPERVISOR_NAME", None),
+        ]);
+        let temp = tempfile::tempdir().expect("temporary Cassy root");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).expect("Cassy root");
+        let agents = crate::store::open_agent_store(&cas_root).expect("agent store");
+        let mut supervisor = Agent::new("supervisor-id".to_string(), "supervisor".to_string());
+        supervisor.role = AgentRole::Supervisor;
+        supervisor.factory_session = None;
+        agents.register(&supervisor).expect("register supervisor");
+
+        let queue = crate::store::open_prompt_queue_store(&cas_root).expect("prompt queue");
+        let asked = queue
+            .enqueue_urgent_with_outcome(
+                "commander:Daniel@phone-7",
+                "supervisor",
+                "Status?",
+                Some("factory-elsewhere"),
+                Some("status"),
+                Some(cas_store::NotificationPriority::Normal),
+                false,
+                Some(&cas_store::QueueOrigin::PairedDevice {
+                    device_id: "phone-7".to_string(),
+                }),
+            )
+            .expect("queue Commander message")
+            .id();
+
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+        core.set_agent_id_for_testing(supervisor.id);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let request: AgentRequest = serde_json::from_value(serde_json::json!({
+            "action": "message",
+            "target": "operator",
+            "in_reply_to": asked,
+            "summary": "status",
+            "message": "All green.",
+        }))
+        .expect("operator reply request");
+        let error = service
+            .message_send(request)
+            .await
+            .expect_err("a sessionless answer is refused");
+        assert!(error.message.contains("requires an active factory session"), "{error:?}");
+        assert!(
+            queue
+                .peek_operator_replies("factory-elsewhere", 10)
+                .expect("answered session replies")
+                .is_empty()
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

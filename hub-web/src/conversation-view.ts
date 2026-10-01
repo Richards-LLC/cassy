@@ -8,9 +8,9 @@ import { sessionCodename, type ConversationEvent, type ConversationHistory, type
 import type { ArtifactRef, OperatorReply, OperatorTurnKind } from "./types";
 import {
   cellTone,
-  clockLabel,
   coalesceText,
   dayLabel,
+  stampLabel,
   messageBlocks,
   threadModel,
   type ThreadCoalesce,
@@ -218,6 +218,15 @@ function relativeAgo(at: number, now: number): string {
   return `${Math.floor(elapsed / 86_400_000)}d ago`;
 }
 
+/** "re: earlier session calm-puma-34" above an answer to another session's turn (cas-e829). */
+export function earlierReplyQuote(document: Document, session: string): HTMLElement {
+  const quote = document.createElement("div");
+  quote.className = "reply-quote";
+  quote.textContent = `re: earlier session ${sessionCodename(session)}`;
+  quote.title = session;
+  return quote;
+}
+
 /** "Earlier session calm-puma-34, Yesterday" (cas-55a4). */
 export function earlierSessionLabel(entry: Pick<EarlierSession, "session" | "lastAt">, now: number): string {
   const when = entry.lastAt === undefined ? undefined : dayLabel(entry.lastAt, now);
@@ -242,7 +251,7 @@ function earlierSessionNode(document: Document, entry: EarlierSession, now: numb
     const time = document.createElement("time");
     if (event.at !== undefined && Number.isFinite(event.at)) {
       time.dateTime = new Date(event.at).toISOString();
-      time.textContent = `${dayLabel(event.at, now)} ${clockLabel(event.at)}`;
+      time.textContent = stampLabel(event.at, now) ?? "";
     }
     const text = document.createElement("p");
     text.textContent = plainTextMarkdown(event.kind === "send" ? event.value.text : event.value.message);
@@ -1069,6 +1078,9 @@ export class ConversationView {
     }
     bubble.dataset.kind = kind;
     bubble.dataset.replyTo = reply.reply_to === null ? "" : String(reply.reply_to);
+    // cas-e829: an answer to another session's turn stays in this thread and
+    // only names what it answers; the earlier session itself is read-only.
+    if (reply.reply_to_session) bubble.prepend(earlierReplyQuote(document, reply.reply_to_session));
     return { bubble, sheets };
   }
 

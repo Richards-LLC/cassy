@@ -138,14 +138,38 @@ describe("blocker object", () => {
     const acknowledged = renderBlockerObject(blocker, context(blocker, history));
     expect(acknowledged.dataset.waiting).toBe("false");
     expect(acknowledged.querySelector(".blk-hint")).toBeNull();
-    // cas-71af (aac8 QA F01): handled, it says so and quiets like an answered ask.
+    // cas-e829: a later send that is not bound to this blocker stops it
+    // waiting and quiets it, but never claims a reply.
     expect(acknowledged.dataset.acknowledged).toBe("true");
-    expect(acknowledged.querySelector(".blk-handled")?.textContent).toBe("Acknowledged — you replied");
-    expect(acknowledged.querySelector(".blk-handled svg.tick")).not.toBeNull();
-    expect(acknowledged.getAttribute("aria-label")).toBe("Blocker from atlas-sup, acknowledged");
+    expect(acknowledged.querySelector(".blk-handled")?.textContent).toBe("You've written since this");
+    expect(acknowledged.querySelector(".blk-handled svg.tick")).toBeNull();
+    expect(acknowledged.getAttribute("aria-label")).toBe("Blocker from atlas-sup, you've written since");
+    expect(acknowledged.textContent).not.toContain("you replied");
+    // cas-71af (aac8 QA F01): a reply bound to it (in_reply_to) is handled,
+    // says so with a tick and quiets like an answered ask.
+    history.submit("bound", "atlas-sup", "Rolling it back.", at(10, 1), 51);
+    const replied = renderBlockerObject(blocker, context(blocker, history));
+    expect(replied.dataset.acknowledged).toBe("true");
+    expect(replied.querySelector(".blk-handled")?.textContent).toBe("Acknowledged — you replied");
+    expect(replied.querySelector(".blk-handled svg.tick")).not.toBeNull();
+    expect(replied.getAttribute("aria-label")).toBe("Blocker from atlas-sup, acknowledged");
+    history.reject("bound", "no access");
     // A refused send never reached the supervisor: the blocker still waits and still says how.
     history.reject("ack", "no access");
     expect(renderBlockerObject(blocker, context(blocker, history)).querySelector(".blk-hint")?.textContent).toBe("Reply to unblock");
+  });
+  it("never says you replied to a blocker nobody answered, even once it stops waiting (cas-e829)", () => {
+    // The operator's 2026-10-01 screenshot: watchdog blockers from an ended
+    // session, with no reply bound to any of them, each said "you replied".
+    const history = new ConversationHistory();
+    const blocker = reply(3196301, "blocker", "The supervisor was told 9 minutes ago that a worker died.");
+    history.reply(blocker, at(9, 58), "Accounting-wise-lion-31");
+    history.currentSession = "Accounting-rapid-gazelle-52";
+    const node = renderBlockerObject(blocker, context(blocker, history));
+    expect(node.dataset.waiting).toBe("false");
+    expect(node.dataset.retired).toBe("session-ended");
+    expect(node.querySelector(".blk-handled")).toBeNull();
+    expect(node.textContent).not.toContain("you replied");
   });
   it("keeps waiting beside a send whose receipt never came (cas-71af, aac8 QA F02)", () => {
     const history = new ConversationHistory();

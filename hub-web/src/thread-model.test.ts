@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ConversationHistory } from "./conversation-history";
-import { blockerEvidence, cellTone, coalesceText, dayLabel, foldsAsStatus, messageBlocks, STATUS_FOLD_LIMIT, statusAsks, threadModel, type ThreadGroup } from "./thread-model";
+import { blockerEvidence, cellTone, coalesceText, dayLabel, foldsAsStatus, messageBlocks, stampLabel, STATUS_FOLD_LIMIT, statusAsks, threadModel, type ThreadGroup } from "./thread-model";
 import ROW_20812 from "./fixtures/hub-row-20812.txt?raw";
 import type { OperatorReply, OperatorTurnKind } from "./types";
 
@@ -11,6 +11,17 @@ function reply(id: number, kind: OperatorTurnKind, message = `m${id}`, reply_to:
 }
 
 describe("threadModel", () => {
+  it("dates any turn time that is not today's (cas-e829)", () => {
+    expect(stampLabel(at(9, 41), NOW)).toBe("09:41");
+    expect(stampLabel(at(17, 20, -1), NOW)).toBe("Sep 20, 17:20");
+    expect(stampLabel(new Date(2025, 11, 31, 23, 5).getTime(), NOW)).toBe("Dec 31 2025, 23:05");
+    expect(stampLabel(undefined, NOW)).toBeUndefined();
+    const history = new ConversationHistory();
+    history.reply(reply(1, "blocker", "Supervisor missed an update"), at(17, 20, -1));
+    history.reply(reply(2, "answer"), at(9, 0));
+    const times = threadModel(history.events, { now: NOW }).flatMap((item) => item.type === "group" ? [item.time] : []);
+    expect(times).toEqual(["Sep 20, 17:20", "09:00"]);
+  });
   it("draws no session line when the thread's own session opens it, and one when another turn precedes it (cas-55a4)", () => {
     const own = new ConversationHistory();
     own.reply(reply(1, "answer"), at(9, 0), "live");

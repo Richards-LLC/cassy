@@ -7,6 +7,7 @@ import { controlCommandCopy, sessionJumpCommandMarkup } from "./palette-commands
 import { ConversationHistory } from "./conversation-history";
 import { loadDismissedAsks, saveDismissedAsks, type DismissedAsksStorage } from "./dismissed-asks";
 import { ConversationView, emptyActivityText } from "./conversation-view";
+import { isOperatorNotice, NOTICE_KIND, noticeFingerprint, planNotice } from "./operator-notices";
 import { REFUSED_SEE_ABOVE, refusalSentence, refusal } from "./refusal";
 import { installAttentionObjects } from "./attention-objects";
 import { clearTransientAttachmentNotes, installAttachmentSheet, setAttachmentNote } from "./attachment-sheet";
@@ -761,6 +762,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       catalogExpiresAt.set(machine.id, Date.now() + ttl);
       window.clearTimeout(catalogExpiryTimers.get(machine.id));
       if (Number.isFinite(ttl)) catalogExpiryTimers.set(machine.id, window.setTimeout(() => render(), ttl));
+      retireEndedSessionNotices(machine.id, items);
       // A session the operator ended is gone, not unreachable: it is never retained (cas-55a4).
       sessions.set(machine.id, retainPendingSessions(sessions.get(machine.id) ?? [], items, name => !endedSessions.has(sessionKey(machine.id, name)) && (conversationHistories.get(sessionKey(machine.id, name))?.hasPending() ?? false)));
       if (!openPairedSession(machine.id, visibleSessions(machine.id))) restoreLastSession(machine.id, visibleSessions(machine.id));
@@ -849,6 +851,8 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       updateConversationViews(); renderConversationList();
     },
     onOperatorReply: (session, reply) => {
+      // cas-e829: a system notice goes to the attention lane, never the thread.
+      if (isOperatorNotice(reply)) { applyOperatorNotice(machine, session, reply); return; }
       conversationHistory(sessionKey(machine.id, session), session).receive(reply, Date.now(), session);
       // A later supervisor turn shortens an unreceipted send's wait (cas-1622).
       scheduleReceiptCheck(sessionKey(machine.id, session));
@@ -869,6 +873,9 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       cursor.requested = true;
       updateConversationViews();
     },
+    onOperatorNoticeResolved: (session, resolved) => {
+      resolveAttention(noticeFingerprint(machine.id, session, resolved.notification_id, resolved.subject));
+    },
     onConversationHistory: (session, page: ConversationHistoryPage) => {
       const key = sessionKey(machine.id, session);
       const cursor = conversationHistoryPage(key);
@@ -883,6 +890,12 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       for (const message of [...page.messages, ...(page.earlier_messages ?? [])]) history.hydrateSend(message);
       const replies = operatorReplies.get(key) ?? [];
       for (const reply of [...page.replies, ...(page.earlier_replies ?? [])]) {
+        // cas-e829: this session's notices raise or retire attention; another
+        // session's are its own business.
+        if (isOperatorNotice(reply)) {
+          if (reply.session === undefined || reply.session === session) applyOperatorNotice(machine, session, reply);
+          continue;
+        }
         history.hydrateReply(reply);
         const own = reply.session === undefined || reply.session === session;
         if (own && !replies.some((item) => item.notification_id === reply.notification_id)) replies.push(reply);
@@ -1039,6 +1052,20 @@ async function addAttention(machine: StoredMachine, session: string | undefined,
   await attentionStore.put(merge.stored);
   render();
   newCriticalAttentionIds.delete(merge.stored.id);
+}
+
+/** Raise, keep or retire the attention item for one system notice (cas-e829). */
+function applyOperatorNotice(machine: StoredMachine, session: string, reply: OperatorReply): void {
+  const plan = planNotice(machine.id, session, reply, (fingerprint) => attention.some((item) => item.fingerprint === fingerprint));
+  if (plan.action === "resolve") resolveAttention(plan.fingerprint);
+  else if (plan.action === "raise") void addAttention(machine, session, NOTICE_KIND, plan.content);
+}
+
+/** A session that left the catalog takes its open notices with it (cas-e829). */
+function retireEndedSessionNotices(machineId: string, listed: readonly HubSession[]): void {
+  const names = new Set(listed.map((item) => item.name));
+  const open = attention.filter((item) => !item.acknowledgedAt && item.machineId === machineId && item.fingerprint?.startsWith(`notice:${machineId}:`) && item.session !== undefined && !names.has(item.session));
+  if (open.length) void acknowledgeAttentionGroup(open);
 }
 
 /**

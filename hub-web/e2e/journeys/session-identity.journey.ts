@@ -82,7 +82,7 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     await noble.locator("summary").click();
     await expect(noble.locator(".earlier-turn")).toHaveCount(2);
     await expect(noble.locator(".earlier-turn").nth(1)).toContainText("Mixdown preview rendered: 3 stems.");
-    await expect(noble.locator(".earlier-turn time").nth(1)).toHaveText("Yesterday 21:41");
+    await expect(noble.locator(".earlier-turn time").nth(1)).toHaveText("Sep 29, 21:41");
     await expect(noble.getByRole("button")).toHaveCount(0);
     await noble.locator("summary").click();
   });

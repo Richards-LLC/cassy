@@ -75,6 +75,8 @@ const MACHINE_EVENT_TEMPLATES: Record<string, DeterministicTemplate> = {
   session_unreachable: { headline: "Session unreachable", severity: "critical", action: "view_pane" },
   pane_exited: { headline: "Worker stopped", detail: "Open the session to inspect the worker and its terminal output.", severity: "critical", action: "view_pane" },
   awaiting_merge: { headline: "Change is ready to merge", severity: "warning", action: "open_pr" },
+  // cas-e829: a relay-watchdog notice; the supervisor never saw an update.
+  delivery_stall: { headline: "The supervisor missed an update", severity: "warning", action: "view_pane" },
   retry: { headline: "Operation will retry", severity: "warning", action: "retry" },
   retry_loop: { headline: "Operation is retrying", severity: "warning", action: "retry" },
   retrying: { headline: "Operation is retrying", severity: "warning", action: "retry" },

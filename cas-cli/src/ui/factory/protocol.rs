@@ -155,6 +155,11 @@ pub struct OperatorReplyPayload {
     pub kind: OperatorTurnKind,
     #[serde(default)]
     pub attachments: Vec<ArtifactRef>,
+    /// The session of the turn `reply_to` answers, when it is not the
+    /// session this reply belongs to (cas-e829). The reply stays in its own
+    /// thread and only quotes the earlier one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to_session: Option<String>,
 }
 
 /// A durable operator message replayed into the Commander conversation.
@@ -181,6 +186,22 @@ pub struct ConversationHistoryMessage {
     pub at: String,
 }
 
+/// A daemon-raised notice about a session's own plumbing (cas-e829), such as
+/// a relay-watchdog alert that the supervisor never saw an update. It is not
+/// something the supervisor said: Commander shows it as an attention item,
+/// deduplicated by `subject`, and retires it once `resolved`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperatorNotice {
+    /// The queue source that raised it, e.g. `relay-watchdog`.
+    pub source: String,
+    /// The queue row the notice is about, when it is about one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<i64>,
+    /// The problem it reports is over.
+    #[serde(default)]
+    pub resolved: bool,
+}
+
 /// A supervisor turn replayed with the same fields as the live OperatorReply
 /// frame, plus its durable timestamp for chronological hydration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -201,6 +222,14 @@ pub struct ConversationHistoryReply {
     #[serde(default)]
     pub session: String,
     pub at: String,
+    /// Set when the row is a system notice, not a supervisor turn (cas-e829).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<OperatorNotice>,
+    /// The session of the turn `reply_to` answers, when it is not the
+    /// session this reply belongs to (cas-e829). The reply stays in its own
+    /// thread and only quotes the earlier one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to_session: Option<String>,
 }
 
 impl MessageAttribution {
@@ -453,6 +482,21 @@ pub enum DaemonMessage {
         kind: OperatorTurnKind,
         #[serde(default)]
         attachments: Vec<ArtifactRef>,
+        /// Set when the row is a system notice, not a supervisor turn (cas-e829).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        notice: Option<OperatorNotice>,
+        /// Session of the answered turn when it is another session's (cas-e829).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_to_session: Option<String>,
+    },
+
+    /// A system notice delivered earlier is over (cas-e829): the relay it
+    /// reported reached the supervisor or was withdrawn. Commander retires
+    /// its attention item.
+    OperatorNoticeResolved {
+        notification_id: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subject: Option<i64>,
     },
 
     /// A private, request-correlated page of durable Commander turns.
@@ -1078,10 +1122,23 @@ mod tests {
                 size_bytes: 42,
                 sha256: "ab".repeat(32),
             }],
+            reply_to_session: None,
         };
         let encoded = serde_json::to_string(&current).unwrap();
+        assert!(!encoded.contains("reply_to_session"), "{encoded}");
         let decoded: OperatorReplyPayload = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, current);
+        assert_eq!(legacy.reply_to_session, None);
+
+        // cas-e829: a cross-session answer names the session it quotes.
+        let cross = OperatorReplyPayload {
+            reply_to: Some(41),
+            reply_to_session: Some("acct-wise-lion-31".into()),
+            ..current
+        };
+        let decoded: OperatorReplyPayload =
+            serde_json::from_str(&serde_json::to_string(&cross).unwrap()).unwrap();
+        assert_eq!(decoded.reply_to_session.as_deref(), Some("acct-wise-lion-31"));
     }
 
     #[test]

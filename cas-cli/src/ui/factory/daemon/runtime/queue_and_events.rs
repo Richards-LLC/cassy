@@ -1932,6 +1932,7 @@ pub(super) fn escalate_undelivered_supervisor_relays(
             operator_label: None,
             kind: crate::ui::factory::OperatorTurnKind::Blocker,
             attachments: Vec::new(),
+            reply_to_session: None,
         }) {
             Ok(payload) => payload,
             Err(error) => {
@@ -2421,7 +2422,42 @@ impl FactoryDaemon {
     /// not reached the supervisor after [`RELAY_OPERATOR_ESCALATION_AFTER_SECS`].
     /// See [`escalate_undelivered_supervisor_relays`]; this adds the desktop
     /// notification (when enabled) and the coordination log line.
+    /// cas-e829: tell Commander once when a relay-watchdog notice it showed is
+    /// over, so its attention item retires instead of waiting for a dismissal.
+    fn announce_resolved_operator_notices(&mut self, queue: &dyn cas_store::PromptQueueStore) {
+        if self.open_operator_notices.is_empty() {
+            return;
+        }
+        let ids: Vec<i64> = self.open_operator_notices.keys().copied().collect();
+        let states = match queue.relay_alert_states(&self.session_name, &ids, ids.len()) {
+            Ok(states) => states,
+            Err(error) => {
+                tracing::warn!(%error, "cas-e829: failed to read relay alert states");
+                return;
+            }
+        };
+        let open: std::collections::HashSet<i64> = states
+            .iter()
+            .filter(|state| !state.resolved)
+            .map(|state| state.alert_id)
+            .collect();
+        let resolved: Vec<(i64, i64)> = self
+            .open_operator_notices
+            .iter()
+            .filter(|(alert_id, _)| !open.contains(alert_id))
+            .map(|(alert_id, subject)| (*alert_id, *subject))
+            .collect();
+        for (alert_id, subject) in resolved {
+            self.open_operator_notices.remove(&alert_id);
+            self.ws_broadcast(&crate::ui::factory::DaemonMessage::OperatorNoticeResolved {
+                notification_id: alert_id,
+                subject: Some(subject),
+            });
+        }
+    }
+
     fn escalate_undelivered_supervisor_relays(&mut self, queue: &dyn cas_store::PromptQueueStore) {
+        self.announce_resolved_operator_notices(queue);
         let supervisor_name = self.app.supervisor_name().to_string();
         let harness = format!("{:?}", self.app.harness_for(&supervisor_name));
         for alert in escalate_undelivered_supervisor_relays(
@@ -4302,7 +4338,7 @@ impl FactoryDaemon {
     /// transport. The queue remains pending while no upstream hub socket is
     /// connected, which makes device offline/reconnect delivery durable.
     pub(super) fn conversation_history_page(
-        &self,
+        &mut self,
         request_id: String,
         device_id: &str,
         before: Option<i64>,
@@ -4327,7 +4363,13 @@ impl FactoryDaemon {
         // while retaining the durable id as its dedupe key.
         let next_before = rows.last().map(|row| row.id);
         rows.reverse();
-        let (messages, replies) = commander_history_turns(rows, &self.session_name);
+        let notices = operator_notices(queue.as_ref(), &self.session_name, &rows);
+        for (id, notice) in &notices {
+            if let (false, Some(subject)) = (notice.resolved, notice.subject) {
+                self.open_operator_notices.insert(*id, subject);
+            }
+        }
+        let (messages, replies) = commander_history_turns(rows, &self.session_name, &notices);
         // cas-55a4: other sessions' Commander turns travel beside the page,
         // never in it, so Commander can show them only as a labelled, collapsed
         // earlier-session section. They come once, with the newest page.
@@ -4340,7 +4382,10 @@ impl FactoryDaemon {
             earlier.reverse();
             // A row with no session recorded keeps an empty session: it is
             // not this session's turn.
-            commander_history_turns(earlier, "")
+            // Another session's plumbing notices are its own business: they
+            // are never part of this session's history, earlier or not.
+            earlier.retain(|row| !is_operator_notice(row));
+            commander_history_turns(earlier, "", &std::collections::HashMap::new())
         } else {
             (Vec::new(), Vec::new())
         };
@@ -4415,6 +4460,11 @@ impl FactoryDaemon {
                 }
             };
             let _ = queue.record_selected(queued.id);
+            let notice = operator_notices(queue, &self.session_name, std::slice::from_ref(&queued))
+                .remove(&queued.id);
+            if let Some(subject) = notice.as_ref().filter(|notice| !notice.resolved).and_then(|notice| notice.subject) {
+                self.open_operator_notices.insert(queued.id, subject);
+            }
             let reply = crate::ui::factory::DaemonMessage::OperatorReply {
                 notification_id: queued.id,
                 reply_to: payload.reply_to,
@@ -4424,6 +4474,8 @@ impl FactoryDaemon {
                 operator_label: payload.operator_label,
                 kind: payload.kind,
                 attachments: payload.attachments,
+                notice,
+                reply_to_session: payload.reply_to_session,
             };
             self.ws_broadcast(&reply);
             tracing::info!(
@@ -8036,11 +8088,60 @@ impl FactoryDaemon {
 }
 
 /// Project the same durable send shape for history pages and live broadcasts.
+/// Whether an operator-lane row was raised by the daemon about the session's
+/// own plumbing rather than written by its supervisor (cas-e829). Supervisor
+/// replies and mirrored supervisor turns use the `supervisor` source.
+fn is_operator_notice(row: &cas_store::QueuedPrompt) -> bool {
+    row.target.eq_ignore_ascii_case("operator")
+        && row.source != "supervisor"
+        && matches!(row.origin, Some(cas_store::QueueOrigin::Daemon))
+}
+
+/// The notice fields for the daemon-raised rows among `rows` (cas-e829): its
+/// source, and for a relay-watchdog alert the relay it is about and whether
+/// that relay has since reached the supervisor.
+fn operator_notices(
+    queue: &dyn cas_store::PromptQueueStore,
+    factory_session: &str,
+    rows: &[cas_store::QueuedPrompt],
+) -> std::collections::HashMap<i64, crate::ui::factory::OperatorNotice> {
+    let notice_rows: Vec<&cas_store::QueuedPrompt> =
+        rows.iter().filter(|row| is_operator_notice(row)).collect();
+    if notice_rows.is_empty() {
+        return std::collections::HashMap::new();
+    }
+    let ids: Vec<i64> = notice_rows.iter().map(|row| row.id).collect();
+    let states: std::collections::HashMap<i64, cas_store::RelayAlertState> = queue
+        .relay_alert_states(factory_session, &ids, ids.len())
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "cas-e829: failed to read relay alert states");
+            Vec::new()
+        })
+        .into_iter()
+        .map(|state| (state.alert_id, state))
+        .collect();
+    notice_rows
+        .into_iter()
+        .map(|row| {
+            let state = states.get(&row.id);
+            (
+                row.id,
+                crate::ui::factory::OperatorNotice {
+                    source: row.source.clone(),
+                    subject: state.map(|state| state.subject_id),
+                    resolved: state.is_some_and(|state| state.resolved),
+                },
+            )
+        })
+        .collect()
+}
+
 /// Project oldest-first Commander-lane rows onto the history wire shapes.
 /// `fallback_session` names a row that carries no session of its own.
 fn commander_history_turns(
     rows: Vec<cas_store::QueuedPrompt>,
     fallback_session: &str,
+    notices: &std::collections::HashMap<i64, crate::ui::factory::OperatorNotice>,
 ) -> (
     Vec<crate::ui::factory::ConversationHistoryMessage>,
     Vec<crate::ui::factory::ConversationHistoryReply>,
@@ -8075,6 +8176,8 @@ fn commander_history_turns(
                     .clone()
                     .unwrap_or_else(|| fallback_session.to_string()),
                 at: row.created_at.to_rfc3339(),
+                notice: notices.get(&row.id).cloned(),
+                reply_to_session: payload.reply_to_session,
             });
             continue;
         }
@@ -8387,6 +8490,58 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
+    /// cas-e829: a relay-watchdog alert reaches Commander as a notice that
+    /// names the relay it is about and whether that relay has since been
+    /// seen; a supervisor turn carries no notice.
+    #[test]
+    fn operator_notices_mark_daemon_alerts_and_follow_their_relay() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
+        cas_store::PromptQueueStore::init(&store).unwrap();
+        let queue: &dyn cas_store::PromptQueueStore = &store;
+        let payload = r#"{"schema_version":2,"reply_to":null,"message":"m","summary":"s","device_id":"*","kind":"blocker","attachments":[]}"#;
+        let relay = queue
+            .enqueue_with_session("lifecycle-wake:worker-died:9", "supervisor", "worker died", "acct-52")
+            .unwrap();
+        let cas_store::EnqueueIdempotentResult::Created(alert) = queue
+            .enqueue_idempotent(
+                "relay-watchdog",
+                "operator",
+                payload,
+                Some("acct-52"),
+                Some("s"),
+                None,
+                &format!("{}{relay}", cas_store::RELAY_OPERATOR_ESCALATION_DEDUPE_PREFIX),
+                Some(&cas_store::QueueOrigin::Daemon),
+            )
+            .unwrap()
+        else {
+            panic!("alert not created");
+        };
+        let reply = queue
+            .enqueue_urgent_with_outcome("supervisor", "operator", payload, Some("acct-52"), None, None, false, Some(&cas_store::QueueOrigin::Daemon))
+            .unwrap()
+            .id();
+        let rows: Vec<_> = [alert, reply]
+            .into_iter()
+            .map(|id| queue.queued_prompt(id).unwrap().unwrap())
+            .collect();
+        let notices = super::operator_notices(queue, "acct-52", &rows);
+        assert_eq!(
+            notices.get(&alert),
+            Some(&crate::ui::factory::OperatorNotice {
+                source: "relay-watchdog".into(),
+                subject: Some(relay),
+                resolved: false,
+            })
+        );
+        assert!(!notices.contains_key(&reply));
+        queue.mark_transport_delivered(relay).unwrap();
+        assert!(super::operator_notices(queue, "acct-52", &rows)[&alert].resolved);
+        let (_, replies) = super::commander_history_turns(rows, "acct-52", &notices);
+        assert_eq!(replies.iter().filter(|reply| reply.notice.is_some()).count(), 1);
+    }
+
     /// cas-55a4: an earlier-session row keeps the session it was written in,
     /// and a row with no session never borrows the session asking for history.
     #[test]
@@ -8403,8 +8558,15 @@ mod tests {
         queue
             .enqueue_with_session("supervisor", "operator", &reply("old"), "acct-wise-lion-31")
             .unwrap();
-        queue
-            .enqueue("relay-watchdog", "operator", &reply("unbound"))
+        // A legacy row written before the store required a session
+        // (cas-e829 refuses new ones), seeded directly.
+        rusqlite::Connection::open(temp.path().join("cas.db"))
+            .unwrap()
+            .execute(
+                "INSERT INTO prompt_queue (source, target, prompt, created_at)
+                 VALUES ('relay-watchdog', 'operator', ?1, ?2)",
+                rusqlite::params![reply("unbound"), chrono::Utc::now().to_rfc3339()],
+            )
             .unwrap();
         queue
             .record_terminal_operator_turn("acct-wise-lion-31", "typed")
@@ -8413,7 +8575,8 @@ mod tests {
             .earlier_session_history("acct-rapid-gazelle-52", "phone", 10)
             .unwrap();
         rows.reverse();
-        let (messages, replies) = super::commander_history_turns(rows, "");
+        let (messages, replies) =
+            super::commander_history_turns(rows, "", &std::collections::HashMap::new());
         assert_eq!(
             replies
                 .iter()
@@ -10782,6 +10945,7 @@ mod tests {
             operator_label: Some("Pippenz".to_string()),
             kind: crate::ui::factory::OperatorTurnKind::Ask,
             attachments: Vec::new(),
+            reply_to_session: None,
         })
         .unwrap();
         let ask_id = queue

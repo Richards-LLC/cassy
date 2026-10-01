@@ -26,6 +26,8 @@ describe("ConversationView (Pebble thread)", () => {
     expect(line()).toContain("Retry once the session is live again.");
   });
   it("paints operator pebbles right, supervisor pebbles in the accent scope, grouped corners and one time per group", () => {
+    // Read on the day these turns were sent: a same-day time is the clock alone (cas-e829).
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(at(12, 0));
     const history = new ConversationHistory();
     const view = new ConversationView(document, history, { supervisor: "atlas-sup", machine: "Atlas", project: "cas-src", accentClass: "machine-accent-0" });
     document.body.replaceChildren(view.element);
@@ -46,6 +48,7 @@ describe("ConversationView (Pebble thread)", () => {
     expect(bubbles[1]?.classList.contains("group-first")).toBe(false); expect(bubbles[1]?.classList.contains("group-last")).toBe(true);
     expect(bubbles[1]?.classList.contains("receipt")).toBe(true); expect(bubbles[1]?.querySelector(".tick")).not.toBeNull();
     expect(sup.querySelectorAll("time")).toHaveLength(1); expect(sup.querySelector("time")?.textContent).toBe("09:47");
+    vi.useRealTimers();
   });
   it("re-derives grouping on incremental updates so a later turn tightens the earlier outer corner", () => {
     const history = new ConversationHistory();
@@ -227,6 +230,20 @@ describe("ConversationView (Pebble thread)", () => {
     const ask = view.element.querySelector<HTMLElement>('[data-kind="ask"]')!;
     expect(ask.classList.contains("bub")).toBe(true); expect(ask.textContent).toBe("Fix in-train or ship?");
     expect(view.element.querySelector<HTMLElement>('[data-kind="blocker"]')?.classList.contains("bub")).toBe(true);
+  });
+  it("names the earlier session an answer quotes, and keeps it in this thread (cas-e829)", () => {
+    const history = new ConversationHistory();
+    const view = new ConversationView(document, history, "sup"); document.body.replaceChildren(view.element);
+    history.reply({ ...reply(5, "answer", "The import finished overnight.", 3196243), reply_to_session: "acct-wise-lion-31" }, at(9, 40));
+    history.reply(reply(6, "answer", "Same-session answer.", 5), at(9, 41));
+    view.update();
+    const [cross, same] = [...view.element.querySelectorAll<HTMLElement>('.turn.sup .bub[data-kind="answer"]')];
+    expect(cross!.querySelector(".reply-quote")?.textContent).toBe("re: earlier session wise-lion-31");
+    expect(cross!.querySelector(".reply-quote")?.getAttribute("title")).toBe("acct-wise-lion-31");
+    expect(cross!.dataset.replyTo).toBe("3196243");
+    expect(cross!.textContent).toContain("The import finished overnight.");
+    expect(same!.querySelector(".reply-quote")).toBeNull();
+    expect(view.element.querySelector(".earlier-session")).toBeNull();
   });
   it("renders a markdown table as an evidence table with toned cells", () => {
     const history = new ConversationHistory();
@@ -428,7 +445,7 @@ describe("ConversationView (Pebble thread)", () => {
     history.reply(reply(3, "status", "gate 1 of 3"), at(12, 46)); history.reply(reply(4, "status", "gate 2 of 3"), at(12, 46));
     view.update();
     const groups = [...view.element.querySelectorAll<HTMLElement>('.msgs [role="group"]')];
-    expect(groups.map((group) => group.getAttribute("aria-label")?.replace(/\d{1,2}:\d{2}/, "<t>"))).toEqual(["You, <t>", "sup, <t>", "sup, status, <t>"]);
+    expect(groups.map((group) => group.getAttribute("aria-label")?.replace(/(?:[A-Z][a-z]{2} \d{1,2}, )?\d{1,2}:\d{2}/, "<t>"))).toEqual(["You, <t>", "sup, <t>", "sup, status, <t>"]);
     // The visible time is not read twice: the group label carries it.
     for (const time of view.element.querySelectorAll(".msgs time")) expect(time.getAttribute("aria-hidden")).toBe("true");
   });

@@ -113,6 +113,22 @@ export function shownTimes(events: readonly ConversationEvent[], now: number): A
   return shown;
 }
 
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/**
+ * A turn's time as it is shown (cas-e829): "17:20" today, "Sep 30, 17:20" on
+ * any other day, with the year when it is not this year. A bare clock time
+ * from yesterday read as today's.
+ */
+export function stampLabel(at: number | undefined, now: number): string | undefined {
+  const clock = clockLabel(at);
+  if (at === undefined || clock === undefined) return undefined;
+  if (dayKey(at) === dayKey(now)) return clock;
+  const date = new Date(at);
+  const year = date.getFullYear() === new Date(now).getFullYear() ? "" : ` ${date.getFullYear()}`;
+  return `${MONTHS[date.getMonth()]} ${date.getDate()}${year}, ${clock}`;
+}
+
 function dayKey(at: number): string {
   const date = new Date(at);
   return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
@@ -213,7 +229,7 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
       coalesce.count += 1;
       coalesce.latest = event.value.message;
       coalesce.replies.push(event.value);
-      coalesce.time = clockLabel(at) ?? coalesce.time;
+      coalesce.time = stampLabel(at, now) ?? coalesce.time;
       // The hint belongs to the time shown, which is the latest turn's.
       if (at !== undefined) coalesce.clockAhead = clockAhead;
       return;
@@ -227,7 +243,7 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
       items.push(group);
     }
     group.turns.push(turn);
-    group.time = clockLabel(at) ?? group.time;
+    group.time = stampLabel(at, now) ?? group.time;
     if (at !== undefined) group.clockAhead = clockAhead;
   });
   closeGroup();

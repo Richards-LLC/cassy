@@ -464,3 +464,32 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - A turn with no session recorded is filed under "Earlier messages with no session recorded".
 - A device without `factory:manage` sees no End session; the hub refuses the call with 403 `scope_denied`.
 - Ending a session whose daemon PID now belongs to another process only cleans up its metadata.
+
+### HUB-J15 · See a delivery problem as attention, not conversation
+
+- **Entry:** `/commander/` on a desktop, one live session whose supervisor missed a relayed update
+- **Goal:** the session's thread is only its conversation; a delivery problem is one attention item that goes away once resolved, and nothing claims I replied when I didn't
+- **Touches:** `hub-web/src/operator-notices.ts`, `hub-web/src/attention-objects.ts`, `hub-web/src/attention.ts`, `hub-web/src/thread-model.ts`, `hub-web/src/connection.ts`, `hub-web/src/conversation-view.ts`
+- **Suite:** `hub-web/e2e/journeys/delivery-notice.journey.ts`
+- **Gaps:** the daemon's notice state and resolution announcement are doubled; that the daemon announces a real relay reaching the supervisor is proven by its Rust tests and at epic assembly
+
+#### Steps
+
+1. Open the session: only its conversation — the blocker and the operator's later message are in the thread, the watchdog notice is not, and yesterday's turn shows "Sep 29, 17:20"
+2. A blocker I never answered does not say I replied — the blocker reads "You've written since this" with no tick, never "you replied"
+3. The delivery problem is one attention item — the notice is a single warning in Attention, and a repeat of it adds nothing
+4. It retires once the update gets through — the resolution removes it, and a reload does not bring it back
+5. An answer to an earlier session's question stays here — the supervisor's answer to a question from the ended session arrives in this thread with "re: earlier session wise-lion-31", and no earlier-session section opens for it
+
+#### Expected experience
+
+- The thread holds what the supervisor and the operator said; plumbing notices live in Attention.
+- "Acknowledged — you replied" appears only for a reply sent to that card.
+- Every turn not from today carries its date.
+- A reply belongs to the session it is sent from; another session's turn is only quoted.
+
+#### Edge paths
+
+- A notice from another session never appears here, in the thread or its earlier sections.
+- A dismissed notice stays dismissed when history replays it.
+- A session that leaves the catalog retires its open notices.

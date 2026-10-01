@@ -344,6 +344,7 @@ pub(super) fn mirror_supervisor_replies(
                 operator_label: None,
                 kind,
                 attachments: Vec::new(),
+                reply_to_session: None,
             };
             let Ok(payload) = serde_json::to_string(&payload) else {
                 continue;
@@ -463,6 +464,7 @@ mod tests {
             operator_label: None,
             kind: crate::ui::factory::OperatorTurnKind::Answer,
             attachments: Vec::new(),
+            reply_to_session: None,
         })
         .unwrap();
         assert!(

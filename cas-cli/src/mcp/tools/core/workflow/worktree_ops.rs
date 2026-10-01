@@ -110,7 +110,12 @@ fn lookup_branch_ci(branch: &str, cwd: &Path) -> BranchCiState {
         .unwrap_or_else(|| "unresolved".to_string());
     lookup_branch_ci_with(branch, &sha, |_, sha| {
         let endpoint = BRANCH_CI_ENDPOINT.replace("{sha}", sha);
-        let mut command = Command::new("gh");
+        // The shared `CAS_GH_BIN` override (operator and test seam) selects
+        // the binary without touching PATH.
+        let binary = std::env::var_os(crate::github_issue_attach::GH_BIN_ENV)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "gh".into());
+        let mut command = Command::new(binary);
         command.current_dir(cwd).args(["api", "--method", "GET"]);
         command.arg(&endpoint).args(["-F", "per_page=100"]);
         let response = match crate::bounded_process::run_command(

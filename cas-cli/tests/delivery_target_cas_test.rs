@@ -621,13 +621,31 @@ async fn red_ci_worktree_merge_accepts_supervisor_override_end_to_end_cas_4150()
     let refused = outcome(supervisor_service.coordination(Parameters(merge_with(None, None))).await);
     assert!(refused.contains("CI RED"), "{refused}");
     assert!(refused.contains("supervisor_override=true"), "{refused}");
-    assert_eq!(delivery_state(&fixture), WorkerDeliveryState::AwaitingMerge);
+    // Refusals happen after merge authorization but before Git: the target
+    // is untouched and the delivery has not merged.
+    let unmerged = |label: &str| {
+        assert_eq!(
+            git_stdout(&fixture.repo.root, &["rev-parse", "main"]),
+            fixture.receipt.target_sha,
+            "{label}: the target must not move"
+        );
+        assert!(
+            !matches!(
+                delivery_state(&fixture),
+                WorkerDeliveryState::Merged
+                    | WorkerDeliveryState::CloseReady
+                    | WorkerDeliveryState::Delivered
+            ),
+            "{label}: the delivery must not merge"
+        );
+    };
+    unmerged("red CI without override");
 
     let no_reason =
         outcome(supervisor_service.coordination(Parameters(merge_with(Some(true), None))).await);
     assert!(!no_reason.contains("Unsupported parameter(s)"), "{no_reason}");
     assert!(no_reason.contains("non-empty reason"), "{no_reason}");
-    assert_eq!(delivery_state(&fixture), WorkerDeliveryState::AwaitingMerge);
+    unmerged("override without reason");
 
     let merged = outcome(
         supervisor_service

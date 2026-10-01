@@ -1593,6 +1593,9 @@ pub(crate) mod orphan_recovery;
 mod panic_catch;
 #[cfg(test)]
 mod panic_regression_test;
+
+#[cfg(test)]
+mod memory_lifecycle_tests;
 mod pattern_ops;
 mod qa_pass_ops;
 mod server_handler;

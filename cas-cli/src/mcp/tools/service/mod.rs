@@ -1225,8 +1225,21 @@ impl CasService {
                 "worktree_merge" => {
                     // `task_id` binds a delivery merge to its immutable task
                     // receipt and is consumed by target resolution. It is not
-                    // an incidental task-domain field.
-                    Some(&["action", "id", "task_id", "force", "allow_trunk", "cleanup"])
+                    // an incidental task-domain field. cas-4150: the red-CI
+                    // refusal tells a supervisor to retry with
+                    // `supervisor_override` and `reason`; worktree_merge
+                    // consumes both (live-supervisor check, required reason,
+                    // decision note on `task_id`), so they belong here.
+                    Some(&[
+                        "action",
+                        "id",
+                        "task_id",
+                        "force",
+                        "allow_trunk",
+                        "cleanup",
+                        "supervisor_override",
+                        "reason",
+                    ])
                 }
                 _ => None,
             };

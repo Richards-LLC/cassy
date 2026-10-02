@@ -146,3 +146,13 @@ describe("speech dictation", () => {
     expect(controller.listening).toBe(false);
   });
 });
+
+describe("focus after dictation (cas-71f4, journey F21)", () => {
+  it("takes focus back to the reply box only on a fine pointer", async () => {
+    const { focusAfterDictation } = await import("./speech-input");
+    const media = (fine: boolean) => ({ matchMedia: (query: string) => ({ matches: query === "(pointer: fine)" && fine }) as MediaQueryList });
+    expect(focusAfterDictation(media(true))).toBe(true);
+    expect(focusAfterDictation(media(false))).toBe(false);
+    expect(focusAfterDictation({ matchMedia: () => { throw new Error("no matchMedia"); } })).toBe(false);
+  });
+});

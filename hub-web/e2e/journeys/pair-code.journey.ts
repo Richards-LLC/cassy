@@ -57,7 +57,7 @@ test("HUB-J1 first open and pair a machine with a code", async ({ page, journey 
     const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ });
     await expect(row).toBeVisible();
     await row.click();
-    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     // cas-010f: a supervisor that has not written yet reads plainly, with
     // one Terminal view label, the header's.
     const empty = page.locator(".thread .empty");

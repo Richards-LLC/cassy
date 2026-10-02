@@ -73,7 +73,7 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await expect(composer).toHaveValue("");
     await composer.fill("Is the Mac build green?");
     const sent = hub.nextSend();
-    await page.getByRole("button", { name: `Send to ${OTTER}`, exact: true }).click();
+    await page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true }).click();
     expect(await sent).toMatchObject({ machine: "studio", target: OTTER, text: "Is the Mac build green?" });
   });
 
@@ -81,7 +81,7 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await list.getByRole("button", { name: /cas-src/ }).click();
     await expect(page.locator(".conversation-host")).toContainText("Atlas · Linux");
     await expect(composer).toHaveValue("Draft: ask about the flaky pairing test");
-    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
   });
 
   await journey.stage("Reopen the session picker after closing it", async () => {
@@ -326,10 +326,10 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     // The list stays beside the thread on a desktop (cas-479a).
     await list.getByRole("button", { name: /cas-src/ }).focus();
     await page.keyboard.press("Enter");
-    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     await expect(composer).toBeFocused();
     await list.getByRole("button", { name: /gabber-studio/ }).click();
-    await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true })).toBeVisible();
     await expect(composer).toBeFocused();
   });
 
@@ -399,12 +399,12 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await expect(composer).toHaveValue("Draft: ask about the flaky pairing test");
     // ...and once it is sent, it does not come back after another reload.
     const sent = hub.nextSend();
-    await page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true }).click();
+    await page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }).click();
     expect(await sent).toMatchObject({ machine: "atlas", target: PELICAN, text: "Draft: ask about the flaky pairing test" });
     await expect(composer).toHaveValue("");
     await page.reload();
     await list.getByRole("button", { name: /cas-src/ }).click();
-    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     await expect(composer).toHaveValue("");
   });
 

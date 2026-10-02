@@ -79,7 +79,7 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     await composer.tap();
     await composer.fill("On my phone — go ahead with the cut.");
     const sent = hub.nextSend();
-    await page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true }).tap();
+    await page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }).tap();
     expect((await sent).text).toBe("On my phone — go ahead with the cut.");
     hub.answerLatest(PELICAN, "Cutting now.");
     await expect(page.getByRole("log").getByText("Cutting now.")).toBeVisible();
@@ -105,7 +105,7 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     await expect(page.locator("#command-palette [data-palette-machine] small").filter({ hasText: OTTER })).toBeVisible();
     await page.getByRole("button", { name: /Jump to gabber-studio/ }).tap();
     await expect(page.locator("#command-palette")).toBeHidden();
-    await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true })).toBeVisible();
     await expectHeaderKeepsCodename("Studio Mac", OTTER);
     // Like a tap on a list row: land to read, with no soft keyboard raised
     // over the conversation just opened.
@@ -139,7 +139,7 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     await filter.pressSequentially(PELICAN);
     await filter.press("Enter");
     await expect(page.locator("#command-palette")).toBeHidden();
-    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     await expect(composer).not.toBeFocused();
     await expect.poll(() => page.evaluate(() => {
       const active = document.activeElement as HTMLElement | null;

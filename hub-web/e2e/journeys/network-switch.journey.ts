@@ -42,7 +42,7 @@ async function chooseConversation(page: Page): Promise<void> {
 }
 async function sendNow(page: Page, text: string): Promise<void> {
   await page.getByRole("textbox", { name: "Your message" }).fill(text);
-  await page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true }).click();
+  await page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }).click();
 }
 function sentTimes(hub: HubDouble, text: string): number { return hub.sends.filter(m => m.text === text).length; }
 

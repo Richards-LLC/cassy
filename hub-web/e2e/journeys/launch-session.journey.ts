@@ -116,7 +116,7 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
     await sheet.getByRole("button", { name: "Start", exact: true }).tap();
     await expect(sheet.getByRole("status")).toContainText("Starting ledger-api with Claude (support@petrastella.io) on Atlas · Linux…");
     await expect(sheet).toBeHidden({ timeout: 15_000 });
-    await expect(page.getByRole("button", { name: "Send to bright-heron-21", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the ledger-api supervisor", exact: true })).toBeVisible();
     await expect(page.locator(".conversation-heading")).toContainText("ledger-api");
     expect(hub.launches.at(-1)?.body).toEqual({ target: { kind: "project", id: "p-ledger" }, supervisor_cli: "claude", profile: "support@petrastella.io" });
   });
@@ -125,7 +125,7 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
     // Closing the tab and coming back: the machine still runs it, and the
     // conversation reopens where the operator left it.
     await page.reload();
-    await expect(page.getByRole("button", { name: "Send to bright-heron-21", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the ledger-api supervisor", exact: true })).toBeVisible();
     await back.tap();
     await expect(list.getByRole("button", { name: /ledger-api/ })).toBeVisible();
   });
@@ -134,7 +134,7 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
     await page.getByRole("button", { name: "New session", exact: true }).tap();
     await sheet.getByRole("button", { name: `Attach to cas-src (${PELICAN})` }).tap();
     await expect(sheet).toBeHidden();
-    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     await back.tap();
   });
 
@@ -158,7 +158,7 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
     await sheet.getByRole("radio", { name: /acme-portal/ }).check();
     await sheet.getByRole("button", { name: "Start", exact: true }).tap();
     await expect(sheet).toBeHidden({ timeout: 15_000 });
-    await expect(page.getByRole("button", { name: "Send to quiet-fox-5", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the acme-portal supervisor", exact: true })).toBeVisible();
     expect(hub.launches.at(-1)?.body).toEqual({ target: { kind: "browse", root_id: "root-code", path: "clients/acme-portal" }, supervisor_cli: "claude", profile: "main" });
   });
 

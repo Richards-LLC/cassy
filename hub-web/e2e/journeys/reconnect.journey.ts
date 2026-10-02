@@ -8,7 +8,7 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
   await journey.stage("Open the conversation", async () => {
     await journey.open();
     await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
-    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
   });
 
   const header = page.locator("#conversation-connection");
@@ -57,7 +57,7 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     // A send during the outage is held, not refused: it waits in the thread
     // and goes out by itself, once, when the session is back (cas-0978).
     await composer.fill("Are you there?");
-    await page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true }).click();
+    await page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }).click();
     await expect(page.locator("#message-status")).toHaveText("Lost connection to Atlas · Linux. Reconnecting… Your message will go out by itself when it's back.");
     await expect(composer).toHaveValue("");
     await expect(page.getByRole("log").locator(".conversation-held")).toHaveText("Waiting for the connection — sends when it's back");
@@ -111,7 +111,7 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
   await journey.stage("Sending works again", async () => {
     await composer.fill("Are we back?");
     const sent = hub.nextSend();
-    await page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true }).click();
+    await page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }).click();
     expect((await sent).text).toBe("Are we back?");
     hub.answerLatest(PELICAN, "Back. Nothing was lost.");
     await expect(page.getByRole("log").getByText("Back. Nothing was lost.")).toBeVisible();
@@ -123,7 +123,7 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
 
   await journey.stage("On a phone, the banner stays readable through an outage", async () => {
     await page.setViewportSize({ width: 390, height: 844 });
-    await expect(page.getByRole("button", { name: `Send to ${PELICAN}` })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor" })).toBeVisible();
     // Watch every frame of the outage: no toast may sit on the reconnect banner (cas-00cc).
     await page.evaluate(() => {
       const w = window as unknown as { __covered: string[] };

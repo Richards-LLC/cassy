@@ -2117,11 +2117,11 @@ function invalidateMachineLeases(machineId: string): void {
   // Control disappearing in silence invites typing into a terminal that is no
   // longer listening.
   // cas-d15c QA N2: a refused pairing is not a dropped connection; cas-a6f0:
-  // nor is a machine that still reads live while its heartbeats go unanswered
-  // (the lease heartbeat failed first), which the header calls Unsteady.
+  // nor is a machine that still reads live (its lease heartbeat failed before
+  // its heartbeats said Unsteady): that connection is being checked.
   const state = connectionStates.get(machineId);
   if (held) toast(state?.authFailure ? "Control released — this browser needs pairing again"
-    : state?.phase === "live" && state.degraded ? "Control released while the connection is unsteady — checking…"
+    : state?.phase === "live" ? "Control released — checking the connection…"
     : "Control released — the hub connection dropped");
 }
 

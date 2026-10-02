@@ -1014,7 +1014,9 @@ export class HubConnectionSupervisor {
           settled = true;
           resolve(true);
         }
-        socket.close(1002, "protocol mismatch");
+        // A page may close with 1000 or 3000–4999 only; 1002 threw
+        // InvalidAccessError from the handshake timer (cas-7b31).
+        socket.close(4002, "protocol mismatch");
       };
       socket.onopen = () => {
         if (this.machineSocket !== socket) return;

@@ -259,7 +259,9 @@ pub struct TaskRequest {
 
     /// Optional recorded-only reversibility declaration; no merge policy reads it.
     #[serde(default)]
-    #[schemars(description = "Recorded only: one-way or two-way; pass an empty string on update to clear. Does not affect merge policy.")]
+    #[schemars(
+        description = "Recorded only: one-way or two-way; pass an empty string on update to clear. Does not affect merge policy."
+    )]
     pub door: Option<String>,
 
     /// Test modules/targets required by blast-radius close proof.
@@ -1299,4 +1301,23 @@ mod worker_delivery_request_tests {
             Some("https://github.com/pippenz/cas/pull/242")
         );
     }
+}
+
+/// Calibrated Jev decision evaluation.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct JevRequest {
+    #[schemars(
+        schema_with = "crate::actions::jev_action_schema",
+        description = "Operation: ask or batch (1–50 states)."
+    )]
+    pub action: String,
+    /// State for ask: text, object or array.
+    pub state: Option<serde_json::Value>,
+    /// Ordered states for batch (1–50 records).
+    pub records: Option<Vec<serde_json::Value>>,
+    /// Map of question ids to typed noul, choice or score questions.
+    pub questions: serde_json::Value,
+    /// Return typed unavailable on transport failure; defaults to false.
+    #[serde(default)]
+    pub advisory: bool,
 }

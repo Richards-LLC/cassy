@@ -340,6 +340,40 @@ mod tests {
     use super::potentially_mutating_call;
 
     #[tokio::test]
+    async fn message_timeout_after_commit_reports_notification_id_cas_e4a8() {
+        use crate::mcp::server::CasCore;
+        use crate::mcp::tools::service::CasService;
+        use crate::test_support::TestEnvGuard;
+        use rmcp::handler::server::wrapper::Parameters;
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_NAME", "timeout-supervisor");
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let temp = tempfile::tempdir().unwrap();
+        let core = CasCore::with_daemon(temp.path().join(".cas"), None, None);
+        std::fs::create_dir_all(&core.cas_root).unwrap();
+        core.register_agent("timeout-sender".into(), "timeout-supervisor".into(), None)
+            .unwrap();
+        let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
+        let arguments = serde_json::json!({
+            "action": "message", "target": "timeout-recipient",
+            "summary": "committed before slow handoff", "message": "durable message"
+        });
+        let sender = service.clone();
+        let request = serde_json::from_value(arguments.clone()).unwrap();
+        let call = async move {
+            sender.coordination(Parameters(request)).await.unwrap();
+            // Simulate post-commit work that outlives the response budget.
+            std::future::pending::<()>().await;
+        };
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(50), call).await.is_err());
+        let rows = service.inner.open_prompt_queue_store().unwrap().peek_all(10).unwrap();
+        let row = rows.iter().find(|row| row.target == "timeout-recipient").unwrap();
+        let outcome = service.mutation_timeout_outcome("coordination", arguments.as_object());
+        assert!(outcome.contains("COMMITTED"), "durable notification {} reported {outcome}", row.id);
+        assert!(outcome.contains(&format!("notification_id: {}", row.id)), "{outcome}");
+    }
+
+    #[tokio::test]
     async fn response_fallback_preserves_result_and_surfaces_mail_once() {
         use crate::mcp::server::CasCore;
         use crate::mcp::tools::service::CasService;

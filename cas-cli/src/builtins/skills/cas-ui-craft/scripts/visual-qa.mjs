@@ -1,13 +1,127 @@
 #!/usr/bin/env node
 
 import { execFileSync } from 'node:child_process';
-import { readFile, mkdir, writeFile } from 'node:fs/promises';
+import { readFile, mkdir, writeFile, rm, mkdtemp } from 'node:fs/promises';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { inflateSync } from 'node:zlib';
+import { inflateSync, inflateRawSync, deflateRawSync } from 'node:zlib';
+
+const SECRET_KEY = /^(?:authorization|cookie|set-cookie|__session|x-firebase-.*|(?:id|refresh|access)[_-]?token|token|password|client[_-]?secret)$/i;
+
+/** Sanitize diagnostics before console output or artifact serialization. */
+export function redactQaText(value, secrets = []) {
+  let text = value instanceof Error ? value.message : String(value);
+  for (const secret of secrets) if (typeof secret === 'string' && secret) text = text.split(secret).join('[REDACTED]');
+  return text
+    .replace(/\b(?:authorization|cookie|set-cookie|x-firebase-[\w-]+)["']?\s*[:=][^\r\n]*/gi, '[REDACTED header]')
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, '[REDACTED]')
+    .replace(/(\b(?:__session|(?:id|refresh|access)[_-]?token|token|password|client[_-]?secret)\b["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^;,\s}\]]+)/gi, '$1[REDACTED]')
+    .replace(/\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[REDACTED]')
+    .replace(/\bAMf-vB[A-Za-z0-9_-]+\b/g, '[REDACTED]');
+}
+
+export function redactQaValue(value, secrets = []) {
+  if (typeof value === 'string') {
+    // Playwright evaluate arguments and Firebase storage often embed JSON text.
+    try {
+      const parsed = JSON.parse(value);
+      if (parsed && typeof parsed === 'object') return JSON.stringify(redactQaValue(parsed, secrets));
+    } catch { /* Plain diagnostic text. */ }
+    return redactQaText(value, secrets);
+  }
+  if (Array.isArray(value)) return value.map((item) => redactQaValue(item, secrets));
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key,
+    key === 'v' && SECRET_KEY.test(value.k ?? '') ? { s: '[REDACTED]' } :
+    SECRET_KEY.test(key) || (key === 'value' && SECRET_KEY.test(value.name ?? ''))
+      ? '[REDACTED]' : redactQaValue(item, secrets)]));
+}
+
+/** Drain page and context routes before close; ignore late handler rejections. */
+export async function closeQaContext(context) {
+  try {
+    for (const page of context.pages()) await page.unrouteAll({ behavior: 'ignoreErrors' });
+    await context.unrouteAll({ behavior: 'ignoreErrors' });
+    await context.close();
+  } catch (error) {
+    throw new Error(redactQaText(error));
+  }
+}
+
+function zipCrc(bytes) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+// Read the central directory (Playwright uses data descriptors), then rebuild
+// a normal deflated ZIP. No optional ZIP dependency is needed by installed skills.
+function scrubTraceZip(zip, secrets) {
+  if (zip.length < 22) throw new Error('Invalid QA trace ZIP');
+  let end = zip.length - 22;
+  while (end >= Math.max(0, zip.length - 65557) && zip.readUInt32LE(end) !== 0x06054b50) end--;
+  if (end < 0 || zip.readUInt32LE(end) !== 0x06054b50) throw new Error('Invalid QA trace ZIP');
+  const count = zip.readUInt16LE(end + 10);
+  let cursor = zip.readUInt32LE(end + 16);
+  if (count === 0xffff || cursor === 0xffffffff || zip.readUInt16LE(end + 4) || zip.readUInt16LE(end + 6)) throw new Error('Unsupported QA trace ZIP');
+  const bodies = [], directory = [];
+  let offset = 0;
+  for (let index = 0; index < count; index++) {
+    if (zip.readUInt32LE(cursor) !== 0x02014b50) throw new Error('Invalid QA trace entry');
+    const flags = zip.readUInt16LE(cursor + 8), method = zip.readUInt16LE(cursor + 10);
+    const size = zip.readUInt32LE(cursor + 20), nameLength = zip.readUInt16LE(cursor + 28);
+    const localOffset = zip.readUInt32LE(cursor + 42);
+    if ((flags & 1) || ![0, 8].includes(method) || size === 0xffffffff || localOffset === 0xffffffff) throw new Error('Unsupported QA trace entry');
+    const name = zip.subarray(cursor + 46, cursor + 46 + nameLength);
+    if (zip.readUInt32LE(localOffset) !== 0x04034b50) throw new Error('Invalid QA trace local entry');
+    const start = localOffset + 30 + zip.readUInt16LE(localOffset + 26) + zip.readUInt16LE(localOffset + 28);
+    let bytes = zip.subarray(start, start + size);
+    if (method === 8) bytes = inflateRawSync(bytes);
+    const text = bytes.toString('utf8');
+    // Images remain byte-identical. Scrub all UTF-8 resources, including
+    // extensionless JSON response bodies, sources, network and action records.
+    if (Buffer.from(text).equals(bytes)) {
+      bytes = Buffer.from(text.split('\n').map((line) => {
+        try { return JSON.stringify(redactQaValue(JSON.parse(line), secrets)); }
+        catch { return redactQaText(line, secrets); }
+      }).join('\n'));
+    }
+    const compressed = deflateRawSync(bytes), crc = zipCrc(bytes);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50); local.writeUInt16LE(20, 4); local.writeUInt16LE(0x800, 6); local.writeUInt16LE(8, 8);
+    local.writeUInt32LE(crc, 14); local.writeUInt32LE(compressed.length, 18); local.writeUInt32LE(bytes.length, 22); local.writeUInt16LE(name.length, 26);
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50); central.writeUInt16LE(20, 4); central.writeUInt16LE(20, 6); central.writeUInt16LE(0x800, 8); central.writeUInt16LE(8, 10);
+    central.writeUInt32LE(crc, 16); central.writeUInt32LE(compressed.length, 20); central.writeUInt32LE(bytes.length, 24); central.writeUInt16LE(name.length, 28); central.writeUInt32LE(offset, 42);
+    bodies.push(local, name, compressed); directory.push(central, name);
+    offset += local.length + name.length + compressed.length;
+    cursor += 46 + nameLength + zip.readUInt16LE(cursor + 30) + zip.readUInt16LE(cursor + 32);
+  }
+  const central = Buffer.concat(directory), footer = Buffer.alloc(22);
+  footer.writeUInt32LE(0x06054b50); footer.writeUInt16LE(count, 8); footer.writeUInt16LE(count, 10); footer.writeUInt32LE(central.length, 12); footer.writeUInt32LE(offset, 16);
+  return Buffer.concat([...bodies, central, footer]);
+}
+
+/** Publish only a scrubbed trace; failed scrubs remove the private raw archive. */
+export async function saveQaTrace(context, path, { secrets = [] } = {}) {
+  const privateDir = await mkdtemp(join(tmpdir(), 'qa-trace-'));
+  const privatePath = join(privateDir, 'raw.zip');
+  try {
+    await context.tracing.stop({ path: privatePath });
+    await writeFile(path, scrubTraceZip(await readFile(privatePath), secrets));
+  } catch (error) {
+    await rm(path, { force: true });
+    throw new Error(redactQaText(error, secrets));
+  } finally {
+    await rm(privateDir, { recursive: true, force: true });
+  }
+}
 
 const DEFAULT_VIEWPORTS = [
   { name: 'desktop', width: 1280, height: 800 },
@@ -727,9 +841,16 @@ async function runStep(page, context, step, timeout) {
  * Render and inspect one or more HTML URLs.
  * With `journey` (a journey file path or object, see loadJourney), its
  * declared states are rendered and inspected after the resting pages.
+ * Authenticated callers pass storageState (seeded before tracing), optional
+ * extraHTTPHeaders, and secrets for any opaque credential values.
  * @param {{urls?: string[], artifactDir?: string, schemes?: string[], viewports?: Array<{name?: string,width:number,height:number}|string>, allowlistPath?: string, strict?: boolean, journey?: string | object}} options
  */
 export async function runVisualQa(options) {
+  try { return await inspectVisualQa(options); }
+  catch (error) { throw new Error(redactQaText(error, options?.secrets)); }
+}
+
+async function inspectVisualQa(options) {
   const journey = options?.journey ? await loadJourney(options.journey) : undefined;
   const inputUrls = [...(options?.urls ?? [])];
   // The journey's page is checked at rest too, like any URL given.
@@ -743,7 +864,7 @@ export async function runVisualQa(options) {
   const allowlist = await loadAllowlist(options.allowlistPath);
   await mkdir(artifactDir, { recursive: true });
   const { playwright, version: playwrightVersion, source: playwrightSource } = await resolvePlaywright();
-  console.log(`Playwright ${playwrightVersion} (${playwrightSource})`);
+  console.log(redactQaText(`Playwright ${playwrightVersion} (${playwrightSource})`, options.secrets));
   const browser = await playwright.chromium.launch({ headless: true, executablePath: systemChromium() });
   const findings = [];
   const infoFindings = [];
@@ -756,7 +877,7 @@ export async function runVisualQa(options) {
       const source = inputUrls[urlIndex];
       for (const scheme of schemes) {
         for (const viewport of viewports) {
-          const context = await browser.newContext({ colorScheme: scheme, viewport: { width: viewport.width, height: viewport.height } });
+          const context = await browser.newContext({ storageState: options.storageState, extraHTTPHeaders: options.extraHTTPHeaders, colorScheme: scheme, viewport: { width: viewport.width, height: viewport.height } });
           const page = await context.newPage();
           try {
             await page.goto(url, { waitUntil: 'load' });
@@ -792,7 +913,7 @@ export async function runVisualQa(options) {
               recordFinding({ ...info, sampledBackground, sampledRatio }, true);
             }
 
-            const noScriptContext = await browser.newContext({ colorScheme: scheme, viewport: { width: viewport.width, height: viewport.height }, javaScriptEnabled: false });
+            const noScriptContext = await browser.newContext({ storageState: options.storageState, extraHTTPHeaders: options.extraHTTPHeaders, colorScheme: scheme, viewport: { width: viewport.width, height: viewport.height }, javaScriptEnabled: false });
             const noScriptPage = await noScriptContext.newPage();
             try {
               await noScriptPage.goto(url, { waitUntil: 'load' });
@@ -801,13 +922,13 @@ export async function runVisualQa(options) {
                 recordFinding({ type: 'javascript-disabled-loss', selector: 'body', elementPath: 'body', textSample: noScriptText.trim().slice(0, 96), reason: 'content-requires-javascript', screenCharacters: screenText.trim().length, javascriptDisabledCharacters: noScriptText.trim().length });
               }
             } finally {
-              await noScriptContext.close();
+              await closeQaContext(noScriptContext);
             }
 
             const filename = `${slug(source)}-${scheme}-${viewport.name}.png`;
             screenshots.push({ path: filename, url: source, scheme, viewport });
           } finally {
-            await context.close();
+            await closeQaContext(context);
           }
         }
       }
@@ -833,11 +954,16 @@ export async function runVisualQa(options) {
               else if (informational) infoFindings.push(enriched);
               else findings.push(enriched);
             };
-            const context = await browser.newContext({ colorScheme: scheme, viewport: { width: viewport.width, height: viewport.height } });
+            const context = await browser.newContext({ storageState: options.storageState, extraHTTPHeaders: options.extraHTTPHeaders, colorScheme: scheme, viewport: { width: viewport.width, height: viewport.height } });
             const holds = [];
-            // Inside a Playwright test the runner already traces every context; its trace then holds these steps.
-            const tracing = await context.tracing.start({ screenshots: true, snapshots: true, title: `${journey.name} · ${state.name} · ${scheme} · ${viewport.name}` }).then(() => true, () => false);
-            if (!tracing) run.trace = undefined;
+            // Only publish traces owned by this harness, where we can scrub them.
+            try {
+              await context.tracing.start({ screenshots: true, snapshots: true, title: `${journey.name} · ${state.name} · ${scheme} · ${viewport.name}` });
+            } catch {
+              await context.tracing.stop().catch(() => {});
+              await closeQaContext(context);
+              throw new Error('Visual QA requires a private trace; disable automatic tracing.');
+            }
             const page = await context.newPage();
             try {
               for (const route of state.routes) await installRoute(page, route, holds);
@@ -859,7 +985,7 @@ export async function runVisualQa(options) {
                 } catch (error) {
                   failed = true;
                   entry.status = 'failed';
-                  entry.error = (error instanceof Error ? error.message : String(error)).split('\n')[0];
+                  entry.error = redactQaText(error, options.secrets).split('\n')[0];
                   recordFinding({ type: 'journey-step-failed', selector: `step ${entry.index}`, elementPath: `step ${entry.index}`, reason: `${entry.step}: ${entry.error}`, step: entry.index });
                 }
                 entry.ms = Date.now() - started;
@@ -876,11 +1002,14 @@ export async function runVisualQa(options) {
               }
               screenshots.push({ path: run.screenshot, url: source, state: state.name, scheme, viewport });
             } catch (error) {
-              recordFinding({ type: 'journey-step-failed', selector: 'journey', elementPath: 'journey', reason: `${state.name}: ${(error instanceof Error ? error.message : String(error)).split('\n')[0]}` });
+              recordFinding({ type: 'journey-step-failed', selector: 'journey', elementPath: 'journey', reason: `${state.name}: ${redactQaText(error, options.secrets).split('\n')[0]}` });
             } finally {
               for (const release of holds) release();
-              if (tracing) await context.tracing.stop({ path: join(artifactDir, run.trace) }).catch(() => { run.trace = undefined; });
-              await context.close();
+              await saveQaTrace(context, join(artifactDir, run.trace), { secrets: options.secrets }).catch(() => {
+                run.trace = undefined;
+                recordFinding({ type: 'journey-trace-failed', selector: 'journey', elementPath: 'journey', reason: 'Could not publish a scrubbed trace.' });
+              });
+              await closeQaContext(context);
             }
           }
         }
@@ -889,7 +1018,7 @@ export async function runVisualQa(options) {
   } finally {
     await browser.close();
   }
-  const result = {
+  const result = redactQaValue({
     status: findings.length ? 'FAIL' : 'PASS',
     exitCode: findings.length && options.strict ? 1 : 0,
     // The close gate counts a claimed pass only from a strict run.
@@ -906,7 +1035,7 @@ export async function runVisualQa(options) {
     screenshots,
     counts: findings.reduce((counts, finding) => ({ ...counts, [finding.type]: (counts[finding.type] || 0) + 1 }), {}),
     infoCounts: infoFindings.reduce((counts, finding) => ({ ...counts, [finding.type]: (counts[finding.type] || 0) + 1 }), {}),
-  };
+  }, options.secrets);
   result.markdown = markdownReport(result);
   const { markdown: _markdown, ...jsonResult } = result;
   await writeFile(join(artifactDir, 'visual-qa.json'), `${JSON.stringify(jsonResult, null, 2)}\n`);
@@ -941,11 +1070,11 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       if (result.status === 'PASS') console.log('PASS');
       else for (const finding of result.findings) {
         const colors = finding.foreground && finding.background ? ` foreground=${finding.foreground.join(',')} background=${finding.background.join(',')} ratio=${finding.ratio ?? 'n/a'}` : '';
-        console.log(`FAIL ${finding.type}${finding.state ? ` [${finding.state}]` : ''} ${finding.elementPath} text=${JSON.stringify(finding.textSample || (finding.type.startsWith('journey-') ? finding.reason : '') || '')}${colors}`);
+        console.log(redactQaText(`FAIL ${finding.type}${finding.state ? ` [${finding.state}]` : ''} ${finding.elementPath} text=${JSON.stringify(finding.textSample || (finding.type.startsWith('journey-') ? finding.reason : '') || '')}${colors}`));
       }
       process.exitCode = result.exitCode;
     } catch (error) {
-      console.error(error instanceof Error ? error.message : error);
+      console.error(redactQaText(error));
       process.exitCode = 2;
     }
   }

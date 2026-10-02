@@ -131,6 +131,59 @@ class ImpactTests(unittest.TestCase):
         self.assertNotIn("gamma_test::", expression)
         self.assertNotIn("integration_contracts", command["stems"])
 
+    def install_directory_main_inventory(self):
+        self.put("scripts/cas-test-targets.py", (HERE / "cas-test-targets.py").read_text())
+        manifest = (self.root / "cas-cli/Cargo.toml").read_text()
+        manifest = manifest.replace("[dependencies]", "autotests=false\n[dependencies]")
+        manifest += '''
+[[test]]
+name="integration_contracts"
+path="tests/integration/contracts.rs"
+[[test]]
+name="builtin_archive_portability_test"
+path="tests/builtin_archive_portability_test.rs"
+'''
+        self.put("cas-cli/Cargo.toml", manifest)
+        self.put("cas-cli/tests/integration/contracts.rs", "\n".join(
+            f'#[path="../{stem}.rs"] mod {stem};'
+            for stem in ["alpha_test", "beta_test", "gamma_test", "opaque_test"]
+        ) + '\n#[path="../hooks_test/main.rs"] mod hooks_test;\n')
+        self.put("cas-cli/tests/hooks_test/main.rs", 'mod requests;\n')
+        self.put("cas-cli/tests/hooks_test/requests.rs", 'use cas::alpha::value;\n')
+        self.commit()
+        self.base = self.git("rev-parse", "HEAD")
+
+    def test_directory_main_hooks_inventory(self):
+        self.install_directory_main_inventory()
+        mapping = impact.inventory(self.root, impact.workspace(self.root)[0]["cas"][1])
+        self.assertEqual(mapping["hooks_test"], "integration_contracts")
+        self.assertNotIn("integration_contracts", mapping)
+
+    def test_hooks_directory_change_selects_grouped_suite(self):
+        self.install_directory_main_inventory()
+        plan = self.select("cas-cli/tests/hooks_test/requests.rs")
+        self.assertEqual(plan["mode"], "scoped")
+        self.assertEqual(plan["paths"], ["cas-cli/tests/hooks_test/requests.rs"])
+        command = plan["commands"][0]
+        self.assertEqual(command["stems"], ["builtin_archive_portability_test", "hooks_test"])
+        self.assertIn("integration_contracts", command["targets"])
+        self.assertIn("binary(integration_contracts) and test(hooks_test::)", command["args"][-1])
+        self.assertNotIn("--lib", command["args"])
+
+    def test_unwired_directory_main_inventory_runs_workspace(self):
+        self.install_directory_main_inventory()
+        self.put("cas-cli/tests/unmapped_test/main.rs", '// unwired suite\n')
+        self.commit()
+        plan = impact.plan(self.root, self.base, "", None)
+        self.assertEqual(plan["mode"], "workspace")
+        self.assertEqual(plan["commands"][0]["args"], ["--workspace"])
+
+    def test_malformed_inventory_runs_workspace(self):
+        self.put("scripts/cas-test-targets.py", 'import sys\nif "--check" not in sys.argv: print("malformed")\n')
+        self.commit()
+        self.base = self.git("rev-parse", "HEAD")
+        self.assertEqual(self.select("cas-cli/tests/alpha_test.rs")["mode"], "workspace")
+
     def test_full_failure_outside_plan_is_a_recall_miss(self):
         plan = self.select()
         log = self.root / "run.log"

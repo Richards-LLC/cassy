@@ -104,6 +104,40 @@ pub(crate) fn root_override_notice(env_root: &Path, cwd_root: &Path) -> Option<S
     ))
 }
 
+/// cas-e1c7: `CAS_ROOT` and the working directory resolve two different stores.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootConflict {
+    /// The store `CAS_ROOT` names (what every command uses by default).
+    pub env_root: PathBuf,
+    /// The store the working directory resolves to on its own.
+    pub cwd_root: PathBuf,
+}
+
+/// cas-e1c7: whether `CAS_ROOT` overrides a different working-directory store
+/// for this process. `None` when `CAS_ROOT` is unset or invalid, when the
+/// working directory has no store, or when both name the same store.
+pub fn root_conflict() -> Option<RootConflict> {
+    let env_root = std::env::var_os("CAS_ROOT")?;
+    let cwd = std::env::current_dir().ok()?;
+    root_conflict_for(Path::new(&env_root), &cwd)
+}
+
+/// [`root_conflict`] for explicit inputs, so it is testable without touching
+/// the process environment.
+pub fn root_conflict_for(env_root: &Path, start: &Path) -> Option<RootConflict> {
+    if !env_root.is_dir() {
+        return None;
+    }
+    let cwd_root = find_cas_root_ignoring_env(start).ok()?;
+    if canonical_or_owned(env_root) == canonical_or_owned(&cwd_root) {
+        return None;
+    }
+    Some(RootConflict {
+        env_root: env_root.to_path_buf(),
+        cwd_root,
+    })
+}
+
 /// `canonicalize` when the path resolves, otherwise the path as given. Used only
 /// for equality comparison, never for anything the user sees.
 fn canonical_or_owned(path: &Path) -> PathBuf {

@@ -104,6 +104,10 @@ pub struct CloudTeamDefaultArgs {
 pub struct CloudTeamSetArgs {
     /// Team slug or UUID (e.g., petra-stella or 550e8400-e29b-41d4-a716-446655440000)
     pub id: Option<String>,
+
+    /// cas-e1c7: which store to write when CAS_ROOT and this directory differ.
+    #[command(flatten)]
+    pub store: crate::cli::store_choice::StoreChoiceArgs,
 }
 
 /// Subcommands for `cas cloud team auto`.
@@ -152,6 +156,10 @@ pub struct CloudProjectArgs {
 pub struct CloudProjectSetArgs {
     /// Canonical project slug (e.g., `github.com/foo/bar`)
     pub canonical_id: String,
+
+    /// cas-e1c7: which store to write when CAS_ROOT and this directory differ.
+    #[command(flatten)]
+    pub store: crate::cli::store_choice::StoreChoiceArgs,
 }
 
 fn parse_positive_usize(value: &str) -> Result<usize, String> {

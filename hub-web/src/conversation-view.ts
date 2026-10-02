@@ -5,6 +5,7 @@ import { refusal } from "./refusal";
 import { shouldFollowTail } from "./transcript";
 import { bindSwipeDismiss } from "./swipe-dismiss";
 import { CANT_REACH_RETRYING, NEEDS_PAIRING } from "./connection-state";
+import { CONVERSATION_OPENING, OPENING_MOTION_DELAY_MS, openingLine } from "./connection-state-view";
 import { sessionCodename, type ConversationEvent, type ConversationHistory, type ConversationSend, type EarlierSession } from "./conversation-history";
 import type { ArtifactRef, OperatorReply, OperatorTurnKind } from "./types";
 import {
@@ -163,6 +164,11 @@ export interface ConversationViewOptions {
    * line rather than claiming nothing is waiting (cas-04ee).
    */
   loadingHistory?: () => boolean;
+  /**
+   * When this conversation began to open (cas-813a). The loading line keeps
+   * the attach's motion clock, so it doesn't start its motion over.
+   */
+  openingSince?: () => number | undefined;
   /** The loaded page reaches the beginning of the project history. */
   historyEnd?: () => boolean;
   /**
@@ -732,14 +738,11 @@ export class ConversationView {
       if (this.empty.dataset.state === "loading") return;
       this.empty.dataset.state = "loading";
       delete this.empty.dataset.signature;
-      const document = this.element.ownerDocument;
-      const line = document.createElement("p"); line.className = "said conversation-loading"; line.setAttribute("role", "status");
-      const dots = document.createElement("span"); dots.className = "dots"; dots.setAttribute("aria-hidden", "true");
-      dots.append(document.createElement("i"), document.createElement("i"), document.createElement("i"));
-      const codename = document.createElement("span"); codename.className = "codename"; codename.textContent = supervisor; codename.title = supervisor;
-      const text = document.createElement("span"); text.append("Loading your conversation with ", codename, "…");
-      line.append(dots, text);
-      this.empty.replaceChildren(line);
+      // cas-813a: the same line the attach showed, in the same place, with
+      // its motion clock counted from when the conversation began to open.
+      const since = this.options.openingSince?.();
+      const delay = since === undefined ? OPENING_MOTION_DELAY_MS : OPENING_MOTION_DELAY_MS - (Date.now() - since);
+      this.empty.replaceChildren(openingLine(this.element.ownerDocument, CONVERSATION_OPENING, delay));
       return;
     }
     this.empty.dataset.state = copy.state;

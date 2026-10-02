@@ -449,7 +449,7 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     await expect(details).toBeVisible();
     await details.focus();
     await expect(details).toBeFocused();
-    await expect(page.locator(".conversation-pane-slot .terminal-connecting")).toHaveCount(0, { timeout: 10_000 });
+    await expect(page.locator(".conversation-pane-slot :is(.terminal-connecting, .conversation-opening)")).toHaveCount(0, { timeout: 10_000 });
     await expect(composer).toBeFocused();
     // Focus outside the card (the list search) stays there when it is replaced.
     await page.reload();
@@ -459,7 +459,7 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     await expect(details).toBeVisible();
     const search = page.getByRole("searchbox", { name: "Search conversations" });
     await search.focus();
-    await expect(page.locator(".conversation-pane-slot .terminal-connecting")).toHaveCount(0, { timeout: 10_000 });
+    await expect(page.locator(".conversation-pane-slot :is(.terminal-connecting, .conversation-opening)")).toHaveCount(0, { timeout: 10_000 });
     await page.waitForTimeout(500);
     await expect(search).toBeFocused();
   });

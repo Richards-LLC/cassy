@@ -380,20 +380,40 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     const footerState = page.locator("#hub-footer-badges .machine-badge-state");
     await expect(footerState).toHaveText("Connected");
     await page.evaluate(() => {
-      const seen = { footer: new Set<string>(), pane: new Set<string>() };
+      // cas-813a: also every loading look, where its line sits, the header
+      // and row words, and the composer's width, frame by frame.
+      const seen = { footer: new Set<string>(), pane: new Set<string>(), looks: new Set<string>(), centres: new Set<string>(), status: new Set<string>(), composer: new Set<number>() };
       (window as unknown as { __attachSeen: typeof seen }).__attachSeen = seen;
       const sample = () => {
         const footer = document.querySelector<HTMLElement>("#hub-footer-badges .machine-badge-state");
         if (footer) seen.footer.add(footer.innerText.trim());
         const pane = document.querySelector<HTMLElement>(".conversation-pane-slot");
         if (pane) seen.pane.add(pane.innerText.trim());
+        if (!pane) return;
+        for (const verdict of pane.querySelectorAll(".terminal-state")) if ((verdict as HTMLElement).offsetParent) seen.looks.add("verdict card");
+        for (const line of pane.querySelectorAll<HTMLElement>(".conversation-loading")) {
+          if (!line.offsetParent) continue;
+          seen.looks.add(`line: ${line.innerText.trim()}`);
+          const box = line.getBoundingClientRect();
+          seen.centres.add(`${Math.round(box.x + box.width / 2)},${Math.round(box.y + box.height / 2)}`);
+        }
+        const header = document.querySelector<HTMLElement>("#conversation-connection")?.innerText.replace("·", "").trim();
+        const row = document.querySelector<HTMLElement>('.conversation-row[aria-current="true"] .conversation-preview')?.innerText.trim();
+        if (header) seen.status.add(`header: ${header}`);
+        if (row) seen.status.add(`row: ${row}`);
+        const composer = document.querySelector<HTMLElement>("#message-text");
+        if (composer?.offsetParent) seen.composer.add(Math.round(composer.getBoundingClientRect().width));
       };
       new MutationObserver(sample).observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true });
     });
     hub.delayAttach("quiet-heron-7", 2_000);
     await list.getByRole("button", { name: /lighthouse/ }).click();
-    const opening = page.locator(".conversation-pane-slot .terminal-connecting-title");
+    const opening = page.locator(".conversation-pane-slot .conversation-loading");
     await expect(opening).toHaveText("Opening the conversation…");
+    // cas-813a: still for the first second, then a quiet pulse.
+    const dot = opening.locator(".dots i").first();
+    expect(Number(await dot.evaluate((element) => getComputedStyle(element).opacity)), "no motion at first").toBe(0);
+    await expect.poll(() => dot.evaluate((element) => Number(getComputedStyle(element).opacity)), { message: "the dots move after a second" }).toBeGreaterThan(0.3);
     // Past the quiet window the attempt and stage are offered behind Details, closed.
     const details = page.locator(".conversation-pane-slot .connection-details");
     await expect(details.getByText("Details", { exact: true })).toBeVisible();
@@ -402,9 +422,20 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(page.getByRole("button", { name: "Send to quiet-heron-7", exact: true })).toBeVisible();
     await expect(page.locator(".thread .empty b")).toHaveText("lighthouse", { timeout: 10_000 });
     const seen = await page.evaluate(() => {
-      const { footer, pane } = (window as unknown as { __attachSeen: { footer: Set<string>; pane: Set<string> } }).__attachSeen;
-      return { footer: [...footer], pane: [...pane] };
+      const { footer, pane, looks, centres, status, composer } = (window as unknown as { __attachSeen: Record<string, Set<string | number>> }).__attachSeen;
+      return { footer: [...footer], pane: [...pane], looks: [...looks], centres: [...centres], status: [...status], composer: [...composer] };
     });
+    // cas-813a: one loading look, in one place, centred in the reading area;
+    // the header and row stay Live and the composer keeps its width.
+    expect(seen.looks, "loading looks while it opened").toEqual(["line: Opening the conversation…"]);
+    expect(seen.centres, "where the opening line sat").toHaveLength(1);
+    const slot = (await page.locator(".conversation-pane-slot").boundingBox())!;
+    const [cx, cy] = String(seen.centres[0]).split(",").map(Number);
+    expect(Math.abs(cx - (slot.x + slot.width / 2)), "line centred across the reading area").toBeLessThan(4);
+    expect(Math.abs(cy - (slot.y + slot.height / 2)), "line centred down the reading area").toBeLessThan(4);
+    expect(seen.status.filter((text) => String(text).startsWith("header:")), "header words while it opened").toEqual(["header: Live"]);
+    expect(seen.status.filter((text) => /Connecting|Opening/.test(String(text))), "row or header flipping while it opened").toEqual([]);
+    expect(seen.composer, "composer widths while it opened").toHaveLength(1);
     // cas-71af (e918 QA F02): the empty card's machine · codename line yields
     // the 40-character machine name first; the codename stays whole on a phone.
     await page.setViewportSize({ width: 390, height: 844 });
@@ -413,7 +444,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     expect(await meta.locator(".proj2-machine").evaluate((element) => element.scrollWidth > element.clientWidth), "machine ellipsised at 390px").toBe(true);
     await page.setViewportSize({ width: 1280, height: 720 });
     expect(seen.footer, "the footer while the conversation opened").toEqual(["Connected"]);
-    const jargon = seen.pane.filter((text) => /relay|attempt|authori[sz]ation|handshake|heartbeat|resolving|dialing/i.test(text));
+    const jargon = seen.pane.filter((text) => /relay|attempt|authori[sz]ation|handshake|heartbeat|resolving|dialing/i.test(String(text)));
     expect(jargon, "relay-stage words on the default attach surface").toEqual([]);
     await expect(footerState).toHaveText("Connected");
   });
@@ -439,7 +470,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     });
     hub.delayAttach("quiet-heron-7", 3_500);
     await page.reload();
-    const opening = page.locator(".conversation-pane-slot .terminal-connecting-title");
+    const opening = page.locator(".conversation-pane-slot .conversation-loading");
     await expect(opening).toHaveText("Opening the conversation…");
     await expect(page.locator(".thread .empty b")).toHaveText("lighthouse", { timeout: 15_000 });
     const seen = await page.evaluate(() => (window as unknown as { __retrySeen: { footer: string[]; pane: string[] } }).__retrySeen);

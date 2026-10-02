@@ -1315,7 +1315,10 @@ describe("binding Cassy Cloud browser invariants", () => {
     // Header, row and footer read one conversation connection, and the
     // transport alarm resolves itself once the socket is live again.
     expect(source).toContain('fleetConnectionLabel(conversationConnection(machine.id, session.name), machine.id)');
-    expect(source).toContain('fleetConnectionLabel(conversationConnection(selectedMachineId, selectedSession), selectedMachineId)');
+    // The header and the empty thread read one helper (cas-010f).
+    expect(source).toContain('fleetConnectionLabel(conversationConnection(machineId, session), machineId)');
+    expect(source).toContain('const label = conversationHeaderLabel(selectedMachineId, selectedSession);');
+    expect(source).toContain('connection: () => conversationHeaderLabel(threadMachineId, threadSession),');
     expect(source).toContain("const state = machineFooterConnection(machine.id);");
     // The header status reads "Live", not "· Live": the dot is aria-hidden (cas-17e3).
     expect(source).toContain('const separator = document.createElement("span"); separator.setAttribute("aria-hidden", "true"); separator.textContent = " · ";');

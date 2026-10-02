@@ -68,8 +68,13 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
   await journey.stage("Open a session that has not written yet", async () => {
     await row("calm-puma-34").click();
     const empty = page.locator(".thread .empty");
-    await expect(empty.locator(".said")).toHaveText("No Commander messages from this session yet. The supervisor (calm-puma-34) will write here when it needs a decision.");
-    await expect(empty.locator(".empty-activity")).toHaveText("Last activity 2m ago · supervisor → bright-robin-85");
+    // cas-010f: plain words, no product codename or queue jargon, and
+    // Terminal view named as the header names it.
+    await expect(empty.locator(".said")).toHaveText("No messages from the gabber-studio supervisor in this session yet — nothing is waiting on you.");
+    await expect(empty.locator(".empty-activity")).toHaveText("Last active 2m ago");
+    await expect(empty).not.toContainText("Commander");
+    await expect(empty).not.toContainText("→");
+    await expect(empty.getByRole("button")).toHaveText(["Terminal view"]);
     await expect(page.locator(".thread .msgs")).not.toContainText("Mixdown preview rendered");
     await expect(page.locator(".pinned-ask")).toBeHidden();
     // The older session's thread is a collapsed, labelled section, with dates.
@@ -87,17 +92,29 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     await noble.locator("summary").click();
   });
 
-  await journey.stage("Open the Terminal from the empty session", async () => {
-    await page.locator(".thread .empty").getByRole("button", { name: "Open Terminal" }).click();
+  await journey.stage("Open Terminal view from the empty session", async () => {
+    await page.locator(".thread .empty").getByRole("button", { name: "Terminal view" }).click();
     await expect(page.locator("#conversation-return")).toBeVisible();
+    // The pane header says what it has seen, not "No activity" beside a
+    // session that was active two minutes ago (cas-010f).
+    for (const stamp of await page.locator(".pane-last-activity").filter({ visible: true }).allTextContents()) expect(stamp).not.toBe("No activity yet");
     await page.locator("#conversation-return").click();
     await expect(page.locator(".thread .empty .said")).toBeVisible();
   });
 
   await journey.stage("Each session shows its own conversation", async () => {
     await backToList();
+    // cas-010f: a conversation with history never claims, even for a frame,
+    // that it has no messages while its first page is on its way.
+    await page.evaluate(() => {
+      const claims: string[] = [];
+      (window as unknown as { emptyClaims: string[] }).emptyClaims = claims;
+      const check = () => { for (const said of document.querySelectorAll(".thread .empty:not([hidden]) .said")) if (/^No (Commander )?messages/.test(said.textContent ?? "")) claims.push(said.textContent ?? ""); };
+      new MutationObserver(check).observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ["hidden"] });
+    });
     await row("wild-shark-68").click();
     await expect(log).toContainText("Stem export is at 60%.");
+    expect(await page.evaluate(() => (window as unknown as { emptyClaims: string[] }).emptyClaims), "no empty claim while history loads").toEqual([]);
     await expect(log).not.toContainText("Mixdown preview rendered");
     await expect(earlier).toBeHidden();
     await backToList();

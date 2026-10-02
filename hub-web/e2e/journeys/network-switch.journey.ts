@@ -477,3 +477,59 @@ test("HUB-J12 network switch: a revoked pairing leaves no stored draft behind (c
   await clock.advance(15_000);
   expect(await stored()).not.toContain("atlas:");
 });
+
+// cas-e7b1: a phone that discards the tab during a network switch reloads it.
+// The operator's unsettled messages come back as what they are: one still
+// waiting goes out once when the session is back; one whose receipt never
+// came stays "Not confirmed" and is not sent again by itself.
+test("HUB-J12 network switch: a waiting and a not-confirmed message survive a reload, and the waiting one goes once (cas-e7b1)", async ({ page }) => {
+  const { hub, clock, held } = await connected(page);
+  const log = page.getByRole("log");
+  const bubble = (text: string) => log.locator(".bub").filter({ hasText: text });
+  const stored = () => page.evaluate(() => localStorage.getItem("cas-commander-conversation:sends:v1") ?? "");
+  await test.step("One message goes out and its receipt never comes; the next waits for the session", async () => {
+    const first = hub.nextSend();
+    await sendNow(page, "Did this one land?");
+    expect((await first).text).toBe("Did this one land?");
+    await clock.advance(15_000); // the receipt deadline
+    await expect(bubble("Did this one land?")).toContainText("Not confirmed");
+    hub.upstreamLost(PELICAN);
+    await sendNow(page, "Send this when it's back");
+    await expect(held).toHaveText("Waiting for the connection — sends when it's back");
+    expect(sentTimes(hub, "Send this when it's back")).toBe(0);
+  });
+  await test.step("The tab reloads: both are still there, saying what they are", async () => {
+    await page.reload();
+    await chooseConversation(page);
+    await expect(held).toHaveText("Waiting for the connection — sends when it's back");
+    await expect(bubble("Send this when it's back")).not.toContainText(/Sending…|Delivered/);
+    await expect(bubble("Did this one land?")).toContainText("Not confirmed");
+    await expect(bubble("Did this one land?")).not.toContainText(/Sending…|Delivered/);
+    expect(sentTimes(hub, "Send this when it's back")).toBe(0);
+  });
+  await test.step("The session is back: the waiting one goes out once, the other is not resent", async () => {
+    hub.upstreamBack(PELICAN);
+    const next = hub.nextSend();
+    await clock.advance(10_000); // the reattach retry ceiling, in protocol time
+    expect((await next).text).toBe("Send this when it's back");
+    await expect(held).toHaveCount(0);
+    hub.deliverLatest(PELICAN);
+    await expect(bubble("Send this when it's back")).toContainText("Delivered");
+    await clock.advance(30_000);
+    expect(sentTimes(hub, "Send this when it's back")).toBe(1);
+    expect(sentTimes(hub, "Did this one land?")).toBe(1);
+    // Delivered, it is no longer kept; the unconfirmed one still is.
+    expect(await stored()).not.toContain("Send this when it's back");
+    expect(await stored()).toContain("Did this one land?");
+  });
+  await test.step("The pairing is revoked: the kept message leaves the disk with it, and stays on screen", async () => {
+    hub.refuseProofs("atlas", 1_000, "revoked", false);
+    await hub.down("atlas", { sockets: "close" });
+    await hub.up("atlas");
+    await clock.advance(1_000);
+    await expect(page.locator("#conversation-connection")).toHaveText(" · Needs pairing");
+    await expect(bubble("Did this one land?")).toContainText("Not confirmed");
+    await clock.advance(15_000);
+    expect(await stored()).not.toContain("atlas:");
+  });
+});

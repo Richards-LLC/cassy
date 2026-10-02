@@ -153,3 +153,72 @@ export function draftStore(storage: StorageLike | undefined): {
     },
   };
 }
+
+/**
+ * One of the operator's messages that has not settled (cas-e7b1): `held`
+ * waits in this browser and has never been on the wire; `sending` went out
+ * and its receipt has not come; `unconfirmed` gave up on its receipt; `error`
+ * was not sent. A confirmed, answered, replaced or dismissed message is never
+ * stored.
+ */
+export type PendingSend = {
+  id: string;
+  target: string;
+  text: string;
+  state: "held" | "sending" | "unconfirmed" | "error";
+  /** When it was written (ms epoch): its place in the thread. */
+  at: number;
+  /** When it was first held (ms epoch; `held` only): its wait runs out from here. */
+  heldAt?: number;
+  /** When it went on the wire (ms epoch). */
+  sentAt?: number;
+  replyTo?: number;
+  error?: string;
+  session?: string;
+};
+
+const PENDING_STATES = new Set<PendingSend["state"]>(["held", "sending", "unconfirmed", "error"]);
+/** At most this many unsettled messages are kept per conversation, the newest. */
+export const MAX_PENDING_SENDS = 20;
+
+const finite = (value: unknown): number | undefined => (typeof value === "number" && Number.isFinite(value) ? value : undefined);
+
+/** One stored unsettled message, or undefined when malformed. */
+export function validPendingSend(raw: unknown): PendingSend | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const { id, target, text, state, at, heldAt, sentAt, replyTo, error, session } = raw as Record<string, unknown>;
+  if (typeof id !== "string" || !id || typeof target !== "string" || typeof text !== "string" || !text.trim()) return undefined;
+  if (typeof state !== "string" || !PENDING_STATES.has(state as PendingSend["state"])) return undefined;
+  const when = finite(at);
+  if (when === undefined) return undefined;
+  return {
+    id, target, text, state: state as PendingSend["state"], at: when,
+    ...(finite(heldAt) === undefined ? {} : { heldAt: finite(heldAt) }),
+    ...(finite(sentAt) === undefined ? {} : { sentAt: finite(sentAt) }),
+    ...(finite(replyTo) === undefined ? {} : { replyTo: finite(replyTo) }),
+    ...(typeof error === "string" ? { error } : {}),
+    ...(typeof session === "string" ? { session } : {}),
+  };
+}
+
+/** A conversation's stored unsettled messages; malformed ones are dropped, the rest kept. */
+export function validPendingSends(raw: unknown): PendingSend[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const sends = raw.flatMap((send) => validPendingSend(send) ?? []);
+  return sends.length ? sends : undefined;
+}
+
+/** The unsettled-messages store (cas-e7b1): an empty list is a deletion. */
+export function pendingSendStore(storage: StorageLike | undefined): {
+  load(): Map<string, PendingSend[]>;
+  save(conversation: string, sends: PendingSend[]): void;
+} {
+  const store = new ConversationStore(storage, "sends", validPendingSends);
+  return {
+    load: () => store.entries(),
+    save: (conversation, sends) => {
+      const kept = sends.flatMap((send) => validPendingSend(send) ?? []).slice(-MAX_PENDING_SENDS);
+      if (kept.length) store.set(conversation, kept); else store.delete(conversation);
+    },
+  };
+}

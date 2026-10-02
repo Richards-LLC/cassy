@@ -443,8 +443,15 @@ async fn jev_files_mock_http_globs_secrets_ignores_binary_and_hash_only() {
         client.files(
             &root,
             &FilesOptions {
-                paths: vec!["ignored.txt".into()],
-                globs: vec!["**/*".into(), "src/*.rs".into()],
+                paths: vec![
+                    "ignored.txt".into(),
+                    ".env.local".into(),
+                    "server.pem".into(),
+                    "creds/password.txt".into(),
+                    "binary.dat".into(),
+                    "invalid.dat".into(),
+                ],
+                globs: vec!["src/**/*".into(), "src/*.rs".into()],
                 ..Default::default()
             },
             &questions(),
@@ -704,6 +711,58 @@ async fn jev_files_refuses_outside_and_symlinked_secrets_before_http() {
         assert!(!value.to_string().contains("outside-token"));
         assert!(!value.to_string().contains("inside-secret"));
         assert!(!dir.path().join("jev-decisions.jsonl").exists());
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn jev_files_choice_confidence_and_strict_advisory_log_all_calls() {
+    use wiremock::matchers::body_partial_json;
+    let server = MockServer::start().await;
+    let dir = TempDir::new().unwrap();
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        fs::write(dir.path().join(name), "private-choice-state").unwrap();
+    }
+    let q = json!({"area":{"type":"choice", "instructions":"Select area", "criteria":{"ui":null,"core":null}}});
+    Mock::given(method("POST")).and(body_partial_json(json!({"state":{"path":"a.txt"}})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"model":"jev-1.13.0", "answers":{"area":{"type":"choice", "choice":"core", "probabilities":{"core":0.9,"ui":0.1}, "confidence":0.9}}, "usage":{"input_tokens":10,"output_tokens":1}})))
+        .expect(2).with_priority(1).mount(&server).await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(4)
+        .with_priority(2)
+        .mount(&server)
+        .await;
+    let client = fixture(&server, &dir, false);
+    tokio::task::spawn_blocking(move || {
+        let options = FilesOptions {
+            globs: vec!["*.txt".into()],
+            ..Default::default()
+        };
+        assert!(matches!(
+            client.files(dir.path(), &options, &q, "files", false),
+            Err(JevError::Unavailable(_))
+        ));
+        assert_eq!(rows(&dir).len(), 3);
+        let result = client
+            .files(dir.path(), &options, &q, "files", true)
+            .unwrap();
+        let result = serde_json::to_value(result).unwrap();
+        assert_eq!(
+            result["files"][0]["answers"]["area"]["probabilities"]["core"],
+            0.9
+        );
+        assert_eq!(result["files"][0]["answers"]["area"]["confidence"], 0.9);
+        assert_eq!(result["files"][1]["status"], "unavailable");
+        assert_eq!(result["files"][2]["status"], "unavailable");
+        assert_eq!(rows(&dir).len(), 6);
+        assert!(!result.to_string().contains("private-choice-state"));
+        assert!(
+            !fs::read_to_string(dir.path().join("jev-decisions.jsonl"))
+                .unwrap()
+                .contains("private-choice-state")
+        );
     })
     .await
     .unwrap();

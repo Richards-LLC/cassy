@@ -1055,6 +1055,52 @@ mod cas_3dcb_death_relay_tests {
         assert!(relay.prompt.contains("cas-in-progress") && relay.prompt.contains("cas-blocked"));
     }
 
+    #[test]
+    fn expired_stale_lease_keeps_live_worker_process_cas_230b() {
+        let fixture = Fixture::new();
+        let mut worker = fixture.dead_worker("live-process-cas-230b", 900);
+        worker.pid = Some(std::process::id());
+        fixture.agent_store.register(&worker).unwrap();
+        let tasks = open_task_store(&fixture.cas_root).unwrap();
+        let mut task = Task::new("cas-live-process".into(), "Long-running proof".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some(worker.name.clone());
+        tasks.add(&task).unwrap();
+        assert!(fixture.agent_store.try_claim(&task.id, &worker.id, -1, None).unwrap().is_success());
+        // Match the stale registry and revoked-lease state seen under CPU
+        // starvation, while the actual worker process is still alive.
+        fixture.agent_store.mark_stale(&worker.id).unwrap();
+        let summaries = recover_expired_leases_for_dead_holders(
+            &fixture.cas_root, fixture.agent_store.as_ref(), &[(task.id.clone(), worker.id.clone())], 600,
+        );
+        assert!(summaries.is_empty(), "live process must not produce orphan recovery: {summaries:?}");
+        let after = tasks.get(&task.id).unwrap();
+        assert_eq!(after.status, TaskStatus::InProgress);
+        assert_eq!(after.assignee, task.assignee);
+        let lease = fixture.agent_store.get_lease(&task.id).unwrap().expect("live worker keeps a renewed lease");
+        assert_eq!(lease.agent_id, worker.id);
+        assert!(lease.expires_at > Utc::now());
+        assert!(fixture.prompt_relays().is_empty(), "no false worker-death/reassignment signal");
+    }
+
+    #[test]
+    fn dead_holder_recovery_preserves_blocked_status_cas_230b() {
+        let fixture = Fixture::new();
+        let worker = fixture.dead_worker("blocked-holder-cas-230b", 900);
+        let tasks = open_task_store(&fixture.cas_root).unwrap();
+        let mut task = Task::new("cas-still-blocked".into(), "Waiting for credentials".into());
+        task.status = TaskStatus::Blocked;
+        task.assignee = Some(worker.name.clone());
+        task.notes = "BLOCKER: waiting for operator credentials".into();
+        tasks.add(&task).unwrap();
+        let summary = recover_worker_vanished(&fixture.cas_root, fixture.agent_store.as_ref(), &worker, &[task.id.clone()], "holder died while blocked");
+        let after = tasks.get(&task.id).unwrap();
+        assert_eq!(after.status, TaskStatus::Blocked, "worker death must not clear the blocker");
+        assert_eq!(after.notes, task.notes);
+        assert!(summary.recovered_task_ids.is_empty());
+        assert_eq!(summary.held_task_ids, vec![task.id]);
+    }
+
     /// GH #924: a worker re-registered under a new row while its old row went
     /// stale. The old row's lease expires; recovery must not park the task the
     /// live worker is on, nor report its death. The lease moves to the live row.

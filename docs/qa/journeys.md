@@ -447,12 +447,12 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 #### Steps
 
-1. See a project's live sessions together — the project's rows sit under one heading naming the session count, the most recently active one is marked "Most recent", and each row's time is its own last activity
+1. See a project's live sessions together — the project's rows sit under one heading naming the conversation count (the footer's noun), the most recently active one is marked "Most recent", each row's time is its own last activity, and each row leads with its codename and what its session last did in plain words ("Messaged bright-robin-85") before any is opened; at 1280×720 every row is in view
 2. Open a session that has not written yet — the thread says "No messages from the gabber-studio supervisor in this session yet — nothing is waiting on you", shows "Last active 2m ago" with no internal jargon, and the older session's thread is only a collapsed "Earlier session noble-cheetah-84, Yesterday" section
 3. Read an earlier session's messages — the section opens to its turns, each with its day and time, and offers no actions
 4. Open Terminal view from the empty session — its "Terminal view" link switches to the session's Terminal view and back; the pane header never says "No activity" for a session that was just active
 5. The empty thread follows the connection — off the network it says it is reconnecting to Atlas · Linux and offers no Terminal view; back on, the plain copy and the link return
-6. Each session shows its own conversation — another session's turns, even from a daemon that still sends project-wide history, appear only in its earlier section; a conversation with history never flashes a "no messages" card while its first page loads
+6. Each session shows its own conversation — the lowest row stays in view when it opens; another session's turns, even from a daemon that still sends project-wide history, appear only in its earlier section; a conversation with history never flashes a "no messages" card while its first page loads
 7. End a stale session — End session asks first, names what stops, and only the confirmation ends it; the row leaves the group
 
 #### Expected experience
@@ -513,7 +513,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 #### Steps
 
-1. See six sessions at once — under "gabber-studio · 7 sessions on Atlas", each row leads with its codename, End session is a glyph button in its own column at the row's end, and at least six rows are fully in view
+1. See six sessions at once — under "gabber-studio · 7 conversations on Atlas", each row leads with its codename, End session is a glyph button in its own column at the row's end, and at least six rows are fully in view
 2. Tap a session's time to open it, then come back — the time belongs to the row (End is a 44px column of its own beside it), the session opens, and back on the list all seven are still there
 3. End session asks at once, focused on Cancel — on the last row the confirmation is present in the same task as the tap, Cancel has focus, both buttons are fully in view, and no row leaves the list
 4. Cancel, then end it from the keyboard — Cancel returns focus to End session; Enter, Shift+Tab to the confirmation's End session and Enter end it, the heading reads 6 sessions, and focus lands on the row before the ended last row, never on the page

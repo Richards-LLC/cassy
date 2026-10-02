@@ -4083,7 +4083,12 @@ button.chip:disabled { cursor: default; }
 }
 
 /* cas-55a4: one project's live sessions on one machine, together. */
-.conversation-group-head { margin: var(--space-2) 14px 0; color: var(--ink-mid); font: var(--weight-medium) var(--fs-xs)/1.35 var(--font-ui); }
+/* cas-5d2c: the heading names the project and machine once, at the weight of
+   a row's title, so the rows under it lead with what tells them apart: the
+   codename, then what the session last did. */
+.conversation-group-head { margin: var(--space-2) 14px 0; color: var(--ink); font: var(--weight-semibold) var(--fs-meta)/1.35 var(--font-ui); }
+.conversation-row.grouped .conversation-title:has(+ .conversation-supervisor) { display: none; }
+.conversation-row.grouped .conversation-supervisor { font-size: var(--fs-meta); color: var(--ink); }
 .conversation-row.grouped { padding-left: 22px; }
 .conversation-row[aria-current="true"] .conversation-session-mark { background: var(--bg-panel); }
 .conversation-session-mark { margin-left: 8px; padding: 1px 7px; border-radius: var(--radius-pill); background: var(--accent-soft); color: var(--ink); font: var(--weight-medium) 10px/1.4 var(--font-ui); white-space: nowrap; }
@@ -4097,10 +4102,6 @@ button.chip:disabled { cursor: default; }
 /* cas-d6bf: desktop keeps the words; the glyph is the phone's. */
 .conversation-end-icon { display: none; width: 16px; height: 16px; }
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
-  /* Under the group heading that names the project and machine, a session row
-     leads with its codename, so a phone shows twice as many of them. */
-  .conversation-row.grouped .conversation-title:has(+ .conversation-supervisor) { display: none; }
-  .conversation-row.grouped .conversation-supervisor { font-size: var(--fs-meta); color: var(--ink); }
   /* End session is a trailing column of the row, not a line of its own
      (cas-d6bf). The row gives that column up (cas-339a), so its 44px target
      sits beside the time and marks, never over them. */

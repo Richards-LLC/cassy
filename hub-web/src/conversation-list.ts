@@ -19,6 +19,12 @@ export interface ConversationRow {
   whenSpoken?: string;
   /** Last turn in the thread, or the connection state when there is none. */
   preview?: string;
+  /**
+   * The session's newest activity in plain words, from the catalog
+   * ("Messaged bright-robin-85"). A grouped row shows it until the thread has
+   * a turn of its own, so sibling sessions differ before any visit (cas-5d2c).
+   */
+  activityLine?: string;
   /** The session left the catalog with an instruction still pending: the
    * preview line names that state instead of the last turn (cas-7294). */
   unreachable?: boolean;
@@ -69,10 +75,30 @@ export function groupConversationRows<T extends ConversationRow>(rows: readonly 
     const anyActivity = group.some((member) => member.activityAt !== undefined);
     const rank = (member: T): number => (anyActivity ? member.activityAt : member.startedAt) ?? -Infinity;
     const ordered = [...group].sort((a, b) => rank(b) - rank(a));
-    const label = `${projectTitle(row.projectDir) ?? row.supervisor} · ${group.length} sessions on ${machineName(row.host)}`;
+    // cas-5d2c: the same noun as the footer's "3 conversations".
+    const label = `${projectTitle(row.projectDir) ?? row.supervisor} · ${group.length} conversations on ${machineName(row.host)}`;
     ordered.forEach((member, index) => out.push({ ...member, group: { key, label, size: group.length, first: index === 0, active: index === 0 && rank(member) !== -Infinity } }));
   }
   return out;
+}
+
+/**
+ * The catalog's "from → to" activity label (hub/mod.rs activity_label) in
+ * plain words (cas-5d2c): "supervisor → Commander" is "Wrote to you",
+ * "supervisor → bright-robin-85" is "Messaged bright-robin-85". No arrows and
+ * no role jargon reach a row.
+ */
+export function plainActivity(label: string | undefined): string | undefined {
+  if (!label) return undefined;
+  const [from, to] = label.split(" → ").map((part) => part.trim());
+  if (!from || !to) return label;
+  if (from === "supervisor" && to === "Commander") return "Wrote to you";
+  if (from === "Commander") return "You wrote to it";
+  if (from === "supervisor" && to === "supervisor") return "Typed at its terminal";
+  if (from === "supervisor") return `Messaged ${to}`;
+  if (from === "lifecycle-wake" || from.endsWith("-wake")) return "Woken up";
+  if (to === "supervisor") return `Heard from ${from}`;
+  return `${from} to ${to}`;
 }
 
 /**
@@ -125,7 +151,10 @@ export function filterConversationRows<T extends Pick<ConversationRow, "projectD
 export function conversationRowMarkup(row: ConversationRow): string {
   const waiting = row.attention > 0;
   const unread = row.unread ?? 0;
-  const preview = truncateConversationPreview(plainTextMarkdown(row.unreachable || row.interrupted ? row.connection : row.preview || row.connection));
+  // cas-5d2c: a grouped row with no turn of its own yet shows what its
+  // session last did, so siblings differ before any of them is opened.
+  const fallback = row.group ? row.activityLine || row.connection : row.connection;
+  const preview = truncateConversationPreview(plainTextMarkdown(row.unreachable || row.interrupted ? row.connection : row.preview || fallback));
   // The time always holds the headline end; an unread count sits beneath it
   // with the waiting dot, so the most active row never loses its time (P13).
   // cas-6acf: assistive tech hears the time in words ("20 minutes ago"), not "20m".

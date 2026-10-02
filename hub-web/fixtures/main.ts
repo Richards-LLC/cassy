@@ -82,7 +82,7 @@ function session(name: string, supervisor: string, workers: string[], liveness: 
 function fleetModel(): FleetBoardModel {
   const machines = [
     { id: "atlas", label: "Atlas laptop", state: "live", phase: "Live", selected: true },
-    { id: "forge", label: "Forge desktop", state: "degraded", phase: "Degraded", selected: false },
+    { id: "forge", label: "Forge desktop", state: "degraded", phase: "Unsteady", selected: false },
   ];
   const entries = [
     { machineId: "atlas", machineLabel: "Atlas laptop", session: "bright-otter", role: "supervisor" as const, supervisor: "bright-otter", workerCount: 3, status: "live", title: "Commander design pass", phase: "editing" as const, current: false },
@@ -121,7 +121,7 @@ function renderRail(machineCount: number): HTMLElement {
   for (let index = 0; index < machineCount; index += 1) {
     const machine = index === 0 ? "Atlas laptop" : "Forge desktop";
     const item = button(index === 0 ? "AL" : "FD", `machine-icon${index === 0 ? " active" : ""}`);
-    item.setAttribute("aria-label", `${machine}, ${index === 0 ? "live" : "degraded"}`);
+    item.setAttribute("aria-label", `${machine}, ${index === 0 ? "live" : "unsteady"}`);
     item.append(element("span", `machine-state ${index === 0 ? "live" : "degraded"}`));
     rail.append(item);
   }

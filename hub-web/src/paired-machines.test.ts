@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
 import { CANT_REACH_RETRYING, machineFooterMarkup, type PairedMachineRow } from './paired-machines';
+import { UNSTEADY } from './connection-state';
 
 const atlas: PairedMachineRow = {
   id: 'atlas', label: 'Atlas', address: 'atlas.test', connection: 'Needs pairing',
@@ -40,5 +41,22 @@ describe('paired machine footer after authentication loss (cas-f698)', () => {
 
   it('keeps the connected count when a second machine needs pairing', () => {
     expect(footerState([atlas, { ...atlas, id: 'studio', connected: true, connection: 'Connected', connectionState: { phase: 'live', degraded: false } }])).toBe('1 connected');
+  });
+});
+
+describe('an unsteady machine reads Unsteady in the footer, as in the header and row (cas-a6f0)', () => {
+  const unsteady: PairedMachineRow = { ...atlas, connection: UNSTEADY, connectionState: { phase: 'live', degraded: true } };
+  it('names the only machine unsteady, with the warning dot', () => {
+    const footer = document.createElement('div');
+    footer.innerHTML = machineFooterMarkup([unsteady], 1, 'test-build');
+    expect(footer.querySelector('.machine-badge-state')!.textContent).toBe('Unsteady');
+    expect(footer.querySelector('.pairing-dot')!.classList.contains('partial')).toBe(true);
+  });
+  it('says Reconnecting once another machine is actually down', () => {
+    const retrying = { ...atlas, id: 'studio', connection: 'Reconnecting', connectionState: { phase: 'backoff' as const, degraded: false } };
+    expect(footerState([unsteady, retrying])).toBe('Reconnecting');
+  });
+  it('keeps the connected count beside a connected machine', () => {
+    expect(footerState([unsteady, { ...atlas, id: 'studio', connected: true, connection: 'Connected', connectionState: { phase: 'live', degraded: false } }])).toBe('1 connected');
   });
 });

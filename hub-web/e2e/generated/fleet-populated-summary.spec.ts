@@ -45,7 +45,7 @@ test.describe("Populated fleet", () => {
     await expect(atlas.locator("header")).toContainText("Atlas laptop");
     await expect(atlas.locator("header")).toContainText("Live");
     await expect(forge.locator("header")).toContainText("Forge desktop");
-    await expect(forge.locator("header")).toContainText("Degraded");
+    await expect(forge.locator("header")).toContainText("Unsteady");
     await expect(atlas.getByRole("listitem")).toHaveCount(2);
     await expect(forge.getByRole("listitem")).toHaveCount(1);
     await expect(atlas.getByRole("button", { name: "Open bright-otter on Atlas laptop" })).toHaveCount(1);

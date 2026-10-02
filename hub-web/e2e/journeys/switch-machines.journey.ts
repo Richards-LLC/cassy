@@ -388,15 +388,17 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     const railDot = page.locator("#machine-rail-list .machine-icon").filter({ hasText: "AT" }).locator(".machine-state");
     const heartbeat = "https://atlas.test/v1/machine";
     await page.route(heartbeat, (route) => route.abort());
-    await expect(latency).toHaveText("Degraded", { timeout: 20_000 });
+    await expect(latency).toHaveText("Unsteady", { timeout: 20_000 });
     await expect(chip).toHaveClass(/\bdegraded\b/);
     await expect(railDot).toHaveClass(/\bdegraded\b/);
     // cas-71af (bf07 QA F01): the chip's tooltip reads the same machine state
     // as the chip, not the terminal attach's "live".
-    await expect(chip).toHaveAttribute("title", /^degraded · \d+ missed$/);
-    // bf07 QA F02: a longer outage does not leave the chip Degraded. After
+    await expect(chip).toHaveAttribute("title", /^unsteady · \d+ missed$/);
+    // cas-a6f0 (journey F9): the rail beside it does not say All clear.
+    await expect(page.locator("#attention-panel .attention-empty")).toHaveText(/^Not all clear\. Atlas · Linux: connection unsteady — checking\./);
+    // bf07 QA F02: a longer outage does not leave the chip Unsteady. After
     // four missed heartbeats the machine reconnects, and it comes back.
-    await expect(latency).not.toHaveText("Degraded", { timeout: 20_000 });
+    await expect(latency).not.toHaveText("Unsteady", { timeout: 20_000 });
     await page.unroute(heartbeat);
     await expect(latency).toHaveText(/^\d+ms$/, { timeout: 30_000 });
     await expect(chip).not.toHaveClass(/\bdegraded\b/);

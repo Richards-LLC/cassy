@@ -1,5 +1,5 @@
 import { cloudBrand, escapeHtml } from './cloud-brand';
-import { CANT_REACH_RETRYING, NEEDS_PAIRING, machineConnectionLabel, type MachineConnectionLabelState } from './connection-state';
+import { CANT_REACH_RETRYING, NEEDS_PAIRING, UNSTEADY, machineConnectionLabel, type MachineConnectionLabelState } from './connection-state';
 export { CANT_REACH_RETRYING } from './connection-state';
 
 export interface PairedMachineRow {
@@ -30,14 +30,18 @@ export function machineFooterMarkup(rows: readonly PairedMachineRow[], sessions:
   // another machine's first retry look like a reconnect (cas-f698).
   const retryable = rows.filter((_row, index) => labels[index] !== NEEDS_PAIRING);
   const unreachable = retryable.length > 0 && retryable.every(row => row.connection === CANT_REACH_RETRYING);
+  // cas-a6f0 (journey F8): machines still live with heartbeats unanswered
+  // are unsteady, as the header and the row say, not reconnecting.
+  const unsteady = retryable.length > 0 && labels.every(label => label === UNSTEADY || label === NEEDS_PAIRING);
   const state = loading ? 'Loading…' : connected ? `${connected === rows.length ? 'Connected' : `${connected} connected`}`
     : !rows.length ? 'Not paired'
     : !retryable.length ? labels[0]
+    : unsteady ? UNSTEADY
     : retryable.some(row => row.everConnected) ? 'Reconnecting'
     : unreachable ? CANT_REACH_RETRYING : 'Connecting…';
   // The dot shows the worst machine: green only when every machine is
-  // connected, the warning tone when some are down (cas-b789).
-  const dot = connected && connected === rows.length ? ' connected' : connected ? ' partial' : '';
+  // connected, the warning tone when some are down (cas-b789) or unsteady.
+  const dot = connected && connected === rows.length ? ' connected' : connected || state === UNSTEADY ? ' partial' : '';
   return `<button id="paired-machines-toggle" type="button" aria-haspopup="dialog"><span class="pairing-dot${dot}" aria-hidden="true"></span><span>${escapeHtml(machine)}</span><span class="machine-badge-state">${state}</span></button><div class="hub-footer-meta"><span>${sessions} ${sessions === 1 ? 'conversation' : 'conversations'}</span><span title="Hub build">Hub ${escapeHtml(build)}</span></div>`;
 }
 

@@ -422,6 +422,23 @@ export class ConversationHistory {
     });
     return changed;
   }
+  /**
+   * cas-a6f0: no receipt can come for sends already on the wire (the hub
+   * refused this browser's pairing). They may or may not have arrived, so
+   * they turn `unconfirmed` now instead of reading "Sending…" until their
+   * deadline. Held sends are not on the wire and are left alone. Returns the
+   * ids that changed.
+   */
+  unconfirmInFlight(now: number): string[] {
+    const changed: string[] = [];
+    for (const event of this.events) {
+      if (event.kind !== "send" || event.value.state !== "sending" || event.value.held || event.value.notificationId !== undefined || event.value.sentAt === undefined) continue;
+      event.value.state = "unconfirmed";
+      event.value.unconfirmedAt = now;
+      changed.push(event.value.id);
+    }
+    return changed;
+  }
   /** Milliseconds until the next send could become unconfirmed, if any is waiting. */
   nextReceiptCheck(now: number): number | undefined {
     let next: number | undefined;

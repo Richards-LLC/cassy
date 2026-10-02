@@ -58,7 +58,7 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     // and goes out by itself, once, when the session is back (cas-0978).
     await composer.fill("Are you there?");
     await page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true }).click();
-    await expect(page.locator("#message-status")).toHaveText("Not connected to Atlas · Linux right now. Your message will go out by itself when it's back.");
+    await expect(page.locator("#message-status")).toHaveText("Lost connection to Atlas · Linux. Reconnecting… Your message will go out by itself when it's back.");
     await expect(composer).toHaveValue("");
     await expect(page.getByRole("log").locator(".conversation-held")).toHaveText("Waiting for the connection — sends when it's back");
     expect(hub.sends.filter((m) => m.text === "Are you there?")).toHaveLength(0);

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { REFUSED_SEE_ABOVE, refusal, refusalSentence } from "./refusal";
-import { outageRefusal } from "./connection-state-view";
+import { outageRefusal, pairingRefusal } from "./connection-state-view";
 
 describe("refusal (F6: plain reasons with a next step)", () => {
   it.each([
@@ -23,6 +23,10 @@ describe("refusal (F6: plain reasons with a next step)", () => {
     // "re-pair this device", whatever the machine is called.
     [outageRefusal("Atlas · Linux"), "The session didn't come back while it waited.", "Retry once the session is live again."],
     [outageRefusal("Repair bench · control lease"), "The session didn't come back while it waited.", "Retry once the session is live again."],
+    // cas-a6f0 (journey F35): a held send whose pairing the hub refused names
+    // the machine to re-pair, whatever it is called.
+    [pairingRefusal("Atlas · Linux"), "Atlas · Linux needs pairing again.", "Re-pair Atlas · Linux, then retry."],
+    [pairingRefusal("Repair bench · control lease"), "Repair bench · control lease needs pairing again.", "Re-pair Repair bench · control lease, then retry."],
   ])("maps %j to a plain reason", (detail, reason, next) => {
     expect(refusal(detail)).toMatchObject({ reason, next });
   });

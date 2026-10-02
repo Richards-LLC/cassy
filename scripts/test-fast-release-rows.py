@@ -2,6 +2,7 @@
 """Exercise fast admission against real Git trees and real no-build checks."""
 
 import os
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -10,9 +11,13 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
+SPEC = importlib.util.spec_from_file_location("lane_fast_rows", ROOT / "scripts/check-lane-fast-rows.py")
+LANE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(LANE)
 
 
 def command(repo, *args, **kwargs):
@@ -68,6 +73,7 @@ class FastRows(unittest.TestCase):
 
     def fast(self):
         env = dict(os.environ, CARGO=str(self.repo / "cargo-tripwire"),
+                   CAS_RELEASE_GATE_LOG_DIR=str(self.repo / ".git" / "gate-rows"),
                    CAS_RELEASE_GATE_CACHE_DIR=str(self.repo / ".git" / "gate-cache"))
         result = command(self.repo, "bash", "scripts/release-gate.sh", "--fast-rows",
                          "--base", self.base, env=env)
@@ -78,7 +84,7 @@ class FastRows(unittest.TestCase):
         start = time.monotonic()
         result = self.fast()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertLess(time.monotonic() - start, 30)
+        self.assertLess(time.monotonic() - start, LANE.fast_rows_budget())
         for row in ("failure-log", "version-literals", "changelog-and-versions", "release-script",
                     "release-notes-shell-injection", "procedure-guardrails", "test-targets",
                     "markdown-lint", "test-shape", "test-env", "builtin-doc-hygiene"):
@@ -87,6 +93,76 @@ class FastRows(unittest.TestCase):
             else:
                 self.assertIn("PASS " + row, result.stdout)
         self.assertNotIn("PASS workspace-tests", result.stdout)
+        row_dir = self.repo / ".git" / "gate-rows"
+        self.assertIn("test-env", (row_dir / "plan.txt").read_text().splitlines())
+        self.assertNotIn("test-shape", (row_dir / "plan.txt").read_text().splitlines())
+        self.assertEqual(LANE.unfinished_rows(row_dir), [])
+
+    def test_normal_factory_load_allows_rows_over_old_wall_budget(self):
+        command(self.repo, "git", "checkout", "-qb", "factory/lane")
+        self.write("scripts/example.py", "# scripts-only lane\n")
+        self.commit()
+        real_popen = subprocess.Popen
+
+        class PassingGate:
+            pid = 999999
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def wait(self, timeout=None):
+                # Deterministically model 45 seconds of passing rows at load 1.5/core.
+                if timeout is not None and timeout < 45:
+                    raise subprocess.TimeoutExpired("passing fast rows", timeout)
+                return 0
+
+        def popen(args, **kwargs):
+            return PassingGate() if args[0] == "bash" else real_popen(args, **kwargs)
+
+        with patch.object(LANE.os, "getloadavg", return_value=(27, 27, 27)), \
+                patch.object(LANE.os, "cpu_count", return_value=18), \
+                patch.object(LANE.subprocess, "Popen", side_effect=popen), \
+                patch.object(LANE.os, "killpg"):
+            self.assertEqual(LANE.check_merge(self.repo, "target", "factory/lane"), 0)
+
+    def test_fast_test_env_skips_unchanged_crate_paths_and_fixture_suite(self):
+        self.write("crates/unrelated/Cargo.toml", '[package]\nname = "unrelated"\nversion = "9.99.7"\n')
+        self.write("crates/unrelated/src/lib.rs", '#[test] fn broken() {')
+        self.write("scripts/test-check-test-env.py", "raise SystemExit('unchanged fixture suite ran')\n")
+        self.commit()
+        base = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        self.write("scripts/example.py", "# scripts-only lane\n")
+        self.commit()
+        result = self.fast_from(base)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PASS test-env", result.stdout)
+
+    def test_timeout_names_unfinished_rows_and_bounded_retry_preserves_refs(self):
+        command(self.repo, "git", "checkout", "-qb", "factory/lane")
+        self.write("scripts/release-gate.sh", '''#!/bin/bash
+mkdir -p "$CAS_RELEASE_GATE_LOG_DIR"
+printf 'version-literals\\ntest-env\\nbuiltin-doc-hygiene\\n' >"$CAS_RELEASE_GATE_LOG_DIR/plan.txt"
+printf 'row\\tstatus\\nversion-literals\\t0\\n' >"$CAS_RELEASE_GATE_LOG_DIR/timing.tsv"
+sleep 2
+''')
+        self.commit()
+        source = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        before = command(self.repo, "git", "worktree", "list", "--porcelain").stdout
+        result = command(self.repo, "python3", "scripts/check-lane-fast-rows.py", ".", "target", "factory/lane",
+                         "--timeout-secs", "1")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("unfinished rows: test-env, builtin-doc-hygiene", result.stderr)
+        self.assertIn("--timeout-secs 2", result.stderr)
+        self.assertNotIn("unfinished rows: version-literals", result.stderr)
+        retry = command(self.repo, "python3", "scripts/check-lane-fast-rows.py", ".", "target", "factory/lane",
+                        "--timeout-secs", "5")
+        self.assertEqual(retry.returncode, 0, retry.stdout + retry.stderr)
+        self.assertEqual(command(self.repo, "git", "rev-parse", "target").stdout.strip(), self.base)
+        self.assertEqual(command(self.repo, "git", "rev-parse", "HEAD").stdout.strip(), source)
+        self.assertEqual(command(self.repo, "git", "worktree", "list", "--porcelain").stdout, before)
 
     def test_real_defects_name_the_row(self):
         cases = [
@@ -189,7 +265,7 @@ class FastRows(unittest.TestCase):
         for args in (("reflog", "expire", "--expire=now", "--all"), ("gc", "-q", "--prune=now")):
             self.assertEqual(command(self.repo, "git", *args).returncode, 0)
         self.assertNotEqual(command(self.repo, "git", "cat-file", "-e", vanished + "^{commit}").returncode, 0)
-        env_lint = "import sys\nassert sys.argv[1:] == ['--changed-since', '" + self.base + "'], sys.argv\n"
+        env_lint = "import sys\nassert sys.argv[1:] == ['--changed-since', '" + self.base + "', '--changed-paths'], sys.argv\n"
         self.write("scripts/check-test-env.py", env_lint)
         self.commit()
         result = self.fast_from(vanished, ZERO_BASE_REF="target")
@@ -230,7 +306,7 @@ class FastRows(unittest.TestCase):
         self.assertIn('stale baseline entry', stale.stdout)
 
     def test_env_checker_is_mandatory_and_receives_base(self):
-        self.write('scripts/check-test-env.py', "import sys\nassert sys.argv[1:] == ['--changed-since', '" + self.base + "']\nprint('bad process state fixture.rs:1')\nsys.exit(1)\n")
+        self.write('scripts/check-test-env.py', "import sys\nassert sys.argv[1:] == ['--changed-since', '" + self.base + "', '--changed-paths']\nprint('bad process state fixture.rs:1')\nsys.exit(1)\n")
         self.commit()
         result = self.fast()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
@@ -248,6 +324,27 @@ class FastRows(unittest.TestCase):
         result = self.fast()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("FAIL test-shape", result.stdout)
+
+
+class Budget(unittest.TestCase):
+    def test_scales_at_one_to_one_and_a_half_load_per_core_and_caps_extremes(self):
+        with patch.object(LANE.os, "cpu_count", return_value=18):
+            for load, expected in ((0, 60), (18, 120), (27, 150), (1000, 600)):
+                with self.subTest(load=load), patch.object(LANE.os, "getloadavg", return_value=(load, 0, 0)):
+                    self.assertEqual(LANE.fast_rows_budget(), expected)
+
+    def test_missing_or_invalid_host_metrics_have_a_finite_budget(self):
+        with patch.object(LANE.os, "cpu_count", return_value=None), \
+                patch.object(LANE.os, "getloadavg", side_effect=OSError):
+            self.assertEqual(LANE.fast_rows_budget(), 60)
+        with patch.object(LANE.os, "getloadavg", return_value=(float("nan"), 0, 0)):
+            self.assertEqual(LANE.fast_rows_budget(), 60)
+
+    def test_explicit_retry_is_bounded(self):
+        for invalid in (0, -1, 1801, True, 1.5):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "1 and 1800"):
+                LANE.fast_rows_budget(invalid)
+        self.assertEqual(LANE.fast_rows_budget(1800), 1800)
 
 
 if __name__ == "__main__":

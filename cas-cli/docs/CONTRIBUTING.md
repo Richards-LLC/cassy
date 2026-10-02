@@ -202,6 +202,15 @@ The preview preflight, `release-train.sh --check-lane`, and the actual detached
 Git merge enforce this evidence before the epic ref advances. Docs/scripts-only
 merges need no compile receipt. Rust merges require clean linked target checkouts.
 
+The no-build lane preview uses a load-aware wall budget for fast rows: 60 seconds
+times `(1 + one-minute load / CPU count)`, capped at 600 seconds. At load of
+1–1.5 times the core count, this allows 120–150 seconds. An exhausted budget
+reports unfinished rows from the gate's plan and timing receipts, plus a retry
+command. Supervisors can rerun
+`python3 scripts/check-lane-fast-rows.py . <target> <source> --timeout-secs 180`
+with an explicit bound of 1–1800 seconds. The preview preserves branch refs and
+cleans its temporary checkout on success, row failure, and timeout.
+
 Workers may also run exactly
 `cargo nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`.
 An omitted target selects `--lib`; `--test` must name one explicit harness from

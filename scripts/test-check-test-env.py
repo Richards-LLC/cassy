@@ -305,6 +305,19 @@ class GitRatchet(unittest.TestCase):
             if not is_test_helper:
                 rows = [r for r in rows if r['kind'] == 'unguarded-mutation']
             self.write(LINT.BASELINE, json.dumps(baseline(rows)))
+        if self._testMethodName in ('test_scoped_new_caller_reaches_unchanged_helper',
+                                    'test_scoped_helper_change_checks_unchanged_callers'):
+            support = ('#[cfg(test)] fn fixture() { std::env::set_var("HOME", "x"); }'
+                       if self._testMethodName.endswith('unchanged_helper') else '#[cfg(test)] fn fixture() {}')
+            self.write('cas-cli/src/support.rs', support)
+            self.write(LINT.BASELINE, json.dumps(baseline(analyze(support, 'cas-cli/src/support.rs'))))
+        if self._testMethodName in ('test_scoped_unaffected_baseline_is_not_treated_as_stale',
+                                    'test_scoped_deleted_source_requires_pruning'):
+            path = ('crates/other/src/lib.rs' if 'unaffected' in self._testMethodName
+                    else 'cas-cli/src/fixture.rs')
+            source = '#[test] fn bad() { std::env::remove_var("HOME"); }'
+            self.write(path, source)
+            self.write(LINT.BASELINE, json.dumps(baseline(analyze(source, path))))
         for args in [('init', '-q'), ('config', 'user.name', 'Lint fixture'),
                      ('config', 'user.email', 'fixture@example.invalid')]:
             self.git(*args)
@@ -323,10 +336,59 @@ class GitRatchet(unittest.TestCase):
         self.git('add', '.')
         self.git('commit', '-qm', 'fixture')
 
-    def lint(self, base=None):
+    def lint(self, base=None, changed_paths=False):
         return subprocess.run([sys.executable, str(ROOT / 'scripts/check-test-env.py'),
-                               '--root', str(self.root), '--changed-since', base or self.base],
+                               '--root', str(self.root), '--changed-since', base or self.base]
+                              + (['--changed-paths'] if changed_paths else []),
                               text=True, capture_output=True)
+
+    def test_scoped_unaffected_baseline_is_not_treated_as_stale(self):
+        self.write('cas-cli/src/fixture.rs', '#[test] fn safe() { let value = 1; }')
+        result = self.lint(changed_paths=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('1 Rust paths analyzed (affected crates)', result.stdout)
+        self.assertEqual(self.lint().returncode, 0)
+
+    def test_scoped_new_caller_reaches_unchanged_helper(self):
+        self.write('cas-cli/tests/new.rs', '#[test] fn caller() { crate::support::fixture(); }')
+        result = self.lint(changed_paths=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('cas-cli/tests/new.rs:1: unguarded-helper-call', result.stderr)
+
+    def test_scoped_helper_change_checks_unchanged_callers(self):
+        self.write('cas-cli/src/fixture.rs', '#[test] fn caller() { crate::support::fixture(); }')
+        self.commit()
+        base = self.git('rev-parse', 'HEAD').strip()
+        self.write('cas-cli/src/support.rs', '#[cfg(test)] fn fixture() { std::env::remove_var("HOME"); }')
+        result = self.lint(base, changed_paths=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('cas-cli/src/fixture.rs:1: unguarded-helper-call', result.stderr)
+
+    def test_scoped_deleted_source_requires_pruning(self):
+        (self.root / 'cas-cli/src/fixture.rs').unlink()
+        result = self.lint(changed_paths=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('stale baseline entry', result.stderr)
+        self.write(LINT.BASELINE, json.dumps(baseline()))
+        self.assertEqual(self.lint(changed_paths=True).returncode, 0)
+
+    def test_scoped_policy_change_forces_complete_inventory(self):
+        self.write('crates/other/src/lib.rs', '#[test] fn broken() {')
+        self.commit()
+        base = self.git('rev-parse', 'HEAD').strip()
+        self.assertEqual(self.lint(base, changed_paths=True).returncode, 0)
+        self.write('scripts/check-test-env.py', '# changed lint policy\n')
+        result = self.lint(base, changed_paths=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('unbalanced Rust delimiters', result.stderr)
+
+    def test_scoped_baseline_growth_still_fails(self):
+        source = '#[test] fn bad() { std::env::set_var("HOME", "x"); }'
+        self.write('crates/other/src/lib.rs', source)
+        self.write(LINT.BASELINE, json.dumps(baseline(analyze(source, 'crates/other/src/lib.rs'))))
+        result = self.lint(changed_paths=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('baseline growth', result.stderr)
 
     def test_new_violation_any_member_and_untracked_file(self):
         self.assertEqual(self.lint().returncode, 0)

@@ -467,6 +467,7 @@ if [[ -n "$only_rows" ]]; then
         fi
     done
 fi
+printf '%s\n' "${selected_rows_summary//,/$'\n'}" >"$row_log_dir/plan.txt"
 
 # This is deliberately the first receipt row. It must reject a bad scratch
 # location in seconds, before a Cargo process can spend a gate cycle filling the
@@ -1204,7 +1205,13 @@ check_test_env() {
         return 1
     }
     if [[ "$fast_rows" == true ]]; then
-        python3 scripts/check-test-env.py --changed-since "${fast_base:-HEAD^}" || return $?
+        python3 scripts/check-test-env.py --changed-since "${fast_base:-HEAD^}" --changed-paths || return $?
+        # Fixture suites belong to the full gate, unless this lane changes the
+        # lint implementation/fixtures themselves.
+        if git diff --quiet "${fast_base:-HEAD^}" -- scripts/check-test-env.py scripts/rust_test_source.py \
+            scripts/test-check-test-env.py scripts/fixtures/test-env-lint.json; then
+            return 0
+        fi
     else
         python3 scripts/check-test-env.py || return $?
     fi
@@ -1357,7 +1364,7 @@ if [[ "$fast_rows" == true && ! -f scripts/check-test-shape.py ]]; then
 else
     run_check test-shape 'python3 scripts/check-test-shape.py (changed lane in fast mode)' check_test_shape
 fi
-run_check test-env 'whole-workspace process-state test lint and strict baseline ratchet' check_test_env
+run_check test-env 'process-state test lint (affected crate paths in fast mode) and strict baseline ratchet' check_test_env
 run_check builtin-doc-hygiene 'shared operator-data policy on builtin sources' check_builtin_doc_hygiene
 run_check working-tree \
     'git diff --quiet; git diff --cached --quiet; git ls-files --others --exclude-standard' \

@@ -29256,6 +29256,78 @@ mod epic_status_gate_tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn epic_override_budget_bounds_missing_anchor_fetch_cas_9069() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = init_epic_repo(&[]);
+        let p = dir.path();
+        let helper = p.join("slow-upload-pack");
+        std::fs::write(&helper, "#!/bin/sh\nsleep 2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        git(p, &["remote", "add", "origin", p.to_str().unwrap()]);
+        git(p, &["config", "remote.origin.uploadpack", helper.to_str().unwrap()]);
+        let children: Vec<_> = (0..139).map(|index| {
+            let mut task = child(&format!("cas-missing-{index}"), TaskStatus::Closed, Some("deleted"));
+            task.deliverables.factory_branch_anchor = Some(format!("{:040x}", index + 1));
+            task
+        }).collect();
+        let task = epic("cas-override-missing");
+        let mut req = base_req(&task.id);
+        req.supervisor_override = Some(true);
+        req.reason = Some("inspected all terminal child deliveries".into());
+        let started = std::time::Instant::now();
+        let outcome = run_epic_close_merge_gate_with_budget(
+            &task, &req, "main", p, &children, std::time::Duration::from_millis(100),
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "fetch escaped close budget: {:?}", started.elapsed());
+        match outcome {
+            EpicCloseGateOutcome::Incomplete(message) => {
+                assert!(message.contains("checked 0 of 139"), "{message}");
+                for task in children { assert!(message.contains(&format!("  - {}\n", task.id)), "missing unchecked {}", task.id); }
+            }
+            other => panic!("unfinished fetch must leave children unchecked: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn epic_override_budget_bounds_reanchor_scan_cas_9069() {
+        let dir = init_epic_repo(&[("squashed", 1)]);
+        let p = dir.path();
+        let anchor = epic_git_stdout(p, &["rev-parse", "factory/squashed"]);
+        let tree = epic_git_stdout(p, &["rev-parse", "main^{tree}"]);
+        let mut tip = epic_git_stdout(p, &["rev-parse", "main"]);
+        // Keep the delivered path absent across a long target history. The
+        // lane was recycled at main, so reconciliation scans for a squash.
+        for _ in 0..100 {
+            let output = Command::new("git").args(["commit-tree", &tree, "-p", &tip, "-m", "unrelated evolution"])
+                .current_dir(p).env("GIT_AUTHOR_NAME", "test").env("GIT_AUTHOR_EMAIL", "test@test")
+                .env("GIT_COMMITTER_NAME", "test").env("GIT_COMMITTER_EMAIL", "test@test")
+                .output().unwrap();
+            assert!(output.status.success());
+            tip = String::from_utf8(output.stdout).unwrap().trim().to_string();
+        }
+        git(p, &["update-ref", "refs/heads/main", &tip]);
+        git(p, &["branch", "-f", "factory/squashed", &tip]);
+        let mut children: Vec<_> = (0..139).map(|index| child(&format!("cas-scan-{index}"), TaskStatus::Closed, Some("deleted"))).collect();
+        children[0].assignee = Some("squashed".into());
+        children[0].deliverables.parked_branch = Some("factory/squashed".into());
+        children[0].deliverables.factory_branch_anchor = Some(anchor);
+        let task = epic("cas-override-scan");
+        let mut req = base_req(&task.id);
+        req.supervisor_override = Some(true);
+        req.reason = Some("inspected terminal child delivery history".into());
+        let started = std::time::Instant::now();
+        let outcome = run_epic_close_merge_gate_with_budget(&task, &req, "main", p, &children, std::time::Duration::from_millis(100));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "scan escaped close budget: {:?}", started.elapsed());
+        match outcome {
+            EpicCloseGateOutcome::Incomplete(message) => {
+                for child in children { assert!(message.contains(&format!("  - {}\n", child.id)), "missing unchecked {}", child.id); }
+            }
+            other => panic!("unfinished proof must leave children unchecked: {other:?}"),
+        }
+    }
+
     /// Build `count` closed children spread over `lanes` worker lanes, each
     /// with its own delivery commit as anchor, and merge every lane to main.
     fn merged_epic_children(p: &std::path::Path, count: usize, lanes: usize) -> Vec<Task> {

@@ -12,6 +12,7 @@ import {
   disconnectedView,
   elapsedSeconds,
   lostConnectionBanner,
+  pairingControlsReason,
   pairingLostBanner,
   pairingRefusal,
   unsteadyBanner,
@@ -288,6 +289,9 @@ describe("one outage, one vocabulary (journey F9)", () => {
     // cas-a6f0: still live, heartbeats unanswered: unsteady, not lost.
     expect(unsteadyBanner("Atlas · Linux")).toBe("Connection to Atlas · Linux unsteady — checking…");
     expect(pairingRefusal("Atlas · Linux")).toBe("Not sent: Atlas · Linux needs pairing again.");
+    // cas-7b31: a refused pairing promises no reconnect and no returning control.
+    expect(pairingControlsReason("Atlas · Linux")).toBe("Atlas · Linux needs pairing again. Re-pair it to take control and interrupt.");
+    expect(pairingControlsReason("Atlas · Linux")).not.toMatch(/return|reconnect/i);
     expect(outageRefusal("Atlas · Linux")).toBe("Not sent: lost connection to Atlas · Linux. Your message is kept; send it again when it's back.");
     expect(outageControlsReason("Atlas · Linux")).toBe("Lost connection to Atlas · Linux. Control and interrupts return when it reconnects.");
     for (const line of [outageRefusal("Atlas · Linux"), outageControlsReason("Atlas · Linux")]) {

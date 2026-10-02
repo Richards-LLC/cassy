@@ -477,7 +477,9 @@ test("HUB-J12 network switch: in Terminal view a refused pairing leaves no 'conn
   await expect(page.locator(".terminal-disconnected-banner .banner-text")).toHaveText("Atlas · Linux needs pairing again.");
   await expect(page.locator("#toast")).not.toContainText("connection dropped");
   expect(await page.locator("body").ariaSnapshot()).not.toContain("connection dropped");
-  // Nor does control come back by itself: the pairing must be repaired first.
+  // Nor does control come back by itself: the pairing must be repaired first,
+  // and the controls say so instead of promising a reconnect.
+  await expect(page.locator("#session-controls-reason")).toHaveText("Atlas · Linux needs pairing again. Re-pair it to take control and interrupt.");
   await clock.advance(10_000);
   await expect(page.locator(".mode-badge")).not.toHaveText("CONTROL");
 });

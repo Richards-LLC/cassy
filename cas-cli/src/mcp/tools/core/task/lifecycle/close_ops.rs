@@ -23670,7 +23670,7 @@ mod merge_state_gate_tests {
         use crate::store::{
             open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store,
         };
-        use cas_types::{Agent, AgentRole, Dependency, DependencyType, WorkTarget};
+        use cas_types::{Agent, AgentRole, Dependency, DependencyType};
         use std::os::unix::fs::PermissionsExt;
 
         let mut env = TestEnvGuard::temp_home();
@@ -23724,10 +23724,8 @@ mod merge_state_gate_tests {
             risk: vec![TaskRisk::None],
             ..Default::default()
         };
-        epic.deliverables.work_target = Some(WorkTarget {
-            repo_selector: p.to_str().unwrap().into(),
-            target_branch: "main".into(),
-        });
+        // The epic binds to the store's own repository (`<repo>/.cas`), as a
+        // supervisor's epic in the project checkout does.
         epic.deliverables.files_changed = vec!["delivery.rs".to_string()];
         store.add(&epic).unwrap();
         let children = 64;

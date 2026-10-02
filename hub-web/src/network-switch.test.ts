@@ -186,6 +186,23 @@ describe("network hints (cas-0978)", () => {
     expect(opened[0]).toContain("ticket=fresh");
   });
 
+  it("beats no heartbeat after a pairing refusal, so the machine never reads live again by itself (cas-7b31)", async () => {
+    vi.stubGlobal("window", globalThis);
+    const onState = vi.fn();
+    const { internals } = supervisor({ onState });
+    const fields = internals as unknown as { desired: boolean; heartbeat(): Promise<void>; startHeartbeat(): void; heartbeatTimer?: number; blockAuthentication(kind: string, detail: string): void };
+    fields.desired = true;
+    internals.lifecycle = { phase: "live", stage: "live" };
+    fields.startHeartbeat();
+    vi.spyOn(internals, "request").mockRejectedValue(new Error("401"));
+    fields.blockAuthentication("revoked", "pairing was revoked");
+    expect(fields.heartbeatTimer, "the heartbeat stops with the refusal").toBeUndefined();
+    onState.mockClear();
+    await fields.heartbeat();
+    expect(onState, "a stray beat changes nothing").not.toHaveBeenCalled();
+    expect(internals.lifecycle).toMatchObject({ phase: "failed", authFailure: "revoked" });
+  });
+
   it("waits at most 10 s between reconnects and gives a doubted socket 3 s to answer", () => {
     expect(MACHINE_RETRY_CEILING_MS).toBe(10_000);
     expect(SOCKET_PROBE_TIMEOUT_MS).toBe(3_000);

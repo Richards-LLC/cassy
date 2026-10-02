@@ -693,6 +693,11 @@ export class HubConnectionSupervisor {
   }
 
   private async heartbeat(): Promise<void> {
+    // cas-7b31 (cas-05c0 QA): a stopped or refused connection has no
+    // heartbeat. One that ran on after a pairing refusal turned the machine
+    // "live" again on its next beat, which erased "Needs pairing" from the
+    // controls and the rail while the header still said it.
+    if (!this.desired || this.lifecycle.phase !== "live") return;
     const started = performance.now();
     try {
       await this.refreshSessions(AbortSignal.timeout(3_000));
@@ -721,6 +726,8 @@ export class HubConnectionSupervisor {
       this.transition("live", "live", { latencyMs: Math.round(performance.now() - started) });
       if (wasUnsteady) this.releaseHeldMessages();
     } catch (error) {
+      // Stopped or refused while this beat was in flight: not a live machine.
+      if (!this.desired || this.lifecycle.phase !== "live") return;
       this.missedHeartbeats += 1;
       this.transition("live", "live", { reason: error instanceof Error ? error.message : "heartbeat failed" });
       if (this.missedHeartbeats >= RECONNECT_AFTER_MISSED_HEARTBEATS) this.connectionLostNow("Lost connection to the machine");
@@ -1208,6 +1215,7 @@ export class HubConnectionSupervisor {
 
   private blockAuthentication(kind: AuthFailureKind, detail: string, session?: string): void {
     this.desired = false;
+    this.stopHeartbeat();
     this.eventAbort?.abort();
     if (this.retryTimer !== undefined) window.clearTimeout(this.retryTimer);
     this.retryTimer = undefined;

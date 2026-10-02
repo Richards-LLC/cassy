@@ -58,8 +58,9 @@ describe("unsettled messages across a reload (cas-e7b1)", () => {
     view.update();
     const line = (text: string) => [...view.element.querySelectorAll<HTMLElement>(".bub")].find((bubble) => bubble.textContent?.includes(text))?.querySelector(".conversation-delivery")?.textContent;
     expect(line("Waiting for the network")).toBe("Waiting for the connection — sends when it's back");
-    expect(line("On the wire, no receipt yet")).toContain("Not confirmed");
-    expect(line("Receipt never came")).toContain("Not confirmed");
+    // Two in a row read as one notice on the second (cas-b00c); neither claims it arrived.
+    expect(line("On the wire, no receipt yet")).toBeUndefined();
+    expect(line("Receipt never came")).toContain("2 messages not confirmed");
     expect(line("Refused by the hub")).toContain("Not sent");
     expect(view.element.textContent).not.toMatch(/Sending…|Delivered/);
     // The held message still counts as pending (its session stays listed), and nothing claims the supervisor has it.

@@ -533,3 +533,38 @@ test("HUB-J12 network switch: a waiting and a not-confirmed message survive a re
     expect(await stored()).not.toContain("atlas:");
   });
 });
+
+// cas-b00c (journey F19): when several sends in a row lose their receipts
+// across a network switch, the thread says so once, with Review, instead of
+// stacking a warning card with its own Retry and × for each. The list row
+// says the last one is not confirmed and does not date the row by it.
+test("HUB-J12 network switch: three unconfirmed messages read as one notice (cas-b00c)", async ({ page }) => {
+  const { hub, clock } = await connected(page);
+  const log = page.getByRole("log");
+  const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ });
+  const when = row.locator(".conversation-when");
+  const whenBefore = (await when.count()) ? await when.textContent() : null;
+  for (const text of ["Is the gate green?", "Did the Mac tests start?", "Ship it if both are green"]) {
+    const next = hub.nextSend();
+    await sendNow(page, text);
+    expect((await next).text).toBe(text);
+  }
+  await clock.advance(15_000); // every receipt deadline passes
+  const notice = log.locator('.conversation-unconfirmed[role="status"]');
+  await expect(notice).toHaveCount(1);
+  await expect(notice).toHaveText(`3 messages not confirmed · Cassy couldn't confirm delivery to ${PELICAN}. Review them to retry.`);
+  await expect(log.getByRole("button", { name: "Retry sending" })).toHaveCount(0);
+  await expect(log.getByRole("button", { name: /^Dismiss/ })).toHaveCount(0);
+  await expect(row).toContainText("Not confirmed: Ship it if both are green");
+  // Unconfirmed sends are not activity the supervisor saw: the row's time is unchanged.
+  if (whenBefore === null) await expect(when).toHaveCount(0); else await expect(when).toHaveText(whenBefore);
+  const review = log.getByRole("button", { name: "Review 3 messages not confirmed", exact: true });
+  await review.click();
+  await expect(log.getByRole("button", { name: "Retry sending" })).toHaveCount(3);
+  await expect(log.getByRole("button", { name: "Retry sending" }).first()).toBeFocused();
+  await expect(log.getByRole("button", { name: "Dismiss this notice", exact: true })).toHaveCount(3);
+  await log.getByRole("button", { name: /^Show 3 messages not confirmed as one notice$/ }).click();
+  await expect(review).toBeFocused();
+  // Nothing was sent twice.
+  expect(hub.sends).toHaveLength(3);
+});

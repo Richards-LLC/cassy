@@ -2714,7 +2714,10 @@ async function takeControlForRefused(machineId: string, session: string): Promis
     if (!stillHere()) return;
     const after = leases.get(key);
     if (requested && after?.held_by_me) {
-      showComposerStatus("You control this session now. Retry to send the message.", "info");
+      // cas-b00c (journey F18): the message itself now says this device
+      // controls the session and that Retry goes through, and focus is on its
+      // Retry. The composer does not say it again in other words.
+      clearComposerStatus();
       return;
     }
     // Journey F5: the message already names the device in control and what
@@ -3695,7 +3698,10 @@ function renderConversationList(): void {
     // newest turn here, its newest queue row, or its panes' output), so
     // several sessions of one project never show one shared catalog time.
     const activity = sessionActivity(machine.id, session.name);
-    const lastTurn = Math.max(-Infinity, ...events.flatMap((event) => event.at !== undefined && Number.isFinite(event.at) ? [event.at] : []));
+    // cas-b00c: only confirmed activity dates a row. A message still waiting,
+    // not confirmed or not sent never reached the supervisor as far as this
+    // page knows, so it must not make its row "Most recent" or "now".
+    const lastTurn = Math.max(-Infinity, ...events.flatMap((event) => event.at !== undefined && Number.isFinite(event.at) && (event.kind === "reply" || event.value.notificationId !== undefined) ? [event.at] : []));
     // cas-6acf: a row's time never runs backwards without new activity.
     const activityAt = Math.max(activity?.at ?? -Infinity, lastTurn, rowActivityHighWater.get(key) ?? -Infinity);
     const active = Number.isFinite(activityAt) ? activityAt : undefined;

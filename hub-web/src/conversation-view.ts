@@ -28,6 +28,9 @@ import {
  */
 
 /** What a kind-specific renderer receives. */
+/** A message's place in a run of unconfirmed messages shown as one notice (cas-b00c). */
+type UnconfirmedRun = { count: number; last: boolean; expanded: boolean };
+
 export interface TurnRenderContext {
   readonly document: Document;
   readonly turn: ThreadTurn;
@@ -359,6 +362,8 @@ export class ConversationView {
   private nodes = new Map<string, HTMLElement>();
   /** Coalesced status lines the operator opened with "Show full update"; survives repaints. */
   private expanded = new Set<string>();
+  /** cas-b00c: runs of several unconfirmed messages are shown one by one (Review) instead of as one notice. */
+  private reviewUnconfirmed = false;
   private following = true;
   /**
    * cas-71af (1584 QA F01): Load earlier held focus when pressed. It is
@@ -675,12 +680,19 @@ export class ConversationView {
   }
 
   private renderUnsent(): void {
-    const count = this.history.dismissedSends().length;
+    const dismissed = this.history.dismissedSends();
+    const count = dismissed.length;
     this.unsent.hidden = count === 0;
     if (!count) { delete this.unsent.dataset.count; return; }
-    if (this.unsent.dataset.count === String(count)) return;
-    this.unsent.dataset.count = String(count);
-    const noun = count === 1 ? "1 unsent message" : `${count} unsent messages`;
+    // cas-b00c (journey F19): a message whose delivery was not confirmed may
+    // well have arrived, so the chip does not call it unsent.
+    const unconfirmed = dismissed.filter((send) => send.state === "unconfirmed").length;
+    const signature = `${count}:${unconfirmed}`;
+    if (this.unsent.dataset.count === signature) return;
+    this.unsent.dataset.count = signature;
+    const noun = unconfirmed === 0 ? (count === 1 ? "1 unsent message" : `${count} unsent messages`)
+      : unconfirmed === count ? (count === 1 ? "1 message not confirmed" : `${count} messages not confirmed`)
+      : `${count} messages not sent or not confirmed`;
     const document = this.element.ownerDocument;
     const glyph = document.createElement("template"); glyph.innerHTML = WARN;
     const text = document.createElement("span"); text.textContent = noun;
@@ -717,7 +729,9 @@ export class ConversationView {
     const live = turn.event.kind === "send" && turn.event.value.state === "error" ? this.options.sessionLive?.() === true : undefined;
     // An unconfirmed send settles once the supervisor speaks after it (journey F10).
     const settled = turn.event.kind === "send" && turn.event.value.state === "unconfirmed" ? this.history.repliedSince(turn.event.value) : undefined;
-    return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting, pinned, retired, delivered, held, holder, settled, live]);
+    // cas-b00c: a run of unconfirmed messages repaints when Review opens or closes it.
+    const review = settled === false ? this.reviewUnconfirmed : undefined;
+    return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting, pinned, retired, delivered, held, holder, settled, live, review]);
   }
 
   /**
@@ -913,8 +927,10 @@ export class ConversationView {
     // replacement instead of dropping it to the page body.
     const active = document.activeElement;
     let refocus: { bubble: HTMLElement; className: string } | undefined;
-    for (const turn of group.turns) {
-      const signature = this.turnSignature(turn);
+    const runs = this.unconfirmedRuns(group);
+    for (const [index, turn] of group.turns.entries()) {
+      const run = runs.get(index);
+      const signature = this.turnSignature(turn) + (run ? JSON.stringify(run) : "");
       let bubble = existing.get(turn.key);
       let sheets: HTMLElement[] = [];
       if (bubble && bubble.dataset.signature === signature) {
@@ -922,7 +938,7 @@ export class ConversationView {
       } else {
         const previous = bubble;
         const focusedClass = previous && active instanceof HTMLElement && previous.contains(active) ? active.className : undefined;
-        if (turn.event.kind === "send") bubble = this.renderSend(document, turn, turn.event.value);
+        if (turn.event.kind === "send") bubble = this.renderSend(document, turn, turn.event.value, run);
         else ({ bubble, sheets } = this.renderReply(document, turn, turn.event.value));
         bubble.classList.add("conversation-turn");
         bubble.dataset.key = turn.key;
@@ -939,7 +955,37 @@ export class ConversationView {
     if (refocus) landFocusIn(refocus.bubble, refocus.className);
   }
 
-  private renderSend(document: Document, turn: ThreadTurn, send: ConversationSend): HTMLElement {
+  /**
+   * cas-b00c (journey F19): two or more unconfirmed messages in a row read as
+   * one notice, not a stack of warning cards each with its own Retry. Maps a
+   * turn's index in the group to its place in such a run.
+   */
+  private unconfirmedRuns(group: ThreadGroup): Map<number, UnconfirmedRun> {
+    const runs = new Map<number, UnconfirmedRun>();
+    const actionable = group.turns.map((turn) => turn.event.kind === "send" && turn.event.value.state === "unconfirmed" && !this.history.repliedSince(turn.event.value));
+    for (let start = 0; start < actionable.length; ) {
+      let end = start;
+      while (end < actionable.length && actionable[end]) end += 1;
+      if (end - start >= 2) {
+        for (let index = start; index < end; index += 1) {
+          runs.set(index, { count: end - start, last: index === end - 1, expanded: this.reviewUnconfirmed });
+        }
+      }
+      start = Math.max(end, start + 1);
+    }
+    return runs;
+  }
+
+  /** Open (or close) the unconfirmed runs, and keep the keyboard user's place. */
+  private toggleUnconfirmedReview(open: boolean): void {
+    this.reviewUnconfirmed = open;
+    this.update();
+    const turns = [...this.msgs.querySelectorAll<HTMLElement>('.conversation-turn[data-state="unconfirmed"]:not([data-settled="true"])')];
+    if (open) { if (turns[0]) landFocusIn(turns[0], "conversation-retry"); return; }
+    this.msgs.querySelector<HTMLElement>(".conversation-review")?.focus({ preventScroll: true });
+  }
+
+  private renderSend(document: Document, turn: ThreadTurn, send: ConversationSend, run?: UnconfirmedRun): HTMLElement {
     const bubble = document.createElement("div");
     bubble.className = "bub";
     bubble.dataset.state = send.state;
@@ -968,6 +1014,30 @@ export class ConversationView {
       const label = document.createElement("span"); label.textContent = "Delivered";
       state.append(tick.content.firstElementChild!, label);
       bubble.append(state);
+    } else if (send.state === "unconfirmed" && run && !run.expanded) {
+      // cas-b00c: one notice for the run, on its last message; the earlier
+      // ones are quiet records of what was sent. Review opens each with its
+      // own Retry.
+      bubble.dataset.grouped = run.last ? "last" : "member";
+      if (run.last) {
+        const state = document.createElement("span");
+        state.className = "conversation-delivery conversation-refused conversation-unconfirmed"; state.setAttribute("role", "status");
+        const glyph = document.createElement("template"); glyph.innerHTML = WARN;
+        const label = document.createElement("b"); label.textContent = `${run.count} messages not confirmed`;
+        const separator = document.createElement("span"); separator.className = "sr-only"; separator.textContent = " · ";
+        const reason = document.createElement("span"); reason.className = "conversation-refused-reason";
+        reason.textContent = `Cassy couldn't confirm delivery to ${this.options.supervisor}.`;
+        const next = document.createElement("span"); next.className = "conversation-refused-next"; next.textContent = " Review them to retry.";
+        reason.append(next);
+        state.append(glyph.content.firstElementChild!, label, separator, reason);
+        const actions = document.createElement("div"); actions.className = "conversation-actions";
+        const review = document.createElement("button"); review.type = "button"; review.className = "conversation-review"; review.textContent = "Review";
+        review.setAttribute("aria-label", `Review ${run.count} messages not confirmed`);
+        review.setAttribute("aria-expanded", "false");
+        review.onclick = () => this.toggleUnconfirmedReview(true);
+        actions.append(review);
+        bubble.append(state, actions);
+      }
     } else if (send.state === "unconfirmed" && this.history.repliedSince(send)) {
       // Journey F10: the supervisor has spoken since, so this send most
       // likely arrived. The card settles to a quiet record: no warning and no
@@ -1015,6 +1085,15 @@ export class ConversationView {
         retry.onclick = () => this.options.retryMessage?.(send);
         actions.append(retry);
         bubble.append(actions);
+      }
+      if (run?.last) {
+        const less = document.createElement("div"); less.className = "conversation-actions conversation-actions-quiet";
+        const close = document.createElement("button"); close.type = "button"; close.className = "conversation-review-less conversation-send-again"; close.textContent = "Show less";
+        close.setAttribute("aria-label", `Show ${run.count} messages not confirmed as one notice`);
+        close.setAttribute("aria-expanded", "true");
+        close.onclick = () => this.toggleUnconfirmedReview(false);
+        less.append(close);
+        bubble.append(less);
       }
       this.dismissable(document, bubble, send);
     } else if (send.state === "error" && send.replaced) {
@@ -1083,7 +1162,15 @@ export class ConversationView {
       if (this.options.retryMessage) {
         const retry = document.createElement("button"); retry.type = "button"; retry.className = "conversation-retry"; retry.textContent = "Retry";
         retry.setAttribute("aria-label", "Retry sending");
-        retry.onclick = () => this.options.retryMessage?.(send);
+        if (holder) {
+          // cas-b00c (journey F18): while another device holds control a
+          // retry can only be refused again, so it is not pressable either.
+          retry.setAttribute("aria-disabled", "true");
+          retry.setAttribute("aria-description", `Waiting for ${holder} to release control`);
+          retry.dataset.waiting = "true";
+        } else {
+          retry.onclick = () => this.options.retryMessage?.(send);
+        }
         actions.append(retry);
       }
       if (actions.childElementCount) bubble.append(actions);
@@ -1101,7 +1188,9 @@ export class ConversationView {
   private dismissable(document: Document, bubble: HTMLElement, send: ConversationSend): void {
     bubble.dataset.swipe = "dismiss";
     const dismiss = document.createElement("button"); dismiss.type = "button"; dismiss.className = "conversation-dismiss";
-    dismiss.setAttribute("aria-label", "Dismiss unsent message");
+    // cas-b00c (journey F19): an unconfirmed message may well have arrived;
+    // only the notice about it is dismissed, not a message called unsent.
+    dismiss.setAttribute("aria-label", send.state === "unconfirmed" ? "Dismiss this notice" : "Dismiss unsent message");
     dismiss.title = "Dismiss";
     dismiss.innerHTML = CLOSE;
     dismiss.onclick = () => this.dismissSend(send, bubble);

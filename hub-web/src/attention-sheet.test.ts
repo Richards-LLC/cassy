@@ -1,13 +1,13 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
-import { applySheetSemantics, sheetKeydown } from "./attention-sheet";
+import { applySheetSemantics, layerAboveSheet, sheetFocusables, sheetKeydown } from "./attention-sheet";
 
 /** A conversation shell as conversationShellMarkup builds it: sidebar, main (badge), rail (sheet). */
 function shell(): { root: HTMLElement; badge: HTMLButtonElement; rail: HTMLElement; close: HTMLButtonElement; details: HTMLElement; send: HTMLButtonElement } {
   const root = document.createElement("div"); root.className = "conversation-shell thread-open";
   root.innerHTML = '<aside class="conversation-sidebar"><nav id="conversation-list"><button class="conversation-row">row</button></nav></aside>'
     + '<main class="conversation-main"><button id="conversation-attention" aria-expanded="false">1</button><button id="message-send">Send</button></main>'
-    + '<aside class="conversation-context" aria-label="Conversation context"><button class="context-sheet-close">×</button><section data-section="attention"><button class="dismiss">Dismiss</button><details><summary>Details</summary></details></section></aside>';
+    + '<aside class="conversation-context" aria-label="Conversation context"><button class="context-sheet-close">×</button><section data-section="attention"><button class="dismiss">Dismiss</button><button class="later" disabled>Later</button><details><summary>Details</summary><pre>payload</pre><button class="copy">Copy</button></details></section></aside>';
   document.body.replaceChildren(root);
   return {
     root,
@@ -66,5 +66,40 @@ describe("phone Attention sheet (cas-a5c6)", () => {
     expect(sheetKeydown({ key: "Escape", shiftKey: false }, rail, document.activeElement, shut, all)).toBe(true);
     expect(shut).toHaveBeenCalledOnce();
     expect(sheetKeydown({ key: "a", shiftKey: false }, rail, document.activeElement, shut, all)).toBe(false);
+  });
+
+  it("skips what Tab cannot reach: a collapsed Details' contents, disabled and hidden controls (QA F01)", () => {
+    const { rail, close, details } = shell();
+    const names = () => sheetFocusables(rail, all).map((node) => node.textContent);
+    expect(names()).toEqual(["×", "Dismiss", "Details"]);
+    // Shift+Tab from Close (where the sheet opens) reaches Details, not the hidden Copy.
+    close.focus();
+    expect(sheetKeydown({ key: "Tab", shiftKey: true }, rail, document.activeElement, vi.fn(), all)).toBe(true);
+    expect(document.activeElement).toBe(details);
+    // Opened, the Details' Copy is a stop; Tab from it wraps to Close.
+    rail.querySelector("details")!.open = true;
+    expect(names()).toEqual(["×", "Dismiss", "Details", "Copy"]);
+    rail.querySelector<HTMLButtonElement>(".copy")!.focus();
+    sheetKeydown({ key: "Tab", shiftKey: false }, rail, document.activeElement, vi.fn(), all);
+    expect(document.activeElement).toBe(close);
+  });
+
+  it("leaves Escape and Tab to a palette opened over it (QA F02)", () => {
+    const { rail, close } = shell();
+    const palette = document.createElement("dialog"); palette.id = "command-palette";
+    palette.innerHTML = '<input aria-label="Filter commands">';
+    document.body.append(palette);
+    palette.setAttribute("open", "");
+    const shut = vi.fn();
+    palette.querySelector("input")!.focus();
+    expect(layerAboveSheet(rail)).toBe(true);
+    expect(sheetKeydown({ key: "Escape", shiftKey: false }, rail, document.activeElement, shut, all)).toBe(false);
+    expect(sheetKeydown({ key: "Tab", shiftKey: false }, rail, document.activeElement, shut, all)).toBe(false);
+    expect(shut).not.toHaveBeenCalled();
+    // Palette closed: Escape is the sheet's again.
+    palette.removeAttribute("open");
+    close.focus();
+    expect(sheetKeydown({ key: "Escape", shiftKey: false }, rail, document.activeElement, shut, all)).toBe(true);
+    expect(shut).toHaveBeenCalledOnce();
   });
 });

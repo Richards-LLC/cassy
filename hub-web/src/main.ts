@@ -7,7 +7,7 @@ import { controlCommandCopy, sessionJumpCommandMarkup } from "./palette-commands
 import { ConversationHistory } from "./conversation-history";
 import { loadDismissedAsks, saveDismissedAsks, type DismissedAsksStorage } from "./dismissed-asks";
 import { ConversationView, emptyActivityText } from "./conversation-view";
-import { applySheetSemantics, sheetFocusables, sheetKeydown } from "./attention-sheet";
+import { applySheetSemantics, layerAboveSheet, sheetFocusables, sheetKeydown } from "./attention-sheet";
 import { isOperatorNotice, NOTICE_KIND, noticeFingerprint, noticeTime, planNotice } from "./operator-notices";
 import { REFUSED_SEE_ABOVE, refusalSentence, refusal } from "./refusal";
 import { installAttentionObjects } from "./attention-objects";
@@ -3782,7 +3782,7 @@ function applyAttentionSheet(): void {
   // A redraw (a catalog poll, a new turn) rebuilds the shell and moves the
   // rail's panel, which drops focus to the page. Put it back where it was.
   const sheet = document.querySelector<HTMLElement>(".conversation-shell.attention-sheet-open > .conversation-context");
-  if (!sheet || sheet.contains(document.activeElement)) return;
+  if (!sheet || sheet.contains(document.activeElement) || layerAboveSheet(sheet)) return;
   const back = sheetFocus?.isConnected && sheet.contains(sheetFocus) ? sheetFocus : sheetFocusables(sheet)[0];
   back?.focus({ preventScroll: true });
 }
@@ -3802,6 +3802,8 @@ document.addEventListener("focusin", (event) => {
   const sheet = document.querySelector<HTMLElement>(".conversation-shell.attention-sheet-open > .conversation-context");
   if (!sheet || !(event.target instanceof HTMLElement)) return;
   if (sheet.contains(event.target)) sheetFocus = event.target;
+  // A palette opened over the sheet keeps its focus (cas-a5c6 QA F02).
+  else if (layerAboveSheet(sheet)) return;
   else sheetFocusables(sheet)[0]?.focus();
 });
 function openAttentionSheet(): void {

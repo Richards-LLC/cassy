@@ -83,14 +83,49 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     const sheet = page.getByRole("dialog", { name: "Attention for this session" });
     // cas-a5c6: the modal sheet holds Tab and Shift+Tab; nothing behind it is reachable.
     const inSheet = () => page.evaluate(() => Boolean(document.activeElement?.closest(".conversation-context[role='dialog']")));
+    // Each element gets a stable tag the first time it is focused, so two
+    // controls with the same words still count as two stops.
+    const focused = () => page.evaluate(() => {
+      const node = document.activeElement as HTMLElement | null;
+      if (!node) return "";
+      const label = `${node.tagName.toLowerCase()}.${node.className.split(" ")[0]}:${node.textContent?.trim() ?? ""}`;
+      const counter = window as unknown as { __stop?: number };
+      node.dataset.stop ??= String((counter.__stop = (counter.__stop ?? 0) + 1));
+      return label === "button.context-sheet-close:×" || label === "summary.:Details" ? label : `${label}#${node.dataset.stop}`;
+    });
+    // QA F01: Shift+Tab from Close really moves, to the sheet's last stop (the
+    // collapsed Details' summary, not the Copy button hidden inside it).
     await page.keyboard.press("Shift+Tab");
     expect(await inSheet(), "Shift+Tab from Close stays in the sheet").toBe(true);
-    for (let step = 0; step < 8; step += 1) {
+    expect(await focused()).toBe("summary.:Details");
+    // Tab walks every stop once and wraps from Details back to Close.
+    const stops: string[] = [];
+    for (let step = 0; step < 12; step += 1) {
       await page.keyboard.press("Tab");
       expect(await inSheet(), `Tab ${step + 1} stays in the sheet`).toBe(true);
+      stops.push(await focused());
     }
+    const close = "button.context-sheet-close:×";
+    expect(stops[0], "Tab from Details wraps to Close").toBe(close);
+    const lap = stops.indexOf(close, 1);
+    expect(lap, `Tab comes back round to Close: ${stops.join(" → ")}`).toBeGreaterThan(1);
+    expect(new Set(stops.slice(0, lap)).size, `each Tab moves on: ${stops.join(" → ")}`).toBe(lap);
     await expect(page.locator(".conversation-main")).toHaveAttribute("inert", "");
     await expect(sheet).toBeVisible();
+  });
+
+  await journey.stage("A palette opened over the sheet closes first", async () => {
+    const sheet = page.getByRole("dialog", { name: "Attention for this session" });
+    const palette = page.locator("#command-palette");
+    // QA F02: the topmost layer owns Escape.
+    await page.keyboard.press("ControlOrMeta+k");
+    if (!(await palette.evaluate((node) => (node as HTMLDialogElement).open))) await page.keyboard.press("ControlOrMeta+k");
+    await expect(palette).toHaveAttribute("open", "");
+    await expect(page.getByRole("searchbox", { name: "Filter commands" })).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(palette).not.toHaveAttribute("open", "");
+    await expect(sheet).toBeVisible();
+    await expect(page.locator(".conversation-context .context-sheet-close")).toBeFocused();
   });
 
   await journey.stage("Close it and keep reading", async () => {

@@ -42,9 +42,40 @@ export function applySheetSemantics(shell: HTMLElement | null, modal: boolean): 
 /** Rendered, so focusable: the sheet hides its other sections with CSS. */
 const rendered = (node: HTMLElement): boolean => node.getClientRects().length > 0;
 
-/** The sheet's focusable controls, in order, skipping hidden ones. */
+/**
+ * Inside a closed <details> only its own <summary> can take focus; the rest
+ * is not rendered, and focus() on it does nothing (cas-a5c6 QA F01: a Copy
+ * button inside a collapsed Details was counted as the sheet's last stop, so
+ * Shift+Tab from Close and Tab past Details went nowhere).
+ */
+function insideClosedDetails(node: HTMLElement): boolean {
+  for (let details = node.closest("details"); details; details = details.parentElement?.closest("details") ?? null) {
+    if (details.open) continue;
+    const ownSummary = node.tagName === "SUMMARY" && node.parentElement === details;
+    if (!ownSummary) return true;
+  }
+  return false;
+}
+
+/** The sheet's focusable controls, in order, skipping hidden, disabled and collapsed ones. */
 export function sheetFocusables(sheet: HTMLElement, visible: (node: HTMLElement) => boolean = rendered): HTMLElement[] {
-  return [...sheet.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((node) => node.tabIndex >= 0 && !node.closest("[hidden], [inert]") && visible(node));
+  return [...sheet.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((node) =>
+    node.tabIndex >= 0
+    && !node.closest("[hidden], [inert], [aria-hidden='true']")
+    && !(node as HTMLButtonElement).disabled
+    && node.getAttribute("aria-disabled") !== "true"
+    && !insideClosedDetails(node)
+    && visible(node));
+}
+
+/**
+ * A layer over the sheet (cas-a5c6 QA F02): an open modal <dialog> or another
+ * aria-modal surface outside it, such as the Ctrl+K command palette. That
+ * layer owns Escape, Tab and focus until it closes.
+ */
+export function layerAboveSheet(sheet: HTMLElement): boolean {
+  const document = sheet.ownerDocument;
+  return [...document.querySelectorAll<HTMLElement>("dialog[open], [aria-modal='true']")].some((layer) => layer !== sheet && !sheet.contains(layer) && !layer.contains(sheet));
 }
 
 /**
@@ -52,6 +83,8 @@ export function sheetFocusables(sheet: HTMLElement, visible: (node: HTMLElement)
  * the sheet's to handle (the caller then prevents the default).
  */
 export function sheetKeydown(event: Pick<KeyboardEvent, "key" | "shiftKey">, sheet: HTMLElement, active: Element | null, close: () => void, visible?: (node: HTMLElement) => boolean): boolean {
+  // The topmost layer wins: a palette opened over the sheet closes first.
+  if (layerAboveSheet(sheet)) return false;
   if (event.key === "Escape") { close(); return true; }
   if (event.key !== "Tab") return false;
   const controls = sheetFocusables(sheet, visible);

@@ -830,7 +830,11 @@ export class ConversationView {
   /** Cheap liveness poll: repaints only when the working state actually flipped. */
   refreshWorking(): void {
     if (this.disposed) return;
-    const working = this.options.working?.() === true;
+    // cas-71f4: a newest message still "Sending…" holds the working line back
+    // (threadModel), so it is not a flip to repaint for.
+    const newest = this.history.visibleEvents().at(-1);
+    const sending = newest?.kind === "send" && newest.value.state === "sending" && !newest.value.held;
+    const working = this.options.working?.() === true && !sending;
     if (working !== this.nodes.has("working")) this.update();
   }
 

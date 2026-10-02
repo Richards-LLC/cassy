@@ -120,7 +120,7 @@ test("HUB-J12 network switch: half-open machine waits for four failed heartbeats
         await expect(footer).toHaveText("Unsteady");
         await expect(panel).toHaveText(/^Connection unsteady — checking…/);
         await expect(page.getByText("All clear").filter({ visible: true })).toHaveCount(0);
-        await expect(page.getByText(/degraded/i).filter({ visible: true })).toHaveCount(0);
+        await expect(page.getByText(/degraded|connection dropped/i).filter({ visible: true })).toHaveCount(0);
         await sendNow(page, "While unsteady");
         await expect(held).toHaveText("Waiting for the connection — sends when it's back");
         await expect(page.locator("#message-status")).toHaveText("Connection to Atlas · Linux unsteady — checking… Your message will go out by itself when it's back.");

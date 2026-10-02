@@ -4056,7 +4056,13 @@ mod tests {
                 repo.path().join("gh-fixture"),
             );
             let state = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path());
-            assert!(admit_branch_ci(&state, false, None).is_err(), "{state:?}");
+            if conclusion.is_some() {
+                assert!(admit_branch_ci(&state, false, None).is_err(), "{state:?}");
+            } else {
+                assert_eq!(admit_branch_ci(&state, false, None), Ok(false));
+                assert!(describe_branch_ci_state("factory/ci-fixture", &state)
+                    .contains("code validation not confirmed for"));
+            }
             let receipt = describe_branch_ci_state("factory/ci-fixture", &state);
             assert!(
                 receipt.contains(&format!("CI SHA: {code_sha}")),
@@ -4119,10 +4125,68 @@ mod tests {
             .unwrap();
             env.set(crate::github_issue_attach::GH_BIN_ENV, &fake_gh);
             let state = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path());
-            let refusal = admit_branch_ci(&state, false, None).unwrap_err();
-            assert!(refusal.contains("CODE CI REQUIRED"), "{refusal}");
-            assert!(refusal.contains(&code_sha), "{refusal}");
+            if response.contains("Docs Lint") {
+                let refusal = admit_branch_ci(&state, false, None).unwrap_err();
+                assert!(refusal.contains("CODE CI REQUIRED"), "{refusal}");
+                assert!(refusal.contains(&code_sha), "{refusal}");
+            } else {
+                assert_eq!(admit_branch_ci(&state, false, None), Ok(false));
+                let receipt = describe_branch_ci_state("factory/ci-fixture", &state);
+                assert!(receipt.contains(&format!("code validation not confirmed for {code_sha}")), "{receipt}");
+                assert!(!receipt.contains("CI state: green"), "{receipt}");
+            }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn multi_commit_push_uses_tip_code_ci_cas_a9bd() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let (repo, code_sha, tip) = delivery_ci_fixture(true, Some("success"));
+        let fake_gh = repo.path().join("gh-fixture");
+        std::fs::write(&fake_gh, format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$4\" >> gh-requests.log\ncase \"$4\" in\n*/{tip}/check-runs) printf '%s\\n' '{{\"check_runs\":[{{\"name\":\"Scoped Validation\",\"status\":\"completed\",\"conclusion\":\"success\"}}]}}' ;;\n*/{code_sha}/check-runs) printf '%s\\n' '{{\"check_runs\":[]}}' ;;\n*) exit 97 ;;\nesac\n"
+        )).unwrap();
+        env.set(crate::github_issue_attach::GH_BIN_ENV, &fake_gh);
+        let state = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path());
+        assert_eq!(admit_branch_ci(&state, false, None), Ok(false));
+        let receipt = describe_branch_ci_state("factory/ci-fixture", &state);
+        assert!(receipt.contains("CI state: green"), "{receipt}");
+        assert!(receipt.contains(&format!("CI SHA: {tip}")), "{receipt}");
+        let requests = std::fs::read_to_string(repo.path().join("gh-requests.log")).unwrap();
+        assert_eq!(requests.lines().count(), 1, "{requests}");
+        assert!(requests.contains(&tip), "{requests}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn docs_tip_over_docs_only_code_ci_is_refused_cas_a9bd() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let (repo, code_sha, _) = delivery_ci_fixture(true, Some("success"));
+        let fake_gh = repo.path().join("gh-fixture");
+        std::fs::write(&fake_gh, "#!/bin/sh\nprintf '%s\\n' '{\"check_runs\":[{\"name\":\"Docs Lint\",\"status\":\"completed\",\"conclusion\":\"success\"},{\"name\":\"Scoped Validation\",\"status\":\"completed\",\"conclusion\":\"skipped\"}]}'\n").unwrap();
+        env.set(crate::github_issue_attach::GH_BIN_ENV, &fake_gh);
+        let state = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path());
+        let refusal = admit_branch_ci(&state, false, None).unwrap_err();
+        assert!(refusal.contains("CODE CI REQUIRED"), "{refusal}");
+        assert!(refusal.contains(&code_sha), "{refusal}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unavailable_code_ci_remains_advisory_cas_a9bd() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let (repo, code_sha, _) = delivery_ci_fixture(true, Some("success"));
+        let fake_gh = repo.path().join("gh-fixture");
+        std::fs::write(&fake_gh, "#!/bin/sh\nprintf '%s\\n' 'HTTP 422: No commit found for SHA' >&2\nexit 1\n").unwrap();
+        env.set(crate::github_issue_attach::GH_BIN_ENV, &fake_gh);
+        let state = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path());
+        assert_eq!(admit_branch_ci(&state, false, None), Ok(false));
+        let receipt = describe_branch_ci_state("factory/ci-fixture", &state);
+        assert!(receipt.contains(&format!("code validation not confirmed for {code_sha}")), "{receipt}");
+        assert!(receipt.contains("HTTP 422"), "{receipt}");
+        assert!(receipt.contains("advisory"), "{receipt}");
+        assert!(!receipt.contains("CI state: green"), "{receipt}");
     }
 
     #[test]
@@ -4150,7 +4214,8 @@ mod tests {
             repo.path().join("gh-fixture"),
         );
         let state = super::lookup_branch_ci("factory/ci-fixture", "missing-target", repo.path());
-        assert!(admit_branch_ci(&state, false, None).is_err(), "{state:?}");
+        assert_eq!(admit_branch_ci(&state, false, None), Ok(false));
+        assert!(!describe_branch_ci_state("factory/ci-fixture", &state).contains("CI state: green"));
         assert!(!repo.path().join("gh-requests.log").exists());
     }
 

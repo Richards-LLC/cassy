@@ -2,7 +2,7 @@ import { cloudBrand, projectTitle } from "./cloud-brand";
 import { CANT_REACH_RETRYING, machineFooterMarkup, orderPairedMachines, pairedMachinesDialogMarkup, renderPairedMachines, type PairedMachineRow } from "./paired-machines";
 import { retainPendingSessions, visibleCatalog } from "./worker-visibility";
 import "./styles.css";
-import { activityTime, ConversationList, filterConversationRows, groupConversationRows, plainActivity, type ConversationRow } from "./conversation-list";
+import { activityTime, ConversationList, filterConversationRows, groupConversationRows, machineActivityAt, plainActivity, type ConversationRow } from "./conversation-list";
 import { controlCommandCopy, sessionJumpCommandMarkup } from "./palette-commands";
 import { applyHistoryCursor, ConversationHistory, supervisorWorking } from "./conversation-history";
 import { gridPlaceholder, threadBeforePanes } from "./early-thread";
@@ -3831,6 +3831,17 @@ function renderMachineNavigation(): void {
  * board is rebuilt when a machine or session actually changes state and a
  * button the operator is on is never pulled out from under a thumb.
  */
+/** When this page first saw each session's listed activity stamp, while that stamp read in its future (cas-24fe). */
+const listedActivitySeen = new Map<string, { stamp: number; seen: number }>();
+
+/** A session's listed activity in this browser's time (cas-24fe, `machineActivityAt`). */
+function listedActivityAt(machineId: string, session: string, stamp: number, now: number = Date.now()): number {
+  const key = sessionKey(machineId, session);
+  const { at, seen } = machineActivityAt(stamp, conversationHistories.get(key)?.machineLead(), listedActivitySeen.get(key), now);
+  if (seen) listedActivitySeen.set(key, seen);
+  return at;
+}
+
 /**
  * When a session last did anything, and between whom (cas-55a4): the hub's
  * newest queue row for it, or this page's last pane output when that is
@@ -3838,7 +3849,8 @@ function renderMachineNavigation(): void {
  */
 function sessionActivity(machineId: string, session: string): { at?: number; label?: string; terminal?: boolean } | undefined {
   const hubSession = sessions.get(machineId)?.find((item) => item.name === session);
-  const listed = hubSession?.last_activity_at ? Date.parse(hubSession.last_activity_at) : NaN;
+  const stamp = hubSession?.last_activity_at ? Date.parse(hubSession.last_activity_at) : NaN;
+  const listed = Number.isFinite(stamp) ? listedActivityAt(machineId, session, stamp) : NaN;
   const prefix = `${sessionKey(machineId, session)}:`;
   const pane = Math.max(-Infinity, ...[...paneLastActivity].flatMap(([key, at]) => key.startsWith(prefix) ? [at] : []));
   if (Number.isFinite(pane) && (!Number.isFinite(listed) || pane > listed)) return { at: pane, label: "terminal output", terminal: true };
@@ -3938,7 +3950,8 @@ function renderConversationList(): void {
     // cas-b00c: only confirmed activity dates a row. A message still waiting,
     // not confirmed or not sent never reached the supervisor as far as this
     // page knows, so it must not make its row "Most recent" or "now".
-    const lastTurn = Math.max(-Infinity, ...events.flatMap((event) => event.at !== undefined && Number.isFinite(event.at) && (event.kind === "reply" || event.value.notificationId !== undefined) ? [event.at] : []));
+    // cas-24fe: dated by the time the thread shows each turn, never the machine's stamp.
+    const lastTurn = conversationHistories.get(key)?.lastActivityAt() ?? -Infinity;
     // cas-6acf: a row's time never runs backwards without new activity.
     const activityAt = Math.max(activity?.at ?? -Infinity, lastTurn, rowActivityHighWater.get(key) ?? -Infinity);
     const active = Number.isFinite(activityAt) ? activityAt : undefined;

@@ -29424,6 +29424,79 @@ mod epic_status_gate_tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn epic_override_budget_bounds_stranded_audit_cas_9069() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = init_epic_repo(&[("stranded", 1)]);
+        let p = dir.path();
+        let helper = p.join("slow-upload-pack");
+        std::fs::write(&helper, "#!/bin/sh\nsleep 5\nexit 1\n").unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        git(p, &["remote", "add", "origin", p.to_str().unwrap()]);
+        git(
+            p,
+            &[
+                "config",
+                "remote.origin.uploadpack",
+                helper.to_str().unwrap(),
+            ],
+        );
+        let mut children: Vec<_> = (0..139)
+            .map(|index| {
+                let mut task = child(
+                    &format!("cas-audit-{index}"),
+                    TaskStatus::Closed,
+                    Some("deleted"),
+                );
+                task.deliverables.factory_branch_anchor = Some(format!("{:040x}", index + 1));
+                task
+            })
+            .collect();
+        children[0] = child("cas-audit-0", TaskStatus::Closed, Some("stranded"));
+        let task = epic("cas-override-audit");
+        let mut req = base_req(&task.id);
+        req.supervisor_override = Some(true);
+        req.stranded_branch_override = Some("inspected terminal child deliveries against main".into());
+        let started = std::time::Instant::now();
+        let outcome = run_epic_close_merge_gate_with_budget(
+            &task,
+            &req,
+            "main",
+            p,
+            &children,
+            std::time::Duration::from_secs(2),
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "partial stranded gate escaped budget: {:?}",
+            started.elapsed()
+        );
+        match outcome {
+            EpicCloseGateOutcome::Reject(message) => {
+                // A measured blocker is still mandatory for the ordinary
+                // override. The distinct stranded override records this
+                // whole output, including every child left unmeasured.
+                assert!(message.contains("cas-audit-0"));
+                let unchecked = message
+                    .split("Child task(s) not checked:")
+                    .nth(1)
+                    .expect("partial rejection must audit unchecked children");
+                assert!(!unchecked.contains("  - cas-audit-0\n"));
+                for child in children.iter().skip(1) {
+                    assert!(
+                        unchecked
+                            .lines()
+                            .any(|line| line == format!("  - {}", child.id)),
+                        "missing unchecked {}",
+                        child.id
+                    );
+                }
+            }
+            other => panic!("measured stranded child must still block ordinary override: {other:?}"),
+        }
+    }
+
     /// Build `count` closed children spread over `lanes` worker lanes, each
     /// with its own delivery commit as anchor, and merge every lane to main.
     fn merged_epic_children(p: &std::path::Path, count: usize, lanes: usize) -> Vec<Task> {

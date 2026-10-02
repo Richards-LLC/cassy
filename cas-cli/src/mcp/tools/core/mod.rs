@@ -2,6 +2,7 @@ mod agent_coordination;
 mod artifact;
 pub(crate) mod guidance;
 mod imports;
+mod jev;
 mod knowledge;
 mod maintenance;
 mod memory;

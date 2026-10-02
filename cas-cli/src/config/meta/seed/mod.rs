@@ -2,9 +2,10 @@ use crate::config::meta::registry::ConfigRegistry;
 
 mod coordination;
 mod daemon;
-mod hooks_and_code;
 mod history;
+mod hooks_and_code;
 mod issues;
+mod jev;
 mod llm;
 mod memory;
 mod notifications;
@@ -25,6 +26,7 @@ pub(crate) fn populate_registry(registry: &mut ConfigRegistry) {
     qa::register_qa(registry);
     coordination::register_coordination_lease_telemetry_and_missing(registry);
     llm::register_llm(registry);
+    jev::register_jev(registry);
     memory::register_memory(registry);
     release::register_release(registry);
     skill_validation::register_skill_validation(registry);

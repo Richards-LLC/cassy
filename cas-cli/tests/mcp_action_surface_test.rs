@@ -417,6 +417,7 @@ fn call_shape_action_lists() -> Vec<(&'static str, Vec<&'static str>)> {
             .concat(),
         ),
         ("artifact", accepted::ARTIFACT_ACTIONS.to_vec()),
+        ("jev", accepted::JEV_ACTIONS.to_vec()),
         ("knowledge", accepted::KNOWLEDGE_ACTIONS.to_vec()),
         ("team", accepted::TEAM_ACTIONS.to_vec()),
         ("pattern", accepted::PATTERN_ACTIONS.to_vec()),

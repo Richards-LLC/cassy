@@ -19,6 +19,15 @@ impl Config {
         let memory = self.memory.clone().unwrap_or_default();
         let factory = self.factory();
         match key {
+            "jev.model" => Some(self.jev.clone().unwrap_or_default().model),
+            "jev.key_file" => Some(
+                self.jev
+                    .clone()
+                    .unwrap_or_default()
+                    .key_file
+                    .unwrap_or_default(),
+            ),
+            "jev.enabled" => Some(self.jev.clone().unwrap_or_default().enabled.to_string()),
             "slack.transport" => Some(
                 match self.slack.as_ref().map(|s| s.transport).unwrap_or_default() {
                     SlackTransport::Violet => "violet",

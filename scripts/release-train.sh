@@ -418,10 +418,24 @@ pipeline_finish() {
     pipeline_log "pipeline terminal state: $state"
 }
 
+pull_request_run_exists() {
+    local branch="$1" expected_sha="$2" runs
+    runs="$(gh_cmd run list -R "$repo_slug" --branch "$branch" --event pull_request \
+        --commit "$expected_sha" --limit 20 --json headSha 2>/dev/null)" || return 1
+    printf '%s' "$runs" | jq -e --arg sha "$expected_sha" \
+        'type == "array" and any(.[]; .headSha == $sha)' >/dev/null 2>&1
+}
+
 # At least one bucket==pass row for EVERY required check. A skipped row carries
 # the same name and proves nothing, so it is treated as absent.
 required_checks_pass() {
     local checks
+    # A previous head can still have a green rollup just after the push.
+    # Wait for this pushed head's PR run before interpreting those buckets.
+    if ! pull_request_run_exists "$branch" "$gate_sha"; then
+        pipeline_log "pull_request run for pushed head $gate_sha not yet visible"
+        return 1
+    fi
     checks="$(gh_cmd pr checks "$pr_number" -R "$repo_slug" --json name,bucket 2>/dev/null || printf '[]')"
     printf '%s' "$checks" | jq -e '
         (map(select(.name == "Fast Validation" and .bucket == "pass")) | length) >= 1

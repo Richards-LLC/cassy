@@ -36,9 +36,24 @@ cut_preflight_merge_queue_query() {
     printf '%s\n' 'query { repository(owner: "Richards-LLC", name: "cassy") { mergeQueue(branch: "main") { entries(first: 100) { nodes { pullRequest { number title headRefName } } } } } }'
 }
 
+cut_preflight_has_competing_pr() {
+    local own_pr="$1" own_branch="$2"
+    jq -e --arg v "$version" --arg own_pr "$own_pr" --arg own_branch "$own_branch" '
+        any(.[];
+            ($own_pr == "" or ((.number // "") | tostring) != $own_pr)
+            and ($own_branch == "" or (.headRefName // "") != $own_branch)
+            and (((.title // "") + " " + (.headRefName // "")) |
+                 test("release[ /_-]*" + $v + "|v" + $v; "i")))
+    ' >/dev/null 2>&1
+}
+
 cut_preflight_check_competing_release() {
-    local gh="${CAS_RELEASE_TRAIN_GH:-gh}" prs queue query competing
+    local gh="${CAS_RELEASE_TRAIN_GH:-gh}" prs queue query own_pr own_branch
     [[ "${CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_COMPETING:-}" == 1 ]] && return 0
+    own_pr="$(cat "$run_dir/pr-number.txt" 2>/dev/null || true)"
+    [[ "$own_pr" =~ ^[1-9][0-9]*$ ]] || own_pr=""
+    own_branch="$(git -C "$worktree" branch --show-current 2>/dev/null || true)"
+    [[ "$own_branch" == release/* ]] || own_branch=""
     if ! command -v "$gh" >/dev/null 2>&1; then
         cut_preflight_block competing-release "GitHub CLI $gh is not available"
         return $?
@@ -48,10 +63,7 @@ cut_preflight_check_competing_release() {
         cut_preflight_block competing-release "could not inspect open release PRs with $gh"
         return $?
     fi
-    if command -v jq >/dev/null 2>&1 && printf '%s' "$prs" | jq -e --arg v "$version" '
-        any(.[]; ((.title // "") + " " + (.headRefName // "")) |
-        test("release[ /_-]*" + $v + "|v" + $v; "i"))
-    ' >/dev/null 2>&1; then
+    if printf '%s' "$prs" | cut_preflight_has_competing_pr "$own_pr" "$own_branch"; then
         cut_preflight_block competing-release "an open release PR already targets $version"
         return $?
     fi
@@ -65,10 +77,8 @@ cut_preflight_check_competing_release() {
         cut_preflight_block competing-release "merge queue response did not contain repository.mergeQueue.entries.nodes"
         return $?
     fi
-    competing="$(printf '%s' "$queue" | jq -r \
-        '.data.repository.mergeQueue.entries.nodes[]?.pullRequest
-         | [(.title // ""), (.headRefName // "")] | join(" ")')"
-    if printf '%s' "$competing" | grep -Eiq "release[ /_-]*${version}|v${version}"; then
+    if printf '%s' "$queue" | jq '.data.repository.mergeQueue.entries.nodes | map(.pullRequest)' \
+        | cut_preflight_has_competing_pr "$own_pr" "$own_branch"; then
         cut_preflight_block competing-release "a release pull request is already in the merge queue"
         return $?
     fi

@@ -144,3 +144,33 @@ describe("redraws keep each notice's state by its key (cas-a5c6 QA round 3)", ()
     expect((document.activeElement as HTMLElement).closest("[data-attention-id]")).toBe(card(root, "a"));
   });
 });
+
+describe("a rebuilt page keeps the Attention panel as the operator left it (cas-f486)", () => {
+  const warn = (id: string): AttentionItem => ({ ...event(id, "delivery_stall"), createdAt: "2026-09-07T11:59:00Z", message: `notice ${id}` });
+  const panel = () => { const root = document.createElement("section"); root.id = "attention-panel"; return root; };
+
+  it("carries opened Details and focus into the panel that replaces it", () => {
+    const first = panel(); document.body.replaceChildren(first);
+    renderAttentionPanel(first, [warn("a")], callbacks(), { now });
+    first.querySelector("details")!.open = true;
+    first.querySelector<HTMLElement>("[data-role='copy']")!.focus();
+    // A wake from sleep rebuilds the shell: a fresh, empty panel element.
+    const second = panel(); document.body.replaceChildren(second);
+    expect(document.activeElement).toBe(document.body);
+    renderAttentionPanel(second, [warn("a")], callbacks(), { now: now + 600_000 });
+    expect(second.querySelector("details")!.open).toBe(true);
+    expect(document.activeElement).toBe(second.querySelector("[data-role='copy']"));
+  });
+
+  it("does not pull back focus the operator moved elsewhere", () => {
+    const first = panel(); const elsewhere = document.createElement("button");
+    document.body.replaceChildren(first, elsewhere);
+    renderAttentionPanel(first, [warn("b")], callbacks(), { now });
+    first.querySelector<HTMLElement>("[data-role='dismiss']")!.focus();
+    elsewhere.focus();
+    elsewhere.blur();
+    const second = panel(); document.body.replaceChildren(second);
+    renderAttentionPanel(second, [warn("b")], callbacks(), { now });
+    expect(document.activeElement).toBe(document.body);
+  });
+});

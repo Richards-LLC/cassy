@@ -47,8 +47,8 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     expect(seen.banner).toBe("Lost connection to Atlas · Linux. Reconnecting…");
     expect(seen.header).toContain("Reconnecting");
     expect(seen.row).toContain("Reconnecting");
-    // Two machines, one of them down: the footer counts it and its dot is not all-clear (cas-b789).
-    expect(seen.footer).toContain("1 connected");
+    // Two machines, one of them down: the footer names it (cas-0739) and its dot is not all-clear (cas-b789).
+    expect(seen.footer).toContain("Atlas reconnecting");
     await expect(footer.locator(".pairing-dot")).toHaveClass("pairing-dot partial");
     // Only the terminal dims: the conversation stays readable while it
     // reconnects (cas-3446 measured 2.2-3.3:1 when the whole mount faded).

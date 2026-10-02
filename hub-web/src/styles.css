@@ -4171,6 +4171,11 @@ button.chip:disabled { cursor: default; }
 .conversation-end .conversation-end-confirm { color: var(--state-crit); border-color: currentColor; }
 .conversation-end-question { flex-basis: 100%; color: var(--ink); }
 .conversation-end-error { flex-basis: 100%; color: var(--state-crit); }
+/* cas-f60a: Cancel comes first and is at least as wide as End session's
+   words, so the pointer that opened the confirmation rests on Cancel. */
+.conversation-end .conversation-end-cancel { min-width: 7.5em; }
+/* cas-f60a: "<codename> on <machine> ended." where the row was, for a while. */
+.conversation-ended { margin: 0 14px var(--space-1) 77px; color: var(--ink-mid); font: var(--weight-medium) var(--fs-xs)/1.35 var(--font-ui); }
 /* cas-d6bf: desktop keeps the words; the glyph is the phone's. */
 .conversation-end-icon { display: none; width: 16px; height: 16px; }
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
@@ -4185,6 +4190,7 @@ button.chip:disabled { cursor: default; }
   /* The button's aria-label names it; the glyph is its face. */
   .conversation-end[data-state="idle"] .conversation-end-label { display: none; }
   .conversation-end:not([data-state="idle"]) { margin: 0 12px var(--space-2) 12px; }
+  .conversation-ended { margin: 0 14px var(--space-2); }
   .conversation-end .conversation-end-confirm, .conversation-end .conversation-end-cancel { min-height: 36px; padding-inline: 14px; }
 }
 @media (forced-colors: active) {

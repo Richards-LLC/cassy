@@ -221,6 +221,9 @@ function revealWhole(control: HTMLElement): void {
 /** A power glyph: End session's face on a phone, where the words would crowd the row (cas-d6bf). */
 const END_ICON = `<svg class="conversation-end-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M10 3v6"/><path d="M6.2 5.6a6 6 0 1 0 7.6 0"/></svg>`;
 
+/** How long "<codename> on <machine> ended." stays where its row was (cas-f60a). */
+export const ENDED_NOTICE_MS = 8_000;
+
 /** Keyed buttons: a catalog heartbeat must never steal keyboard focus. */
 export class ConversationList {
   private nodes = new Map<string, HTMLButtonElement>();
@@ -236,6 +239,14 @@ export class ConversationList {
    * live one until the next catalog poll.
    */
   private latest?: { container: HTMLElement; rows: readonly ConversationRow[]; open: (row: ConversationRow, event?: MouseEvent) => void; end?: (row: ConversationRow) => Promise<void> };
+  /**
+   * cas-f60a: the session that just ended, said where its row was and through
+   * a polite live region, until ENDED_NOTICE_MS passes or another one ends.
+   */
+  private ended?: { text: string; after?: string; before?: string; group?: string; timer: ReturnType<typeof setTimeout> };
+  private endedNode?: HTMLParagraphElement;
+  /** The live region beside the list. It stays in the page, so a new sentence is announced. */
+  private announcer?: HTMLParagraphElement;
   render(container: HTMLElement, rows: readonly ConversationRow[], open: (row: ConversationRow, event?: MouseEvent) => void, end?: (row: ConversationRow) => Promise<void>): void {
     this.latest = { container, rows, open, end };
     const document = container.ownerDocument;
@@ -288,6 +299,16 @@ export class ConversationList {
     for (const [key, node] of this.extras) {
       if (!extrasKept.has(key)) { node.remove(); this.extras.delete(key); }
     }
+    if (this.ended) {
+      const notice = this.endedNode ??= Object.assign(document.createElement("p"), { className: "conversation-ended" });
+      if (notice.textContent !== this.ended.text) notice.textContent = this.ended.text;
+      ordered.splice(this.endedPlace(ordered, rows, this.ended), 0, notice);
+    } else this.endedNode?.remove();
+    if (end) {
+      const announcer = this.announcer ??= Object.assign(document.createElement("p"), { className: "sr-only conversation-ended-status" });
+      announcer.setAttribute("role", "status");
+      if (container.nextElementSibling !== announcer && container.parentElement) container.after(announcer);
+    }
     ordered.forEach((node, index) => {
       if (container.children[index] !== node) container.insertBefore(node, container.children[index] ?? null);
     });
@@ -303,6 +324,48 @@ export class ConversationList {
     const index = rows.findIndex((candidate) => candidate.key === key);
     const group = rows[index]?.group?.key;
     return { after: rows[index + 1]?.key, before: index > 0 ? rows[index - 1]?.key : undefined, group: group === undefined ? undefined : `group:${group}` };
+  }
+
+  /**
+   * Where the ended notice goes (cas-f60a): where the row was. Before the row
+   * that followed it when that is in the same group, else after the row before
+   * it (and its End control), else at the top.
+   */
+  private endedPlace(ordered: readonly HTMLElement[], rows: readonly ConversationRow[], ended: { after?: string; before?: string; group?: string }): number {
+    const at = (node?: HTMLElement) => (node ? ordered.indexOf(node) : -1);
+    const after = ended.after === undefined ? -1 : at(this.nodes.get(ended.after));
+    if (after >= 0 && rows.find((row) => row.key === ended.after)?.group?.key === ended.group) return after;
+    if (ended.before !== undefined) {
+      const before = Math.max(at(this.nodes.get(ended.before)), at(this.extras.get(`end:${ended.before}`)));
+      if (before >= 0) return before + 1;
+    }
+    return 0;
+  }
+
+  /** Say that a session ended, in place and to assistive tech (cas-f60a). */
+  private announceEnded(row: ConversationRow, neighbours: { after?: string; before?: string }): void {
+    if (this.ended) clearTimeout(this.ended.timer);
+    const text = `${row.supervisor} on ${machineName(row.host)} ended.`;
+    const timer = setTimeout(() => {
+      if (this.ended?.timer !== timer) return;
+      this.ended = undefined;
+      if (this.announcer) this.announcer.textContent = "";
+      this.repaint();
+    }, ENDED_NOTICE_MS);
+    this.ended = { text, after: neighbours.after, before: neighbours.before, group: row.group?.key, timer };
+    this.repaint();
+    if (this.announcer) this.announcer.textContent = text;
+  }
+
+  /** Render again with the newest arguments, into the live list. */
+  private repaint(): void {
+    const latest = this.latest;
+    if (!latest) return;
+    // A list rebuilt since the newest render is found again by its id.
+    const container = latest.container.isConnected || !latest.container.id
+      ? latest.container
+      : latest.container.ownerDocument.getElementById(latest.container.id) ?? latest.container;
+    this.render(container, latest.rows, latest.open, latest.end);
   }
 
   /** The ended row is gone; if focus went with it, land it on the nearest thing left. */
@@ -331,16 +394,8 @@ export class ConversationList {
     control.dataset.signature = signature;
     control.dataset.state = state === undefined ? "idle" : typeof state === "object" ? "error" : state;
     const document = control.ownerDocument;
-    const rerender = (): void => {
-      const latest = this.latest;
-      if (!latest) return;
-      // A list rebuilt since the newest render is found again by its id.
-      const container = latest.container.isConnected || !latest.container.id
-        ? latest.container
-        : latest.container.ownerDocument.getElementById(latest.container.id) ?? latest.container;
-      this.render(container, latest.rows, latest.open, latest.end);
-    };
-    const button = (text: string, className: string, onclick: () => void): HTMLButtonElement => {
+    const rerender = (): void => this.repaint();
+    const button = (text: string, className: string, onclick: (event: MouseEvent) => void): HTMLButtonElement => {
       const node = document.createElement("button"); node.type = "button"; node.className = className; node.textContent = text; node.onclick = onclick; return node;
     };
     if (state === undefined || typeof state === "object") {
@@ -371,7 +426,11 @@ export class ConversationList {
       control.replaceChildren(question);
       return;
     }
-    const confirm = button("End session", "conversation-end-confirm danger", () => {
+    // cas-f60a: the confirmation opens where End session was, so the second
+    // click of a double-click (detail 2 and up) lands in it. Neither button
+    // takes that click: only a deliberate click, tap or key confirms or cancels.
+    const confirm = button("End session", "conversation-end-confirm danger", (event) => {
+      if (event.detail > 1) return;
       const keyboard = control.contains(control.ownerDocument.activeElement);
       const neighbours = this.neighbours(row.key);
       this.ending.set(row.key, "ending");
@@ -379,17 +438,23 @@ export class ConversationList {
       if (keyboard) control.querySelector<HTMLElement>(".conversation-end-question")?.focus({ preventScroll: true });
       void end(row).then(() => {
         this.ending.delete(row.key);
+        this.announceEnded(row, neighbours);
         this.landAfterEnd(control, neighbours);
       }, (error: unknown) => {
         this.ending.set(row.key, { error: `Could not end ${row.supervisor}: ${error instanceof Error ? error.message : String(error)}` });
         rerender();
       });
     });
-    const cancel = button("Cancel", "conversation-end-cancel", () => {
+    const cancel = button("Cancel", "conversation-end-cancel", (event) => {
+      if (event.detail > 1) return;
       this.ending.delete(row.key);
       rerender();
       control.querySelector<HTMLButtonElement>(".conversation-end-ask")?.focus({ preventScroll: true });
     });
-    control.replaceChildren(question, confirm, cancel);
+    // Cancel first, where the pointer that opened this already is (cas-f60a).
+    control.replaceChildren(question, cancel, confirm);
+    // A double-click's second press on the question would take focus off
+    // Cancel (and select a word): it does neither (cas-f60a).
+    control.onmousedown = (event) => { if (event.detail > 1) event.preventDefault(); };
   }
 }

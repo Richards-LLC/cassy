@@ -79,10 +79,11 @@ test("HUB-J16 end a session from my phone", async ({ page, journey }) => {
     await last.getByRole("button", { name: "Cancel" }).tap();
     await expect(last.getByRole("button", { name: "End session amber-fox-29 on Atlas" })).toBeFocused();
     expect(hub.ends).toEqual([]);
-    // cas-e634: keyboard only — Enter on End, Shift+Tab from Cancel to confirm, Enter.
+    // cas-e634: keyboard only — Enter on End, Tab from Cancel to confirm, Enter.
+    // cas-f60a: Cancel comes first, so the confirm is the next stop.
     await page.keyboard.press("Enter");
     await expect(last.getByRole("button", { name: "Cancel" })).toBeFocused();
-    await page.keyboard.press("Shift+Tab");
+    await page.keyboard.press("Tab");
     await expect(last.getByRole("button", { name: "End session", exact: true })).toBeFocused();
     await page.keyboard.press("Enter");
     await expect(row("amber-fox-29")).toHaveCount(0);
@@ -90,5 +91,9 @@ test("HUB-J16 end a session from my phone", async ({ page, journey }) => {
     await expect(row("swift-heron-51")).toBeFocused();
     expect(hub.ends).toEqual([{ machine: "atlas", session: "gabber-studio-amber-fox-29", scopes: [...SCOPES, "factory-manage"] }]);
     await expect(list.locator(".conversation-group-head")).toHaveText("gabber-studio · 6 conversations on Atlas");
+    // cas-f60a: told it ended, on screen where the row was and to a screen reader.
+    await expect(list.locator(".conversation-ended")).toHaveText("amber-fox-29 on Atlas ended.");
+    await expect(list.locator(".conversation-ended")).toBeInViewport();
+    await expect(page.locator(".conversation-ended-status[role=status]")).toHaveText("amber-fox-29 on Atlas ended.");
   });
 });

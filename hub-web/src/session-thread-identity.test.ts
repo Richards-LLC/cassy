@@ -6,7 +6,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { ConversationHistory, sessionCodename } from "./conversation-history";
 import { ConversationView, earlierSessionLabel, emptyActivityText, emptyCardActivityText, emptyThreadCopy } from "./conversation-view";
-import { activityTime, ConversationList, conversationRowMarkup, groupConversationRows, machineActivityAt, plainActivity, type ConversationRow } from "./conversation-list";
+import { activityTime, ConversationList, conversationRowMarkup, ENDED_NOTICE_MS, groupConversationRows, machineActivityAt, plainActivity, type ConversationRow } from "./conversation-list";
 import type { ConversationHistoryMessage, ConversationHistoryReply } from "./types";
 
 const at = (day: number, hh: number, mm: number) => new Date(2026, 8, day, hh, mm).toISOString();
@@ -326,6 +326,68 @@ describe("grouped project sessions (cas-55a4)", () => {
     expect(activityTime(fiveLater.at, now + 5 * 60_000).short).toBe("5m");
     // A newer stamp is new activity.
     expect(machineActivityAt(now + 9 * 60_000, undefined, first.seen, now + 5 * 60_000)).toEqual({ at: now + 5 * 60_000, seen: { stamp: now + 9 * 60_000, seen: now + 5 * 60_000 } });
+  });
+
+  it("never ends a session on the second click of a double-click: Cancel sits first, and neither button takes it (cas-f60a)", () => {
+    const container = document.createElement("nav"); document.body.replaceChildren(container);
+    const end = vi.fn(async (_row: ConversationRow) => {});
+    new ConversationList().render(container, groupConversationRows([row("calm-puma-34", 300, { canEnd: true }), row("noble-cheetah-84", 100, { canEnd: true })]), vi.fn(), end);
+    const control = container.querySelectorAll<HTMLElement>(".conversation-end")[1]!;
+    const click = (node: Element, detail: number) => node.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, detail }));
+    click(control.querySelector(".conversation-end-ask")!, 1);
+    expect([...control.querySelectorAll("button")].map((node) => node.textContent)).toEqual(["Cancel", "End session"]);
+    // The double-click's second press keeps focus on Cancel and selects nothing.
+    const press = new MouseEvent("mousedown", { bubbles: true, cancelable: true, detail: 2 });
+    control.querySelector(".conversation-end-question")!.dispatchEvent(press);
+    expect(press.defaultPrevented).toBe(true);
+    // The double-click's second click, wherever it lands, does nothing.
+    click(control.querySelector(".conversation-end-confirm")!, 2);
+    click(control.querySelector(".conversation-end-cancel")!, 2);
+    click(control.querySelector(".conversation-end-confirm")!, 3);
+    expect(end).not.toHaveBeenCalled();
+    expect(control.dataset.state).toBe("confirm");
+    // A deliberate click, or a key (detail 0), ends it.
+    click(control.querySelector(".conversation-end-confirm")!, 0);
+    expect(end).toHaveBeenCalledOnce();
+  });
+
+  it("says a session ended where its row was and in a polite live region, then lets it go (cas-f60a)", async () => {
+    vi.useFakeTimers();
+    try {
+      const sidebar = document.createElement("aside");
+      const container = document.createElement("nav"); container.id = "conversation-list";
+      sidebar.append(container, Object.assign(document.createElement("footer"), { textContent: "2 paired machines" }));
+      document.body.replaceChildren(sidebar);
+      const list = new ConversationList();
+      let live = [row("calm-puma-34", 300, { canEnd: true }), row("wild-shark-68", 200, { canEnd: true }), row("noble-cheetah-84", 100, { canEnd: true })];
+      const open = vi.fn();
+      const end = vi.fn(async (ended: ConversationRow) => {
+        live = live.filter((item) => item.key !== ended.key);
+        list.render(container, groupConversationRows(live), open, end);
+      });
+      list.render(container, groupConversationRows(live), open, end);
+      // The live region is beside the list from the first render, empty, so its first sentence is announced.
+      const status = container.nextElementSibling as HTMLElement;
+      expect(status.getAttribute("role")).toBe("status");
+      expect(status.classList.contains("sr-only")).toBe(true);
+      expect(status.textContent).toBe("");
+      const control = [...container.querySelectorAll<HTMLElement>(".conversation-end")].find((node) => node.previousElementSibling?.textContent?.includes("wild-shark-68"))!;
+      control.querySelector<HTMLButtonElement>(".conversation-end-ask")!.click();
+      control.querySelector<HTMLButtonElement>(".conversation-end-confirm")!.click();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(status.textContent).toBe("wild-shark-68 on Atlas ended.");
+      expect([...container.children].map((node) => node.className.split(" ")[0])).toEqual(["conversation-group-head", "conversation-row", "conversation-end", "conversation-ended", "conversation-row", "conversation-end"]);
+      expect(container.querySelector(".conversation-ended")?.textContent).toBe("wild-shark-68 on Atlas ended.");
+      // A catalog poll keeps it in place.
+      list.render(container, groupConversationRows(live), open, end);
+      expect(container.querySelector(".conversation-ended")?.previousElementSibling?.previousElementSibling?.textContent).toContain("calm-puma-34");
+      await vi.advanceTimersByTimeAsync(ENDED_NOTICE_MS);
+      expect(container.querySelector(".conversation-ended")).toBeNull();
+      expect(status.textContent).toBe("");
+      expect(container.nextElementSibling).toBe(status);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("times a row from its own activity only: now under a minute, then words for assistive tech (cas-6acf)", () => {

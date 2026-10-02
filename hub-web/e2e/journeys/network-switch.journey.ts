@@ -741,6 +741,8 @@ test("HUB-J12 network switch: kept messages show before the session attaches aft
   await expect(held).toHaveText("Waiting for the connection — sends when it's back");
   await expect(page.getByRole("log").locator(".bub").filter({ hasText: "Kept while the session is away" })).not.toContainText(/Sending…|Delivered/);
   expect(sentTimes(hub, "Kept while the session is away")).toBe(0);
+  // A keyboard reader is in the thread when the session comes back.
+  await page.locator(".conversation-reading.thread").focus();
   // The session comes back: the thread is the same one, and the message goes once.
   hub.upstreamBack(PELICAN);
   const next = hub.nextSend();
@@ -748,6 +750,8 @@ test("HUB-J12 network switch: kept messages show before the session attaches aft
   await clock.advance(1_000);
   expect((await next).text).toBe("Kept while the session is away");
   await expect(held).toHaveCount(0);
+  // The reader stays in the thread that took over, not on the page.
+  await expect(page.locator(".conversation-reading.thread")).toBeFocused();
   await expect(page.getByRole("log")).toHaveCount(1);
   await expect(page.getByRole("log").locator(".bub").filter({ hasText: "Kept while the session is away" })).toHaveCount(1);
   await clock.advance(15_000);

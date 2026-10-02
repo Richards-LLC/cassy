@@ -469,18 +469,11 @@ function mountConversation(key: string, mount: HTMLElement): void {
   // it never floats over a turn in the thread (cas-97ea).
   if (composerSlot && conversation.jump.parentElement !== composerSlot) composerSlot.prepend(conversation.jump);
   conversation.update();
-  // cas-fc2c: the reader was in the thread shown before the panes; they stay in the thread.
-  if (earlyThreadHadFocus && !key.endsWith(`:${EARLY_THREAD}`)) {
-    earlyThreadHadFocus = false;
-    conversation.element.focus({ preventScroll: true });
-  }
 }
 
 /** The view key of a thread shown before its session's panes (cas-fc2c). */
 const EARLY_THREAD = "early-thread";
 const earlyThreadKey = (threadKey: string): string => `${threadKey}:${EARLY_THREAD}`;
-/** Focus was in the early thread when it gave way: the pane's thread takes it. */
-let earlyThreadHadFocus = false;
 
 /**
  * cas-fc2c: while the selected conversation is still opening or reconnecting,
@@ -496,7 +489,6 @@ function syncEarlyThread(): void {
     && threadBeforePanes({ presentation: hubPresentation, placeholder: gridPlaceholder(grid!), history: conversationHistories.get(threadKey!) });
   for (const [key, view] of [...conversationViews]) {
     if (!key.endsWith(`:${EARLY_THREAD}`) || (wanted && key === earlyThreadKey(threadKey!))) continue;
-    if (view.element.contains(document.activeElement)) earlyThreadHadFocus = true;
     view.dispose();
     conversationViews.delete(key);
   }
@@ -1961,6 +1953,13 @@ async function renderSessionState(machineId: string, session: string, state: Ses
     grid.replaceChildren(empty);
     syncEarlyThread();
     return;
+  }
+  // cas-fc2c: the panes are about to replace the thread shown before them.
+  // A reader in it lands in the pane's thread, as a reader on the connecting
+  // card does, rather than on the page once the grid is rebuilt.
+  const earlyActive = document.activeElement;
+  if (earlyActive instanceof HTMLElement && grid.querySelector(":scope > .conversation-early")?.contains(earlyActive)) {
+    landFocus([focusTargets.thread], { keep: true, nextTask: true, waitMs: 2_000, since: earlyActive });
   }
   // Only the grid's own placeholder: a bare ".empty" also matched the
   // conversation thread's empty state and deleted it, leaving a re-opened

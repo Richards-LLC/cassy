@@ -266,7 +266,7 @@ impl CheckGroup {
             | "models"
             | "sessionstart budget" => Self::Config,
             "issue repositories" => Self::Config,
-            "integrations" | "violet" => Self::Integrations,
+            "integrations" | "violet" | "github origin" => Self::Integrations,
             name if name.starts_with("integration") => Self::Integrations,
             _ => Self::Store,
         }
@@ -2010,6 +2010,8 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     let host = host_checks(Some(project_root));
     if cli.full { checks.extend(host); } else { checks.push(host_summary(&host)); }
     recorder.mark("host checks", &checks);
+    if let Some(check) = github_origin_check(project_root) { checks.push(check); }
+    recorder.mark("GitHub origin", &checks);
     checks.push(prompt_hook_check(&cas_root));
     recorder.mark("prompt hook", &checks);
     checks.push(session_start_budget_check());
@@ -3889,6 +3891,41 @@ fn registered_project_root_checks(current_project_root: &Path) -> Vec<Check> {
 /// `known_roots` carries the registry read outcome, not just its rows: an
 /// `Err` becomes a Warning row naming the failure, so a skipped collision
 /// check can never masquerade as a clean one.
+/// A moved origin is diagnostic, never an automatic remote rewrite.
+fn github_origin_check(project: &Path) -> Option<Check> {
+    let timeout = Duration::from_secs(2);
+    let origin = match crate::github_repo::origin_slug(project, timeout) {
+        Ok(Some(origin)) => origin,
+        Ok(None) => return None,
+        Err(error) => return Some(Check::new("GitHub origin", CheckStatus::Warning, error)),
+    };
+    let binary = crate::github_repo::gh_binary();
+    Some(
+        match crate::github_repo::resolve_slug(&origin, project, &binary, timeout) {
+            Ok(repo) if !repo.origin.eq_ignore_ascii_case(&repo.canonical) => Check::new(
+                "GitHub origin",
+                CheckStatus::Warning,
+                format!(
+                    "origin repository moved: {} -> {}; CI uses the canonical repository. Run `git remote set-url origin https://github.com/{}.git`",
+                    repo.origin, repo.canonical, repo.canonical
+                ),
+            ),
+            Ok(repo) => Check::new(
+                "GitHub origin",
+                CheckStatus::Ok,
+                format!("origin repository is current: {}", repo.canonical),
+            ),
+            Err(error) => Check::new(
+                "GitHub origin",
+                CheckStatus::Warning,
+                format!(
+                    "origin repository could not be checked: {error}. Run `gh repo view {origin} --json nameWithOwner`"
+                ),
+            ),
+        },
+    )
+}
+
 fn canonical_id_checks(
     cas_root: &Path,
     known_roots: Result<Vec<crate::cloud::LocalRootIdentity>, String>,
@@ -5603,6 +5640,72 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[cfg(unix)]
+    #[test]
+    fn github_origin_doctor_warns_on_move_and_preserves_json_remedy_cas_28c8() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let temp = TempDir::new().unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/pippenz/cas.git",
+            ],
+            vec![
+                "remote",
+                "add",
+                "upstream",
+                "https://github.com/codingagentsystem/cas.git",
+            ],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .current_dir(temp.path())
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let gh = temp.path().join("gh");
+        crate::test_paths::warm_stub(
+            &gh,
+            "#!/bin/sh\n[ \"$1 $2 $3\" = 'repo view pippenz/cas' ] || exit 97\nprintf '%s' '{\"nameWithOwner\":\"Richards-LLC/cassy\"}'\n",
+        );
+        env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
+        let check = github_origin_check(temp.path()).unwrap();
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(
+            check.message.contains("pippenz/cas -> Richards-LLC/cassy"),
+            "{}",
+            check.message
+        );
+        let json = serialize_checks(&[check], &[]);
+        assert_eq!(json[0]["group"], "integrations");
+        assert_eq!(json[0]["status"], "warning");
+        assert_eq!(
+            json[0]["remediation"],
+            "Run `git remote set-url origin https://github.com/Richards-LLC/cassy.git`"
+        );
+        crate::test_paths::warm_stub(
+            &gh,
+            "#!/bin/sh\nprintf '%s' '{\"nameWithOwner\":\"Pippenz/Cas\"}'\n",
+        );
+        assert!(matches!(
+            github_origin_check(temp.path()).unwrap().status,
+            CheckStatus::Ok
+        ));
+        crate::test_paths::warm_stub(&gh, "#!/bin/sh\nexit 1\n");
+        let unavailable = github_origin_check(temp.path()).unwrap();
+        assert!(matches!(unavailable.status, CheckStatus::Warning));
+        assert!(unavailable.message.contains("could not be checked"));
+        assert!(!unavailable.message.contains("is current"));
+        let empty = TempDir::new().unwrap();
+        assert!(github_origin_check(empty.path()).is_none());
+    }
 
     /// cas-0140: doctor errors on a failing hub audit writer and stays OK on a
     /// log that is merely quiet.

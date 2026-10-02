@@ -568,28 +568,14 @@ pub(crate) struct GhCiTransport {
 
 impl GhCiTransport {
     pub(crate) fn from_project(project: &Path) -> Result<Self, CiWatchError> {
-        let output = Command::new("git")
-            .args(["remote", "get-url", "origin"])
-            .current_dir(project)
-            .output()
-            .map_err(|e| CiWatchError::Unavailable(format!("cannot read git origin: {e}")))?;
-        if !output.status.success() {
-            return Err(CiWatchError::Unavailable(
-                "cannot read git origin for CI watcher".to_string(),
-            ));
-        }
-        let origin = String::from_utf8_lossy(&output.stdout);
-        let repo = crate::cli::integrate::github::parse_origin_url(&origin)
-            .map(|repo| repo.full_name())
-            .ok_or_else(|| {
-                CiWatchError::Unavailable(
-                    "origin is not a GitHub owner/repo URL; CI watcher disabled".to_string(),
-                )
-            })?;
+        let gh_binary = crate::github_repo::gh_binary();
+        let repo = crate::github_repo::resolve_origin(project, &gh_binary, Duration::from_secs(2))
+            .map_err(CiWatchError::Unavailable)?
+            .canonical;
         Ok(Self {
             repo,
             cwd: project.to_path_buf(),
-            gh_binary: PathBuf::from("gh"),
+            gh_binary,
         })
     }
 
@@ -1219,6 +1205,41 @@ mod tests {
         assert_eq!(observations.len(), 1);
         assert_eq!(observations[0].pr_number, 932);
         assert_eq!(observations[0].merge_commit.as_deref(), Some("merge-tip"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ci_watch_moved_origin_ignores_upstream_cas_28c8() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let temp = tempfile::TempDir::new().unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["remote", "add", "origin", "git@github.com:pippenz/cas.git"],
+            vec![
+                "remote",
+                "add",
+                "upstream",
+                "https://github.com/codingagentsystem/cas.git",
+            ],
+        ] {
+            assert!(
+                Command::new("git")
+                    .current_dir(temp.path())
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let gh = temp.path().join("gh");
+        crate::test_paths::warm_stub(
+            &gh,
+            "#!/bin/sh\ncase \"$1 $2 $3\" in\n'repo view pippenz/cas') printf '%s' '{\"nameWithOwner\":\"Richards-LLC/cassy\"}' ;;\n'api -X GET') [ \"$4\" = 'repos/Richards-LLC/cassy/actions/runs' ] || exit 97; printf '%s' '{\"workflow_runs\":[]}' ;;\n*) exit 98 ;;\nesac\n",
+        );
+        env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
+        let transport = GhCiTransport::from_project(temp.path()).unwrap();
+        assert_eq!(transport.repo, "Richards-LLC/cassy");
+        assert!(transport.completed_runs().unwrap().is_empty());
     }
 
     #[test]

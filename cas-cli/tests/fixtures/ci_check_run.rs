@@ -7,7 +7,7 @@ pub fn green_ci(dir: &Path) -> PathBuf {
     let binary = dir.join("green-ci-gh");
     std::fs::write(
         &binary,
-        "#!/bin/sh\ncat <<'JSON'\n{\"check_runs\":[{\"name\":\"Scoped Validation (factory/PR)\",\"status\":\"completed\",\"conclusion\":\"success\"}]}\nJSON\n",
+        "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '{\"nameWithOwner\":\"%s\"}\\n' \"$3\"; exit 0; fi\ncat <<'JSON'\n{\"check_runs\":[{\"name\":\"Scoped Validation (factory/PR)\",\"status\":\"completed\",\"conclusion\":\"success\"}]}\nJSON\n",
     )
     .expect("write successful CI fixture");
     std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))

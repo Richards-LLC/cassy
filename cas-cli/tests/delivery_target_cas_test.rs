@@ -595,7 +595,7 @@ async fn red_ci_worktree_merge_accepts_supervisor_override_end_to_end_cas_4150()
     let gh = fake_bin.path().join("gh");
     std::fs::write(
         &gh,
-        "#!/bin/sh\ncat <<'JSON'\n{\"check_runs\":[{\"name\":\"Fast Validation\",\"status\":\"completed\",\"conclusion\":\"failure\",\"html_url\":\"https://github.com/org/repo/actions/runs/4150\"}]}\nJSON\n",
+        "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '{\"nameWithOwner\":\"%s\"}\\n' \"$3\"; exit 0; fi\ncat <<'JSON'\n{\"check_runs\":[{\"name\":\"Fast Validation\",\"status\":\"completed\",\"conclusion\":\"failure\",\"html_url\":\"https://github.com/org/repo/actions/runs/4150\"}]}\nJSON\n",
     )
     .expect("write fake gh");
     {
@@ -693,7 +693,7 @@ async fn docs_only_code_ci_supervisor_override_is_logged_cas_a9bd() {
     let gh = fake_bin.path().join("gh");
     std::fs::write(
         &gh,
-        "#!/bin/sh\ncat <<'JSON'\n{\"check_runs\":[{\"name\":\"Docs Lint\",\"status\":\"completed\",\"conclusion\":\"success\",\"html_url\":\"https://github.com/org/repo/actions/runs/4150\"}]}\nJSON\n",
+        "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '{\"nameWithOwner\":\"%s\"}\\n' \"$3\"; exit 0; fi\ncat <<'JSON'\n{\"check_runs\":[{\"name\":\"Docs Lint\",\"status\":\"completed\",\"conclusion\":\"success\",\"html_url\":\"https://github.com/org/repo/actions/runs/4150\"}]}\nJSON\n",
     )
     .expect("write fake gh");
     {

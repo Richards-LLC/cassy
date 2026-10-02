@@ -41,7 +41,7 @@ test('signed-in trace and in-flight route teardown contain no seeded credentials
       const tokens = ${JSON.stringify({ idToken, refreshToken, cookie })};
       const server = createServer((req, res) => {
         if (req.url === '/slow') return;
-        res.writeHead(200, { 'Content-Type': 'text/html', 'Set-Cookie': '__session=' + tokens.cookie });
+        res.writeHead(200, { 'Content-Type': 'text/html', 'Set-Cookie': 'app-session=' + tokens.cookie });
         res.end('<body>Authenticated fixture</body>');
       });
       await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -50,7 +50,7 @@ test('signed-in trace and in-flight route teardown contain no seeded credentials
       const browser = await playwright.chromium.launch({ headless: true });
       try {
         const context = await browser.newContext({ extraHTTPHeaders: { Authorization: 'Bearer ' + tokens.idToken } });
-        await context.addCookies([{ name: '__session', value: tokens.cookie, url }]);
+        await context.addCookies([{ name: 'app-session', value: tokens.cookie, url }]);
         await context.tracing.start({ snapshots: true, screenshots: true });
         const page = await context.newPage();
         await page.goto(url);

@@ -9,14 +9,14 @@ import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { inflateSync, inflateRawSync, deflateRawSync } from 'node:zlib';
 
-const SECRET_KEY = /^(?:authorization|cookie|set-cookie|__session|x-firebase-.*|(?:id|refresh|access)[_-]?token|token|password|client[_-]?secret)$/i;
+const SECRET_KEY = /^(?:authorization|cookies?|set-cookie|__session|x-firebase-.*|(?:id|refresh|access)[_-]?token|token|password|client[_-]?secret)$/i;
 
 /** Sanitize diagnostics before console output or artifact serialization. */
 export function redactQaText(value, secrets = []) {
   let text = value instanceof Error ? value.message : String(value);
   for (const secret of secrets) if (typeof secret === 'string' && secret) text = text.split(secret).join('[REDACTED]');
   return text
-    .replace(/\b(?:authorization|cookie|set-cookie|x-firebase-[\w-]+)["']?\s*[:=][^\r\n]*/gi, '[REDACTED header]')
+    .replace(/\b(?:authorization|cookies?|set-cookie|x-firebase-[\w-]+)["']?\s*[:=][^\r\n]*/gi, '[REDACTED header]')
     .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, '[REDACTED]')
     .replace(/(\b(?:__session|(?:id|refresh|access)[_-]?token|token|password|client[_-]?secret)\b["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^;,\s}\]]+)/gi, '$1[REDACTED]')
     .replace(/\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[REDACTED]')
@@ -35,7 +35,8 @@ export function redactQaValue(value, secrets = []) {
   if (Array.isArray(value)) return value.map((item) => redactQaValue(item, secrets));
   if (!value || typeof value !== 'object') return value;
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [key,
-    key === 'v' && SECRET_KEY.test(value.k ?? '') ? { s: '[REDACTED]' } :
+    key.toLowerCase() === 'cookies' ? [] :
+    key === 'v' && SECRET_KEY.test(value.k ?? '') ? (/^cookies$/i.test(value.k) ? { a: [] } : { s: '[REDACTED]' }) :
     SECRET_KEY.test(key) || (key === 'value' && SECRET_KEY.test(value.name ?? ''))
       ? '[REDACTED]' : redactQaValue(item, secrets)]));
 }

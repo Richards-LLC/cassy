@@ -50,6 +50,7 @@ fn is_protected_status(status: TaskStatus) -> bool {
             | TaskStatus::Cancelled
             | TaskStatus::Open
             | TaskStatus::AwaitingMerge
+            | TaskStatus::Blocked
     )
 }
 
@@ -57,7 +58,8 @@ fn is_protected_status(status: TaskStatus) -> bool {
 ///
 /// `held_task_ids` should be the leases observed *before* `mark_stale` /
 /// reclaim (those calls clear active leases). Also recovers InProgress/
-/// Blocked tasks still assigned to the agent by name or id.
+/// Blocked tasks still assigned to the agent by name or id. Blocked remains
+/// blocked and is listed in the death relay for the supervisor to resolve.
 pub fn recover_worker_vanished(
     cas_root: &Path,
     agent_store: &dyn AgentStore,
@@ -120,6 +122,14 @@ pub(crate) fn recover_worker_vanished_with_exit(
     candidate_ids.dedup();
     summary.held_task_ids = candidate_ids.clone();
 
+    // Heartbeat maintenance may already have revoked leases/marked the row
+    // stale. The harness/PTY process is independent evidence of ownership;
+    // never report it dead merely because timers lapsed under CPU starvation.
+    if agent.role == AgentRole::Worker && super::agent_liveness::agent_process_is_alive(agent) {
+        keep_live_worker_leases(cas_root, &task_store, agent_store, agent, &candidate_ids);
+        return summary;
+    }
+
     for task_id in &candidate_ids {
         if park_orphaned_task(&task_store, task_id, agent, reason) {
             summary.recovered_task_ids.push(task_id.clone());
@@ -156,6 +166,9 @@ pub fn recover_expired_leases_for_dead_holders(
             Err(_) => continue,
         };
         if holder_is_alive(&agent, stale_threshold_secs) {
+            if let Ok(tasks) = open_task_store(cas_root) {
+                keep_live_worker_leases(cas_root, &tasks, agent_store, &agent, &task_ids);
+            }
             continue;
         }
         let summary = recover_worker_vanished(
@@ -242,11 +255,41 @@ fn rehome_leases_to_live_successor(
 }
 
 fn holder_is_alive(agent: &Agent, stale_threshold_secs: i64) -> bool {
-    if !matches!(agent.status, AgentStatus::Active | AgentStatus::Idle) {
-        return false;
+    let fresh_heartbeat = matches!(agent.status, AgentStatus::Active | AgentStatus::Idle)
+        && (Utc::now() - agent.last_heartbeat).num_seconds() <= stale_threshold_secs;
+    fresh_heartbeat
+        || (agent.role == AgentRole::Worker && super::agent_liveness::agent_process_is_alive(agent))
+}
+
+/// Restore an expired/revoked lease only while its working task is still
+/// assigned to this live holder. Never take another agent's lease, revive a
+/// parked/terminal task, or reopen a blocker to restore ownership.
+fn keep_live_worker_leases(
+    cas_root: &Path,
+    tasks: &Arc<dyn TaskStore>,
+    agents: &dyn AgentStore,
+    agent: &Agent,
+    task_ids: &[String],
+) {
+    if agent.role == AgentRole::Worker && agent.status == AgentStatus::Stale {
+        let _ = agents.revive(&agent.id);
     }
-    let elapsed = (Utc::now() - agent.last_heartbeat).num_seconds();
-    elapsed <= stale_threshold_secs
+    let duration = crate::config::Config::load(cas_root)
+        .map(|config| i64::from(config.lease().default_duration_mins.max(1)) * 60)
+        .unwrap_or(30 * 60);
+    for id in task_ids {
+        let Ok(task) = tasks.get(id) else { continue; };
+        if !matches!(task.status, TaskStatus::InProgress | TaskStatus::Blocked)
+            || !task_assigned_to_agent(&task.assignee, agent) { continue; }
+        let lease = match agents.get_lease(id) { Ok(lease) => lease, Err(_) => continue };
+        if let Some(lease) = lease {
+            if lease.agent_id != agent.id { continue; }
+            if agents.renew_lease(id, &agent.id, duration).is_ok() { continue; }
+        }
+        // try_claim is atomic and refuses a competing valid lease which
+        // appeared after the read above. A missed renewal never parks work.
+        let _ = agents.try_claim(id, &agent.id, duration, Some("live worker ownership preserved after lease expiry (GH #1065)"));
+    }
 }
 
 fn task_assigned_to_agent(assignee: &Option<String>, agent: &Agent) -> bool {
@@ -1022,7 +1065,7 @@ mod cas_3dcb_death_relay_tests {
     }
 
     #[test]
-    fn recovery_enumerates_and_parks_assigned_in_progress_and_blocked_tasks() {
+    fn recovery_parks_in_progress_and_reports_blocked_without_reopening_cas_230b() {
         let fixture = Fixture::new();
         let worker = fixture.dead_worker("task-holder", 900);
         let tasks = open_task_store(&fixture.cas_root).expect("task store");
@@ -1044,7 +1087,8 @@ mod cas_3dcb_death_relay_tests {
             "test worker death",
         );
         assert_eq!(summary.held_task_ids, vec!["cas-blocked", "cas-in-progress"]);
-        assert_eq!(summary.recovered_task_ids, vec!["cas-blocked", "cas-in-progress"]);
+        assert_eq!(summary.recovered_task_ids, vec!["cas-in-progress"]);
+        assert_eq!(tasks.get("cas-blocked").unwrap().status, TaskStatus::Blocked);
         for id in &summary.recovered_task_ids {
             let task = tasks.get(id).expect("recovered task");
             assert_eq!(task.status, TaskStatus::Open);

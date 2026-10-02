@@ -16907,6 +16907,8 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
         // not a substitute for the branch state the operator needs to
         // act on now. Fall back to an anchor only when there is no live
         // branch receipt at all.
+        #[cfg(test)]
+        epic_measurement::test_load::delay();
         let checked_refs: Vec<&str> = if fallback_branches.is_empty() {
             resolved_anchor.into_iter().collect()
         } else {
@@ -29941,6 +29943,37 @@ mod epic_status_gate_tests {
             summary: false,
             budget,
         }
+    }
+
+    #[test]
+    fn epic_child_cost_above_budget_makes_progress_cas_4151() {
+        let dir = init_epic_repo(&[]);
+        let p = dir.path();
+        let delivered = merged_epic_children(p, 1, 1).pop().unwrap();
+        let children = (0..4).map(|index| {
+            let mut child = delivered.clone();
+            child.id = format!("cas-cost-{index}");
+            child
+        }).collect::<Vec<_>>();
+        let _load = epic_measurement::test_load::Guard::new(
+            std::time::Duration::from_millis(150),
+            std::time::Duration::from_secs(2),
+        );
+        for expected in 1..=children.len() {
+            let started = std::time::Instant::now();
+            let result = collect_epic_branch_statuses_with_options(
+                &children, "main", p, full_view(std::time::Duration::from_millis(100)),
+            );
+            assert_eq!(result.statuses.len(), expected, "each call must finish one expensive child");
+            assert_eq!(result.reused_verdicts, expected - 1);
+            assert!(result.statuses.iter().all(|row| !row.blocks_epic_close()));
+            assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        }
+        let reused = collect_epic_branch_statuses_with_options(
+            &children, "main", p, full_view(std::time::Duration::ZERO),
+        );
+        assert_eq!(reused.reused_verdicts, children.len());
+        assert!(!reused.budget_exhausted);
     }
 
     /// cas-b412: v34 (cas-459b) had 141 children; every close retry restarted

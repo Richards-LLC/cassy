@@ -42,6 +42,41 @@ pub(super) fn check() -> Result<(), String> {
     }
 }
 
+/// Thread-local, deterministic load injection; never reads process-wide env.
+#[cfg(test)]
+pub(super) mod test_load {
+    use std::cell::Cell;
+    use std::time::Duration;
+
+    thread_local! {
+        static DELAY: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+        static CHILD_CAP: Cell<Duration> = const { Cell::new(Duration::from_secs(20)) };
+    }
+
+    pub(crate) struct Guard(Duration, Duration);
+
+    impl Guard {
+        pub(crate) fn new(delay: Duration, child_cap: Duration) -> Self {
+            Self(DELAY.replace(delay), CHILD_CAP.replace(child_cap))
+        }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            DELAY.set(self.0);
+            CHILD_CAP.set(self.1);
+        }
+    }
+
+    pub(crate) fn delay() {
+        std::thread::sleep(DELAY.get());
+    }
+
+    pub(crate) fn child_cap() -> Duration {
+        CHILD_CAP.get()
+    }
+}
+
 fn io_error(error: BoundedCommandError) -> io::Error {
     match error {
         BoundedCommandError::TimedOut => io::Error::new(

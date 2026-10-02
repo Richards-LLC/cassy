@@ -2425,6 +2425,32 @@ fieldset {
   font-size: var(--fs-meta);
 }
 
+/* cas-093d F02: a command to run on the machine is one code block that wraps
+   only between its words (never inside --scopes … or the origin), scrolls
+   sideways if a single word is wider than the dialog, and keeps Copy beside
+   or under it. */
+.pair-command {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-2) 0;
+  padding: var(--space-3);
+  background: var(--panel);
+  border-radius: var(--radius-card);
+}
+.pair-command-token {
+  flex: 1 1 16rem;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: normal;
+  word-break: keep-all;
+  color: var(--text-hi);
+  font-size: var(--fs-meta);
+}
+
 .pair-details {
   display: grid;
   gap: 0;

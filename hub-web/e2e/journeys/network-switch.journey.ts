@@ -625,9 +625,27 @@ test("HUB-J12 network switch: re-pairing by code says plainly that starting sess
     await page.getByRole("button", { name: "Re-pair Atlas · Linux" }).filter({ visible: true }).first().click();
     await expect(dialog).toBeVisible();
     await expect(dialog.locator(".pair-status")).toContainText("starting sessions will need to be allowed again");
-    await expect(dialog.locator(".pair-status")).toContainText("--scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,session:launch");
-    // The long command wraps inside the dialog rather than running out of it.
-    expect(await dialog.locator(".pair-status").evaluate((element) => element.scrollWidth <= element.clientWidth), "the re-pair copy fits the dialog").toBe(true);
+    // cas-093d F02: the command is its own code token with Copy, not prose
+    // that broke mid-token when it wrapped.
+    const command = "cas hub pair --origin " + new URL(page.url()).origin + " --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,session:launch";
+    await expect(dialog.locator(".pair-status")).not.toContainText("cas hub pair");
+    await expect(dialog.locator(".pair-command code")).toHaveText(command);
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 720 });
+      // Every line break falls between words: no token is split across lines.
+      const splits = await dialog.locator(".pair-command code").evaluate((code) => {
+        const text = code.firstChild!;
+        const range = document.createRange();
+        const tops = [...(text.textContent ?? "")].map((_, index) => { range.setStart(text, index); range.setEnd(text, index + 1); return range.getClientRects()[0]?.top ?? 0; });
+        return [...(text.textContent ?? "")].flatMap((char, index) => index > 0 && tops[index] !== tops[index - 1] && char !== " " && text.textContent![index - 1] !== " " ? [index] : []);
+      });
+      expect(splits, `no mid-token break at ${width}`).toEqual([]);
+    }
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await dialog.getByRole("button", { name: "Copy the re-pair command" }).click();
+    await expect(dialog.locator(".pair-command-status")).toHaveText("Command copied");
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(command);
   });
 
   await journey.stage("Re-pair with a code anyway", async () => {
@@ -645,7 +663,11 @@ test("HUB-J12 network switch: re-pairing by code says plainly that starting sess
     await expect(header).toHaveText(" · Live", { timeout: 30_000 });
   });
 
-  await journey.stage("Told plainly that starting sessions needs allowing again", async () => {
+  await journey.stage("Told plainly that starting sessions needs allowing again, even after a reload (cas-093d)", async () => {
+    // cas-093d F01: the page reloads in between; New session still knows why.
+    await page.reload();
+    await chooseConversation(page);
+    await expect(header).toHaveText(" · Live", { timeout: 30_000 });
     const notice = page.locator("#attention-panel").getByText("Starting sessions needs allowing again").filter({ visible: true });
     await expect(notice).toBeVisible();
     await expect(page.locator("#attention-panel")).toContainText("Re-pairing Atlas · Linux with a code didn't include starting sessions. Open New session to allow it again.");
@@ -665,6 +687,8 @@ test("HUB-J12 network switch: re-pairing by code says plainly that starting sess
     await sheet.getByRole("button", { name: "Cancel", exact: true }).click();
     await expect(page.locator("#attention-panel").getByText("Starting sessions needs allowing again").filter({ visible: true })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "New session", exact: true })).toBeVisible();
+    // Allowed: the remembered state is gone, so a reload does not bring the lead back.
+    expect(await page.evaluate(() => localStorage.getItem("cas-commander-launch-dropped:v1"))).toBeNull();
   });
 });
 

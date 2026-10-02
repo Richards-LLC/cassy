@@ -108,3 +108,24 @@ describe("Technical details open state", () => {
     expect(code.querySelector("details.pair-technical")?.hasAttribute("open")).toBe(false);
   });
 });
+
+describe("the Re-pair dialog's command (cas-093d F02)", () => {
+  const origin = "https://hub.example";
+  const command = "cas hub pair --origin https://hub.example --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,session:launch";
+  const base = { cleanupFailed: false, cleanupContext: { cause: "cancel" as const, storeOpen: false, rollbackPending: false }, pendingPairing: null, draft: createPairingDraft(origin), status: "Re-pairing Atlas · Linux: … To keep it, run this on Atlas · Linux and open the link it prints instead:", createInFlight: false, exchangeInFlight: false, relayOrigin: origin, pageOrigin: origin };
+  it("is its own code token with a labelled Copy and an in-dialog announcement, after the status", () => {
+    const doc = new DOMParser().parseFromString(pairDialogMarkup({ ...base, repairCommand: command }), "text/html");
+    const block = doc.querySelector(".pair-command")!;
+    expect(block.querySelector("code.pair-command-token")!.textContent).toBe(command);
+    const copy = block.querySelector<HTMLButtonElement>("button.pair-command-copy")!;
+    expect(copy.dataset.pairCommand).toBe(command);
+    expect(copy.getAttribute("aria-label")).toBe("Copy the re-pair command");
+    expect(block.querySelector('.pair-command-status[role="status"]')).not.toBeNull();
+    expect(doc.querySelector(".pair-status")!.compareDocumentPosition(block) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(doc.querySelector(".pair-status")!.textContent).not.toContain("cas hub pair");
+  });
+  it("is absent when there is no command to keep", () => {
+    const doc = new DOMParser().parseFromString(pairDialogMarkup(base), "text/html");
+    expect(doc.querySelector(".pair-command")).toBeNull();
+  });
+});

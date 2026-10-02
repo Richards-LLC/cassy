@@ -32,7 +32,8 @@ import { EXPIRED_PAIRING_INVITATION_MESSAGE, INVALID_PAIRING_LINK_MESSAGE, cance
 import { exchangePendingPairing, PairingCleanupError, PairingExchangeError, PairingStorageError } from "./pairing-exchange";
 import { PairingOperationCoordinator, commitPairingResult } from "./pairing-operation";
 import { LATE_ROLLBACK_FAILURE_MESSAGE, PairingCancellationTracker, cleanupRetryOutcome } from "./pairing-cancellation";
-import { launchDropped, launchDroppedNotice, preselectedScopes, repairStatus } from "./pairing-scopes";
+import { launchDropped, launchDroppedNotice, preselectedScopes, repairCommand, repairStatus } from "./pairing-scopes";
+import { loadLaunchDropped, saveLaunchDropped } from "./launch-dropped";
 import { LaunchSheet, canLaunch } from "./launch-session";
 import { pendingPairingStoreFor, type PendingPairing, type PendingRelayRequest } from "./pending-pairing";
 import { DEFAULT_PAIRING_SCOPES, PairingRelayError, acknowledgePairing, createPairingRequest, pairingRelayOrigin, pollPairingRequest } from "./pairing-relay";
@@ -681,7 +682,10 @@ function openRepairDialog(machineId: string): void {
   const label = machine?.label ?? "this machine";
   if (!pendingPairing && !pairingCleanupFailed) {
     // cas-0e14 F29: a code re-pair can't keep starting sessions; say so first.
-    pairingStatus = repairStatus(label, machine?.scopes ?? [], location.origin);
+    pairingStatus = repairStatus(label, machine?.scopes ?? []);
+    // cas-093d F02: the command that keeps it, as its own copyable code.
+    const command = repairCommand(machine?.scopes ?? [], location.origin);
+    pairingRepairCommand = command ? { status: pairingStatus, command } : undefined;
     render(false);
   }
   openPairDialog();
@@ -1177,17 +1181,24 @@ function machineFooterConnection(machineId: string): ConnectionState | undefined
   return machineConnection(connectionStates.get(machineId), attached);
 }
 
-/** Machines whose code re-pair dropped session launch in this page (cas-0e14 F29). */
-const launchDroppedMachines = new Set<string>();
+/**
+ * Machines whose code re-pair dropped session launch (cas-0e14 F29), kept
+ * across a reload (cas-093d F01).
+ */
+const launchDroppedStorage = (() => { try { return window.localStorage; } catch { return undefined; } })();
+const launchDroppedMachines = loadLaunchDropped(launchDroppedStorage);
 
 function announceLaunchDropped(machine: StoredMachine): void {
   launchDroppedMachines.add(machine.id);
+  saveLaunchDropped(launchDroppedStorage, launchDroppedMachines);
   const notice = launchDroppedNotice(machine.label);
   void addAttention(machine, undefined, "launch_dropped", { ...notice, severity: "warning", action: "none", fingerprint: `${machine.id}:launch_dropped` });
 }
 
 function settleLaunchDropped(machineId: string): void {
-  if (!launchDroppedMachines.delete(machineId) && !attention.some((item) => item.fingerprint === `${machineId}:launch_dropped`)) return;
+  const dropped = launchDroppedMachines.delete(machineId);
+  if (dropped) saveLaunchDropped(launchDroppedStorage, launchDroppedMachines);
+  if (!dropped && !attention.some((item) => item.fingerprint === `${machineId}:launch_dropped`)) return;
   resolveAttention(`${machineId}:launch_dropped`);
   launchSheet.refresh();
 }
@@ -2324,8 +2335,16 @@ function connectionLabel(state: ConnectionState | AttachSnapshot | undefined): s
 
 function connectionClass(state: ConnectionState | undefined): string { return state?.degraded ? "degraded" : state?.phase ?? "idle"; }
 
+/** The re-pair command shown under the status that introduces it (cas-093d F02). */
+let pairingRepairCommand: { status: string; command: string } | undefined;
+/** Shown only while the status that introduces it is the one on screen. */
+function shownRepairCommand(): string | undefined {
+  return pairingRepairCommand && pairingRepairCommand.status === pairingStatus ? pairingRepairCommand.command : undefined;
+}
+
 function pairDialogMarkup(): string {
   return renderPairDialogMarkup({
+    repairCommand: shownRepairCommand(),
     cleanupFailed: pairingCleanupFailed,
     cleanupContext: pairingCleanupContext,
     pendingPairing,
@@ -3456,6 +3475,7 @@ function render(captureDraft = true): void {
     pendingPairing?.kind === "relay-request" ? pendingPairing.userCode : pendingPairing?.token ?? "",
     pendingPairing?.expiresAt ?? "",
     pairingCleanupFailed ? `cleanup-failed:${pairingCleanupContext.cause}:${pairingCleanupContext.storeOpen ? "store" : ""}:${pairingCleanupContext.rollbackPending ? "rollback" : ""}` : "",
+    shownRepairCommand() ?? "",
   ].join("|");
   const signature = shellSignature({
     machineId: selectedMachineId,
@@ -4810,6 +4830,17 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
     }),
     cancelPendingPairing,
   );
+  // cas-093d F02: the re-pair command's Copy, announced inside the dialog
+  // (a toast outside a modal dialog is not read).
+  for (const copy of document.querySelectorAll<HTMLButtonElement>("#pair-dialog .pair-command-copy")) {
+    copy.onclick = () => {
+      const status = copy.parentElement?.querySelector<HTMLElement>(".pair-command-status");
+      void navigator.clipboard.writeText(copy.dataset.pairCommand ?? "")
+        .then(() => { copy.textContent = "Copied"; if (status) status.textContent = "Command copied"; })
+        .catch(() => { copy.textContent = "Copy failed"; if (status) status.textContent = "Copy failed — select the command and copy it"; })
+        .finally(() => { window.setTimeout(() => { copy.textContent = "Copy command"; }, 2000); });
+    };
+  }
   const pairCopy = document.querySelector<HTMLButtonElement>("#pair-copy");
   if (pairCopy) pairCopy.onclick = () => {
     // The code has to be typed on another machine; retyping it by hand off a
@@ -5062,6 +5093,8 @@ async function forgetPairedMachine(id: string): Promise<void> {
   catch { if (error) { error.hidden = false; error.textContent = 'Could not remove this pairing. Try again.'; } else toast('Could not remove this pairing. Try again.'); return; }
   connections.get(id)?.stop(); firstConnections.forget(id);
   connections.delete(id); machines.delete(id); sessions.delete(id);
+  // cas-093d: a removed machine has no start-sessions permission to re-allow.
+  if (launchDroppedMachines.delete(id)) saveLaunchDropped(launchDroppedStorage, launchDroppedMachines);
   // cas-7752: removing the pairing removes the operator's stored words for it.
   purgeMachineConversations(id, { forgetInMemory: true });
   window.clearTimeout(catalogExpiryTimers.get(id)); catalogExpiryTimers.delete(id); catalogExpiresAt.delete(id);

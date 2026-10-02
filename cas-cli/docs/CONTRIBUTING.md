@@ -543,6 +543,12 @@ commit receipt caps the displayed history and includes unnamed predecessor
 commits within the work window, stopping at another task's commit. Receipt
 inputs remain hexadecimal commit IDs, including unambiguous abbreviations.
 
+The close gate resolves the recorded factory branch locally or on origin before
+counting commits. An unavailable branch produces a missing-evidence error and
+is not parked for merge. A no-code task whose stale code target and delivery
+anchor were cleared closes on a portable `external_ref`; retained code anchors
+and commit receipts still require delivery proof.
+
 A live registered supervisor may use `supervisor_override=true` with a non-empty
 reason to waive additive-only/value-only posture checks and the receipt epoch
 check for a retroactive record task. Close records the decision. Repository
@@ -564,7 +570,10 @@ Each named commit must be the delivery anchor or a descendant of it, be
 reachable on the target, and carry a non-empty first-parent diff. Cassy records
 the resolved commits, anchor, target and review as a decision note.
 
-The epic close gate proves every child within an 8 s budget. When it stops
+The epic close gate proves every child within an 8 s budget, shared by ref
+reads, missing-anchor fetches and nested delivery/history proofs. A probe that
+runs out of time is terminated with its descendants, and its unfinished child
+remains unchecked rather than becoming a measured verdict. When it stops
 early (`EPIC CLOSE CHECK INCOMPLETE`), the verdicts it already proved for
 closed children are saved under the repository's common Git directory
 (`cas/epic-close-verdicts.json`), keyed by the exact refs and anchor each proof

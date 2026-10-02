@@ -25,6 +25,7 @@
 
 use super::{BranchContentDirection, EpicChildBranchStatus, EpicGitSnapshot};
 use cas_types::Task;
+use super::epic_measurement::CommandExt as _;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -183,7 +184,7 @@ fn cache_path(repo_path: &Path) -> Option<PathBuf> {
     let output = std::process::Command::new("git")
         .args(["rev-parse", "--git-common-dir"])
         .current_dir(repo_path)
-        .output()
+        .measurement_output()
         .ok()?;
     if !output.status.success() {
         return None;

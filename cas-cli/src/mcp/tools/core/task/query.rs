@@ -852,7 +852,6 @@ mod tests {
 
     #[tokio::test]
     async fn cas_4bd8_open_list_accounts_for_quarantined_mixed_rows_and_release() {
-        use crate::store::TaskStore;
         use cas_types::TaskType;
         let _env = crate::test_support::TestEnvGuard::temp_home();
         let temp = tempfile::tempdir().unwrap();
@@ -906,6 +905,13 @@ mod tests {
             expected.difference(&hidden).cloned().collect()
         );
         assert!(text.contains("30 quarantined tasks hidden"), "{text}");
+        let mut limited = list_request();
+        limited.limit = Some(5);
+        let limited_text = list_text(core.cas_task_list(Parameters(limited)).await.unwrap());
+        assert_eq!(listed_ids(&limited_text).len(), 5);
+        assert!(limited_text.contains("195 total, showing 5"));
+        assert!(limited_text.contains("... and 190 more"));
+        assert!(limited_text.contains("30 quarantined tasks hidden"));
         let mut epic_request = list_request();
         epic_request.epic = Some("cas-row000".into());
         let epic_text = list_text(core.cas_task_list(Parameters(epic_request)).await.unwrap());

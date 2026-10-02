@@ -27,6 +27,22 @@ pub(crate) enum QaCloseGate {
     Waived(String),
 }
 
+/// Dispatch carries the satisfying verdict separately from its presentation,
+/// so close cannot prepend a QA-required refusal to a satisfied round.
+struct QaDispatchStatus {
+    text: String,
+    satisfied: Option<QaPass>,
+}
+
+impl QaDispatchStatus {
+    fn required(text: String) -> Self {
+        Self {
+            text,
+            satisfied: None,
+        }
+    }
+}
+
 fn is_ancestor(repo: &Path, commit: &str, target: &str) -> bool {
     std::process::Command::new("git")
         .args(["merge-base", "--is-ancestor", commit, target])
@@ -53,7 +69,12 @@ fn resolve_commit(repo: &Path, reference: &str) -> Option<String> {
         return None;
     }
     std::process::Command::new("git")
-        .args(["rev-parse", "--verify", "--quiet", &format!("{reference}^{{commit}}")])
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{reference}^{{commit}}"),
+        ])
         .current_dir(repo)
         .output()
         .ok()
@@ -66,6 +87,120 @@ fn resolve_commit(repo: &Path, reference: &str) -> Option<String> {
 fn trunk_containing(repo: &Path, commit: &str) -> Option<String> {
     let trunk = crate::mcp::tools::core::task::repo_context::resolve_default_branch(repo).ok()?;
     is_ancestor(repo, commit, &trunk).then_some(trunk)
+}
+
+/// A rewritten delivery retains the QA identity of the reviewed tip. Prove
+/// its aggregate delivered files in an integrated receipt (or current target),
+/// allowing unrelated target files but never unresolved or empty Git evidence.
+fn reviewed_tip_carried_by(repo: &Path, reviewed: &str, integrated: &str, target: &str) -> bool {
+    if !is_ancestor(repo, integrated, target) {
+        return false;
+    }
+    let output = std::process::Command::new("git")
+        .args(["merge-base", reviewed, target])
+        .current_dir(repo)
+        .output();
+    let base = match output {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+        _ => return false,
+    };
+    let output = std::process::Command::new("git")
+        .args([
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            &base,
+            reviewed,
+            "--",
+        ])
+        .current_dir(repo)
+        .output();
+    let paths = match output {
+        Ok(output) if output.status.success() => output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+            .map(|path| String::from_utf8(path.to_vec()))
+            .collect::<Result<Vec<_>, _>>(),
+        _ => return false,
+    };
+    let Ok(paths) = paths else {
+        return false;
+    };
+    if paths.is_empty() {
+        return false;
+    }
+    let matches = std::process::Command::new("git")
+        .args([
+            "diff",
+            "--quiet",
+            "--no-ext-diff",
+            "--no-textconv",
+            reviewed,
+            integrated,
+            "--",
+        ])
+        .args(&paths)
+        .current_dir(repo)
+        .status()
+        .is_ok_and(|status| status.success());
+    matches
+        || super::close_ops::commit_patches_cherry_equivalent_on_parent(repo, reviewed, integrated)
+}
+
+fn qa_pass_covers_integrated_delivery(
+    repo: &Path,
+    pass: &QaPass,
+    head: Option<&str>,
+    receipt: Option<&str>,
+    target: &str,
+) -> bool {
+    if !pass.state.satisfies_gate() {
+        return false;
+    }
+    let Some(reviewed) = resolve_commit(repo, &pass.bound_head) else {
+        return false;
+    };
+    let targets = [target.to_string(), format!("origin/{target}")];
+    // Ordinary merges retain ancestry. Preserve that evidence and also
+    // consult origin when the worker's local target has not advanced.
+    if targets
+        .iter()
+        .any(|target| is_ancestor(repo, &reviewed, target))
+    {
+        return true;
+    }
+    let head = head.and_then(|head| resolve_commit(repo, head));
+    let receipt = receipt.and_then(|receipt| resolve_commit(repo, receipt));
+    // A recorded newer pre-merge tip needs its own verdict. A squash receipt
+    // can carry the old reviewed identity when it is the delivery being closed.
+    if head.as_deref() != Some(reviewed.as_str()) && !(head.is_some() && head == receipt) {
+        return false;
+    }
+    targets.iter().any(|target| {
+        let Some(target_tip) = resolve_commit(repo, target) else {
+            return false;
+        };
+        let integrated = receipt.as_deref().unwrap_or(&target_tip);
+        reviewed_tip_carried_by(repo, &reviewed, integrated, &target_tip)
+    })
+}
+
+fn qa_delivery_not_proven(task: &Task, pass: &QaPass, target: &str) -> String {
+    format!(
+        "INDEPENDENT QA {}: task {} pass {} covers reviewed tip @{}, but Cassy cannot prove that delivery's content on {target}. No new QA round is needed for that reviewed tip. Refresh the target refs or provide commit_receipt=<integrated-delivery-sha>; changed delivery content needs its own round.",
+        if pass.state == cas_types::QaPassState::Waived {
+            "WAIVED"
+        } else {
+            "PASSED"
+        },
+        task.id,
+        pass.id,
+        pass.head8(),
+    )
 }
 
 impl CasCore {
@@ -86,7 +221,10 @@ impl CasCore {
 
     /// cas-619f: starting a QA work item claims its round for the caller,
     /// and refuses the delivery's implementer (under either identity).
-    pub(crate) fn claim_qa_round_on_start(&self, qa_task: &Task) -> Result<Option<String>, McpError> {
+    pub(crate) fn claim_qa_round_on_start(
+        &self,
+        qa_task: &Task,
+    ) -> Result<Option<String>, McpError> {
         if !qa_task.labels.iter().any(|label| label == QA_PASS_LABEL) {
             return Ok(None);
         }
@@ -99,8 +237,8 @@ impl CasCore {
         // Check the session id too: an assignee recorded as an id must not
         // slip past a name-only comparison.
         cas_store::assert_may_review_qa_task(&self.cas_root, &qa_task.id, &id).map_err(reject)?;
-        let Some(pass) =
-            cas_store::assert_may_review_qa_task(&self.cas_root, &qa_task.id, &name).map_err(reject)?
+        let Some(pass) = cas_store::assert_may_review_qa_task(&self.cas_root, &qa_task.id, &name)
+            .map_err(reject)?
         else {
             return Ok(None);
         };
@@ -135,8 +273,9 @@ impl CasCore {
                 data: None,
             });
         }
-        let claimed = cas_store::claim_qa_pass(&self.cas_root, &pass.task_id, &name, chrono::Utc::now())
-            .map_err(reject)?;
+        let claimed =
+            cas_store::claim_qa_pass(&self.cas_root, &pass.task_id, &name, chrono::Utc::now())
+                .map_err(reject)?;
         let preflight_note = preflight
             .map(|report| format!("\nQA preflight:\n{}", report.render()))
             .unwrap_or_default();
@@ -233,6 +372,7 @@ impl CasCore {
             QaDeliveryLocation::ParkedForMerge,
             None,
         )
+        .map(|status| status.text)
     }
 
     /// cas-74284: a supervisor asks for an independent QA round on a parked
@@ -327,6 +467,7 @@ impl CasCore {
             QaDeliveryLocation::ParkedForMerge,
             Some(reason),
         )
+        .map(|status| status.text)
         .ok_or_else(|| format!("Cassy could not open a round for {} @{head}", task.id))
     }
 
@@ -345,7 +486,7 @@ impl CasCore {
         changed: Option<Vec<String>>,
         location: QaDeliveryLocation<'_>,
         requested: Option<&str>,
-    ) -> Option<String> {
+    ) -> Option<QaDispatchStatus> {
         let config = crate::config::Config::load(&self.cas_root).ok()?;
         let qa = config.qa();
         let implementer = task.assignee.as_deref()?;
@@ -377,16 +518,17 @@ impl CasCore {
                 return None;
             }
             let latest = prior.iter().find(|pass| !pass.is_withdrawn())?;
-            eligibility
-                .reasons
-                .push(format!("re-review after round {} ({})", latest.round, latest.state));
+            eligibility.reasons.push(format!(
+                "re-review after round {} ({})",
+                latest.round, latest.state
+            ));
         }
         let reasons = eligibility.reasons.join(", ");
         let Some(head) = head else {
-            return Some(format!(
+            return Some(QaDispatchStatus::required(format!(
                 "\n\nINDEPENDENT QA REQUIRED ({reasons}), but the tip of {branch} could not be resolved, \
                  so no QA pass was dispatched. Push the branch and close again."
-            ));
+            )));
         };
         let now = chrono::Utc::now();
         let new = NewQaPass {
@@ -405,14 +547,18 @@ impl CasCore {
             Ok(outcome) => outcome,
             Err(error) => {
                 tracing::error!(task_id = %task.id, error = %error, "cas-619f: QA pass could not be opened");
-                return Some(format!(
+                return Some(QaDispatchStatus::required(format!(
                     "\n\nINDEPENDENT QA REQUIRED ({reasons}), but Cassy could not open the pass: {error}. \
                      The merge stays blocked until a pass records a verdict for {head}."
-                ));
+                )));
             }
         };
         let new_round_id = match &outcome {
             QaPassOpen::Dispatched(pass) => Some(pass.id.clone()),
+            _ => None,
+        };
+        let satisfied = match &outcome {
+            QaPassOpen::AlreadySatisfied(pass) => Some(pass.clone()),
             _ => None,
         };
         let mut status = match outcome {
@@ -423,7 +569,14 @@ impl CasCore {
                 if pass.qa_task_id.is_none() {
                     // A previous park opened the round but crashed before
                     // its work item existed; finish the job.
-                    self.materialize_qa_round(task, pass, &reasons, parent_branch, &config, location)
+                    self.materialize_qa_round(
+                        task,
+                        pass,
+                        &reasons,
+                        parent_branch,
+                        &config,
+                        location,
+                    )
                 } else {
                     format!(
                         "\n\nINDEPENDENT QA PENDING: pass {} (round {}) for {} is {}{}; QA task {}. \
@@ -483,7 +636,10 @@ impl CasCore {
         {
             crate::qa_pass::github_gate::publish_pass_status(&self.cas_root, &current);
         }
-        Some(status)
+        Some(QaDispatchStatus {
+            text: status,
+            satisfied,
+        })
     }
 
     /// cas-ce39: a re-park at a new tip superseded `retired`. Cancel its QA
@@ -531,7 +687,12 @@ impl CasCore {
     }
 
     /// Tell the reviewer of a superseded round to stop (cas-ce39).
-    fn notify_superseded_reviewer(&self, retired: &QaPass, reviewer: &str, next_desc: &str) -> String {
+    fn notify_superseded_reviewer(
+        &self,
+        retired: &QaPass,
+        reviewer: &str,
+        next_desc: &str,
+    ) -> String {
         let queue = match crate::store::open_prompt_queue_store(&self.cas_root) {
             Ok(queue) => queue,
             Err(error) => {
@@ -595,7 +756,11 @@ impl CasCore {
             task.deliverables
                 .parked_branch
                 .clone()
-                .or_else(|| task.assignee.as_deref().map(|name| format!("factory/{name}")))
+                .or_else(|| {
+                    task.assignee
+                        .as_deref()
+                        .map(|name| format!("factory/{name}"))
+                })
                 .unwrap_or_else(|| format!("factory/{merge_id}"))
         };
         let Some(head) = super::close_ops::resolve_branch_sha(repo, &branch) else {
@@ -641,12 +806,6 @@ impl CasCore {
             return QaCloseGate::Clear;
         }
         let passes = cas_store::list_qa_passes(&self.cas_root, &task.id).unwrap_or_default();
-        let covered = passes.iter().any(|pass| {
-            pass.state.satisfies_gate() && is_ancestor(repo, &pass.bound_head, target_branch)
-        });
-        if covered {
-            return QaCloseGate::Clear;
-        }
         let branch = task
             .deliverables
             .parked_branch
@@ -659,14 +818,23 @@ impl CasCore {
             .factory_branch_anchor
             .clone()
             .or_else(|| commit_receipt.and_then(|receipt| resolve_commit(repo, receipt)));
-        let head = recorded_head
-            .clone()
-            .or_else(|| {
-                // The live branch tip is the delivery only while it is itself
-                // merged: months later it carries unrelated work.
-                super::close_ops::resolve_branch_sha(repo, &branch)
-                    .filter(|tip| is_ancestor(repo, tip, target_branch))
-            });
+        let head = recorded_head.clone().or_else(|| {
+            // The live branch tip is the delivery only while it is itself
+            // merged: months later it carries unrelated work.
+            super::close_ops::resolve_branch_sha(repo, &branch)
+                .filter(|tip| is_ancestor(repo, tip, target_branch))
+        });
+        if passes.iter().any(|pass| {
+            qa_pass_covers_integrated_delivery(
+                repo,
+                pass,
+                head.as_deref(),
+                commit_receipt,
+                target_branch,
+            )
+        }) {
+            return QaCloseGate::Clear;
+        }
         // Judge from what the delivery actually integrated, so a
         // docs/test/CI-only change closes freely even when it merged before
         // it ever parked through the gate.
@@ -739,6 +907,14 @@ impl CasCore {
             };
         }
 
+        // Review coverage and integration proof are separate facts. A failed
+        // integration proof must not claim that an existing verdict is missing.
+        if let Some(pass) = passes.iter().find(|pass| {
+            pass.state.satisfies_gate() && head.as_deref() == Some(pass.bound_head.as_str())
+        }) {
+            return QaCloseGate::Refuse(qa_delivery_not_proven(task, pass, target_branch));
+        }
+
         let remedy = "A live supervisor closes it with supervisor_override=true, a reason and \
              commit_receipt=<merged sha>; the waiver is recorded against that commit";
         let Some(head) = head else {
@@ -760,18 +936,33 @@ impl CasCore {
             ));
         }
         let location = close_delivery_location(repo, &head, target_branch);
-        let dispatch = self
-            .independent_qa_for_paths(
-                task,
+        let dispatch = self.independent_qa_for_paths(
+            task,
+            repo,
+            target_branch,
+            &branch,
+            Some(&head),
+            changed,
+            location,
+            None,
+        );
+        if let Some(pass) = dispatch
+            .as_ref()
+            .and_then(|status| status.satisfied.as_ref())
+        {
+            return if qa_pass_covers_integrated_delivery(
                 repo,
-                target_branch,
-                &branch,
+                pass,
                 Some(&head),
-                changed,
-                location,
-                None,
-            )
-            .unwrap_or_default();
+                commit_receipt,
+                target_branch,
+            ) {
+                QaCloseGate::Clear
+            } else {
+                QaCloseGate::Refuse(qa_delivery_not_proven(task, pass, target_branch))
+            };
+        }
+        let dispatch = dispatch.map(|status| status.text).unwrap_or_default();
         QaCloseGate::Refuse(format!(
             "INDEPENDENT QA REQUIRED: {} is user-facing and no passed or waived QA round covers \
              its delivered tip @{} for {target_branch}. The {} waits for the reviewer's verdict \
@@ -793,10 +984,15 @@ impl CasCore {
         config: &crate::config::Config,
         location: QaDeliveryLocation<'_>,
     ) -> String {
-        let artifacts_root =
-            crate::config::project_factory_artifacts_root(&self.cas_root, &crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref()));
+        let artifacts_root = crate::config::project_factory_artifacts_root(
+            &self.cas_root,
+            &crate::config::resolved_factory_artifacts_root(
+                config.factory().artifacts_root.as_deref(),
+            ),
+        );
         let ledger_dir = round_dir(&artifacts_root, &pass);
-        let qa_task_id = match self.create_qa_task(task, &pass, reasons, &ledger_dir, parent_branch) {
+        let qa_task_id = match self.create_qa_task(task, &pass, reasons, &ledger_dir, parent_branch)
+        {
             Ok(id) => id,
             Err(error) => {
                 tracing::error!(task_id = %task.id, pass_id = %pass.id, error = %error, "cas-619f: QA task not created");
@@ -1028,7 +1224,11 @@ mod delivery_location_tests {
                 .env("GIT_CONFIG_SYSTEM", "/dev/null")
                 .output()
                 .unwrap();
-            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
             String::from_utf8_lossy(&output.stdout).trim().to_string()
         };
         git(&["init", "-q", "-b", "epic/ui"]);

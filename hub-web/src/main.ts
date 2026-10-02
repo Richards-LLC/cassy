@@ -3265,10 +3265,14 @@ function render(captureDraft = true): void {
   // A five-second heartbeat render must not slam the picker shut mid-choice.
   if (sessionPickerOpen) document.querySelector<HTMLDialogElement>("#session-picker")?.showModal();
   if (pairDialogWasOpen) document.querySelector<HTMLDialogElement>("#pair-dialog")?.showModal();
+  renderRegions({ selected, session: selectedSession, status, connectionSnapshot, counts, liveRegions });
+  // After the regions, not before: a control can be hidden in fresh shell
+  // markup until its region shows it (the phone Attention badge, cas-a5c6),
+  // and focus() on a hidden control does nothing, so a rebuild left focus on
+  // the page.
   if (focusWinner === "none" && focusedControl && (document.activeElement === document.body || document.activeElement === null)) {
     document.getElementById(focusedControl)?.focus({ preventScroll: true });
   }
-  renderRegions({ selected, session: selectedSession, status, connectionSnapshot, counts, liveRegions });
 }
 
 interface RegionContext {

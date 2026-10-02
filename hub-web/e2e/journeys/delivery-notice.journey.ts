@@ -143,7 +143,15 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
     await page.keyboard.press("Escape");
     await expect(sheet).toBeHidden();
-    await expect(page.getByRole("button", { name: "Attention: 1 item for this session" })).toBeFocused();
+    const badge = page.getByRole("button", { name: "Attention: 1 item for this session" });
+    await expect(badge).toBeFocused();
+    // A catalog change rebuilds the shell, and the fresh badge starts hidden
+    // until its region shows it: focus must still land back on it.
+    const sessions = hub.machine("atlas").sessions;
+    sessions.push({ name: "Accounting-quiet-otter-3", supervisor: "quiet-otter-3", project_dir: "/projects/Ledger", workers: [], liveness: "live" });
+    await expect(page.getByRole("navigation", { name: "Choose a supervisor", includeHidden: true }).locator(".conversation-row")).toHaveCount(2, { timeout: 15_000 });
+    sessions.pop();
+    await expect(badge).toBeFocused();
     await expect(log).toContainText("The ledger import is red");
   });
 

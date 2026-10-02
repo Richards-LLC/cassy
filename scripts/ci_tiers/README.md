@@ -41,6 +41,10 @@ UTC-aware ISO-8601 parser for GitHub timestamps when it fails. The fixtures also
 force the fallback on Linux, cover UTC offsets/fractions and invalid timestamps,
 and verify that successful GNU parsing retains its exact result.
 
+Workflow-body subprocess fixtures retain the parent-selected Bash executable
+when isolating fake-tool `PATH`, so Homebrew Bash on macOS is not silently
+replaced by the system Bash 3.2. The actual Ubuntu run scalars stay unchanged.
+
 ## Preservation ledger
 
 The previous script reported 832 checks: 778 `require_*` instances plus 54

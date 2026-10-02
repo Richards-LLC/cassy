@@ -102,6 +102,21 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     await expect(page.locator(".thread .empty .said")).toBeVisible();
   });
 
+  await journey.stage("The empty thread follows the connection", async () => {
+    // cas-010f: off the network, the card says why nothing new can arrive and
+    // stops offering Terminal view; back on, it is the plain live copy again.
+    const empty = page.locator(".thread .empty");
+    const header = page.locator("#conversation-connection");
+    await hub.down("atlas", { sockets: "close" });
+    await expect(header).toContainText("Reconnecting");
+    await expect(empty.locator(".said")).toHaveText("No messages from the gabber-studio supervisor in this session yet. Reconnecting to Atlas · Linux — anything new will show here once it's back.");
+    await expect(empty.getByRole("button", { name: "Terminal view" })).toHaveCount(0);
+    await hub.up("atlas");
+    await expect(header).toContainText("Live", { timeout: 20_000 });
+    await expect(empty.locator(".said")).toHaveText("No messages from the gabber-studio supervisor in this session yet — nothing is waiting on you.");
+    await expect(empty.getByRole("button", { name: "Terminal view" })).toBeVisible();
+  });
+
   await journey.stage("Each session shows its own conversation", async () => {
     await backToList();
     // cas-010f: a conversation with history never claims, even for a frame,

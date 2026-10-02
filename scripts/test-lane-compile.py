@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
 import sys
 import tempfile
 import unittest
@@ -22,11 +23,12 @@ class LaneCompile(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.repo = Path(self.temp.name) / "repo with spaces"
         self.repo.mkdir()
-        self.write(".gitignore", "/.cas/\n/target/\n")
+        self.write(".gitignore", "/.cas/\n/target/\n/.context/\n")
         self.write("Cargo.toml", '[workspace]\nmembers=["first", "second"]\n')
         for package in ("first", "second"):
             self.write(f"{package}/Cargo.toml", f'[package]\nname="{package}"\nversion="0.1.0"\n')
             self.write(f"{package}/src/lib.rs", "pub fn original() {}\n")
+        self.write("crates/ghostty_vt_sys/build.rs", "// Zig toolchain consumer\n")
         self.write("scripts/check-lane-compile.py", SCRIPT.read_text())
         self.git("init", "-q", "-b", "target")
         self.git("config", "user.email", "fixture@example.invalid")
@@ -46,7 +48,7 @@ cwd = pathlib.Path.cwd().resolve()
 assert cwd.is_relative_to(root / 'worktrees')
 assert args[-1] in ['--lib', '--tests']
 with open(os.environ['LANE_FIXTURE_LOG'], 'a') as log:
-    log.write(json.dumps({'args': args, 'cwd': str(cwd)}) + '\\n')
+    log.write(json.dumps({'args': args, 'cwd': str(cwd), 'zig': os.environ.get('ZIG')}) + '\\n')
 if args[-1] == os.environ.get('LANE_FIXTURE_FAIL'):
     sys.exit(7)
 if args[-1] == '--tests' and os.environ.get('LANE_FIXTURE_MOVE'):
@@ -61,7 +63,72 @@ if not os.environ.get('LANE_FIXTURE_MISSING'):
     receipt.write_text(json.dumps({'head': head, 'repo': str(cwd), 'packages': args[6:-1:2]}))
 """)
         self.fake.chmod(0o755)
-        self.env = dict(os.environ, CAS_LANE_CHECK_CAS=str(self.fake), LANE_FIXTURE_LOG=str(self.log))
+        self.bin = Path(self.temp.name) / "bin"
+        self.bin.mkdir()
+        for name, path in (("git", shutil.which("git")), ("bash", shutil.which("bash")),
+                           ("python3", sys.executable)):
+            (self.bin / name).symlink_to(path)
+        self.zig = self.make_zig(self.repo / ".context/zig/zig")
+        self.env = dict(os.environ, ZIG="", PATH=str(self.bin),
+                        CAS_LANE_CHECK_CAS=str(self.fake), LANE_FIXTURE_LOG=str(self.log))
+
+    def make_zig(self, path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/bin/sh\nexit 0\n")
+        path.chmod(0o755)
+        return path.resolve()
+
+    def assert_preview_zig(self, expected):
+        self.rust_lane()
+        self.prove()
+        calls = [json.loads(line) for line in self.log.read_text().splitlines()]
+        self.assertEqual([call["zig"] for call in calls], [str(expected)] * 2)
+        self.assertTrue(all(not (Path(call["cwd"]) / ".context/zig/zig").exists()
+                            for call in calls))
+
+    def test_unrelated_rust_repo_needs_no_zig(self):
+        self.git("rm", "crates/ghostty_vt_sys/build.rs")
+        self.commit()
+        self.zig.unlink()
+        self.rust_lane()
+        self.prove()
+        calls = [json.loads(line) for line in self.log.read_text().splitlines()]
+        self.assertEqual([call["zig"] for call in calls], [""] * 2)
+
+    def test_source_repo_zig_is_exported_to_fresh_preview_without_path_zig(self):
+        self.assert_preview_zig(self.zig)
+
+    def test_explicit_zig_precedes_path_and_source_repo(self):
+        expected = self.make_zig(self.repo / ".context/custom-zig")
+        self.make_zig(self.bin / "zig")
+        self.env["ZIG"] = ".context/custom-zig"
+        self.assert_preview_zig(expected)
+
+    def test_path_zig_precedes_source_repo_and_invalid_configured_zig(self):
+        expected = self.make_zig(self.bin / "zig")
+        self.env["ZIG"] = "missing-zig"
+        self.assert_preview_zig(expected)
+
+    def test_linked_source_repo_resolves_main_checkout_zig(self):
+        self.rust_lane()
+        checkout = Path(self.temp.name) / "source-worktree"
+        self.git("worktree", "add", "--detach", str(checkout), "HEAD")
+        self.repo = checkout
+        self.prove()
+        calls = [json.loads(line) for line in self.log.read_text().splitlines()]
+        self.assertEqual([call["zig"] for call in calls], [str(self.zig)] * 2)
+
+    def test_missing_zig_refuses_before_runner_and_invalidates_previous_proof(self):
+        self.rust_lane()
+        path = self.prove()
+        self.zig.chmod(0o644)
+        result = self.run_check("--prove")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Zig compiler", result.stderr)
+        self.assertIn("bootstrap-zig.sh", result.stderr)
+        self.assertEqual(len(self.log.read_text().splitlines()), 2)
+        self.assertFalse(path.exists())
+        self.assertNotIn("lane-compile-", self.git("worktree", "list", "--porcelain"))
 
     def write(self, path, text):
         target = self.repo / path

@@ -28,6 +28,28 @@ def common_dir(repo):
     return Path(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
 
 
+def resolve_zig(repo, tree):
+    # Ignore unrelated Rust projects. The preview may introduce Ghostty, so
+    # inspect the candidate tree rather than only the source checkout.
+    if subprocess.run(["git", "-C", str(repo), "cat-file", "-e",
+                       f"{tree}:crates/ghostty_vt_sys/build.rs"],
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+        return None
+    candidates = []
+    configured = os.environ.get("ZIG", "")
+    if configured:
+        candidates.append(Path(configured))
+    if "PATH" in os.environ:
+        candidates.extend(Path(directory) / "zig" for directory in os.environ["PATH"].split(os.pathsep))
+    candidates.extend((repo / ".context/zig/zig", common_dir(repo).parent / ".context/zig/zig"))
+    for candidate in candidates:
+        candidate = candidate if candidate.is_absolute() else repo / candidate
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate.resolve()
+    raise ValueError("missing Zig compiler in ZIG, PATH or source/main checkout .context.\n"
+                     "Run ./scripts/bootstrap-zig.sh in the source repo, or set an absolute ZIG.")
+
+
 def package_at(repo, tree, directory):
     path = str(directory / "Cargo.toml")
     result = subprocess.run(["git", "-C", str(repo), "show", f"{tree}:{path}"],
@@ -126,8 +148,11 @@ def prove(repo, target, source):
     with path.with_suffix(".lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         path.unlink(missing_ok=True)
+        zig = resolve_zig(repo, tree)
         env = dict(os.environ, GIT_AUTHOR_NAME="Lane compile", GIT_AUTHOR_EMAIL="lane@example.invalid",
                    GIT_COMMITTER_NAME="Lane compile", GIT_COMMITTER_EMAIL="lane@example.invalid")
+        if zig is not None:
+            env["ZIG"] = str(zig)
         commit = git(repo, "commit-tree", tree, "-p", base, "-p", source_sha,
                      input=b"Capped lane compile preview\n", env=env)
         with tempfile.TemporaryDirectory(prefix="lane-compile-", dir=previews) as scratch:
@@ -139,7 +164,7 @@ def prove(repo, target, source):
                     command = [os.environ.get("CAS_LANE_CHECK_CAS", "cas"), "factory", "worker-check",
                                "--cas-root", str(root), "--", *package_args, selector]
                     print("Capped check: " + shlex.join(command), flush=True)
-                    subprocess.run(command, cwd=preview, check=True)
+                    subprocess.run(command, cwd=preview, env=env, check=True)
                     key = hashlib.sha256(os.fsencode(preview.resolve())).hexdigest()
                     worker_receipt = root / "worker-checks" / key / f"{commit}.json"
                     try:

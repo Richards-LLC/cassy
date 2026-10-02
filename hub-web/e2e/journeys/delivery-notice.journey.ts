@@ -118,6 +118,18 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     const resting = await focused();
     await page.waitForTimeout(6_000);
     expect(await focused(), "focus stays put across a heartbeat").toBe(resting);
+    // QA round 3 F02/F03: a minute rollover (the cards' ages change) is not a
+    // redraw either. Open the notice's Details, rest on its Copy, cross a
+    // minute on the page clock: the same element keeps focus, Details stays open.
+    const notice = sheet.locator("article.attention-item").first();
+    await notice.locator("summary").click();
+    await notice.getByRole("button", { name: "Copy" }).focus();
+    const copy = await focused();
+    await page.clock.fastForward(61_000);
+    await page.waitForTimeout(6_000);
+    expect(await focused(), "focus stays on Copy across a minute").toBe(copy);
+    await expect(notice.locator("details")).toHaveAttribute("open", "");
+    await sheet.locator(".attention-dismiss-group").focus();
     await expect(page.locator(".conversation-main")).toHaveAttribute("inert", "");
     await expect(sheet).toBeVisible();
   });

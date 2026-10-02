@@ -103,19 +103,18 @@ describe("phone Attention sheet (cas-a5c6)", () => {
     expect(shut).toHaveBeenCalledOnce();
   });
 
-  it("finds the same control again after the panel is rebuilt (QA F03)", () => {
+  it("finds the same notice's control again after a redraw, never a look-alike (QA rounds 2 and 3)", () => {
     const { rail } = shell();
     const section = rail.querySelector("section")!;
-    section.insertAdjacentHTML("beforeend", '<button class="dismiss">Dismiss</button>');
-    const second = section.querySelectorAll<HTMLButtonElement>(".dismiss")[1]!;
-    const key = focusKey(rail, second);
-    // A redraw replaces every control with an equal new one.
-    section.innerHTML = section.innerHTML;
+    const notice = (id: string) => `<article data-attention-id="${id}"><button data-role="dismiss">Dismiss</button></article>`;
+    section.innerHTML = notice("A") + notice("B");
+    const key = focusKey(rail, section.querySelector<HTMLElement>("[data-attention-id='B'] button")!);
+    // A redraw with a new notice above: position would say A's Dismiss is B's.
+    section.innerHTML = notice("NEW") + notice("A") + notice("B");
     const found = findByFocusKey(rail, key, all)!;
-    expect(found).not.toBe(second);
-    expect(found).toBe(section.querySelectorAll(".dismiss")[1]);
-    // A control that is gone has no match; the caller falls back to Close.
-    section.querySelectorAll(".dismiss")[1]!.remove();
+    expect(found.closest<HTMLElement>("[data-attention-id]")!.dataset.attentionId).toBe("B");
+    // B is gone: nothing matches, and the caller falls back to Close, never a sibling's Dismiss.
+    section.innerHTML = notice("NEW") + notice("A");
     expect(findByFocusKey(rail, key, all)).toBeUndefined();
   });
 });

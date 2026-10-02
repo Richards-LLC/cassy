@@ -99,9 +99,48 @@ describe("heartbeat redraws (cas-a5c6 QA F03)", () => {
     // A new item is a real change.
     renderAttentionPanel(root, [event("1"), event("2")], callbacks(), { now: now + 10_000 });
     expect(root.querySelector(".attention-dismiss-group")).not.toBe(dismiss);
-    // So is the next minute: the cards' ages move on.
+    // The next minute is not a redraw: the ages move on in place (round 3).
     const before = root.querySelector(".attention-dismiss-group");
     renderAttentionPanel(root, [event("1"), event("2")], callbacks(), { now: now + 70_000 });
-    expect(root.querySelector(".attention-dismiss-group")).not.toBe(before);
+    expect(root.querySelector(".attention-dismiss-group")).toBe(before);
+  });
+});
+
+describe("redraws keep each notice's state by its key (cas-a5c6 QA round 3)", () => {
+  const warn = (id: string, at: string): AttentionItem => ({ ...event(id, "delivery_stall"), createdAt: at, message: `notice ${id}` });
+  const card = (root: HTMLElement, id: string) => [...root.querySelectorAll<HTMLElement>("[data-attention-id]")].find((node) => node.textContent?.includes(`notice ${id}`))!;
+
+  it("keeps focus on the same notice's Dismiss when a new notice arrives above it (F01)", () => {
+    const root = document.createElement("div"); document.body.replaceChildren(root);
+    const a = warn("a", "2026-09-07T11:50:00Z");
+    renderAttentionPanel(root, [a], callbacks(), { now });
+    card(root, "a").querySelector<HTMLElement>("[data-role='dismiss']")!.focus();
+    renderAttentionPanel(root, [a, warn("b", "2026-09-07T11:59:00Z")], callbacks(), { now });
+    const focused = document.activeElement as HTMLElement;
+    expect(focused.dataset.role).toBe("dismiss");
+    expect(focused.closest("[data-attention-id]")).toBe(card(root, "a"));
+  });
+
+  it("keeps an opened Details open and Copy focused across a minute, and its age moves on in place (F02, F03)", () => {
+    const root = document.createElement("div"); document.body.replaceChildren(root);
+    const a = warn("a", "2026-09-07T11:59:00Z");
+    renderAttentionPanel(root, [a], callbacks(), { now });
+    const details = card(root, "a").querySelector("details")!;
+    details.open = true;
+    const copy = card(root, "a").querySelector<HTMLElement>("[data-role='copy']")!;
+    copy.focus();
+    const time = card(root, "a").querySelector("time.attention-time")!;
+    const before = time.textContent;
+    renderAttentionPanel(root, [a], callbacks(), { now: now + 61_000 });
+    expect(card(root, "a").querySelector("[data-role='copy']")).toBe(copy);
+    expect(document.activeElement).toBe(copy);
+    expect(details.open).toBe(true);
+    expect(time.textContent).not.toBe(before);
+    // A real change redraws, and the opened Details stays open on its notice.
+    renderAttentionPanel(root, [a, warn("b", "2026-09-07T11:59:30Z")], callbacks(), { now: now + 62_000 });
+    expect(card(root, "a").querySelector("details")!.open).toBe(true);
+    expect(card(root, "b").querySelector("details")!.open).toBe(false);
+    expect((document.activeElement as HTMLElement).dataset.role).toBe("copy");
+    expect((document.activeElement as HTMLElement).closest("[data-attention-id]")).toBe(card(root, "a"));
   });
 });

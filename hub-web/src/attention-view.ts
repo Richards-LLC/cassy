@@ -122,12 +122,15 @@ function renderPayload(card: AttentionCard, callbacks: AttentionPanelCallbacks):
   details.className = "attention-payload";
   const summary = document.createElement("summary");
   summary.textContent = "Details";
+  summary.dataset.role = "details";
   const body = document.createElement("div");
   body.className = "attention-payload-body";
   const payload = attentionPayload(card.latest);
   const pre = document.createElement("pre");
   pre.textContent = payload;
-  body.append(button("Copy", "attention-copy", () => void callbacks.copy(payload)), pre);
+  const copy = button("Copy", "attention-copy", () => void callbacks.copy(payload));
+  copy.dataset.role = "copy";
+  body.append(copy, pre);
   details.append(summary, body);
   return details;
 }
@@ -136,6 +139,9 @@ function renderCard(card: AttentionCard, callbacks: AttentionPanelCallbacks, opt
   const severity = card.content.severity;
   const article = document.createElement("article");
   article.className = `attention-item attention-item--${severity}`;
+  // cas-a5c6 QA round 3: a stable identity for this notice, so focus and an
+  // opened Details follow the notice across redraws, never its position.
+  article.dataset.attentionId = card.key;
   if (card.content.enrichmentPending) article.classList.add("attention-item--enriching");
   if (severity === "critical" && options.animateIds?.has(card.latest.id)) {
     article.classList.add("attention-item--new-critical");
@@ -202,14 +208,17 @@ function renderCard(card: AttentionCard, callbacks: AttentionPanelCallbacks, opt
   actions.className = "attention-actions";
   if (card.content.action !== "none") {
     const action = card.content.action;
-    actions.append(button(ACTION_LABEL[action], "attention-action", () => {
+    const act = button(ACTION_LABEL[action], "attention-action", () => {
       void Promise.resolve(callbacks.act(card.latest, action)).then(() => {
         if (severity === "critical") return callbacks.dismiss(card.items);
       });
-    }));
+    });
+    act.dataset.role = "action";
+    actions.append(act);
   }
   const dismiss = button("Dismiss", severity !== "critical" ? "attention-dismiss" : "attention-explicit-dismiss", () => void callbacks.dismiss(card.items));
   dismiss.setAttribute("aria-label", `Dismiss ${severity} event`);
+  dismiss.dataset.role = "dismiss";
   if (card.content.action === "none") dismiss.classList.add("attention-action");
   actions.append(dismiss);
   actions.append(renderPayload(card, callbacks));
@@ -220,6 +229,7 @@ function renderCard(card: AttentionCard, callbacks: AttentionPanelCallbacks, opt
 function renderGroup(group: AttentionGroup, callbacks: AttentionPanelCallbacks, options: AttentionPanelOptions): HTMLElement {
   const section = document.createElement("section");
   section.className = `attention-group${group.overflow ? " attention-group--overflow" : ""}`;
+  section.dataset.groupKey = group.key;
   const header = document.createElement("header");
   header.className = "attention-group-header";
   const toggle = button("", "attention-group-toggle", () => {
@@ -228,6 +238,7 @@ function renderGroup(group: AttentionGroup, callbacks: AttentionPanelCallbacks, 
     body.hidden = expanded;
   });
   toggle.setAttribute("aria-expanded", "true");
+  toggle.dataset.role = "group-toggle";
   toggle.append(severityDot(group.worstSeverity));
   const label = document.createElement("span");
   label.className = "attention-group-label";
@@ -239,7 +250,9 @@ function renderGroup(group: AttentionGroup, callbacks: AttentionPanelCallbacks, 
   count.textContent = String(group.count);
   toggle.append(label, count);
   const allItems = group.cards.flatMap((card) => card.items);
-  header.append(toggle, button("Dismiss group", "attention-dismiss-group", () => void callbacks.dismiss(allItems)));
+  const dismissGroup = button("Dismiss group", "attention-dismiss-group", () => void callbacks.dismiss(allItems));
+  dismissGroup.dataset.role = "group-dismiss";
+  header.append(toggle, dismissGroup);
   const body = document.createElement("div");
   body.className = "attention-group-body";
   const groupLabel = group.overflow ? group.machineLabel : group.session ?? group.machineLabel;
@@ -254,19 +267,93 @@ export function renderAttentionPanel(
   callbacks: AttentionPanelCallbacks,
   options: AttentionPanelOptions = {},
 ): void {
-  // cas-a5c6 QA F03: a heartbeat redraw with nothing new rebuilt the panel
-  // every 5 s, taking the keyboard user's focus (and any opened Details or
-  // folded group) with it. Redraw only when what it shows has changed; the
-  // minute keeps the cards' ages current.
+  // cas-a5c6 QA F03 (rounds 2 and 3): a heartbeat redraw with nothing new
+  // rebuilt the panel every 5 s, and the minute's age change rebuilt it once a
+  // minute, taking the keyboard user's focus and any opened Details with it.
+  // Unchanged content is left alone; only the cards' ages are refreshed, in
+  // place.
+  const now = options.now ?? Date.now();
   const signature = JSON.stringify([
     items,
     options.outage ?? null,
-    Math.floor((options.now ?? Date.now()) / 60_000),
     [...(options.animateIds ?? [])].filter((id) => items.some((item) => item.id === id)),
     [...(options.reclassifyIds ?? [])].filter((id) => items.some((item) => item.id === id)),
   ]);
-  if (container.dataset.panelSignature === signature && container.childElementCount > 0) return;
+  if (container.dataset.panelSignature === signature && container.childElementCount > 0) {
+    for (const time of container.querySelectorAll<HTMLTimeElement>("time.attention-time")) {
+      const label = attentionTimeLabel(time.dateTime, now);
+      if (time.textContent !== label) time.textContent = label;
+    }
+    return;
+  }
   container.dataset.panelSignature = signature;
+  // A real change redraws; what the operator had open, folded and focused is
+  // carried over by each notice's and group's own key, never by position.
+  const kept = attentionPanelState(container);
+  renderAttentionPanelContent(container, items, callbacks, options);
+  restoreAttentionPanelState(container, kept);
+}
+
+/** Opened Details, folded groups and the focused control, keyed by notice or group and role. */
+interface AttentionPanelState { open: Set<string>; folded: Set<string>; focus?: string }
+
+/** The key of a panel control: its notice (or group, or the panel) and its role (cas-a5c6). */
+export function attentionControlKey(node: Element): string | undefined {
+  if (!(node instanceof HTMLElement) || !node.dataset.role) return undefined;
+  const notice = node.closest<HTMLElement>("[data-attention-id]")?.dataset.attentionId;
+  const group = node.closest<HTMLElement>("[data-group-key]")?.dataset.groupKey;
+  const scope = notice !== undefined ? `notice:${notice}` : group !== undefined ? `group:${group}` : "panel";
+  return `${scope}|${node.dataset.role}`;
+}
+
+/** The control in `root` with this key, if it is there. */
+export function findAttentionControl(root: ParentNode, key: string): HTMLElement | undefined {
+  return [...root.querySelectorAll<HTMLElement>("[data-role]")].find((node) => attentionControlKey(node) === key);
+}
+
+function attentionPanelState(container: HTMLElement): AttentionPanelState {
+  const open = new Set<string>();
+  for (const details of container.querySelectorAll<HTMLDetailsElement>("[data-attention-id] details[open]")) {
+    const id = details.closest<HTMLElement>("[data-attention-id]")?.dataset.attentionId;
+    if (id !== undefined) open.add(id);
+  }
+  const folded = new Set<string>();
+  for (const toggle of container.querySelectorAll<HTMLElement>("[data-group-key] [data-role='group-toggle'][aria-expanded='false']")) {
+    const key = toggle.closest<HTMLElement>("[data-group-key]")?.dataset.groupKey;
+    if (key !== undefined) folded.add(key);
+  }
+  const active = container.ownerDocument.activeElement;
+  const focus = active && container.contains(active) ? attentionControlKey(active) : undefined;
+  return { open, folded, focus };
+}
+
+function restoreAttentionPanelState(container: HTMLElement, state: AttentionPanelState): void {
+  for (const article of container.querySelectorAll<HTMLElement>("[data-attention-id]")) {
+    if (!state.open.has(article.dataset.attentionId!)) continue;
+    const details = article.querySelector<HTMLDetailsElement>("details");
+    if (details) details.open = true;
+  }
+  for (const section of container.querySelectorAll<HTMLElement>("[data-group-key]")) {
+    if (!state.folded.has(section.dataset.groupKey!)) continue;
+    const toggle = section.querySelector<HTMLElement>("[data-role='group-toggle']");
+    const body = section.querySelector<HTMLElement>(".attention-group-body");
+    toggle?.setAttribute("aria-expanded", "false");
+    if (body) body.hidden = true;
+  }
+  if (state.focus === undefined) return;
+  const document = container.ownerDocument;
+  if (document.activeElement && document.activeElement !== document.body && container.contains(document.activeElement)) return;
+  // The same control of the same notice, or nothing: never a neighbour's
+  // look-alike, which could be another notice's Dismiss (QA round 3 F01).
+  findAttentionControl(container, state.focus)?.focus({ preventScroll: true });
+}
+
+function renderAttentionPanelContent(
+  container: HTMLElement,
+  items: readonly AttentionItem[],
+  callbacks: AttentionPanelCallbacks,
+  options: AttentionPanelOptions,
+): void {
   container.replaceChildren();
   const counts = attentionCounts(items);
   const header = document.createElement("header");
@@ -281,7 +368,9 @@ export function renderAttentionPanel(
   header.append(heading);
   const infoItems = items.filter((item) => !item.acknowledgedAt && attentionCounts([item]).info === 1);
   if (infoItems.length > 0) {
-    header.append(button("Dismiss all info", "attention-dismiss-info", () => void callbacks.dismiss(infoItems)));
+    const dismissInfo = button("Dismiss all info", "attention-dismiss-info", () => void callbacks.dismiss(infoItems));
+    dismissInfo.dataset.role = "dismiss-info";
+    header.append(dismissInfo);
   }
   container.append(header, summary);
 

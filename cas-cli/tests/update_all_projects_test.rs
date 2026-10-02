@@ -444,10 +444,11 @@ fn all_projects_skips_later_phases_when_a_held_write_lock_blocks_migration() {
     assert!(column_exists(&conn, "entries", "origin_project"));
 }
 
-/// cas-3af4: a legacy store (rules and entries without a task table) used to
-/// be called "not initialized", its migration phase reported ok, and the
-/// skills phase failed on "no such column: operator_authority". It is
-/// migrated first now, and the refresh succeeds.
+/// cas-3af4: a legacy store (entries, rules, metadata and sessions only; no
+/// task table, no migration ledger, user_version 0, rules without
+/// operator_authority) used to be called "not initialized": its migration
+/// phase reported ok and the skills phase failed on "no such column:
+/// operator_authority". It is migrated first now, and the refresh succeeds.
 #[test]
 fn all_projects_migrates_a_legacy_store_before_reading_its_rules() {
     let temp = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
@@ -455,16 +456,19 @@ fn all_projects_migrates_a_legacy_store_before_reading_its_rules() {
     let projects = root.join("projects");
     let project = projects.join("legacy");
     init_project(root, &project);
+    for name in ["cas.db", "cas.db-wal", "cas.db-shm"] {
+        let _ = std::fs::remove_file(project.join(".cas").join(name));
+    }
     {
         let conn = open_project_db(&project);
+        conn.execute_batch(cas_store::ENTRIES_RULES_SCHEMA)
+            .expect("create the entries/rules-only store");
         conn.execute_batch(
-            "DROP TABLE tasks;
-             DELETE FROM cas_migrations WHERE id >= 259;
-             ALTER TABLE rules DROP COLUMN origin_project;
+            "ALTER TABLE rules DROP COLUMN origin_project;
              ALTER TABLE rules DROP COLUMN operator_authority;
              ALTER TABLE entries DROP COLUMN origin_project;",
         )
-        .expect("rewind the store to a legacy shape without a task table");
+        .expect("rewind rules and entries to their legacy shape");
         assert!(!column_exists(&conn, "rules", "operator_authority"));
     }
 

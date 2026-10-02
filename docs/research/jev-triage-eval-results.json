@@ -1,0 +1,1900 @@
+{
+  "task": "cas-9add",
+  "manifest": {
+    "created_utc": "2026-10-02T13:54:10.881327+00:00",
+    "origin_main": "2aa95f39323716583de2aae166f936679691c3ce",
+    "labels_sha256": "094296a0ef11a0cc9c86ec7c324094a4249c434bc754ec4593beefa907315a62",
+    "cohort_size": 172,
+    "calibration_ids": [
+      "cas-8b34",
+      "cas-c107",
+      "cas-05dd",
+      "cas-91b8",
+      "cas-7cb3",
+      "cas-49c0",
+      "cas-0f22",
+      "cas-786a",
+      "cas-9040",
+      "cas-4e45",
+      "cas-d1eb",
+      "cas-dae6",
+      "cas-d8a5",
+      "cas-f2eb",
+      "cas-b5ab",
+      "cas-3af4",
+      "cas-616e",
+      "cas-3760",
+      "cas-ea1a",
+      "cas-5eb9",
+      "cas-1502",
+      "cas-91a3",
+      "cas-844b",
+      "cas-d0b7",
+      "cas-f1f4",
+      "cas-569f",
+      "cas-cae2",
+      "cas-b52d",
+      "cas-046c",
+      "cas-8121",
+      "cas-746a",
+      "cas-236d",
+      "cas-3e05",
+      "cas-3172"
+    ],
+    "holdout_ids": [
+      "cas-045f",
+      "cas-052a",
+      "cas-0906",
+      "cas-0aab",
+      "cas-0bad",
+      "cas-0d16",
+      "cas-1451",
+      "cas-1a95",
+      "cas-1b12",
+      "cas-1c31",
+      "cas-230b",
+      "cas-248c",
+      "cas-24d0",
+      "cas-24fe",
+      "cas-2556",
+      "cas-266e",
+      "cas-269ab",
+      "cas-2929",
+      "cas-2b9f",
+      "cas-2cce",
+      "cas-3067",
+      "cas-326e",
+      "cas-3316",
+      "cas-376a",
+      "cas-3831",
+      "cas-3843",
+      "cas-3e8d",
+      "cas-41500",
+      "cas-460a",
+      "cas-467a",
+      "cas-48e4",
+      "cas-4a8e1",
+      "cas-4bd8",
+      "cas-4c89",
+      "cas-4cec",
+      "cas-4f8d",
+      "cas-5042",
+      "cas-5129",
+      "cas-563a",
+      "cas-5f61",
+      "cas-624f",
+      "cas-63b9",
+      "cas-6419",
+      "cas-65cce",
+      "cas-6667",
+      "cas-6a96",
+      "cas-6b75",
+      "cas-6c28",
+      "cas-6c75",
+      "cas-6fb6",
+      "cas-7062",
+      "cas-72163",
+      "cas-7391",
+      "cas-74b9",
+      "cas-74c8",
+      "cas-7719e",
+      "cas-78d5",
+      "cas-7c15",
+      "cas-7cc95",
+      "cas-8030",
+      "cas-8090",
+      "cas-8095",
+      "cas-82bc",
+      "cas-84b3",
+      "cas-84f2",
+      "cas-8526",
+      "cas-8674",
+      "cas-876e",
+      "cas-88a0",
+      "cas-90d6",
+      "cas-92b7",
+      "cas-939a",
+      "cas-93de",
+      "cas-96ab",
+      "cas-96c0",
+      "cas-9886",
+      "cas-99d7",
+      "cas-9d8a",
+      "cas-9d9b",
+      "cas-9e33",
+      "cas-9fe6",
+      "cas-a3af",
+      "cas-a49c",
+      "cas-a549",
+      "cas-a5c0",
+      "cas-a768",
+      "cas-a957",
+      "cas-a9bd",
+      "cas-adfc",
+      "cas-b043",
+      "cas-b1cf",
+      "cas-b1dd",
+      "cas-b352",
+      "cas-b452",
+      "cas-b8b1",
+      "cas-b8fc",
+      "cas-bad9",
+      "cas-baf7",
+      "cas-c0ec",
+      "cas-c19d",
+      "cas-c214",
+      "cas-c8a6",
+      "cas-c945",
+      "cas-cae9",
+      "cas-ce30",
+      "cas-cee5",
+      "cas-cf4f",
+      "cas-d141",
+      "cas-d1fa",
+      "cas-d362",
+      "cas-d4a0",
+      "cas-d4fb",
+      "cas-d6b9",
+      "cas-db95",
+      "cas-de46",
+      "cas-e1c7",
+      "cas-e4a8",
+      "cas-e4aa",
+      "cas-e687",
+      "cas-e7ae",
+      "cas-e85e",
+      "cas-ea48",
+      "cas-eb10",
+      "cas-eb27",
+      "cas-eb39",
+      "cas-ec70",
+      "cas-eef7",
+      "cas-f01b",
+      "cas-f163",
+      "cas-f50f",
+      "cas-f60a",
+      "cas-f616",
+      "cas-f6ad",
+      "cas-f7ac",
+      "cas-f9d5",
+      "cas-fa64",
+      "cas-fda3",
+      "cas-fe7b"
+    ],
+    "retrieval": "cited path log last 200 + task ids in full main log; four ranked subject candidates; three similar tasks; three source snippets; no gold evidence in model state"
+  },
+  "run1": {
+    "overall": {
+      "n": 172,
+      "correct": 119,
+      "accuracy": 0.6918604651162791,
+      "errors": [],
+      "confusion_matrix": {
+        "VALID": {
+          "VALID": 107,
+          "FIXED": 3,
+          "OBSOLETE": 0,
+          "DUPLICATE": 1,
+          "UNCLEAR": 1
+        },
+        "FIXED": {
+          "VALID": 9,
+          "FIXED": 12,
+          "OBSOLETE": 0,
+          "DUPLICATE": 0,
+          "UNCLEAR": 0
+        },
+        "OBSOLETE": {
+          "VALID": 17,
+          "FIXED": 1,
+          "OBSOLETE": 0,
+          "DUPLICATE": 2,
+          "UNCLEAR": 0
+        },
+        "DUPLICATE": {
+          "VALID": 4,
+          "FIXED": 0,
+          "OBSOLETE": 0,
+          "DUPLICATE": 0,
+          "UNCLEAR": 0
+        },
+        "UNCLEAR": {
+          "VALID": 15,
+          "FIXED": 0,
+          "OBSOLETE": 0,
+          "DUPLICATE": 0,
+          "UNCLEAR": 0
+        }
+      },
+      "confidence_buckets": {
+        ">=0.9": {
+          "n": 75,
+          "correct": 60
+        },
+        "0.5-0.9": {
+          "n": 79,
+          "correct": 51
+        },
+        "<0.5": {
+          "n": 18,
+          "correct": 8
+        }
+      },
+      "area_labelled_n": 40,
+      "area_correct": 35,
+      "disagreements": [
+        {
+          "id": "cas-6c28",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.93
+        },
+        {
+          "id": "cas-563a",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.98
+        },
+        {
+          "id": "cas-5f61",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.93
+        },
+        {
+          "id": "cas-1c31",
+          "gold": "FIXED",
+          "predicted": "VALID",
+          "confidence": 0.98
+        },
+        {
+          "id": "cas-939a",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.95
+        },
+        {
+          "id": "cas-1b12",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.93
+        },
+        {
+          "id": "cas-63b9",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.82
+        },
+        {
+          "id": "cas-844b",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.72
+        },
+        {
+          "id": "cas-24d0",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.64
+        },
+        {
+          "id": "cas-ce30",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.74
+        },
+        {
+          "id": "cas-7062",
+          "gold": "FIXED",
+          "predicted": "VALID",
+          "confidence": 0.68
+        },
+        {
+          "id": "cas-9040",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.98
+        },
+        {
+          "id": "cas-74c8",
+          "gold": "FIXED",
+          "predicted": "VALID",
+          "confidence": 0.35
+        },
+        {
+          "id": "cas-7391",
+          "gold": "VALID",
+          "predicted": "UNCLEAR",
+          "confidence": 0.44
+        },
+        {
+          "id": "cas-5eb9",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.54
+        },
+        {
+          "id": "cas-3843",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.9
+        },
+        {
+          "id": "cas-eb39",
+          "gold": "FIXED",
+          "predicted": "VALID",
+          "confidence": 0.76
+        },
+        {
+          "id": "cas-ec70",
+          "gold": "FIXED",
+          "predicted": "VALID",
+          "confidence": 0.67
+        },
+        {
+          "id": "cas-fa64",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.98
+        },
+        {
+          "id": "cas-c214",
+          "gold": "FIXED",
+          "predicted": "VALID",
+          "confidence": 0.58
+        },
+        {
+          "id": "cas-dae6",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.97
+        },
+        {
+          "id": "cas-746a",
+          "gold": "FIXED",
+          "predicted": "VALID",
+          "confidence": 0.47
+        },
+        {
+          "id": "cas-9fe6",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.85
+        },
+        {
+          "id": "cas-248c",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.57
+        },
+        {
+          "id": "cas-8030",
+          "gold": "VALID",
+          "predicted": "FIXED",
+          "confidence": 0.41
+        },
+        {
+          "id": "cas-e4aa",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.77
+        },
+        {
+          "id": "cas-b8fc",
+          "gold": "OBSOLETE",
+          "predicted": "FIXED",
+          "confidence": 0.62
+        },
+        {
+          "id": "cas-9d9b",
+          "gold": "FIXED",
+          "predicted": "VALID",
+          "confidence": 0.37
+        },
+        {
+          "id": "cas-3af4",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.61
+        },
+        {
+          "id": "cas-88a0",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.99
+        },
+        {
+          "id": "cas-0bad",
+          "gold": "FIXED",
+          "predicted": "VALID",
+          "confidence": 0.97
+        },
+        {
+          "id": "cas-91b8",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.58
+        },
+        {
+          "id": "cas-05dd",
+          "gold": "DUPLICATE",
+          "predicted": "VALID",
+          "confidence": 0.92
+        },
+        {
+          "id": "cas-eef7",
+          "gold": "OBSOLETE",
+          "predicted": "DUPLICATE",
+          "confidence": 0.35
+        },
+        {
+          "id": "cas-ea1a",
+          "gold": "OBSOLETE",
+          "predicted": "DUPLICATE",
+          "confidence": 0.48
+        },
+        {
+          "id": "cas-b1dd",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.8
+        },
+        {
+          "id": "cas-460a",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.49
+        },
+        {
+          "id": "cas-d0b7",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.84
+        },
+        {
+          "id": "cas-e687",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.86
+        },
+        {
+          "id": "cas-3e05",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.41
+        },
+        {
+          "id": "cas-0aab",
+          "gold": "DUPLICATE",
+          "predicted": "VALID",
+          "confidence": 0.84
+        },
+        {
+          "id": "cas-b043",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.51
+        },
+        {
+          "id": "cas-82bc",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.61
+        },
+        {
+          "id": "cas-ea48",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.62
+        },
+        {
+          "id": "cas-b5ab",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.58
+        },
+        {
+          "id": "cas-a3af",
+          "gold": "DUPLICATE",
+          "predicted": "VALID",
+          "confidence": 0.85
+        },
+        {
+          "id": "cas-72163",
+          "gold": "DUPLICATE",
+          "predicted": "VALID",
+          "confidence": 0.62
+        },
+        {
+          "id": "cas-a768",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.16
+        },
+        {
+          "id": "cas-cae9",
+          "gold": "VALID",
+          "predicted": "FIXED",
+          "confidence": 0.5
+        },
+        {
+          "id": "cas-3e8d",
+          "gold": "VALID",
+          "predicted": "DUPLICATE",
+          "confidence": 0.53
+        },
+        {
+          "id": "cas-78d5",
+          "gold": "VALID",
+          "predicted": "FIXED",
+          "confidence": 0.55
+        },
+        {
+          "id": "cas-4e45",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.98
+        },
+        {
+          "id": "cas-96c0",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.95
+        }
+      ]
+    },
+    "calibration": {
+      "n": 34,
+      "correct": 21,
+      "accuracy": 0.6176470588235294,
+      "errors": [],
+      "confusion_matrix": {
+        "VALID": {
+          "VALID": 20,
+          "FIXED": 0,
+          "OBSOLETE": 0,
+          "DUPLICATE": 0,
+          "UNCLEAR": 0
+        },
+        "FIXED": {
+          "VALID": 1,
+          "FIXED": 1,
+          "OBSOLETE": 0,
+          "DUPLICATE": 0,
+          "UNCLEAR": 0
+        },
+        "OBSOLETE": {
+          "VALID": 3,
+          "FIXED": 0,
+          "OBSOLETE": 0,
+          "DUPLICATE": 1,
+          "UNCLEAR": 0
+        },
+        "DUPLICATE": {
+          "VALID": 1,
+          "FIXED": 0,
+          "OBSOLETE": 0,
+          "DUPLICATE": 0,
+          "UNCLEAR": 0
+        },
+        "UNCLEAR": {
+          "VALID": 7,
+          "FIXED": 0,
+          "OBSOLETE": 0,
+          "DUPLICATE": 0,
+          "UNCLEAR": 0
+        }
+      },
+      "confidence_buckets": {
+        ">=0.9": {
+          "n": 16,
+          "correct": 12
+        },
+        "0.5-0.9": {
+          "n": 14,
+          "correct": 8
+        },
+        "<0.5": {
+          "n": 4,
+          "correct": 1
+        }
+      },
+      "area_labelled_n": 8,
+      "area_correct": 6,
+      "disagreements": [
+        {
+          "id": "cas-05dd",
+          "gold": "DUPLICATE",
+          "predicted": "VALID",
+          "confidence": 0.92
+        },
+        {
+          "id": "cas-91b8",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.58
+        },
+        {
+          "id": "cas-9040",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.98
+        },
+        {
+          "id": "cas-4e45",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.98
+        },
+        {
+          "id": "cas-dae6",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.97
+        },
+        {
+          "id": "cas-b5ab",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.58
+        },
+        {
+          "id": "cas-3af4",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.61
+        },
+        {
+          "id": "cas-ea1a",
+          "gold": "OBSOLETE",
+          "predicted": "DUPLICATE",
+          "confidence": 0.48
+        },
+        {
+          "id": "cas-5eb9",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.54
+        },
+        {
+          "id": "cas-844b",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.72
+        },
+        {
+          "id": "cas-d0b7",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.84
+        },
+        {
+          "id": "cas-746a",
+          "gold": "FIXED",
+          "predicted": "VALID",
+          "confidence": 0.47
+        },
+        {
+          "id": "cas-3e05",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.41
+        }
+      ]
+    },
+    "holdout": {
+      "n": 138,
+      "correct": 98,
+      "accuracy": 0.7101449275362319,
+      "errors": [],
+      "confusion_matrix": {
+        "VALID": {
+          "VALID": 87,
+          "FIXED": 3,
+          "OBSOLETE": 0,
+          "DUPLICATE": 1,
+          "UNCLEAR": 1
+        },
+        "FIXED": {
+          "VALID": 8,
+          "FIXED": 11,
+          "OBSOLETE": 0,
+          "DUPLICATE": 0,
+          "UNCLEAR": 0
+        },
+        "OBSOLETE": {
+          "VALID": 14,
+          "FIXED": 1,
+          "OBSOLETE": 0,
+          "DUPLICATE": 1,
+          "UNCLEAR": 0
+        },
+        "DUPLICATE": {
+          "VALID": 3,
+          "FIXED": 0,
+          "OBSOLETE": 0,
+          "DUPLICATE": 0,
+          "UNCLEAR": 0
+        },
+        "UNCLEAR": {
+          "VALID": 8,
+          "FIXED": 0,
+          "OBSOLETE": 0,
+          "DUPLICATE": 0,
+          "UNCLEAR": 0
+        }
+      },
+      "confidence_buckets": {
+        ">=0.9": {
+          "n": 59,
+          "correct": 48
+        },
+        "0.5-0.9": {
+          "n": 65,
+          "correct": 43
+        },
+        "<0.5": {
+          "n": 14,
+          "correct": 7
+        }
+      },
+      "area_labelled_n": 32,
+      "area_correct": 29,
+      "disagreements": [
+        {
+          "id": "cas-0aab",
+          "gold": "DUPLICATE",
+          "predicted": "VALID",
+          "confidence": 0.84
+        },
+        {
+          "id": "cas-0bad",
+          "gold": "FIXED",
+          "predicted": "VALID",
+          "confidence": 0.97
+        },
+        {
+          "id": "cas-1b12",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.93
+        },
+        {
+          "id": "cas-1c31",
+          "gold": "FIXED",
+          "predicted": "VALID",
+          "confidence": 0.98
+        },
+        {
+          "id": "cas-248c",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.57
+        },
+        {
+          "id": "cas-24d0",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.64
+        },
+        {
+          "id": "cas-3843",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.9
+        },
+        {
+          "id": "cas-3e8d",
+          "gold": "VALID",
+          "predicted": "DUPLICATE",
+          "confidence": 0.53
+        },
+        {
+          "id": "cas-460a",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.49
+        },
+        {
+          "id": "cas-563a",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.98
+        },
+        {
+          "id": "cas-5f61",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.93
+        },
+        {
+          "id": "cas-63b9",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.82
+        },
+        {
+          "id": "cas-6c28",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.93
+        },
+        {
+          "id": "cas-7062",
+          "gold": "FIXED",
+          "predicted": "VALID",
+          "confidence": 0.68
+        },
+        {
+          "id": "cas-72163",
+          "gold": "DUPLICATE",
+          "predicted": "VALID",
+          "confidence": 0.62
+        },
+        {
+          "id": "cas-7391",
+          "gold": "VALID",
+          "predicted": "UNCLEAR",
+          "confidence": 0.44
+        },
+        {
+          "id": "cas-74c8",
+          "gold": "FIXED",
+          "predicted": "VALID",
+          "confidence": 0.35
+        },
+        {
+          "id": "cas-78d5",
+          "gold": "VALID",
+          "predicted": "FIXED",
+          "confidence": 0.55
+        },
+        {
+          "id": "cas-8030",
+          "gold": "VALID",
+          "predicted": "FIXED",
+          "confidence": 0.41
+        },
+        {
+          "id": "cas-82bc",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.61
+        },
+        {
+          "id": "cas-88a0",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.99
+        },
+        {
+          "id": "cas-939a",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.95
+        },
+        {
+          "id": "cas-96c0",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.95
+        },
+        {
+          "id": "cas-9d9b",
+          "gold": "FIXED",
+          "predicted": "VALID",
+          "confidence": 0.37
+        },
+        {
+          "id": "cas-9fe6",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.85
+        },
+        {
+          "id": "cas-a3af",
+          "gold": "DUPLICATE",
+          "predicted": "VALID",
+          "confidence": 0.85
+        },
+        {
+          "id": "cas-a768",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.16
+        },
+        {
+          "id": "cas-b043",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.51
+        },
+        {
+          "id": "cas-b1dd",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.8
+        },
+        {
+          "id": "cas-b8fc",
+          "gold": "OBSOLETE",
+          "predicted": "FIXED",
+          "confidence": 0.62
+        },
+        {
+          "id": "cas-c214",
+          "gold": "FIXED",
+          "predicted": "VALID",
+          "confidence": 0.58
+        },
+        {
+          "id": "cas-cae9",
+          "gold": "VALID",
+          "predicted": "FIXED",
+          "confidence": 0.5
+        },
+        {
+          "id": "cas-ce30",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.74
+        },
+        {
+          "id": "cas-e4aa",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.77
+        },
+        {
+          "id": "cas-e687",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.86
+        },
+        {
+          "id": "cas-ea48",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.62
+        },
+        {
+          "id": "cas-eb39",
+          "gold": "FIXED",
+          "predicted": "VALID",
+          "confidence": 0.76
+        },
+        {
+          "id": "cas-ec70",
+          "gold": "FIXED",
+          "predicted": "VALID",
+          "confidence": 0.67
+        },
+        {
+          "id": "cas-eef7",
+          "gold": "OBSOLETE",
+          "predicted": "DUPLICATE",
+          "confidence": 0.35
+        },
+        {
+          "id": "cas-fa64",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.98
+        }
+      ]
+    },
+    "calls": 716,
+    "successful_calls": 716,
+    "failed_calls": 0,
+    "attempts": 716,
+    "usage": {
+      "input_tokens": 3261682,
+      "output_tokens": 41496
+    },
+    "estimated_usd": 0.136990644,
+    "latency_s": {
+      "median": 0.19333624999853782,
+      "p95": 0.28776808300608536,
+      "sum": 148.6192652859172
+    },
+    "run": {
+      "wall_s": 19.508543875002943,
+      "workers": 8,
+      "questions_sha256": "ac552bacaa9a4162ba1f2e0e4156616d6c95da6add86519b0398d82a00f6eaee"
+    },
+    "area_distribution": {
+      "other": 18,
+      "factory": 28,
+      "close-gate": 20,
+      "ci": 8,
+      "hooks": 10,
+      "hub-web": 38,
+      "release": 11,
+      "memory-search": 8,
+      "qa": 20,
+      "cloud": 8,
+      "slack": 3
+    },
+    "area_mean_confidence": {
+      "other": 0.6777777777777777,
+      "factory": 0.8657142857142857,
+      "close-gate": 0.7939999999999999,
+      "ci": 0.85,
+      "hooks": 0.842,
+      "hub-web": 0.9355263157894737,
+      "release": 0.7981818181818181,
+      "memory-search": 0.875,
+      "qa": 0.7885,
+      "cloud": 0.87125,
+      "slack": 0.87
+    },
+    "models": [
+      "jev-1.13.0"
+    ]
+  },
+  "run2": {
+    "overall": {
+      "n": 172,
+      "correct": 121,
+      "accuracy": 0.7034883720930233,
+      "errors": [],
+      "confusion_matrix": {
+        "VALID": {
+          "VALID": 97,
+          "FIXED": 9,
+          "OBSOLETE": 4,
+          "DUPLICATE": 1,
+          "UNCLEAR": 1
+        },
+        "FIXED": {
+          "VALID": 7,
+          "FIXED": 13,
+          "OBSOLETE": 1,
+          "DUPLICATE": 0,
+          "UNCLEAR": 0
+        },
+        "OBSOLETE": {
+          "VALID": 10,
+          "FIXED": 1,
+          "OBSOLETE": 9,
+          "DUPLICATE": 0,
+          "UNCLEAR": 0
+        },
+        "DUPLICATE": {
+          "VALID": 3,
+          "FIXED": 0,
+          "OBSOLETE": 0,
+          "DUPLICATE": 0,
+          "UNCLEAR": 1
+        },
+        "UNCLEAR": {
+          "VALID": 12,
+          "FIXED": 0,
+          "OBSOLETE": 1,
+          "DUPLICATE": 0,
+          "UNCLEAR": 2
+        }
+      },
+      "confidence_buckets": {
+        ">=0.9": {
+          "n": 32,
+          "correct": 28
+        },
+        "0.5-0.9": {
+          "n": 95,
+          "correct": 71
+        },
+        "<0.5": {
+          "n": 45,
+          "correct": 22
+        }
+      },
+      "area_labelled_n": 40,
+      "area_correct": 32,
+      "disagreements": [
+        {
+          "id": "cas-6c28",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.7
+        },
+        {
+          "id": "cas-563a",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.98
+        },
+        {
+          "id": "cas-5f61",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.8
+        },
+        {
+          "id": "cas-1c31",
+          "gold": "FIXED",
+          "predicted": "VALID",
+          "confidence": 0.72
+        },
+        {
+          "id": "cas-939a",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.94
+        },
+        {
+          "id": "cas-1b12",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.82
+        },
+        {
+          "id": "cas-63b9",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.68
+        },
+        {
+          "id": "cas-24d0",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.8
+        },
+        {
+          "id": "cas-7062",
+          "gold": "FIXED",
+          "predicted": "VALID",
+          "confidence": 0.34
+        },
+        {
+          "id": "cas-d4a0",
+          "gold": "VALID",
+          "predicted": "OBSOLETE",
+          "confidence": 0.53
+        },
+        {
+          "id": "cas-9040",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.49
+        },
+        {
+          "id": "cas-3843",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.85
+        },
+        {
+          "id": "cas-eb39",
+          "gold": "FIXED",
+          "predicted": "VALID",
+          "confidence": 0.35
+        },
+        {
+          "id": "cas-ec70",
+          "gold": "FIXED",
+          "predicted": "VALID",
+          "confidence": 0.66
+        },
+        {
+          "id": "cas-fa64",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.9
+        },
+        {
+          "id": "cas-c214",
+          "gold": "FIXED",
+          "predicted": "VALID",
+          "confidence": 0.23
+        },
+        {
+          "id": "cas-dae6",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.68
+        },
+        {
+          "id": "cas-746a",
+          "gold": "FIXED",
+          "predicted": "VALID",
+          "confidence": 0.33
+        },
+        {
+          "id": "cas-9fe6",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.68
+        },
+        {
+          "id": "cas-8030",
+          "gold": "VALID",
+          "predicted": "FIXED",
+          "confidence": 0.5
+        },
+        {
+          "id": "cas-e4aa",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.76
+        },
+        {
+          "id": "cas-b8fc",
+          "gold": "OBSOLETE",
+          "predicted": "FIXED",
+          "confidence": 0.38
+        },
+        {
+          "id": "cas-9d9b",
+          "gold": "FIXED",
+          "predicted": "OBSOLETE",
+          "confidence": 0.2
+        },
+        {
+          "id": "cas-d141",
+          "gold": "VALID",
+          "predicted": "OBSOLETE",
+          "confidence": 0.19
+        },
+        {
+          "id": "cas-3af4",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.65
+        },
+        {
+          "id": "cas-88a0",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.61
+        },
+        {
+          "id": "cas-eb10",
+          "gold": "VALID",
+          "predicted": "FIXED",
+          "confidence": 0.39
+        },
+        {
+          "id": "cas-8095",
+          "gold": "VALID",
+          "predicted": "FIXED",
+          "confidence": 0.15
+        },
+        {
+          "id": "cas-0bad",
+          "gold": "FIXED",
+          "predicted": "VALID",
+          "confidence": 0.96
+        },
+        {
+          "id": "cas-91b8",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.37
+        },
+        {
+          "id": "cas-05dd",
+          "gold": "DUPLICATE",
+          "predicted": "VALID",
+          "confidence": 0.78
+        },
+        {
+          "id": "cas-1502",
+          "gold": "VALID",
+          "predicted": "UNCLEAR",
+          "confidence": 0.4
+        },
+        {
+          "id": "cas-b1dd",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.37
+        },
+        {
+          "id": "cas-d0b7",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.64
+        },
+        {
+          "id": "cas-e687",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.49
+        },
+        {
+          "id": "cas-0aab",
+          "gold": "DUPLICATE",
+          "predicted": "UNCLEAR",
+          "confidence": 0.59
+        },
+        {
+          "id": "cas-82bc",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.55
+        },
+        {
+          "id": "cas-ea48",
+          "gold": "UNCLEAR",
+          "predicted": "OBSOLETE",
+          "confidence": 0.35
+        },
+        {
+          "id": "cas-a3af",
+          "gold": "DUPLICATE",
+          "predicted": "VALID",
+          "confidence": 0.84
+        },
+        {
+          "id": "cas-f50f",
+          "gold": "VALID",
+          "predicted": "FIXED",
+          "confidence": 0.23
+        },
+        {
+          "id": "cas-72163",
+          "gold": "DUPLICATE",
+          "predicted": "VALID",
+          "confidence": 0.58
+        },
+        {
+          "id": "cas-9e33",
+          "gold": "VALID",
+          "predicted": "OBSOLETE",
+          "confidence": 0.15
+        },
+        {
+          "id": "cas-24fe",
+          "gold": "VALID",
+          "predicted": "OBSOLETE",
+          "confidence": 0.16
+        },
+        {
+          "id": "cas-cae9",
+          "gold": "VALID",
+          "predicted": "FIXED",
+          "confidence": 0.58
+        },
+        {
+          "id": "cas-3e8d",
+          "gold": "VALID",
+          "predicted": "DUPLICATE",
+          "confidence": 0.42
+        },
+        {
+          "id": "cas-78d5",
+          "gold": "VALID",
+          "predicted": "FIXED",
+          "confidence": 0.31
+        },
+        {
+          "id": "cas-f01b",
+          "gold": "VALID",
+          "predicted": "FIXED",
+          "confidence": 0.35
+        },
+        {
+          "id": "cas-3760",
+          "gold": "VALID",
+          "predicted": "FIXED",
+          "confidence": 0.45
+        },
+        {
+          "id": "cas-4a8e1",
+          "gold": "VALID",
+          "predicted": "FIXED",
+          "confidence": 0.35
+        },
+        {
+          "id": "cas-4e45",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.59
+        },
+        {
+          "id": "cas-96c0",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.51
+        }
+      ]
+    },
+    "calibration": {
+      "n": 34,
+      "correct": 24,
+      "accuracy": 0.7058823529411765,
+      "errors": [],
+      "confusion_matrix": {
+        "VALID": {
+          "VALID": 18,
+          "FIXED": 1,
+          "OBSOLETE": 0,
+          "DUPLICATE": 0,
+          "UNCLEAR": 1
+        },
+        "FIXED": {
+          "VALID": 1,
+          "FIXED": 1,
+          "OBSOLETE": 0,
+          "DUPLICATE": 0,
+          "UNCLEAR": 0
+        },
+        "OBSOLETE": {
+          "VALID": 0,
+          "FIXED": 0,
+          "OBSOLETE": 4,
+          "DUPLICATE": 0,
+          "UNCLEAR": 0
+        },
+        "DUPLICATE": {
+          "VALID": 1,
+          "FIXED": 0,
+          "OBSOLETE": 0,
+          "DUPLICATE": 0,
+          "UNCLEAR": 0
+        },
+        "UNCLEAR": {
+          "VALID": 6,
+          "FIXED": 0,
+          "OBSOLETE": 0,
+          "DUPLICATE": 0,
+          "UNCLEAR": 1
+        }
+      },
+      "confidence_buckets": {
+        ">=0.9": {
+          "n": 6,
+          "correct": 6
+        },
+        "0.5-0.9": {
+          "n": 18,
+          "correct": 13
+        },
+        "<0.5": {
+          "n": 10,
+          "correct": 5
+        }
+      },
+      "area_labelled_n": 8,
+      "area_correct": 5,
+      "disagreements": [
+        {
+          "id": "cas-05dd",
+          "gold": "DUPLICATE",
+          "predicted": "VALID",
+          "confidence": 0.78
+        },
+        {
+          "id": "cas-91b8",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.37
+        },
+        {
+          "id": "cas-9040",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.49
+        },
+        {
+          "id": "cas-4e45",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.59
+        },
+        {
+          "id": "cas-dae6",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.68
+        },
+        {
+          "id": "cas-3af4",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.65
+        },
+        {
+          "id": "cas-3760",
+          "gold": "VALID",
+          "predicted": "FIXED",
+          "confidence": 0.45
+        },
+        {
+          "id": "cas-1502",
+          "gold": "VALID",
+          "predicted": "UNCLEAR",
+          "confidence": 0.4
+        },
+        {
+          "id": "cas-d0b7",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.64
+        },
+        {
+          "id": "cas-746a",
+          "gold": "FIXED",
+          "predicted": "VALID",
+          "confidence": 0.33
+        }
+      ]
+    },
+    "holdout": {
+      "n": 138,
+      "correct": 97,
+      "accuracy": 0.7028985507246377,
+      "errors": [],
+      "confusion_matrix": {
+        "VALID": {
+          "VALID": 79,
+          "FIXED": 8,
+          "OBSOLETE": 4,
+          "DUPLICATE": 1,
+          "UNCLEAR": 0
+        },
+        "FIXED": {
+          "VALID": 6,
+          "FIXED": 12,
+          "OBSOLETE": 1,
+          "DUPLICATE": 0,
+          "UNCLEAR": 0
+        },
+        "OBSOLETE": {
+          "VALID": 10,
+          "FIXED": 1,
+          "OBSOLETE": 5,
+          "DUPLICATE": 0,
+          "UNCLEAR": 0
+        },
+        "DUPLICATE": {
+          "VALID": 2,
+          "FIXED": 0,
+          "OBSOLETE": 0,
+          "DUPLICATE": 0,
+          "UNCLEAR": 1
+        },
+        "UNCLEAR": {
+          "VALID": 6,
+          "FIXED": 0,
+          "OBSOLETE": 1,
+          "DUPLICATE": 0,
+          "UNCLEAR": 1
+        }
+      },
+      "confidence_buckets": {
+        ">=0.9": {
+          "n": 26,
+          "correct": 22
+        },
+        "0.5-0.9": {
+          "n": 77,
+          "correct": 58
+        },
+        "<0.5": {
+          "n": 35,
+          "correct": 17
+        }
+      },
+      "area_labelled_n": 32,
+      "area_correct": 27,
+      "disagreements": [
+        {
+          "id": "cas-0aab",
+          "gold": "DUPLICATE",
+          "predicted": "UNCLEAR",
+          "confidence": 0.59
+        },
+        {
+          "id": "cas-0bad",
+          "gold": "FIXED",
+          "predicted": "VALID",
+          "confidence": 0.96
+        },
+        {
+          "id": "cas-1b12",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.82
+        },
+        {
+          "id": "cas-1c31",
+          "gold": "FIXED",
+          "predicted": "VALID",
+          "confidence": 0.72
+        },
+        {
+          "id": "cas-24d0",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.8
+        },
+        {
+          "id": "cas-24fe",
+          "gold": "VALID",
+          "predicted": "OBSOLETE",
+          "confidence": 0.16
+        },
+        {
+          "id": "cas-3843",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.85
+        },
+        {
+          "id": "cas-3e8d",
+          "gold": "VALID",
+          "predicted": "DUPLICATE",
+          "confidence": 0.42
+        },
+        {
+          "id": "cas-4a8e1",
+          "gold": "VALID",
+          "predicted": "FIXED",
+          "confidence": 0.35
+        },
+        {
+          "id": "cas-563a",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.98
+        },
+        {
+          "id": "cas-5f61",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.8
+        },
+        {
+          "id": "cas-63b9",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.68
+        },
+        {
+          "id": "cas-6c28",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.7
+        },
+        {
+          "id": "cas-7062",
+          "gold": "FIXED",
+          "predicted": "VALID",
+          "confidence": 0.34
+        },
+        {
+          "id": "cas-72163",
+          "gold": "DUPLICATE",
+          "predicted": "VALID",
+          "confidence": 0.58
+        },
+        {
+          "id": "cas-78d5",
+          "gold": "VALID",
+          "predicted": "FIXED",
+          "confidence": 0.31
+        },
+        {
+          "id": "cas-8030",
+          "gold": "VALID",
+          "predicted": "FIXED",
+          "confidence": 0.5
+        },
+        {
+          "id": "cas-8095",
+          "gold": "VALID",
+          "predicted": "FIXED",
+          "confidence": 0.15
+        },
+        {
+          "id": "cas-82bc",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.55
+        },
+        {
+          "id": "cas-88a0",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.61
+        },
+        {
+          "id": "cas-939a",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.94
+        },
+        {
+          "id": "cas-96c0",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.51
+        },
+        {
+          "id": "cas-9d9b",
+          "gold": "FIXED",
+          "predicted": "OBSOLETE",
+          "confidence": 0.2
+        },
+        {
+          "id": "cas-9e33",
+          "gold": "VALID",
+          "predicted": "OBSOLETE",
+          "confidence": 0.15
+        },
+        {
+          "id": "cas-9fe6",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.68
+        },
+        {
+          "id": "cas-a3af",
+          "gold": "DUPLICATE",
+          "predicted": "VALID",
+          "confidence": 0.84
+        },
+        {
+          "id": "cas-b1dd",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.37
+        },
+        {
+          "id": "cas-b8fc",
+          "gold": "OBSOLETE",
+          "predicted": "FIXED",
+          "confidence": 0.38
+        },
+        {
+          "id": "cas-c214",
+          "gold": "FIXED",
+          "predicted": "VALID",
+          "confidence": 0.23
+        },
+        {
+          "id": "cas-cae9",
+          "gold": "VALID",
+          "predicted": "FIXED",
+          "confidence": 0.58
+        },
+        {
+          "id": "cas-d141",
+          "gold": "VALID",
+          "predicted": "OBSOLETE",
+          "confidence": 0.19
+        },
+        {
+          "id": "cas-d4a0",
+          "gold": "VALID",
+          "predicted": "OBSOLETE",
+          "confidence": 0.53
+        },
+        {
+          "id": "cas-e4aa",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.76
+        },
+        {
+          "id": "cas-e687",
+          "gold": "OBSOLETE",
+          "predicted": "VALID",
+          "confidence": 0.49
+        },
+        {
+          "id": "cas-ea48",
+          "gold": "UNCLEAR",
+          "predicted": "OBSOLETE",
+          "confidence": 0.35
+        },
+        {
+          "id": "cas-eb10",
+          "gold": "VALID",
+          "predicted": "FIXED",
+          "confidence": 0.39
+        },
+        {
+          "id": "cas-eb39",
+          "gold": "FIXED",
+          "predicted": "VALID",
+          "confidence": 0.35
+        },
+        {
+          "id": "cas-ec70",
+          "gold": "FIXED",
+          "predicted": "VALID",
+          "confidence": 0.66
+        },
+        {
+          "id": "cas-f01b",
+          "gold": "VALID",
+          "predicted": "FIXED",
+          "confidence": 0.35
+        },
+        {
+          "id": "cas-f50f",
+          "gold": "VALID",
+          "predicted": "FIXED",
+          "confidence": 0.23
+        },
+        {
+          "id": "cas-fa64",
+          "gold": "UNCLEAR",
+          "predicted": "VALID",
+          "confidence": 0.9
+        }
+      ]
+    },
+    "calls": 716,
+    "successful_calls": 716,
+    "failed_calls": 0,
+    "attempts": 716,
+    "usage": {
+      "input_tokens": 3327365,
+      "output_tokens": 41517
+    },
+    "estimated_usd": 0.13974933,
+    "latency_s": {
+      "median": 0.1801302499952726,
+      "p95": 0.2765739590031444,
+      "sum": 142.2523849888821
+    },
+    "run": {
+      "wall_s": 18.457086374997743,
+      "workers": 8,
+      "questions_sha256": "0b2acab7924ecfb7904b6075ab41019ffd9e8b8a8c51a8c25f2e99133e9a3133"
+    },
+    "area_distribution": {
+      "other": 45,
+      "close-gate": 15,
+      "factory": 24,
+      "ci": 11,
+      "hooks": 8,
+      "memory-search": 3,
+      "release": 6,
+      "cloud": 4,
+      "slack": 3,
+      "qa": 16,
+      "hub-web": 37
+    },
+    "area_mean_confidence": {
+      "other": 0.7324444444444445,
+      "close-gate": 0.7766666666666667,
+      "factory": 0.8762500000000001,
+      "ci": 0.7018181818181818,
+      "hooks": 0.77,
+      "memory-search": 0.86,
+      "release": 0.8816666666666667,
+      "cloud": 0.84,
+      "slack": 0.6533333333333333,
+      "qa": 0.835625,
+      "hub-web": 0.921081081081081
+    },
+    "models": [
+      "jev-1.13.0"
+    ]
+  }
+}

@@ -428,10 +428,72 @@ test("HUB-J12 network switch: a revoked pairing settles waiting sends and is nam
     await expect(page.getByText("Machine needs pairing").filter({ visible: true }).first()).toBeVisible();
     await expect(page.getByText(/Authentication blocked/).filter({ visible: true })).toHaveCount(0);
     await expect(page.getByText(/reconnecting/i).filter({ visible: true })).toHaveCount(0);
-    // Negative window: the held send never goes by itself.
+    // Negative window: the held send never goes by itself, and the refusal
+    // stands through later heartbeats (cas-05c0 QA).
     await clock.advance(10_000);
     expect(sentTimes(hub, "Held before the revoke")).toBe(0);
+    await expect(header).toHaveText(" · Needs pairing");
+    await expect(page.getByText("Machine needs pairing").filter({ visible: true }).first()).toBeVisible();
+    await expect(page.locator(".status-stale").filter({ visible: true })).toHaveText(/^Not live — this browser needs pairing again\./);
+    await expect(page.getByText(/reconnecting/i).filter({ visible: true })).toHaveCount(0);
   });
+});
+
+test("HUB-J12 network switch: a machine drop is told by the banner alone, and control comes back with the machine (cas-7b31)", async ({ page }) => {
+  await test.step("The whole machine drops, then returns", async () => {
+    const { hub, clock, header } = await connected(page);
+    const rail = page.locator("#attention-panel");
+    const transport = /Reconnecting to hub|Hub connection lost|Stuck dialing|heartbeats missed|attach failed|needs attention/i;
+    const leaseTakes: string[] = [];
+    page.on("request", request => { if (request.method() === "POST" && request.url().endsWith("/lease")) leaseTakes.push(request.url()); });
+    await hub.down("atlas", { sockets: "close" });
+    await expect(header).toHaveText(" · Reconnecting");
+    await expect(page.locator(".terminal-disconnected-banner .banner-text")).toHaveText("Lost connection to Atlas · Linux. Reconnecting…");
+    // Retrying: no rail card beside the banner, through several retries (journey F1).
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await clock.advance(5_000);
+      await expect(rail.getByText(transport)).toHaveCount(0);
+    }
+    // The conversation view raises no control toast over the thread (journey F2).
+    await expect(page.getByText(/Control released/)).toHaveCount(0);
+    expect(leaseTakes).toEqual([]);
+    await hub.up("atlas");
+    await clock.advance(10_000);
+    await expect(header).toHaveText(" · Live");
+    // Control held before the drop is taken back, nothing having been sent.
+    await expect.poll(() => leaseTakes.length).toBe(1);
+    await expect(rail.getByText(transport)).toHaveCount(0);
+    await page.locator("#conversation-terminal").click();
+    const mode = page.locator(".mode-badge");
+    await expect(mode).toHaveText("CONTROL");
+    await expect(mode).toBeVisible();
+  });
+});
+
+test("HUB-J12 network switch: in Terminal view a refused pairing leaves no 'connection dropped' toast behind (cas-7b31)", async ({ page }) => {
+  const { hub, clock } = await connected(page, true);
+  await page.locator("#conversation-terminal").click();
+  await expect(page.locator(".mode-badge")).toHaveText("CONTROL");
+  hub.refuseProofs("atlas", 1_000, "revoked", false);
+  await hub.down("atlas", { sockets: "close" });
+  await expect(page.locator("#toast")).toHaveText("Control released — the hub connection dropped");
+  await hub.up("atlas");
+  await clock.advance(1_000);
+  await expect(page.locator(".terminal-disconnected-banner .banner-text")).toHaveText("Atlas · Linux needs pairing again.");
+  await expect(page.locator("#toast")).not.toContainText("connection dropped");
+  expect(await page.locator("body").ariaSnapshot()).not.toContain("connection dropped");
+  // Nor does control come back by itself: the pairing must be repaired first,
+  // and the controls say so instead of promising a reconnect.
+  await expect(page.locator("#session-controls-reason")).toHaveText("Atlas · Linux needs pairing again. Re-pair it to take control and interrupt.");
+  // Heartbeats keep ticking: the refusal must stand on every surface (it
+  // turned "live" again on the next beat, cas-05c0 QA).
+  for (let beat = 0; beat < 3; beat++) await clock.advance(5_000);
+  await expect(page.locator(".mode-badge")).not.toHaveText("CONTROL");
+  await expect(page.locator("#session-controls-reason")).toHaveText("Atlas · Linux needs pairing again. Re-pair it to take control and interrupt.");
+  await expect(page.locator(".terminal-disconnected-banner .banner-text")).toHaveText("Atlas · Linux needs pairing again.");
+  await expect(page.locator("[data-machine-latency]")).toHaveText("Needs pairing");
+  await expect(page.locator("#attention-panel .attention-title").filter({ hasText: "Machine needs pairing" })).toBeVisible();
+  await expect(page.getByText(/return when it reconnects|Reconnecting/).filter({ visible: true })).toHaveCount(0);
 });
 
 // cas-f698: the old two-machine journey hid this behind the healthy STUDIO.

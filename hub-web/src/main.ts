@@ -22,7 +22,7 @@ import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionU
 import { cycleAttentionGroup, renderAttentionPanel, renderAttentionSummary } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
 import { attachElapsedSeconds, elapsedSeconds, headerConnectionChip, machineConnectionLabel, UNSTEADY, UNSTEADY_SENTENCE, type AttachSnapshot } from "./connection-state";
-import { CONVERSATION_OPENING, OPENING_MOTION_DELAY_MS, attachInProgress, showOpeningInto, disconnectedView, lostConnectionBanner, outageControlsReason, outageRefusal, pairingLostBanner, pairingRefusal, unsteadyBanner, renderConnectionSurfaceInto, sessionOutageControlsReason, sessionReconnectingBanner, shouldRetainDisconnectedFrame, transportFailureNeedsAttention } from "./connection-state-view";
+import { CONVERSATION_OPENING, OPENING_MOTION_DELAY_MS, attachInProgress, showOpeningInto, disconnectedView, lostConnectionBanner, outageControlsReason, outageRefusal, pairingControlsReason, pairingLostBanner, pairingRefusal, unsteadyBanner, renderConnectionSurfaceInto, sessionOutageControlsReason, sessionReconnectingBanner, shouldRetainDisconnectedFrame, transportFailureNeedsAttention } from "./connection-state-view";
 import { ensureMachineConnection, replaceMachineConnection } from "./connection-lifecycle";
 import { createDeviceKey } from "./dpop";
 import { readPairingFragment, watchPairingFragment } from "./fragment";
@@ -746,6 +746,12 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
         // The hub answered, so it is not "Reconnecting to hub" any more; the
         // pairing card below says what is wrong (cas-d15c QA F01).
         resolveAttention(`${machine.id}:hub_disconnected`);
+        // cas-7b31: control does not come back by itself now, and a toast
+        // still saying the connection dropped would contradict the pairing
+        // card, on screen or to a screen reader.
+        for (const key of [...controlLostToOutage]) if (key.startsWith(`${machine.id}:`)) controlLostToOutage.delete(key);
+        const shown = document.querySelector<HTMLElement>("#toast");
+        if (shown?.textContent === CONTROL_DROPPED_TOAST) shown.textContent = CONTROL_PAIRING_TOAST;
         // cas-a6f0 (journey F8): one name for a pairing the hub refused,
         // revoked or otherwise, as the header's "Needs pairing" and the
         // banner's "needs pairing again" say.
@@ -762,12 +768,19 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
         // cas-d636 QA F02: a pairing that works again is no longer blocked.
         resolveAttention(`${machine.id}:auth_loss`);
       }
-      if (state.phase === "backoff") {
+      // cas-7b31 (journey F1): a drop that retries is told by the banner,
+      // header, row and footer in plain words; a rail card beside them said
+      // it again in transport terms. Only a failure that will not retry
+      // earns a card, worded as the banner words it.
+      if (state.phase === "failed" && state.fatal === true && !state.authFailure) {
+        // cas-be76: the card names the machine; the transport reason (raw
+        // host, stage) stays behind Details.
         void addAttention(machine, undefined, "hub_disconnected", {
-          headline: "Reconnecting to hub",
-          detail: state.reason ?? "Hub disconnected",
+          headline: lostConnectionBanner(machine.label, true),
+          detail: "Retry to connect again.",
           severity: "warning",
           action: "retry",
+          payload: { reason: state.reason, stage: state.stage },
           fingerprint: `${machine.id}:hub_disconnected`,
         });
       }
@@ -780,7 +793,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       if (state.phase === "live") {
         sessionsEverLive.add(key);
         clearTransportStatus(key);
-        void flushHeldSends(machine, session);
+        void reclaimControlThenFlush(machine, session);
         if (!attachWasLive) clearTransientAttachmentNotes(document, machine.id);
         // The socket is back: its transport alarm is history, not attention.
         resolveAttention(`${machine.id}:${session}:session_transport`);
@@ -2195,7 +2208,19 @@ function startLeaseHeartbeat(machineId: string, session: string): void {
   }, 10_000));
 }
 
-function invalidateMachineLeases(machineId: string): void {
+/**
+ * Sessions whose control this browser held when the connection dropped
+ * (cas-7b31, journey F2). The outage controls promise that control "returns
+ * when it reconnects", so it is taken back once the session is live again,
+ * unless another device took it meanwhile (the hub refuses that take) or the
+ * operator released it, or the pairing was refused.
+ */
+const controlLostToOutage = new Set<string>();
+
+const CONTROL_DROPPED_TOAST = "Control released — the hub connection dropped";
+const CONTROL_PAIRING_TOAST = "Control released — this browser needs pairing again";
+
+function invalidateMachineLeases(machineId: string, cause: "outage" | "released" = "outage"): void {
   for (const [key, timer] of leaseHeartbeats) {
     if (key.startsWith(`${machineId}:`)) { window.clearInterval(timer); leaseHeartbeats.delete(key); }
   }
@@ -2203,6 +2228,8 @@ function invalidateMachineLeases(machineId: string): void {
   for (const [key, lease] of leases) {
     if (!key.startsWith(`${machineId}:`)) continue;
     held ||= lease.held_by_me;
+    if (lease.held_by_me && cause === "outage") controlLostToOutage.add(key);
+    if (cause === "released") controlLostToOutage.delete(key);
     // The controller identity was learned over the connection that just died.
     // Keeping it told the operator that another controller — in fact this very
     // browser — was holding the session against them.
@@ -2213,10 +2240,15 @@ function invalidateMachineLeases(machineId: string): void {
   // cas-d15c QA N2: a refused pairing is not a dropped connection; cas-a6f0:
   // nor is a machine that still reads live (its lease heartbeat failed before
   // its heartbeats said Unsteady): that connection is being checked.
+  // cas-7b31 (journey F2): the conversation view says nothing here. Its
+  // header, banner and controls already say the session is down, the toast
+  // covered thread text, and control comes back by itself. A release the
+  // operator asked for needs no toast either: the control says so.
+  if (!held || cause === "released" || hubPresentation === "conversation") return;
   const state = connectionStates.get(machineId);
-  if (held) toast(state?.authFailure ? "Control released — this browser needs pairing again"
+  toast(state?.authFailure ? CONTROL_PAIRING_TOAST
     : state?.phase === "live" ? "Control released — checking the connection…"
-    : "Control released — the hub connection dropped");
+    : CONTROL_DROPPED_TOAST);
 }
 
 let toastTimer: number | undefined;
@@ -3000,6 +3032,26 @@ function settleSendsForPairingLoss(machine: StoredMachine): void {
   if (changed) { updateConversationViews(); renderConversationList(); }
 }
 
+/**
+ * The session is live again: take back control this browser held when the
+ * connection dropped (cas-7b31), then send what was held. A take the hub
+ * refuses (another device took control meanwhile) leaves this browser an
+ * observer, as before.
+ */
+async function reclaimControlThenFlush(machine: StoredMachine, session: string): Promise<void> {
+  const key = sessionKey(machine.id, session);
+  // While the machine still holds messages (unsteady, or a socket being
+  // probed) the take waits: the next live announcement brings it back here.
+  if (controlLostToOutage.has(key) && !connections.get(machine.id)?.holdsMessages()) {
+    controlLostToOutage.delete(key);
+    if (leases.get(key)?.held_by_me !== true) {
+      await takeControlForMessage(machine, session);
+      if (selectedMachineId === machine.id && selectedSession === session) render();
+    }
+  }
+  await flushHeldSends(machine, session);
+}
+
 /** The session is back: send what was held, in order, each once. */
 async function flushHeldSends(machine: StoredMachine, session: string): Promise<void> {
   const key = sessionKey(machine.id, session);
@@ -3212,7 +3264,10 @@ function render(captureDraft = true): void {
   const outageReason = sessionDown && selected && selectedSession
     && (sessionsEverLive.has(sessionKey(selected.id, selectedSession))
       || (machineConnectionSnapshot !== undefined && machineConnectionSnapshot.phase !== "live" && lastLiveAt.has(selected.id)))
-    ? (sessionOnlyDrop(selected.id, selectedSession) ? sessionOutageControlsReason(conversationLabel(selected.id, selectedSession)) : outageControlsReason(selected.label))
+    // cas-7b31 (journey F2): a refused pairing does not reconnect, and
+    // control does not come back by itself, so it does not promise either.
+    ? (machineConnectionSnapshot?.authFailure ? pairingControlsReason(selected.label)
+      : sessionOnlyDrop(selected.id, selectedSession) ? sessionOutageControlsReason(conversationLabel(selected.id, selectedSession)) : outageControlsReason(selected.label))
     : undefined;
   const controlReason = controlDisabledReason(selected, selectedSession, lease);
   const takeControlReason = outageReason ?? takeControlDisabledReason(selected, selectedSession, lease);
@@ -4301,7 +4356,7 @@ async function toggleControl(selected: StoredMachine | undefined, lease: LeaseSt
   if (!selected || !selectedSession) return;
   if (lease?.held_by_me) {
     await connections.get(selected.id)?.releaseLease(selectedSession);
-    invalidateMachineLeases(selected.id);
+    invalidateMachineLeases(selected.id, "released");
   } else {
     await connections.get(selected.id)?.requestControl(selectedSession, Boolean(lease?.controller_label && selected.scopes.includes("hub-admin")));
   }

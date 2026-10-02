@@ -165,6 +165,44 @@ describe("network hints (cas-0978)", () => {
     expect(onAttachState).not.toHaveBeenCalled();
   });
 
+  it("opens no machine socket for an opening abandoned while its ticket was on the way (cas-7b31)", async () => {
+    vi.stubGlobal("window", globalThis);
+    const opened: string[] = [];
+    vi.stubGlobal("WebSocket", class { static CONNECTING = 0; static OPEN = 1; readyState = 0; constructor(url: string) { opened.push(String(url)); } close() {} send() {} });
+    const { internals } = supervisor();
+    (internals as unknown as { desired: boolean; machine: { baseUrl: string } }).desired = true;
+    let answer!: (value: unknown) => void;
+    vi.spyOn(internals, "request").mockReturnValue(new Promise((resolve) => { answer = resolve; }));
+    const opening = internals.openMachineSocket("patient-pelican-9");
+    // The network changed: every socket, and this opening, is abandoned.
+    internals.abandonSockets("Reconnected after the network changed");
+    answer({ ticket: "late" });
+    expect(await opening).toBe(true);
+    expect(opened, "the stale opening opened nothing").toEqual([]);
+    // A fresh opening still opens its socket.
+    vi.spyOn(internals, "request").mockResolvedValue({ ticket: "fresh" });
+    void internals.openMachineSocket("patient-pelican-9");
+    await vi.waitFor(() => expect(opened).toHaveLength(1));
+    expect(opened[0]).toContain("ticket=fresh");
+  });
+
+  it("beats no heartbeat after a pairing refusal, so the machine never reads live again by itself (cas-7b31)", async () => {
+    vi.stubGlobal("window", globalThis);
+    const onState = vi.fn();
+    const { internals } = supervisor({ onState });
+    const fields = internals as unknown as { desired: boolean; heartbeat(): Promise<void>; startHeartbeat(): void; heartbeatTimer?: number; blockAuthentication(kind: string, detail: string): void };
+    fields.desired = true;
+    internals.lifecycle = { phase: "live", stage: "live" };
+    fields.startHeartbeat();
+    vi.spyOn(internals, "request").mockRejectedValue(new Error("401"));
+    fields.blockAuthentication("revoked", "pairing was revoked");
+    expect(fields.heartbeatTimer, "the heartbeat stops with the refusal").toBeUndefined();
+    onState.mockClear();
+    await fields.heartbeat();
+    expect(onState, "a stray beat changes nothing").not.toHaveBeenCalled();
+    expect(internals.lifecycle).toMatchObject({ phase: "failed", authFailure: "revoked" });
+  });
+
   it("waits at most 10 s between reconnects and gives a doubted socket 3 s to answer", () => {
     expect(MACHINE_RETRY_CEILING_MS).toBe(10_000);
     expect(SOCKET_PROBE_TIMEOUT_MS).toBe(3_000);

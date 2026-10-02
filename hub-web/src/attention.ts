@@ -81,8 +81,10 @@ const MACHINE_EVENT_TEMPLATES: Record<string, DeterministicTemplate> = {
   retry: { headline: "Operation will retry", severity: "warning", action: "retry" },
   retry_loop: { headline: "Operation is retrying", severity: "warning", action: "retry" },
   retrying: { headline: "Operation is retrying", severity: "warning", action: "retry" },
-  hub_disconnected: { headline: "Hub connection lost", severity: "warning", action: "retry" },
-  reconnecting: { headline: "Reconnecting to hub", severity: "warning", action: "retry" },
+  // cas-be76: the machine, as the banner names it (the rail groups cards
+  // under the machine's label), never "the hub" or its raw host.
+  hub_disconnected: { headline: "Lost connection to the machine", severity: "warning", action: "retry" },
+  reconnecting: { headline: "Reconnecting to the machine", severity: "warning", action: "retry" },
   connection_degraded: { headline: "Connection unsteady", severity: "warning", action: "none" },
   degraded_connection: { headline: "Connection unsteady", severity: "warning", action: "none" },
   config_drift: { headline: "Configuration changed", severity: "warning", action: "none" },

@@ -387,6 +387,14 @@ export function outageRefusal(machineLabel: string): string {
   return `Not sent: lost connection to ${machineLabel}. Your message is kept; send it again when it's back.`;
 }
 
+/**
+ * cas-7b31 (journey F2): why the controls wait while the pairing is refused.
+ * Nothing reconnects or comes back by itself; re-pairing is the step.
+ */
+export function pairingControlsReason(machineLabel: string): string {
+  return `${machineLabel} needs pairing again. Re-pair it to take control and interrupt.`;
+}
+
 /** Why Take control, Release control and Interrupt are unavailable during an outage. */
 export function outageControlsReason(machineLabel: string): string {
   return `Lost connection to ${machineLabel}. Control and interrupts return when it reconnects.`;

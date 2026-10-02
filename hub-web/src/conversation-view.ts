@@ -29,8 +29,13 @@ import {
 
 /** What a kind-specific renderer receives. */
 /** A message's place in a run of unconfirmed messages shown as one notice (cas-b00c). */
-/** `key`: the run's first message (cas-ca7f), so Review opens this run only. */
-type UnconfirmedRun = { count: number; last: boolean; expanded: boolean; key: string };
+/**
+ * `key`: the run's first message, and `members` every message in it
+ * (cas-ca7f): Review opens this run only, and the run stays open while any
+ * message the operator opened it on is still in it (dismissing one must not
+ * close the rest).
+ */
+type UnconfirmedRun = { count: number; last: boolean; expanded: boolean; key: string; members: string[] };
 
 export interface TurnRenderContext {
   readonly document: Document;
@@ -365,9 +370,10 @@ export class ConversationView {
   /** Coalesced status lines the operator opened with "Show full update"; survives repaints. */
   private expanded = new Set<string>();
   /**
-   * cas-b00c: runs of several unconfirmed messages the operator opened with
-   * Review, by the run's first message (cas-ca7f): a later, separate run
-   * starts as one notice again instead of opening already expanded.
+   * cas-b00c: messages in the unconfirmed runs the operator opened with
+   * Review (cas-ca7f): a run is open while any of its messages is here, so a
+   * later, separate run starts as one notice instead of opening already
+   * expanded, and dismissing one message keeps the rest of its run open.
    */
   private readonly reviewedRuns = new Set<string>();
   private following = true;
@@ -1081,8 +1087,9 @@ export class ConversationView {
       while (end < actionable.length && actionable[end]) end += 1;
       if (end - start >= 2) {
         for (let index = start; index < end; index += 1) {
-          const key = group.turns[start]!.key;
-          runs.set(index, { count: end - start, last: index === end - 1, expanded: this.reviewedRuns.has(key), key });
+          const members = group.turns.slice(start, end).map((turn) => turn.key);
+          const expanded = members.some((member) => this.reviewedRuns.has(member));
+          runs.set(index, { count: end - start, last: index === end - 1, expanded, key: members[0]!, members });
         }
       }
       start = Math.max(end, start + 1);
@@ -1092,7 +1099,7 @@ export class ConversationView {
 
   /** Open (or close) one unconfirmed run, and keep the keyboard user's place. */
   private toggleUnconfirmedReview(run: UnconfirmedRun, open: boolean): void {
-    if (open) this.reviewedRuns.add(run.key); else this.reviewedRuns.delete(run.key);
+    for (const member of run.members) if (open) this.reviewedRuns.add(member); else this.reviewedRuns.delete(member);
     this.update();
     const first = [...this.msgs.querySelectorAll<HTMLElement>(".conversation-turn")].find((node) => node.dataset.key === run.key);
     if (open) { if (first) landFocusIn(first, "conversation-retry"); return; }

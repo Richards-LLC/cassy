@@ -431,7 +431,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     // Cassy Cloud has no pane drag-and-drop, so the empty slot must not promise one.
     expect(main).not.toContain("drag it here");
     expect(attentionView).toContain('message.textContent = options.outage ?? "All clear"');
-    expect(attentionView).toContain("Last event ${new Date(latest.createdAt).toLocaleString()}");
+    expect(attentionView).toContain("timestamp.textContent = lastEventLabel(latest.createdAt, options.now ?? Date.now());");
+    expect(attentionView).toContain("`Last event ${stampLabel(at, now)}`");
+    expect(attentionView).not.toContain("toLocaleString()");
   });
 
   // Contract: distinguishes a loading catalog from an unpaired Cassy Cloud drawer.

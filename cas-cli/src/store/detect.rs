@@ -951,7 +951,11 @@ mod tests {
         env.remove("CAS_ROOT");
 
         let child_store = init_cas_dir(&repo).unwrap();
-        assert_eq!(find_cas_root_from(&repo.join("src")).unwrap(), child_store);
+        // Git reports the physical toplevel, unlike init_cas_dir's input spelling.
+        assert_eq!(
+            find_cas_root_from(&repo.join("src")).unwrap(),
+            child_store.canonicalize().unwrap()
+        );
         assert_ne!(child_store, parent_store);
     }
 

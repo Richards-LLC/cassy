@@ -141,6 +141,11 @@ report() { # <file> <tree> <blocking> <rows...>
 }
 report stale.md "$(git -C "$fx" rev-parse "$base_sha:hub-web/dist")" 0 '| HUB-J1 | PASS | 0 |' '| HUB-J2 | PASS | 0 |'
 if out="$(gate_run)"; then bad "gate accepted a report for another dist tree"; else ok "gate: a report for another dist tree does not count"; fi
+# A longer word containing the current tree as a prefix is different proof.
+report prefix.md "${tree}00" 0 '| HUB-J1 | PASS | 0 |' '| HUB-J2 | PASS | 0 |'
+if out="$(gate_run)"; then bad "gate accepted a prefix-only tree match"; else
+    [[ "$out" == *"no committed report"* ]] && ok "gate: a longer tree token cannot cover its prefix" || bad "gate prefix output: $out"
+fi
 report blocking.md "$tree" 1 '| HUB-J1 | PASS | 0 |' '| HUB-J2 | PASS | 0 |'
 if out="$(gate_run)"; then bad "gate accepted blocking findings"; else
     [[ "$out" == *"blocking_findings is not 0"* ]] && ok "gate: blocking findings block" || bad "gate blocking output: $out"

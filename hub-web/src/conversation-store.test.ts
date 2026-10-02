@@ -235,6 +235,14 @@ describe("turn times store (cas-8d52)", () => {
     expect(Object.keys(kept.at)).toHaveLength(MAX_ARRIVALS);
     expect(kept.at["r:0"]).toBeUndefined();
   });
+  it("keeps each live turn's clock-ahead mark only for a kept supervisor turn (cas-9e33)", () => {
+    expect(validArrivals({ at: { "r:1": 10, "s:2": 20 }, live: { "r:1": false, "s:2": true, "r:3": true, "r:x": true } })).toEqual({ at: { "r:1": 10, "s:2": 20 }, live: { "r:1": false } });
+    expect(validArrivals({ at: { "r:1": 10 }, live: { "r:1": "yes" } })).toEqual({ at: { "r:1": 10 } });
+    expect(validArrivals({ at: { "r:1": 10 }, live: ["r:1"] })).toEqual({ at: { "r:1": 10 } });
+    const storage = memoryStorage();
+    arrivalStore(storage).save("atlas:pelican", { at: { "r:1": 100, "r:2": 200 }, live: { "r:1": false, "r:2": true } });
+    expect(arrivalStore(storage).load().get("atlas:pelican")).toEqual({ at: { "r:1": 100, "r:2": 200 }, live: { "r:1": false, "r:2": true } });
+  });
   it("round-trips per conversation and is purged with its machine", () => {
     const storage = memoryStorage();
     const store = arrivalStore(storage);

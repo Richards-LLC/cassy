@@ -222,7 +222,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** an open conversation where the supervisor asks a question with choices
 - **Goal:** I answer with one tap and the supervisor acts on it
-- **Touches:** `hub-web/src/attention-objects.ts`, `hub-web/src/attention-view.ts`, `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/context-rail.ts`, `hub-web/src/swipe-dismiss.ts`, `hub-web/src/dismissed-asks.ts`
+- **Touches:** `hub-web/src/attention-objects.ts`, `hub-web/src/attention-view.ts`, `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/context-rail.ts`, `hub-web/src/swipe-dismiss.ts`, `hub-web/src/dismissed-asks.ts`, `hub-web/src/thread-model.ts`, `hub-web/src/conversation-list.ts`
 - **Suite:** `hub-web/e2e/journeys/answer-ask.journey.ts`
 - **Gaps:** none
 
@@ -236,6 +236,9 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 6. Fold, open and dismiss a question — the supervisor posting an FYI and a status update while it waits leaves the question pinned with its choices; on a desktop the pinned question collapses to a one-line bar ("Waiting on you: open the PR…") and opens again, and writing in the composer leaves it open; on a phone (390px, dark) focusing the composer folds it to the bar, and with the keyboard up (about 440px of page) at least three lines of the latest conversation stay readable; a tap on the bar opens it; a swipe takes it off, and its copy in the thread says "Dismissed. You can still answer here." and keeps its choices
 7. Reply to a machine a day ahead — no future day header: the machine's turn sits under Today at its arrival time, marked "machine clock ahead", and the reply shows the time it was sent below it, with no session line between them
 8. Reopen the page — minutes later, the thread rebuilt from history keeps every turn where the visit showed it and at the same time (not the reload's), in the machine's order, under Today, with times reading in order
+9. The supervisor answers live — a separate part on a machine whose clock runs five minutes ahead, which nothing in the thread has shown yet: the answer shows its arrival, unmarked, and its row reads "now"
+10. Reload three minutes later — the answer shows the same time and still no mark, exactly as the visit showed it (cas-9e33), and its row reads "3m", not "now" (cas-24fe)
+11. Come back five minutes later — the row reads "8m"; the reload measured the machine's lead, so the next live answer is marked "machine clock ahead" and its row reads "now"
 
 #### Expected experience
 

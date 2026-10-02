@@ -968,10 +968,10 @@ async fn test_worktree_merge_succeeds_for_factory_worktree_when_system_a_disable
     );
     assert!(
         text.contains("Merge policy: merge proceeded because CI is advisory."),
-        "successful code worktree_merge must state its validation policy.\nGot:\n{text}"
+        "worktree_merge without a GitHub origin must state its advisory policy.\nGot:\n{text}"
     );
     assert!(
-        text.contains("gh endpoint queried:") && text.contains("CI SHA:"),
+        text.contains("gh endpoint unavailable: repository unresolved") && text.contains("CI SHA:"),
         "worktree_merge CI diagnostics must name the endpoint and source SHA.\nGot:\n{text}"
     );
 

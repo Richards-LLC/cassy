@@ -595,7 +595,7 @@ async fn red_ci_worktree_merge_accepts_supervisor_override_end_to_end_cas_4150()
     let gh = fake_bin.path().join("gh");
     std::fs::write(
         &gh,
-        "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '{\"nameWithOwner\":\"%s\"}\\n' \"$3\"; exit 0; fi\ncat <<'JSON'\n{\"check_runs\":[{\"name\":\"Fast Validation\",\"status\":\"completed\",\"conclusion\":\"failure\",\"html_url\":\"https://github.com/org/repo/actions/runs/4150\"}]}\nJSON\n",
+        "#!/bin/sh\nif [ \"$1 $2 $3\" = 'repo view org/red-ci-override' ]; then printf '%s\\n' '{\"nameWithOwner\":\"Richards-LLC/cassy\"}'; exit 0; fi\ncase \"$4\" in repos/Richards-LLC/cassy/commits/*/check-runs) ;; *) echo 'HTTP 422: No commit found for SHA' >&2; exit 1 ;; esac\ncat <<'JSON'\n{\"check_runs\":[{\"name\":\"Fast Validation\",\"status\":\"completed\",\"conclusion\":\"failure\",\"html_url\":\"https://github.com/org/repo/actions/runs/4150\"}]}\nJSON\n",
     )
     .expect("write fake gh");
     {
@@ -608,6 +608,10 @@ async fn red_ci_worktree_merge_accepts_supervisor_override_end_to_end_cas_4150()
     // PATH stays untouched (factory_mcp_ops_test PATH-isolation lint).
     env.set(cas::github_issue_attach::GH_BIN_ENV, &gh);
     let fixture = arm_delivery("redcioverride", "red-ci-override", &mut env).await;
+    // cas-28c8: origin maps to a renamed canonical repo; upstream/default must
+    // not select CI. The fake refuses every noncanonical endpoint.
+    run_git(&["remote", "add", "upstream", "https://github.com/codingagentsystem/cas.git"], &fixture.repo.root);
+    env.set("GH_REPO", "codingagentsystem/cas");
     let supervisor_service = delivery_service(&fixture.cas_root, &fixture.supervisor_id);
     let merge_with = |supervisor_override: Option<bool>, reason: Option<&str>| {
         let mut merge = coord_req("worktree_merge");
@@ -626,6 +630,7 @@ async fn red_ci_worktree_merge_accepts_supervisor_override_end_to_end_cas_4150()
 
     let refused = outcome(supervisor_service.coordination(Parameters(merge_with(None, None))).await);
     assert!(refused.contains("CI RED"), "{refused}");
+    assert!(refused.contains(&format!("repos/Richards-LLC/cassy/commits/{}/check-runs", fixture.receipt.commit_sha)), "{refused}");
     assert!(refused.contains("supervisor_override=true"), "{refused}");
     // Refusals happen after merge authorization but before Git: the target
     // is untouched and the delivery has not merged.

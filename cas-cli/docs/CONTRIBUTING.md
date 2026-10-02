@@ -564,7 +564,10 @@ Each named commit must be the delivery anchor or a descendant of it, be
 reachable on the target, and carry a non-empty first-parent diff. Cassy records
 the resolved commits, anchor, target and review as a decision note.
 
-The epic close gate proves every child within an 8 s budget. When it stops
+The epic close gate proves every child within an 8 s budget, shared by ref
+reads, missing-anchor fetches and nested delivery/history proofs. A probe that
+runs out of time is terminated with its descendants, and its unfinished child
+remains unchecked rather than becoming a measured verdict. When it stops
 early (`EPIC CLOSE CHECK INCOMPLETE`), the verdicts it already proved for
 closed children are saved under the repository's common Git directory
 (`cas/epic-close-verdicts.json`), keyed by the exact refs and anchor each proof

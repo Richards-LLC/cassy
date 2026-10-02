@@ -3,6 +3,8 @@ mod task_attribution;
 mod delivery_evolution;
 mod snapshot_approval;
 mod epic_verdict_cache;
+mod epic_measurement;
+use epic_measurement::CommandExt as _;
 
 use super::TaskLifecycleGateError;
 use crate::harness_policy::{
@@ -12880,7 +12882,7 @@ pub(crate) fn count_unmerged_factory_commits(
     let merge_base_out = Command::new("git")
         .args(["merge-base", parent_branch, factory_branch])
         .current_dir(repo_path)
-        .output();
+        .measurement_output();
     let merge_base = match merge_base_out {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         _ => return 0,
@@ -12893,7 +12895,7 @@ pub(crate) fn count_unmerged_factory_commits(
     let count_out = Command::new("git")
         .args(["rev-list", "--count", &count_range])
         .current_dir(repo_path)
-        .output();
+        .measurement_output();
     match count_out {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
             .trim()
@@ -12982,7 +12984,7 @@ fn commit_patches_cherry_equivalent_on_parent(
     let cherry_out = Command::new("git")
         .args(["cherry", parent_ref, commit_ish])
         .current_dir(repo_path)
-        .output();
+        .measurement_output();
     let Ok(o) = cherry_out else {
         return false;
     };
@@ -13052,7 +13054,7 @@ pub(crate) fn count_unmerged_against_targets(
     let out = Command::new("git")
         .args(&args)
         .current_dir(repo_path)
-        .output()
+        .measurement_output()
         .ok()?;
     if !out.status.success() {
         return None;
@@ -13192,7 +13194,7 @@ pub(crate) fn known_unmerged_factory_commits(
     let merge_base_out = Command::new("git")
         .args(["merge-base", parent_branch, factory_branch])
         .current_dir(repo_path)
-        .output();
+        .measurement_output();
     let merge_base = match merge_base_out {
         Ok(o) if o.status.success() => {
             let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
@@ -13211,7 +13213,7 @@ pub(crate) fn known_unmerged_factory_commits(
             &format!("{merge_base}..{factory_branch}"),
         ])
         .current_dir(repo_path)
-        .output();
+        .measurement_output();
     match count_out {
         Ok(o) if o.status.success() => {
             match String::from_utf8_lossy(&o.stdout).trim().parse::<u32>() {
@@ -13253,7 +13255,7 @@ fn commit_tip_tree_reachable_from(
     let tree_out = Command::new("git")
         .args(["rev-parse", &format!("{commit_ish}^{{tree}}")])
         .current_dir(repo_path)
-        .output();
+        .measurement_output();
     let tree = match tree_out {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         _ => return false,
@@ -13268,7 +13270,7 @@ fn commit_tip_tree_reachable_from(
     let log_out = Command::new("git")
         .args(["log", "--pretty=%T", parent_ref])
         .current_dir(repo_path)
-        .output();
+        .measurement_output();
     match log_out {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
             .lines()
@@ -13296,7 +13298,7 @@ fn commit_reachable_from_any(
             Command::new("git")
                 .args(["merge-base", "--is-ancestor", commit, trunk])
                 .current_dir(repo_path)
-                .status(),
+                .measurement_status(),
             Ok(status) if status.success()
         )
     })
@@ -13364,7 +13366,7 @@ fn anchor_work_patches_equivalent_on_parent(
     let cherry_out = Command::new("git")
         .args(["cherry", parent_ref, commit_ish])
         .current_dir(repo_path)
-        .output();
+        .measurement_output();
     let Ok(o) = cherry_out else {
         return false;
     };
@@ -13465,6 +13467,22 @@ enum BoundedFetch {
 fn run_bounded_git_fetch(repo_path: &std::path::Path, args: &[&str]) -> BoundedFetch {
     use std::process::{Command, Stdio};
     use std::time::Instant;
+
+    if let Some(deadline) = epic_measurement::deadline() {
+        let mut command = Command::new("git");
+        command
+            .args(args)
+            .current_dir(repo_path)
+            .env("GIT_TERMINAL_PROMPT", "0");
+        return match crate::bounded_process::run_command(&mut command, deadline, FETCH_TIMEOUT) {
+            Ok(output) if output.status.success() => BoundedFetch::Succeeded,
+            Ok(_) => BoundedFetch::Failed,
+            Err(crate::bounded_process::BoundedCommandError::TimedOut) => BoundedFetch::TimedOut,
+            Err(crate::bounded_process::BoundedCommandError::Io) => {
+                BoundedFetch::NotStarted("Git probe failed".into())
+            }
+        };
+    }
 
     let mut child = match Command::new("git")
         .args(args)
@@ -13579,7 +13597,7 @@ fn origin_remote_configured(repo_path: &std::path::Path) -> bool {
     std::process::Command::new("git")
         .args(["remote", "get-url", "origin"])
         .current_dir(repo_path)
-        .output()
+        .measurement_output()
         .is_ok_and(|output| output.status.success())
 }
 
@@ -13794,7 +13812,7 @@ fn git_ref_exists(repo_path: &std::path::Path, refname: &str) -> bool {
     Command::new("git")
         .args(["cat-file", "-e", "--", &format!("{refname}^{{commit}}")])
         .current_dir(repo_path)
-        .output()
+        .measurement_output()
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
@@ -13809,7 +13827,7 @@ pub(crate) fn resolve_branch_sha(repo_path: &std::path::Path, refname: &str) -> 
     let out = Command::new("git")
         .args(["rev-parse", "--verify", refname])
         .current_dir(repo_path)
-        .output()
+        .measurement_output()
         .ok()?;
     if !out.status.success() {
         return None;
@@ -13827,7 +13845,7 @@ pub(crate) fn git_merge_base(
     let out = Command::new("git")
         .args(["merge-base", left, right])
         .current_dir(repo_path)
-        .output()
+        .measurement_output()
         .ok()?;
     if !out.status.success() {
         return None;
@@ -13916,7 +13934,7 @@ fn resolve_close_gate_default_branch(repo_path: &std::path::Path) -> Result<Stri
     let remote_head = Command::new("git")
         .args(["symbolic-ref", "refs/remotes/origin/HEAD"])
         .current_dir(repo_path)
-        .output();
+        .measurement_output();
     if let Ok(output) = remote_head {
         if output.status.success() {
             let reference = String::from_utf8_lossy(&output.stdout);
@@ -13935,7 +13953,7 @@ fn resolve_close_gate_default_branch(repo_path: &std::path::Path) -> Result<Stri
         let exists = Command::new("git")
             .args(["show-ref", "--verify", "--quiet", &reference])
             .current_dir(repo_path)
-            .status();
+            .measurement_status();
         if matches!(exists, Ok(status) if status.success()) {
             return Ok(candidate.to_string());
         }
@@ -16255,7 +16273,7 @@ impl EpicGitSnapshot {
             "--format=%(refname) %(objectname) %(committerdate:unix)".to_string(),
         ];
         args.extend(patterns);
-        if let Ok(output) = Command::new("git").args(&args).current_dir(repo_path).output()
+        if let Ok(output) = Command::new("git").args(&args).current_dir(repo_path).measurement_output()
             && output.status.success()
         {
             for line in String::from_utf8_lossy(&output.stdout).lines() {
@@ -16285,33 +16303,29 @@ impl EpicGitSnapshot {
             .filter(|anchor| is_safe_git_refname(anchor))
             .map(str::to_string)
             .collect::<std::collections::BTreeSet<_>>();
-        if !anchors.is_empty()
-            && let Ok(mut child) = Command::new("git")
-                .args(["cat-file", "--batch-check=%(objectname) %(objecttype)"])
-                .current_dir(repo_path)
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .spawn()
-        {
-            if let Some(mut stdin) = child.stdin.take() {
-                use std::io::Write;
-                for anchor in &anchors {
-                    let _ = writeln!(stdin, "{anchor}");
-                }
-            }
-            if let Ok(output) = child.wait_with_output()
-                && output.status.success()
-            {
-                for (anchor, line) in anchors
-                    .iter()
-                    .zip(String::from_utf8_lossy(&output.stdout).lines())
-                {
-                    if line.split_whitespace().nth(1) == Some("commit") {
-                        snapshot.resolved_anchors.insert(anchor.clone());
+        if !anchors.is_empty() {
+            // A file-fed batch avoids pipe backpressure and lets the shared
+            // bounded runner reap Git and descendants on the same deadline.
+            use std::io::{Seek, Write};
+            if let Ok(mut input) = tempfile::tempfile() {
+                let written = anchors.iter().try_for_each(|anchor| writeln!(input, "{anchor}"));
+                if written.is_ok() && input.rewind().is_ok() {
+                    if let Ok(output) = Command::new("git")
+                        .args(["cat-file", "--batch-check=%(objectname) %(objecttype)"])
+                        .current_dir(repo_path)
+                        .measurement_output_with_stdin(std::process::Stdio::from(input))
+                        && output.status.success()
+                    {
+                        for (anchor, line) in anchors.iter().zip(String::from_utf8_lossy(&output.stdout).lines()) {
+                            if line.split_whitespace().nth(1) == Some("commit") {
+                                snapshot.resolved_anchors.insert(anchor.clone());
+                            }
+                        }
                     }
                 }
             }
         }
+
         snapshot
     }
 
@@ -16382,7 +16396,7 @@ impl EpicGitSnapshot {
         let output = Command::new("git")
             .args(args)
             .current_dir(repo_path)
-            .output()
+            .measurement_output()
             .ok()?;
         if !output.status.success() {
             return None;
@@ -16577,6 +16591,7 @@ fn reanchored_delivery_content_in_parent(
 
     let delivery_parent = resolve_branch_sha(repo_path, &format!("{anchor}^1"))?;
     for integration in candidates {
+        epic_measurement::check().ok()?;
         // The source anchor need not be an ancestor of its squash commit, so
         // require its complete exact patch to reverse-apply at the accepted
         // integration. The ancestry tracer is valid only AFTER re-anchoring.
@@ -16684,15 +16699,19 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
     repo_path: &std::path::Path,
     options: EpicStatusOptions,
 ) -> EpicStatusCollection {
+    // A zero proof budget still supports validating/reusing cached verdicts.
+    // Bound its metadata prelude independently; it must never fetch or prove.
+    let _measurement_scope = epic_measurement::Scope::new(if options.budget.is_zero() {
+        EPIC_CLOSE_GATE_BUDGET
+    } else {
+        options.budget
+    });
     let total_children = subtasks.len();
     let git_snapshot = EpicGitSnapshot::collect(repo_path, parent_branch, subtasks);
     let offset = options.offset.min(total_children);
     let page_len = options
         .limit
         .unwrap_or(total_children.saturating_sub(offset));
-    let deadline = (options.budget != std::time::Duration::MAX)
-        .then(|| std::time::Instant::now().checked_add(options.budget))
-        .flatten();
     let mut statuses = Vec::with_capacity(page_len.min(total_children.saturating_sub(offset)));
     let mut budget_exhausted = false;
     // cas-b412: full-fidelity verdicts persist across calls, so a large epic
@@ -16703,6 +16722,10 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
     } else {
         epic_verdict_cache::EpicVerdictCache::load(repo_path)
     };
+    let _zero_proof_scope = options
+        .budget
+        .is_zero()
+        .then(|| epic_measurement::Scope::new(options.budget));
     let mut reused_verdicts = 0;
     // Children assigned to the same worker share one live lane. Within one
     // collection the ref snapshot is fixed, so each (branch, target) content
@@ -16736,10 +16759,8 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
         // cas-ba4a: a recorded anchor this checkout lacks (the worker lane
         // was force-pushed or deleted) is fetched by SHA before the gate
         // falls back to measuring live lanes that no longer hold it.
-        let resolved_anchor = recorded_anchor.filter(|anchor| {
-            git_snapshot.commit_exists(anchor)
-                || (!options.summary && resolve_or_fetch_commit(repo_path, anchor).is_ok())
-        });
+        let mut resolved_anchor =
+            recorded_anchor.filter(|anchor| git_snapshot.commit_exists(anchor));
 
         let mut fallback_branches = Vec::new();
         if let Some(branch) = parked_branch.as_ref() {
@@ -16759,7 +16780,7 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
             .chain(additional_factory_branches.iter())
             .cloned()
             .collect::<Vec<_>>();
-        let cache_key = (!options.summary).then(|| {
+        let mut cache_key = (!options.summary).then(|| {
             epic_verdict_cache::verdict_key(
                 t,
                 parent_branch,
@@ -16770,17 +16791,33 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                 &git_snapshot,
             )
         });
-        if let Some(cached) = cache_key
-            .as_deref()
-            .and_then(|key| verdict_cache.get(key))
-        {
+        if let Some(cached) = cache_key.as_deref().and_then(|key| verdict_cache.get(key)) {
             statuses.push(cached);
             reused_verdicts += 1;
             continue;
         }
         // The deadline bounds proof work only; a reused verdict costs no Git
         // subprocess, so it is taken even after the budget is spent.
-        if deadline.is_some_and(|limit| std::time::Instant::now() >= limit) {
+        if epic_measurement::expired() {
+            budget_exhausted = true;
+            break;
+        }
+        if resolved_anchor.is_none() && !options.summary {
+            resolved_anchor =
+                recorded_anchor.filter(|anchor| resolve_or_fetch_commit(repo_path, anchor).is_ok());
+            if resolved_anchor.is_some() {
+                cache_key = Some(epic_verdict_cache::verdict_key(
+                    t,
+                    parent_branch,
+                    has_delivery,
+                    recorded_anchor,
+                    true,
+                    &fallback_branches,
+                    &git_snapshot,
+                ));
+            }
+        }
+        if epic_measurement::expired() {
             budget_exhausted = true;
             break;
         }
@@ -16831,6 +16868,10 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
         // cost on large epics and remains available in the paged full
         // view when an operator needs it for a specific child range.
         if options.summary {
+            if epic_measurement::expired() {
+                budget_exhausted = true;
+                break;
+            }
             statuses.push(EpicChildBranchStatus {
                 task_id: t.id.clone(),
                 task_status: t.status,
@@ -17002,17 +17043,17 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                              is integrated through accepted squash re-anchor `{integration}`. Its \
                              task-specific effect survives on `{parent_branch}` under the same \
                              hunk-survival proof used by child close.",
-                            t.id,
-                        ));
-                    }
-                    Some(ReanchoredDeliveryContent::Superseded {
-                        integration,
-                        paths,
-                        commits,
-                    }) => {
-                        unmerged_count = 0;
-                        content_evolution_note = Some(format!(
-                            "decision: recorded factory_branch_anchor `{anchor}` for child task `{}` \
+                        t.id,
+                    ));
+                }
+                Some(ReanchoredDeliveryContent::Superseded {
+                    integration,
+                    paths,
+                    commits,
+                }) => {
+                    unmerged_count = 0;
+                    content_evolution_note = Some(format!(
+                        "decision: recorded factory_branch_anchor `{anchor}` for child task `{}` \
                              is integrated through accepted squash re-anchor `{integration}` and \
                              its delivered path(s) {} were intentionally evolved by later \
                              first-parent commit(s) {}. The child close content proof (including \
@@ -17077,11 +17118,7 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                         )
                     })
                     .collect();
-                content_directions = fallback_branches
-                    .iter()
-                    .cloned()
-                    .zip(directions)
-                    .collect();
+                content_directions = fallback_branches.iter().cloned().zip(directions).collect();
             }
             let directions: Vec<BranchContentDirection> = content_directions
                 .iter()
@@ -17142,6 +17179,10 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                     )
                 })
                 .collect();
+        }
+        if epic_measurement::expired() {
+            budget_exhausted = true;
+            break;
         }
         let status = EpicChildBranchStatus {
             task_id: t.id.clone(),
@@ -17450,7 +17491,7 @@ pub(crate) fn last_commit_unix(repo_path: &std::path::Path, branch: &str) -> Opt
     let out = Command::new("git")
         .args(["log", "-1", "--format=%ct", branch])
         .current_dir(repo_path)
-        .output()
+        .measurement_output()
         .ok()?;
     if !out.status.success() {
         return None;
@@ -17612,7 +17653,7 @@ fn git_stdout_lines(repo_path: &std::path::Path, args: &[&str]) -> Result<Vec<St
     let out = Command::new("git")
         .args(args)
         .current_dir(repo_path)
-        .output()
+        .measurement_output()
         .map_err(|error| format!("failed to run git {}: {error}", args.join(" ")))?;
     if !out.status.success() {
         return Err(format!(
@@ -17986,6 +18027,14 @@ fn run_epic_close_merge_gate_with_budget(
             unchecked = unchecked.join("\n"),
         ));
     }
+    let unchecked_note = if collection.budget_exhausted {
+        format!(
+            "\n\nPartial evaluation: checked {} of {} child task(s). Child task(s) not checked:\n{}",
+            collection.statuses.len(), collection.total_children,
+            subtasks.iter().skip(collection.offset + collection.statuses.len())
+                .map(|child| format!("  - {}", child.id)).collect::<Vec<_>>().join("\n"),
+        )
+    } else { String::new() };
     let statuses = collection.statuses;
     let stranded: Vec<&EpicChildBranchStatus> =
         statuses.iter().filter(|s| s.blocks_epic_close()).collect();
@@ -18196,7 +18245,7 @@ fn run_epic_close_merge_gate_with_budget(
          {guidance_heading}\n\
          {cleaned_worktree_guidance}\n\
          Diagnostic: run `{tool_prefix}factory action=epic_status id={epic_id}` \
-         for a per-child report.",
+         for a per-child report.{unchecked_note}",
         headline = headline,
         guidance_heading = guidance_heading,
         epic_id = task.id,
@@ -19789,7 +19838,7 @@ pub(crate) fn git_commit_is_ancestor(
         .arg("-C")
         .arg(repo_path)
         .args(["merge-base", "--is-ancestor", commit, descendant])
-        .status()
+        .measurement_status()
         .map(|status| status.success())
         .unwrap_or(false)
 }
@@ -19904,8 +19953,7 @@ fn reverse_delivery_patch_applies_to_tree(
     target_tree: &str,
     selected_path: Option<&str>,
 ) -> Result<bool, String> {
-    use std::io::Write as _;
-    use std::process::{Command, Stdio};
+    use std::process::Command;
     let path = selected_path.unwrap_or("all delivery paths");
 
     let temp = tempfile::tempdir()
@@ -19915,7 +19963,7 @@ fn reverse_delivery_patch_applies_to_tree(
         .args(["read-tree", target_tree])
         .current_dir(repo_path)
         .env("GIT_INDEX_FILE", &index_path)
-        .output()
+        .measurement_output()
         .map_err(|error| format!("failed to materialize target tree `{target_tree}`: {error}"))?;
     if !read_tree.status.success() {
         return Err(format!(
@@ -19939,7 +19987,7 @@ fn reverse_delivery_patch_applies_to_tree(
     }
     let patch = patch_command
         .current_dir(repo_path)
-        .output()
+        .measurement_output()
         .map_err(|error| format!("failed to render delivery patch for `{path}`: {error}"))?;
     if !patch.status.success() || patch.stdout.is_empty() {
         return Err(format!(
@@ -19948,40 +19996,23 @@ fn reverse_delivery_patch_applies_to_tree(
         ));
     }
 
-    let mut child = Command::new("git")
+    let patch_path = temp.path().join("delivery.patch");
+    std::fs::write(&patch_path, &patch.stdout)
+        .map_err(|error| format!("failed to store delivery patch for `{path}`: {error}"))?;
+    Command::new("git")
         .args([
             "apply",
             "--cached",
             "--reverse",
             "--check",
             "--whitespace=nowarn",
-            "-",
         ])
+        .arg(&patch_path)
         .current_dir(repo_path)
         .env("GIT_INDEX_FILE", &index_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| format!("failed to verify delivery patch for `{path}`: {error}"))?;
-    let write_result = child
-        .stdin
-        .take()
-        .ok_or_else(|| "Git apply stdin was unavailable".to_string())
-        .and_then(|mut stdin| {
-            stdin
-                .write_all(&patch.stdout)
-                .map_err(|error| error.to_string())
-        });
-    if let Err(reason) = write_result {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(format!(
-            "failed to send delivery patch for `{path}` to Git: {reason}"
-        ));
-    }
-    child
-        .wait()
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .measurement_status()
         .map(|status| status.success())
         .map_err(|error| format!("failed to verify delivery patch for `{path}`: {error}"))
 }
@@ -20016,7 +20047,7 @@ fn delivery_added_hunks_survive_on_tree(
             path,
         ])
         .current_dir(repo_path)
-        .output()
+        .measurement_output()
         .map_err(|error| {
             format!("failed to render zero-context delivery patch for `{path}`: {error}")
         })?;
@@ -20049,7 +20080,7 @@ fn delivery_added_hunks_survive_on_tree(
     let target = Command::new("git")
         .args(["show", &format!("{target_tree}:{path}")])
         .current_dir(repo_path)
-        .output()
+        .measurement_output()
         .map_err(|error| format!("failed to read `{path}` from target `{target_tree}`: {error}"))?;
     if !target.status.success() {
         return Ok(false);
@@ -20176,7 +20207,7 @@ fn commit_changes_path(
             path,
         ])
         .current_dir(repo_path)
-        .status()
+        .measurement_status()
         .map_err(|error| format!("failed to inspect `{path}` at `{commit}`: {error}"))?;
     match status.code() {
         Some(0) => Ok(false),
@@ -20248,7 +20279,7 @@ fn delivery_content_presence_on_target_for_paths(
             "--",
         ])
         .current_dir(repo_path)
-        .output();
+        .measurement_output();
     let names = match names {
         Ok(output) if output.status.success() => output.stdout,
         Ok(output) => {
@@ -29256,6 +29287,216 @@ mod epic_status_gate_tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn epic_override_budget_bounds_missing_anchor_fetch_cas_9069() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = init_epic_repo(&[]);
+        let p = dir.path();
+        let helper = p.join("slow-upload-pack");
+        std::fs::write(&helper, "#!/bin/sh\nsleep 2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        git(p, &["remote", "add", "origin", p.to_str().unwrap()]);
+        git(
+            p,
+            &[
+                "config",
+                "remote.origin.uploadpack",
+                helper.to_str().unwrap(),
+            ],
+        );
+        let children: Vec<_> = (0..139)
+            .map(|index| {
+                let mut task = child(
+                    &format!("cas-missing-{index}"),
+                    TaskStatus::Closed,
+                    Some("deleted"),
+                );
+                task.deliverables.factory_branch_anchor = Some(format!("{:040x}", index + 1));
+                task
+            })
+            .collect();
+        let task = epic("cas-override-missing");
+        let mut req = base_req(&task.id);
+        req.supervisor_override = Some(true);
+        req.reason = Some("inspected all terminal child deliveries".into());
+        let started = std::time::Instant::now();
+        let outcome = run_epic_close_merge_gate_with_budget(
+            &task,
+            &req,
+            "main",
+            p,
+            &children,
+            std::time::Duration::from_millis(100),
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "fetch escaped close budget: {:?}",
+            started.elapsed()
+        );
+        match outcome {
+            EpicCloseGateOutcome::Incomplete(message) => {
+                assert!(message.contains("checked 0 of 139"), "{message}");
+                for task in children {
+                    assert!(
+                        message.contains(&format!("  - {}\n", task.id)),
+                        "missing unchecked {}",
+                        task.id
+                    );
+                }
+            }
+            other => panic!("unfinished fetch must leave children unchecked: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn epic_override_budget_bounds_reanchor_scan_cas_9069() {
+        let dir = init_epic_repo(&[("squashed", 1)]);
+        let p = dir.path();
+        let anchor = epic_git_stdout(p, &["rev-parse", "factory/squashed"]);
+        let tree = epic_git_stdout(p, &["rev-parse", "main^{tree}"]);
+        let mut tip = epic_git_stdout(p, &["rev-parse", "main"]);
+        // Keep the delivered path absent across a long target history. The
+        // lane was recycled at main, so reconciliation scans for a squash.
+        for _ in 0..100 {
+            let output = Command::new("git")
+                .args([
+                    "commit-tree",
+                    &tree,
+                    "-p",
+                    &tip,
+                    "-m",
+                    "unrelated evolution",
+                ])
+                .current_dir(p)
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "test@test")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "test@test")
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            tip = String::from_utf8(output.stdout).unwrap().trim().to_string();
+        }
+        git(p, &["update-ref", "refs/heads/main", &tip]);
+        git(p, &["branch", "-f", "factory/squashed", &tip]);
+        let mut children: Vec<_> = (0..139)
+            .map(|index| {
+                child(
+                    &format!("cas-scan-{index}"),
+                    TaskStatus::Closed,
+                    Some("deleted"),
+                )
+            })
+            .collect();
+        children[0].assignee = Some("squashed".into());
+        children[0].deliverables.parked_branch = Some("factory/squashed".into());
+        children[0].deliverables.factory_branch_anchor = Some(anchor);
+        let task = epic("cas-override-scan");
+        let mut req = base_req(&task.id);
+        req.supervisor_override = Some(true);
+        req.reason = Some("inspected terminal child delivery history".into());
+        let started = std::time::Instant::now();
+        let outcome = run_epic_close_merge_gate_with_budget(
+            &task,
+            &req,
+            "main",
+            p,
+            &children,
+            std::time::Duration::from_millis(100),
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "scan escaped close budget: {:?}",
+            started.elapsed()
+        );
+        match outcome {
+            EpicCloseGateOutcome::Incomplete(message) => {
+                for child in children {
+                    assert!(
+                        message.contains(&format!("  - {}\n", child.id)),
+                        "missing unchecked {}",
+                        child.id
+                    );
+                }
+            }
+            other => panic!("unfinished proof must leave children unchecked: {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn epic_override_budget_bounds_stranded_audit_cas_9069() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = init_epic_repo(&[("stranded", 1)]);
+        let p = dir.path();
+        let helper = p.join("slow-upload-pack");
+        std::fs::write(&helper, "#!/bin/sh\nsleep 5\nexit 1\n").unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        git(p, &["remote", "add", "origin", p.to_str().unwrap()]);
+        git(
+            p,
+            &[
+                "config",
+                "remote.origin.uploadpack",
+                helper.to_str().unwrap(),
+            ],
+        );
+        let mut children: Vec<_> = (0..139)
+            .map(|index| {
+                let mut task = child(
+                    &format!("cas-audit-{index}"),
+                    TaskStatus::Closed,
+                    Some("deleted"),
+                );
+                task.deliverables.factory_branch_anchor = Some(format!("{:040x}", index + 1));
+                task
+            })
+            .collect();
+        children[0] = child("cas-audit-0", TaskStatus::Closed, Some("stranded"));
+        let task = epic("cas-override-audit");
+        let mut req = base_req(&task.id);
+        req.supervisor_override = Some(true);
+        req.stranded_branch_override = Some("inspected terminal child deliveries against main".into());
+        let started = std::time::Instant::now();
+        let outcome = run_epic_close_merge_gate_with_budget(
+            &task,
+            &req,
+            "main",
+            p,
+            &children,
+            std::time::Duration::from_secs(2),
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "partial stranded gate escaped budget: {:?}",
+            started.elapsed()
+        );
+        match outcome {
+            EpicCloseGateOutcome::Reject(message) => {
+                // A measured blocker is still mandatory for the ordinary
+                // override. The distinct stranded override records this
+                // whole output, including every child left unmeasured.
+                assert!(message.contains("cas-audit-0"));
+                let unchecked = message
+                    .split("Child task(s) not checked:")
+                    .nth(1)
+                    .expect("partial rejection must audit unchecked children");
+                assert!(!unchecked.contains("  - cas-audit-0\n"));
+                for child in children.iter().skip(1) {
+                    assert!(
+                        unchecked
+                            .lines()
+                            .any(|line| line == format!("  - {}", child.id)),
+                        "missing unchecked {}",
+                        child.id
+                    );
+                }
+            }
+            other => panic!("measured stranded child must still block ordinary override: {other:?}"),
+        }
+    }
+
     /// Build `count` closed children spread over `lanes` worker lanes, each
     /// with its own delivery commit as anchor, and merge every lane to main.
     fn merged_epic_children(p: &std::path::Path, count: usize, lanes: usize) -> Vec<Task> {
@@ -29311,7 +29552,16 @@ mod epic_status_gate_tests {
     fn epic_close_gate_resumes_across_calls_for_150_children_cas_b412() {
         let dir = init_epic_repo(&[]);
         let p = dir.path();
-        let subtasks = merged_epic_children(p, 150, 8);
+        // Keep each proof smaller than the artificial retry budget. A long
+        // per-child history can now be interrupted inside a proof instead of
+        // overrunning it; that behavior is covered by cas-9069's scan test.
+        // Distinct child IDs still require 150 separately cached verdicts.
+        let delivered = merged_epic_children(p, 1, 1).pop().unwrap();
+        let subtasks = (0..150).map(|index| {
+            let mut child = delivered.clone();
+            child.id = format!("cas-big-{index:03}");
+            child
+        }).collect::<Vec<_>>();
         let task = epic("cas-big-epic");
         let req = base_req(&task.id);
 

@@ -41,6 +41,17 @@ pub(crate) fn run_command(
     deadline: Deadline,
     per_command_cap: Duration,
 ) -> Result<Output, BoundedCommandError> {
+    run_command_with_stdin(command, deadline, per_command_cap, Stdio::null())
+}
+
+/// The same deadline and process-group cleanup for probes with explicit input.
+/// Callers use a file rather than a pipe so writing input cannot block cleanup.
+pub(crate) fn run_command_with_stdin(
+    command: &mut Command,
+    deadline: Deadline,
+    per_command_cap: Duration,
+    stdin: Stdio,
+) -> Result<Output, BoundedCommandError> {
     let remaining = deadline.remaining();
     if remaining.is_zero() {
         return Err(BoundedCommandError::TimedOut);
@@ -49,7 +60,7 @@ pub(crate) fn run_command(
     let stdout = Capture::new().ok_or(BoundedCommandError::Io)?;
     let stderr = Capture::new().ok_or(BoundedCommandError::Io)?;
     command
-        .stdin(Stdio::null())
+        .stdin(stdin)
         .stdout(Stdio::from(
             stdout.writer().map_err(|_| BoundedCommandError::Io)?,
         ))
@@ -205,6 +216,24 @@ mod tests {
             "returned after {:?}, which no longer proves the inherited sleep was skipped",
             started.elapsed()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn captures_file_input() {
+        use std::io::{Seek, Write};
+        let mut input = tempfile::tempfile().unwrap();
+        writeln!(input, "anchor input").unwrap();
+        input.rewind().unwrap();
+        let output = run_command_with_stdin(
+            Command::new("sh").arg("-c").arg("cat"),
+            Deadline::after(GENEROUS),
+            GENEROUS,
+            Stdio::from(input),
+        )
+        .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"anchor input\n");
     }
 
     #[test]

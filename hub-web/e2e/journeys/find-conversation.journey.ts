@@ -382,7 +382,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await page.evaluate(() => {
       // cas-813a: also every loading look, where its line sits, the header
       // and row words, and the composer's width, frame by frame.
-      const seen = { footer: new Set<string>(), pane: new Set<string>(), looks: new Set<string>(), centres: new Set<string>(), status: new Set<string>(), composer: new Set<number>() };
+      const seen = { footer: new Set<string>(), pane: new Set<string>(), looks: new Set<string>(), centres: new Set<string>(), status: new Set<string>(), composer: new Set<number>(), details: new Set<string>() };
       (window as unknown as { __attachSeen: typeof seen }).__attachSeen = seen;
       const sample = () => {
         const footer = document.querySelector<HTMLElement>("#hub-footer-badges .machine-badge-state");
@@ -390,6 +390,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
         const pane = document.querySelector<HTMLElement>(".conversation-pane-slot");
         if (pane) seen.pane.add(pane.innerText.trim());
         if (!pane) return;
+        for (const details of pane.querySelectorAll<HTMLDetailsElement>(".connection-details")) seen.details.add(`${details.querySelector("summary")?.innerText.trim()} ${details.open ? "open" : "closed"}`);
         for (const verdict of pane.querySelectorAll(".terminal-state")) if ((verdict as HTMLElement).offsetParent) seen.looks.add("verdict card");
         for (const line of pane.querySelectorAll<HTMLElement>(".conversation-loading")) {
           if (!line.offsetParent) continue;
@@ -414,16 +415,15 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     const dot = opening.locator(".dots i").first();
     // Its first frames are still: the pulse is scheduled about a second after the open.
     expect(parseInt(await dot.evaluate((element) => element.style.animationDelay), 10), "motion waits after the open").toBeGreaterThanOrEqual(500);
-    await expect.poll(() => dot.evaluate((element) => Number(getComputedStyle(element).opacity)), { message: "the dots move after a second" }).toBeGreaterThan(0.3);
-    // Past the quiet window the attempt and stage are offered behind Details, closed.
-    // One locator, so the check can't straddle the attach finishing.
-    await expect(page.locator(".conversation-pane-slot .connection-details:not([open]) > summary"), "Details offered, closed").toHaveText("Details");
+    expect(await dot.evaluate((element) => element.getAnimations().map((animation) => (animation as CSSAnimation).animationName)), "the quiet pulse that follows").toEqual(["opening-dots"]);
     await expect(page.getByRole("button", { name: "Send to quiet-heron-7", exact: true })).toBeVisible();
     await expect(page.locator(".thread .empty b")).toHaveText("lighthouse", { timeout: 10_000 });
     const seen = await page.evaluate(() => {
-      const { footer, pane, looks, centres, status, composer } = (window as unknown as { __attachSeen: Record<string, Set<string | number>> }).__attachSeen;
-      return { footer: [...footer], pane: [...pane], looks: [...looks], centres: [...centres], status: [...status], composer: [...composer] };
+      const { footer, pane, looks, centres, status, composer, details } = (window as unknown as { __attachSeen: Record<string, Set<string | number>> }).__attachSeen;
+      return { footer: [...footer], pane: [...pane], looks: [...looks], centres: [...centres], status: [...status], composer: [...composer], details: [...details] };
     });
+    // Past the quiet window the attempt and stage were offered behind Details, closed.
+    expect(seen.details, "Details while it opened").toEqual(["Details closed"]);
     // cas-813a: one loading look, in one place, centred in the reading area;
     // the header and row stay Live and the composer keeps its width.
     expect(seen.looks, "loading looks while it opened").toEqual(["line: Opening the conversation…"]);

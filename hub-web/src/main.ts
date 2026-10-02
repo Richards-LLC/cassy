@@ -4071,6 +4071,13 @@ document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") event.stopPropagation();
   }
 }, true);
+// cas-0739: a Paired machines register that closes is put back in order
+// (machines that aren't connected first) for its next opening; while it was
+// open, status ticks left its rows where they were.
+document.addEventListener("close", (event) => {
+  if ((event.target as Element | null)?.id === "paired-machines-dialog") renderMachineRegister();
+}, true);
+
 // A layer that was over the sheet (the palette) has closed: focus goes back
 // into the sheet, to the control it left, rather than to the page.
 document.addEventListener("close", () => {

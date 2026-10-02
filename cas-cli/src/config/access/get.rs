@@ -19,6 +19,7 @@ impl Config {
         let memory = self.memory.clone().unwrap_or_default();
         let factory = self.factory();
         match key {
+            "jev.gate.shadow" => Some(self.jev.clone().unwrap_or_default().gate.shadow.to_string()),
             "jev.model" => Some(self.jev.clone().unwrap_or_default().model),
             "jev.key_file" => Some(
                 self.jev

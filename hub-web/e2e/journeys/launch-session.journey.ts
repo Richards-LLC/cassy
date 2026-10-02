@@ -52,8 +52,12 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
   await journey.stage("A paired controller enables launch from Commander", async () => {
     await journey.open();
     await expect(list.getByRole("button", { name: /cas-src/ })).toBeVisible();
-    await expect(page.getByRole("button", { name: "New session", exact: true })).toHaveCount(0);
-    await page.getByRole("button", { name: "Allow new sessions" }).tap();
+    // cas-865c: New session is named by its goal before the permission too; it
+    // opens the sheet's grant view, which explains what is asked.
+    const toggle = page.locator("#new-session-toggle");
+    await expect(toggle).toHaveText("+ New session");
+    await expect(toggle).toHaveAttribute("data-launch-grant", "true");
+    await toggle.tap();
     await expect(sheet).toBeVisible();
     await expect(sheet.getByRole("button", { name: "Allow starting sessions on Atlas · Linux" })).toBeVisible();
     await expect(sheet.getByRole("button", { name: "Allow starting sessions on Atlas · Linux" })).toBeFocused();
@@ -72,7 +76,7 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
     await hub.seedPaired();
     await page.reload();
     await expect(page.getByRole("button", { name: "New session", exact: true })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Allow new sessions" })).toHaveCount(0);
+    await expect(page.locator("#new-session-toggle")).not.toHaveAttribute("data-launch-grant", "true");
   });
 
   await journey.stage("Open New session and find the project", async () => {
@@ -168,7 +172,7 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
     hub.setScopes("atlas", [...SCOPES]);
     await hub.seedPaired();
     await page.reload();
-    await page.getByRole("button", { name: "Allow new sessions" }).tap();
+    await page.locator('#new-session-toggle[data-launch-grant="true"]').tap();
     const allow = sheet.getByRole("button", { name: `Allow starting sessions on ${ATLAS.label}` });
     await expect(allow).toBeVisible();
     await expect(sheet.getByRole("button", { name: "Close", exact: true })).toBeVisible();

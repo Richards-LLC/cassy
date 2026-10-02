@@ -20,6 +20,8 @@ test("HUB-J10 switch to dark and keep reading", async ({ page, journey }) => {
     await expect(current).toHaveAttribute("data-palette-scheme", "system");
     await expect(current.locator(".palette-check")).toBeVisible();
     await expect(current.locator("small")).toHaveText("Current · follows this device");
+    // cas-865c: every Appearance row fits the palette at 1280×720.
+    for (const scheme of ["system", "light", "dark"]) await expect(page.locator(`#command-palette [data-palette-scheme='${scheme}']`)).toBeInViewport({ ratio: 1 });
     await page.getByRole("button", { name: /^Appearance · Dark/ }).click();
     await expect(page.locator("html")).toHaveAttribute("data-scheme", "dark");
   });

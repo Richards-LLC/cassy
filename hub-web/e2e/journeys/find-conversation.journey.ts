@@ -23,6 +23,15 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
   const hub = await journey.hub({ machines: [ATLAS, STUDIO, FORGE], paired: ["atlas", "studio", "forge"] });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
   const search = page.getByRole("searchbox", { name: "Search conversations" });
+  /** "Conversations" and its New session control sit on one line (cas-865c). */
+  const expectOneRowHeading = async () => {
+    const heading = page.locator(".conversation-list-title h1");
+    const control = page.locator(".conversation-list-title #new-session-toggle");
+    await expect(control).toHaveText("+ New session");
+    const [h1, button] = await Promise.all([heading.boundingBox(), control.boundingBox()]);
+    expect(Math.abs((h1!.y + h1!.height / 2) - (button!.y + button!.height / 2)), "heading and New session on one row").toBeLessThan(6);
+    await expect(page.locator(".conversation-list-top #pair-toggle")).toBeVisible();
+  };
   const filter = page.getByRole("searchbox", { name: "Filter commands" });
   // Ctrl/Cmd+K lands in the list search; pressed again from there, it opens
   // the command palette.
@@ -53,6 +62,8 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
   await journey.stage("See every machine's supervisors in one list", async () => {
     await journey.open();
     await expect(list.getByRole("button")).toHaveCount(3);
+    // cas-865c: the heading and New session share one row; nothing wraps.
+    await expectOneRowHeading();
     firstWelcome = await welcomeLayout();
     expect(firstWelcome).toMatchObject({ contextOpen: false, railWidth: 0, mainRight: 1280, centred: true });
     // Machines list in id order (atlas, forge, studio). Rows are titled by project, then machine; the codename is tertiary.
@@ -188,6 +199,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await page.setViewportSize({ width: 390, height: 844 });
     await page.getByRole("button", { name: "‹ Conversations", exact: true }).click();
     await expect(row).toBeVisible();
+    await expectOneRowHeading();
     expect(await clearOfTime()).toEqual({ ellipsised: true, clear: true });
     expect(await noLeadingDot()).toBe(true);
     // Receipt beside the stage screenshots: the 390 px list with the long name.

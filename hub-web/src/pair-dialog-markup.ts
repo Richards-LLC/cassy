@@ -84,7 +84,12 @@ function pairStatusMarkup(pairingStatus: string): string {
  * (cas-093d F02).
  */
 export function pairCommandMarkup(command: string): string {
-  return `<div class="pair-code-actions pair-command"><code class="pair-command-token">${escapeHtml(command)}</code><button type="button" class="pair-command-copy" data-pair-command="${escapeAttr(command)}" aria-label="Copy the re-pair command">Copy command</button><span class="sr-only pair-command-status" role="status"></span></div>`;
+  // cas-093d QA F01: each word is unbreakable on its own (white-space:
+  // nowrap), so the only places a line can break are the spaces between
+  // words. word-break: keep-all still let the browser break after a hyphen
+  // ("--" / "scopes"). The visible label is the accessible name (QA F02).
+  const words = command.split(" ").map((word) => `<span class="pair-command-word">${escapeHtml(word)}</span>`).join(" ");
+  return `<div class="pair-code-actions pair-command"><code class="pair-command-token" id="pair-repair-command">${words}</code><button type="button" class="pair-command-copy" data-pair-command="${escapeAttr(command)}" aria-describedby="pair-repair-command">Copy command</button><span class="sr-only pair-command-status" role="status"></span></div>`;
 }
 
 /**

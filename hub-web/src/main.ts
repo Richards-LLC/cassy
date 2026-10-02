@@ -4835,9 +4835,11 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   for (const copy of document.querySelectorAll<HTMLButtonElement>("#pair-dialog .pair-command-copy")) {
     copy.onclick = () => {
       const status = copy.parentElement?.querySelector<HTMLElement>(".pair-command-status");
+      // QA F03: the status is emptied first, so a second copy is announced again.
+      const say = (text: string) => { if (!status) return; status.textContent = ""; window.setTimeout(() => { status.textContent = text; }, 50); };
       void navigator.clipboard.writeText(copy.dataset.pairCommand ?? "")
-        .then(() => { copy.textContent = "Copied"; if (status) status.textContent = "Command copied"; })
-        .catch(() => { copy.textContent = "Copy failed"; if (status) status.textContent = "Copy failed — select the command and copy it"; })
+        .then(() => { copy.textContent = "Copied"; say("Command copied"); })
+        .catch(() => { copy.textContent = "Copy failed"; say("Copy failed — select the command and copy it"); })
         .finally(() => { window.setTimeout(() => { copy.textContent = "Copy command"; }, 2000); });
     };
   }

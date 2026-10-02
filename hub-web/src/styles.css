@@ -2444,12 +2444,16 @@ fieldset {
   min-width: 0;
   max-width: 100%;
   overflow-x: auto;
-  white-space: pre-wrap;
+  white-space: normal;
   overflow-wrap: normal;
-  word-break: keep-all;
+  word-break: normal;
   color: var(--text-hi);
   font-size: var(--fs-meta);
 }
+/* cas-093d QA F01: a word never breaks, not even after a hyphen. */
+.pair-command-word { white-space: nowrap; }
+/* The label changes to "Copied"; a fixed width keeps the block from reflowing. */
+.pair-command-copy { min-width: 9.5em; }
 
 .pair-details {
   display: grid;

@@ -630,22 +630,53 @@ test("HUB-J12 network switch: re-pairing by code says plainly that starting sess
     const command = "cas hub pair --origin " + new URL(page.url()).origin + " --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,session:launch";
     await expect(dialog.locator(".pair-status")).not.toContainText("cas hub pair");
     await expect(dialog.locator(".pair-command code")).toHaveText(command);
-    for (const width of [1280, 390]) {
-      await page.setViewportSize({ width, height: width === 390 ? 844 : 720 });
-      // Every line break falls between words: no token is split across lines.
-      const splits = await dialog.locator(".pair-command code").evaluate((code) => {
-        const text = code.firstChild!;
-        const range = document.createRange();
-        const tops = [...(text.textContent ?? "")].map((_, index) => { range.setStart(text, index); range.setEnd(text, index + 1); return range.getClientRects()[0]?.top ?? 0; });
-        return [...(text.textContent ?? "")].flatMap((char, index) => index > 0 && tops[index] !== tops[index - 1] && char !== " " && text.textContent![index - 1] !== " " ? [index] : []);
-      });
-      expect(splits, `no mid-token break at ${width}`).toEqual([]);
-    }
+    // No line break falls between two non-space characters, at any width from
+    // a phone to a wide desktop, before and after Copy relabels the button
+    // (cas-093d QA F01: "--" / "scopes" at 450–470 px, and 530–640 px once it
+    // read "Copied"). Measured per character, so it holds for any markup.
+    const splitWords = () => dialog.locator(".pair-command code").evaluate((code) => {
+      const chars: Array<{ char: string; top: number }> = [];
+      const walker = document.createTreeWalker(code, NodeFilter.SHOW_TEXT);
+      const range = document.createRange();
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const text = node.textContent ?? "";
+        for (let index = 0; index < text.length; index += 1) {
+          range.setStart(node, index); range.setEnd(node, index + 1);
+          chars.push({ char: text[index]!, top: Math.round(range.getClientRects()[0]?.top ?? 0) });
+        }
+      }
+      return chars.flatMap((item, index) => index > 0 && item.top !== chars[index - 1]!.top && item.char !== " " && chars[index - 1]!.char !== " " ? [`${chars[index - 1]!.char}|${item.char}@${index}`] : []);
+    });
+    const sweep = async (phase: string, label?: string) => {
+      for (let width = 360; width <= 1440; width += 10) {
+        await page.setViewportSize({ width, height: 844 });
+        if (label) await dialog.locator(".pair-command-copy").evaluate((button, text) => { button.textContent = text; }, label);
+        expect(await splitWords(), `no word split at ${width} px (${phase})`).toEqual([]);
+      }
+    };
+    await sweep("before Copy");
     await page.setViewportSize({ width: 1280, height: 720 });
     await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
-    await dialog.getByRole("button", { name: "Copy the re-pair command" }).click();
+    // QA F02: the visible label is the accessible name.
+    const copy = dialog.getByRole("button", { name: "Copy command", exact: true });
+    await copy.click();
     await expect(dialog.locator(".pair-command-status")).toHaveText("Command copied");
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(command);
+    await expect(dialog.getByRole("button", { name: "Copied", exact: true })).toBeVisible();
+    // The label reverts after two seconds; hold it at "Copied" through the
+    // sweep, the state in which the block used to reflow.
+    await sweep("while Copy reads Copied", "Copied");
+    await dialog.locator(".pair-command-copy").evaluate((button) => { button.textContent = "Copy command"; });
+    await page.setViewportSize({ width: 1280, height: 720 });
+    // QA F03: a second copy is announced again (the status empties, then speaks).
+    await expect(dialog.getByRole("button", { name: "Copy command", exact: true })).toBeVisible({ timeout: 5_000 });
+    const announcements = await dialog.locator(".pair-command-status").evaluate((status) => new Promise<string[]>((resolve) => {
+      const seen: string[] = [];
+      new MutationObserver(() => seen.push(status.textContent ?? "")).observe(status, { childList: true, characterData: true, subtree: true });
+      (status.parentElement!.querySelector("button") as HTMLButtonElement).click();
+      setTimeout(() => resolve(seen), 500);
+    }));
+    expect(announcements).toEqual(["", "Command copied"]);
   });
 
   await journey.stage("Re-pair with a code anyway", async () => {

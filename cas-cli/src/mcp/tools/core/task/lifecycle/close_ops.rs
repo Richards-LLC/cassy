@@ -25632,6 +25632,7 @@ mod merge_state_gate_tests {
     /// continuation still advances it.
     #[test]
     fn advance_keeps_anchor_when_next_task_is_open_blocked_or_force_pushed_cas_ba4a() {
+        use cas_store::TaskStore;
         let dir = init_factory_repo("worker");
         let p = dir.path();
         let base = rev_parse_local(p, "main");

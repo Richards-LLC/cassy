@@ -341,10 +341,18 @@ jobs:
           echo "Fast tier skipped: $FAST_ADMISSION_REASON;
           Scoped Validation (factory/PR) owns this delta."
 
-      # The bridge is Node-only and its whole suite is bounded to the fast
-      # tier when a small delta touches it.  Keeping this target here avoids
-      # making the shared fast admission classifier a coverage hole for mixed
-      # or bridge-only changes.
+      # Node test inputs can live outside the package (e.g. visual-qa.mjs).
+      # Both scoped tiers consume the path signal before accepting a lane.
+      - name: Typecheck and test Commander web assets
+        if: >-
+          steps.classify-diff.outputs.fast-admission == 'true'
+          && steps.classify-diff.outputs.web-check-needed == 'true'
+        working-directory: hub-web
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
+
       - name: Build and test the Slack bridge
         if: >-
           steps.classify-diff.outputs.fast-admission == 'true'
@@ -496,8 +504,19 @@ jobs:
           && (github.event_name != 'push' || steps.classify-diff.outputs.fast-admission != 'true')
         run: ./scripts/test-cas-install.sh
 
-      # The bridge is Node-only and its whole suite runs in about a second, so
-      # it rides the existing lane instead of adding one.
+      # PRs and larger pushes own these checks here; small factory pushes
+      # already ran them in scoped-validation-fast.
+      - name: Typecheck and test Commander web assets
+        if: >-
+          steps.pr-dedupe.outputs.covered != 'true'
+          && (github.event_name != 'push' || steps.classify-diff.outputs.fast-admission != 'true')
+          && steps.classify-diff.outputs.web-check-needed == 'true'
+        working-directory: hub-web
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
+
       - name: Build and test the Slack bridge
         if: >-
           steps.pr-dedupe.outputs.covered != 'true'

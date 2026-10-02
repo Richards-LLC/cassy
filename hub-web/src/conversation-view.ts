@@ -925,6 +925,11 @@ export class ConversationView {
     fitMachineLine(line, this.empty.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight));
   }
 
+  /** "the cas-src supervisor", never the generated codename (cas-71f4, journey F20). */
+  private supervisorPhrase(): string {
+    return this.options.project ? `the ${this.options.project} supervisor` : "the supervisor";
+  }
+
   /** Cheap liveness poll: repaints only when the working state actually flipped. */
   refreshWorking(): void {
     if (this.disposed) return;
@@ -1114,7 +1119,7 @@ export class ConversationView {
         const label = document.createElement("b"); label.textContent = `${run.count} messages not confirmed`;
         const separator = document.createElement("span"); separator.className = "sr-only"; separator.textContent = " · ";
         const reason = document.createElement("span"); reason.className = "conversation-refused-reason";
-        reason.textContent = `Cassy couldn't confirm delivery to ${this.options.supervisor}.`;
+        reason.textContent = `Cassy couldn't confirm delivery to ${this.supervisorPhrase()}.`;
         const next = document.createElement("span"); next.className = "conversation-refused-next"; next.textContent = " Review them to retry.";
         reason.append(next);
         state.append(glyph.content.firstElementChild!, label, separator, reason);
@@ -1162,7 +1167,7 @@ export class ConversationView {
       const separator = document.createElement("span"); separator.className = "sr-only"; separator.textContent = " · ";
       const reason = document.createElement("span"); reason.className = "conversation-refused-reason";
       // cas-71f4 (journey F20): the project's supervisor, never the codename.
-      reason.textContent = `Cassy couldn't confirm delivery to ${this.options.project ? `the ${this.options.project} supervisor` : "the supervisor"}.`;
+      reason.textContent = `Cassy couldn't confirm delivery to ${this.supervisorPhrase()}.`;
       const next = document.createElement("span"); next.className = "conversation-refused-next"; next.textContent = " Retry sends it again.";
       reason.append(next);
       state.append(glyph.content.firstElementChild!, label, separator, reason);

@@ -103,11 +103,14 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     await expect.poll(() => hub.sends.filter((m) => m.text === "Are you there?").length, { timeout: 10_000 }).toBe(1);
     await expect(page.locator("#message-status")).toBeHidden();
     await expect(page.getByRole("log").locator(".conversation-held")).toHaveCount(0);
-    // cas-5a8f: once the held send is out on a live machine, the supervisor
-    // has it and the thread says it is working again.
-    await expect(page.getByRole("log").locator(".working")).toHaveCount(1);
+    // cas-71f4: while it still says "Sending…", that bubble is the one
+    // sending signal; no working line beside it.
+    await expect(page.getByRole("log").locator(".working")).toHaveCount(0);
     hub.deliverLatest(PELICAN);
     await expect(page.getByRole("log").getByText("Delivered")).toBeVisible();
+    // cas-5a8f: once the held send is out on a live machine and delivered,
+    // the supervisor has it and the thread says it is working again.
+    await expect(page.getByRole("log").locator(".working")).toHaveCount(1);
     await page.waitForTimeout(1_000);
     expect(hub.sends.filter((m) => m.text === "Are you there?"), "sent once, not again").toHaveLength(1);
     // The transport alarm resolved itself with the reconnect.

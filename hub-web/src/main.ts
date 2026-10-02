@@ -2835,8 +2835,7 @@ const receiptChecks = new Map<string, ReturnType<typeof setTimeout>>();
 /**
  * A send whose delivery receipt never comes stops saying "Sending…": at its
  * deadline (conversation-history RECEIPT_TIMEOUT_MS, or the shorter grace
- * once a supervisor turn lands after it) it turns "Not confirmed" with Retry,
- * and the composer's "Sending to …" line goes away with it.
+ * once a supervisor turn lands after it) it turns "Not confirmed" with Retry.
  */
 function scheduleReceiptCheck(key: string): void {
   const pending = receiptChecks.get(key);

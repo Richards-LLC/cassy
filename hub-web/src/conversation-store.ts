@@ -222,3 +222,49 @@ export function pendingSendStore(storage: StorageLike | undefined): {
     },
   };
 }
+
+/**
+ * When this browser first saw each of a conversation's turns (cas-8d52): a
+ * supervisor turn's arrival (`r:<notification id>`) and the operator's own
+ * message's send time (`s:<notification id>`), in ms epoch, plus the machine
+ * clock's measured lead over this browser (`skew`, ms; positive when ahead).
+ * A reload rebuilds the thread from the machine's stamps; these keep each turn
+ * at the time the visit showed it instead of the moment of the reload.
+ */
+export type Arrivals = { skew?: number; at: Record<string, number> };
+
+/** At most this many turns' times are kept per conversation, the newest. */
+export const MAX_ARRIVALS = 400;
+
+const ARRIVAL_KEY = /^[rs]:\d+$/;
+
+export function validArrivals(raw: unknown): Arrivals | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const { skew, at } = raw as Record<string, unknown>;
+  const times: Record<string, number> = {};
+  if (at && typeof at === "object" && !Array.isArray(at)) {
+    const entries = Object.entries(at as Record<string, unknown>)
+      .flatMap(([key, value]) => ARRIVAL_KEY.test(key) && finite(value) !== undefined ? [[key, value as number] as const] : [])
+      .sort(([, a], [, b]) => a - b)
+      .slice(-MAX_ARRIVALS);
+    for (const [key, value] of entries) times[key] = value;
+  }
+  const lead = finite(skew);
+  if (!Object.keys(times).length && lead === undefined) return undefined;
+  return { ...(lead === undefined ? {} : { skew: lead }), at: times };
+}
+
+/** The turn-times store (cas-8d52): an empty record is a deletion. */
+export function arrivalStore(storage: StorageLike | undefined): {
+  load(): Map<string, Arrivals>;
+  save(conversation: string, arrivals: Arrivals | undefined): void;
+} {
+  const store = new ConversationStore(storage, "arrivals", validArrivals);
+  return {
+    load: () => store.entries(),
+    save: (conversation, arrivals) => {
+      const valid = arrivals && validArrivals(arrivals);
+      if (valid) store.set(conversation, valid); else store.delete(conversation);
+    },
+  };
+}

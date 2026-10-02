@@ -47,6 +47,8 @@ export interface ThreadCoalesce {
   replies: OperatorReply[];
   time: string | undefined;
   clockAhead?: boolean;
+  /** The session the folded statuses came from (cas-8d52): it names the speaker. */
+  session?: string;
 }
 
 export interface ThreadDay { type: "day"; key: string; label: string }
@@ -207,7 +209,10 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
       items.push({ type: "day", key: `day:${lastDay}`, label: "Today" });
     }
 
-    const session = event.session;
+    // cas-8d52 (journey F13): a turn with no session recorded (an older
+    // daemon's history row) belongs to the session the thread is attached to,
+    // so it no longer opens a "session … started" line below itself.
+    const session = event.session ?? options.session;
     // The thread's own session opening the thread needs no line (cas-55a4).
     if (session && index === 0 && session === options.session) lastSession = session;
     if (session && session !== lastSession) {
@@ -223,7 +228,7 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
     if (event.kind === "reply" && (event.value.kind ?? "answer") === "status" && foldsAsStatus(event.value.message)) {
       closeGroup();
       if (!coalesce) {
-        coalesce = { type: "coalesce", key: `coalesce:${event.value.notification_id}`, count: 0, latest: "", replies: [], time: undefined };
+        coalesce = { type: "coalesce", key: `coalesce:${event.value.notification_id}`, count: 0, latest: "", replies: [], time: undefined, ...(event.session ? { session: event.session } : {}) };
         items.push(coalesce);
       }
       coalesce.count += 1;

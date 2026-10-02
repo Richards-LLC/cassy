@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ConversationStore, draftStore, MAX_PENDING_SENDS, pendingSendStore, purgeConversations, validDraft, type PendingSend } from "./conversation-store";
+import { arrivalStore, ConversationStore, draftStore, MAX_ARRIVALS, MAX_PENDING_SENDS, pendingSendStore, purgeConversations, validArrivals, validDraft, type PendingSend } from "./conversation-store";
 
 function memoryStorage(initial: Record<string, string> = {}) {
   const values = new Map(Object.entries(initial));
@@ -154,5 +154,28 @@ describe("unsettled messages store (cas-e7b1)", () => {
     pendingSendStore(storage).save("studio:s", [send("studio")]);
     purgeConversations(storage, "atlas");
     expect([...pendingSendStore(storage).load().keys()]).toEqual(["studio:s"]);
+  });
+});
+
+describe("turn times store (cas-8d52)", () => {
+  it("keeps valid times and the lead, drops the rest, and bounds the record", () => {
+    expect(validArrivals({ skew: 300_000, at: { "r:1": 10, "s:2": 20, "x:3": 30, "r:4": "late", "r:5": Number.NaN } })).toEqual({ skew: 300_000, at: { "r:1": 10, "s:2": 20 } });
+    expect(validArrivals({ at: {} })).toBeUndefined();
+    expect(validArrivals("{not json")).toBeUndefined();
+    const many = Object.fromEntries(Array.from({ length: MAX_ARRIVALS + 10 }, (_, index) => [`r:${index}`, index]));
+    const kept = validArrivals({ at: many })!;
+    expect(Object.keys(kept.at)).toHaveLength(MAX_ARRIVALS);
+    expect(kept.at["r:0"]).toBeUndefined();
+  });
+  it("round-trips per conversation and is purged with its machine", () => {
+    const storage = memoryStorage();
+    const store = arrivalStore(storage);
+    store.save("atlas:pelican", { skew: 5, at: { "r:1": 100 } });
+    store.save("studio:otter", { at: { "s:2": 200 } });
+    expect(arrivalStore(storage).load().get("atlas:pelican")).toEqual({ skew: 5, at: { "r:1": 100 } });
+    purgeConversations(storage as never, "atlas");
+    expect([...arrivalStore(storage).load().keys()]).toEqual(["studio:otter"]);
+    store.save("studio:otter", { at: {} });
+    expect(arrivalStore(storage).load().size).toBe(0);
   });
 });

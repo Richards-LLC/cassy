@@ -18,11 +18,11 @@ import { LaunchSheet, type LaunchHost, type LaunchResult } from "../src/launch-s
 import type { GhosttyCell, GhosttyColor, GhosttyRow } from "../src/terminal/ghostty/core";
 
 export const FIXTURE_NAMES = [
-  "paired-machines", "conversations-list", "conversation", "conversation-replied", "conversation-error",
+  "paired-machines", "paired-machines-down", "conversations-machine-down-long", "conversations-list", "conversation", "conversation-replied", "conversation-error",
   "conversation-thread", "conversation-evidence",
   "conversation-ask", "conversation-ask-answered", "conversation-blocker", "conversation-pairs",
   "conversation-attachment", "conversation-empty", "conversation-composer", "conversation-keyboard",
-  "conversation-sessions", "conversation-earlier",
+  "conversation-sessions", "conversation-earlier", "conversation-dated", "conversations-sessions",
   "fleet-populated",
   "fleet-empty",
   "session-canvas",
@@ -38,6 +38,7 @@ export const FIXTURE_NAMES = [
   "pairing-cleanup",
   "conversation-long-status",
   "conversation-loading-earlier",
+  "conversation-opening",
   "conversation-mic-idle",
   "conversation-mic-listening",
   "conversation-mic-unavailable",
@@ -48,6 +49,7 @@ export const FIXTURE_NAMES = [
   "launch-error",
   "launch-starting",
   "launch-grant",
+  "launch-offline",
   "launch-account",
   "launch-account-unavailable",
 ] as const;
@@ -82,7 +84,7 @@ function session(name: string, supervisor: string, workers: string[], liveness: 
 function fleetModel(): FleetBoardModel {
   const machines = [
     { id: "atlas", label: "Atlas laptop", state: "live", phase: "Live", selected: true },
-    { id: "forge", label: "Forge desktop", state: "degraded", phase: "Degraded", selected: false },
+    { id: "forge", label: "Forge desktop", state: "degraded", phase: "Unsteady", selected: false },
   ];
   const entries = [
     { machineId: "atlas", machineLabel: "Atlas laptop", session: "bright-otter", role: "supervisor" as const, supervisor: "bright-otter", workerCount: 3, status: "live", title: "Commander design pass", phase: "editing" as const, current: false },
@@ -121,7 +123,7 @@ function renderRail(machineCount: number): HTMLElement {
   for (let index = 0; index < machineCount; index += 1) {
     const machine = index === 0 ? "Atlas laptop" : "Forge desktop";
     const item = button(index === 0 ? "AL" : "FD", `machine-icon${index === 0 ? " active" : ""}`);
-    item.setAttribute("aria-label", `${machine}, ${index === 0 ? "live" : "degraded"}`);
+    item.setAttribute("aria-label", `${machine}, ${index === 0 ? "live" : "unsteady"}`);
     item.append(element("span", `machine-state ${index === 0 ? "live" : "degraded"}`));
     rail.append(item);
   }
@@ -369,7 +371,7 @@ function appendOpenPairingDialog(view: PairingFixture): void {
   }
 }
 
-type LaunchFixture = "launch-form" | "launch-browse" | "launch-error" | "launch-starting" | "launch-grant" | "launch-account" | "launch-account-unavailable";
+type LaunchFixture = "launch-form" | "launch-browse" | "launch-error" | "launch-starting" | "launch-grant" | "launch-offline" | "launch-account" | "launch-account-unavailable";
 
 /**
  * The production New session sheet (LaunchSheet, cas-0f51) driven through its
@@ -381,7 +383,8 @@ async function openLaunchSheet(view: LaunchFixture): Promise<void> {
   const root = { id: "root-code", name: "code", path: "/home/dev/code" };
   const host: LaunchHost = {
     machines: () => [
-      { id: "atlas", label: "Atlas · Linux", scopes: [...control, "session-launch"] },
+      // cas-0e14: the offline view's machine is reconnecting.
+      { id: "atlas", label: "Atlas · Linux", scopes: [...control, "session-launch"], ...(view === "launch-offline" ? { connection: "Reconnecting" } : {}) },
       { id: "studio", label: "Studio Mac · macOS", scopes: control },
     ],
     currentMachineId: () => (view === "launch-grant" ? "studio" : "atlas"),
@@ -538,5 +541,5 @@ function renderShell(): void {
   }
 }
 
-if (fixtureName.startsWith("conversation") || fixtureName === "paired-machines") renderConversationFixture(app, fixtureName);
+if (fixtureName.startsWith("conversation") || fixtureName === "paired-machines" || fixtureName === "paired-machines-down") renderConversationFixture(app, fixtureName);
 else renderShell();

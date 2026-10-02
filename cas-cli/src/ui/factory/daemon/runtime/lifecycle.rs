@@ -1718,6 +1718,7 @@ impl FactoryDaemon {
             recent_worker_exits: Vec::new(),
             reported_unavailable_workers: std::collections::HashMap::new(),
             last_usage_limit_scan: None,
+            open_operator_notices: std::collections::HashMap::new(),
             last_permission_request_scan: None,
             reported_permission_requests: std::collections::HashSet::new(),
             last_commander_mirror_scan: None,

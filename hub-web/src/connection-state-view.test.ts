@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   ATTACH_QUIET_MS,
   CONVERSATION_OPENING,
+  OPENING_MOTION_DELAY_MS,
+  showOpeningInto,
   attachInProgress,
   connectionTimeline,
   renderConnectionSurfaceInto,
@@ -10,7 +12,10 @@ import {
   disconnectedView,
   elapsedSeconds,
   lostConnectionBanner,
+  pairingControlsReason,
   pairingLostBanner,
+  pairingRefusal,
+  unsteadyBanner,
   sessionOutageControlsReason,
   sessionReconnectingBanner,
   outageControlsReason,
@@ -225,6 +230,52 @@ describe("the attach surface opens calmly (journey F3)", () => {
   });
 });
 
+describe("a conversation opens behind one quiet line (cas-813a)", () => {
+  const slot = () => { const target = document.createElement("div"); target.className = "empty"; document.body.replaceChildren(target); return target; };
+  const quiet = { openingTitle: CONVERSATION_OPENING, quietOpening: true } as const;
+
+  it("draws the opening line, not the verdict card, and keeps the same line across repaints", () => {
+    const target = slot();
+    const first = showOpeningInto(target, CONVERSATION_OPENING, OPENING_MOTION_DELAY_MS);
+    expect(target.className).toBe("empty conversation-opening");
+    expect(first.getAttribute("role")).toBe("status");
+    expect(first.textContent).toBe(CONVERSATION_OPENING);
+    expect([...first.querySelectorAll<HTMLElement>(".dots i")].map((dot) => dot.style.animationDelay)).toEqual(["1000ms", "1200ms", "1400ms"]);
+    // The attach surface and every 1 Hz repaint reuse it, so its motion never restarts.
+    renderConnectionSurfaceInto(target, "patient-pelican-9", snapshot(), {}, startedAt + 200, quiet);
+    renderConnectionSurfaceInto(target, "patient-pelican-9", snapshot(), {}, startedAt + 1_200, quiet);
+    expect(target.querySelector(":scope > .conversation-loading")).toBe(first);
+    expect(target.querySelector(".terminal-connecting-title")).toBeNull();
+    expect(target.classList.contains("terminal-state")).toBe(false);
+  });
+
+  it("waits until its motion starts before offering Details", () => {
+    const target = slot();
+    renderConnectionSurfaceInto(target, "patient-pelican-9", snapshot(), {}, startedAt + OPENING_MOTION_DELAY_MS - 1, quiet);
+    expect(target.textContent).toBe(CONVERSATION_OPENING);
+    renderConnectionSurfaceInto(target, "patient-pelican-9", snapshot(), {}, startedAt + OPENING_MOTION_DELAY_MS, quiet);
+    expect(target.querySelector(":scope > details.connection-details summary")?.textContent).toBe("Details");
+  });
+
+  it("stays quiet through a never-live conversation's first retry, then shows the verdict card on a real failure", () => {
+    const target = slot();
+    const retry = snapshot({ phase: "backoff", stage: "attaching", attempt: 1, retryInMs: 1_000 });
+    renderConnectionSurfaceInto(target, "patient-pelican-9", retry, {}, startedAt + 3_200, { ...quiet, quietRetry: true });
+    expect(target.querySelector(":scope > .conversation-loading")?.textContent).toBe(CONVERSATION_OPENING);
+    renderConnectionSurfaceInto(target, "patient-pelican-9", snapshot({ phase: "failed", attempt: 2, reason: "hub did not answer" }), {}, startedAt + 9_000, quiet);
+    expect(target.classList.contains("terminal-state")).toBe(true);
+    expect(target.querySelector(".conversation-loading")).toBeNull();
+    expect(target.querySelector(".terminal-connecting-title")?.textContent).toBe("Connection failed — retry available.");
+  });
+
+  it("starts the line's motion from when the open began, not when the line was drawn", () => {
+    const target = slot();
+    const line = showOpeningInto(target, CONVERSATION_OPENING, OPENING_MOTION_DELAY_MS - 700);
+    expect(line.querySelector<HTMLElement>(".dots i")?.style.animationDelay).toBe("300ms");
+    expect(showOpeningInto(slot(), CONVERSATION_OPENING, -500).querySelector<HTMLElement>(".dots i")?.style.animationDelay).toBe("0ms");
+  });
+});
+
 describe("one outage, one vocabulary (journey F9)", () => {
   it("words the refusal and the disabled controls the way the banner does", () => {
     expect(lostConnectionBanner("Atlas · Linux", false)).toBe("Lost connection to Atlas · Linux. Reconnecting…");
@@ -235,6 +286,12 @@ describe("one outage, one vocabulary (journey F9)", () => {
     expect(sessionOutageControlsReason("cas-src")).toBe("Reconnecting to cas-src. Control and interrupts return when it's back.");
     // A refused pairing does not claim to be reconnecting.
     expect(pairingLostBanner("Atlas · Linux")).toBe("Atlas · Linux needs pairing again.");
+    // cas-a6f0: still live, heartbeats unanswered: unsteady, not lost.
+    expect(unsteadyBanner("Atlas · Linux")).toBe("Connection to Atlas · Linux unsteady — checking…");
+    expect(pairingRefusal("Atlas · Linux")).toBe("Not sent: Atlas · Linux needs pairing again.");
+    // cas-7b31: a refused pairing promises no reconnect and no returning control.
+    expect(pairingControlsReason("Atlas · Linux")).toBe("Atlas · Linux needs pairing again. Re-pair it to take control and interrupt.");
+    expect(pairingControlsReason("Atlas · Linux")).not.toMatch(/return|reconnect/i);
     expect(outageRefusal("Atlas · Linux")).toBe("Not sent: lost connection to Atlas · Linux. Your message is kept; send it again when it's back.");
     expect(outageControlsReason("Atlas · Linux")).toBe("Lost connection to Atlas · Linux. Control and interrupts return when it reconnects.");
     for (const line of [outageRefusal("Atlas · Linux"), outageControlsReason("Atlas · Linux")]) {

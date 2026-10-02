@@ -1,4 +1,5 @@
 import type { ConversationHistoryMessage, ConversationHistoryReply, MessageQueued, OperatorReply } from "./types";
+import type { PendingSend } from "./conversation-store";
 
 /**
  * How long a live send waits for the hub's delivery receipt (MessageQueued)
@@ -44,7 +45,16 @@ export interface ConversationSend {
    * wire yet, so it goes out once (with its own client_ref) when the
    * session is back, or turns "Not sent" if it is not back in time (cas-0978). */
   held?: boolean;
+  /** Brought back from this browser's storage after a reload (cas-e7b1). */
+  restored?: boolean;
 }
+
+/**
+ * A restored "Not confirmed" message (cas-e7b1) is the same message as a
+ * durable history row with its target and text stamped no earlier than this
+ * before it went out: the machine's clock may run behind this browser's.
+ */
+export const RESTORED_MATCH_WINDOW_MS = 10 * 60_000;
 
 /**
  * Why an unanswered ask (or blocker) no longer waits on the operator
@@ -119,6 +129,45 @@ export class ConversationHistory {
   private readonly dismissedAsks = new Set<number>();
   /** A durable stamp from this thread's machine has been seen in this browser's future. */
   private machineAhead = false;
+  /**
+   * When this browser first saw each turn (cas-8d52), by `r:<id>` / `s:<id>`,
+   * and the machine clock's measured lead. Kept across a reload so a rebuilt
+   * thread shows each turn at the time the visit showed it.
+   */
+  private readonly arrivals = new Map<string, number>();
+  /** Turns this page saw arrive live: only they measure the machine's lead. */
+  private readonly liveArrivals = new Set<string>();
+  private skewMs?: number;
+
+  /** Seed the times a previous visit recorded (cas-8d52). */
+  seedArrivals(arrivals: { skew?: number; at: Record<string, number> }): void {
+    for (const [key, at] of Object.entries(arrivals.at)) if (!this.arrivals.has(key)) this.arrivals.set(key, at);
+    if (this.skewMs === undefined && arrivals.skew !== undefined) this.skewMs = arrivals.skew;
+  }
+
+  /** What to keep for the next visit: the newest turns' times and the measured lead. */
+  arrivalsRecord(limit = 400): { skew?: number; at: Record<string, number> } {
+    const at: Record<string, number> = {};
+    for (const [key, value] of [...this.arrivals].sort(([, a], [, b]) => a - b).slice(-limit)) at[key] = value;
+    return { ...(this.skewMs === undefined ? {} : { skew: this.skewMs }), at };
+  }
+
+  /**
+   * The browser time a durable turn is shown at, at most `now`: the time this
+   * browser first saw it, else its stamp less the machine's measured lead, else
+   * `now` (cas-8d52). A stamp for a turn seen before refines the measured lead.
+   */
+  private arrivalFor(key: string, stamped: number | undefined, now: number): number {
+    const seen = this.arrivals.get(key);
+    if (seen !== undefined) {
+      if (stamped !== undefined && this.liveArrivals.has(key)) this.skewMs = stamped - seen;
+      return Math.min(seen, now);
+    }
+    const shown = stamped !== undefined && this.skewMs !== undefined ? Math.min(stamped - this.skewMs, now) : now;
+    // The time this visit shows it is the time the next visit shows it.
+    this.arrivals.set(key, shown);
+    return shown;
+  }
   private insert(event: ConversationEvent): void {
     const at = event.at ?? Number.POSITIVE_INFINITY;
     const index = this.events.findIndex((existing) => (existing.at ?? Number.POSITIVE_INFINITY) > at);
@@ -159,6 +208,16 @@ export class ConversationHistory {
 
   hasPending(): boolean {
     return this.events.some(event => event.kind === "send" && (event.value.state === "sending" || event.value.state === "acknowledged"));
+  }
+
+  /**
+   * A send that left this browser and has no reply yet (cas-5a8f). Unlike
+   * `hasPending`, a send still held here because the machine is unreachable
+   * does not count: the supervisor has not seen it, so it cannot be working
+   * on it.
+   */
+  awaitingReply(): boolean {
+    return this.events.some(event => event.kind === "send" && !event.value.held && (event.value.state === "sending" || event.value.state === "acknowledged"));
   }
   /**
    * A new send comes after everything already in the thread, whatever the
@@ -203,6 +262,58 @@ export class ConversationHistory {
     delete send.value.held;
     send.value.sentAt = at;
     return true;
+  }
+
+  /**
+   * The operator's messages that have not settled (cas-e7b1), to keep across a
+   * reload: held here, on the wire without a receipt, not confirmed, or not
+   * sent. Confirmed, answered, replaced and dismissed messages are not.
+   */
+  pendingSends(): PendingSend[] {
+    return this.events.flatMap((event): PendingSend[] => {
+      if (event.kind !== "send") return [];
+      const send = event.value;
+      if (send.notificationId !== undefined || send.dismissed || send.replaced) return [];
+      const state = send.held ? "held" : send.state === "sending" || send.state === "unconfirmed" || send.state === "error" ? send.state : undefined;
+      const at = event.shownAt ?? event.at;
+      if (!state || at === undefined || !Number.isFinite(at)) return [];
+      return [{
+        id: send.id, target: send.target, text: send.text, state, at,
+        ...(send.sentAt === undefined || send.held ? {} : { sentAt: send.sentAt }),
+        ...(send.replyTo === undefined ? {} : { replyTo: send.replyTo }),
+        ...(send.error === undefined ? {} : { error: send.error }),
+        ...(event.session === undefined ? {} : { session: event.session }),
+      }];
+    });
+  }
+
+  /**
+   * Put messages kept across a reload back in the thread (cas-e7b1), each once.
+   * A held message still waits: it has never left this browser, and the
+   * caller queues it to go out once. One that was on the wire without a
+   * receipt cannot be known to have arrived, so it comes back "Not confirmed"
+   * (never "Sending…" or delivered) and is not sent again by itself. A
+   * message that was not sent stays not sent. Returns the held ones.
+   */
+  restorePending(sends: PendingSend[], now: number = Date.now()): PendingSend[] {
+    const held: PendingSend[] = [];
+    for (const stored of sends) {
+      if (this.events.some((event) => event.kind === "send" && event.value.id === stored.id)) continue;
+      const value: ConversationSend = { id: stored.id, target: stored.target, text: stored.text, state: "sending", restored: true, ...(stored.replyTo === undefined ? {} : { replyTo: stored.replyTo }) };
+      if (stored.state === "held") {
+        value.held = true;
+        held.push(stored);
+      } else if (stored.state === "error") {
+        value.state = "error";
+        value.error = stored.error ?? "This message was not sent.";
+      } else {
+        value.state = "unconfirmed";
+        value.unconfirmedAt = now;
+        if (stored.sentAt !== undefined) value.sentAt = stored.sentAt;
+      }
+      this.insert({ kind: "send", value, at: stored.at, ...(stored.session === undefined ? {} : { session: stored.session }) });
+    }
+    return held;
   }
 
   /** The latest stamp already in the thread; live events are placed at or after it. */
@@ -263,6 +374,25 @@ export class ConversationHistory {
       return;
     }
     const at = ConversationHistory.timestamp(message.at);
+    // cas-e7b1: a message restored as "Not confirmed" that the machine's
+    // history now shows did arrive. It becomes that row instead of a second
+    // copy of the message.
+    const restored = this.events.find((event) => event.kind === "send" && event.value.restored && event.value.state === "unconfirmed" && event.value.notificationId === undefined
+      && event.value.sentAt !== undefined && event.value.target === message.target && event.value.text === message.text
+      && (at === undefined || at >= event.value.sentAt - RESTORED_MATCH_WINDOW_MS));
+    if (restored?.kind === "send") {
+      const value = restored.value;
+      value.notificationId = message.notification_id;
+      value.state = message.state;
+      value.stamped = message.stamped;
+      value.deviceLabel = message.operator_label;
+      value.replyTo = message.reply_to ?? value.replyTo;
+      delete value.sentAt;
+      delete value.unconfirmedAt;
+      delete value.restored;
+      restored.session ??= message.session;
+      return;
+    }
     this.observeStamp(at, now);
     this.insertDurable({
       kind: "send",
@@ -277,7 +407,7 @@ export class ConversationHistory {
         ...(message.reply_to === undefined ? {} : { replyTo: message.reply_to }),
       },
       at,
-      arrivedAt: now,
+      arrivedAt: this.arrivalFor(`s:${message.notification_id}`, at, now),
       session: message.session,
     });
   }
@@ -291,6 +421,15 @@ export class ConversationHistory {
   answered(notificationId: number): ConversationSend | undefined {
     for (const event of this.events) if (event.kind === "send" && event.value.replyTo === notificationId && event.value.state !== "error") return event.value;
     return undefined;
+  }
+  /**
+   * Whether the operator sent anything that went out (not refused) after the
+   * turn with this notification id (cas-e829). That is what stops a blocker
+   * waiting; it is not a reply to it unless the send carries its id.
+   */
+  writtenSince(notificationId: number): boolean {
+    const index = this.events.findIndex((event) => event.kind === "reply" && event.value.notification_id === notificationId);
+    return index >= 0 && this.events.slice(index + 1).some((later) => later.kind === "send" && later.value.state !== "error" && later.value.state !== "unconfirmed");
   }
   /**
    * Asks and blockers still waiting on the operator, oldest first. An ask is
@@ -381,6 +520,9 @@ export class ConversationHistory {
     send.value.notificationId = receipt.notification_id;
     send.value.stamped = receipt.stamped;
     if (receipt.device_label) send.value.deviceLabel = receipt.device_label;
+    // cas-8d52: the time this message shows, for the thread a reload rebuilds.
+    const shown = send.shownAt ?? send.at;
+    if (shown !== undefined && Number.isFinite(shown) && !this.arrivals.has(`s:${receipt.notification_id}`)) { this.arrivals.set(`s:${receipt.notification_id}`, shown); this.liveArrivals.add(`s:${receipt.notification_id}`); }
     // A late receipt means it did go: a dismissed "failed" send is back in the thread as delivered.
     delete send.value.dismissed;
     send.value.state = this.events.some((event) => event.kind === "reply" && event.value.reply_to === receipt.notification_id) ? "replied" : "acknowledged";
@@ -411,6 +553,23 @@ export class ConversationHistory {
       event.value.unconfirmedAt = now;
       changed.push(event.value.id);
     });
+    return changed;
+  }
+  /**
+   * cas-a6f0: no receipt can come for sends already on the wire (the hub
+   * refused this browser's pairing). They may or may not have arrived, so
+   * they turn `unconfirmed` now instead of reading "Sending…" until their
+   * deadline. Held sends are not on the wire and are left alone. Returns the
+   * ids that changed.
+   */
+  unconfirmInFlight(now: number): string[] {
+    const changed: string[] = [];
+    for (const event of this.events) {
+      if (event.kind !== "send" || event.value.state !== "sending" || event.value.held || event.value.notificationId !== undefined || event.value.sentAt === undefined) continue;
+      event.value.state = "unconfirmed";
+      event.value.unconfirmedAt = now;
+      changed.push(event.value.id);
+    }
     return changed;
   }
   /** Milliseconds until the next send could become unconfirmed, if any is waiting. */
@@ -495,6 +654,8 @@ export class ConversationHistory {
       if (event.kind === "reply") return event.value.message;
       // A failed send the operator dismissed is out of the thread, so out of the preview too.
       if (event.value.dismissed && this.isFailedSend(event.value)) continue;
+      // cas-b00c: a message whose delivery was never confirmed says so in the list too.
+      if (event.value.state === "unconfirmed" && !this.repliedSince(event.value)) return `Not confirmed: ${event.value.text}`;
       if (event.value.state !== "error") return `You: ${event.value.text}`;
       if (!event.value.replaced) return `Not sent: ${event.value.text}`;
     }
@@ -523,6 +684,7 @@ export class ConversationHistory {
    * answer and read as already acknowledged.
    */
   receive(reply: OperatorReply, at: number = Date.now(), session?: string): void {
+    if (!this.arrivals.has(`r:${reply.notification_id}`)) { this.arrivals.set(`r:${reply.notification_id}`, at); this.liveArrivals.add(`r:${reply.notification_id}`); }
     const key = Math.max(at, this.latestAt());
     this.reply(reply, key, session, key === at ? undefined : at, at, "time", this.machineAhead);
   }
@@ -536,6 +698,59 @@ export class ConversationHistory {
       return;
     }
     this.observeStamp(stamped, now);
-    this.reply(live, stamped, reply.session, undefined, now, "durable");
+    this.reply(live, stamped, reply.session, undefined, this.arrivalFor(`r:${reply.notification_id}`, stamped, now), "durable");
   }
+}
+
+/**
+ * Whether the thread may say the supervisor is "working" (cas-5a8f). Real
+ * pane output is independent evidence and always counts. A send awaiting its
+ * reply counts only while the machine is live and paired: during an outage or
+ * a revoked pairing the page cannot know, and a send held in this browser was
+ * never seen at all, so "working" beside "Waiting for the connection" or
+ * "Needs pairing" contradicted itself.
+ */
+export function supervisorWorking(
+  history: Pick<ConversationHistory, "awaitingReply">,
+  machine: { phase: string; authFailure?: unknown } | undefined,
+  recentPaneOutput: boolean,
+): boolean {
+  if (recentPaneOutput) return true;
+  const reachable = machine?.phase === "live" && !machine.authFailure;
+  return reachable && history.awaitingReply();
+}
+
+/** The thread's paging state: how far back it has loaded, and whether more is offered. */
+export interface HistoryCursor { hasEarlier: boolean; nextBefore?: number; loading: boolean; loaded: boolean }
+
+/**
+ * Fold one history page into the thread's cursor (cas-2093). Every attach
+ * asks again for the newest page, and a reconnect lands that page on a thread
+ * that may already reach further back, even to its start. The newest page's
+ * "has earlier" is about itself, not the thread: it never brings back "Load
+ * earlier" once the start was reached, nor moves the cursor forward again.
+ * An older page (the one Load earlier asked for) moves the cursor back.
+ */
+export function applyHistoryCursor(cursor: HistoryCursor, page: { has_earlier: boolean; next_before?: number }): void {
+  const first = !cursor.loaded;
+  cursor.loaded = true;
+  if (first) {
+    cursor.loading = false;
+    cursor.hasEarlier = page.has_earlier;
+    cursor.nextBefore = page.next_before;
+    return;
+  }
+  if (!page.has_earlier) {
+    // This page reaches the start: the thread does too.
+    cursor.loading = false;
+    cursor.hasEarlier = false;
+    cursor.nextBefore = undefined;
+    return;
+  }
+  // The start was reached already: a newer page changes nothing here.
+  if (!cursor.hasEarlier) return;
+  const older = page.next_before !== undefined && (cursor.nextBefore === undefined || page.next_before < cursor.nextBefore);
+  if (!older) return;
+  cursor.loading = false;
+  cursor.nextBefore = page.next_before;
 }

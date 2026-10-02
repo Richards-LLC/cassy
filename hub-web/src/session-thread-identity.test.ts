@@ -5,8 +5,8 @@
 // sessions are grouped with the most recent one marked.
 import { describe, expect, it, vi } from "vitest";
 import { ConversationHistory, sessionCodename } from "./conversation-history";
-import { ConversationView, earlierSessionLabel, emptyActivityText } from "./conversation-view";
-import { ConversationList, conversationRowMarkup, groupConversationRows, type ConversationRow } from "./conversation-list";
+import { ConversationView, earlierSessionLabel, emptyActivityText, emptyCardActivityText, emptyThreadCopy } from "./conversation-view";
+import { activityTime, ConversationList, conversationRowMarkup, groupConversationRows, plainActivity, type ConversationRow } from "./conversation-list";
 import type { ConversationHistoryMessage, ConversationHistoryReply } from "./types";
 
 const at = (day: number, hh: number, mm: number) => new Date(2026, 8, day, hh, mm).toISOString();
@@ -78,27 +78,89 @@ describe("session-bound thread history (cas-55a4)", () => {
     expect(section.querySelector<HTMLDetailsElement>("details.earlier-session")!.open).toBe(true);
   });
 
-  it("says a session has not written yet, shows its last activity, and offers its Terminal", () => {
+  it("says a session has not written yet, shows its last activity, and offers its Terminal view", () => {
     const history = new ConversationHistory();
     history.currentSession = "gabber-studio-calm-puma-34";
     history.hydrateReply(said(2, "Old answer", "gabber-studio-noble-cheetah-84", at(29, 21, 41)));
     const openTerminal = vi.fn();
     const now = Date.now();
-    const view = new ConversationView(document, history, { supervisor: "calm-puma-34", project: "gabber-studio", header: false, activity: () => ({ at: now - 3 * 60_000, label: "supervisor → wild-shark-68" }), openTerminal });
+    let activity: { at: number; label?: string; terminal?: boolean } = { at: now - 3 * 60_000, label: "supervisor → wild-shark-68" };
+    const view = new ConversationView(document, history, { supervisor: "calm-puma-34", project: "gabber-studio", header: false, activity: () => activity, openTerminal });
     document.body.replaceChildren(view.element);
     view.update();
     const empty = view.element.querySelector<HTMLElement>(".empty")!;
     expect(empty.hidden).toBe(false);
-    expect(empty.querySelector(".said")?.textContent).toBe("No Commander messages from this session yet. The supervisor (calm-puma-34) will write here when it needs a decision.");
-    expect(empty.querySelector(".empty-activity")?.textContent).toBe("Last activity 3m ago · supervisor → wild-shark-68");
-    empty.querySelector<HTMLButtonElement>(".empty-terminal")!.click();
+    expect(empty.querySelector(".said")?.textContent).toBe("No messages from the gabber-studio supervisor in this session yet — nothing is waiting on you.");
+    // cas-010f: no product codename and no queue jargon; one line holds the
+    // activity and Terminal view, named as the header names it.
+    expect(empty.textContent).not.toContain("Commander");
+    expect(empty.textContent).not.toContain("→");
+    expect(empty.querySelector(".empty-activity")?.textContent).toBe("Last active 3m ago");
+    expect(empty.querySelector(".empty-foot")?.textContent).toBe("Last active 3m ago·Terminal view");
+    const terminal = empty.querySelector<HTMLButtonElement>(".empty-foot > button.empty-terminal")!;
+    expect(terminal.textContent).toBe("Terminal view");
+    terminal.click();
     expect(openTerminal).toHaveBeenCalledOnce();
+    // Terminal output is the time Terminal view's pane header shows.
+    activity = { at: now - 60_000, label: "terminal output", terminal: true }; view.update();
+    expect(empty.querySelector(".empty-activity")?.textContent).toBe("Terminal output 1m ago");
     // The other session's thread is not shown as this one's: it is the
     // collapsed section under the card.
     expect(view.element.querySelector('[role="log"]')!.textContent).not.toContain("Old answer");
     const section = view.element.querySelector<HTMLElement>("section.earlier-sessions")!;
     expect(section.hidden).toBe(false);
     expect(section.previousElementSibling).toBe(empty);
+  });
+
+  it("reads the header's connection state, and claims nothing before the first page resolves (cas-010f)", () => {
+    const history = new ConversationHistory();
+    let connection = "Live";
+    let loading = true;
+    const openTerminal = vi.fn();
+    const view = new ConversationView(document, history, { supervisor: "calm-puma-34", machine: "Atlas · Linux", project: "gabber-studio", header: false, connection: () => connection, loadingHistory: () => loading, openTerminal });
+    document.body.replaceChildren(view.element);
+    view.update();
+    const empty = view.element.querySelector<HTMLElement>(".empty")!;
+    // Live, page on its way: the loading line, never "No messages".
+    expect(empty.dataset.state).toBe("loading");
+    expect(empty.textContent).not.toContain("No messages");
+    // Not live and the page cannot come: say why, offer no Terminal view.
+    connection = "Needs pairing"; view.update();
+    expect(empty.dataset.state).toBe("waiting");
+    expect(empty.querySelector(".said")?.textContent).toBe("Atlas · Linux needs pairing again before messages from the gabber-studio supervisor can load.");
+    expect(empty.textContent).not.toContain("No messages");
+    expect(empty.querySelector(".empty-terminal")).toBeNull();
+    connection = "Live"; loading = false; view.update();
+    expect(empty.dataset.state).toBe("empty");
+    expect(empty.querySelector(".said")?.textContent).toBe("No messages from the gabber-studio supervisor in this session yet — nothing is waiting on you.");
+    expect(empty.querySelector(".empty-terminal")?.textContent).toBe("Terminal view");
+    connection = "Reconnecting"; view.update();
+    expect(empty.querySelector(".said")?.textContent).toBe("No messages from the gabber-studio supervisor in this session yet. Reconnecting to Atlas · Linux — anything new will show here once it's back.");
+    expect(empty.querySelector(".empty-terminal")).toBeNull();
+    connection = "Degraded"; view.update();
+    expect(empty.querySelector(".said")?.textContent).toBe("No messages from the gabber-studio supervisor in this session yet. The connection is unsteady, so a new one may arrive late.");
+    expect(empty.querySelector(".empty-terminal")).not.toBeNull();
+  });
+
+  it("words every connection state for the empty thread", () => {
+    const base = { project: "cas-src", machine: "Atlas · Linux" };
+    expect(emptyThreadCopy({ ...base, connection: "Live", resolved: true })).toEqual({ state: "empty", said: "No messages from the cas-src supervisor in this session yet — nothing is waiting on you.", terminal: true });
+    expect(emptyThreadCopy({ ...base, connection: undefined, resolved: true }).terminal).toBe(true);
+    expect(emptyThreadCopy({ ...base, connection: "Needs pairing", resolved: true })).toEqual({ state: "empty", said: "No messages from the cas-src supervisor in this session yet. Atlas · Linux needs pairing again before new ones can arrive.", terminal: false });
+    expect(emptyThreadCopy({ ...base, connection: "Unreachable · message pending", resolved: true }).said).toBe("No messages from the cas-src supervisor in this session yet. Atlas · Linux can't be reached — anything new will show here once it's back.");
+    expect(emptyThreadCopy({ ...base, connection: "Can't reach · retrying", resolved: true }).said).toContain("Reconnecting to Atlas · Linux");
+    for (const connection of ["Live", "Degraded", "Connecting", "Idle", undefined]) expect(emptyThreadCopy({ ...base, connection, resolved: false }).state).toBe("loading");
+    expect(emptyThreadCopy({ ...base, connection: "Reconnecting", resolved: false })).toEqual({ state: "waiting", said: "Reconnecting to Atlas · Linux — messages from the cas-src supervisor will load once it's back.", terminal: false });
+    expect(emptyThreadCopy({ ...base, connection: "Unreachable", resolved: false }).said).toBe("Atlas · Linux can't be reached — messages from the cas-src supervisor will load once it's back.");
+    expect(emptyThreadCopy({ connection: "Needs pairing", resolved: false }).said).toBe("This machine needs pairing again before messages from this supervisor can load.");
+    expect(emptyThreadCopy({ connection: "Reconnecting", resolved: true }).said).toContain("Reconnecting to this machine");
+  });
+
+  it("words the empty thread's activity plainly", () => {
+    const now = new Date(2026, 8, 30, 12, 0).getTime();
+    expect(emptyCardActivityText({ at: now - 2 * 60_000 }, now)).toBe("Last active 2m ago");
+    expect(emptyCardActivityText({ at: now - 30_000, terminal: true }, now)).toBe("Terminal output just now");
+    expect(emptyCardActivityText({}, now)).toBe("");
   });
 
   it("words last activity plainly", () => {
@@ -121,9 +183,33 @@ describe("grouped project sessions (cas-55a4)", () => {
     ]);
     expect(rows.map((item) => item.session)).toEqual(["calm-puma-34", "wild-shark-68", "noble-cheetah-84", "solo"]);
     expect(rows.map((item) => item.group?.active ?? null)).toEqual([true, false, false, null]);
-    expect(rows[0]!.group).toMatchObject({ first: true, size: 3, label: "gabber-studio · 3 sessions on Atlas" });
+    expect(rows[0]!.group).toMatchObject({ first: true, size: 3, label: "gabber-studio · 3 conversations on Atlas" });
     expect(conversationRowMarkup(rows[0]!)).toContain('<span class="conversation-session-mark">Most recent</span>');
     expect(conversationRowMarkup(rows[1]!)).not.toContain("Most recent");
+  });
+
+  it("tells grouped rows apart before any is opened: what each session last did, in plain words (cas-5d2c)", () => {
+    const rows = groupConversationRows([
+      row("calm-puma-34", 300, { activityLine: "Messaged bright-robin-85" }),
+      row("wild-shark-68", 200, { activityLine: "You wrote to it", preview: "Stem export is at 60%." }),
+      row("noble-cheetah-84", 100),
+    ]);
+    const preview = (index: number) => new DOMParser().parseFromString(conversationRowMarkup(rows[index]!), "text/html").querySelector(".conversation-preview")?.textContent;
+    // The catalog's activity until the thread has a turn; the turn once it has; the state when neither.
+    expect([preview(0), preview(1), preview(2)]).toEqual(["Messaged bright-robin-85", "Stem export is at 60%.", "Live"]);
+    // An ungrouped row keeps its connection words.
+    expect(new DOMParser().parseFromString(conversationRowMarkup({ ...row("solo", 1), activityLine: "Wrote to you" }), "text/html").querySelector(".conversation-preview")?.textContent).toBe("Live");
+  });
+
+  it("words the catalog's activity label plainly", () => {
+    expect(plainActivity("supervisor → bright-robin-85")).toBe("Messaged bright-robin-85");
+    expect(plainActivity("supervisor → Commander")).toBe("Wrote to you");
+    expect(plainActivity("Commander → supervisor")).toBe("You wrote to it");
+    expect(plainActivity("daring-robin-43 → supervisor")).toBe("Heard from daring-robin-43");
+    expect(plainActivity("lifecycle-wake → supervisor")).toBe("Woken up");
+    expect(plainActivity("supervisor → supervisor")).toBe("Typed at its terminal");
+    expect(plainActivity(undefined)).toBeUndefined();
+    expect(plainActivity("something else")).toBe("something else");
   });
 
   it("keeps sessions of one project on different machines apart", () => {
@@ -138,7 +224,7 @@ describe("grouped project sessions (cas-55a4)", () => {
     let resolve!: () => void;
     const end = vi.fn((_row: ConversationRow) => new Promise<void>((ok) => { resolve = ok; }));
     list.render(container, rows, vi.fn(), end);
-    expect(container.querySelector(".conversation-group-head")?.textContent).toBe("gabber-studio · 2 sessions on Atlas");
+    expect(container.querySelector(".conversation-group-head")?.textContent).toBe("gabber-studio · 2 conversations on Atlas");
     expect([...container.children].map((node) => node.className.split(" ")[0])).toEqual(["conversation-group-head", "conversation-row", "conversation-end", "conversation-row", "conversation-end"]);
     const control = container.querySelectorAll<HTMLElement>(".conversation-end")[1]!;
     const ask = control.querySelector<HTMLButtonElement>(".conversation-end-ask")!;
@@ -154,6 +240,100 @@ describe("grouped project sessions (cas-55a4)", () => {
     expect(end.mock.calls[0]![0].session).toBe("noble-cheetah-84");
     expect(control.querySelector('[role="status"]')?.textContent).toBe("Ending noble-cheetah-84…");
     resolve();
+  });
+
+  it("opens the confirmation at once in a list rebuilt since the control was made, focused on Cancel (cas-d6bf)", () => {
+    // The shell rebuilds #conversation-list when a conversation opens; the
+    // End control is kept across that render. Its repaint once went to the
+    // detached list and emptied the live one until the next catalog poll.
+    const list = new ConversationList();
+    const rows = groupConversationRows([row("calm-puma-34", 300, { canEnd: true }), row("noble-cheetah-84", 100, { canEnd: true })]);
+    const before = document.createElement("nav"); before.id = "conversation-list"; document.body.replaceChildren(before);
+    list.render(before, rows, vi.fn(), vi.fn(async () => {}));
+    const live = document.createElement("nav"); live.id = "conversation-list"; document.body.replaceChildren(live);
+    list.render(live, rows, vi.fn(), vi.fn(async () => {}));
+    const control = live.querySelectorAll<HTMLElement>(".conversation-end")[1]!;
+    expect(control.dataset.state).toBe("idle");
+    control.querySelector<HTMLButtonElement>(".conversation-end-ask")!.click();
+    expect(live.querySelectorAll(".conversation-row")).toHaveLength(2);
+    expect(before.children).toHaveLength(0);
+    expect(control.parentElement).toBe(live);
+    expect(control.dataset.state).toBe("confirm");
+    expect(control.querySelector(".conversation-end-question")?.textContent).toBe("End noble-cheetah-84 on Atlas? Its supervisor and workers stop.");
+    expect(document.activeElement).toBe(control.querySelector(".conversation-end-cancel"));
+    // Cancel hands focus back to End session.
+    control.querySelector<HTMLButtonElement>(".conversation-end-cancel")!.click();
+    expect(live.querySelectorAll(".conversation-row")).toHaveLength(2);
+    expect(document.activeElement).toBe(control.querySelector(".conversation-end-ask"));
+  });
+
+  it("gives End session its own column only on rows that can end (cas-339a)", () => {
+    const container = document.createElement("nav"); document.body.replaceChildren(container);
+    const rows = groupConversationRows([row("calm-puma-34", 300, { canEnd: true }), row("noble-cheetah-84", 100)]);
+    new ConversationList().render(container, rows, vi.fn(), vi.fn(async () => {}));
+    expect([...container.querySelectorAll(".conversation-row")].map((node) => node.classList.contains("endable"))).toEqual([true, false]);
+    const plain = document.createElement("nav"); document.body.replaceChildren(plain);
+    new ConversationList().render(plain, rows, vi.fn());
+    expect(plain.querySelector(".conversation-row.endable")).toBeNull();
+  });
+
+  it("lands focus on the next row, the one before, then the list once a session ends from the keyboard (cas-e634)", async () => {
+    const container = document.createElement("nav"); container.id = "conversation-list"; document.body.replaceChildren(container);
+    const list = new ConversationList();
+    let live = [row("calm-puma-34", 300, { canEnd: true }), row("wild-shark-68", 200, { canEnd: true }), row("noble-cheetah-84", 100, { canEnd: true })];
+    const open = vi.fn();
+    // As main.ts does: the hub ends it, the catalog drops it, the list redraws.
+    const end = vi.fn(async (ended: ConversationRow) => {
+      await new Promise((ok) => setTimeout(ok, 0));
+      live = live.filter((item) => item.key !== ended.key);
+      list.render(container, groupConversationRows(live), open, end);
+    });
+    const draw = () => list.render(container, groupConversationRows(live), open, end);
+    const endFromKeyboard = async (session: string) => {
+      const control = [...container.querySelectorAll<HTMLElement>(".conversation-end")].find((node) => node.previousElementSibling?.textContent?.includes(session))!;
+      control.querySelector<HTMLButtonElement>(".conversation-end-ask")!.click();
+      const confirm = control.querySelector<HTMLButtonElement>(".conversation-end-confirm")!;
+      confirm.focus();
+      confirm.click();
+      // While it ends, focus waits on the status line, not the page.
+      expect(document.activeElement?.textContent).toBe(`Ending ${session}…`);
+      await new Promise((ok) => setTimeout(ok, 5));
+    };
+    draw();
+    await endFromKeyboard("wild-shark-68");
+    expect((document.activeElement as HTMLElement).dataset.threadKey).toBe("atlas:noble-cheetah-84");
+    await endFromKeyboard("noble-cheetah-84");
+    // The last row ended: the one before it. One session left is no longer a group.
+    expect((document.activeElement as HTMLElement).dataset.threadKey).toBe("atlas:calm-puma-34");
+    expect(container.querySelector(".conversation-group-head")).toBeNull();
+    expect(document.activeElement).not.toBe(document.body);
+  });
+
+  it("times a row from its own activity only: now under a minute, then words for assistive tech (cas-6acf)", () => {
+    const now = new Date(2026, 9, 1, 12, 0).getTime();
+    expect(activityTime(now - 20_000, now)).toEqual({ short: "now", spoken: "just now" });
+    expect(activityTime(now - 59_999, now)).toEqual({ short: "now", spoken: "just now" });
+    expect(activityTime(now - 60_000, now)).toEqual({ short: "1m", spoken: "1 minute ago" });
+    expect(activityTime(now - 20 * 60_000, now)).toEqual({ short: "20m", spoken: "20 minutes ago" });
+    expect(activityTime(now - 3 * 3_600_000, now)).toEqual({ short: "3h", spoken: "3 hours ago" });
+    expect(activityTime(now - 2 * 86_400_000, now)).toEqual({ short: "2d", spoken: "2 days ago" });
+    // A machine clock ahead never reads as the future.
+    expect(activityTime(now + 30_000, now).short).toBe("now");
+    const markup = conversationRowMarkup(row("calm-puma-34", 300, { when: "20m", whenSpoken: "20 minutes ago", freshness: "Last activity 20m ago" }));
+    expect(markup).toContain('<span class="conversation-when" title="Last activity 20m ago" aria-hidden="true">20m</span>');
+    expect(markup).toContain('<span class="sr-only">, 20 minutes ago</span>');
+    // No activity, no time: never a catalog-check "now".
+    expect(conversationRowMarkup(row("idle-otter-1"))).not.toContain("conversation-when");
+  });
+
+  it("marks the newest-started session Most recent when none has activity (cas-6acf)", () => {
+    const rows = groupConversationRows([row("old-owl-1", undefined, { startedAt: 100 }), row("new-newt-2", undefined, { startedAt: 300 }), row("mid-mole-3", undefined, { startedAt: 200 })]);
+    expect(rows.map((item) => [item.session, item.group?.active])).toEqual([["new-newt-2", true], ["mid-mole-3", false], ["old-owl-1", false]]);
+    // Any activity outranks start times.
+    const active = groupConversationRows([row("old-owl-1", 50, { startedAt: 100 }), row("new-newt-2", undefined, { startedAt: 300 })]);
+    expect(active[0]).toMatchObject({ session: "old-owl-1", group: { active: true } });
+    // Neither activity nor start: nothing is claimed.
+    expect(groupConversationRows([row("a-b-1"), row("c-d-2")]).some((item) => item.group?.active)).toBe(false);
   });
 
   it("offers no End session without the callback or the scope", () => {

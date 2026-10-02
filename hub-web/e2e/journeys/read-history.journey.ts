@@ -26,6 +26,28 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
     await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
     await expect(log.getByText("Yes. The gate is green on the release branch.")).toBeVisible();
     await expect(log.getByText("Is the release ready to cut?")).toBeVisible();
+    // cas-acb4b: the latest exchange is on screen at once, without Jump to latest.
+    const newest = log.getByText("Closing it after the notes go out.");
+    const jump = page.getByRole("button", { name: "Jump to latest" });
+    /** The thread sits at its tail: nothing below the newest turn is out of view. */
+    const atTail = () => page.evaluate(() => {
+      const thread = document.querySelector<HTMLElement>(".conversation-reading.thread")!;
+      return thread.scrollHeight - thread.clientHeight - thread.scrollTop <= 4;
+    });
+    await expect.poll(atTail, { message: "the thread opens at its latest turn" }).toBe(true);
+    await expect(newest).toBeInViewport();
+    await expect(jump).toBeHidden();
+    // File cards that finish their layout late (an image, a font) grow the
+    // thread after it was pinned to the tail. The thread keeps following it:
+    // the newest turn stays on screen and the reader is not marked as having
+    // scrolled away.
+    const late = await page.addStyleTag({ content: '.msgs a[data-artifact-id] { min-height: 180px; } .msgs [data-key] { min-height: 140px; }' });
+    await page.evaluate(() => new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(ok))));
+    expect(await atTail(), "late layout growth keeps the thread at its latest turn").toBe(true);
+    await expect(newest).toBeInViewport();
+    await expect(jump).toBeHidden();
+    // The rest of the journey reads the thread at its normal size.
+    await late.evaluate((node) => (node as Element).remove());
   });
 
   /** Top of the first thread item on screen: the line the reader is on. */
@@ -36,7 +58,7 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
     return { key: node.dataset.key!, y: Math.round(node.getBoundingClientRect().top) };
   });
   /** Load earlier keeps the reading position (journey F7): the turn the reader was on stays put. */
-  const loadEarlierKeepsPlace = async (arrived: string) => {
+  const loadEarlierKeepsPlace = async (arrived: string, last = false) => {
     // The reader scrolls up to the button first, as a person does.
     await page.getByRole("button", { name: "Load earlier" }).scrollIntoViewIfNeeded();
     await page.evaluate(() => new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(ok))));
@@ -47,6 +69,14 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
       const node = [...document.querySelectorAll<HTMLElement>(".msgs [data-key]")].find((item) => item.dataset.key === key);
       return node ? Math.round(node.getBoundingClientRect().top) : NaN;
     }, before.key);
+    if (last) {
+      // cas-2093 (F12): on the last page the thread scrolls up just enough
+      // to state the end of history at the top; the page the reader asked
+      // for reads down from it to where they were.
+      await expect(page.getByText("No earlier history")).toBeInViewport();
+      expect(await y(), "the reader's turn is below the page they loaded, not above it").toBeGreaterThan(before.y);
+      return;
+    }
     await expect.poll(y, { message: `"${before.key}" stays where the reader left it` }).toBeGreaterThanOrEqual(before.y - 3);
     expect(await y()).toBeLessThanOrEqual(before.y + 3);
     // The older turns are above, off screen until the reader scrolls up.
@@ -65,7 +95,7 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
 
   await journey.stage("Reach the start of the conversation", async () => {
     // A second page, from further back: the place holds again.
-    await loadEarlierKeepsPlace("Drafted: three lanes, one gate.");
+    await loadEarlierKeepsPlace("Drafted: three lanes, one gate.", true);
     expect(hub.historyRequests.at(-1)).toMatchObject({ before: 10 });
     await expect(page.getByText("No earlier history")).toBeVisible();
     await expect(page.getByRole("button", { name: "Load earlier" })).toBeHidden();
@@ -73,6 +103,8 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
     // focus lands on the line that took its place, not the page body.
     await expect(page.getByText("No earlier history")).toBeFocused();
     await expect(log.getByText("Yesterday")).toBeVisible();
+    // cas-2093 (F12): the end of history is stated on screen, not left above the fold.
+    await expect(page.getByText("No earlier history")).toBeInViewport();
   });
 
   await journey.stage("Open a report the supervisor sent", async () => {
@@ -125,13 +157,34 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
     // outage. Once the connection is back it leaves the card; a note about
     // the file itself stays.
     const header = page.locator("#conversation-connection");
+    // cas-2093 (F3): the reader is on the file cards when the connection drops.
+    const anchorY = (key: string) => page.evaluate((key) => {
+      const node = [...document.querySelectorAll<HTMLElement>(".msgs [data-key]")].find((item) => item.dataset.key === key);
+      return node ? Math.round(node.getBoundingClientRect().top) : NaN;
+    }, key);
+    /** The reader's turn stays where it was (within 3 px) across what follows. */
+    const holds = async (anchor: { key: string; y: number }, what: string) => {
+      await expect.poll(() => anchorY(anchor.key), { message: `"${anchor.key}" stays where the reader left it ${what}` }).toBeGreaterThanOrEqual(anchor.y - 3);
+      expect(await anchorY(anchor.key)).toBeLessThanOrEqual(anchor.y + 3);
+    };
+    const beforeDrop = await reading();
     hub.hold(PELICAN);
     hub.drop(PELICAN);
     await expect(header).toContainText("Reconnecting");
+    await holds(beforeDrop, "when the connection drops");
     await log.locator('a[data-artifact-id="art-offline"]').click();
     await expect(note("art-offline")).toHaveText("Couldn't reach Atlas · Linux. Check that it's on and connected, then open the file again.");
+    // Opening the card brought it into view: that is where the reader is now.
+    const beforeReconnect = await reading();
+    const firstPages = hub.historyRequests.filter((request) => request.before === undefined).length;
     hub.release(PELICAN);
     await expect(header).toHaveText(" · Live", { timeout: 30_000 });
+    // The reattach asks for the newest page again; it neither moves the reader
+    // nor brings "Load earlier" back once the start was reached (cas-2093).
+    await expect.poll(() => hub.historyRequests.filter((request) => request.before === undefined).length).toBeGreaterThan(firstPages);
+    await holds(beforeReconnect, "across the reconnect");
+    await expect(page.getByRole("button", { name: "Load earlier" })).toBeHidden();
+    await expect(page.getByText("No earlier history")).toBeAttached();
     await expect(note("art-offline")).toHaveCount(0);
     await expect(note("art-cloud-down")).toHaveCount(0);
     await expect(note("art-local-draft")).toContainText("only saved on Atlas · Linux");

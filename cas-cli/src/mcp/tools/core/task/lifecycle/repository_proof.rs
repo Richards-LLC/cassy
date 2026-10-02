@@ -322,6 +322,33 @@ fn commit_is_reachable_from(worktree_root: &Path, commit: &str, head: &str) -> b
         .is_ok()
 }
 
+/// Ref namespaces that hold a parked delivery after its implementer moves on:
+/// the worker's published factory branch, and the local `parked/<task>` branch
+/// a reused lane keeps when it starts the next task (see `lifecycle.rs`).
+const PARKED_ANCHOR_REF_PREFIXES: [&str; 2] = ["refs/remotes/origin/factory", "refs/heads/parked"];
+
+/// The parked-anchor refs that still contain `commit`, if any.
+///
+/// cas-94e0: a worker that parks a delivery and then moves its worktree to QA
+/// another delivery or start its next lane leaves the delivered commit out of
+/// the live HEAD's history, yet the delivery is unchanged on its origin factory
+/// branch or `parked/<task>`. Those refs answer for the parked delivery, as
+/// they do at close (cas-ba4a) and for a merged receipt (cas-5200).
+fn parked_refs_containing(root: &Path, commit: &str) -> Vec<String> {
+    let mut args = vec!["for-each-ref", "--format=%(refname)", "--contains", commit];
+    args.extend(PARKED_ANCHOR_REF_PREFIXES);
+    git_output(root, &args)
+        .map(|output| {
+            String::from_utf8_lossy(&output)
+                .lines()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// What a bound proof looks like against the repository right now.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RepositoryProofStatus {
@@ -335,6 +362,9 @@ pub(crate) enum RepositoryProofStatus {
         current_head: String,
         bound_digest: String,
         current_digest: String,
+        /// Parked-anchor refs that answer for delivered commits the live HEAD
+        /// no longer reaches (cas-94e0). Empty when HEAD reaches them all.
+        parked_refs: Vec<String>,
     },
 }
 
@@ -348,11 +378,22 @@ impl RepositoryProofStatus {
                 current_head,
                 bound_digest,
                 current_digest,
-            } => Some(format!(
-                "Repository moved after dispatch but every delivered commit is still reachable: \
-                 bound head {bound_head} digest {bound_digest}; current head {current_head} \
-                 digest {current_digest}."
-            )),
+                parked_refs,
+            } => {
+                let mut note = format!(
+                    "Repository moved after dispatch but every delivered commit is still reachable: \
+                     bound head {bound_head} digest {bound_digest}; current head {current_head} \
+                     digest {current_digest}."
+                );
+                if !parked_refs.is_empty() {
+                    note.push_str(&format!(
+                        " The current head no longer reaches the delivery; it is held by the \
+                         parked anchor {}.",
+                        parked_refs.join(", ")
+                    ));
+                }
+                Some(note)
+            }
         }
     }
 }
@@ -422,14 +463,30 @@ pub(crate) fn evaluate_repository_proof(
         });
     }
 
-    let missing: Vec<&String> = proof
-        .anchor_commits
-        .iter()
-        .filter(|anchor| {
-            !commit_exists(&validation_root, anchor)
-                || !commit_is_reachable_from(&validation_root, anchor, &current.head_commit)
-        })
-        .collect();
+    // An anchor the live HEAD no longer reaches still counts while a parked
+    // anchor ref holds it (cas-94e0): the implementer moved on after parking.
+    // A rewritten or dropped delivery is held by neither and is refused.
+    let mut parked_refs: Vec<String> = Vec::new();
+    let mut missing: Vec<&String> = Vec::new();
+    for anchor in &proof.anchor_commits {
+        if !commit_exists(&validation_root, anchor) {
+            missing.push(anchor);
+            continue;
+        }
+        if commit_is_reachable_from(&validation_root, anchor, &current.head_commit) {
+            continue;
+        }
+        let holders = parked_refs_containing(&validation_root, anchor);
+        if holders.is_empty() {
+            missing.push(anchor);
+            continue;
+        }
+        for holder in holders {
+            if !parked_refs.contains(&holder) {
+                parked_refs.push(holder);
+            }
+        }
+    }
     if !missing.is_empty() {
         let names = missing
             .iter()
@@ -452,6 +509,7 @@ pub(crate) fn evaluate_repository_proof(
         current_head: current.head_commit,
         bound_digest: proof.state_digest.clone(),
         current_digest: current.state_digest,
+        parked_refs,
     })
 }
 
@@ -662,6 +720,7 @@ mod tests {
             current_head,
             bound_digest,
             current_digest,
+            parked_refs,
         } = &status
         else {
             panic!("expected a reported move, got {status:?}");
@@ -669,6 +728,7 @@ mod tests {
         assert_eq!(bound_head, &proof.head_commit);
         assert_ne!(bound_head, current_head, "the tip really did move");
         assert_ne!(bound_digest, current_digest);
+        assert!(parked_refs.is_empty(), "HEAD still reaches the delivery");
         let note = status.drift_note().expect("a moved tree must be reported");
         assert!(note.contains(bound_digest), "{note}");
         assert!(note.contains(current_digest), "{note}");
@@ -714,6 +774,72 @@ mod tests {
         };
         assert!(message.contains(&proof.head_commit), "bound tip: {message}");
         assert!(message.contains(&head(path)), "current tip: {message}");
+        assert!(message.contains(&delivered), "lost delivery: {message}");
+    }
+
+    /// cas-94e0: the worker parks the delivery (kept as `parked/<task>` and
+    /// published on its origin factory branch), then moves its worktree to QA
+    /// another delivery. HEAD no longer reaches the delivered commit, but the
+    /// parked anchor still holds it, so the pending verdict must survive.
+    #[test]
+    fn parked_anchor_keeps_the_proof_after_the_worktree_moves_on() {
+        for holder in ["refs/heads/parked/cas-park", "refs/remotes/origin/factory/worker"] {
+            let repo = delivered_repo();
+            let path = repo.path();
+            let delivered = head(path);
+            let anchors = delivered_anchor_commits(path, Some("main"), None, None);
+            assert_eq!(anchors, vec![delivered.clone()]);
+            let proof =
+                capture_repository_proof_with_anchors(path, path, anchors).expect("capture");
+            git(path, &["update-ref", holder, &delivered]);
+
+            // The lane moves to the target for its next assignment, and the
+            // worktree then checks out someone else's delivery to QA it.
+            git(path, &["reset", "-q", "--hard", "main"]);
+            git(path, &["checkout", "-q", "-b", "factory/other", "main"]);
+            std::fs::write(path.join("other.txt"), "another delivery\n").unwrap();
+            git(path, &["add", "other.txt"]);
+            git(path, &["commit", "-q", "-m", "another worker's delivery"]);
+            git(path, &["checkout", "-q", "--detach", "factory/other"]);
+            assert!(!commit_is_reachable_from(path, &delivered, &head(path)));
+
+            let status = evaluate_repository_proof(&proof)
+                .unwrap_or_else(|error| panic!("{holder} holds the delivery: {error:?}"));
+            let RepositoryProofStatus::DeliveredContentIntact { parked_refs, .. } = &status else {
+                panic!("expected a reported move, got {status:?}");
+            };
+            assert_eq!(parked_refs, &vec![holder.to_string()]);
+            let note = status.drift_note().expect("the move is reported");
+            assert!(note.contains(holder), "{note}");
+        }
+    }
+
+    /// The parked-anchor tolerance is for an unchanged delivery only: once the
+    /// origin factory branch is force-pushed to different work and no parked
+    /// ref keeps the old tip, the dispatch is refused as before, even with
+    /// unrelated parked refs around.
+    #[test]
+    fn rewritten_parked_delivery_is_still_rejected() {
+        let repo = delivered_repo();
+        let path = repo.path();
+        let delivered = head(path);
+        let anchors = delivered_anchor_commits(path, Some("main"), None, None);
+        let proof = capture_repository_proof_with_anchors(path, path, anchors).expect("capture");
+
+        git(path, &["reset", "-q", "--hard", "main"]);
+        std::fs::write(path.join("replacement.txt"), "different work\n").unwrap();
+        git(path, &["add", "replacement.txt"]);
+        git(path, &["commit", "-q", "-m", "rewritten delivery"]);
+        let rewritten = head(path);
+        git(path, &["update-ref", "refs/remotes/origin/factory/worker", &rewritten]);
+        git(path, &["update-ref", "refs/heads/parked/cas-other", &rewritten]);
+        git(path, &["checkout", "-q", "--detach", "main"]);
+
+        let error = evaluate_repository_proof(&proof).expect_err("a rewritten delivery must fail");
+        let TaskLifecycleGateError::RepositoryProof { message } = error else {
+            panic!("expected a repository-proof refusal");
+        };
+        assert!(message.contains("no longer reachable"), "{message}");
         assert!(message.contains(&delivered), "lost delivery: {message}");
     }
 

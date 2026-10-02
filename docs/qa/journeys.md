@@ -42,7 +42,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 2. Ask for a pairing code — "Pair a machine", then "Create pairing code" shows `cas hub authorize <code>`
 3. Approve on the machine — the dialog follows the machine: waiting, claimed, authorized
 4. Confirm and pair this browser — enter the operator label, then press Pair
-5. See the machine's supervisor ready to talk to — a toast says the machine is connected without covering the composer or any heading, and its row opens a conversation
+5. See the machine's supervisor ready to talk to — a toast says the machine is connected without covering the composer or any heading, and its row opens a conversation that says, in plain words, "No messages from the cas-src supervisor in this session yet — nothing is waiting on you", with one "Terminal view" link named as the header names it
 
 #### Expected experience
 
@@ -99,15 +99,16 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 #### Steps
 
 1. See every machine's supervisors in one list — every row is titled by its project, then its machine, with the supervisor codename beneath
-2. Notice a new reply while away — the row shows an unread count
-3. Find the conversation through the list search — "Search conversations (Ctrl K)" at the top of the list filters rows by project, machine or supervisor; the header names the project once
-4. Find the conversation from the keyboard — Ctrl+K lands in the search, type the project, Enter: the conversation is open and the reply box has focus
+2. Each row's time is its own session's activity — lighthouse reads "3h" and its row is named with "3 hours ago"; no time is a catalog check, and across a catalog poll none turns "now" or runs backwards
+3. Notice a new reply while away — the row shows an unread count
+4. Find the conversation through the list search — "Search conversations (Ctrl K)" at the top of the list filters rows by project, machine or supervisor; the row Enter opens is marked ("Enter ↵") and is the field's active descendant; opening a result clears the search and brings the whole list back; the header names the project once
+5. Find the conversation from the keyboard — Ctrl+K lands in the search, type the project, Enter: the conversation is open and the reply box has focus
    - An empty thread's card also leads with the project, with machine and codename beneath it
    - A 40-character machine name ellipsises in its row and never runs under the time stamp, on desktop and at 390px
-5. Jump to a supervisor by name — the command palette ("Type a command or conversation"; grouped Conversations / This conversation / Machines / Appearance / Advanced, Advanced collapsed; "Dismiss all info" only when something is outstanding) filters by supervisor or project and opens the conversation; each "Jump to" row leads with the project, the codename first in its description (right of the title on a desktop, on the line beneath on a phone); the control command names what the device can do ("Let other devices type here"), the control term as its hint; a filter that matches nothing says "No commands or conversations match"
-6. Jump to a supervisor from the keyboard — Ctrl+K twice opens the palette, type the name, Enter: the palette closes, the conversation is open and the reply box has focus
+6. Jump to a supervisor by name — the command palette ("Type a command or conversation"; grouped Conversations / This conversation / Machines / Appearance / Advanced, Advanced collapsed; "Dismiss all info" only when something is outstanding) filters by supervisor or project and opens the conversation; each "Jump to" row leads with the project, the codename first in its description (right of the title on a desktop, on the line beneath on a phone); the control command names what the device can do ("Let other devices type here"), the control term as its hint; a filter that matches nothing says "No commands or conversations match"; the command Enter runs is marked and is the filter's active descendant ("light" marks "Jump to lighthouse")
+7. Jump to a supervisor from the keyboard — Ctrl+K twice opens the palette, type the name, Enter: the palette closes, the conversation is open and the reply box has focus
    - Open Paired machines from the palette, then a conversation — the palette gives way to Paired machines and stays closed afterwards; it never comes back over the next conversation opened
-7. Open a conversation over a slow relay: one calm line, and the footer stays Connected — "Opening the conversation…", the attempt and relay stage only behind a closed Details
+8. Open a conversation over a slow relay: one calm line, and the footer stays Connected — "Opening the conversation…", the attempt and relay stage only behind a closed Details; one loading look from the attach to the first history page, centred in the reading area, still for its first second and then a quiet pulse, with the header and row on Live and the composer's width steady (cas-813a)
    - A first open that misses the 3-second mark retries calmly, and the footer stays Connected — the first retry of a conversation that has never opened still reads "Opening the conversation…" with the retry behind Details; no "Terminal unavailable", no retry timeline, and the footer never drops to "1 connected"; a second failure shows as a real one
 
 #### Expected experience
@@ -228,13 +229,13 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 #### Steps
 
 1. Open the conversation — the thread is live
-2. A question from an ended session does not wait — the previous session's unanswered question is not in this session's thread: it sits in a collapsed "Earlier session patient-pelican-8" section with no choices; nothing is pinned and the context rail lists only the live blocker
-3. The supervisor asks a question — it is pinned above the composer with its choices, and the thread keeps a one-line reference to it; the machine's earlier blocker, stamped by a clock that runs ahead, sits above the session line at its arrival time and is marked "machine clock ahead"
+2. A question from an ended session does not wait — the previous session's unanswered question is not in this session's thread: it sits in a collapsed "Earlier session patient-pelican-8" section with no choices, said by patient-pelican-8 (its own supervisor); nothing is pinned and the context rail lists only the live blocker
+3. The supervisor asks a question — it is pinned above the composer with its choices, and the thread keeps a one-line reference to it; the machine's earlier blocker, stamped by a clock that runs ahead and carrying no session, is this session's own turn: it sits above the question at its arrival time, labelled by this session's supervisor, with no "session … started" line below it, and is marked "machine clock ahead"
 4. Answer with one tap — the pin clears, the thread records the chosen answer, and nothing is left waiting in the context rail, even when the machine's clock runs ahead; the answer shows the time it was sent, under today
 5. See the supervisor act on the answer — the reply follows, and a new blocker after the answer waits
 6. Fold, open and dismiss a question — the supervisor posting an FYI and a status update while it waits leaves the question pinned with its choices; on a desktop the pinned question collapses to a one-line bar ("Waiting on you: open the PR…") and opens again, and writing in the composer leaves it open; on a phone (390px, dark) focusing the composer folds it to the bar, and with the keyboard up (about 440px of page) at least three lines of the latest conversation stay readable; a tap on the bar opens it; a swipe takes it off, and its copy in the thread says "Dismissed. You can still answer here." and keeps its choices
-7. Reply to a machine a day ahead — no future day header: the machine's turn sits under Today at its arrival time, marked "machine clock ahead", and the reply shows the time it was sent below it
-8. Reopen the page — the thread rebuilt from history keeps every turn where the visit showed it, in the machine's order, under Today, with times reading in order
+7. Reply to a machine a day ahead — no future day header: the machine's turn sits under Today at its arrival time, marked "machine clock ahead", and the reply shows the time it was sent below it, with no session line between them
+8. Reopen the page — minutes later, the thread rebuilt from history keeps every turn where the visit showed it and at the same time (not the reload's), in the machine's order, under Today, with times reading in order
 
 #### Expected experience
 
@@ -307,6 +308,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - One column at a time; every target is big enough to tap.
 - The composer stays visible above the keyboard.
+- The header always names the machine: a long machine name keeps its place (its OS word goes first, never cut mid-word) and the generated codename yields, ellipsised and then stepped aside; the line's title keeps both (cas-766c; suite stage "A long machine name keeps its place ahead of the codename in the header").
 
 #### Edge paths
 
@@ -353,7 +355,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 2. The network drops — "Lost connection to Atlas · Linux. Reconnecting…" appears; the header and the row say Reconnecting, and the footer counts 1 of 2 connected with a warning dot; a send is held in the thread ("Waiting for the connection — sends when it's back") and not sent; the attention rail raises no transport alarm of its own, and its counts agree
 3. It reconnects on its own — the banner and the waiting line clear, everything says Live again, the held message goes out exactly once and is delivered, and no transport alarm is left
 4. Sending works again — a message goes through and is answered
-5. On a phone, the banner stays readable through an outage — no toast sits on the reconnect banner, in light and dark; after it reconnects, every turn keeps its place (the message stays below its session line)
+5. On a phone, the banner stays readable through an outage — no toast sits on the reconnect banner, in light and dark; after it reconnects, every turn keeps its place (the day line still heads the thread, the session's own thread has no session line, and the held message stays above the ones sent after it)
 6. In Terminal view, nothing claims all clear or live during an outage — the Attention rail names the outage instead of "All clear", the machine rail says Reconnecting, the header drops CONTROL and shows Reconnecting in place of a latency, Take/Release control and Interrupt say why they are unavailable, and the machine drawer's session row says Reconnecting, not live; all return when the session is back
 
 #### Expected experience
@@ -373,20 +375,21 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - **Entry:** an open conversation on a phone or laptop that changes network: local network to Tailscale, Tailscale off and on, Wi-Fi to cellular, sleep and wake
 - **Goal:** the conversation reconnects by itself and every message I send is delivered exactly once
 - **Touches:** `hub-web/src/connection*.ts`, `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/main.ts`
-- **Suite:** `hub-web/e2e/journeys/network-switch.journey.ts`
+- **Suite:** `hub-web/e2e/journeys/network-switch.journey.ts`: one main test and several part tests marked `journeyPart`. Each part writes its receipts under `journeys/HUB-J12/parts/<part>/`, and `scripts/journey-bundles.py` folds every part's stages, cells and verdict into the HUB-J12 bundle and its JOURNEYS.md total (cas-1f7e)
 - **Gaps:** the protocol double reproduces what a switch leaves behind (reset sockets, half-open sockets, offline, no event at all); a real phone moving between radios and a laptop truly sleeping are not driven, and a sleeping page is simulated by its visibility events
 
 #### Steps
 
 1. Open the conversation — the thread is live over the machine socket
 2. The route changes under the page — the sockets reset and are replaced within seconds; a message sent then goes out once
-3. Tailscale goes off, then on again — no browser event says so; the dead socket is noticed, everything says Reconnecting, a message written meanwhile waits in the thread; within 15 s of Tailscale returning it is Live again without a reload, and the waiting message goes out once and is delivered
+3. Tailscale goes off, then on again — no browser event says so; after two unanswered heartbeats the header, row, footer and Tasks panel all say Unsteady ("Connection unsteady — checking…"), never "Degraded", and a message written then waits in the thread instead of going into the dead socket; once the dead socket is noticed everything says Reconnecting and the composer uses the banner's words; within 15 s of Tailscale returning it is Live again without a reload, and the waiting messages go out once each, in order, and are delivered. If the heartbeats answer again before that, a message held while unsteady goes out once without a reconnect
 4. Wi-Fi hands over to cellular — going offline says Reconnecting at once; a message written meanwhile waits; coming online reconnects within 5 s and sends it once
 5. The page wakes on a half-open socket — waking checks the socket and replaces it within seconds, well before the heartbeat would notice; a message then goes out once
 6. The session's daemon link drops for a moment — the hub is reachable but cannot reach the session's daemon, so it refuses the send as retryable (upstream_unavailable); the message waits in the thread instead of reading "Not sent", and goes out once when the session is live again; while the link stays down the page retries with a growing pause (about 1, 2, 4, then 8 s), and past the two-minute hold the message reads Not sent with Retry ("The session didn't come back while it waited."), never "re-pair this device" or "will go out by itself"; meanwhile the banner reads "Reconnecting to <project>… <machine> is still connected." and the footer stays Connected ("Lost connection to <machine>" is kept for a real machine drop)
 7. A proof refused after a switch retries on its own — the hub refuses the first proofs after a switch as stale (a 401 that names its reason); they are retried with a fresh proof, and a proof refused twice backs off like a lost network; it is Live again by itself, a message goes out once, and nothing asks to re-pair. Only a definitive refusal (revoked, unknown key) shows re-pair
 8. On a legacy socket, a second message sent before the refusal arrives waits too — a hub without the machine protocol stops reading a session's socket once it refuses a send, so a message written before that refusal reached the page is held with the first; both go out once, in order, when the session is back; and once the session has stayed live for 10 s, the next drop retries after about 1 s again, receipt or not
-9. A revoked pairing says so and offers Re-pair, on a phone too — a definitive refusal shows "Needs pairing", the banner says the machine needs pairing again instead of "Reconnecting…", and carries a Re-pair control (44 px on a phone) that opens pairing
+9. A revoked pairing says so and offers Re-pair, on a phone too — a definitive refusal shows "Needs pairing", the banner says the machine needs pairing again instead of "Reconnecting…", the rail card is headed "Machine needs pairing", and the banner carries a Re-pair control (44 px on a phone) that opens pairing; a message waiting to send reads Not sent ("<machine> needs pairing again. Re-pair <machine>, then retry.") with Retry, and one already sent without a receipt reads Not confirmed, never Sending…
+10. The whole machine drops, then returns — while it retries, the banner alone tells it ("Lost connection to <machine>. Reconnecting…"): no Attention card in transport terms ("Reconnecting to hub", "Stuck dialing", heartbeat counts), and no control toast over the conversation; a card appears only for a failure that will not retry, worded like the banner. Once it is back, control this browser held is taken back by itself (unless another device took it), so "Control and interrupts return when it reconnects" holds; in Terminal view a "connection dropped" toast is reworded once the pairing turns out to be refused, on screen and to a screen reader
 
 #### Expected experience
 
@@ -409,8 +412,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 #### Steps
 
-1. A paired controller enables launch from Commander — "Allow new sessions" names the machine, confirms "Start new sessions", and opens the launch form without a new pairing
-2. The granted scope stays available — after reload "New session" replaces the grant path
+1. A paired controller enables launch from Commander — "+ New session" (named by its goal before the permission too) opens the sheet's grant view, which names the machine, confirms "Start new sessions", and opens the launch form without a new pairing
+2. The granted scope stays available — after reload "New session" opens the launch form instead of the grant view
 3. Open New session and find the project — the most recently used project leads, a running project offers Attach, Browse is offered because the machine has launch folders, filtering narrows the list, and Claude is marked as the machine's default
 4. Choose the account — every Claude account on the machine is listed with the default preselected; a logged-out one can't be picked and shows its `cas claude login <name>` command with Copy; a long address wraps; Grok has no account step; the summary names the chosen account
 5. Start it and land on its supervisor — Start shows progress ("Starting <project> with <supervisor> (<account>) on <machine>…"), sends the account, and lands in the new session's conversation once the machine lists it
@@ -422,7 +425,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 #### Expected experience
 
-- One obvious New session action beside Pair a machine, and in the command palette; a paired controller can allow it on the chosen machine while a read-only device sees invitation instructions.
+- One obvious New session action on the "Conversations" heading's row (Pair a machine sits with the appearance control above), and in the command palette; a paired controller can allow it on the chosen machine while a read-only device sees invitation instructions.
 - Nothing is started twice: a running project attaches.
 - A refusal names what to fix on which machine; it never reads as a lost pairing.
 
@@ -446,12 +449,13 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 #### Steps
 
-1. See a project's live sessions together — the project's rows sit under one heading naming the session count, the most recently active one is marked "Most recent", and each row's time is its own last activity
-2. Open a session that has not written yet — the thread says "No Commander messages from this session yet", shows its last activity, and the older session's thread is only a collapsed "Earlier session noble-cheetah-84, Yesterday" section
+1. See a project's live sessions together — the project's rows sit under one heading naming the conversation count (the footer's noun), the most recently active one is marked "Most recent", each row's time is its own last activity, and each row leads with its codename and what its session last did in plain words ("Messaged bright-robin-85") before any is opened; at 1280×720 every row is in view
+2. Open a session that has not written yet — the thread says "No messages from the gabber-studio supervisor in this session yet — nothing is waiting on you", shows "Last active 2m ago" with no internal jargon, and the older session's thread is only a collapsed "Earlier session noble-cheetah-84, Yesterday" section
 3. Read an earlier session's messages — the section opens to its turns, each with its day and time, and offers no actions
-4. Open the Terminal from the empty session — "Open Terminal" switches to the session's Terminal view and back
-5. Each session shows its own conversation — another session's turns, even from a daemon that still sends project-wide history, appear only in its earlier section
-6. End a stale session — End session asks first, names what stops, and only the confirmation ends it; the row leaves the group
+4. Open Terminal view from the empty session — its "Terminal view" link switches to the session's Terminal view and back; the pane header never says "No activity" for a session that was just active
+5. The empty thread follows the connection — off the network it says it is reconnecting to Atlas · Linux and offers no Terminal view; back on, the plain copy and the link return
+6. Each session shows its own conversation — the lowest row stays in view when it opens; another session's turns, even from a daemon that still sends project-wide history, appear only in its earlier section; a conversation with history never flashes a "no messages" card while its first page loads
+7. End a stale session — End session asks first, names what stops, and only the confirmation ends it; the row leaves the group
 
 #### Expected experience
 
@@ -463,4 +467,65 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - A turn with no session recorded is filed under "Earlier messages with no session recorded".
 - A device without `factory:manage` sees no End session; the hub refuses the call with 403 `scope_denied`.
+- Under Needs pairing, Reconnecting or Unreachable the empty thread says why new messages cannot arrive and offers no Terminal view; before its first page has loaded it claims no messages at all (cas-010f).
 - Ending a session whose daemon PID now belongs to another process only cleans up its metadata.
+
+### HUB-J15 · See a delivery problem as attention, not conversation
+
+- **Entry:** `/commander/` on a desktop, one live session whose supervisor missed a relayed update
+- **Goal:** the session's thread is only its conversation; a delivery problem is one attention item that goes away once resolved, and nothing claims I replied when I didn't
+- **Touches:** `hub-web/src/operator-notices.ts`, `hub-web/src/attention-objects.ts`, `hub-web/src/attention.ts`, `hub-web/src/attention-view.ts`, `hub-web/src/thread-model.ts`, `hub-web/src/connection.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/conversation-shell.ts`
+- **Suite:** `hub-web/e2e/journeys/delivery-notice.journey.ts`
+- **Gaps:** the daemon's notice state and resolution announcement are doubled; that the daemon announces a real relay reaching the supervisor is proven by its Rust tests and at epic assembly
+
+#### Steps
+
+1. Open the session: only its conversation — the blocker and the operator's later message are in the thread, the watchdog notice is not, and yesterday's turn shows "Sep 29, 17:20"
+2. A blocker I never answered does not say I replied — the blocker reads "You've written since this" with no tick, never "you replied"
+3. The delivery problem is one attention item — the notice is a single warning in Attention dated "Sep 29, 17:49" (its own time, not when the page heard of it), and a repeat of it adds nothing
+4. On a phone, the delivery problem is one tap from the conversation — at 390×844 an Attention badge reading 1 sits in the thread header; tapping it opens the session's Attention as a sheet, focused on Close, showing the notice and its date
+5. Keyboard stays in the sheet — Shift+Tab from Close moves to the collapsed Details' summary (never a control hidden inside it); twelve Tabs stay inside the modal sheet, each moving to a new stop and wrapping from Details to Close; focus on Dismiss group stays there across a 5 s heartbeat; with a notice's Details open and Copy focused, a minute crossing keeps them, and so does a ten-minute wake that rebuilds the page (cas-f486); the conversation behind it is inert
+6. A palette opened over the sheet closes first — Ctrl+K opens the command palette over the sheet; Escape closes the palette, the sheet stays open and focus is back on the control it left
+7. Close it and keep reading — Escape closes the sheet even with focus dropped to the page, focus returns to the badge and stays on it when a catalog change rebuilds the page, and the thread is as it was
+8. A sheet left open on a phone is a plain rail on a desktop — reopened, then resized to 1280×800: the rail has no dialog role, aria-modal or sheet label, the badge is not expanded, nothing is inert, and the notice is in the side panel
+9. It retires once the update gets through — the resolution removes it, and a reload does not bring it back
+10. An answer to an earlier session's question stays here — the supervisor's answer to a question from the ended session arrives in this thread with "re: earlier session wise-lion-31", and no earlier-session section opens for it
+
+#### Expected experience
+
+- The thread holds what the supervisor and the operator said; plumbing notices live in Attention.
+- "Acknowledged — you replied" appears only for a reply sent to that card.
+- Every turn not from today carries its date, and so does every Attention item.
+- On a phone, a session's open Attention is never more than one tap from its conversation.
+- A reply belongs to the session it is sent from; another session's turn is only quoted.
+
+#### Edge paths
+
+- A notice from another session never appears here, in the thread or its earlier sections.
+- A dismissed notice stays dismissed when history replays it.
+- A session that leaves the catalog retires its open notices.
+
+### HUB-J16 · End a session from my phone
+
+- **Entry:** `/commander/` on a phone (390×844, touch), one project with seven live sessions on one machine, and a device that may end sessions
+- **Goal:** see at least six of the sessions at once, and end one with a confirmation that appears immediately, is focused and is fully visible
+- **Touches:** `hub-web/src/conversation-list.ts`, `hub-web/src/styles.css`, `hub-web/src/main.ts`
+- **Suite:** `hub-web/e2e/journeys/end-session.journey.ts`
+- **Gaps:** the hub double ends the session; that the daemon stops its supervisor and workers is covered by the hub's Rust tests
+
+#### Steps
+
+1. See six sessions at once — under "gabber-studio · 7 conversations on Atlas", each row leads with its codename, End session is a glyph button in its own column at the row's end, and at least six rows are fully in view
+2. Tap a session's time to open it, then come back — the time belongs to the row (End is a 44px column of its own beside it), the session opens, and back on the list all seven are still there
+3. End session asks at once, focused on Cancel — on the last row the confirmation is present in the same task as the tap, Cancel has focus, both buttons are fully in view, and no row leaves the list
+4. Cancel, then end it from the keyboard — Cancel returns focus to End session; Enter, Shift+Tab to the confirmation's End session and Enter end it, the heading reads 6 sessions, and focus lands on the row before the ended last row, never on the page
+
+#### Expected experience
+
+- A phone shows the sessions, not a column of End session lines.
+- Ending a session is a deliberate two-step that never blanks the list or loses focus.
+
+#### Edge paths
+
+- A desktop keeps the worded End session line under each row (HUB-J14 covers it, including the last row's confirmation in view).
+- A failed end shows its error under the row and offers End session again.

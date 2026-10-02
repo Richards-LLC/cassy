@@ -10,7 +10,7 @@ test.describe("Conversation composer", () => {
     await expect(page.getByRole("heading", { name: "cas-src", exact: true })).toBeVisible();
     const message = page.getByRole("textbox", { name: "Your message" });
     await expect(message).toHaveValue("Cut 3.26.0 once the gate is green, then post the release notes.");
-    await expect(page.getByRole("button", { name: "Send to patient-pelican-9" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor" })).toBeVisible();
     // No dead attach control until attaching works (cas-17e3).
     const attachment = page.getByRole("button", { name: /Attach a file/ });
     await expect(attachment).toHaveCount(0);

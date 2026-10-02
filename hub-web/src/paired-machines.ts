@@ -1,5 +1,5 @@
 import { cloudBrand, escapeHtml } from './cloud-brand';
-import { CANT_REACH_RETRYING, NEEDS_PAIRING, machineConnectionLabel, type MachineConnectionLabelState } from './connection-state';
+import { CANT_REACH_RETRYING, NEEDS_PAIRING, UNSTEADY, machineConnectionLabel, type MachineConnectionLabelState } from './connection-state';
 export { CANT_REACH_RETRYING } from './connection-state';
 
 export interface PairedMachineRow {
@@ -30,15 +30,46 @@ export function machineFooterMarkup(rows: readonly PairedMachineRow[], sessions:
   // another machine's first retry look like a reconnect (cas-f698).
   const retryable = rows.filter((_row, index) => labels[index] !== NEEDS_PAIRING);
   const unreachable = retryable.length > 0 && retryable.every(row => row.connection === CANT_REACH_RETRYING);
-  const state = loading ? 'Loading…' : connected ? `${connected === rows.length ? 'Connected' : `${connected} connected`}`
+  // cas-a6f0 (journey F8): machines still live with heartbeats unanswered
+  // are unsteady, as the header and the row say, not reconnecting.
+  const unsteady = retryable.length > 0 && labels.every(label => label === UNSTEADY || label === NEEDS_PAIRING);
+  // cas-0739 (journey F10): with some machines connected and some not, name
+  // the one that isn't ("Shed NAS can't be reached"), not "5 connected".
+  const down = rows.filter(row => !row.connected);
+  const partial = down.length === 1 ? `${shortMachineName(down[0]!.label)} ${outageWords(down[0]!.connection)}` : `${down.length} not connected`;
+  const state = loading ? 'Loading…' : connected ? (connected === rows.length ? 'Connected' : partial)
     : !rows.length ? 'Not paired'
     : !retryable.length ? labels[0]
+    : unsteady ? UNSTEADY
     : retryable.some(row => row.everConnected) ? 'Reconnecting'
     : unreachable ? CANT_REACH_RETRYING : 'Connecting…';
   // The dot shows the worst machine: green only when every machine is
-  // connected, the warning tone when some are down (cas-b789).
-  const dot = connected && connected === rows.length ? ' connected' : connected ? ' partial' : '';
-  return `<button id="paired-machines-toggle" type="button" aria-haspopup="dialog"><span class="pairing-dot${dot}" aria-hidden="true"></span><span>${escapeHtml(machine)}</span><span class="machine-badge-state">${state}</span></button><div class="hub-footer-meta"><span>${sessions} ${sessions === 1 ? 'conversation' : 'conversations'}</span><span title="Hub build">Hub ${escapeHtml(build)}</span></div>`;
+  // connected, the warning tone when some are down (cas-b789) or unsteady.
+  const dot = connected && connected === rows.length ? ' connected' : connected || state === UNSTEADY ? ' partial' : '';
+  return `<button id="paired-machines-toggle" type="button" aria-haspopup="dialog"><span class="pairing-dot${dot}" aria-hidden="true"></span><span>${escapeHtml(machine)}</span><span class="machine-badge-state" title="${escapeHtml(state)}">${escapeHtml(state)}</span></button><div class="hub-footer-meta"><span>${sessions} ${sessions === 1 ? 'conversation' : 'conversations'}</span><span title="Hub build">Hub ${escapeHtml(build)}</span></div>`;
+}
+
+/** "Shed NAS · Linux" reads "Shed NAS" where room is short. */
+function shortMachineName(label: string): string {
+  return label.split(' · ')[0]?.trim() || label.trim();
+}
+
+/** A machine's connection in the footer's words: "can't be reached", "reconnecting", "needs pairing" (cas-0739). */
+function outageWords(connection: string): string {
+  if (connection === CANT_REACH_RETRYING || connection === 'Unreachable') return "can't be reached";
+  if (connection === NEEDS_PAIRING) return 'needs pairing';
+  if (connection === UNSTEADY) return 'unsteady';
+  if (connection.startsWith('Connecting') || connection === 'Idle') return 'connecting';
+  return connection.toLowerCase();
+}
+
+/**
+ * The register lists machines that aren't connected first, each group in its
+ * own order, so the one the footer names is on screen when the dialog opens
+ * (cas-0739, journey F10).
+ */
+export function orderPairedMachines<T extends Pick<PairedMachineRow, 'connected'>>(rows: readonly T[]): T[] {
+  return [...rows.filter(row => !row.connected), ...rows.filter(row => row.connected)];
 }
 
 export function pairedMachinesDialogMarkup(): string {
@@ -46,7 +77,7 @@ export function pairedMachinesDialogMarkup(): string {
 }
 
 /** Keyed register: status ticks preserve focused controls and removal confirmation. */
-export function renderPairedMachines(container: HTMLElement, rows: readonly PairedMachineRow[], remove: (id: string) => Promise<void>): void {
+export function renderPairedMachines(container: HTMLElement, rows: readonly PairedMachineRow[], remove: (id: string) => Promise<void>, options: { reorder?: boolean } = {}): void {
   const ids = new Set(rows.map(row => row.id));
   for (const node of container.querySelectorAll<HTMLElement>('[data-machine-id]')) if (!ids.has(node.dataset.machineId!)) node.remove();
   let empty = container.querySelector<HTMLElement>('.machine-register-empty');
@@ -69,4 +100,13 @@ export function renderPairedMachines(container: HTMLElement, rows: readonly Pair
     const texts = { h3: row.label, '.paired-machine-address': row.address, '.paired-machine-state': row.connection, '.paired-machine-seen': row.lastSeen, '.paired-machine-runtime': row.runtime ? `Cassy ${row.runtime}` : 'Version unknown until it connects' };
     for (const [selector, text] of Object.entries(texts)) { const target = node.querySelector(selector)!; if (target.textContent !== text) target.textContent = text; }
   }
+  // cas-0739: put rows in the given order. An open register passes
+  // reorder: false so a status tick never moves a row under the operator's
+  // finger or focus; it is ordered again before it next opens.
+  if (options.reorder === false) return;
+  const current = [...container.querySelectorAll<HTMLElement>('[data-machine-id]')];
+  const nodes = rows.map(row => current.find(node => node.dataset.machineId === row.id)).filter((node): node is HTMLElement => Boolean(node));
+  if (nodes.every((node, index) => current[index] === node)) return;
+  const anchor = container.querySelector('.machine-register-empty');
+  for (const node of nodes) container.insertBefore(node, anchor);
 }

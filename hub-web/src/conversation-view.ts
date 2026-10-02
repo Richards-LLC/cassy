@@ -1,16 +1,18 @@
-import { fitMachineLine } from "./conversation-shell";
+import { fitMachineLine, hostMarkup } from "./conversation-shell";
 import { machineMonogram } from "./machine-accent";
 import { plainTextMarkdown, renderMarkdown } from "./markdown-renderer";
 import { refusal } from "./refusal";
 import { shouldFollowTail } from "./transcript";
 import { bindSwipeDismiss } from "./swipe-dismiss";
+import { CANT_REACH_RETRYING, NEEDS_PAIRING } from "./connection-state";
+import { CONVERSATION_OPENING, OPENING_MOTION_DELAY_MS, openingLine } from "./connection-state-view";
 import { sessionCodename, type ConversationEvent, type ConversationHistory, type ConversationSend, type EarlierSession } from "./conversation-history";
 import type { ArtifactRef, OperatorReply, OperatorTurnKind } from "./types";
 import {
   cellTone,
-  clockLabel,
   coalesceText,
   dayLabel,
+  stampLabel,
   messageBlocks,
   threadModel,
   type ThreadCoalesce,
@@ -26,6 +28,15 @@ import {
  */
 
 /** What a kind-specific renderer receives. */
+/** A message's place in a run of unconfirmed messages shown as one notice (cas-b00c). */
+/**
+ * `key`: the run's first message, and `members` every message in it
+ * (cas-ca7f): Review opens this run only, and the run stays open while any
+ * message the operator opened it on is still in it (dismissing one must not
+ * close the rest).
+ */
+type UnconfirmedRun = { count: number; last: boolean; expanded: boolean; key: string; members: string[] };
+
 export interface TurnRenderContext {
   readonly document: Document;
   readonly turn: ThreadTurn;
@@ -141,9 +152,16 @@ export interface ConversationViewOptions {
    * (cas-55a4): when it last did anything and between whom. The empty
    * thread shows it, so a live session never reads as idle or as a copy.
    */
-  activity?: () => { at?: number; label?: string } | undefined;
+  activity?: () => { at?: number; label?: string; terminal?: boolean } | undefined;
   /** The empty thread offers the session's Terminal view (cas-55a4). */
   openTerminal?: () => void;
+  /**
+   * The conversation header's connection label ("Live", "Degraded",
+   * "Reconnecting", "Needs pairing", …). The empty thread reads it, so it
+   * never promises new messages or offers Terminal view over a connection
+   * that cannot carry them (cas-010f). Unset reads as live.
+   */
+  connection?: () => string | undefined;
   /** Requests the next older durable page when history has more turns. */
   loadEarlier?: () => void;
   /** Whether the daemon reported an older page still available. */
@@ -155,6 +173,11 @@ export interface ConversationViewOptions {
    * line rather than claiming nothing is waiting (cas-04ee).
    */
   loadingHistory?: () => boolean;
+  /**
+   * When this conversation began to open (cas-813a). The loading line keeps
+   * the attach's motion clock, so it doesn't start its motion over.
+   */
+  openingSince?: () => number | undefined;
   /** The loaded page reaches the beginning of the project history. */
   historyEnd?: () => boolean;
   /**
@@ -204,7 +227,52 @@ function landFocusIn(bubble: HTMLElement, className: string): void {
   bubble.focus({ preventScroll: true });
 }
 
-/** "Last activity 3m ago · supervisor → worker-1" for the empty thread (cas-55a4). */
+/**
+ * What the empty thread says (cas-010f), from the header's connection label
+ * and whether this session's first history page has resolved:
+ * - `loading`: the page is on its way over a connection that can bring it;
+ * - `waiting`: it cannot arrive until the connection is back, so the card
+ *   says why instead of claiming there is nothing;
+ * - `empty`: the page resolved with no turns of this session's own.
+ * Plain words only: no product codename, and the generated session codename
+ * stays in the card's meta line. Terminal view is offered only while the
+ * connection can carry it.
+ */
+export function emptyThreadCopy(input: { project?: string; machine?: string; connection?: string; resolved: boolean }): { state: "loading" | "waiting" | "empty"; said: string; terminal: boolean } {
+  const subject = input.project ? `the ${input.project} supervisor` : "this supervisor";
+  const where = input.machine || "this machine";
+  const subjectMachine = input.machine || "This machine";
+  const label = input.connection;
+  const kind = label === undefined || label === "Live" ? "live"
+    : label === "Degraded" ? "degraded"
+      : label === NEEDS_PAIRING ? "pairing"
+        : label === "Reconnecting" || label === "Connecting" || label === "Idle" || label === CANT_REACH_RETRYING ? "reconnecting"
+          : "unreachable";
+  const none = `No messages from ${subject} in this session yet`;
+  if (!input.resolved) {
+    if (kind === "live" || kind === "degraded" || label === "Connecting" || label === "Idle") return { state: "loading", said: "", terminal: false };
+    if (kind === "pairing") return { state: "waiting", said: `${subjectMachine} needs pairing again before messages from ${subject} can load.`, terminal: false };
+    if (kind === "reconnecting") return { state: "waiting", said: `Reconnecting to ${where} — messages from ${subject} will load once it's back.`, terminal: false };
+    return { state: "waiting", said: `${subjectMachine} can't be reached — messages from ${subject} will load once it's back.`, terminal: false };
+  }
+  if (kind === "live") return { state: "empty", said: `${none} — nothing is waiting on you.`, terminal: true };
+  if (kind === "degraded") return { state: "empty", said: `${none}. The connection is unsteady, so a new one may arrive late.`, terminal: true };
+  if (kind === "pairing") return { state: "empty", said: `${none}. ${subjectMachine} needs pairing again before new ones can arrive.`, terminal: false };
+  if (kind === "reconnecting") return { state: "empty", said: `${none}. Reconnecting to ${where} — anything new will show here once it's back.`, terminal: false };
+  return { state: "empty", said: `${none}. ${subjectMachine} can't be reached — anything new will show here once it's back.`, terminal: false };
+}
+
+/**
+ * The empty thread's activity line (cas-010f): plain words, no queue jargon.
+ * Terminal output is the same time Terminal view's pane header shows;
+ * otherwise the session's own last activity.
+ */
+export function emptyCardActivityText(activity: { at?: number; terminal?: boolean }, now: number): string {
+  if (activity.at === undefined) return "";
+  return `${activity.terminal ? "Terminal output" : "Last active"} ${relativeAgo(activity.at, now)}`;
+}
+
+/** "Last activity 3m ago · supervisor → worker-1": a conversation row's title (cas-55a4). */
 export function emptyActivityText(activity: { at?: number; label?: string }, now: number): string {
   const when = activity.at === undefined ? undefined : relativeAgo(activity.at, now);
   return ["Last activity", when, activity.label ? `· ${activity.label}` : undefined].filter(Boolean).join(" ");
@@ -216,6 +284,15 @@ function relativeAgo(at: number, now: number): string {
   if (elapsed < 3_600_000) return `${Math.floor(elapsed / 60_000)}m ago`;
   if (elapsed < 86_400_000) return `${Math.floor(elapsed / 3_600_000)}h ago`;
   return `${Math.floor(elapsed / 86_400_000)}d ago`;
+}
+
+/** "re: earlier session calm-puma-34" above an answer to another session's turn (cas-e829). */
+export function earlierReplyQuote(document: Document, session: string): HTMLElement {
+  const quote = document.createElement("div");
+  quote.className = "reply-quote";
+  quote.textContent = `re: earlier session ${sessionCodename(session)}`;
+  quote.title = session;
+  return quote;
 }
 
 /** "Earlier session calm-puma-34, Yesterday" (cas-55a4). */
@@ -238,11 +315,12 @@ function earlierSessionNode(document: Document, entry: EarlierSession, now: numb
   const list = document.createElement("ol"); list.className = "earlier-turns";
   for (const event of entry.events) {
     const item = document.createElement("li"); item.className = `earlier-turn ${event.kind === "send" ? "you" : "supervisor"}`;
-    const who = document.createElement("b"); who.textContent = event.kind === "send" ? (event.value.deviceLabel ? `You · ${event.value.deviceLabel}` : "You") : "Supervisor";
+    // cas-8d52: an earlier session's supervisor by its own codename.
+    const who = document.createElement("b"); who.textContent = event.kind === "send" ? (event.value.deviceLabel ? `You · ${event.value.deviceLabel}` : "You") : entry.session ? sessionCodename(entry.session) : "Supervisor";
     const time = document.createElement("time");
     if (event.at !== undefined && Number.isFinite(event.at)) {
       time.dateTime = new Date(event.at).toISOString();
-      time.textContent = `${dayLabel(event.at, now)} ${clockLabel(event.at)}`;
+      time.textContent = stampLabel(event.at, now) ?? "";
     }
     const text = document.createElement("p");
     text.textContent = plainTextMarkdown(event.kind === "send" ? event.value.text : event.value.message);
@@ -291,7 +369,23 @@ export class ConversationView {
   private nodes = new Map<string, HTMLElement>();
   /** Coalesced status lines the operator opened with "Show full update"; survives repaints. */
   private expanded = new Set<string>();
+  /**
+   * cas-b00c: messages in the unconfirmed runs the operator opened with
+   * Review (cas-ca7f): a run is open while any of its messages is here, so a
+   * later, separate run starts as one notice instead of opening already
+   * expanded, and dismissing one message keeps the rest of its run open.
+   */
+  private readonly reviewedRuns = new Set<string>();
   private following = true;
+  /**
+   * Where the reader was, by turn, while not following the tail (cas-2093).
+   * A reconnect rebuilds the pane card around this view, and the browser
+   * resets the moved thread's scroll to the top; this puts the reader back.
+   */
+  private place?: { key: string; offset: number };
+  private placePending = false;
+  /** The scroll position this view last saw or set; another value means the browser reset it. */
+  private scrolledTo = 0;
   /**
    * cas-71af (1584 QA F01): Load earlier held focus when pressed. It is
    * disabled while the page loads and hidden once the last page lands, and
@@ -301,6 +395,8 @@ export class ConversationView {
   private pinPending = false;
   /** The thread's height at the last scroll or resize it saw (cas-16eed). */
   private lastHeight?: number;
+  /** The thread's content height at the last scroll it saw (cas-acb4b). */
+  private lastContentHeight?: number;
   private disposed = false;
   private resize?: ResizeObserver;
 
@@ -361,26 +457,45 @@ export class ConversationView {
         if (this.following) { this.pin(); return; }
       }
       this.lastHeight = height;
+      // A scroll that comes with a change of content height while following
+      // is layout (content grew, the browser re-anchored), not the reader.
+      const contentHeight = this.element.scrollHeight;
+      const grew = this.lastContentHeight !== undefined && contentHeight !== this.lastContentHeight;
+      this.lastContentHeight = contentHeight;
+      if (grew && this.following) { this.pin(); return; }
       this.following = shouldFollowTail(this.element);
       this.jump.hidden = this.following;
+      this.scrolledTo = this.element.scrollTop;
+      this.notePlace();
     }, { passive: true });
     if (typeof ResizeObserver !== "undefined") {
       this.resize = new ResizeObserver(() => {
         for (const node of this.msgs.querySelectorAll<HTMLElement>(".coalesce-turn")) syncClampPill(node);
         this.lastHeight = this.element.clientHeight;
         this.fitEmptyMeta();
+        this.noticeReset();
+        this.restorePlace();
         if (this.following) this.pin();
       });
       this.resize.observe(this.element);
+      // cas-acb4b: the thread's content grows after it was pinned (file cards
+      // and late text layout finish after the first paint) while the scroll
+      // box keeps its size. Watching only the box left a thread that was
+      // following its tail a few exchanges above it, and the browser's next
+      // scroll-anchoring nudge then read as the reader scrolling away.
+      this.resize.observe(this.msgs);
     }
   }
 
   /** Re-derive the thread from the history; nodes are keyed so grouping survives. */
   update(): void {
     if (this.disposed) return;
+    this.noticeReset();
+    this.restorePlace();
     // Turns added above the reader (Load earlier) must not move what they are
     // reading (journey F7): remember the first turn on screen and where it sat.
     const anchor = this.following ? undefined : this.readingAnchor();
+    const offeredEarlier = !this.loadEarlier.hidden;
     const hasEarlier = this.options.hasEarlier?.() === true;
     const loadingEarlier = this.options.loadingEarlier?.() === true;
     this.loadEarlier.hidden = !hasEarlier;
@@ -414,7 +529,14 @@ export class ConversationView {
       // anchoring has nothing to hold on to; hold the turn ourselves.
       const drift = held.getBoundingClientRect().top - anchor.top;
       if (Math.abs(drift) >= 1) this.element.scrollTop += drift;
+      // cas-2093 (F12): the last page landed. The end of history is stated on
+      // screen, not left above the fold.
+      if (offeredEarlier && !hasEarlier) this.revealHistoryEnd();
     }
+    this.restorePlace();
+    this.scrolledTo = this.element.scrollTop;
+    this.lastContentHeight = this.element.scrollHeight;
+    this.notePlace();
     if (this.following && document.getSelection()?.isCollapsed !== false) this.pin();
     if (this.loadEarlierFocus && !loadingEarlier) this.restoreLoadEarlierFocus(document);
   }
@@ -460,6 +582,53 @@ export class ConversationView {
       if (at !== undefined) return { node: child as HTMLElement, top: at };
     }
     return undefined;
+  }
+
+  /**
+   * The last page the reader asked for is above them; they asked for it to
+   * read it. Scroll up just enough that its first line, the end of history,
+   * is at the top: the page reads down to where they were.
+   */
+  private revealHistoryEnd(): void {
+    const end = this.msgs.querySelector<HTMLElement>(":scope > .history-end");
+    if (!end) return;
+    const view = this.element.getBoundingClientRect();
+    const above = view.top - end.getBoundingClientRect().top;
+    if (above <= 0) return;
+    this.element.scrollTop -= above;
+  }
+
+  /** Remember the reader's turn and its offset from the top of the thread (cas-2093). */
+  private notePlace(): void {
+    if (this.following) { this.place = undefined; return; }
+    if (!this.element.isConnected || this.element.clientHeight === 0 || this.placePending) return;
+    const anchor = this.readingAnchor();
+    if (anchor?.key === undefined) return;
+    this.place = { key: anchor.key, offset: anchor.top - this.element.getBoundingClientRect().top };
+  }
+
+  /**
+   * A thread taken out of the page and put back (a reconnect rebuilds the
+   * pane card around it) comes back scrolled to its top, with no scroll event
+   * to say so. A position this view did not see or set is that reset: put the
+   * reader back (cas-2093).
+   */
+  private noticeReset(): void {
+    if (!this.element.isConnected || this.element.clientHeight === 0) return;
+    if (Math.abs(this.element.scrollTop - this.scrolledTo) > 1) this.placePending = true;
+  }
+
+  private restorePlace(): void {
+    if (!this.placePending || !this.element.isConnected || this.element.clientHeight === 0) return;
+    if (this.following) { this.placePending = false; this.pin(); return; }
+    const place = this.place;
+    if (!place) { this.placePending = false; return; }
+    const node = [...this.msgs.querySelectorAll<HTMLElement>("[data-key]")].find((item) => item.dataset.key === place.key);
+    // Not drawn yet: try again on the next update.
+    if (!node) return;
+    this.placePending = false;
+    const offset = node.getBoundingClientRect().top - this.element.getBoundingClientRect().top;
+    this.element.scrollTop += offset - place.offset;
   }
 
   private anchorNode(anchor: { key?: string; node: HTMLElement }): HTMLElement | undefined {
@@ -607,12 +776,24 @@ export class ConversationView {
   }
 
   private renderUnsent(): void {
-    const count = this.history.dismissedSends().length;
+    const dismissed = this.history.dismissedSends();
+    const count = dismissed.length;
     this.unsent.hidden = count === 0;
     if (!count) { delete this.unsent.dataset.count; return; }
-    if (this.unsent.dataset.count === String(count)) return;
-    this.unsent.dataset.count = String(count);
-    const noun = count === 1 ? "1 unsent message" : `${count} unsent messages`;
+    // cas-b00c (journey F19): a message whose delivery was not confirmed may
+    // well have arrived, so the chip does not call it unsent.
+    const unconfirmed = dismissed.filter((send) => send.state === "unconfirmed").length;
+    const signature = `${count}:${unconfirmed}`;
+    if (this.unsent.dataset.count === signature) return;
+    this.unsent.dataset.count = signature;
+    // cas-ca7f (cas-b00c QA F02): the chip's tone is decided, not inherited.
+    // Only messages that may well have arrived (not confirmed) take the
+    // caution tone the thread gives them; any message known not to be sent
+    // keeps the critical tone, because that one certainly needs the operator.
+    this.unsent.dataset.tone = unconfirmed === count ? "caution" : "critical";
+    const noun = unconfirmed === 0 ? (count === 1 ? "1 unsent message" : `${count} unsent messages`)
+      : unconfirmed === count ? (count === 1 ? "1 message not confirmed" : `${count} messages not confirmed`)
+      : `${count} messages not sent or not confirmed`;
     const document = this.element.ownerDocument;
     const glyph = document.createElement("template"); glyph.innerHTML = WARN;
     const text = document.createElement("span"); text.textContent = noun;
@@ -621,9 +802,18 @@ export class ConversationView {
     this.unsent.setAttribute("aria-label", `Show ${noun}`);
   }
 
+  /**
+   * Who said a turn (cas-8d52, journey F13): a turn from another session
+   * than the one the thread is attached to is that session's, by its own
+   * codename, never the current supervisor's.
+   */
+  private speakerOf(session: string | undefined): string {
+    return session && this.history.currentSession !== undefined && session !== this.history.currentSession ? sessionCodename(session) : this.options.supervisor;
+  }
+
   private context(document: Document, turn: ThreadTurn, reply: OperatorReply, pinned = false): TurnRenderContext {
     const context: TurnRenderContext = {
-      document, turn, reply, supervisor: this.options.supervisor,
+      document, turn, reply, supervisor: this.speakerOf(turn.event.session),
       body: () => renderBody(document, reply, context),
       history: this.history,
       respond: this.options.respond,
@@ -649,7 +839,9 @@ export class ConversationView {
     const live = turn.event.kind === "send" && turn.event.value.state === "error" ? this.options.sessionLive?.() === true : undefined;
     // An unconfirmed send settles once the supervisor speaks after it (journey F10).
     const settled = turn.event.kind === "send" && turn.event.value.state === "unconfirmed" ? this.history.repliedSince(turn.event.value) : undefined;
-    return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting, pinned, retired, delivered, held, holder, settled, live]);
+    // cas-b00c: a run of unconfirmed messages repaints when Review opens or closes it.
+    const review = settled === false ? [...this.reviewedRuns].join(",") : undefined;
+    return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting, pinned, retired, delivered, held, holder, settled, live, review]);
   }
 
   /**
@@ -662,27 +854,27 @@ export class ConversationView {
     this.msgs.hidden = show;
     if (!show) { this.empty.replaceChildren(); delete this.empty.dataset.signature; delete this.empty.dataset.state; return; }
     const { supervisor, machine, project } = this.options;
-    if (loading) {
+    // cas-010f: "no messages" only once this session's first page resolved
+    // empty, and in words that match the header's connection state.
+    const copy = emptyThreadCopy({ project, machine, connection: this.options.connection?.(), resolved: !loading });
+    if (copy.state === "loading") {
       // Until the first page lands, "Nothing waiting" would be a guess.
       if (this.empty.dataset.state === "loading") return;
       this.empty.dataset.state = "loading";
       delete this.empty.dataset.signature;
-      const document = this.element.ownerDocument;
-      const line = document.createElement("p"); line.className = "said conversation-loading"; line.setAttribute("role", "status");
-      const dots = document.createElement("span"); dots.className = "dots"; dots.setAttribute("aria-hidden", "true");
-      dots.append(document.createElement("i"), document.createElement("i"), document.createElement("i"));
-      const codename = document.createElement("span"); codename.className = "codename"; codename.textContent = supervisor; codename.title = supervisor;
-      const text = document.createElement("span"); text.append("Loading your conversation with ", codename, "…");
-      line.append(dots, text);
-      this.empty.replaceChildren(line);
+      // cas-813a: the same line the attach showed, in the same place, with
+      // its motion clock counted from when the conversation began to open.
+      const since = this.options.openingSince?.();
+      const delay = since === undefined ? OPENING_MOTION_DELAY_MS : OPENING_MOTION_DELAY_MS - (Date.now() - since);
+      this.empty.replaceChildren(openingLine(this.element.ownerDocument, CONVERSATION_OPENING, delay));
       return;
     }
-    delete this.empty.dataset.state;
+    this.empty.dataset.state = copy.state;
     const echo = this.options.echo?.()?.trim() || "";
     const activity = this.options.activity?.();
-    const activityText = activity?.at !== undefined || activity?.label ? emptyActivityText(activity, Date.now()) : "";
-    const terminal = this.options.openTerminal !== undefined;
-    const signature = JSON.stringify([supervisor, machine, project, echo, activityText, terminal]);
+    const activityText = activity ? emptyCardActivityText(activity, Date.now()) : "";
+    const terminal = copy.terminal && this.options.openTerminal !== undefined;
+    const signature = JSON.stringify([supervisor, machine, project, echo, activityText, terminal, copy.said]);
     if (this.empty.dataset.signature === signature) return;
     this.empty.dataset.signature = signature;
     const document = this.element.ownerDocument;
@@ -695,32 +887,34 @@ export class ConversationView {
     if (!project) name.className = "codename";
     const where = document.createElement("span"); where.className = "proj2";
     where.title = [machine, project ? supervisor : undefined].filter(Boolean).join(" · ");
-    // cas-71af (e918 QA F02): as in the header, the machine name yields to the
-    // codename: it ellipsises in its own span, down to a letter and "…".
-    const host = document.createElement("span"); host.className = "proj2-machine"; host.textContent = machine ?? "";
+    // cas-766c: as in the header, the machine name holds its place; its OS
+    // word goes first, then the codename yields (fitMachineLine).
+    const host = document.createElement("span"); host.className = "proj2-machine"; host.innerHTML = hostMarkup(machine ?? "");
     if (machine) where.append(host);
     if (project) {
       const secondary = document.createElement("span"); secondary.className = "codename"; secondary.textContent = supervisor;
       const separator = document.createElement("span"); separator.className = "proj2-sep"; separator.textContent = " · ";
       where.append(...(machine ? [separator] : []), secondary);
     }
-    const said = document.createElement("p"); said.className = "said"; said.setAttribute("role", "status");
-    // The sentence names the role, not the generated codename (journey F13).
-    // The codename follows in brackets as an identifier: mono, one unbroken
-    // line, ellipsised past a cap, and whole in its title and the DOM.
-    const codename = document.createElement("span"); codename.className = "codename"; codename.textContent = supervisor; codename.title = supervisor;
-    // The brackets travel with it: no line break between "(" and the name.
-    const who = document.createElement("span"); who.className = "said-who"; who.append("(", codename, ")");
     // cas-55a4: an honest empty state. This session has said nothing here
-    // yet; another session's thread is never shown in its place.
-    said.append("No Commander messages from this session yet. The supervisor ", who, " will write here when it needs a decision.");
+    // yet; another session's thread is never shown in its place. The sentence
+    // names the role (journey F13); the codename is in the line above it.
+    const said = document.createElement("p"); said.className = "said"; said.setAttribute("role", "status");
+    said.textContent = copy.said;
     const children: HTMLElement[] = [mono, name, where, said];
-    if (activityText) { const live = document.createElement("p"); live.className = "empty-activity"; live.textContent = activityText; children.push(live); }
-    if (this.options.openTerminal) {
-      const open = document.createElement("button"); open.type = "button"; open.className = "empty-terminal";
-      open.textContent = "Open Terminal";
-      open.onclick = () => this.options.openTerminal?.();
-      children.push(open);
+    if (activityText || terminal) {
+      // One quiet line: when the session last did anything, then the way into
+      // Terminal view, named as the header names it (cas-010f).
+      const foot = document.createElement("p"); foot.className = "empty-foot";
+      if (activityText) { const live = document.createElement("span"); live.className = "empty-activity"; live.textContent = activityText; foot.append(live); }
+      if (terminal) {
+        if (activityText) { const dot = document.createElement("span"); dot.className = "empty-foot-sep"; dot.setAttribute("aria-hidden", "true"); dot.textContent = "·"; foot.append(dot); }
+        const open = document.createElement("button"); open.type = "button"; open.className = "empty-terminal";
+        open.textContent = "Terminal view";
+        open.onclick = () => this.options.openTerminal?.();
+        foot.append(open);
+      }
+      children.push(foot);
     }
     if (echo) { const quiet = document.createElement("div"); quiet.className = "quiet"; quiet.textContent = echo; children.push(quiet); }
     this.empty.replaceChildren(...children);
@@ -757,10 +951,19 @@ export class ConversationView {
     fitMachineLine(line, this.empty.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight));
   }
 
+  /** "the cas-src supervisor", never the generated codename (cas-71f4, journey F20). */
+  private supervisorPhrase(): string {
+    return this.options.project ? `the ${this.options.project} supervisor` : "the supervisor";
+  }
+
   /** Cheap liveness poll: repaints only when the working state actually flipped. */
   refreshWorking(): void {
     if (this.disposed) return;
-    const working = this.options.working?.() === true;
+    // cas-71f4: a newest message still "Sending…" holds the working line back
+    // (threadModel), so it is not a flip to repaint for.
+    const newest = this.history.visibleEvents().at(-1);
+    const sending = newest?.kind === "send" && newest.value.state === "sending" && !newest.value.held;
+    const working = this.options.working?.() === true && !sending;
     if (working !== this.nodes.has("working")) this.update();
   }
 
@@ -798,7 +1001,7 @@ export class ConversationView {
     const document = node.ownerDocument;
     const expanded = this.expanded.has(item.key);
     node.className = "turn coalesce-turn";
-    speaker(node, `${this.options.supervisor}, status`, item.time, item.clockAhead);
+    speaker(node, `${this.speakerOf(item.session)}, status`, item.time, item.clockAhead);
     const line = document.createElement("div"); line.className = "coalesce";
     line.id = `coalesce-${item.key.replace(/[^\w-]/g, "-")}`;
     line.dataset.count = String(item.count);
@@ -831,7 +1034,7 @@ export class ConversationView {
     node.className = `turn ${group.side === "you" ? "you" : "sup"}`;
     // F19 (cas-17e3): a screen reader hears who spoke and when, not bare
     // paragraphs and times. The visible time stays for sighted readers.
-    speaker(node, group.side === "you" ? "You" : this.options.supervisor, group.time, group.clockAhead);
+    speaker(node, group.side === "you" ? "You" : this.speakerOf(group.turns[0]?.event.session), group.time, group.clockAhead);
     // Bubbles are keyed too: a later turn re-derives the earlier one's corner
     // classes without replacing its node, so a selection or focus inside it
     // survives the update.
@@ -843,8 +1046,10 @@ export class ConversationView {
     // replacement instead of dropping it to the page body.
     const active = document.activeElement;
     let refocus: { bubble: HTMLElement; className: string } | undefined;
-    for (const turn of group.turns) {
-      const signature = this.turnSignature(turn);
+    const runs = this.unconfirmedRuns(group);
+    for (const [index, turn] of group.turns.entries()) {
+      const run = runs.get(index);
+      const signature = this.turnSignature(turn) + (run ? JSON.stringify(run) : "");
       let bubble = existing.get(turn.key);
       let sheets: HTMLElement[] = [];
       if (bubble && bubble.dataset.signature === signature) {
@@ -852,7 +1057,7 @@ export class ConversationView {
       } else {
         const previous = bubble;
         const focusedClass = previous && active instanceof HTMLElement && previous.contains(active) ? active.className : undefined;
-        if (turn.event.kind === "send") bubble = this.renderSend(document, turn, turn.event.value);
+        if (turn.event.kind === "send") bubble = this.renderSend(document, turn, turn.event.value, run);
         else ({ bubble, sheets } = this.renderReply(document, turn, turn.event.value));
         bubble.classList.add("conversation-turn");
         bubble.dataset.key = turn.key;
@@ -869,7 +1074,40 @@ export class ConversationView {
     if (refocus) landFocusIn(refocus.bubble, refocus.className);
   }
 
-  private renderSend(document: Document, turn: ThreadTurn, send: ConversationSend): HTMLElement {
+  /**
+   * cas-b00c (journey F19): two or more unconfirmed messages in a row read as
+   * one notice, not a stack of warning cards each with its own Retry. Maps a
+   * turn's index in the group to its place in such a run.
+   */
+  private unconfirmedRuns(group: ThreadGroup): Map<number, UnconfirmedRun> {
+    const runs = new Map<number, UnconfirmedRun>();
+    const actionable = group.turns.map((turn) => turn.event.kind === "send" && turn.event.value.state === "unconfirmed" && !this.history.repliedSince(turn.event.value));
+    for (let start = 0; start < actionable.length; ) {
+      let end = start;
+      while (end < actionable.length && actionable[end]) end += 1;
+      if (end - start >= 2) {
+        for (let index = start; index < end; index += 1) {
+          const members = group.turns.slice(start, end).map((turn) => turn.key);
+          const expanded = members.some((member) => this.reviewedRuns.has(member));
+          runs.set(index, { count: end - start, last: index === end - 1, expanded, key: members[0]!, members });
+        }
+      }
+      start = Math.max(end, start + 1);
+    }
+    return runs;
+  }
+
+  /** Open (or close) one unconfirmed run, and keep the keyboard user's place. */
+  private toggleUnconfirmedReview(run: UnconfirmedRun, open: boolean): void {
+    for (const member of run.members) if (open) this.reviewedRuns.add(member); else this.reviewedRuns.delete(member);
+    this.update();
+    const first = [...this.msgs.querySelectorAll<HTMLElement>(".conversation-turn")].find((node) => node.dataset.key === run.key);
+    if (open) { if (first) landFocusIn(first, "conversation-retry"); return; }
+    const notice = [...this.msgs.querySelectorAll<HTMLElement>(".conversation-review")].find((button) => button.dataset.run === run.key) ?? this.msgs.querySelector<HTMLElement>(".conversation-review");
+    notice?.focus({ preventScroll: true });
+  }
+
+  private renderSend(document: Document, turn: ThreadTurn, send: ConversationSend, run?: UnconfirmedRun): HTMLElement {
     const bubble = document.createElement("div");
     bubble.className = "bub";
     bubble.dataset.state = send.state;
@@ -898,6 +1136,31 @@ export class ConversationView {
       const label = document.createElement("span"); label.textContent = "Delivered";
       state.append(tick.content.firstElementChild!, label);
       bubble.append(state);
+    } else if (send.state === "unconfirmed" && run && !run.expanded) {
+      // cas-b00c: one notice for the run, on its last message; the earlier
+      // ones are quiet records of what was sent. Review opens each with its
+      // own Retry.
+      bubble.dataset.grouped = run.last ? "last" : "member";
+      if (run.last) {
+        const state = document.createElement("span");
+        state.className = "conversation-delivery conversation-refused conversation-unconfirmed"; state.setAttribute("role", "status");
+        const glyph = document.createElement("template"); glyph.innerHTML = WARN;
+        const label = document.createElement("b"); label.textContent = `${run.count} messages not confirmed`;
+        const separator = document.createElement("span"); separator.className = "sr-only"; separator.textContent = " · ";
+        const reason = document.createElement("span"); reason.className = "conversation-refused-reason";
+        reason.textContent = `Cassy couldn't confirm delivery to ${this.supervisorPhrase()}.`;
+        const next = document.createElement("span"); next.className = "conversation-refused-next"; next.textContent = " Review them to retry.";
+        reason.append(next);
+        state.append(glyph.content.firstElementChild!, label, separator, reason);
+        const actions = document.createElement("div"); actions.className = "conversation-actions";
+        const review = document.createElement("button"); review.type = "button"; review.className = "conversation-review"; review.textContent = "Review";
+        review.setAttribute("aria-label", `Review ${run.count} messages not confirmed`);
+        review.setAttribute("aria-expanded", "false");
+        review.dataset.run = run.key;
+        review.onclick = () => this.toggleUnconfirmedReview(run, true);
+        actions.append(review);
+        bubble.append(state, actions);
+      }
     } else if (send.state === "unconfirmed" && this.history.repliedSince(send)) {
       // Journey F10: the supervisor has spoken since, so this send most
       // likely arrived. The card settles to a quiet record: no warning and no
@@ -933,7 +1196,8 @@ export class ConversationView {
       const label = document.createElement("b"); label.textContent = "Not confirmed";
       const separator = document.createElement("span"); separator.className = "sr-only"; separator.textContent = " · ";
       const reason = document.createElement("span"); reason.className = "conversation-refused-reason";
-      reason.textContent = `Cassy couldn't confirm delivery to ${this.options.supervisor}.`;
+      // cas-71f4 (journey F20): the project's supervisor, never the codename.
+      reason.textContent = `Cassy couldn't confirm delivery to ${this.supervisorPhrase()}.`;
       const next = document.createElement("span"); next.className = "conversation-refused-next"; next.textContent = " Retry sends it again.";
       reason.append(next);
       state.append(glyph.content.firstElementChild!, label, separator, reason);
@@ -945,6 +1209,15 @@ export class ConversationView {
         retry.onclick = () => this.options.retryMessage?.(send);
         actions.append(retry);
         bubble.append(actions);
+      }
+      if (run?.last) {
+        const less = document.createElement("div"); less.className = "conversation-actions conversation-actions-quiet";
+        const close = document.createElement("button"); close.type = "button"; close.className = "conversation-review-less conversation-send-again"; close.textContent = "Show less";
+        close.setAttribute("aria-label", `Show ${run.count} messages not confirmed as one notice`);
+        close.setAttribute("aria-expanded", "true");
+        close.onclick = () => this.toggleUnconfirmedReview(run, false);
+        less.append(close);
+        bubble.append(less);
       }
       this.dismissable(document, bubble, send);
     } else if (send.state === "error" && send.replaced) {
@@ -1013,7 +1286,15 @@ export class ConversationView {
       if (this.options.retryMessage) {
         const retry = document.createElement("button"); retry.type = "button"; retry.className = "conversation-retry"; retry.textContent = "Retry";
         retry.setAttribute("aria-label", "Retry sending");
-        retry.onclick = () => this.options.retryMessage?.(send);
+        if (holder) {
+          // cas-b00c (journey F18): while another device holds control a
+          // retry can only be refused again, so it is not pressable either.
+          retry.setAttribute("aria-disabled", "true");
+          retry.setAttribute("aria-description", `Waiting for ${holder} to release control`);
+          retry.dataset.waiting = "true";
+        } else {
+          retry.onclick = () => this.options.retryMessage?.(send);
+        }
         actions.append(retry);
       }
       if (actions.childElementCount) bubble.append(actions);
@@ -1031,7 +1312,9 @@ export class ConversationView {
   private dismissable(document: Document, bubble: HTMLElement, send: ConversationSend): void {
     bubble.dataset.swipe = "dismiss";
     const dismiss = document.createElement("button"); dismiss.type = "button"; dismiss.className = "conversation-dismiss";
-    dismiss.setAttribute("aria-label", "Dismiss unsent message");
+    // cas-b00c (journey F19): an unconfirmed message may well have arrived;
+    // only the notice about it is dismissed, not a message called unsent.
+    dismiss.setAttribute("aria-label", send.state === "unconfirmed" ? "Dismiss this notice" : "Dismiss unsent message");
     dismiss.title = "Dismiss";
     dismiss.innerHTML = CLOSE;
     dismiss.onclick = () => this.dismissSend(send, bubble);
@@ -1069,6 +1352,9 @@ export class ConversationView {
     }
     bubble.dataset.kind = kind;
     bubble.dataset.replyTo = reply.reply_to === null ? "" : String(reply.reply_to);
+    // cas-e829: an answer to another session's turn stays in this thread and
+    // only names what it answers; the earlier session itself is read-only.
+    if (reply.reply_to_session) bubble.prepend(earlierReplyQuote(document, reply.reply_to_session));
     return { bubble, sheets };
   }
 
@@ -1085,6 +1371,8 @@ export class ConversationView {
 
   private pin(): void {
     this.element.scrollTop = this.element.scrollHeight;
+    this.scrolledTo = this.element.scrollTop;
+    this.lastContentHeight = this.element.scrollHeight;
     this.jump.hidden = true;
     if (this.pinPending) return;
     this.pinPending = true;
@@ -1095,7 +1383,7 @@ export class ConversationView {
     });
   }
 
-  dispose(): void { this.disposed = true; this.resize?.disconnect(); this.element.remove(); this.pinned.remove(); }
+  dispose(): void { this.disposed = true; this.resize?.disconnect(); this.element.remove(); this.pinned.remove(); this.unsent.remove(); this.jump.remove(); }
 }
 
 /** Show the expand pill on a lone folded status only while the three-line clamp is hiding text. */

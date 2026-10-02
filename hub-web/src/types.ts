@@ -44,6 +44,8 @@ export interface HubSession {
   last_activity_at?: string;
   /** Who that row was between, e.g. "supervisor → worker-1"; never its content. */
   last_activity?: string;
+  /** When the session started; ranks Most recent when no session of a project has activity (cas-6acf). */
+  started_at?: string;
 }
 
 export interface PaneInfo {
@@ -86,6 +88,32 @@ export interface OperatorReply {
   /** Quick-reply choices for an `ask`. Not yet in OperatorReplyPayload
    * (protocol.rs); consumed when a payload carries it, else the defaults. */
   options?: string[];
+  /**
+   * Set when the row is a daemon notice about the session's plumbing, not a
+   * supervisor turn (cas-e829): it belongs in attention, never the thread.
+   */
+  notice?: OperatorNotice | null;
+  /**
+   * The session of the turn `reply_to` answers, when it is another session's
+   * (cas-e829). The reply belongs to this thread and only quotes that one.
+   */
+  reply_to_session?: string | null;
+}
+
+/** protocol.rs OperatorNotice (cas-e829). */
+export interface OperatorNotice {
+  /** The queue source that raised it, e.g. "relay-watchdog". */
+  source: string;
+  /** The queue row it is about (the unseen relay), when it is about one. */
+  subject?: number;
+  /** The problem it reports is over. */
+  resolved?: boolean;
+}
+
+/** protocol.rs DaemonMessage::OperatorNoticeResolved (cas-e829). */
+export interface OperatorNoticeResolved {
+  notification_id: number;
+  subject?: number;
 }
 
 /** Durable operator message projected by the daemon's history page. */

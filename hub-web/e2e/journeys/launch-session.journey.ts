@@ -52,8 +52,12 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
   await journey.stage("A paired controller enables launch from Commander", async () => {
     await journey.open();
     await expect(list.getByRole("button", { name: /cas-src/ })).toBeVisible();
-    await expect(page.getByRole("button", { name: "New session", exact: true })).toHaveCount(0);
-    await page.getByRole("button", { name: "Allow new sessions" }).tap();
+    // cas-865c: New session is named by its goal before the permission too; it
+    // opens the sheet's grant view, which explains what is asked.
+    const toggle = page.locator("#new-session-toggle");
+    await expect(toggle).toHaveText("+ New session");
+    await expect(toggle).toHaveAttribute("data-launch-grant", "true");
+    await toggle.tap();
     await expect(sheet).toBeVisible();
     await expect(sheet.getByRole("button", { name: "Allow starting sessions on Atlas · Linux" })).toBeVisible();
     await expect(sheet.getByRole("button", { name: "Allow starting sessions on Atlas · Linux" })).toBeFocused();
@@ -72,7 +76,7 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
     await hub.seedPaired();
     await page.reload();
     await expect(page.getByRole("button", { name: "New session", exact: true })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Allow new sessions" })).toHaveCount(0);
+    await expect(page.locator("#new-session-toggle")).not.toHaveAttribute("data-launch-grant", "true");
   });
 
   await journey.stage("Open New session and find the project", async () => {
@@ -116,7 +120,7 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
     await sheet.getByRole("button", { name: "Start", exact: true }).tap();
     await expect(sheet.getByRole("status")).toContainText("Starting ledger-api with Claude (support@petrastella.io) on Atlas · Linux…");
     await expect(sheet).toBeHidden({ timeout: 15_000 });
-    await expect(page.getByRole("button", { name: "Send to bright-heron-21", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the ledger-api supervisor", exact: true })).toBeVisible();
     await expect(page.locator(".conversation-heading")).toContainText("ledger-api");
     expect(hub.launches.at(-1)?.body).toEqual({ target: { kind: "project", id: "p-ledger" }, supervisor_cli: "claude", profile: "support@petrastella.io" });
   });
@@ -125,7 +129,7 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
     // Closing the tab and coming back: the machine still runs it, and the
     // conversation reopens where the operator left it.
     await page.reload();
-    await expect(page.getByRole("button", { name: "Send to bright-heron-21", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the ledger-api supervisor", exact: true })).toBeVisible();
     await back.tap();
     await expect(list.getByRole("button", { name: /ledger-api/ })).toBeVisible();
   });
@@ -134,7 +138,7 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
     await page.getByRole("button", { name: "New session", exact: true }).tap();
     await sheet.getByRole("button", { name: `Attach to cas-src (${PELICAN})` }).tap();
     await expect(sheet).toBeHidden();
-    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     await back.tap();
   });
 
@@ -158,7 +162,7 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
     await sheet.getByRole("radio", { name: /acme-portal/ }).check();
     await sheet.getByRole("button", { name: "Start", exact: true }).tap();
     await expect(sheet).toBeHidden({ timeout: 15_000 });
-    await expect(page.getByRole("button", { name: "Send to quiet-fox-5", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the acme-portal supervisor", exact: true })).toBeVisible();
     expect(hub.launches.at(-1)?.body).toEqual({ target: { kind: "browse", root_id: "root-code", path: "clients/acme-portal" }, supervisor_cli: "claude", profile: "main" });
   });
 
@@ -168,7 +172,7 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
     hub.setScopes("atlas", [...SCOPES]);
     await hub.seedPaired();
     await page.reload();
-    await page.getByRole("button", { name: "Allow new sessions" }).tap();
+    await page.locator('#new-session-toggle[data-launch-grant="true"]').tap();
     const allow = sheet.getByRole("button", { name: `Allow starting sessions on ${ATLAS.label}` });
     await expect(allow).toBeVisible();
     await expect(sheet.getByRole("button", { name: "Close", exact: true })).toBeVisible();
@@ -178,5 +182,39 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
     await expect(sheet.getByText(`Allow “Start new sessions” on ${ATLAS.label}?`)).toBeVisible();
     await expect(sheet.getByRole("button", { name: "Allow starting sessions", exact: true })).toBeFocused();
     ATLAS.label = originalLabel;
+  });
+});
+
+// cas-0e14 (journey F30): New session follows the machine's connection. A
+// machine that is reconnecting says so in the sheet, in the banner's words,
+// instead of failing a project load; once it is back its projects load.
+test("HUB-J13 New session says a reconnecting machine is reconnecting, then loads once it's back (cas-0e14)", async ({ page, journey }) => {
+  test.setTimeout(120_000);
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], scopes: { atlas: [...SCOPES, "session-launch"] }, launch: { atlas: atlasLaunch() } });
+  const sheet = page.getByRole("dialog", { name: "New session" });
+  const list = page.getByRole("navigation", { name: "Choose a supervisor" });
+
+  await journey.stage("The machine drops while I am about to start a session", async () => {
+    await journey.open();
+    await expect(page.getByRole("button", { name: "New session", exact: true })).toBeVisible();
+    await hub.down("atlas", { sockets: "close" });
+    await expect(list.getByRole("button", { name: /cas-src/ })).toContainText("Reconnecting", { timeout: 20_000 });
+  });
+
+  await journey.stage("New session says it is reconnecting and offers nothing that can only fail", async () => {
+    await page.getByRole("button", { name: "New session", exact: true }).tap();
+    await expect(sheet).toBeVisible();
+    await expect(sheet.locator('[data-launch-list="known"]')).toHaveText("Lost connection to Atlas · Linux. Reconnecting… Its projects load once it's back.");
+    await expect(sheet.getByText(/Couldn't load/)).toHaveCount(0);
+    await expect(sheet.getByRole("button", { name: "Start", exact: true })).toHaveAttribute("aria-disabled", "true");
+    expect(hub.launches).toEqual([]);
+  });
+
+  await journey.stage("Back online, its projects load in the same sheet", async () => {
+    await hub.up("atlas");
+    await expect(sheet.getByRole("radio", { name: /ledger-api/ })).toBeVisible({ timeout: 30_000 });
+    await expect(sheet.locator(".launch-offline")).toHaveCount(0);
+    await sheet.getByRole("radio", { name: /ledger-api/ }).tap();
+    await expect(sheet.getByRole("button", { name: "Start", exact: true })).toHaveAttribute("aria-disabled", "false");
   });
 });

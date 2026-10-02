@@ -502,6 +502,11 @@ pub struct HubSession {
     /// Never the row's content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_activity: Option<String>,
+    /// When the session started (its metadata's `created_at`). Commander
+    /// marks the newest of a project's sessions as most recent when none of
+    /// them has activity yet (cas-6acf).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
     #[serde(skip)]
     pub daemon_identity: Option<DaemonIdentity>,
 }
@@ -728,6 +733,7 @@ fn hub_session(session: &SessionInfo) -> HubSession {
         dormant: !has_live_supervisor(session),
         last_activity_at: None,
         last_activity: None,
+        started_at: Some(session.metadata.created_at.clone()).filter(|at| !at.trim().is_empty()),
         daemon_identity: session
             .metadata
             .daemon_pid_starttime
@@ -911,6 +917,7 @@ pub fn fixture_session(name: &str) -> HubSession {
         dormant: false,
         last_activity_at: None,
         last_activity: None,
+        started_at: None,
         daemon_identity: None,
     }
 }

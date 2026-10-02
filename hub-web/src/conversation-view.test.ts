@@ -26,6 +26,8 @@ describe("ConversationView (Pebble thread)", () => {
     expect(line()).toContain("Retry once the session is live again.");
   });
   it("paints operator pebbles right, supervisor pebbles in the accent scope, grouped corners and one time per group", () => {
+    // Read on the day these turns were sent: a same-day time is the clock alone (cas-e829).
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(at(12, 0));
     const history = new ConversationHistory();
     const view = new ConversationView(document, history, { supervisor: "atlas-sup", machine: "Atlas", project: "cas-src", accentClass: "machine-accent-0" });
     document.body.replaceChildren(view.element);
@@ -46,6 +48,7 @@ describe("ConversationView (Pebble thread)", () => {
     expect(bubbles[1]?.classList.contains("group-first")).toBe(false); expect(bubbles[1]?.classList.contains("group-last")).toBe(true);
     expect(bubbles[1]?.classList.contains("receipt")).toBe(true); expect(bubbles[1]?.querySelector(".tick")).not.toBeNull();
     expect(sup.querySelectorAll("time")).toHaveLength(1); expect(sup.querySelector("time")?.textContent).toBe("09:47");
+    vi.useRealTimers();
   });
   it("re-derives grouping on incremental updates so a later turn tightens the earlier outer corner", () => {
     const history = new ConversationHistory();
@@ -78,26 +81,32 @@ describe("ConversationView (Pebble thread)", () => {
     view.update();
 
     expect(view.element.querySelector<HTMLElement>(".empty")?.hidden).toBe(false);
-    expect(view.element.querySelector(".said")?.textContent).toBe("No Commander messages from this session yet. The supervisor (sup) will write here when it needs a decision.");
+    expect(view.element.querySelector(".said")?.textContent).toBe("No messages from this supervisor in this session yet — nothing is waiting on you.");
     expect(view.element.querySelector(".history-end")).toBeNull();
     expect(view.element.querySelector(".working")).toBeNull();
   });
   it("shows a loading line, not the empty state, until the first history page lands (cas-04ee)", () => {
     const history = new ConversationHistory();
     let loading = true;
-    const view = new ConversationView(document, history, { supervisor: "sup", loadingHistory: () => loading });
+    const opened = Date.now() - 600;
+    const view = new ConversationView(document, history, { supervisor: "sup", loadingHistory: () => loading, openingSince: () => opened });
     document.body.replaceChildren(view.element);
     expect(view.element.dataset.mountOverlay).toBe("");
     view.update();
     const empty = view.element.querySelector<HTMLElement>(".empty")!;
     expect(empty.hidden).toBe(false);
     expect(empty.dataset.state).toBe("loading");
-    expect(empty.querySelector('[role="status"]')?.textContent).toBe("Loading your conversation with sup…");
+    // cas-813a: the attach's own words, and its motion clock carried on.
+    expect(empty.querySelector('[role="status"]')?.textContent).toBe("Opening the conversation…");
+    const delays = [...empty.querySelectorAll<HTMLElement>(".conversation-loading .dots i")].map((dot) => parseInt(dot.style.animationDelay, 10));
+    expect(delays).toHaveLength(3);
+    expect(delays[0]).toBeGreaterThan(300); expect(delays[0]).toBeLessThanOrEqual(400);
+    expect(delays[1] - delays[0]).toBe(200); expect(delays[2] - delays[0]).toBe(400);
     expect(empty.textContent).not.toContain("Nothing waiting");
     // The page lands empty: now the empty state is the truth.
     loading = false; view.update();
-    expect(empty.dataset.state).toBeUndefined();
-    expect(empty.querySelector(".said")?.textContent).toBe("No Commander messages from this session yet. The supervisor (sup) will write here when it needs a decision.");
+    expect(empty.dataset.state).toBe("empty");
+    expect(empty.querySelector(".said")?.textContent).toBe("No messages from this supervisor in this session yet — nothing is waiting on you.");
     // A page with turns shows the turns, whatever the flag says.
     loading = true; history.reply(reply(1, "answer", "Ready."), at(9, 0)); view.update();
     expect(empty.hidden).toBe(true);
@@ -227,6 +236,20 @@ describe("ConversationView (Pebble thread)", () => {
     const ask = view.element.querySelector<HTMLElement>('[data-kind="ask"]')!;
     expect(ask.classList.contains("bub")).toBe(true); expect(ask.textContent).toBe("Fix in-train or ship?");
     expect(view.element.querySelector<HTMLElement>('[data-kind="blocker"]')?.classList.contains("bub")).toBe(true);
+  });
+  it("names the earlier session an answer quotes, and keeps it in this thread (cas-e829)", () => {
+    const history = new ConversationHistory();
+    const view = new ConversationView(document, history, "sup"); document.body.replaceChildren(view.element);
+    history.reply({ ...reply(5, "answer", "The import finished overnight.", 3196243), reply_to_session: "acct-wise-lion-31" }, at(9, 40));
+    history.reply(reply(6, "answer", "Same-session answer.", 5), at(9, 41));
+    view.update();
+    const [cross, same] = [...view.element.querySelectorAll<HTMLElement>('.turn.sup .bub[data-kind="answer"]')];
+    expect(cross!.querySelector(".reply-quote")?.textContent).toBe("re: earlier session wise-lion-31");
+    expect(cross!.querySelector(".reply-quote")?.getAttribute("title")).toBe("acct-wise-lion-31");
+    expect(cross!.dataset.replyTo).toBe("3196243");
+    expect(cross!.textContent).toContain("The import finished overnight.");
+    expect(same!.querySelector(".reply-quote")).toBeNull();
+    expect(view.element.querySelector(".earlier-session")).toBeNull();
   });
   it("renders a markdown table as an evidence table with toned cells", () => {
     const history = new ConversationHistory();
@@ -361,7 +384,7 @@ describe("ConversationView (Pebble thread)", () => {
   it("turns a send whose receipt never came into Not confirmed with Retry, not Sending… forever (cas-1622)", () => {
     const history = new ConversationHistory();
     const retry = vi.fn();
-    const view = new ConversationView(document, history, { supervisor: "sup", editMessage: vi.fn(), retryMessage: retry }); document.body.replaceChildren(view.element);
+    const view = new ConversationView(document, history, { supervisor: "sup", project: "cas-src", editMessage: vi.fn(), retryMessage: retry }); document.body.replaceChildren(view.element);
     history.submit("x", "sup", "Is the gate green?", at(9, 0), 52);
     expect(history.unconfirmSilent(at(9, 0) + RECEIPT_TIMEOUT_MS - 1)).toEqual([]);
     view.update();
@@ -372,7 +395,8 @@ describe("ConversationView (Pebble thread)", () => {
     const label = bubble.querySelector<HTMLElement>(".conversation-unconfirmed")!;
     expect(label.getAttribute("role")).toBe("status");
     expect(label.querySelector("svg.warn")?.getAttribute("aria-hidden")).toBe("true");
-    expect(label.textContent).toBe("Not confirmed · Cassy couldn't confirm delivery to sup. Retry sends it again.");
+    // cas-71f4 (journey F20): the project's supervisor, never the codename.
+    expect(label.textContent).toBe("Not confirmed · Cassy couldn't confirm delivery to the cas-src supervisor. Retry sends it again.");
     // Journey F10: the operator's words, not "the hub".
     expect(label.textContent).not.toMatch(/\bhub\b/i);
     // It may have arrived: no "Not sent", and only Retry (an edit could reach the supervisor twice as easily).
@@ -428,7 +452,7 @@ describe("ConversationView (Pebble thread)", () => {
     history.reply(reply(3, "status", "gate 1 of 3"), at(12, 46)); history.reply(reply(4, "status", "gate 2 of 3"), at(12, 46));
     view.update();
     const groups = [...view.element.querySelectorAll<HTMLElement>('.msgs [role="group"]')];
-    expect(groups.map((group) => group.getAttribute("aria-label")?.replace(/\d{1,2}:\d{2}/, "<t>"))).toEqual(["You, <t>", "sup, <t>", "sup, status, <t>"]);
+    expect(groups.map((group) => group.getAttribute("aria-label")?.replace(/(?:[A-Z][a-z]{2} \d{1,2}, )?\d{1,2}:\d{2}/, "<t>"))).toEqual(["You, <t>", "sup, <t>", "sup, status, <t>"]);
     // The visible time is not read twice: the group label carries it.
     for (const time of view.element.querySelectorAll(".msgs time")) expect(time.getAttribute("aria-hidden")).toBe("true");
   });
@@ -544,10 +568,9 @@ describe("ConversationView (Pebble thread)", () => {
     expect(empty.querySelector("b")?.textContent).toBe("cas-hub-static");
     expect(empty.querySelector(".proj2")?.textContent).toBe("Bench · calm-heron-5");
     expect(empty.querySelector(".proj2 > .codename")?.textContent).toBe("calm-heron-5");
-    expect(empty.querySelector(".said")?.textContent).toBe("No Commander messages from this session yet. The supervisor (calm-heron-5) will write here when it needs a decision.");
-    // The codename in the sentence is an identifier span that never breaks at its hyphen.
-    expect(empty.querySelector(".said .codename")?.textContent).toBe("calm-heron-5");
-    expect(empty.querySelector<HTMLElement>(".said .codename")?.title).toBe("calm-heron-5");
+    // The sentence names the project's supervisor; the codename is only in the meta line (cas-010f).
+    expect(empty.querySelector(".said")?.textContent).toBe("No messages from the cas-hub-static supervisor in this session yet — nothing is waiting on you.");
+    expect(empty.querySelector(".said .codename")).toBeNull();
     expect(empty.querySelector<HTMLElement>(".proj2")?.title).toBe("Bench · calm-heron-5");
     expect(empty.querySelector("b")?.classList.contains("codename")).toBe(false);
     expect(empty.querySelector(".quiet")?.textContent).toBe("Promoted the hub to production on Monday.");

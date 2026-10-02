@@ -11,7 +11,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HubDouble, type DoubleOptions } from "./hub-double";
-import { JOURNEY_NOW, JOURNEY_TIMEZONE, startJourneyClock } from "./clock";
+import { JOURNEY_NOW, JOURNEY_TIMEZONE, startJourneyClock, stopJourneyClock } from "./clock";
 
 export { expect };
 
@@ -29,6 +29,13 @@ export type Journey = {
   open(): Promise<void>;
 };
 
+/**
+ * Marks a test as one part of a catalog journey that runs as several tests
+ * (cas-1f7e): `test("HUB-J12 …", JOURNEY_PART, async ({ page, journey }) => …)`.
+ */
+export const JOURNEY_PART = { type: "journey-part", description: "one part of a catalog journey run as several tests" } as const;
+export const journeyPart = { annotation: JOURNEY_PART };
+
 function slug(text: string): string {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48);
 }
@@ -38,12 +45,23 @@ export const test = base.extend<{ journey: Journey }>({
     // Install before navigation; time flows normally from a known instant.
     // Freezing Date would stop the app aging receipts and heartbeat deadlines.
     await page.clock.install({ time: startJourneyClock() });
-    await use(page);
+    try {
+      await use(page);
+    } finally {
+      stopJourneyClock();
+    }
   },
   journey: async ({ page }, use, testInfo) => {
     const id = /^([A-Z]+-J[0-9]+)\b/.exec(testInfo.title)?.[1];
     if (!id) throw new Error(`journey test titles must start with a catalog id: "${testInfo.title}"`);
-    const dir = join(RECEIPTS, id);
+    // cas-1f7e: one catalog journey can run as several tests (HUB-J12's
+    // network switches). Each extra test is marked with JOURNEY_PART and
+    // writes its receipts under <ID>/parts/<slug>/, so no test overwrites
+    // another's; journey-bundles.py folds the parts into the <ID> bundle.
+    const part = testInfo.annotations.some((annotation) => annotation.type === JOURNEY_PART.type)
+      ? testInfo.title.replace(/^[A-Z]+-J[0-9]+\s*/, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 96)
+      : undefined;
+    const dir = part ? join(RECEIPTS, id, "parts", part) : join(RECEIPTS, id);
     mkdirSync(dir, { recursive: true });
     const stages: Stage[] = [];
     const errors: string[] = [];
@@ -142,13 +160,18 @@ export async function expectWholeFocusRing(field: import("@playwright/test").Loc
 
 /** Two animation frames: let the UI paint before a screenshot. */
 async function settle(page: Page): Promise<void> {
-  await page.evaluate(() => new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(ok))));
+  // A test that holds the page clock (ProtocolClock) holds animation frames
+  // too; the screenshot then shows the held frame, after at most a short
+  // real-time wait instead of a hang (cas-1f7e).
+  const painted = page.evaluate(() => new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(ok))));
+  await Promise.race([painted, new Promise((ok) => setTimeout(ok, 250))]);
+  painted.catch(() => undefined);
 }
 
 /**
- * Every animation frame, on every page load: a conversation must never show
- * the terminal canvas (a near-black frame in the light theme) and never sit on
- * a bare panel (cas-04ee, journey evaluation F9/F13). A bare panel is allowed
+ * Every animation frame that can show a change, on every page load: a
+ * conversation must never show the terminal canvas (a near-black frame in the
+ * light theme) and never sit on a bare panel (cas-04ee, journey evaluation F9/F13). A bare panel is allowed
  * for a moment while one view replaces another, not for 250 ms.
  */
 async function watchConversationFrames(page: Page): Promise<string[]> {
@@ -157,21 +180,41 @@ async function watchConversationFrames(page: Page): Promise<string[]> {
   await page.addInitScript(() => {
     const report = (window as unknown as { __journeyFrameDefect: (defect: string) => void }).__journeyFrameDefect;
     let bareSince: number | undefined;
-    const tick = (now: number) => {
-      const slot = document.querySelector<HTMLElement>(".conversation-pane-slot");
-      if (slot) {
-        for (const canvas of slot.querySelectorAll("canvas")) {
-          const box = canvas.getBoundingClientRect();
-          if (getComputedStyle(canvas).visibility === "visible" && box.width > 0 && box.height > 0) report("terminal canvas visible in the conversation");
-        }
-        if (!slot.innerText.trim()) {
-          bareSince ??= now;
-          if (now - bareSince > 250) report("conversation panel bare for over 250 ms");
-        } else bareSince = undefined;
-      } else bareSince = undefined;
+    // Frames are watched only while something can change what they show: the
+    // DOM, the viewport, a transition or an animation. A quiet page queues no
+    // frame callback. A held page clock (ProtocolClock) fires every queued one,
+    // 125 per 2 s tick, and an always-on loop made the clock-heavy HUB-J12
+    // parts 4x slower and stall under load (cas-1f7e). A bare panel keeps being
+    // timed frame by frame until it fills or goes.
+    let changed = true;
+    let queued = false;
+    const watch = () => {
+      if (queued) return;
+      queued = true;
       requestAnimationFrame(tick);
     };
-    requestAnimationFrame(tick);
+    const touched = () => { changed = true; watch(); };
+    const tick = (now: number) => {
+      queued = false;
+      if (changed) {
+        changed = false;
+        const slot = document.querySelector<HTMLElement>(".conversation-pane-slot");
+        if (slot) {
+          for (const canvas of slot.querySelectorAll("canvas")) {
+            const box = canvas.getBoundingClientRect();
+            if (getComputedStyle(canvas).visibility === "visible" && box.width > 0 && box.height > 0) report("terminal canvas visible in the conversation");
+          }
+          if (!slot.innerText.trim()) bareSince ??= now;
+          else bareSince = undefined;
+        } else bareSince = undefined;
+      }
+      if (bareSince === undefined) return;
+      if (now - bareSince > 250) report("conversation panel bare for over 250 ms");
+      watch();
+    };
+    new MutationObserver(touched).observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+    for (const event of ["resize", "transitionrun", "transitionend", "animationstart", "animationend"]) addEventListener(event, touched, true);
+    watch();
   });
   return defects;
 }

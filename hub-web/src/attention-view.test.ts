@@ -33,6 +33,32 @@ describe("attention timeline", () => {
     expect(busy.querySelector(".attention-empty")).toBeNull();
   });
 
+  it("tells the last event's time in the app's 24-hour clock, not the browser's locale (cas-0cd1)", () => {
+    const at = new Date(now);
+    at.setHours(9, 7, 32, 0);
+    const earlier = new Date(now);
+    earlier.setHours(8, 0, 0, 0);
+    const acknowledged = (id: string, createdAt: string): AttentionItem => ({ ...event(id), createdAt, acknowledgedAt: createdAt });
+    const items = [acknowledged("old", earlier.toISOString()), acknowledged("latest", at.toISOString())];
+    const root = document.createElement("div");
+    renderAttentionPanel(root, items, callbacks(), { now: at.getTime() + 60_000 });
+    const stamp = root.querySelector<HTMLTimeElement>(".attention-empty time.attention-last-event")!;
+    expect(stamp.dateTime).toBe(at.toISOString());
+    expect(stamp.textContent).toBe("Last event 09:07");
+    expect(stamp.textContent).not.toMatch(/AM|PM|\d+\/\d+\/\d+|:32/);
+
+    // On a later day it names the day, as thread times do, and a redraw with
+    // nothing new still moves the label over midnight.
+    const tomorrow = at.getTime() + 86_400_000;
+    const later = document.createElement("div");
+    renderAttentionPanel(later, items, callbacks(), { now: tomorrow });
+    const day = `${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][at.getMonth()]} ${at.getDate()}`;
+    expect(later.querySelector(".attention-last-event")?.textContent).toBe(`Last event ${day}, 09:07`);
+    renderAttentionPanel(root, items, callbacks(), { now: tomorrow });
+    expect(root.querySelector(".attention-last-event")).toBe(stamp);
+    expect(stamp.textContent).toBe(`Last event ${day}, 09:07`);
+  });
+
   it("gives all twelve events one primary text action and a timestamp", () => {
     const root = document.createElement("div");
     renderAttentionPanel(root, Array.from({ length: 12 }, (_, i) => event(String(i))), callbacks(), { now });
@@ -80,5 +106,97 @@ describe("attention timeline", () => {
     toggle.click();
     expect(body.hidden).toBe(false);
     expect(toggle.getAttribute("aria-expanded")).toBe("true");
+  });
+});
+
+describe("heartbeat redraws (cas-a5c6 QA F03)", () => {
+  it("leaves an unchanged panel, its focus and an opened Details alone, and redraws when something changes", () => {
+    const root = document.createElement("div"); document.body.replaceChildren(root);
+    renderAttentionPanel(root, [event("1")], callbacks(), { now });
+    const dismiss = root.querySelector<HTMLButtonElement>(".attention-dismiss-group")!;
+    const details = root.querySelector<HTMLDetailsElement>("details")!;
+    details.open = true;
+    dismiss.focus();
+    // The 5 s heartbeat: same items, same minute.
+    renderAttentionPanel(root, [event("1")], callbacks(), { now: now + 5_000 });
+    expect(root.querySelector(".attention-dismiss-group")).toBe(dismiss);
+    expect(document.activeElement).toBe(dismiss);
+    expect(details.open).toBe(true);
+    // A new item is a real change.
+    renderAttentionPanel(root, [event("1"), event("2")], callbacks(), { now: now + 10_000 });
+    expect(root.querySelector(".attention-dismiss-group")).not.toBe(dismiss);
+    // The next minute is not a redraw: the ages move on in place (round 3).
+    const before = root.querySelector(".attention-dismiss-group");
+    renderAttentionPanel(root, [event("1"), event("2")], callbacks(), { now: now + 70_000 });
+    expect(root.querySelector(".attention-dismiss-group")).toBe(before);
+  });
+});
+
+describe("redraws keep each notice's state by its key (cas-a5c6 QA round 3)", () => {
+  const warn = (id: string, at: string): AttentionItem => ({ ...event(id, "delivery_stall"), createdAt: at, message: `notice ${id}` });
+  const card = (root: HTMLElement, id: string) => [...root.querySelectorAll<HTMLElement>("[data-attention-id]")].find((node) => node.textContent?.includes(`notice ${id}`))!;
+
+  it("keeps focus on the same notice's Dismiss when a new notice arrives above it (F01)", () => {
+    const root = document.createElement("div"); document.body.replaceChildren(root);
+    const a = warn("a", "2026-09-07T11:50:00Z");
+    renderAttentionPanel(root, [a], callbacks(), { now });
+    card(root, "a").querySelector<HTMLElement>("[data-role='dismiss']")!.focus();
+    renderAttentionPanel(root, [a, warn("b", "2026-09-07T11:59:00Z")], callbacks(), { now });
+    const focused = document.activeElement as HTMLElement;
+    expect(focused.dataset.role).toBe("dismiss");
+    expect(focused.closest("[data-attention-id]")).toBe(card(root, "a"));
+  });
+
+  it("keeps an opened Details open and Copy focused across a minute, and its age moves on in place (F02, F03)", () => {
+    const root = document.createElement("div"); document.body.replaceChildren(root);
+    const a = warn("a", "2026-09-07T11:59:00Z");
+    renderAttentionPanel(root, [a], callbacks(), { now });
+    const details = card(root, "a").querySelector("details")!;
+    details.open = true;
+    const copy = card(root, "a").querySelector<HTMLElement>("[data-role='copy']")!;
+    copy.focus();
+    const time = card(root, "a").querySelector("time.attention-time")!;
+    const before = time.textContent;
+    renderAttentionPanel(root, [a], callbacks(), { now: now + 61_000 });
+    expect(card(root, "a").querySelector("[data-role='copy']")).toBe(copy);
+    expect(document.activeElement).toBe(copy);
+    expect(details.open).toBe(true);
+    expect(time.textContent).not.toBe(before);
+    // A real change redraws, and the opened Details stays open on its notice.
+    renderAttentionPanel(root, [a, warn("b", "2026-09-07T11:59:30Z")], callbacks(), { now: now + 62_000 });
+    expect(card(root, "a").querySelector("details")!.open).toBe(true);
+    expect(card(root, "b").querySelector("details")!.open).toBe(false);
+    expect((document.activeElement as HTMLElement).dataset.role).toBe("copy");
+    expect((document.activeElement as HTMLElement).closest("[data-attention-id]")).toBe(card(root, "a"));
+  });
+});
+
+describe("a rebuilt page keeps the Attention panel as the operator left it (cas-f486)", () => {
+  const warn = (id: string): AttentionItem => ({ ...event(id, "delivery_stall"), createdAt: "2026-09-07T11:59:00Z", message: `notice ${id}` });
+  const panel = () => { const root = document.createElement("section"); root.id = "attention-panel"; return root; };
+
+  it("carries opened Details and focus into the panel that replaces it", () => {
+    const first = panel(); document.body.replaceChildren(first);
+    renderAttentionPanel(first, [warn("a")], callbacks(), { now });
+    first.querySelector("details")!.open = true;
+    first.querySelector<HTMLElement>("[data-role='copy']")!.focus();
+    // A wake from sleep rebuilds the shell: a fresh, empty panel element.
+    const second = panel(); document.body.replaceChildren(second);
+    expect(document.activeElement).toBe(document.body);
+    renderAttentionPanel(second, [warn("a")], callbacks(), { now: now + 600_000 });
+    expect(second.querySelector("details")!.open).toBe(true);
+    expect(document.activeElement).toBe(second.querySelector("[data-role='copy']"));
+  });
+
+  it("does not pull back focus the operator moved elsewhere", () => {
+    const first = panel(); const elsewhere = document.createElement("button");
+    document.body.replaceChildren(first, elsewhere);
+    renderAttentionPanel(first, [warn("b")], callbacks(), { now });
+    first.querySelector<HTMLElement>("[data-role='dismiss']")!.focus();
+    elsewhere.focus();
+    elsewhere.blur();
+    const second = panel(); document.body.replaceChildren(second);
+    renderAttentionPanel(second, [warn("b")], callbacks(), { now });
+    expect(document.activeElement).toBe(document.body);
   });
 });

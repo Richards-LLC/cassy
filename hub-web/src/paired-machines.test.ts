@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
-import { CANT_REACH_RETRYING, machineFooterMarkup, type PairedMachineRow } from './paired-machines';
+import { CANT_REACH_RETRYING, machineFooterMarkup, orderPairedMachines, renderPairedMachines, type PairedMachineRow } from './paired-machines';
+import { UNSTEADY } from './connection-state';
 
 const atlas: PairedMachineRow = {
   id: 'atlas', label: 'Atlas', address: 'atlas.test', connection: 'Needs pairing',
@@ -38,7 +39,74 @@ describe('paired machine footer after authentication loss (cas-f698)', () => {
     expect(footerState([atlas, retrying])).toBe(CANT_REACH_RETRYING);
   });
 
-  it('keeps the connected count when a second machine needs pairing', () => {
-    expect(footerState([atlas, { ...atlas, id: 'studio', connected: true, connection: 'Connected', connectionState: { phase: 'live', degraded: false } }])).toBe('1 connected');
+  it('names the machine that needs pairing beside a connected one (cas-0739)', () => {
+    expect(footerState([atlas, { ...atlas, id: 'studio', connected: true, connection: 'Connected', connectionState: { phase: 'live', degraded: false } }])).toBe('Atlas needs pairing');
+  });
+});
+
+describe('an unsteady machine reads Unsteady in the footer, as in the header and row (cas-a6f0)', () => {
+  const unsteady: PairedMachineRow = { ...atlas, connection: UNSTEADY, connectionState: { phase: 'live', degraded: true } };
+  it('names the only machine unsteady, with the warning dot', () => {
+    const footer = document.createElement('div');
+    footer.innerHTML = machineFooterMarkup([unsteady], 1, 'test-build');
+    expect(footer.querySelector('.machine-badge-state')!.textContent).toBe('Unsteady');
+    expect(footer.querySelector('.pairing-dot')!.classList.contains('partial')).toBe(true);
+  });
+  it('says Reconnecting once another machine is actually down', () => {
+    const retrying = { ...atlas, id: 'studio', connection: 'Reconnecting', connectionState: { phase: 'backoff' as const, degraded: false } };
+    expect(footerState([unsteady, retrying])).toBe('Reconnecting');
+  });
+  it('names the unsteady machine beside a connected one (cas-0739)', () => {
+    expect(footerState([unsteady, { ...atlas, id: 'studio', connected: true, connection: 'Connected', connectionState: { phase: 'live', degraded: false } }])).toBe('Atlas unsteady');
+  });
+});
+
+describe('the machine that is not connected comes first and the footer names it (cas-0739, journey F10)', () => {
+  const live = (id: string, label: string): PairedMachineRow => ({ id, label, address: `${id}.test`, connection: 'Connected', connected: true, everConnected: true, lastSeen: '', connectionState: { phase: 'live', degraded: false } });
+  const shed: PairedMachineRow = { id: 'shed', label: 'Shed NAS · Linux', address: 'shed.test', connection: CANT_REACH_RETRYING, connected: false, everConnected: false, lastSeen: '', connectionState: { phase: 'backoff', degraded: false } };
+  const fleet = [live('atlas', 'Atlas · Linux'), live('studio', 'Studio Mac · macOS'), shed, live('forge', 'Forge · Linux')];
+
+  it('names the one machine that cannot be reached, by its own name', () => {
+    expect(footerState(fleet)).toBe("Shed NAS can't be reached");
+  });
+
+  it('names its state in words for each kind of outage', () => {
+    const one = (connection: string) => footerState([live('atlas', 'Atlas · Linux'), { ...shed, connection }]);
+    expect(one('Reconnecting')).toBe('Shed NAS reconnecting');
+    expect(one('Needs pairing')).toBe('Shed NAS needs pairing');
+    expect(one('Unreachable')).toBe("Shed NAS can't be reached");
+    expect(one('Connecting…')).toBe('Shed NAS connecting');
+  });
+
+  it('keeps a long name whole in the title and safe as text (cas-0739 QA round 1)', () => {
+    const footer = document.createElement('div');
+    const rack = { ...shed, label: 'Build Server Rack Seven Downstairs <b>x</b> · Windows' };
+    footer.innerHTML = machineFooterMarkup([live('atlas', 'Atlas · Linux'), rack], 1, 'test-build');
+    const state = footer.querySelector<HTMLElement>('.machine-badge-state')!;
+    expect(state.textContent).toBe("Build Server Rack Seven Downstairs <b>x</b> can't be reached");
+    expect(state.title).toBe(state.textContent);
+    expect(state.querySelector('b')).toBeNull();
+    // The label and the state are separate spans, so CSS can let the state yield.
+    expect([...footer.querySelector('#paired-machines-toggle')!.children].map((child) => child.className)).toEqual(['pairing-dot partial', '', 'machine-badge-state']);
+  });
+
+  it('counts several machines that are not connected', () => {
+    expect(footerState([...fleet, { ...shed, id: 'attic', label: 'Attic · Linux', connection: 'Reconnecting' }])).toBe('2 not connected');
+  });
+
+  it('lists the machines that are not connected first, keeping each group in its order', () => {
+    expect(orderPairedMachines(fleet).map((row) => row.id)).toEqual(['shed', 'atlas', 'studio', 'forge']);
+    expect(orderPairedMachines([...fleet, { ...shed, id: 'attic' }]).map((row) => row.id)).toEqual(['shed', 'attic', 'atlas', 'studio', 'forge']);
+  });
+
+  it('moves rendered rows into that order only when asked, so an open list does not jump', () => {
+    const container = document.createElement('div');
+    renderPairedMachines(container, fleet, async () => undefined);
+    const ids = () => [...container.querySelectorAll<HTMLElement>('[data-machine-id]')].map((node) => node.dataset.machineId);
+    expect(ids()).toEqual(['atlas', 'studio', 'shed', 'forge']);
+    renderPairedMachines(container, orderPairedMachines(fleet), async () => undefined, { reorder: false });
+    expect(ids()).toEqual(['atlas', 'studio', 'shed', 'forge']);
+    renderPairedMachines(container, orderPairedMachines(fleet), async () => undefined);
+    expect(ids()).toEqual(['shed', 'atlas', 'studio', 'forge']);
   });
 });

@@ -19,6 +19,11 @@ export interface PairDialogState {
   relayOrigin: string | undefined | null;
   /** This page's origin (location.origin in the app). */
   pageOrigin: string;
+  /**
+   * cas-093d F02: the re-pair command that keeps session launch, shown as its
+   * own copyable code under the status that introduces it.
+   */
+  repairCommand?: string;
 }
 
 function escapeAttr(value: string): string { return escapeHtml(value); }
@@ -74,6 +79,20 @@ function pairStatusMarkup(pairingStatus: string): string {
 }
 
 /**
+ * A command to run on the machine, as one code token that wraps only between
+ * words, with a Copy button whose result is announced inside the dialog
+ * (cas-093d F02).
+ */
+export function pairCommandMarkup(command: string): string {
+  // cas-093d QA F01: each word is unbreakable on its own (white-space:
+  // nowrap), so the only places a line can break are the spaces between
+  // words. word-break: keep-all still let the browser break after a hyphen
+  // ("--" / "scopes"). The visible label is the accessible name (QA F02).
+  const words = command.split(" ").map((word) => `<span class="pair-command-word">${escapeHtml(word)}</span>`).join(" ");
+  return `<div class="pair-code-actions pair-command"><code class="pair-command-token" id="pair-repair-command">${words}</code><button type="button" class="pair-command-copy" data-pair-command="${escapeAttr(command)}" aria-describedby="pair-repair-command">Copy command</button><span class="sr-only pair-command-status" role="status"></span></div>`;
+}
+
+/**
  * The pairing dialog for one pairing state. main.ts renders it from its live
  * state; the visual-QA fixtures render it from a fixture state, so the gate
  * measures the production dialog — the email field included (D11).
@@ -125,7 +144,7 @@ export function pairDialogMarkup(state: PairDialogState): string {
   // One state, one next action. Without an invitation there is nothing to
   // Pair, so no Pair control exists here at all; a link printed by the machine
   // opens the confirmation form directly and never passes through this step.
-  return `<dialog id="pair-dialog">${cloudBrand()}<section class="pair-flow" tabindex="-1" autofocus><h2>Pair a machine</h2>${capabilityLead(DEFAULT_PAIRING_SCOPES)}<p>Create a ten-minute code, then approve it on the machine you want to pair.</p><label>Email me the code too (optional)<input id="pair-email" type="email" autocomplete="email" placeholder="you@example.com" value="${escapeAttr(pairingDraft.email)}"><small class="field-hint">Handy when you approve it on the machine from another screen.</small></label>${technicalDetails("create", pairingDraft, detailRow("Cassy Cloud origin", pageOrigin) + detailRow("Exact scopes", exactScopes(DEFAULT_PAIRING_SCOPES)))}${pairStatusMarkup(pairingStatus)}<p class="pair-alternative">Already have a link? Open the pairing URL that <code>cas hub pair</code> printed on the machine; it continues straight to confirmation.</p><div class="dialog-actions"><button id="pair-close" type="button">${pairingCreateInFlight ? "Cancel" : "Close"}</button>${relayAction}</div></section></dialog>`;
+  return `<dialog id="pair-dialog">${cloudBrand()}<section class="pair-flow" tabindex="-1" autofocus><h2>Pair a machine</h2>${capabilityLead(DEFAULT_PAIRING_SCOPES)}<p>Create a ten-minute code, then approve it on the machine you want to pair.</p><label>Email me the code too (optional)<input id="pair-email" type="email" autocomplete="email" placeholder="you@example.com" value="${escapeAttr(pairingDraft.email)}"><small class="field-hint">Handy when you approve it on the machine from another screen.</small></label>${technicalDetails("create", pairingDraft, detailRow("Cassy Cloud origin", pageOrigin) + detailRow("Exact scopes", exactScopes(DEFAULT_PAIRING_SCOPES)))}${pairStatusMarkup(pairingStatus)}${state.repairCommand ? pairCommandMarkup(state.repairCommand) : ""}<p class="pair-alternative">Already have a link? Open the pairing URL that <code>cas hub pair</code> printed on the machine; it continues straight to confirmation.</p><div class="dialog-actions"><button id="pair-close" type="button">${pairingCreateInFlight ? "Cancel" : "Close"}</button>${relayAction}</div></section></dialog>`;
 }
 
 

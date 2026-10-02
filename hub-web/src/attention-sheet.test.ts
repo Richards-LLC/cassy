@@ -1,0 +1,120 @@
+// @vitest-environment jsdom
+import { describe, expect, it, vi } from "vitest";
+import { applySheetSemantics, findByFocusKey, focusKey, layerAboveSheet, sheetFocusables, sheetKeydown } from "./attention-sheet";
+
+/** A conversation shell as conversationShellMarkup builds it: sidebar, main (badge), rail (sheet). */
+function shell(): { root: HTMLElement; badge: HTMLButtonElement; rail: HTMLElement; close: HTMLButtonElement; details: HTMLElement; send: HTMLButtonElement } {
+  const root = document.createElement("div"); root.className = "conversation-shell thread-open";
+  root.innerHTML = '<aside class="conversation-sidebar"><nav id="conversation-list"><button class="conversation-row">row</button></nav></aside>'
+    + '<main class="conversation-main"><button id="conversation-attention" aria-expanded="false">1</button><button id="message-send">Send</button></main>'
+    + '<aside class="conversation-context" aria-label="Conversation context"><button class="context-sheet-close">×</button><section data-section="attention"><button class="dismiss">Dismiss</button><button class="later" disabled>Later</button><details><summary>Details</summary><pre>payload</pre><button class="copy">Copy</button></details></section></aside>';
+  document.body.replaceChildren(root);
+  return {
+    root,
+    badge: root.querySelector("#conversation-attention")!,
+    rail: root.querySelector(".conversation-context")!,
+    close: root.querySelector(".context-sheet-close")!,
+    details: root.querySelector("summary")!,
+    send: root.querySelector("#message-send")!,
+  };
+}
+const all = () => true;
+
+describe("phone Attention sheet (cas-a5c6)", () => {
+  it("is a modal dialog over an inert page while open, and a plain rail again once closed", () => {
+    const { root, rail } = shell();
+    applySheetSemantics(root, true);
+    expect(rail.getAttribute("role")).toBe("dialog");
+    expect(rail.getAttribute("aria-modal")).toBe("true");
+    expect(rail.getAttribute("aria-label")).toBe("Attention for this session");
+    expect(root.querySelector(".conversation-sidebar")!.hasAttribute("inert")).toBe(true);
+    expect(root.querySelector(".conversation-main")!.hasAttribute("inert")).toBe(true);
+    expect(rail.hasAttribute("inert")).toBe(false);
+    // Closing, or the viewport becoming a desktop, takes every trace of the dialog away.
+    applySheetSemantics(root, false);
+    expect(rail.hasAttribute("role")).toBe(false);
+    expect(rail.hasAttribute("aria-modal")).toBe(false);
+    expect(rail.getAttribute("aria-label")).toBe("Conversation context");
+    expect(root.querySelectorAll("[inert]")).toHaveLength(0);
+    expect(root.classList.contains("attention-sheet-open")).toBe(false);
+  });
+
+  it("cycles Tab and Shift+Tab within the sheet and pulls stray focus back in", () => {
+    const { rail, close, details, send } = shell();
+    const shut = vi.fn();
+    details.focus();
+    expect(sheetKeydown({ key: "Tab", shiftKey: false }, rail, document.activeElement, shut, all)).toBe(true);
+    expect(document.activeElement).toBe(close);
+    expect(sheetKeydown({ key: "Tab", shiftKey: true }, rail, document.activeElement, shut, all)).toBe(true);
+    expect(document.activeElement).toBe(details);
+    // Between its own controls it steps in document order, skipping what Tab cannot reach.
+    rail.querySelector<HTMLButtonElement>(".dismiss")!.tabIndex = -1;
+    close.focus();
+    expect(sheetKeydown({ key: "Tab", shiftKey: false }, rail, document.activeElement, shut, all)).toBe(true);
+    expect(document.activeElement).toBe(details);
+    // Focus behind the sheet (the composer's Send) comes back to it.
+    send.focus();
+    expect(sheetKeydown({ key: "Tab", shiftKey: true }, rail, document.activeElement, shut, all)).toBe(true);
+    expect(document.activeElement).toBe(details);
+    expect(shut).not.toHaveBeenCalled();
+  });
+
+  it("closes on Escape wherever focus is", () => {
+    const { rail, send } = shell();
+    const shut = vi.fn();
+    send.focus();
+    expect(sheetKeydown({ key: "Escape", shiftKey: false }, rail, document.activeElement, shut, all)).toBe(true);
+    expect(shut).toHaveBeenCalledOnce();
+    expect(sheetKeydown({ key: "a", shiftKey: false }, rail, document.activeElement, shut, all)).toBe(false);
+  });
+
+  it("skips what Tab cannot reach: a collapsed Details' contents, disabled and hidden controls (QA F01)", () => {
+    const { rail, close, details } = shell();
+    const names = () => sheetFocusables(rail, all).map((node) => node.textContent);
+    expect(names()).toEqual(["×", "Dismiss", "Details"]);
+    // Shift+Tab from Close (where the sheet opens) reaches Details, not the hidden Copy.
+    close.focus();
+    expect(sheetKeydown({ key: "Tab", shiftKey: true }, rail, document.activeElement, vi.fn(), all)).toBe(true);
+    expect(document.activeElement).toBe(details);
+    // Opened, the Details' Copy is a stop; Tab from it wraps to Close.
+    rail.querySelector("details")!.open = true;
+    expect(names()).toEqual(["×", "Dismiss", "Details", "Copy"]);
+    rail.querySelector<HTMLButtonElement>(".copy")!.focus();
+    sheetKeydown({ key: "Tab", shiftKey: false }, rail, document.activeElement, vi.fn(), all);
+    expect(document.activeElement).toBe(close);
+  });
+
+  it("leaves Escape and Tab to a palette opened over it (QA F02)", () => {
+    const { rail, close } = shell();
+    const palette = document.createElement("dialog"); palette.id = "command-palette";
+    palette.innerHTML = '<input aria-label="Filter commands">';
+    document.body.append(palette);
+    palette.setAttribute("open", "");
+    const shut = vi.fn();
+    palette.querySelector("input")!.focus();
+    expect(layerAboveSheet(rail)).toBe(true);
+    expect(sheetKeydown({ key: "Escape", shiftKey: false }, rail, document.activeElement, shut, all)).toBe(false);
+    expect(sheetKeydown({ key: "Tab", shiftKey: false }, rail, document.activeElement, shut, all)).toBe(false);
+    expect(shut).not.toHaveBeenCalled();
+    // Palette closed: Escape is the sheet's again.
+    palette.removeAttribute("open");
+    close.focus();
+    expect(sheetKeydown({ key: "Escape", shiftKey: false }, rail, document.activeElement, shut, all)).toBe(true);
+    expect(shut).toHaveBeenCalledOnce();
+  });
+
+  it("finds the same notice's control again after a redraw, never a look-alike (QA rounds 2 and 3)", () => {
+    const { rail } = shell();
+    const section = rail.querySelector("section")!;
+    const notice = (id: string) => `<article data-attention-id="${id}"><button data-role="dismiss">Dismiss</button></article>`;
+    section.innerHTML = notice("A") + notice("B");
+    const key = focusKey(rail, section.querySelector<HTMLElement>("[data-attention-id='B'] button")!);
+    // A redraw with a new notice above: position would say A's Dismiss is B's.
+    section.innerHTML = notice("NEW") + notice("A") + notice("B");
+    const found = findByFocusKey(rail, key, all)!;
+    expect(found.closest<HTMLElement>("[data-attention-id]")!.dataset.attentionId).toBe("B");
+    // B is gone: nothing matches, and the caller falls back to Close, never a sibling's Dismiss.
+    section.innerHTML = notice("NEW") + notice("A");
+    expect(findByFocusKey(rail, key, all)).toBeUndefined();
+  });
+});

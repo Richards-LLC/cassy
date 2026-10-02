@@ -45,6 +45,11 @@ export interface ConnectionSurfaceOptions {
    * still reads as opening: the calm title, and the retry behind "Details".
    */
   readonly quietRetry?: boolean;
+  /**
+   * cas-813a: a conversation opens behind the one quiet line (openingLine),
+   * not the verdict card; the card is kept for a failure.
+   */
+  readonly quietOpening?: boolean;
 }
 
 const STAGE_COPY: Record<ConnectionSnapshot["stage"], string> = {
@@ -111,6 +116,50 @@ export function attachInProgress(snapshot: ConnectionSnapshotView): boolean {
 /** A conversation's attach title: calm, and free of relay vocabulary (journey F3). */
 export const CONVERSATION_OPENING = "Opening the conversation…";
 
+/** Quiet motion starts this long after a conversation begins to open (cas-813a). */
+export const OPENING_MOTION_DELAY_MS = 1_000;
+
+/**
+ * The one way a conversation shows that it is opening (cas-813a): a body-size
+ * line, centred where the thread will be, saying "Opening the conversation…".
+ * Its dots stay still until `delayMs` has passed, so a quick open shows no
+ * motion. The same line serves the attach and the first history page, so the
+ * operator sees one wait, not two or three. `delayMs` is counted from when
+ * the open began, so a line built later does not restart the clock.
+ */
+export function openingLine(document: Document, title: string, delayMs: number): HTMLElement {
+  const line = document.createElement("p");
+  line.className = "conversation-loading";
+  line.setAttribute("role", "status");
+  line.dataset.title = title;
+  const dots = document.createElement("span");
+  dots.className = "dots";
+  dots.setAttribute("aria-hidden", "true");
+  const delay = Math.max(0, Math.round(delayMs));
+  for (const step of [0, 200, 400]) {
+    const dot = document.createElement("i");
+    dot.style.animationDelay = `${delay + step}ms`;
+    dots.append(dot);
+  }
+  const text = document.createElement("span");
+  text.textContent = title;
+  line.append(dots, text);
+  return line;
+}
+
+/**
+ * Put the opening line in `target`, keeping the one already there: rebuilding
+ * it on every repaint would restart its motion.
+ */
+export function showOpeningInto(target: HTMLElement, title: string, delayMs: number): HTMLElement {
+  const existing = target.querySelector<HTMLElement>(":scope > .conversation-loading");
+  const line = existing?.dataset.title === title ? existing : openingLine(target.ownerDocument, title, delayMs);
+  target.className = "empty conversation-opening";
+  for (const child of [...target.childNodes]) if (child !== line) child.remove();
+  if (line.parentElement !== target) target.append(line);
+  return line;
+}
+
 /** How long an attach shows its title alone before "Details" is offered. */
 export const ATTACH_QUIET_MS = 400;
 
@@ -175,31 +224,36 @@ export function renderConnectionSurfaceInto(
   const view = connectingView(snapshot, now);
   const fatal = snapshot.fatal === true;
   const opening = attachInProgress(snapshot) || (options.quietRetry === true && !fatal);
+  const quiet = options.quietOpening === true && opening;
   // A repaint (the 1 Hz ticker, a hub push) keeps "Details" as the operator left it.
   const detailsOpen = target.querySelector<HTMLDetailsElement>(":scope > .connection-details")?.open === true;
   // cas-28df: the 1 Hz repaint rebuilds this card, so keyboard focus on
   // "Details" or an action was dropped to the page body every second. Note
   // which control held it and hand it to that control's replacement.
   const focused = document.activeElement instanceof HTMLElement && target.contains(document.activeElement) ? focusKey(document.activeElement) : undefined;
-  target.className = `empty terminal-state terminal-connecting${fatal ? " terminal-connect-failed" : ""}`;
-
-  const title = document.createElement("p");
-  title.className = "terminal-connecting-title";
-  // A spinner and a rising counter over a failure that will never resolve is
-  // the D3 overlay: it reads as progress. State the outcome instead.
-  title.textContent = fatal
-    ? "Connection failed — not retrying."
-    : opening
-      ? options.openingTitle ?? `Connecting to ${session}…`
-    : snapshot.phase === "failed"
-      ? snapshot.authFailure ? "Connection failed — re-pair required." : "Connection failed — retry available."
-    : snapshot.phase === "backoff"
-      ? "Connection interrupted — retrying."
-      : options.openingTitle ?? `Connecting to ${session}…`;
-  target.replaceChildren(title);
+  if (quiet) {
+    showOpeningInto(target, options.openingTitle ?? CONVERSATION_OPENING, OPENING_MOTION_DELAY_MS - elapsedMs(snapshot, now));
+  } else {
+    target.className = `empty terminal-state terminal-connecting${fatal ? " terminal-connect-failed" : ""}`;
+    const title = document.createElement("p");
+    title.className = "terminal-connecting-title";
+    // A spinner and a rising counter over a failure that will never resolve is
+    // the D3 overlay: it reads as progress. State the outcome instead.
+    title.textContent = fatal
+      ? "Connection failed — not retrying."
+      : opening
+        ? options.openingTitle ?? `Connecting to ${session}…`
+      : snapshot.phase === "failed"
+        ? snapshot.authFailure ? "Connection failed — re-pair required." : "Connection failed — retry available."
+      : snapshot.phase === "backoff"
+        ? "Connection interrupted — retrying."
+        : options.openingTitle ?? `Connecting to ${session}…`;
+    target.replaceChildren(title);
+  }
   // An attach in progress shows its title alone for the quiet window: against
   // a quick relay nothing more ever appears (journey F3).
-  if (opening && elapsedMs(snapshot, now) < ATTACH_QUIET_MS && !view.actionsAvailable) return;
+  // A quiet conversation open waits until its motion starts (cas-813a).
+  if (opening && elapsedMs(snapshot, now) < (quiet ? OPENING_MOTION_DELAY_MS : ATTACH_QUIET_MS) && !view.actionsAvailable) return;
 
   const timeline = document.createElement("ol");
   timeline.className = "connection-timeline";
@@ -287,6 +341,23 @@ export function lostConnectionBanner(machineLabel: string, fatal: boolean): stri
 }
 
 /**
+ * cas-a6f0 (journey F8/F9): the machine still reads live but its heartbeats go
+ * unanswered. It is not lost yet, so it is not "Lost connection"; the banner,
+ * the composer and the Tasks panel say what the header's "Unsteady" means.
+ */
+export function unsteadyBanner(machineLabel: string): string {
+  return `Connection to ${machineLabel} unsteady — checking…`;
+}
+
+/**
+ * cas-a6f0 (journey F35): a send held for a machine whose pairing the hub then
+ * refused. It never left this browser and will not go by itself.
+ */
+export function pairingRefusal(machineLabel: string): string {
+  return `Not sent: ${machineLabel} needs pairing again.`;
+}
+
+/**
  * cas-d15c: a pairing the hub refused (revoked, unknown key) is not
  * reconnecting, so the banner beside "Needs pairing" must not say it is.
  */
@@ -314,6 +385,14 @@ export function sessionOutageControlsReason(sessionLabel: string): string {
 /** A message the outage refused. The composer keeps the draft, so it says so. */
 export function outageRefusal(machineLabel: string): string {
   return `Not sent: lost connection to ${machineLabel}. Your message is kept; send it again when it's back.`;
+}
+
+/**
+ * cas-7b31 (journey F2): why the controls wait while the pairing is refused.
+ * Nothing reconnects or comes back by itself; re-pairing is the step.
+ */
+export function pairingControlsReason(machineLabel: string): string {
+  return `${machineLabel} needs pairing again. Re-pair it to take control and interrupt.`;
 }
 
 /** Why Take control, Release control and Interrupt are unavailable during an outage. */

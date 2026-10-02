@@ -66,7 +66,8 @@ fn cas_c0ec_rewritten_worker_logs_require_ignored_or_external_paths() {
     factory.artifacts_root = Some(artifacts.path().to_string_lossy().into_owned());
     config.factory = Some(factory);
     config.save(&root).unwrap();
-    let mut request = input(&format!("cargo check -p cas --tests > {}/worker-check.log 2>&1 &", artifacts.path().display()), "worker");
+    let task_artifacts = crate::config::project_factory_artifacts_root(&root, artifacts.path()).join("cas-c0ec");
+    let mut request = input(&format!("cargo check -p cas --tests > {}/worker-check.log 2>&1 &", task_artifacts.display()), "worker");
     request.cwd = worktree.into();
     let out = handle_pre_tool_use(&request, Some(&root)).unwrap();
     assert!(deny_reason(&out).is_none(), "sanctioned artifact log: {out:?}");

@@ -336,6 +336,27 @@ cut_preflight_check_integration() {
     fi
 }
 
+cut_preflight_check_announce_token() {
+    # An external announcer owns its authentication. An embargo deliberately
+    # permits publication while announcement stages remain pending.
+    [[ -n "${CAS_RELEASE_TRAIN_ANNOUNCE_CMD:-}${CAS_RELEASE_TRAIN_ANNOUNCE_POST_CMD:-}" ]] && return 0
+    if ! declare -F release_train_announce_proxy_toml >/dev/null 2>&1; then
+        # shellcheck disable=SC1091
+        source "$script_dir/release-train.d/announce.sh"
+    fi
+    release_train_announcement_embargo_active && return 0
+    local output proxy_toml
+    proxy_toml="$(release_train_announce_proxy_toml)"
+    if ! output="$(CAS_RELEASE_TRAIN_PROXY_TOML="$proxy_toml" \
+        python3 "$script_dir/release-train-announce.py" --check-token 2>&1)"; then
+        printf '%s\n' "$output" >"$run_dir/preflight-announce-token.log"
+        printf '%s\n' "$output" >&2
+        cut_preflight_block announce-token \
+            "Violet token resolution failed; set VIOLET_SLACK_TOKEN_ENV to the intended credential variable name; inspect $run_dir/preflight-announce-token.log"
+        return $?
+    fi
+}
+
 cut_preflight_check_receipts() {
     local record commit branch
     while IFS=$'\t' read -r record commit branch; do
@@ -366,6 +387,7 @@ cut_stage_preflight() {
     cut_preflight_check_changelog || return 1
     cut_preflight_check_changelog_lint || return 1
     cut_preflight_check_draft || return 1
+    cut_preflight_check_announce_token || return 1
     cut_preflight_check_integration || return 1
     cut_preflight_check_receipts
     printf 'preflight passed version=%s worktree=%s\n' "$version" "$worktree"

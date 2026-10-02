@@ -549,6 +549,12 @@ is not parked for merge. A no-code task whose stale code target and delivery
 anchor were cleared closes on a portable `external_ref`; retained code anchors
 and commit receipts still require delivery proof.
 
+A passed or waived independent QA round remains bound to its reviewed tip after
+a squash merge. Close proves that the integrated receipt carries the same trees
+over the aggregate delivered paths, or the same stable aggregate patch ID.
+Unrelated target files do not change coverage. An unresolved or changed delivery
+still refuses, with review coverage and integration proof reported separately.
+
 A live registered supervisor may use `supervisor_override=true` with a non-empty
 reason to waive additive-only/value-only posture checks and the receipt epoch
 check for a retroactive record task. Close records the decision. Repository

@@ -18,6 +18,10 @@ impl Config {
         let memory = self.memory.clone().unwrap_or_default();
         let factory = self.factory();
         vec![
+            (
+                "slack.transport".to_string(),
+                self.get("slack.transport").unwrap(),
+            ),
             // Sync section
             ("sync.enabled".to_string(), self.sync.enabled.to_string()),
             ("sync.target".to_string(), self.sync.target.clone()),
@@ -368,14 +372,7 @@ impl Config {
             // Issues section
             ("issues.repo".to_string(), issues.repo.unwrap_or_default()),
             ("issues.components.cassy".to_string(), issue_repos.cassy),
-            (
-                "issues.components.violet".to_string(),
-                issue_repos.violet.clone(),
-            ),
-            (
-                "issues.components.mecha_cassy".to_string(),
-                issue_repos.violet,
-            ),
+            ("issues.components.violet".to_string(), issue_repos.violet),
             ("issues.components.cloud".to_string(), issue_repos.cloud),
             // History section
             (

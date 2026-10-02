@@ -35,6 +35,17 @@ fn references_foreign_task(message: &str, identity: &TaskCommitIdentity) -> bool
         })
 }
 
+fn is_target_sync_merge(repo: &Path, merged_parents: &[String], target: &str) -> bool {
+    !merged_parents.is_empty()
+        && merged_parents.iter().all(|parent| {
+            Command::new("git")
+                .args(["merge-base", "--is-ancestor", parent, target])
+                .current_dir(repo)
+                .status()
+                .is_ok_and(|status| status.success())
+        })
+}
+
 /// Current-cycle commits and durably identified earlier-cycle commits share
 /// the same epoch contract in selection and receipt validation.
 pub(super) fn in_work_window(window: &TaskCommitReceiptWindow, epoch: i64, owned: bool) -> bool {
@@ -61,6 +72,24 @@ fn task_delivery_ranges(
     window: &TaskCommitReceiptWindow,
     tip: Option<&str>,
 ) -> Option<Vec<DeliveryRange>> {
+    task_delivery_selection(repo, parent, window, tip).map(|selection| selection.ranges)
+}
+
+/// The selected delivery ranges, plus whether a target-sync merge that would
+/// otherwise have been selected was excluded (cas-2664 defect 7). Empty
+/// ranges with that flag set are a positive finding, "this task only brought
+/// the target into its lane", not an attribution failure.
+struct DeliverySelection {
+    ranges: Vec<DeliveryRange>,
+    excluded_target_sync: bool,
+}
+
+fn task_delivery_selection(
+    repo: &Path,
+    parent: &str,
+    window: &TaskCommitReceiptWindow,
+    tip: Option<&str>,
+) -> Option<DeliverySelection> {
     if !is_safe_git_refname(parent) {
         return None;
     }
@@ -99,6 +128,8 @@ fn task_delivery_ranges(
         owned: bool,
         foreign: bool,
         merge: bool,
+        /// Non-first parents of a merge commit.
+        merged_parents: Vec<String>,
     }
     let commits: Vec<Commit> = history
         .split('\u{1e}')
@@ -129,13 +160,15 @@ fn task_delivery_ranges(
                                     && id.bytes().all(|byte| byte.is_ascii_hexdigit())
                             })
                     });
+            let parents: Vec<&str> = fields[1].split_whitespace().collect();
             Some(Commit {
                 sha,
-                parent: fields[1].split_whitespace().next().unwrap_or("").into(),
+                parent: parents.first().copied().unwrap_or("").into(),
                 epoch: fields[2].parse().ok()?,
                 owned,
                 foreign,
-                merge: fields[1].split_whitespace().count() > 1,
+                merge: parents.len() > 1,
+                merged_parents: parents.iter().skip(1).map(|parent| parent.to_string()).collect(),
             })
         })
         .collect();
@@ -143,13 +176,24 @@ fn task_delivery_ranges(
         .task_floor
         .timestamp()
         .saturating_sub(COMMIT_RECEIPT_CLOCK_SKEW_SECS);
+    let mut excluded_target_sync = false;
     let mut selected: Vec<bool> = commits
         .iter()
         .map(|c| {
-            !c.parent.is_empty()
+            let candidate = !c.parent.is_empty()
                 && !c.foreign
                 && (c.owned || unmerged.contains(&c.sha))
-                && (in_work_window(window, c.epoch, c.owned) || (historical_receipt && c.owned))
+                && (in_work_window(window, c.epoch, c.owned) || (historical_receipt && c.owned));
+            // cas-2664 (7): a merge whose every non-first parent is already
+            // on the target only brings the target into the lane; its tree
+            // effect is other tasks' delivered content. Deselecting it also
+            // splits the ranges, so no range spans the target content it
+            // brought in. Only otherwise-selected merges cost a Git call.
+            if candidate && c.merge && is_target_sync_merge(repo, &c.merged_parents, &target) {
+                excluded_target_sync = true;
+                return false;
+            }
+            candidate
         })
         .collect();
     // The end of a delivery is an upper boundary, not its only commit.
@@ -189,7 +233,10 @@ fn task_delivery_ranges(
         }
         contiguous = selected;
     }
-    Some(ranges)
+    Some(DeliverySelection {
+        ranges,
+        excluded_target_sync,
+    })
 }
 
 pub(super) fn reviewable(
@@ -301,9 +348,14 @@ pub(super) fn qa_paths(
         .map(|receipt| resolve_task_commit_receipt_sha(repo, receipt))
         .transpose()
         .ok()?;
-    let ranges = task_delivery_ranges(repo, target, window, receipt.as_deref())?;
+    let selection = task_delivery_selection(repo, target, window, receipt.as_deref())?;
+    let ranges = selection.ranges;
     if ranges.is_empty() {
-        return None;
+        // GH #1037 / cas-2664: a task whose only candidate commit was a
+        // target-sync merge delivered no reviewable content of its own. That
+        // is an authoritative empty set; `None` would make the QA gate fall
+        // back to the lane's whole range and charge the incoming files.
+        return selection.excluded_target_sync.then(Vec::new);
     }
     let mut paths = Vec::new();
     for range in ranges {
@@ -2542,11 +2594,19 @@ mod tests {
             &["merge", "-q", "--no-ff", "-m", "sync staging", "main"],
         );
         let merge_tip = git(repo, &["rev-parse", "HEAD"]);
+        // GH #1037 and cas-2664 (7) state the same fact from two gates:
+        // `incoming.vue` reached the lane through a merge of the target, so
+        // it is target content, not this task's delivery. QA must not demand
+        // evidence for it (#1037), and proof/attribution must not charge it
+        // to the task (cas-2664). This assertion used to pin the raw-path
+        // behaviour that predates cas-2664; both views now exclude it.
         assert!(
-            paths(repo, "main", &window(), Some(&merge_tip))
+            !paths(repo, "main", &window(), Some(&merge_tip))
                 .unwrap()
                 .contains(&"incoming.vue".into())
         );
+        // The empty QA set stays authoritative (`Some`), not "unattributable"
+        // (`None`), so the QA gate cannot fall back to the merge's whole diff.
         assert_eq!(
             qa_paths(repo, "main", &window(), Some(&merge_tip)),
             Some(vec![])

@@ -506,38 +506,25 @@ impl FactoryDaemon {
             pane.to_string()
         };
 
-        // If the web viewer sent dimensions, resize the PTY to match so
-        // output is formatted for the viewer's terminal size.
+        // If the web viewer sent dimensions, record them as a viewer size and
+        // let the shared decision apply them. Resizing the PTY straight to the
+        // viewer's size made a web attach a geometry writer that overrode the
+        // local dashboard's allocation (cas-37f8, cas-06a2).
         if let (Some(c), Some(r)) = (cols, rows) {
-            if let Some(mux_pane) = self.app.mux.get_mut(&actual_pane) {
-                let (old_rows, old_cols) = mux_pane.size();
-                if old_cols != c || old_rows != r {
-                    match mux_pane.resize(r, c) {
-                        Ok(()) => {
-                            tracing::info!(
-                                "Resized pane '{}' from {}x{} to {}x{} for web viewer",
-                                pane,
-                                old_cols,
-                                old_rows,
-                                c,
-                                r
-                            );
-                            // Rebuild the buffer from the vt snapshot at the
-                            // new dimensions (the virtual terminal reflows on
-                            // resize so the snapshot has correct content).
-                            if let Some(p) = self.app.mux.get(&actual_pane) {
-                                if let Ok(snapshot) = p.get_full_snapshot() {
-                                    let ansi = snapshot_to_ansi(&snapshot, p.is_in_alt_screen());
-                                    self.pane_buffers
-                                        .entry(actual_pane.clone())
-                                        .or_default()
-                                        .replace_with(ansi);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to resize pane '{}': {}", pane, e);
-                        }
+            let before = self.app.mux.get(&actual_pane).map(|p| p.size());
+            self.web_pane_sizes.insert(actual_pane.clone(), (c, r));
+            self.apply_effective_pane_size(&actual_pane);
+            if let Some(p) = self.app.mux.get(&actual_pane) {
+                if before != Some(p.size()) {
+                    // Rebuild the buffer from the vt snapshot at the new
+                    // dimensions (the virtual terminal reflows on resize so
+                    // the snapshot has correct content).
+                    if let Ok(snapshot) = p.get_full_snapshot() {
+                        let ansi = snapshot_to_ansi(&snapshot, p.is_in_alt_screen());
+                        self.pane_buffers
+                            .entry(actual_pane.clone())
+                            .or_default()
+                            .replace_with(ansi);
                     }
                 }
             }
@@ -611,7 +598,7 @@ impl FactoryDaemon {
                     self.rows
                 );
                 let _ = self.app.handle_resize(self.cols, self.rows);
-                self.snapshot_tui_pane_sizes_and_reconcile();
+                self.reconcile_viewer_constrained_panes();
                 self.rebuild_pane_buffers_from_snapshots();
             }
         } else {

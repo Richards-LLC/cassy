@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { HubConnectionSupervisor, messageRejection, UPSTREAM_STREAK_SETTLE_MS, type HubCallbacks } from "./connection";
+import { HubConnectionSupervisor, messageRejection, TransientAuthError, UPSTREAM_STREAK_SETTLE_MS, type HubCallbacks } from "./connection";
 import { ConversationHistory } from "./conversation-history";
 import { MACHINE_RETRY_CEILING_MS, SOCKET_PROBE_TIMEOUT_MS } from "./connection-state";
 import type { StoredMachine } from "./types";
@@ -382,5 +382,56 @@ describe("held-send polish after cas-0653 (cas-a355)", () => {
     await machine.handleDaemonMessage("factory-a", JSON.stringify({ error: "forbidden", client_ref: "send-4" }));
     expect(onMessageRejected.mock.calls).toEqual([["factory-a", "send-4", "forbidden", { code: "forbidden", retryable: false }]]);
     sup.stop();
+  });
+});
+
+// cas-8fe2: HUB-J12 "stale proofs retry with no re-pair request" flaked in the
+// merge queue, stuck on "Reconnecting". Two attaches shared one refused
+// machine-socket ticket; the slower one's reachability probes finished after a
+// retry had opened the socket and subscribed the session, and marked it failed
+// with a retry that, finding the session already subscribed, changed nothing.
+describe("a late attach failure after a retry succeeded (cas-8fe2)", () => {
+  type Late = {
+    desired: boolean;
+    machineSocket?: unknown;
+    machineSocketReady: boolean;
+    machineSubscriptions: Set<string>;
+    attachRetryTimers: Map<string, number>;
+    hubIsReachable(): Promise<boolean>;
+    authenticatedRequestSucceeds(): Promise<boolean>;
+    handleAttachFailure(session: string, error: unknown): Promise<void>;
+  };
+  const SESSION = "patient-pelican-9";
+
+  async function lateFailure(retrySubscribed: boolean) {
+    vi.stubGlobal("window", globalThis);
+    const onAttachState = vi.fn();
+    const { sup, internals } = supervisor({ onAttachState, onSocketError: vi.fn() });
+    const machine = internals as unknown as Late;
+    machine.desired = true;
+    let reachable!: (value: boolean) => void;
+    machine.hubIsReachable = () => new Promise((resolve) => { reachable = resolve; });
+    machine.authenticatedRequestSucceeds = async () => true;
+    const failing = machine.handleAttachFailure(SESSION, new TransientAuthError("stale_proof"));
+    // While its probes are in flight, the retry opens the socket and subscribes.
+    if (retrySubscribed) {
+      machine.machineSocket = fakeSocket();
+      machine.machineSocketReady = true;
+      machine.machineSubscriptions.add(SESSION);
+    }
+    reachable(true);
+    await failing;
+    const failed = onAttachState.mock.calls.some(([session, state]) => session === SESSION && state.phase === "failed");
+    const retrying = machine.attachRetryTimers.has(SESSION);
+    sup.stop();
+    return { failed, retrying };
+  }
+
+  it("leaves a session the retry already subscribed alone", async () => {
+    expect(await lateFailure(true)).toEqual({ failed: false, retrying: false });
+  });
+
+  it("still retries when nothing else brought the session back", async () => {
+    expect(await lateFailure(false)).toEqual({ failed: true, retrying: true });
   });
 });

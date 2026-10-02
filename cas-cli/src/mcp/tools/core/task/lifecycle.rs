@@ -102,8 +102,9 @@ enum ReusedFactoryBranchStart {
     Unchanged,
     Reset,
     /// GH #1006 item 3: the branch sat on a delivery parked for merge. Its tip
-    /// is kept as local branch `parked/<task>` (origin is never touched) and
-    /// the worker branch was reset onto the new target.
+    /// is kept as local branch `parked/<task>` (a convenience; the parked
+    /// task's recorded anchor SHA is its delivery, cas-ba4a) and the worker
+    /// branch was reset onto the new target.
     MovedFromParked { task_id: String, tip: String },
 }
 
@@ -1691,10 +1692,9 @@ impl CasCore {
                             "\n\n🔄 REUSED FACTORY BRANCH RESET: {worker_branch} was already merged into `{target_branch}` and was reset to that target before starting."
                         )),
                         Ok(ReusedFactoryBranchStart::MovedFromParked { task_id, tip }) => Some(format!(
-                            "\n\n🔀 PARKED BRANCH MOVED: {worker_branch} sat at {tip8} for {task_id}, which is parked for merge. \
-                             That tip is kept on origin and as local branch parked/{task_id}; {worker_branch} was reset to `{target_branch}` \
-                             for this task. Do not push {worker_branch} until {task_id} merges: the push would replace the tip under review.",
-                            tip8 = &tip[..tip.len().min(8)],
+                            "\n\n🔀 PARKED BRANCH MOVED: {task_id} is parked for merge at anchor {tip}; that SHA is its delivery. \
+                             {worker_branch} was reset to `{target_branch}` for this task. \
+                             Don't force-push {worker_branch} while a PR is open on it.",
                         )),
                         Ok(ReusedFactoryBranchStart::Unchanged) => None,
                         Err(message) => {

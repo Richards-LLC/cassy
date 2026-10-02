@@ -3514,8 +3514,11 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                AND (q.dedupe_key IS NULL OR q.dedupe_key NOT LIKE 'delivery-stalled:%')
                AND EXISTS (
                    SELECT 1 FROM agents sender
-                    WHERE sender.name = q.source
-                      AND sender.factory_session = q.factory_session
+                    WHERE sender.factory_session = q.factory_session
+                      AND (sender.name = q.source
+                           -- cas-913c: supervisor messages are stored under the
+                           -- `supervisor` alias, which no agent row is named.
+                           OR (q.source = 'supervisor' AND sender.role = 'supervisor'))
                )
                AND q.delivery_stalled_notified_at IS NULL
                AND q.acked_at IS NULL
@@ -3568,8 +3571,9 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                        AND (q.dedupe_key IS NULL OR q.dedupe_key NOT LIKE 'delivery-stalled:%')
                        AND EXISTS (
                            SELECT 1 FROM agents sender
-                            WHERE sender.name = q.source
-                              AND sender.factory_session = q.factory_session
+                            WHERE sender.factory_session = q.factory_session
+                              AND (sender.name = q.source
+                                   OR (q.source = 'supervisor' AND sender.role = 'supervisor'))
                        )
                        AND q.delivery_stalled_notified_at IS NULL
                        AND q.acked_at IS NULL
@@ -9504,6 +9508,85 @@ mod tests {
                 .unwrap(),
             None,
             "a genuine row still bounces exactly once"
+        );
+    }
+
+    /// cas-913c: the supervisor's messages are stored under the `supervisor`
+    /// alias, while its agent row carries its generated name. Requiring an
+    /// agent row named after the source excluded every supervisor→worker
+    /// message from the aged-unread scan (notification 3539008).
+    #[test]
+    fn delivery_stalled_scan_accepts_the_supervisor_alias_sender_cas_913c() {
+        let (_temp, store) = create_test_store();
+        const SESSION: &str = "factory-a";
+        register_bounce_sender(&store, "gentle-jaguar-47", SESSION);
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE agents SET role = 'supervisor' WHERE name = 'gentle-jaguar-47'",
+                [],
+            )
+            .unwrap();
+        register_bounce_sender(&store, "zen-condor-99", SESSION);
+        let from_supervisor = store
+            .enqueue_with_session("supervisor", "zen-condor-99", "fix cas-a5c6", SESSION)
+            .unwrap();
+        let aged = (Utc::now() - chrono::Duration::minutes(6)).to_rfc3339();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE prompt_queue SET created_at = ? WHERE id = ?",
+                params![aged, from_supervisor],
+            )
+            .unwrap();
+
+        let candidates = store
+            .delivery_stalled_candidates(SESSION, 5 * 60, 5 * 60, 10)
+            .unwrap();
+        assert_eq!(
+            candidates.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![from_supervisor]
+        );
+        assert!(
+            store
+                .enqueue_delivery_stalled_bounce(from_supervisor, SESSION, "stalled", "stalled")
+                .unwrap()
+                .is_some(),
+            "the atomic recheck accepts the same alias"
+        );
+
+        // The alias is honoured only when the session has a supervisor.
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE agents SET role = 'worker' WHERE name = 'gentle-jaguar-47'",
+                [],
+            )
+            .unwrap();
+        let orphan = store
+            .enqueue_with_session("supervisor", "zen-condor-99", "no supervisor", SESSION)
+            .unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE prompt_queue SET created_at = ? WHERE id = ?",
+                params![aged, orphan],
+            )
+            .unwrap();
+        assert!(
+            store
+                .delivery_stalled_candidates(SESSION, 5 * 60, 5 * 60, 10)
+                .unwrap()
+                .iter()
+                .all(|row| row.id != orphan)
         );
     }
 

@@ -2743,17 +2743,17 @@
       "summary": "The Violet skill is registered in all three harness catalogs, but the required reference ledger was not updated. A registration-guide mismatch was fixed in commit fa164a462d4971671c218c99e9d096e94f84ed6c. Rust tests were prohibited, and no simulated report submission or Standards cross-check context was available.",
       "criteria": [
         {
-          "criterion": "A fresh sync installs a `violet` skill in every harness; no live skill tells agents to use mecha_* (history excepted); a redirect stub exists for one release; builtins tests and the reference ledger are updated.",
+          "criterion": "A fresh sync installs a `violet` skill in every harness; no live skill tells agents to use violet_* (history excepted); a redirect stub exists for one release; builtins tests and the reference ledger are updated.",
           "status": "rejected",
-          "evidence": "cas-cli/src/builtins.rs:556,1163,1771 registers violet for Claude, Codex, and Grok; :565,1172,1780 registers the redirect. The targeted scan found mecha_read/mecha_post only in the dated failure log, and builtin tests were updated. cas-cli/src/builtins/reference-history.json:1482 retains the legacy registration key but has no violet registration key; the ledger was unchanged in the fixed diff. No Rust tests were run under the adapter restriction."
+          "evidence": "cas-cli/src/builtins.rs:556,1163,1771 registers violet for Claude, Codex, and Grok; :565,1172,1780 registers the redirect. The targeted scan found violet_read/violet_post only in the dated failure log, and builtin tests were updated. cas-cli/src/builtins/reference-history.json:1482 retains the legacy registration key but has no violet registration key; the ledger was unchanged in the fixed diff. No Rust tests were run under the adapter restriction."
         }
       ],
       "scope_creep": [
         {
           "id": "SPEC-01",
           "rank": 1,
-          "source": "A fresh sync installs a `violet` skill in every harness; no live skill tells agents to use mecha_* (history excepted); a redirect stub exists for one release; builtins tests and the reference ledger are updated.",
-          "evidence": "Pre-fix cas-cli/src/builtins/skills/violet/references/registration.md:8-13 claimed an unrequested switch to VIOLET_* credential defaults; :18-33 claimed the command wrote Violet harness entries and repaired Violet project routes. cas-cli/src/cli/integrate/mecha_cassy.rs:112,1317,1827,1896 still uses legacy defaults and server keys. The guide now names the manual Violet steps and current command behavior. Static guide checks and git diff --check passed; bridge commit fa164a462d4971671c218c99e9d096e94f84ed6c.",
+          "source": "A fresh sync installs a `violet` skill in every harness; no live skill tells agents to use violet_* (history excepted); a redirect stub exists for one release; builtins tests and the reference ledger are updated.",
+          "evidence": "Pre-fix cas-cli/src/builtins/skills/violet/references/registration.md:8-13 claimed an unrequested switch to VIOLET_* credential defaults; :18-33 claimed the command wrote Violet harness entries and repaired Violet project routes. cas-cli/src/cli/integrate/violet.rs:112,1317,1827,1896 still uses legacy defaults and server keys. The guide now names the manual Violet steps and current command behavior. Static guide checks and git diff --check passed; bridge commit fa164a462d4971671c218c99e9d096e94f84ed6c.",
           "uncertain": false,
           "judgement": true,
           "commit": "fa164a462d4971671c218c99e9d096e94f84ed6c"
@@ -2763,7 +2763,7 @@
         {
           "id": "SPEC-02",
           "rank": 1,
-          "source": "A fresh sync installs a `violet` skill in every harness; no live skill tells agents to use mecha_* (history excepted); a redirect stub exists for one release; builtins tests and the reference ledger are updated.",
+          "source": "A fresh sync installs a `violet` skill in every harness; no live skill tells agents to use violet_* (history excepted); a redirect stub exists for one release; builtins tests and the reference ledger are updated.",
           "evidence": "cas-cli/src/builtins/reference-history.json:1482 has the old registration path but no skills/violet/references/registration.md entry, and the ledger was unchanged in the fixed diff. This is an unmet deliverable, not a demonstrated sync failure. The ledger is outside the permitted edit scope.",
           "uncertain": false,
           "judgement": true,
@@ -2772,8 +2772,8 @@
         {
           "id": "SPEC-03",
           "rank": 2,
-          "source": "A fresh sync installs a `violet` skill in every harness; no live skill tells agents to use mecha_* (history excepted); a redirect stub exists for one release; builtins tests and the reference ledger are updated.",
-          "evidence": "Pre-fix cas-cli/src/builtins/skills/violet/SKILL.md:67 directs an agent with a denied Violet route to rerun cas integrate violet and cas doctor. cas-cli/src/cli/integrate/mecha_cassy.rs:1317,1425,2000 repairs and checks legacy project routes, so that remedy leaves a project allowlist missing violet.violet_post unchanged. The skill file is outside the permitted edit scope.",
+          "source": "A fresh sync installs a `violet` skill in every harness; no live skill tells agents to use violet_* (history excepted); a redirect stub exists for one release; builtins tests and the reference ledger are updated.",
+          "evidence": "Pre-fix cas-cli/src/builtins/skills/violet/SKILL.md:67 directs an agent with a denied Violet route to rerun cas integrate violet and cas doctor. cas-cli/src/cli/integrate/violet.rs:1317,1425,2000 repairs and checks legacy project routes, so that remedy leaves a project allowlist missing violet.violet_post unchanged. The skill file is outside the permitted edit scope.",
           "uncertain": false,
           "judgement": true,
           "commit": null
@@ -2885,7 +2885,7 @@
       "summary": "The registration guide is not production-ready: its Violet setup and repair instructions conflict with the integration command. Review was read-only; sync and QA were not run.",
       "criteria": [
         {
-          "criterion": "A fresh sync installs a violet skill in every harness; no live skill tells agents to use mecha_*; a redirect stub exists for one release; builtins tests and the reference ledger are updated.",
+          "criterion": "A fresh sync installs a violet skill in every harness; no live skill tells agents to use violet_*; a redirect stub exists for one release; builtins tests and the reference ledger are updated.",
           "status": "INCONCLUSIVE",
           "evidence": "The fixed diff contains the Violet skill registration and redirect stub, but the adapter prohibits a fresh sync or QA run. The scoped registration guide has the concrete defects below; missing execution evidence is not treated as a code defect."
         }
@@ -2896,7 +2896,7 @@
           "id": "credential-names",
           "rank": 1,
           "source": "cas-cli/src/builtins/skills/violet/references/registration.md:10",
-          "evidence": "The guide says `cas integrate violet` prefers `VIOLET_*` credentials. `MechaCassyArgs::resolved_token_env_for_label` instead constructs `MECHA_SLACK_TOKEN_<LABEL>`, and its bypass default is `MECHA_VERCEL_BYPASS` (`cas-cli/src/cli/integrate/mecha_cassy.rs:73,106`). Fresh setup therefore writes and references different names from the guide\u2019s examples and rotation instructions. Align the guide with the implemented defaults, or implement and test the stated Violet preference and fallback.",
+          "evidence": "The guide says `cas integrate violet` prefers `VIOLET_*` credentials. `VioletArgs::resolved_token_env_for_label` instead constructs `VIOLET_SLACK_TOKEN_<LABEL>`, and its bypass default is `VIOLET_VERCEL_BYPASS` (`cas-cli/src/cli/integrate/violet.rs:73,106`). Fresh setup therefore writes and references different names from the guide\u2019s examples and rotation instructions. Align the guide with the implemented defaults, or implement and test the stated Violet preference and fallback.",
           "uncertain": false,
           "judgement": true,
           "commit": null
@@ -2905,7 +2905,7 @@
           "id": "project-repair",
           "rank": 1,
           "source": "cas-cli/src/builtins/skills/violet/references/registration.md:25",
-          "evidence": "The guide says the command repairs Violet routes and `[servers.violet]` in a project proxy file. `plan_project_proxy` recognizes and rewrites only `MECHA_CASSY_SERVER` routes (`cas-cli/src/cli/integrate/mecha_cassy.rs:1297-1328,1423-1444`). A project file containing only Violet routes is left untouched, and `cas doctor` checks the legacy server (`crates/cas-mcp-proxy/src/config.rs:569-582`). Update project repair and doctor for Violet, or give accurate manual repair instructions. Removing or rewording the claim without providing a working Violet repair path will fail re-verification.",
+          "evidence": "The guide says the command repairs Violet routes and `[servers.violet]` in a project proxy file. `plan_project_proxy` recognizes and rewrites only `VIOLET_CASSY_SERVER` routes (`cas-cli/src/cli/integrate/violet.rs:1297-1328,1423-1444`). A project file containing only Violet routes is left untouched, and `cas doctor` checks the legacy server (`crates/cas-mcp-proxy/src/config.rs:569-582`). Update project repair and doctor for Violet, or give accurate manual repair instructions. Removing or rewording the claim without providing a working Violet repair path will fail re-verification.",
           "uncertain": false,
           "judgement": true,
           "commit": null
@@ -2914,7 +2914,7 @@
           "id": "tool-receipt",
           "rank": 2,
           "source": "cas-cli/src/builtins/skills/violet/references/registration.md:17",
-          "evidence": "The guide presents the command\u2019s authenticated `tools/list` receipt as setup proof for Violet. The command compares the live list against `config.mecha_cassy_allowlisted_tools()` (`cas-cli/src/cli/integrate/mecha_cassy.rs:1581-1584,1644-1651`), which selects only legacy routes (`crates/cas-mcp-proxy/src/config.rs:569-575`). A receipt can therefore pass while `violet_read` and `violet_post` are absent. Require those two names in the command\u2019s verification, or state the additional check explicitly before posting.",
+          "evidence": "The guide presents the command\u2019s authenticated `tools/list` receipt as setup proof for Violet. The command compares the live list against `config.violet_ps_allowlisted_tools()` (`cas-cli/src/cli/integrate/violet.rs:1581-1584,1644-1651`), which selects only legacy routes (`crates/cas-mcp-proxy/src/config.rs:569-575`). A receipt can therefore pass while `violet_read` and `violet_post` are absent. Require those two names in the command\u2019s verification, or state the additional check explicitly before posting.",
           "uncertain": false,
           "judgement": true,
           "commit": null
@@ -2955,7 +2955,7 @@
       "summary": "The three harness catalogs and redirect stub are present, but the changed registration reference is absent from the reference ledger, so the criterion cannot be approved. Rust tests were prohibited and were not run. The simulated verification API and sealed Standards report were unavailable, so submission and cross-check could not be completed.",
       "criteria": [
         {
-          "criterion": "A fresh sync installs a `violet` skill in every harness; no live skill tells agents to use mecha_* (history excepted); a redirect stub exists for one release; builtins tests and the reference ledger are updated.",
+          "criterion": "A fresh sync installs a `violet` skill in every harness; no live skill tells agents to use violet_* (history excepted); a redirect stub exists for one release; builtins tests and the reference ledger are updated.",
           "status": "rejected",
           "evidence": "cas-cli/src/builtins.rs:2131\u20132134 registers Violet for Claude, Codex, and Grok; :6287\u20136338 defines a sync test covering all three and the one-release redirect. cas-cli/tests/builtin_skill_description_test.rs:633\u2013661 checks retired live tool names. The changed registration reference\u2019s SHA-256 is absent from cas-cli/src/builtins/reference-history.json:1531. These are code observations, not an executed sync or Rust test receipt."
         }
@@ -2964,7 +2964,7 @@
         {
           "id": "SPEC-SCOPE-1",
           "rank": 2,
-          "source": "A fresh sync installs a `violet` skill in every harness; no live skill tells agents to use mecha_* (history excepted); a redirect stub exists for one release; builtins tests and the reference ledger are updated.",
+          "source": "A fresh sync installs a `violet` skill in every harness; no live skill tells agents to use violet_* (history excepted); a redirect stub exists for one release; builtins tests and the reference ledger are updated.",
           "evidence": "The fixed diff at cas-cli/src/builtins/skills/violet/references/registration.md:47 replaces a specific absent-route issue reference with a configured tracker lookup. Changing that remediation was outside the requested rename and skill-routing work.",
           "uncertain": false,
           "judgement": true,
@@ -2975,7 +2975,7 @@
         {
           "id": "SPEC-1",
           "rank": 2,
-          "source": "A fresh sync installs a `violet` skill in every harness; no live skill tells agents to use mecha_* (history excepted); a redirect stub exists for one release; builtins tests and the reference ledger are updated.",
+          "source": "A fresh sync installs a `violet` skill in every harness; no live skill tells agents to use violet_* (history excepted); a redirect stub exists for one release; builtins tests and the reference ledger are updated.",
           "evidence": "Pre-fix registration.md:47 omitted the issue number, leaving the absent-route remedy incomplete. cas-cli/src/cli/integrate/violet.rs:55 and :539 identify `violet_ps#5`. The permitted-file fix restores issue #5; a targeted Python assertion against the reference and CLI source passed. The bridge returned the commit shown here.",
           "uncertain": false,
           "judgement": true,
@@ -2984,7 +2984,7 @@
         {
           "id": "SPEC-2",
           "rank": 2,
-          "source": "A fresh sync installs a `violet` skill in every harness; no live skill tells agents to use mecha_* (history excepted); a redirect stub exists for one release; builtins tests and the reference ledger are updated.",
+          "source": "A fresh sync installs a `violet` skill in every harness; no live skill tells agents to use violet_* (history excepted); a redirect stub exists for one release; builtins tests and the reference ledger are updated.",
           "evidence": "Pre-fix cas-cli/src/builtins/reference-history.json:1531 lacks the fixed diff\u2019s registration-reference hash `cec9a5fb8a3c0f892aca2cd2b1aeef424967f5045f7a75e3b1d345c6c5bb2dbf`; a Python hash comparison confirmed that the previous version is present. The post-fix hash is absent too. scripts/gen-builtin-reference-history.sh:17\u201326 calls for regeneration after builtin skill-file changes. The ledger is outside the bridge\u2019s permitted scope, so no fix was made.",
           "uncertain": false,
           "judgement": true,
@@ -3097,7 +3097,7 @@
       "summary": "The scoped documentation change is production-ready. Source inspection supports the acceptance criterion; sync tests were not run under the replay restriction.",
       "criteria": [
         {
-          "criterion": "A fresh sync installs a `violet` skill in every harness; no live skill tells agents to use mecha_* (history excepted); a redirect stub exists for one release; builtins tests and the reference ledger are updated.",
+          "criterion": "A fresh sync installs a `violet` skill in every harness; no live skill tells agents to use violet_* (history excepted); a redirect stub exists for one release; builtins tests and the reference ledger are updated.",
           "status": "VERIFIED",
           "evidence": "The Claude, Codex, and Grok builtin catalogs register Violet and the one-release redirect. A sync test covers all three catalogs. A targeted search found retired tool names only in the dated failure log. The reference ledger contains the previous registration file hash. This is source-level verification; no sync or test was executed."
         }

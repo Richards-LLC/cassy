@@ -1711,7 +1711,6 @@ impl FactoryDaemon {
             ws_clients: HashMap::new(),
             terminal_exchange: Default::default(),
             next_ws_client_id: 0,
-            tui_pane_sizes: HashMap::new(),
             web_pane_sizes: HashMap::new(),
             teams,
             notify_rx,
@@ -2613,9 +2612,9 @@ impl FactoryDaemon {
                         }
                     }
 
-                    // Snapshot TUI pane sizes and reconcile with GUI/web
-                    // constraints (smallest client wins per pane).
-                    self.snapshot_tui_pane_sizes_and_reconcile();
+                    // Reconcile panes that also have GUI/WS/web viewers
+                    // against the dashboard allocation.
+                    self.reconcile_viewer_constrained_panes();
 
                     // Rebuild pane ring buffers from the virtual terminal's
                     // current state — after resize the vt reflows content to

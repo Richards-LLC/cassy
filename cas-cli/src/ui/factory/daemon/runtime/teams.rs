@@ -750,7 +750,12 @@ impl TeamsManager {
     /// intercept-only so supervisor worktree spawns can be denied without
     /// auto-approving the call.
     pub(crate) fn factory_pre_tool_intercept_list() -> &'static [&'static str] {
-        &["SendMessage", "AskUserQuestion", "Agent"]
+        &[
+            "SendMessage",
+            "AskUserQuestion",
+            "Agent",
+            crate::config::hooks::SLACK_POLICY_MATCHER,
+        ]
     }
 
     /// `hooks` block for per-role settings files. Wires `PreToolUse` (belt
@@ -3014,6 +3019,11 @@ mod tests {
                 );
             }
 
+            assert!(
+                matcher.contains(crate::config::hooks::SLACK_POLICY_MATCHER),
+                "{role} factory hook must reach Slack tools and CAS proxy dispatches"
+            );
+
             let perm = hooks
                 .get("PermissionRequest")
                 .and_then(|v| v.as_array())
@@ -4343,6 +4353,11 @@ mod tests {
     fn worker_pre_push_hook_refuses_foreign_head_graft_cas_0efb() {
         let tmp = make_git_repo_for_hook_test();
         let repo = tmp.path();
+        // cas-1829: the pre-push hook runs `cas hook WorkerPushRejected`, which
+        // records into $CAS_ROOT under $CAS_SESSION_ID. Inherited from a factory
+        // shell, each run wrote fake 'credit-repairs' push blocks into the live
+        // project, attributed to the supervisor. Pushes use a throwaway root.
+        let hook_cas_root = tempfile::tempdir().unwrap();
         let remote = repo.join("remote.git");
         let init_remote = std::process::Command::new("git")
             .args(["init", "--bare", &remote.to_string_lossy()])
@@ -4378,6 +4393,9 @@ mod tests {
         let initial_push = std::process::Command::new("git")
             .args(["push", "-u", "origin", "factory/credit-repairs"])
             .env("CAS_AGENT_NAME", "credit-repairs")
+            .env("CAS_ROOT", hook_cas_root.path())
+            .env_remove("CAS_SESSION_ID")
+            .env_remove("CAS_FACTORY_SESSION")
             .current_dir(&wt_path)
             .output()
             .unwrap();
@@ -4398,6 +4416,9 @@ mod tests {
         let tag_push = std::process::Command::new("git")
             .args(["push", "origin", "v9.99.9"])
             .env("CAS_AGENT_NAME", "credit-repairs")
+            .env("CAS_ROOT", hook_cas_root.path())
+            .env_remove("CAS_SESSION_ID")
+            .env_remove("CAS_FACTORY_SESSION")
             .current_dir(&wt_path)
             .output()
             .unwrap();
@@ -4418,6 +4439,9 @@ mod tests {
         let wrong_destination = std::process::Command::new("git")
             .args(["push", "origin", "HEAD:refs/heads/staging"])
             .env("CAS_AGENT_NAME", "credit-repairs")
+            .env("CAS_ROOT", hook_cas_root.path())
+            .env_remove("CAS_SESSION_ID")
+            .env_remove("CAS_FACTORY_SESSION")
             .current_dir(&wt_path)
             .output()
             .unwrap();
@@ -4434,6 +4458,9 @@ mod tests {
         let foreign_source = std::process::Command::new("git")
             .args(["push", "origin", "factory/support-triage:refs/heads/staging"])
             .env("CAS_AGENT_NAME", "credit-repairs")
+            .env("CAS_ROOT", hook_cas_root.path())
+            .env_remove("CAS_SESSION_ID")
+            .env_remove("CAS_FACTORY_SESSION")
             .current_dir(&wt_path)
             .output()
             .unwrap();
@@ -4451,6 +4478,9 @@ mod tests {
         let wrong_head = std::process::Command::new("git")
             .args(["push", "origin", "HEAD:refs/heads/factory/credit-repairs"])
             .env("CAS_AGENT_NAME", "credit-repairs")
+            .env("CAS_ROOT", hook_cas_root.path())
+            .env_remove("CAS_SESSION_ID")
+            .env_remove("CAS_FACTORY_SESSION")
             .current_dir(&wt_path)
             .output()
             .unwrap();
@@ -4474,6 +4504,9 @@ mod tests {
         let rejected = std::process::Command::new("git")
             .args(["push", "origin", "HEAD:refs/heads/factory/credit-repairs"])
             .env("CAS_AGENT_NAME", "credit-repairs")
+            .env("CAS_ROOT", hook_cas_root.path())
+            .env_remove("CAS_SESSION_ID")
+            .env_remove("CAS_FACTORY_SESSION")
             .current_dir(&wt_path)
             .output()
             .unwrap();
@@ -4517,6 +4550,11 @@ mod tests {
     fn worker_hooks_allow_the_own_per_task_branch_cas_73b8() {
         let tmp = make_git_repo_for_hook_test();
         let repo = tmp.path();
+        // cas-1829: the pre-push hook runs `cas hook WorkerPushRejected`, which
+        // records into $CAS_ROOT under $CAS_SESSION_ID. Inherited from a factory
+        // shell, each run wrote fake 'credit-repairs' push blocks into the live
+        // project, attributed to the supervisor. Pushes use a throwaway root.
+        let hook_cas_root = tempfile::tempdir().unwrap();
         let remote = repo.join("remote.git");
         assert!(
             std::process::Command::new("git")
@@ -4556,6 +4594,9 @@ mod tests {
             std::process::Command::new("git")
                 .args(args)
                 .env("CAS_AGENT_NAME", "credit-repairs")
+                .env("CAS_ROOT", hook_cas_root.path())
+                .env_remove("CAS_SESSION_ID")
+                .env_remove("CAS_FACTORY_SESSION")
                 .current_dir(&wt_path)
                 .output()
                 .unwrap()

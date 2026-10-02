@@ -22,7 +22,7 @@ Legend:
 - **Missing:** neither.
 
 | # | Principle | Cassy | Evidence |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | 1 | attack-the-premise | Missing | Nothing tells an agent to stop after two failed fixes that share a premise. The closest thing is an operator memory ("no gate loops"), which is not shipped. |
 | 2 | boundary-discipline | Prose (partial) | `cas-codebase-design` covers seams. Nothing covers where validation goes. |
 | 3 | build-the-lever | Prose (partial) | Levers do ship: `terminal-qa.mjs`, `visual-qa.mjs`, `journeys-for-diff.py`, fallow. But no skill tells agents to build one, and no gate asks for the rerunnable script. |
@@ -34,7 +34,7 @@ Legend:
 | 9 | guard-the-context-window | Enforced | Tests pin budgets: SessionStart `SESSION_START_BUDGET_BYTES` (`builtins.rs`), `tools/list` ≤ 59,000 B (`mcp_action_surface_test`), task-verifier < 15 KB (`agent_definition_contract_test`). A 10,000-char instruction-file cap runs in Docs Lint. |
 | 10 | laziness-protocol | Missing | No shipped guidance biases toward deletion or the smallest diff. |
 | 11 | make-operations-idempotent | Enforced (by design) | Migrations carry `detect` queries; `update` runs a backup/rollback transaction; Stop jobs use `create_new` queue markers; the `plan_claude_md` and `plan_agents_md` plans are idempotent and tested. |
-| 12 | migrate-callers-then-delete-legacy-apis | Deliberately contrary | Cassy keeps one-release aliases (e.g. `mecha_cassy` → `violet`) because downstream projects are external users. pstack's own rule exempts that case. |
+| 12 | migrate-callers-then-delete-legacy-apis | Deliberately contrary | Cassy keeps one-release aliases (e.g. `violet_ps` → `violet`) because downstream projects are external users. pstack's own rule exempts that case. |
 | 13 | minimize-reader-load | Prose (docs only) | `cas-writing-for-agents` covers agent-facing text. Nothing covers code. |
 | 14 | model-the-domain | Prose | `cas-codebase-design` (domain terminology). |
 | 15 | never-block-on-the-human | Enforced (factory) | A PreToolUse hook blocks `AskUserQuestion` for factory agents (`pre_tool.rs`, `config/hooks.rs`), and the worker brief bans foreground waits. Interactive sessions: prose only. |
@@ -52,7 +52,7 @@ Totals: 8 enforced (2 of them only partly or at a coarse grain), 9 prose (one co
 ## (b) Verification skills and feature map vs Cassy QA
 
 | Concern | pstack (`create-` / `maintain-verification-skill`) | Cassy |
-|---|---|---|
+| --- | --- | --- |
 | **Per-project drive harness** | Generated `.cursor/skills/verify-<app>/`: Launch with a readiness signal, Doctor (read-only health: process, build, port ownership), Drive with real selectors, Evidence, Cleanup ("kill what you started"; evidence survives), executable Helpers. | None generated. `cas-qa-craft` is a generic procedure. `journey-eval.sh` and `journeys-for-diff.py` exist only in cas-src `scripts/`, so a downstream project learns its launch and drive steps from scratch every pass. |
 | **Feature map** | `features/README.md` index plus one file per feature. Each has four fixed H2s: `Sub-features`, `How to get to it (user POV)`, `Driving it with <harness>`, `Gotchas`. Drives are exact commands with observable results. The rule "do not report a skipped entry point as verified through a different path" is in the map. | `docs/qa/journeys.md` holds journeys: Steps, Touches globs, Entry → Goal, edge paths. They are cross-feature flows, not a per-feature catalog of entry points. Nothing requires that *every* entry point of a feature be covered. |
 | **Self-proof of the harness** | The generator must run launch → doctor → one drive → cleanup, and confirm the evidence survived, before handing over. | No equivalent. A QA pass trusts whatever setup it improvises. |
@@ -67,7 +67,7 @@ Totals: 8 enforced (2 of them only partly or at a coarse grain), 9 prose (one co
 pstack's ladder, strongest mechanism first: an unrepresentable state, then a lint or banned API that fails CI, then a canonical helper, then a runtime check, then rules and skills, then review. Routing: one-off → note; recurring → skill or lint; systemic → principle.
 
 | Rung | Where Cassy lands today | Gap |
-|---|---|---|
+| --- | --- | --- |
 | Review | task-verifier rejections; the harness `/code-review` (Cassy retired its own review workflow) | Fine. |
 | Rules / skills | Stop → learning-reviewer → draft rule → `promote` → `.claude/rules/cas/*.md`. The verifier also writes draft rules on rejection. | **Every lesson terminates here.** Nothing asks whether a lesson that keeps recurring should become a check. |
 | Runtime check / hook | Hand-built hooks: cargo guard, `AskUserQuestion` block, push guard, history-rewrite guard, Neon SQL guard. | These appear only when an engineer writes one. Rules lost their automation field (`hook_command` is retired). |
@@ -81,7 +81,7 @@ Cassy's loop is strong on capture: it never loses a correction. It is weak on ro
 Effort: S ≤ ½ day, M ≈ 1–2 days, L ≈ a week.
 
 | ID | Adopt / skip | Recommendation | File(s) | Effort |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | R1 | **Adopt** | New builtin `cas-verification-skill`. It generates `.claude/skills/verify-<app>/` in a downstream project, with Launch, Doctor, Drive, Evidence and Cleanup sections, executable helpers, and a `features/` map in pstack's four-H2 format. It must prove itself once (launch → doctor → one drive → cleanup, evidence survives). Map rows feed the cas-qa-craft matrix, and Doctor/Launch become the bundle's producing command. | `cas-cli/src/builtins/skills/cas-verification-skill/SKILL.md` (+ `references/feature-map-example/`, ×3 flavours, registered in `builtins.rs`); `cas-qa-craft/SKILL.md` step 2 points at the map | M |
 | R2 | **Adopt** | A maintenance pass for that map: index hygiene, one source subagent per feature, a mandatory live pass, and `clean`/`changed`/`blocked` outcomes. Wire it as a supervisor chore after epics that touch `qa.user_facing_paths`. | `cas-cli/src/builtins/skills/cas-verification-skill/references/maintain.md`; `cas-supervisor/references/workflow.md` (one line) | S |
 | R3 | **Adopt** | Promote the learning loop past prose. rule-reviewer tags a promoted rule `enforceable:<lint\|hook\|type>` when a check can express it. `rule action=promote` then files a `chore` task "encode <rule> as <mechanism>", naming the rule and its source IDs. This is the pstack ladder's routing step. | `cas-cli/src/builtins/jobs/rule-reviewer.md`; `cas-cli/src/mcp/tools/core/rules.rs` (`cas_rule_promote`) | M |

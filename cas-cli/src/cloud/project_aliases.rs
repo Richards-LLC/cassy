@@ -202,7 +202,7 @@ mod tests {
                     "aliases": ["github.com/richards-llc/ozer-health", "ozer-health"]
                 },
                 { "canonical_id": "penguinz", "aliases": [] },
-                { "canonical_id": "github.com/richards-llc/mecha-cassy", "aliases": [] }
+                { "canonical_id": "github.com/richards-llc/violet", "aliases": [] }
             ]
         })
     }

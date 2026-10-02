@@ -643,8 +643,8 @@ impl FactoryDaemon {
         for client in self.ws_clients.values() {
             pane_ids.extend(client.pane_sizes.keys().cloned());
         }
-        // Also include panes with TUI or web sizes
-        pane_ids.extend(self.tui_pane_sizes.keys().cloned());
+        // Also include panes with a dashboard slot or web sizes
+        pane_ids.extend(self.dashboard_pane_ids());
         pane_ids.extend(self.web_pane_sizes.keys().cloned());
 
         for pane_id in pane_ids {
@@ -655,10 +655,12 @@ impl FactoryDaemon {
     /// The size the operator's local dashboard has allocated to this pane, or
     /// `None` when no local dashboard is attached (headless / remote-only).
     ///
-    /// `tui_pane_sizes` is a snapshot of the last local layout, so it outlives
-    /// the dashboard that produced it; the live full-mode client check is what
-    /// makes a remote-only session fall back to viewer-driven geometry
-    /// (cas-37f8).
+    /// The allocation is read from the app's live layout on every call. It
+    /// used to come from a snapshot refreshed only on terminal resizes, which
+    /// went stale when workers spawned, the sidecar toggled or the split
+    /// changed; the next viewer attach then re-applied the old width
+    /// (cas-06a2). The live full-mode client check is what makes a
+    /// remote-only session fall back to viewer-driven geometry (cas-37f8).
     pub(super) fn local_dashboard_pane_size(&self, pane_id: &str) -> Option<(u16, u16)> {
         let dashboard_attached = self
             .clients
@@ -667,7 +669,16 @@ impl FactoryDaemon {
         if !dashboard_attached {
             return None;
         }
-        self.tui_pane_sizes.get(pane_id).copied()
+        self.app.dashboard_pane_size(pane_id)
+    }
+
+    /// Every pane that has a slot in the dashboard layout right now.
+    pub(super) fn dashboard_pane_ids(&self) -> Vec<String> {
+        self.app
+            .dashboard_pane_allocation()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect()
     }
 
     /// Calculate and apply the effective size for a pane across all client types
@@ -720,26 +731,12 @@ impl FactoryDaemon {
         Some(decision)
     }
 
-    /// Snapshot current mux pane sizes into tui_pane_sizes after a TUI layout resize.
-    /// Then re-apply effective sizes for panes that have GUI or web constraints.
-    pub(super) fn snapshot_tui_pane_sizes_and_reconcile(&mut self) {
-        // Collect current mux-allocated sizes
-        self.tui_pane_sizes.clear();
-        let sup_name = self.app.supervisor_name().to_string();
-        if let Some(pane) = self.app.mux.get(&sup_name) {
-            self.tui_pane_sizes
-                .insert(sup_name.clone(), (pane.cols(), pane.rows()));
-        }
-        for name in self.app.worker_names() {
-            if let Some(pane) = self.app.mux.get(name) {
-                self.tui_pane_sizes
-                    .insert(name.clone(), (pane.cols(), pane.rows()));
-            }
-        }
-
+    /// After a TUI layout resize, re-apply effective sizes for panes that also
+    /// have GUI, WebSocket or web viewers, so their PTY matches the decision
+    /// across every viewer.
+    pub(super) fn reconcile_viewer_constrained_panes(&mut self) {
         // Re-apply effective sizes for any panes that have GUI or web constraints
-        let pane_ids: Vec<String> = self.tui_pane_sizes.keys().cloned().collect();
-        for pane_id in pane_ids {
+        for pane_id in self.dashboard_pane_ids() {
             let has_gui = self
                 .gui_clients
                 .values()

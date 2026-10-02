@@ -1099,6 +1099,19 @@ export class HubConnectionSupervisor {
     this.attachTimeouts.set(session, timeouts);
   }
 
+  /**
+   * A session a concurrent attach already brought onto the ready machine
+   * socket (cas-8fe2). Two attaches can share one machine-socket opening; when
+   * its ticket is refused, both handle the failure, and the slower one's
+   * reachability probes can finish after a retry has opened the socket and
+   * subscribed the session. Its failure is then stale: marking the session
+   * failed and scheduling a retry would leave it "Reconnecting" for good,
+   * because the retry finds the session already subscribed and changes nothing.
+   */
+  private servedByMachineSocket(session: string): boolean {
+    return this.machineSocketReady && this.machineSocket?.readyState === WebSocket.OPEN && this.machineSubscriptions.has(session);
+  }
+
   private async handleAttachFailure(session: string, error: unknown): Promise<void> {
     if (!this.desired) return;
     // Checked before the reachability probe, which would otherwise report a
@@ -1114,17 +1127,18 @@ export class HubConnectionSupervisor {
       this.blockAuthentication(error.kind, error.message, session);
       return;
     }
+    if (this.servedByMachineSocket(session)) return;
     // A revoked origin is rejected at CORS preflight before the authenticated
     // request can expose its 401/403 status. Distinguish that terminal policy
     // refusal from an offline hub with a credential-free opaque health probe.
     const reachable = await this.hubIsReachable();
-    if (!this.desired) return;
+    if (!this.desired || this.servedByMachineSocket(session)) return;
     // Across a network switch the attach request can fail while the health
     // probe just after it succeeds: the network came back in between, not a
     // CORS refusal. Only an authenticated request that still fails once the
     // hub is reachable means the pairing is gone (cas-0978).
     if (reachable && await this.authenticatedRequestSucceeds()) {
-      if (!this.desired) return;
+      if (!this.desired || this.servedByMachineSocket(session)) return;
       this.transitionAttach(session, "failed", this.attachLifecycles.get(session)?.stage ?? "dialing", { reason: "network changed during attach" });
       this.scheduleAttach(session);
       return;

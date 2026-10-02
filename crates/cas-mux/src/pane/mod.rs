@@ -24,6 +24,15 @@ use tokio::sync::Mutex;
 
 use cas_recording::{RecordingWriter, WriterConfig};
 
+/// `Pane::mouse_modes` bit: X11 press/release reporting (`ESC [ ? 1000 h`).
+const MOUSE_MODE_X11: u8 = 1 << 0;
+/// `Pane::mouse_modes` bit: button-event (drag) reporting (`ESC [ ? 1002 h`).
+const MOUSE_MODE_BUTTON: u8 = 1 << 1;
+/// `Pane::mouse_modes` bit: any-event (motion) reporting (`ESC [ ? 1003 h`).
+const MOUSE_MODE_ANY: u8 = 1 << 2;
+/// `Pane::mouse_modes` bit: SGR extended coordinates (`ESC [ ? 1006 h`).
+const MOUSE_MODE_SGR: u8 = 1 << 3;
+
 /// How user input is classified for turn-submit side effects (cas-7f6f).
 ///
 /// One explicit submit API across terminal, GUI, WebSocket, and relay surfaces.
@@ -157,6 +166,16 @@ pub struct Pane {
     /// forwarded to the inner process (alt-screen, no scrollback) or handled
     /// by `Pane::scroll` (normal screen, scrollback available).
     in_alt_screen: bool,
+    /// DEC mouse-reporting modes the inner process has enabled, as
+    /// [`MOUSE_MODE_X11`] / [`MOUSE_MODE_BUTTON`] / [`MOUSE_MODE_ANY`] /
+    /// [`MOUSE_MODE_SGR`] bits, tracked by the same `feed()` scan as
+    /// `in_alt_screen` (cas-4cd6).
+    ///
+    /// Claude Code's fullscreen TUI enables `?1000h ?1002h ?1003h ?1006h` and
+    /// draws clickable controls (the diff sidebar's ✕). The factory forwards
+    /// clicks into a focused pane only when the child asked for SGR mouse
+    /// reports, so plain shells and non-mouse TUIs never receive raw SGR bytes.
+    mouse_modes: u8,
     /// Whether this pane has ever received an OSC 8 hyperlink sequence.
     has_hyperlinks: bool,
     /// Partial DEC private mode sequence carried over from the previous `feed()` chunk.
@@ -234,6 +253,7 @@ impl Pane {
             turn_events_byte_offset: std::sync::Mutex::new(None),
             harness_events_path_override: std::sync::Mutex::new(None),
             in_alt_screen: false,
+            mouse_modes: 0,
             has_hyperlinks: false,
             partial_esc: Vec::new(),
             partial_osc8: Vec::new(),
@@ -523,6 +543,16 @@ impl Pane {
         (self.rows, self.cols)
     }
 
+    /// The kernel window size of this pane's PTY as `(rows, cols)`, or `None`
+    /// for a PTY-less pane or when the query fails. Unlike [`Pane::size`],
+    /// which is bookkeeping, this is what the child process sees (cas-06a2).
+    pub fn pty_winsize(&self) -> Option<(u16, u16)> {
+        match &self.backend {
+            PaneBackend::Pty(pty) => pty.winsize().ok(),
+            PaneBackend::None => None,
+        }
+    }
+
     pub fn cursor_position(&self) -> (u16, u16) {
         self.terminal.cursor_position()
     }
@@ -574,7 +604,19 @@ impl Pane {
     /// (via `partial_esc`), so this function is kept pure (no `&self`) and the
     /// caller manages the carry buffer.
     fn update_alt_screen(data: &[u8], current: bool) -> bool {
-        let mut state = current;
+        Self::update_dec_modes(data, current, 0).0
+    }
+
+    /// Scan `data` for DEC private mode set/reset sequences and return the
+    /// updated `(in_alt_screen, mouse_modes)` pair.
+    ///
+    /// Alt-screen keeps its historical first-parameter-only semantics (see
+    /// [`Self::update_alt_screen`]). Mouse-reporting modes (1000 / 1002 /
+    /// 1003 / 1006) are applied for **every** `;`-separated parameter, so both
+    /// `ESC[?1000h ESC[?1006h` and `ESC[?1000;1006h` register (cas-4cd6).
+    fn update_dec_modes(data: &[u8], current_alt: bool, current_mouse: u8) -> (bool, u8) {
+        let mut state = current_alt;
+        let mut mouse = current_mouse;
         let mut i = 0;
         while i < data.len() {
             // Fast-path: skip directly to the next ESC byte using SIMD memchr.
@@ -649,9 +691,33 @@ impl Pane {
                 (47 | 1047 | 1049, b'l') => state = false,
                 _ => {}
             }
+            // Mouse-reporting modes: every `;`-separated parameter counts;
+            // `:` sub-parameters belong to the preceding parameter and are
+            // skipped.
+            for chunk in data[param_start..j].split(|&b| b == b';') {
+                let lead = chunk.split(|&b| b == b':').next().unwrap_or(&[]);
+                if lead.is_empty() || lead.len() > 5 {
+                    continue;
+                }
+                let value: u32 = lead
+                    .iter()
+                    .fold(0u32, |acc, &b| acc * 10 + (b - b'0') as u32);
+                let bit = match value {
+                    1000 => MOUSE_MODE_X11,
+                    1002 => MOUSE_MODE_BUTTON,
+                    1003 => MOUSE_MODE_ANY,
+                    1006 => MOUSE_MODE_SGR,
+                    _ => continue,
+                };
+                if final_byte == b'h' {
+                    mouse |= bit;
+                } else {
+                    mouse &= !bit;
+                }
+            }
             i = j + 1;
         }
-        state
+        (state, mouse)
     }
 
     /// Bench-only re-export of `update_alt_screen`.
@@ -726,6 +792,19 @@ impl Pane {
         self.in_alt_screen
     }
 
+    /// Whether the inner process asked for SGR-encoded mouse click reports:
+    /// a press-reporting mode (`?1000`, `?1002` or `?1003`) plus SGR
+    /// encoding (`?1006`) are both set (cas-4cd6).
+    ///
+    /// When `true`, forwarding `ESC [ < 0 ; col ; row M/m` into the pane is
+    /// what the child expects; Claude Code's fullscreen diff sidebar ✕ is
+    /// closed this way. When `false` the child would see SGR bytes as typed
+    /// input, so the factory must not forward clicks.
+    pub fn wants_sgr_mouse_clicks(&self) -> bool {
+        self.mouse_modes & (MOUSE_MODE_X11 | MOUSE_MODE_BUTTON | MOUSE_MODE_ANY) != 0
+            && self.mouse_modes & MOUSE_MODE_SGR != 0
+    }
+
     pub fn has_hyperlinks(&self) -> bool {
         self.has_hyperlinks
     }
@@ -760,12 +839,14 @@ impl Pane {
         // If the previous chunk ended with an incomplete DEC sequence, prepend
         // those carry bytes so split sequences are always seen whole.
         if self.partial_esc.is_empty() {
-            self.in_alt_screen = Self::update_alt_screen(data, self.in_alt_screen);
+            (self.in_alt_screen, self.mouse_modes) =
+                Self::update_dec_modes(data, self.in_alt_screen, self.mouse_modes);
             self.partial_esc = Self::trailing_dec_partial(data);
         } else {
             let mut scan_buf = std::mem::take(&mut self.partial_esc);
             scan_buf.extend_from_slice(data);
-            self.in_alt_screen = Self::update_alt_screen(&scan_buf, self.in_alt_screen);
+            (self.in_alt_screen, self.mouse_modes) =
+                Self::update_dec_modes(&scan_buf, self.in_alt_screen, self.mouse_modes);
             self.partial_esc = Self::trailing_dec_partial(data);
         }
 
@@ -954,6 +1035,8 @@ impl Pane {
         self.exit_code = code;
         self.exit_signal = signal;
         self.in_alt_screen = false;
+        // Mouse modes belonged to the dead process too (cas-4cd6).
+        self.mouse_modes = 0;
         // Drop any partial-sequence carry too: it belonged to the now-dead
         // process and cannot be completed by the next one.
         self.partial_esc.clear();

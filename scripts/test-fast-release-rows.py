@@ -169,6 +169,44 @@ class FastRows(unittest.TestCase):
         self.assertEqual(command(self.repo, "git", "rev-parse", "target").stdout.strip(), self.base)
         self.assertFalse((self.repo / "cargo-called").exists())
 
+    def fast_from(self, base, **extra_env):
+        env = dict(os.environ, CARGO=str(self.repo / "cargo-tripwire"),
+                   CAS_RELEASE_GATE_CACHE_DIR=str(self.repo / ".git" / "gate-cache"), **extra_env)
+        result = command(self.repo, "bash", "scripts/release-gate.sh", "--fast-rows", "--base", base, env=env)
+        self.assertFalse((self.repo / "cargo-called").exists(), result.stdout + result.stderr)
+        return result
+
+    def test_force_pushed_vanished_before_sha_falls_back_to_default_branch_merge_base(self):
+        # A push event after a force-push names the replaced tip as `before`;
+        # rebuild that: the old tip is rewritten away and pruned from the clone.
+        command(self.repo, "git", "checkout", "-qb", "factory/lane")
+        self.write("scripts/example.py", "# replaced tip\n")
+        self.commit()
+        vanished = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        command(self.repo, "git", "reset", "-q", "--hard", self.base)
+        self.write("scripts/example.py", "# rebased tip\n")
+        self.commit()
+        for args in (("reflog", "expire", "--expire=now", "--all"), ("gc", "-q", "--prune=now")):
+            self.assertEqual(command(self.repo, "git", *args).returncode, 0)
+        self.assertNotEqual(command(self.repo, "git", "cat-file", "-e", vanished + "^{commit}").returncode, 0)
+        env_lint = "import sys\nassert sys.argv[1:] == ['--changed-since', '" + self.base + "'], sys.argv\n"
+        self.write("scripts/check-test-env.py", env_lint)
+        self.commit()
+        result = self.fast_from(vanished, ZERO_BASE_REF="target")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"using merge-base with target ({self.base})", result.stdout)
+        for row in ("markdown-lint", "test-env"):
+            self.assertIn("PASS " + row, result.stdout)
+        self.assertNotIn("FAIL ", result.stdout)
+
+    def test_unavailable_base_and_fallback_compare_against_head_parent_without_failing(self):
+        self.write("scripts/example.py", "# lane\n")
+        self.commit()
+        result = self.fast_from("0" * 39 + "1", ZERO_BASE_REF="origin/no-such-branch")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("are unavailable; comparing against HEAD^", result.stdout)
+        self.assertNotIn("FAIL ", result.stdout)
+
     def test_env_baseline_growth_and_staleness_fail_admission(self):
         import importlib.util
         spec = importlib.util.spec_from_file_location('fast_env_lint', ROOT / 'scripts/check-test-env.py')

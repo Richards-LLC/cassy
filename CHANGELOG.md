@@ -7,6 +7,64 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.43.1] - 2026-10-01
+
+### Fixed
+
+- `cas update` refreshes skills in every project again when a Claude or Codex
+  account profile's config file is a symlink to a shared file. The Violet
+  migration edits the link's target in place, keeps the link and the file's
+  permissions, and edits a target shared by several profiles once. A dangling
+  link, a link leaving HOME and the explicit profile directories, or an
+  unreadable profile file is skipped with a warning naming the file, and the
+  rest of the update continues.
+- Commander shows each session's own conversation. Messages from earlier
+  sessions of the same project appear in a labelled, collapsed "Earlier
+  session" section instead of as the current thread. A session that hasn't
+  messaged Commander yet shows an honest empty state with its latest
+  activity. Several live sessions of one project are grouped, with the most
+  recent one marked, and a paired device can end a session after
+  confirming.
+
+## [3.43.0] - 2026-10-01
+
+### Changed
+
+- Violet is the only Slack hub name. The MechaCassy proxy registration,
+  integration command, issues alias and redirect skill are retired.
+  `cas update` migrates matching production-hub MCP entries in Claude and
+  Codex profiles and project/user proxy files to `violet`, preserving credential
+  references and custom upstreams. Existing `MECHA_*` credentials still work
+  as fallbacks.
+- Slack posts go through `violet.violet_post` by default. Pre-tool hooks block
+  writes through the Claude Slack connector and Codex Slack app; set
+  `cas config set slack.transport any` to allow another transport explicitly.
+  Where native Codex MCP calls cannot run those hooks, generated guidance
+  requires Violet and `cas doctor` warns about locally detected Slack-app
+  access, noting that cached evidence may be stale.
+
+### Fixed
+
+- Factory pane text wraps to the visible width instead of being clipped,
+  including after layout changes and a web viewer attaches.
+- Clicking the ✕ on Claude Code's diff sidebar inside a factory pane closes
+  the panel, including after reopening it with `/diff`.
+- Closing large groups of tasks resumes from previously checked results
+  instead of restarting and repeatedly timing out.
+- Task close attributes snapshots and code changes to the delivered task,
+  excluding unrelated snapshots, later tasks' commits and merged-in target
+  content. Unrelated changes no longer trigger proof or approval demands.
+- Closing a merged task accepts its group's assembly proof instead of
+  requiring the same build checks again.
+- Archiving a memory no longer reports "entry not found" after saving the
+  archived state. Archived memories remain available by ID for inspection,
+  re-tiering and restoration.
+- The activity feed no longer shows push blocks from isolated test runs as
+  live activity.
+- `worktree_merge` accepts its documented `supervisor_override` and `reason`
+  fields for a failed-CI exception, validates authority and the explanation,
+  and records the decision.
+
 ## [3.42.0] - 2026-10-01
 
 ### Fixed

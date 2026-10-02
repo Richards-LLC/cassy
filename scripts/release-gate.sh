@@ -86,6 +86,27 @@ if [[ "${1:-}" == --fast-rows ]]; then
     fi
     fast_rows=true
     fast_base="${3:-}"
+    # A force-pushed branch's push event names the replaced tip as `before`.
+    # That commit is not fetched and may no longer exist, so a missing base
+    # falls back to merge-base(HEAD, default branch) instead of failing every
+    # row that diffs against it. ZERO_BASE_REF names the default branch in CI.
+    if [[ -n "$fast_base" ]] && ! git rev-parse --verify --quiet "$fast_base^{commit}" >/dev/null; then
+        fallback_ref="${ZERO_BASE_REF:-origin/main}"
+        if ! git rev-parse --verify --quiet "$fallback_ref^{commit}" >/dev/null \
+            && [[ "$fallback_ref" == origin/* ]]; then
+            GIT_TERMINAL_PROMPT=0 git fetch --quiet --no-tags origin \
+                "+refs/heads/${fallback_ref#origin/}:refs/remotes/$fallback_ref" 2>/dev/null || true
+        fi
+        if fallback_base="$(git merge-base HEAD "$fallback_ref" 2>/dev/null)"; then
+            printf 'fast rows: base %s is unavailable (force-push?); using merge-base with %s (%s)\n' \
+                "$fast_base" "$fallback_ref" "$fallback_base"
+            fast_base="$fallback_base"
+        else
+            printf 'fast rows: base %s and fallback %s are unavailable; comparing against HEAD^\n' \
+                "$fast_base" "$fallback_ref"
+            fast_base=''
+        fi
+    fi
     version="$(sed -n 's/^version = "\([^" ]*\)".*/\1/p' cas-cli/Cargo.toml | head -n1)"
     [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
         printf 'error: cannot read current release version from cas-cli/Cargo.toml\n' >&2

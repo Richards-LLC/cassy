@@ -23,6 +23,12 @@ pub fn execute(args: &AgentsMdArgs, _cli: &Cli) -> anyhow::Result<()> {
     } else {
         AgentsMdSyncMode::Write
     };
+    #[cfg(feature = "mcp-proxy")]
+    if !args.check {
+        crate::cli::integrate::violet_retirement::retire_installed_hub(Some(
+            &project_root.join(".cas/proxy.toml"),
+        ))?;
+    }
     let report = sync_agents_md(&project_root, mode)?;
 
     if args.check && report.stale_count() > 0 {

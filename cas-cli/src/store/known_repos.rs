@@ -180,7 +180,7 @@ pub(crate) fn forget_known_repo_row_exact(path: &Path) -> anyhow::Result<usize> 
 /// sweeps apply this classification before acting on registered roots.
 ///
 /// ROOT CAUSE this exists for (cas-647c): every registry row is treated as a
-/// live host project by the sweep and doctor surfaces. A closed mecha-cassy
+/// live host project by the sweep and doctor surfaces. A closed violet
 /// task copied a whole CAS root to `~/.cas/artifacts/cas-1bfb/fresh-proxy` as
 /// an isolated proxy-health fixture and ran `cas serve` inside it, which
 /// auto-registered the copy. `cas doctor` then opened the fixture's 10-table
@@ -675,7 +675,7 @@ mod tests {
         });
     }
 
-    /// cas-647c: the measured incident. A closed mecha-cassy task copied a CAS
+    /// cas-647c: the measured incident. A closed violet task copied a CAS
     /// root to `~/.cas/artifacts/cas-1bfb/fresh-proxy` as a proxy-health
     /// fixture and ran `cas serve` inside it, which auto-registered the copy as
     /// a host project. `cas doctor` then opened its 10-table database, found no

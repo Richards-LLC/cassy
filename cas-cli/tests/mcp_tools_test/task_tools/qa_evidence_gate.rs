@@ -465,3 +465,102 @@ async fn supervisor_override_waives_the_gate_with_a_logged_decision() {
         "the waived refusal is recorded: {notes}"
     );
 }
+
+/// cas-ba4a: start the worker's next task on the same factory lane — a lease
+/// claimed now, status `status`, so the in-progress-sibling guard does not
+/// apply — then commit that task's untagged work on top of the lane.
+fn start_next_task_on_the_lane(fx: &Fx, id: &str, status: TaskStatus, path: &str) -> String {
+    let cas_dir = fx.repo.join(".cas");
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut next = cas::types::Task::new(id.to_string(), "next task on the same lane".to_string());
+    next.status = status;
+    next.assignee = Some("test-agent".to_string());
+    tasks.add(&next).unwrap();
+    cas::store::open_agent_store(&cas_dir)
+        .unwrap()
+        .try_claim(id, &format!("test-session-{}", std::process::id()), 600, Some("start"))
+        .unwrap();
+    commit_file(&fx.repo, path, "// next task\n")
+}
+
+fn anchor(fx: &Fx) -> Option<String> {
+    open_task_store(&fx.repo.join(".cas"))
+        .unwrap()
+        .get(TASK)
+        .unwrap()
+        .deliverables
+        .factory_branch_anchor
+}
+
+fn merge_into_main(fx: &Fx, commit: &str) {
+    git(&fx.repo, &["checkout", "-q", "main"]);
+    git(&fx.repo, &["merge", "-q", "--no-ff", "-m", "merge parked delivery", commit]);
+    git(&fx.repo, &["checkout", "-q", "factory/test-agent"]);
+}
+
+/// cas-ba4a: the worker parks A at X with a valid QA bundle, starts B on the
+/// same lane and commits B's work. A pre-merge retry must not move A's anchor
+/// onto B's commit, and once X merges A's plain re-close judges X — not the
+/// lane tip — so it closes without an override.
+#[tokio::test]
+async fn parked_delivery_recloses_on_its_anchor_after_the_next_task_moves_the_lane_cas_ba4a() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut test_env,
+        &[("web/composer.css", ".composer{gap:8px}\n")],
+        "Open the composer; spacing is even",
+    );
+    let parked_at = git(&fx.repo, &["rev-parse", "factory/test-agent"]);
+    fx.write_bundle(&parked_at);
+    let parked = close_text(&fx.core, TASK).await;
+    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+    assert_eq!(fx.status(), TaskStatus::AwaitingMerge);
+    assert_eq!(anchor(&fx).as_deref(), Some(parked_at.as_str()));
+
+    for (id, status) in [("cas-b0b1", TaskStatus::Open), ("cas-b0b2", TaskStatus::Blocked)] {
+        let lane_tip =
+            start_next_task_on_the_lane(&fx, id, status, &format!("web/next-{status:?}.css"));
+        let retry = close_text(&fx.core, TASK).await;
+        assert!(retry.contains("MERGE REQUIRED"), "{status:?}: {retry}");
+        assert!(!retry.contains("stale"), "{status:?}: {retry}");
+        assert_eq!(
+            anchor(&fx).as_deref(),
+            Some(parked_at.as_str()),
+            "B ({status:?}) at {lane_tip} must not become A's delivery"
+        );
+    }
+
+    merge_into_main(&fx, &parked_at);
+    let closed = close_text(&fx.core, TASK).await;
+    assert!(!closed.contains("QA evidence bundle is stale"), "{closed}");
+    assert_eq!(fx.status(), TaskStatus::Closed, "{closed}");
+}
+
+/// cas-ba4a: blast-radius proof scope is measured on the parked anchor. The
+/// next task's untagged commit on the same lane touches a module outside A's
+/// proof targets; counting it (the old HEAD-based attribution) refused A's
+/// re-close with "uncovered source modules".
+#[tokio::test]
+async fn parked_delivery_proof_scope_ignores_the_next_tasks_commits_cas_ba4a() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut test_env, &[], "");
+    let cas_dir = fx.repo.join(".cas");
+    let agent_id = format!("test-session-{}", std::process::id());
+    let agents = cas::store::open_agent_store(&cas_dir).unwrap();
+    agents.try_claim(TASK, &agent_id, 600, Some("start A")).unwrap();
+    let parked_at = commit_file(&fx.repo, "crates/widget/src/composer.rs", "pub fn composer() {}\n");
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = tasks.get(TASK).unwrap();
+    task.risk = vec![cas::types::TaskRisk::BlastRadius];
+    task.proof_targets = vec!["composer".to_string()];
+    task.status = TaskStatus::AwaitingMerge;
+    task.deliverables.factory_branch_anchor = Some(parked_at.clone());
+    tasks.update(&task).unwrap();
+    agents.release_lease(TASK, &agent_id).unwrap();
+
+    start_next_task_on_the_lane(&fx, "cas-b0b3", TaskStatus::Blocked, "crates/widget/src/other.rs");
+    merge_into_main(&fx, &parked_at);
+
+    let closed = close_text(&fx.core, TASK).await;
+    assert!(!closed.contains("uncovered source modules"), "{closed}");
+    assert_eq!(fx.status(), TaskStatus::Closed, "{closed}");
+}

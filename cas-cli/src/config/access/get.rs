@@ -19,6 +19,15 @@ impl Config {
         let memory = self.memory.clone().unwrap_or_default();
         let factory = self.factory();
         match key {
+            "jev.model" => Some(self.jev.clone().unwrap_or_default().model),
+            "jev.key_file" => Some(
+                self.jev
+                    .clone()
+                    .unwrap_or_default()
+                    .key_file
+                    .unwrap_or_default(),
+            ),
+            "jev.enabled" => Some(self.jev.clone().unwrap_or_default().enabled.to_string()),
             "slack.transport" => Some(
                 match self.slack.as_ref().map(|s| s.transport).unwrap_or_default() {
                     SlackTransport::Violet => "violet",
@@ -39,6 +48,7 @@ impl Config {
             "skills.optional" => Some(skills.optional.join(",")),
             // Cloud section
             "cloud.auto_sync" => Some(cloud.auto_sync.to_string()),
+            "cloud.team_only" => Some(cloud.team_only.to_string()),
             "cloud.interval_secs" => Some(cloud.interval_secs.to_string()),
             "cloud.pull_on_start" => Some(cloud.pull_on_start.to_string()),
             "cloud.max_retries" => Some(cloud.max_retries.to_string()),

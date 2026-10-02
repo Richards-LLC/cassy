@@ -38,7 +38,7 @@ if [[ -n "$base" ]] && git -C "$worktree" diff --quiet "$base" HEAD -- hub-web/d
 fi
 
 tree="$(git -C "$worktree" rev-parse 'HEAD:hub-web/dist')"
-mapfile -t reports < <(git -C "$worktree" grep -l -E "^[-* ]*hub_web_dist: *$tree\b" HEAD -- "$reports_dir" 2>/dev/null \
+mapfile -t reports < <(git -C "$worktree" grep -l -E "^[-* ]*hub_web_dist: *$tree($|[^[:alnum:]_])" HEAD -- "$reports_dir" 2>/dev/null \
     | sed 's#^HEAD:##' | grep -v '/TEMPLATE\.md$' || true)
 [[ ${#reports[@]} -gt 0 ]] || block "hub-web/dist changed since ${base:-<no release tag>} and no committed report in $reports_dir names hub_web_dist $tree"
 

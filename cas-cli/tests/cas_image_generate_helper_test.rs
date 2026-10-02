@@ -17,7 +17,7 @@ fn repo_root() -> PathBuf {
 #[test]
 fn helper_streams_large_reference_and_honors_returned_mime() {
     let project = TempDir::new().expect("temporary image-generation project");
-    let reference = project.path().join("reference.png");
+    let reference = project.path().join("reference image.png");
     let reference_bytes: Vec<u8> = (0..256 * 1024).map(|index| (index % 251) as u8).collect();
     fs::write(&reference, &reference_bytes).expect("write large reference fixture");
     assert!(
@@ -59,7 +59,7 @@ printf '%s' '{"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"imag
     let requested_output = project.path().join("generated.png");
     let actual_output = project.path().join("generated.jpg");
     let path = format!("{}:/usr/bin:/bin", bin.display());
-    Command::new("bash")
+    Command::new("/bin/bash")
         .arg(&script)
         .args([
             "--prompt",
@@ -131,7 +131,7 @@ printf '%s' '{"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"imag
     let path = format!("{}:/usr/bin:/bin", bin.display());
     let run = |extra: &[&str], capture: &std::path::Path| {
         let output = project.path().join("hero.png");
-        Command::new("bash")
+        Command::new("/bin/bash")
             .arg(&script)
             .args(["--prompt", "hero", "--output", output.to_str().unwrap()])
             .args(extra)
@@ -149,7 +149,10 @@ printf '%s' '{"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"imag
         &project.path().join("sized.json"),
     );
     assert_eq!(sized["generationConfig"]["responseModalities"][0], "IMAGE");
-    assert_eq!(sized["generationConfig"]["imageConfig"]["aspectRatio"], "16:9");
+    assert_eq!(
+        sized["generationConfig"]["imageConfig"]["aspectRatio"],
+        "16:9"
+    );
     assert_eq!(sized["generationConfig"]["imageConfig"]["imageSize"], "2K");
 
     let plain = run(&[], &project.path().join("plain.json"));
@@ -158,11 +161,40 @@ printf '%s' '{"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"imag
         "without --aspect/--size the request keeps the model defaults: {plain}"
     );
 
-    Command::new("bash")
+    Command::new("/bin/bash")
         .arg(&script)
-        .args(["--prompt", "hero", "--output", "x.png", "--size", "8K", "--dry-run"])
+        .args([
+            "--prompt",
+            "hero",
+            "--output",
+            "x.png",
+            "--size",
+            "8K",
+            "--dry-run",
+        ])
         .env("GEMINI_API_KEY", "offline-test-key")
         .assert()
         .code(2)
         .stderr(predicates::str::contains("--size must be 1K, 2K or 4K"));
+}
+
+#[cfg(unix)]
+#[test]
+fn helper_dry_run_counts_empty_and_populated_references_with_native_bash_cas_edfc() {
+    let script = repo_root()
+        .join("cas-cli/src/builtins/skills/cas-image-generate/scripts/generate-image.sh");
+    for (references, count) in [(vec![], 0), (vec!["one image.png", "two images.jpg"], 2)] {
+        let mut command = Command::new("/bin/bash");
+        command
+            .arg(&script)
+            .args(["--prompt", "hero", "--output", "unused.png", "--dry-run"]);
+        for reference in references {
+            command.args(["--reference", reference]);
+        }
+        command
+            .env("GEMINI_API_KEY", "offline-test-key")
+            .assert()
+            .success()
+            .stdout(predicates::str::contains(format!("references={count}\n")));
+    }
 }

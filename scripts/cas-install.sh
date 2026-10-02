@@ -220,6 +220,7 @@ fetch_release_receipt() {
   local receipt_url="$1" body_path="$2" error_path="$3"
   local github_token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
   local attempt status fetch_status
+  # Bash 3.2 treats an empty array as unset under nounset; expand only if set.
   local -a curl_auth_args=() wget_auth_args=()
 
   if [ -n "$github_token" ]; then
@@ -235,13 +236,13 @@ fetch_release_receipt() {
 
     if command -v curl &>/dev/null; then
       status="$(curl --silent --show-error --location \
-        "${curl_auth_args[@]}" \
+        ${curl_auth_args[@]+"${curl_auth_args[@]}"} \
         --output "$body_path" \
         --write-out '%{http_code}' \
         "$receipt_url" 2>"$error_path")" && fetch_status=0 || fetch_status=$?
     elif command -v wget &>/dev/null; then
       wget --server-response --tries=1 --output-document="$body_path" \
-        "${wget_auth_args[@]}" "$receipt_url" 2>"$error_path" && fetch_status=0 || fetch_status=$?
+        ${wget_auth_args[@]+"${wget_auth_args[@]}"} "$receipt_url" 2>"$error_path" && fetch_status=0 || fetch_status=$?
       status="$(sed -n 's/^[[:space:]]*HTTP\/[0-9.]*[[:space:]]\+\([0-9][0-9][0-9]\).*/\1/p' "$error_path" | tail -1)"
       status="${status:-000}"
     else

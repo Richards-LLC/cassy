@@ -29,7 +29,7 @@ mod imports;
 
 // Re-export types from cas-mcp for MCP tool parameters
 pub use cas_mcp::{
-    AgentRequest, ArtifactRequest, CoordinationRequest, ExecuteRequest, FactoryRequest,
+    AgentRequest, ArtifactRequest, CoordinationRequest, ExecuteRequest, FactoryRequest, JevRequest,
     KnowledgeRequest, MemoryRequest, PatternRequest, RuleRequest, SearchContextRequest,
     SkillRequest, SpecRequest, SystemRequest, TaskRequest, TeamRequest, VerificationRequest,
 };
@@ -778,6 +778,29 @@ impl CasService {
             // Track MCP tool usage
             crate::telemetry::track_mcp_tool("verification", &action, result.is_ok());
 
+            result
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Evaluate calibrated decisions with Jev. ask evaluates state; batch evaluates 1–50 records; files evaluates project paths/globs with secret refusals, ignore rules and caps, returning no content. Shared typed questions. Returns TypeSafe JSON answers, probabilities, confidence and usage. advisory=true returns unavailable when the service is unreachable. Every evaluation records a decision log with a state hash."
+    )]
+    pub async fn jev(
+        &self,
+        Parameters(req): Parameters<JevRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let this = self.clone();
+        panic_catch::dispatch_with_catch("jev", async move {
+            let action = req.action.clone();
+            let result = match action.as_str() {
+                "ask" | "batch" | "files" => this.inner.jev_evaluate(req).await,
+                _ => Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "Unknown Jev action; use ask, batch or files",
+                )),
+            };
+            crate::telemetry::track_mcp_tool("jev", &action, result.is_ok());
             result
         })
         .await
@@ -1784,6 +1807,7 @@ mod tests {
             "pattern",
             "spec",
             "artifact",
+            "jev",
         ] {
             assert!(
                 names.iter().any(|n| n == required),

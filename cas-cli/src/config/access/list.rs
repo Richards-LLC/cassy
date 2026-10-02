@@ -18,6 +18,9 @@ impl Config {
         let memory = self.memory.clone().unwrap_or_default();
         let factory = self.factory();
         vec![
+            ("jev.model".into(), self.get("jev.model").unwrap()),
+            ("jev.key_file".into(), self.get("jev.key_file").unwrap()),
+            ("jev.enabled".into(), self.get("jev.enabled").unwrap()),
             (
                 "slack.transport".to_string(),
                 self.get("slack.transport").unwrap(),
@@ -47,6 +50,7 @@ impl Config {
             ),
             ("skills.optional".to_string(), skills.optional.join(",")),
             // Cloud section
+            ("cloud.team_only".to_string(), cloud.team_only.to_string()),
             ("cloud.auto_sync".to_string(), cloud.auto_sync.to_string()),
             (
                 "cloud.interval_secs".to_string(),

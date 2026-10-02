@@ -117,5 +117,60 @@ for script in "$merge_script" "$queued_script"; do
     fi
 done
 
+# Exercise the BSD fallback on every host, including GNU-date Linux runners.
+# The default fixture runs above still exercise the host's native date parser.
+real_date="$(command -v date)"
+cat >"$tmp/bin/date" <<'EOF_DATE'
+#!/usr/bin/env bash
+if [[ "${FAKE_GNU_DATE_RESULT:-}" == 1 ]]; then
+    printf '4242\n'
+elif [[ "${FAKE_BSD_DATE:-}" == 1 ]]; then
+    exit 64
+else
+    exec "$REAL_DATE" "$@"
+fi
+EOF_DATE
+chmod +x "$tmp/bin/date"
+# shellcheck source=watchdog-policy.sh
+source "$repo_root/scripts/watchdog-policy.sh"
+for timestamp in '1970-01-01T00:00:00Z' '1970-01-01T01:00:00+01:00' '1970-01-01T00:00:00.999Z'; do
+    if epoch="$(PATH="$tmp/bin:$PATH" FAKE_BSD_DATE=1 watchdog_timestamp_epoch "$timestamp")" && [[ "$epoch" == 0 ]]; then
+        printf 'ok   portable UTC epoch for %s\n' "$timestamp"; pass=$((pass + 1))
+    else
+        printf 'FAIL portable UTC epoch for %s\n' "$timestamp" >&2; fail=$((fail + 1))
+    fi
+done
+if epoch="$(PATH="$tmp/bin:$PATH" FAKE_BSD_DATE=1 watchdog_timestamp_epoch '1969-12-31T23:59:59.999Z')" && [[ "$epoch" == -1 ]]; then
+    printf 'ok   portable epoch floors fractional pre-epoch timestamps\n'; pass=$((pass + 1))
+else
+    printf 'FAIL portable epoch floors fractional pre-epoch timestamps\n' >&2; fail=$((fail + 1))
+fi
+for timestamp in 'not-a-date' '1970-01-01T00:00:00'; do
+    if PATH="$tmp/bin:$PATH" FAKE_BSD_DATE=1 watchdog_timestamp_epoch "$timestamp" >/dev/null 2>&1; then
+        printf 'FAIL portable parser rejects invalid or timezone-free timestamp %s\n' "$timestamp" >&2; fail=$((fail + 1))
+    else
+        printf 'ok   portable parser rejects invalid or timezone-free timestamp %s\n' "$timestamp"; pass=$((pass + 1))
+    fi
+done
+# A GNU-success result must win without imposing Python's ISO-only grammar.
+if epoch="$(PATH="$tmp/bin:$PATH" FAKE_GNU_DATE_RESULT=1 watchdog_timestamp_epoch 'GNU-supported date input')" && [[ "$epoch" == 4242 ]]; then
+    printf 'ok   native GNU date success keeps its exact result\n'; pass=$((pass + 1))
+else
+    printf 'FAIL native GNU date success keeps its exact result\n' >&2; fail=$((fail + 1))
+fi
+for script in "$merge_script" "$queued_script"; do
+    if [[ "$script" == "$merge_script" ]]; then run_id=201; else run_id=101; fi
+    output="$tmp/$(basename "$script").bsd-output"
+    : >"$tmp/gh.log"
+    if env "${run_env[@]}" REAL_DATE="$real_date" FAKE_BSD_DATE=1 "$script" >"$output" 2>&1; then
+        if [[ "$script" == "$merge_script" ]]; then kind=merge_group; else kind=queued; fi
+        expect_text "$(<"$output")" "cancelling stale $kind run=$run_id" "$(basename "$script") still cancels with BSD date"
+        expect_text "$(<"$tmp/gh.log")" "actions/runs/$run_id/cancel" "$(basename "$script") BSD fallback sends the cancellation"
+    else
+        printf 'FAIL %s BSD-date fixture exits successfully\n' "$(basename "$script")" >&2; fail=$((fail + 1))
+    fi
+    : >"$tmp/gh.log"
+done
+
 printf 'test result: %s passed; %s failed\n' "$pass" "$fail"
 (( fail == 0 ))

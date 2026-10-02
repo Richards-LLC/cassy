@@ -27,6 +27,7 @@ watchdog_behavior_test="$repo_root/scripts/test-watchdog-scripts.sh"
 
 pass=0
 fail=0
+skip=0
 policy_parser="$repo_root/scripts/ci_tiers/policy.py"
 
 require_text() {
@@ -75,29 +76,31 @@ else
     fail=$((fail + 1))
 fi
 
-if [[ -x "$runner_pruner" && -x "$runner_pruner_test" ]] && "$runner_pruner_test" >/dev/null; then
-    printf 'ok   runner cache pruning behavior test passes\n'
-    pass=$((pass + 1))
-else
-    printf 'FAIL runner cache pruning behavior test must be executable and pass\n'
-    fail=$((fail + 1))
-fi
+# These fixtures exercise Linux runner mount, /proc and flock contracts.
+# Keep executable admission on Darwin, but do not count a platform skip as pass.
+run_linux_runner_fixture() {
+    local script="$1" fixture="$2" label="$3" reason="$4"
+    if [[ ! -x "$script" || ! -x "$fixture" ]]; then
+        printf 'FAIL %s must be executable\n' "$label"
+        fail=$((fail + 1))
+    elif [[ "$(uname -s)" == Darwin ]]; then
+        printf 'SKIP %s on Darwin: %s\n' "$label" "$reason"
+        skip=$((skip + 1))
+    elif "$fixture" >/dev/null; then
+        printf 'ok   %s passes\n' "$label"
+        pass=$((pass + 1))
+    else
+        printf 'FAIL %s must pass\n' "$label"
+        fail=$((fail + 1))
+    fi
+}
 
-if [[ -x "$runner_mount_guard" && -x "$runner_mount_guard_test" ]] && "$runner_mount_guard_test" >/dev/null; then
-    printf 'ok   runner cache mount guard behavior test passes\n'
-    pass=$((pass + 1))
-else
-    printf 'FAIL runner cache mount guard behavior test must be executable and pass\n'
-    fail=$((fail + 1))
-fi
-
-if [[ -x "$runner_job_lock" && -x "$runner_job_lock_test" ]] && "$runner_job_lock_test" >/dev/null; then
-    printf 'ok   runner job-lifetime cache lock behavior test passes\n'
-    pass=$((pass + 1))
-else
-    printf 'FAIL runner job-lifetime cache lock behavior test must be executable and pass\n'
-    fail=$((fail + 1))
-fi
+run_linux_runner_fixture "$runner_pruner" "$runner_pruner_test" \
+    'runner cache pruning behavior test' 'Linux cgroups, flock, findmnt and GNU deletion/accounting tools required'
+run_linux_runner_fixture "$runner_mount_guard" "$runner_mount_guard_test" \
+    'runner cache mount guard behavior test' 'Linux findmnt/mountpoint device and FSROOT semantics required'
+run_linux_runner_fixture "$runner_job_lock" "$runner_job_lock_test" \
+    'runner job-lifetime cache lock behavior test' 'Linux /proc identity and inherited flock descriptor required'
 
 if [[ -x "$runner_isolation" ]]; then
     if CARGO_TARGET_DIR=/var/lib/cassy-actions/cache/cargo-target \
@@ -748,7 +751,7 @@ else
     fail=$((fail + 1))
 fi
 
-printf '\ntest result: %s passed; %s failed\n' "$pass" "$fail"
+printf '\ntest result: %s passed; %s failed; %s skipped\n' "$pass" "$fail" "$skip"
 if [[ "$fail" -ne 0 ]]; then
     exit 1
 fi

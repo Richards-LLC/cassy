@@ -2,6 +2,41 @@ use crate::mcp::tools::core::imports::*;
 
 const TASK_SHOW_NOTES_LIMIT: usize = 5;
 
+fn retain_list_tasks(
+    tasks: &mut Vec<Task>,
+    filter: &str,
+    predicate: impl FnMut(&Task) -> bool,
+    exclusions: &mut Vec<String>,
+) {
+    let before = tasks.len();
+    tasks.retain(predicate);
+    let removed = before - tasks.len();
+    if removed > 0 {
+        exclusions.push(format!("{filter}: {removed}"));
+    }
+}
+
+fn append_list_filter_report(
+    output: &mut String,
+    exclusions: &[String],
+    quarantined: usize,
+    foreign: usize,
+) {
+    if !exclusions.is_empty() {
+        output.push_str(&format!(
+            "\nFilters excluded (applied in order): {}",
+            exclusions.join("; ")
+        ));
+    }
+    if quarantined > 0 {
+        output.push_str(&format!("\n{quarantined} quarantined tasks hidden (local quarantine ledger; task show by id remains available)"));
+    }
+    if let Some(footer) = super::foreign_tasks_hidden_footer(foreign) {
+        output.push('\n');
+        output.push_str(&footer);
+    }
+}
+
 fn task_show_notes(notes: &str, task_id: &str) -> String {
     // Notes written by `task notes` begin with a timestamped `[... ]`
     // heading. Split on the heading boundary so blank lines inside a note do
@@ -631,63 +666,77 @@ impl CasCore {
 
         let task_store = self.open_task_store()?;
 
-        // If epic filter is specified, get subtasks of that epic instead of all tasks
-        let tasks = if let Some(ref epic_id) = req.epic {
-            task_store.get_subtasks(epic_id).map_err(|e| McpError {
+        // Preserve suppression metadata through store wrappers. User filters
+        // run before quarantine/origin so each count describes this query.
+        let (mut filtered, suppressed) =
+            task_store
+                .list_with_suppressed(None)
+                .map_err(|e| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!("Failed to list: {e}")),
+                    data: None,
+                })?;
+        let suppressed_ids: std::collections::BTreeSet<_> =
+            suppressed.iter().map(|task| task.id.clone()).collect();
+        filtered.extend(suppressed);
+        let mut exclusions = Vec::new();
+        if let Some(ref epic_id) = req.epic {
+            let subtasks = task_store.get_subtasks(epic_id).map_err(|e| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
                 message: Cow::from(format!("Failed to get subtasks for epic {epic_id}: {e}")),
                 data: None,
-            })?
-        } else {
-            task_store.list(None).map_err(|e| McpError {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!("Failed to list: {e}")),
-                data: None,
-            })?
-        };
-
-        // Apply filters. Count foreign rows after the user-supplied filters so
-        // the footer describes rows hidden by this exact query.
-        let mut filtered: Vec<_> = tasks
-            .into_iter()
-            .filter(|task| {
-                // Status filter — use Display (snake_case) for matching so
-                // "awaiting_merge", "in_progress", etc. all round-trip
-                // correctly. Previously used Debug (PascalCase) which would not
-                // match snake_case filter strings for multi-word status values.
-                if let Some(ref status_filter) = req.status {
-                    let task_status = task.status.to_string(); // snake_case via Display
-                    if !task_status.contains(&status_filter.to_lowercase()) {
-                        return false;
-                    }
-                }
-                // Label filter
-                if let Some(ref label_filter) = req.label {
-                    if !task
-                        .labels
+            })?;
+            let ids: std::collections::BTreeSet<_> = subtasks.iter().map(|task| &task.id).collect();
+            retain_list_tasks(
+                &mut filtered,
+                &format!("epic={epic_id}"),
+                |task| ids.contains(&task.id),
+                &mut exclusions,
+            );
+        }
+        if let Some(ref status) = req.status {
+            retain_list_tasks(
+                &mut filtered,
+                &format!("status={status}"),
+                |task| task.status.to_string().contains(&status.to_lowercase()),
+                &mut exclusions,
+            );
+        }
+        if let Some(ref label) = req.label {
+            retain_list_tasks(
+                &mut filtered,
+                &format!("label={label}"),
+                |task| {
+                    task.labels
                         .iter()
-                        .any(|l| l.to_lowercase().contains(&label_filter.to_lowercase()))
-                    {
-                        return false;
-                    }
-                }
-                // Assignee filter
-                if let Some(ref assignee_filter) = req.assignee {
-                    match &task.assignee {
-                        Some(a) if a.to_lowercase().contains(&assignee_filter.to_lowercase()) => {}
-                        _ => return false,
-                    }
-                }
-                // Task type filter
-                if let Some(ref type_filter) = req.task_type {
-                    let task_type_str = task.task_type.to_string().to_lowercase();
-                    if task_type_str != type_filter.to_lowercase() {
-                        return false;
-                    }
-                }
-                true
-            })
-            .collect();
+                        .any(|value| value.to_lowercase().contains(&label.to_lowercase()))
+                },
+                &mut exclusions,
+            );
+        }
+        if let Some(ref assignee) = req.assignee {
+            retain_list_tasks(
+                &mut filtered,
+                &format!("assignee={assignee}"),
+                |task| {
+                    task.assignee.as_ref().is_some_and(|value| {
+                        value.to_lowercase().contains(&assignee.to_lowercase())
+                    })
+                },
+                &mut exclusions,
+            );
+        }
+        if let Some(ref task_type) = req.task_type {
+            retain_list_tasks(
+                &mut filtered,
+                &format!("type={task_type}"),
+                |task| task.task_type.to_string().eq_ignore_ascii_case(task_type),
+                &mut exclusions,
+            );
+        }
+        let before_quarantine = filtered.len();
+        filtered.retain(|task| !suppressed_ids.contains(&task.id));
+        let hidden_quarantined = before_quarantine - filtered.len();
         let hidden_foreign = if req.include_foreign {
             0
         } else {
@@ -722,10 +771,7 @@ impl CasCore {
         };
         if filtered.is_empty() {
             let mut output = format!("No tasks found matching filters.\n{scope_note}.");
-            if let Some(footer) = super::foreign_tasks_hidden_footer(hidden_foreign) {
-                output.push_str("\n");
-                output.push_str(&footer);
-            }
+            append_list_filter_report(&mut output, &exclusions, hidden_quarantined, hidden_foreign);
             return Ok(Self::success(output));
         }
 
@@ -765,10 +811,7 @@ impl CasCore {
         if filtered.len() > limit {
             output.push_str(&format!("\n... and {} more", filtered.len() - limit));
         }
-        if let Some(footer) = super::foreign_tasks_hidden_footer(hidden_foreign) {
-            output.push_str("\n");
-            output.push_str(&footer);
-        }
+        append_list_filter_report(&mut output, &exclusions, hidden_quarantined, hidden_foreign);
 
         Ok(Self::success(output))
     }
@@ -776,7 +819,219 @@ impl CasCore {
 
 #[cfg(test)]
 mod tests {
-    use super::task_show_notes;
+    use super::*;
+
+    fn list_request() -> TaskListRequest {
+        TaskListRequest {
+            limit: Some(500),
+            scope: "project".into(),
+            status: Some("open".into()),
+            task_type: None,
+            label: None,
+            assignee: None,
+            epic: None,
+            sort: None,
+            sort_order: None,
+            include_foreign: false,
+        }
+    }
+
+    fn list_text(result: CallToolResult) -> String {
+        let rmcp::model::RawContent::Text(text) = &result.content[0].raw else {
+            panic!("task list must return text")
+        };
+        text.text.clone()
+    }
+
+    fn listed_ids(text: &str) -> std::collections::BTreeSet<String> {
+        text.lines()
+            .filter_map(|line| line.strip_prefix("- ["))
+            .map(|line| line.split(']').next().unwrap().to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn cas_4bd8_open_list_accounts_for_quarantined_mixed_rows_and_release() {
+        use cas_types::TaskType;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let store = core.open_task_store().unwrap();
+        let queue = crate::cloud::SyncQueue::open(&root).unwrap();
+        queue.init().unwrap();
+        for index in 0..225 {
+            let mut task =
+                cas_types::Task::new(format!("cas-row{index:03}"), "Mixed fixture".into());
+            task.task_type = [
+                TaskType::Epic,
+                TaskType::Chore,
+                TaskType::Task,
+                TaskType::Bug,
+                TaskType::Feature,
+            ][index % 5];
+            store
+                .create_atomic(&task, &[], (index > 0).then_some("cas-row000"), None)
+                .unwrap();
+            if index < 30 {
+                queue
+                    .quarantine_row(
+                        crate::cloud::QUARANTINE_TASK,
+                        &task.id,
+                        "fixture suppression",
+                    )
+                    .unwrap();
+            }
+        }
+        let conn = rusqlite::Connection::open(&root.join("cas.db")).unwrap();
+        let expected = conn
+            .prepare("SELECT id FROM tasks WHERE status='open'")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<std::collections::BTreeSet<_>, _>>()
+            .unwrap();
+        assert_eq!(expected.len(), 225);
+        let hidden = queue
+            .quarantined_ids(crate::cloud::QUARANTINE_TASK)
+            .unwrap();
+        let text = list_text(
+            core.cas_task_list(Parameters(list_request()))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            listed_ids(&text),
+            expected.difference(&hidden).cloned().collect()
+        );
+        assert!(text.contains("30 quarantined tasks hidden"), "{text}");
+        let mut limited = list_request();
+        limited.limit = Some(5);
+        let limited_text = list_text(core.cas_task_list(Parameters(limited)).await.unwrap());
+        assert_eq!(listed_ids(&limited_text).len(), 5);
+        assert!(limited_text.contains("195 total, showing 5"));
+        assert!(limited_text.contains("... and 190 more"));
+        assert!(limited_text.contains("30 quarantined tasks hidden"));
+        let mut epic_request = list_request();
+        epic_request.epic = Some("cas-row000".into());
+        let epic_text = list_text(core.cas_task_list(Parameters(epic_request)).await.unwrap());
+        assert_eq!(listed_ids(&epic_text), listed_ids(&text));
+        assert!(epic_text.contains("epic=cas-row000: 1"), "{epic_text}");
+        assert!(
+            epic_text.contains("29 quarantined tasks hidden"),
+            "{epic_text}"
+        );
+        assert_eq!(store.get("cas-row007").unwrap().status, TaskStatus::Open);
+        assert!(
+            queue
+                .release_quarantined_row(crate::cloud::QUARANTINE_TASK, "cas-row007")
+                .unwrap()
+        );
+        let text = list_text(
+            core.cas_task_list(Parameters(list_request()))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(listed_ids(&text).len(), 196);
+        assert!(listed_ids(&text).contains("cas-row007"));
+        assert!(text.contains("29 quarantined tasks hidden"), "{text}");
+        for id in hidden {
+            queue
+                .release_quarantined_row(crate::cloud::QUARANTINE_TASK, &id)
+                .unwrap();
+        }
+        let text = list_text(
+            core.cas_task_list(Parameters(list_request()))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(listed_ids(&text), expected);
+        assert!(!text.contains("quarantined tasks hidden"));
+    }
+
+    #[tokio::test]
+    async fn cas_4bd8_filters_count_only_matching_quarantine_and_empty_results() {
+        use cas_types::TaskType;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let store = core.open_task_store().unwrap();
+        let queue = crate::cloud::SyncQueue::open(&root).unwrap();
+        queue.init().unwrap();
+        for id in [
+            "keep",
+            "hidden",
+            "hidden-closed",
+            "foreign",
+            "closed",
+            "label",
+            "assignee",
+            "type",
+        ] {
+            let mut task = Task::new(format!("cas-{id}"), "Filter fixture".into());
+            task.task_type = if id == "type" {
+                TaskType::Chore
+            } else {
+                TaskType::Bug
+            };
+            task.status = if id.ends_with("closed") {
+                TaskStatus::Closed
+            } else {
+                TaskStatus::Open
+            };
+            task.labels = vec![
+                if id == "label" || id == "closed" {
+                    "other"
+                } else {
+                    "keep"
+                }
+                .into(),
+            ];
+            task.assignee = Some(if id == "assignee" { "other" } else { "owner" }.into());
+            if id == "foreign" {
+                task.origin_project = Some("another-project".into());
+            }
+            store.add(&task).unwrap();
+            if id.starts_with("hidden") {
+                queue
+                    .quarantine_row(crate::cloud::QUARANTINE_TASK, &task.id, "fixture")
+                    .unwrap();
+            }
+        }
+        let mut req = list_request();
+        req.label = Some("keep".into());
+        req.assignee = Some("owner".into());
+        req.task_type = Some("bug".into());
+        let text = list_text(core.cas_task_list(Parameters(req)).await.unwrap());
+        assert_eq!(
+            listed_ids(&text),
+            ["cas-keep".to_string()].into_iter().collect()
+        );
+        assert!(
+            text.contains("status=open: 2; label=keep: 1; assignee=owner: 1; type=bug: 1"),
+            "{text}"
+        );
+        assert!(text.contains("1 quarantined tasks hidden"), "{text}");
+        assert!(text.contains("1 foreign-origin tasks hidden"), "{text}");
+
+        let mut req = list_request();
+        req.include_foreign = true;
+        req.scope = "all".into();
+        let text = list_text(core.cas_task_list(Parameters(req)).await.unwrap());
+        assert!(listed_ids(&text).contains("cas-foreign"));
+        assert!(!text.contains("foreign-origin tasks hidden"));
+        assert!(text.contains("1 quarantined tasks hidden"));
+        assert!(text.contains("Scope: all (currently equivalent"));
+
+        let mut req = list_request();
+        req.status = Some("closed".into());
+        req.label = Some("keep".into());
+        let text = list_text(core.cas_task_list(Parameters(req)).await.unwrap());
+        assert!(listed_ids(&text).is_empty());
+        assert!(text.contains("No tasks found matching filters."));
+        assert!(text.contains("1 quarantined tasks hidden"), "{text}");
+    }
 
     #[test]
     fn task_show_notes_pages_old_entries_but_keeps_newest_five() {

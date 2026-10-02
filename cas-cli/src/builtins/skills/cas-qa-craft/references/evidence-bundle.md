@@ -112,6 +112,15 @@ The `snapshots` keys do the following:
 The same object works in library code:
 `context.tracing.start({ snapshots: { dom: true, aria: true, screen: true }, sources: true })`.
 
+For authenticated runs, prepare `storageState` outside the traced context and pass it
+when creating the context. Start tracing after auth setup; evaluate arguments and
+network headers can contain Firebase credentials. A custom signed-in harness uses
+`cas-ui-craft/scripts/visual-qa.mjs`'s `saveQaTrace(context, path, { secrets })` to scrub
+auth headers and storage tokens, then `closeQaContext(context)` to ignore in-flight
+route errors before teardown. Use `redactQaText(error, secrets)` at logging boundaries.
+For test-runner-owned traces, disable automatic trace capture and save a manual,
+scrubbed trace with those helpers; raw traces and storage exports stay out of evidence.
+
 ## Worked example
 
 Task `cas-1234` says: “User filters tasks and sees no matches.” The spec walks

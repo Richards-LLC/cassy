@@ -118,7 +118,8 @@ if [[ "$dry_run" == true ]]; then
     exit 0
 fi
 
-for reference in "${references[@]}"; do
+# Bash 3.2 treats an empty array as unset under nounset.
+for reference in ${references[@]+"${references[@]}"}; do
     if [[ ! -f "$reference" ]]; then
         echo "error: reference file does not exist: $reference" >&2
         exit 2
@@ -165,7 +166,7 @@ trap 'rm -rf "$work"' EXIT
 printf '%s' "$prompt" > "$work/prompt.txt"
 jq -n --rawfile prompt "$work/prompt.txt" '[{text: $prompt}]' > "$work/parts.json"
 reference_index=0
-for reference in "${references[@]}"; do
+for reference in ${references[@]+"${references[@]}"}; do
     base64 < "$reference" | tr -d '\r\n' > "$work/reference-$reference_index.b64"
     reference_mime="$(reference_mime_type "$reference")"
     jq --arg mime "$reference_mime" --rawfile data "$work/reference-$reference_index.b64" \

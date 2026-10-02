@@ -1,6 +1,32 @@
 use crate::config::meta::*;
 
 #[test]
+fn cas_8095_team_only_config_roundtrips_through_registered_accessors() {
+    let reg = ConfigRegistry::new();
+    reg.validate("cloud.team_only", "true").unwrap();
+    assert!(reg.validate("cloud.team_only", "not-a-bool").is_err());
+    let mut config = crate::config::Config::default();
+    assert_eq!(config.get("cloud.team_only").as_deref(), Some("false"));
+    config.set("cloud.team_only", "true").unwrap();
+    assert_eq!(config.get("cloud.team_only").as_deref(), Some("true"));
+    assert!(
+        config
+            .list()
+            .contains(&("cloud.team_only".into(), "true".into()))
+    );
+    let source = toml::to_string(&config).unwrap();
+    let mut parsed: crate::config::Config = toml::from_str(&source).unwrap();
+    assert_eq!(parsed.get("cloud.team_only").as_deref(), Some("true"));
+    parsed
+        .set(
+            "cloud.team_only",
+            reg.get("cloud.team_only").unwrap().default,
+        )
+        .unwrap();
+    assert_eq!(parsed.get("cloud.team_only").as_deref(), Some("false"));
+}
+
+#[test]
 fn test_registry_has_all_sections() {
     let reg = ConfigRegistry::new();
     let sections = reg.sections();

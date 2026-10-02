@@ -186,6 +186,10 @@ impl TaskStore for NotifyingTaskStore {
         self.inner.list(status)
     }
 
+    fn list_with_suppressed(&self, status: Option<TaskStatus>) -> Result<(Vec<Task>, Vec<Task>)> {
+        self.inner.list_with_suppressed(status)
+    }
+
     fn list_ready(&self) -> Result<Vec<Task>> {
         self.inner.list_ready()
     }

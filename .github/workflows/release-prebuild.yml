@@ -125,7 +125,14 @@ jobs:
           SELF_HOSTED_ENABLED: ${{ vars.CASSY_RELEASE_SELF_HOSTED }}
         run: ./scripts/check-release-runner-trust.sh
 
+      # Runner slots share RUSTUP_HOME. Reuse the preprovisioned toolchain;
+      # exceptional installs must use the same lock as the CI lanes.
+      - name: Set up shared self-hosted Rust toolchain
+        if: needs.prebuild-runner-route.outputs.mode == 'self-hosted'
+        run: ./scripts/setup-cassy-actions-rust.sh
+
       - name: Install Rust
+        if: needs.prebuild-runner-route.outputs.mode == 'hosted'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-gnu

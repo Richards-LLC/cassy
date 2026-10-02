@@ -28,7 +28,7 @@ fall back to guessing from local files.
 
 Then load the Cassy side once, so every later step reads from the same picture:
 
-```
+```text
 task action=list limit=100
 search action=search query="<the issue's subject in your own words>"
 ```
@@ -52,6 +52,8 @@ relay, or pairing defects. If you hit a bug during operation, file a ticket in t
 The code-history document index has a separate source setting. Configure
 `history.github_repo` for an override, or leave it empty to use the checkout's
 GitHub `origin`; never set `issues.repo` to make history indexing work.
+
+For reviewed triage suggestions during a sweep, use [cas-jev](../cas-jev/SKILL.md) and its evidence-based triage recipe.
 
 ## 1. List open issues
 
@@ -103,7 +105,7 @@ status yourself — an epic is auto-promoted to `in_progress` the moment a
 supervisor starts any of its subtasks, so `status=open` hides exactly the epics
 that are most alive:
 
-```
+```text
 task action=list task_type=epic limit=50
 ```
 
@@ -113,13 +115,13 @@ task action=list task_type=epic limit=50
   **create a successor epic first.** Never task into a closed epic — a child of
   a closed epic is invisible to the ready queue and will never be picked up.
 
-```
+```text
 task action=create task_type=epic title="<intake> burn-down v<N>: <theme> (GH #<lo>–#<hi>)" priority=1
 ```
 
 Then, for each new issue, one task:
 
-```
+```text
 task action=create title="<what will be true when this is done> (GH #<n>)" \
   task_type=bug priority=<0-3> epic=<epic-id> \
   external_ref="https://github.com/<owner>/<repo>/issues/<n>" \
@@ -151,7 +153,7 @@ on merge.
 Issues get tasked into lanes that block each other. When a lane merges, its
 dependents stay blocked until someone says so — that someone is this sweep.
 
-```
+```text
 task action=blocked
 ```
 
@@ -164,7 +166,7 @@ gh pr list --state merged --limit 20 --json number,title,mergedAt
 
 If the blocker is closed **and merged**, drop the edge:
 
-```
+```text
 task action=dep_remove id=<blocked task> to_id=<merged blocker>
 ```
 

@@ -112,6 +112,10 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logging: Option<crate::logging::LoggingConfig>,
 
+    /// Jev decision-model client configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jev: Option<crate::jev::JevConfig>,
+
     /// LLM configuration for harness and model selection
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm: Option<LlmConfig>,
@@ -208,6 +212,7 @@ impl Config {
         merge_option!(telemetry);
         merge_option!(logging);
         merge_option!(llm);
+        merge_option!(jev);
         merge_option!(integrations);
         merge_option!(issues);
         merge_option!(history);

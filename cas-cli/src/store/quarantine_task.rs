@@ -139,13 +139,18 @@ impl TaskStore for QuarantineFilteringTaskStore {
     }
 
     fn list(&self, status: Option<TaskStatus>) -> Result<Vec<Task>> {
+        self.list_with_suppressed(status)
+            .map(|(visible, _)| visible)
+    }
+
+    fn list_with_suppressed(&self, status: Option<TaskStatus>) -> Result<(Vec<Task>, Vec<Task>)> {
         let hidden = self.quarantined();
-        Ok(self
-            .inner
-            .list(status)?
+        let (tasks, mut suppressed) = self.inner.list_with_suppressed(status)?;
+        let (newly_suppressed, visible): (Vec<_>, Vec<_>) = tasks
             .into_iter()
-            .filter(|task| !hidden.contains(&task.id))
-            .collect())
+            .partition(|task| hidden.contains(&task.id));
+        suppressed.extend(newly_suppressed);
+        Ok((visible, suppressed))
     }
 
     fn list_ready(&self) -> Result<Vec<Task>> {
@@ -302,6 +307,40 @@ mod tests {
         // Reversible.
         assert!(queue.release_quarantined_row(QUARANTINE_TASK, "cas-hide").unwrap());
         assert_eq!(store.list(None).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn cas_4bd8_suppression_report_survives_notifying_and_syncing_wrappers() {
+        let (_temp, queue, store) = store();
+        store
+            .add(&Task::new("cas-keep".into(), "Visible".into()))
+            .unwrap();
+        store
+            .add(&Task::new("cas-hide".into(), "Suppressed".into()))
+            .unwrap();
+        queue
+            .quarantine_row(QUARANTINE_TASK, "cas-hide", "fixture")
+            .unwrap();
+        let notifying = crate::store::NotifyingTaskStore::new(Arc::new(store), Default::default());
+        let syncing = crate::store::SyncingTaskStore::new(Arc::new(notifying), Arc::clone(&queue));
+        let (visible, suppressed) = syncing
+            .list_with_suppressed(Some(TaskStatus::Open))
+            .unwrap();
+        assert_eq!(
+            visible
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            ["cas-keep"]
+        );
+        assert_eq!(
+            suppressed
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            ["cas-hide"]
+        );
+        assert_eq!(syncing.list(Some(TaskStatus::Open)).unwrap().len(), 1);
     }
 
     #[test]

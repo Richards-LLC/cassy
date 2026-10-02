@@ -143,10 +143,17 @@ export function launchDropped(previous: readonly Scope[] | undefined, next: read
  * pairing can start sessions, it says the code won't keep that, and names the
  * command whose link would (cas-0e14 F29).
  */
-export function repairStatus(label: string, scopes: readonly Scope[], controllerOrigin: string): string {
+export function repairStatus(label: string, scopes: readonly Scope[]): string {
   const plain = `Re-pairing ${label}: create a new code and approve it on that machine. Its saved access here is replaced when the new credential is installed.`;
   if (!scopes.includes(LAUNCH_SCOPE)) return plain;
-  return `Re-pairing ${label}: a new code replaces its saved access here, and starting sessions will need to be allowed again afterwards. To keep it, run ${launchGrantCommand(controllerOrigin, scopes)} on ${label} and open the link it prints instead.`;
+  // cas-093d F02: the command is not set as prose (it broke mid-token when the
+  // sentence wrapped); it follows as its own copyable code (repairCommand).
+  return `Re-pairing ${label}: a new code replaces its saved access here, and starting sessions will need to be allowed again afterwards. To keep it, run this on ${label} and open the link it prints instead:`;
+}
+
+/** The command the Re-pair dialog offers to copy, when a code re-pair would drop session launch (cas-093d F02). */
+export function repairCommand(scopes: readonly Scope[], controllerOrigin: string): string | undefined {
+  return scopes.includes(LAUNCH_SCOPE) ? launchGrantCommand(controllerOrigin, scopes) : undefined;
 }
 
 /** The Attention item after a code re-pair dropped session launch (cas-0e14 F29). */

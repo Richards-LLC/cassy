@@ -5,7 +5,7 @@ import {
   type LaunchProfiles, filterProjects, launchErrorCopy, parseWorkers, sortProjects,
   type BrowseListing, type LaunchHost, type LaunchMachine, type LaunchProject, type LaunchRequest, type LaunchResult, type ProjectCatalog,
 } from "./launch-session";
-import { canEnableSessionLaunch, launchDropped, launchDroppedNotice, launchGrantCommand, parseGrantedScopes, repairStatus, scopeChoices, scopeSummary } from "./pairing-scopes";
+import { canEnableSessionLaunch, launchDropped, launchDroppedNotice, launchGrantCommand, parseGrantedScopes, repairCommand, repairStatus, scopeChoices, scopeSummary } from "./pairing-scopes";
 import type { Scope } from "./types";
 
 const CONTROL: Scope[] = ["machine-read", "session-read", "pane-read", "pane-input", "message-send", "pane-interrupt"];
@@ -443,13 +443,16 @@ describe("re-pairing and session launch (cas-0e14 F29)", () => {
     expect(launchDropped(undefined, CONTROL)).toBe(false);
   });
 
-  it("warns before a code re-pair that starting sessions must be allowed again, with the link command that keeps it", () => {
-    const copy = repairStatus("Atlas · Linux", [...CONTROL, "session-launch"], "https://hub.example");
+  it("warns before a code re-pair that starting sessions must be allowed again, and offers the link command that keeps it as its own code (cas-093d F02)", () => {
+    const copy = repairStatus("Atlas · Linux", [...CONTROL, "session-launch"]);
     expect(copy).toContain("Re-pairing Atlas · Linux");
     expect(copy).toContain("starting sessions will need to be allowed again");
-    expect(copy).toContain("cas hub pair --origin https://hub.example --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,session:launch");
-    // Without launch there is nothing to lose: the plain wording stays.
-    expect(repairStatus("Atlas · Linux", CONTROL, "https://hub.example")).toBe("Re-pairing Atlas · Linux: create a new code and approve it on that machine. Its saved access here is replaced when the new credential is installed.");
+    expect(copy).toMatch(/run this on Atlas · Linux and open the link it prints instead:$/);
+    expect(copy, "the command is not set as prose").not.toContain("cas hub pair");
+    expect(repairCommand([...CONTROL, "session-launch"], "https://hub.example")).toBe("cas hub pair --origin https://hub.example --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,session:launch");
+    // Without launch there is nothing to lose: the plain wording stays, with no command.
+    expect(repairStatus("Atlas · Linux", CONTROL)).toBe("Re-pairing Atlas · Linux: create a new code and approve it on that machine. Its saved access here is replaced when the new credential is installed.");
+    expect(repairCommand(CONTROL, "https://hub.example")).toBeUndefined();
   });
 
   it("says plainly after a re-pair that starting sessions was not kept, and how to get it back", () => {

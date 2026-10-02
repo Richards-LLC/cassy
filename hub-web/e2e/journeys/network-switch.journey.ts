@@ -625,9 +625,64 @@ test("HUB-J12 network switch: re-pairing by code says plainly that starting sess
     await page.getByRole("button", { name: "Re-pair Atlas · Linux" }).filter({ visible: true }).first().click();
     await expect(dialog).toBeVisible();
     await expect(dialog.locator(".pair-status")).toContainText("starting sessions will need to be allowed again");
-    await expect(dialog.locator(".pair-status")).toContainText("--scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,session:launch");
-    // The long command wraps inside the dialog rather than running out of it.
-    expect(await dialog.locator(".pair-status").evaluate((element) => element.scrollWidth <= element.clientWidth), "the re-pair copy fits the dialog").toBe(true);
+    // cas-093d F02: the command is its own code token with Copy, not prose
+    // that broke mid-token when it wrapped.
+    const command = "cas hub pair --origin " + new URL(page.url()).origin + " --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,session:launch";
+    await expect(dialog.locator(".pair-status")).not.toContainText("cas hub pair");
+    await expect(dialog.locator(".pair-command code")).toHaveText(command);
+    // No line break falls between two non-space characters, at any width from
+    // a phone to a wide desktop, before and after Copy relabels the button
+    // (cas-093d QA F01: "--" / "scopes" at 450–470 px, and 530–640 px once it
+    // read "Copied"). Measured per character, so it holds for any markup.
+    const splitWords = () => dialog.locator(".pair-command code").evaluate((code) => {
+      const chars: Array<{ char: string; top: number }> = [];
+      const walker = document.createTreeWalker(code, NodeFilter.SHOW_TEXT);
+      const range = document.createRange();
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const text = node.textContent ?? "";
+        for (let index = 0; index < text.length; index += 1) {
+          range.setStart(node, index); range.setEnd(node, index + 1);
+          chars.push({ char: text[index]!, top: Math.round(range.getClientRects()[0]?.top ?? 0) });
+        }
+      }
+      return chars.flatMap((item, index) => index > 0 && item.top !== chars[index - 1]!.top && item.char !== " " && chars[index - 1]!.char !== " " ? [`${chars[index - 1]!.char}|${item.char}@${index}`] : []);
+    });
+    const sweep = async (phase: string, label?: string) => {
+      // The widths QA found breaking (450–470 before Copy, 530–640 after), and
+      // a phone-to-desktop spread around them; a 10 px sweep of 1080 px took
+      // over a minute and crashed the renderer on a loaded host.
+      for (const width of [360, 390, 420, 440, 450, 460, 470, 480, 500, 530, 560, 600, 640, 700, 768, 900, 1024, 1280, 1440]) {
+        await page.setViewportSize({ width, height: 844 });
+        if (label) await dialog.locator(".pair-command-copy").evaluate((button, text) => { button.textContent = text; }, label);
+        expect(await splitWords(), `no word split at ${width} px (${phase})`).toEqual([]);
+      }
+    };
+    await sweep("before Copy");
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    // QA F02: the visible label is the accessible name.
+    const copy = dialog.getByRole("button", { name: "Copy command", exact: true });
+    await copy.click();
+    await expect(dialog.locator(".pair-command-status")).toHaveText("Command copied");
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(command);
+    await expect(dialog.getByRole("button", { name: "Copied", exact: true })).toBeVisible();
+    // The label reverts after two seconds; hold it at "Copied" through the
+    // sweep, the state in which the block used to reflow.
+    await sweep("while Copy reads Copied", "Copied");
+    await dialog.locator(".pair-command-copy").evaluate((button) => { button.textContent = "Copy command"; });
+    await page.setViewportSize({ width: 1280, height: 720 });
+    // QA F03: a second copy is announced again (the status empties, then speaks).
+    await expect(dialog.getByRole("button", { name: "Copy command", exact: true })).toBeVisible({ timeout: 5_000 });
+    // Two copies in a row: each one sets the status anew, so each is spoken.
+    const announcements = await dialog.locator(".pair-command-status").evaluate((status) => new Promise<string[]>((resolve) => {
+      const seen: string[] = [];
+      new MutationObserver(() => seen.push(status.textContent ?? "")).observe(status, { childList: true, characterData: true, subtree: true });
+      const button = status.parentElement!.querySelector("button") as HTMLButtonElement;
+      button.click();
+      setTimeout(() => button.click(), 400);
+      setTimeout(() => resolve(seen), 900);
+    }));
+    expect(announcements.filter((text) => text === "Command copied"), JSON.stringify(announcements)).toHaveLength(2);
   });
 
   await journey.stage("Re-pair with a code anyway", async () => {
@@ -645,7 +700,11 @@ test("HUB-J12 network switch: re-pairing by code says plainly that starting sess
     await expect(header).toHaveText(" · Live", { timeout: 30_000 });
   });
 
-  await journey.stage("Told plainly that starting sessions needs allowing again", async () => {
+  await journey.stage("Told plainly that starting sessions needs allowing again, even after a reload (cas-093d)", async () => {
+    // cas-093d F01: the page reloads in between; New session still knows why.
+    await page.reload();
+    await chooseConversation(page);
+    await expect(header).toHaveText(" · Live", { timeout: 30_000 });
     const notice = page.locator("#attention-panel").getByText("Starting sessions needs allowing again").filter({ visible: true });
     await expect(notice).toBeVisible();
     await expect(page.locator("#attention-panel")).toContainText("Re-pairing Atlas · Linux with a code didn't include starting sessions. Open New session to allow it again.");
@@ -665,6 +724,8 @@ test("HUB-J12 network switch: re-pairing by code says plainly that starting sess
     await sheet.getByRole("button", { name: "Cancel", exact: true }).click();
     await expect(page.locator("#attention-panel").getByText("Starting sessions needs allowing again").filter({ visible: true })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "New session", exact: true })).toBeVisible();
+    // Allowed: the remembered state is gone, so a reload does not bring the lead back.
+    expect(await page.evaluate(() => localStorage.getItem("cas-commander-launch-dropped:v1"))).toBeNull();
   });
 });
 

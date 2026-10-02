@@ -135,7 +135,15 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     await page.evaluate(() => {
       const claims: string[] = [];
       (window as unknown as { emptyClaims: string[] }).emptyClaims = claims;
-      const check = () => { for (const said of document.querySelectorAll(".thread .empty:not([hidden]) .said")) if (/^No (Commander )?messages/.test(said.textContent ?? "")) claims.push(said.textContent ?? ""); };
+      // Only wild-shark-68's own card counts: calm-puma-34's honest empty card
+      // can still be on screen for a frame while the switch mounts the next thread.
+      const check = () => {
+        for (const card of document.querySelectorAll<HTMLElement>(".thread .empty:not([hidden])")) {
+          if (!card.querySelector(".proj2")?.textContent?.includes("wild-shark-68")) continue;
+          const said = card.querySelector(".said")?.textContent ?? "";
+          if (/^No (Commander )?messages/.test(said)) claims.push(said);
+        }
+      };
       new MutationObserver(check).observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ["hidden"] });
     });
     await row("wild-shark-68").click();

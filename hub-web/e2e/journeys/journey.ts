@@ -29,6 +29,13 @@ export type Journey = {
   open(): Promise<void>;
 };
 
+/**
+ * Marks a test as one part of a catalog journey that runs as several tests
+ * (cas-1f7e): `test("HUB-J12 …", JOURNEY_PART, async ({ page, journey }) => …)`.
+ */
+export const JOURNEY_PART = { type: "journey-part", description: "one part of a catalog journey run as several tests" } as const;
+export const journeyPart = { annotation: JOURNEY_PART };
+
 function slug(text: string): string {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48);
 }
@@ -47,7 +54,14 @@ export const test = base.extend<{ journey: Journey }>({
   journey: async ({ page }, use, testInfo) => {
     const id = /^([A-Z]+-J[0-9]+)\b/.exec(testInfo.title)?.[1];
     if (!id) throw new Error(`journey test titles must start with a catalog id: "${testInfo.title}"`);
-    const dir = join(RECEIPTS, id);
+    // cas-1f7e: one catalog journey can run as several tests (HUB-J12's
+    // network switches). Each extra test is marked with JOURNEY_PART and
+    // writes its receipts under <ID>/parts/<slug>/, so no test overwrites
+    // another's; journey-bundles.py folds the parts into the <ID> bundle.
+    const part = testInfo.annotations.some((annotation) => annotation.type === JOURNEY_PART.type)
+      ? testInfo.title.replace(/^[A-Z]+-J[0-9]+\s*/, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 96)
+      : undefined;
+    const dir = part ? join(RECEIPTS, id, "parts", part) : join(RECEIPTS, id);
     mkdirSync(dir, { recursive: true });
     const stages: Stage[] = [];
     const errors: string[] = [];
@@ -146,7 +160,12 @@ export async function expectWholeFocusRing(field: import("@playwright/test").Loc
 
 /** Two animation frames: let the UI paint before a screenshot. */
 async function settle(page: Page): Promise<void> {
-  await page.evaluate(() => new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(ok))));
+  // A test that holds the page clock (ProtocolClock) holds animation frames
+  // too; the screenshot then shows the held frame, after at most a short
+  // real-time wait instead of a hang (cas-1f7e).
+  const painted = page.evaluate(() => new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(ok))));
+  await Promise.race([painted, new Promise((ok) => setTimeout(ok, 250))]);
+  painted.catch(() => undefined);
 }
 
 /**

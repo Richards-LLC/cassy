@@ -1,5 +1,5 @@
 import type { Locator, Page } from "@playwright/test";
-import { test, expect } from "./journey";
+import { test, expect, journeyPart } from "./journey";
 import { ATLAS, STUDIO, PELICAN } from "./world";
 import { HubDouble, SCOPES } from "./hub-double";
 import { ProtocolClock } from "./protocol-clock";
@@ -71,8 +71,8 @@ async function accepted(page: Page, hub: HubDouble, text: string): Promise<void>
   expect((await next).text).toBe(text);
 }
 
-test("HUB-J12 network switch: delayed legacy refusal holds both sends in order", async ({ page }) => {
-  await test.step("On a legacy socket, a second message sent before the refusal arrives waits too", async () => {
+test("HUB-J12 network switch: delayed legacy refusal holds both sends in order", journeyPart, async ({ page, journey }) => {
+  await journey.stage("On a legacy socket, a second message sent before the refusal arrives waits too", async () => {
     const { hub, clock, header, held } = await connected(page, false);
     hub.upstreamLost(PELICAN, { refusalDelayMs: 1_500 });
     await sendNow(page, "First on legacy");
@@ -98,8 +98,8 @@ test("HUB-J12 network switch: delayed legacy refusal holds both sends in order",
   });
 });
 
-test("HUB-J12 network switch: half-open machine waits for four failed heartbeats then flushes once", async ({ page }) => {
-  await test.step("Tailscale goes off, then on again", async () => {
+test("HUB-J12 network switch: half-open machine waits for four failed heartbeats then flushes once", journeyPart, async ({ page, journey }) => {
+  await journey.stage("Tailscale goes off, then on again", async () => {
     const { hub, clock, header, held } = await connected(page);
     const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).locator(".conversation-preview");
     const footer = page.locator("#hub-footer-badges .machine-badge-state");
@@ -157,8 +157,8 @@ test("HUB-J12 network switch: half-open machine waits for four failed heartbeats
   });
 });
 
-test("HUB-J12 network switch: a message sent while unsteady waits, then goes once when heartbeats answer again (cas-a6f0)", async ({ page }) => {
-  await test.step("The connection wobbles and steadies without a reconnect", async () => {
+test("HUB-J12 network switch: a message sent while unsteady waits, then goes once when heartbeats answer again (cas-a6f0)", journeyPart, async ({ page, journey }) => {
+  await journey.stage("The connection wobbles and steadies without a reconnect", async () => {
     const { hub, clock, header, held } = await connected(page);
     const opens = hub.machineSocketOpens.get("atlas");
     // Two heartbeats go unanswered; the machine socket itself survives.
@@ -187,8 +187,8 @@ test("HUB-J12 network switch: a message sent while unsteady waits, then goes onc
   });
 });
 
-test("HUB-J12 network switch: offline and online hints bypass the heartbeat and retry clocks", async ({ page }) => {
-  await test.step("Wi-Fi hands over to cellular", async () => {
+test("HUB-J12 network switch: offline and online hints bypass the heartbeat and retry clocks", journeyPart, async ({ page, journey }) => {
+  await journey.stage("Wi-Fi hands over to cellular", async () => {
     const { hub, clock, header, held } = await connected(page);
     const before = clock.now();
     await page.context().setOffline(true);
@@ -210,8 +210,8 @@ test("HUB-J12 network switch: offline and online hints bypass the heartbeat and 
   });
 });
 
-test("HUB-J12 network switch: waking probes a half-open socket before sending", async ({ page }) => {
-  await test.step("The page wakes on a half-open socket", async () => {
+test("HUB-J12 network switch: waking probes a half-open socket before sending", journeyPart, async ({ page, journey }) => {
+  await journey.stage("The page wakes on a half-open socket", async () => {
     const { hub, clock, header, held } = await connected(page);
     await hub.down("atlas");
     await hub.up("atlas");
@@ -243,8 +243,8 @@ test("HUB-J12 network switch: waking probes a half-open socket before sending", 
   });
 });
 
-test("HUB-J12 network switch: slow session attach keeps machine connected and session wording", async ({ page }) => {
-  await test.step("The session's daemon link drops for a moment", async () => {
+test("HUB-J12 network switch: slow session attach keeps machine connected and session wording", journeyPart, async ({ page, journey }) => {
+  await journey.stage("The session's daemon link drops for a moment", async () => {
     const { hub, clock, header, held } = await connected(page);
     const banner = page.locator(".terminal-disconnected-banner");
     const footer = page.locator("#hub-footer-badges .machine-badge-state");
@@ -295,67 +295,71 @@ async function refusalAfter(clock: ProtocolClock, hub: HubDouble, held: Locator,
   await expect(held).toHaveCount(1); // refusal processed before the next timer
 }
 
-test("HUB-J12 network switch: legacy upstream backs off and resets after uninterrupted live time", async ({ page }) => {
-  const { hub, clock, header, held } = await connected(page, false);
-  hub.upstreamLost(PELICAN);
-  await sendNow(page, "Through repeated refusals");
-  await expect(held).toHaveCount(1);
-  for (const delay of [1_000, 2_000, 4_000]) await refusalAfter(clock, hub, held, delay);
-  expect(hub.upstreamRefusals).toHaveLength(4);
-  hub.upstreamBack(PELICAN);
-  const next = hub.nextSend();
-  await clock.advance(8_000);
-  expect((await next).text).toBe("Through repeated refusals");
-  await expect(header).toHaveText(" · Live");
-  await expect(held).toHaveCount(0);
-  // No delivery receipt is sent: 10 s of healthy session time resets the streak.
-  await clock.advance(10_000);
-  hub.upstreamLost(PELICAN);
-  await sendNow(page, "After healthy session time");
-  await expect(held).toHaveCount(1);
-  await refusalAfter(clock, hub, held, 1_000);
-  hub.upstreamBack(PELICAN);
-  const retried = hub.nextSend();
-  await clock.advance(2_000);
-  expect((await retried).text).toBe("After healthy session time");
-  await expect(held).toHaveCount(0);
-  expect(hub.sends.map(m => m.text)).toEqual(["Through repeated refusals", "After healthy session time"]);
+test("HUB-J12 network switch: legacy upstream backs off and resets after uninterrupted live time", journeyPart, async ({ page, journey }) => {
+  await journey.stage("Once the session has stayed live for 10 s, the next drop retries after about 1 s again", async () => {
+    const { hub, clock, header, held } = await connected(page, false);
+    hub.upstreamLost(PELICAN);
+    await sendNow(page, "Through repeated refusals");
+    await expect(held).toHaveCount(1);
+    for (const delay of [1_000, 2_000, 4_000]) await refusalAfter(clock, hub, held, delay);
+    expect(hub.upstreamRefusals).toHaveLength(4);
+    hub.upstreamBack(PELICAN);
+    const next = hub.nextSend();
+    await clock.advance(8_000);
+    expect((await next).text).toBe("Through repeated refusals");
+    await expect(header).toHaveText(" · Live");
+    await expect(held).toHaveCount(0);
+    // No delivery receipt is sent: 10 s of healthy session time resets the streak.
+    await clock.advance(10_000);
+    hub.upstreamLost(PELICAN);
+    await sendNow(page, "After healthy session time");
+    await expect(held).toHaveCount(1);
+    await refusalAfter(clock, hub, held, 1_000);
+    hub.upstreamBack(PELICAN);
+    const retried = hub.nextSend();
+    await clock.advance(2_000);
+    expect((await retried).text).toBe("After healthy session time");
+    await expect(held).toHaveCount(0);
+    expect(hub.sends.map(m => m.text)).toEqual(["Through repeated refusals", "After healthy session time"]);
+  });
 });
 
-test("HUB-J12 network switch: a reheld send expires at its original two-minute deadline and Retry sends once", async ({ page }) => {
-  const { hub, clock, header, held } = await connected(page);
-  hub.upstreamLost(PELICAN);
-  await sendNow(page, "While the daemon stays down");
-  await expect(held).toHaveCount(1);
-  // Exercise reholding, which must preserve the ORIGINAL expiry.
-  for (const delay of [1_000, 2_000, 4_000]) await refusalAfter(clock, hub, held, delay);
-  await clock.advance(112_999);
-  await expect(held).toHaveCount(1);
-  const log = page.getByRole("log");
-  await expect(log.getByText("Not sent", { exact: true })).toHaveCount(0);
-  await clock.advance(1);
-  await expect(log.getByText("Not sent", { exact: true })).toBeVisible();
-  await expect(log.getByText("The session didn't come back while it waited.")).toBeVisible();
-  // With no queued send left, a healthy session attach can now settle even
-  // while its daemon still refuses sends. Retry wording follows that state.
-  await clock.advance(8_000);
-  await expect(header).toHaveText(" · Live");
-  await expect(log.locator('.bub[data-state="error"] .conversation-refused-next')).toHaveText(" Retry to send it.");
-  await expect(log.getByText(/re-pair/i)).toHaveCount(0);
-  await expect(held).toHaveCount(0);
-  await expect(page.locator("#message-status")).not.toContainText("go out by itself");
-  expect(hub.sends).toHaveLength(0);
-  hub.upstreamBack(PELICAN);
-  const next = hub.nextSend();
-  await log.getByRole("button", { name: "Retry" }).click();
-  await clock.advance(8_000);
-  expect((await next).text).toBe("While the daemon stays down");
-  await expect(header).toHaveText(" · Live");
-  expect(sentTimes(hub, "While the daemon stays down")).toBe(1);
+test("HUB-J12 network switch: a reheld send expires at its original two-minute deadline and Retry sends once", journeyPart, async ({ page, journey }) => {
+  await journey.stage("Past the two-minute hold, the message reads Not sent with Retry, and Retry sends it once", async () => {
+    const { hub, clock, header, held } = await connected(page);
+    hub.upstreamLost(PELICAN);
+    await sendNow(page, "While the daemon stays down");
+    await expect(held).toHaveCount(1);
+    // Exercise reholding, which must preserve the ORIGINAL expiry.
+    for (const delay of [1_000, 2_000, 4_000]) await refusalAfter(clock, hub, held, delay);
+    await clock.advance(112_999);
+    await expect(held).toHaveCount(1);
+    const log = page.getByRole("log");
+    await expect(log.getByText("Not sent", { exact: true })).toHaveCount(0);
+    await clock.advance(1);
+    await expect(log.getByText("Not sent", { exact: true })).toBeVisible();
+    await expect(log.getByText("The session didn't come back while it waited.")).toBeVisible();
+    // With no queued send left, a healthy session attach can now settle even
+    // while its daemon still refuses sends. Retry wording follows that state.
+    await clock.advance(8_000);
+    await expect(header).toHaveText(" · Live");
+    await expect(log.locator('.bub[data-state="error"] .conversation-refused-next')).toHaveText(" Retry to send it.");
+    await expect(log.getByText(/re-pair/i)).toHaveCount(0);
+    await expect(held).toHaveCount(0);
+    await expect(page.locator("#message-status")).not.toContainText("go out by itself");
+    expect(hub.sends).toHaveLength(0);
+    hub.upstreamBack(PELICAN);
+    const next = hub.nextSend();
+    await log.getByRole("button", { name: "Retry" }).click();
+    await clock.advance(8_000);
+    expect((await next).text).toBe("While the daemon stays down");
+    await expect(header).toHaveText(" · Live");
+    expect(sentTimes(hub, "While the daemon stays down")).toBe(1);
+  });
 });
 
-test("HUB-J12 network switch: stale proofs retry with no re-pair request", async ({ page }) => {
-  await test.step("A proof refused after a switch retries on its own", async () => {
+test("HUB-J12 network switch: stale proofs retry with no re-pair request", journeyPart, async ({ page, journey }) => {
+  await journey.stage("A proof refused after a switch retries on its own", async () => {
     const { hub, clock, header } = await connected(page);
     await hub.down("atlas", { sockets: "close" });
     hub.refuseProofs("atlas", 3);
@@ -375,8 +379,8 @@ test("HUB-J12 network switch: stale proofs retry with no re-pair request", async
   });
 });
 
-test("HUB-J12 network switch: revoked pairing offers accessible Re-pair on desktop and phone", async ({ page }) => {
-  await test.step("A revoked pairing says so and offers Re-pair, on a phone too", async () => {
+test("HUB-J12 network switch: revoked pairing offers accessible Re-pair on desktop and phone", journeyPart, async ({ page, journey }) => {
+  await journey.stage("A revoked pairing says so and offers Re-pair, on a phone too", async () => {
     // Keep the original two-machine world. A singleton fleet currently leaves
     // its footer saying Reconnecting after revocation; reported separately.
     const { hub, clock, header } = await connected(page, true, [ATLAS, STUDIO]);
@@ -399,8 +403,8 @@ test("HUB-J12 network switch: revoked pairing offers accessible Re-pair on deskt
   });
 });
 
-test("HUB-J12 network switch: a revoked pairing settles waiting sends and is named one way everywhere (cas-a6f0)", async ({ page }) => {
-  await test.step("The pairing is revoked while messages wait", async () => {
+test("HUB-J12 network switch: a revoked pairing settles waiting sends and is named one way everywhere (cas-a6f0)", journeyPart, async ({ page, journey }) => {
+  await journey.stage("The pairing is revoked while messages wait", async () => {
     const { hub, clock, header, held } = await connected(page);
     const log = page.getByRole("log");
     // On the wire, with no receipt yet.
@@ -439,8 +443,8 @@ test("HUB-J12 network switch: a revoked pairing settles waiting sends and is nam
   });
 });
 
-test("HUB-J12 network switch: a machine drop is told by the banner alone, and control comes back with the machine (cas-7b31)", async ({ page }) => {
-  await test.step("The whole machine drops, then returns", async () => {
+test("HUB-J12 network switch: a machine drop is told by the banner alone, and control comes back with the machine (cas-7b31)", journeyPart, async ({ page, journey }) => {
+  await journey.stage("The whole machine drops, then returns", async () => {
     const { hub, clock, header } = await connected(page);
     const rail = page.locator("#attention-panel");
     const transport = /Reconnecting to hub|Hub connection lost|Stuck dialing|heartbeats missed|attach failed|needs attention/i;
@@ -470,90 +474,96 @@ test("HUB-J12 network switch: a machine drop is told by the banner alone, and co
   });
 });
 
-test("HUB-J12 network switch: in Terminal view a refused pairing leaves no 'connection dropped' toast behind (cas-7b31)", async ({ page }) => {
-  const { hub, clock } = await connected(page, true);
-  await page.locator("#conversation-terminal").click();
-  await expect(page.locator(".mode-badge")).toHaveText("CONTROL");
-  hub.refuseProofs("atlas", 1_000, "revoked", false);
-  await hub.down("atlas", { sockets: "close" });
-  await expect(page.locator("#toast")).toHaveText("Control released — the hub connection dropped");
-  await hub.up("atlas");
-  await clock.advance(1_000);
-  await expect(page.locator(".terminal-disconnected-banner .banner-text")).toHaveText("Atlas · Linux needs pairing again.");
-  await expect(page.locator("#toast")).not.toContainText("connection dropped");
-  expect(await page.locator("body").ariaSnapshot()).not.toContain("connection dropped");
-  // Nor does control come back by itself: the pairing must be repaired first,
-  // and the controls say so instead of promising a reconnect.
-  await expect(page.locator("#session-controls-reason")).toHaveText("Atlas · Linux needs pairing again. Re-pair it to take control and interrupt.");
-  // Heartbeats keep ticking: the refusal must stand on every surface (it
-  // turned "live" again on the next beat, cas-05c0 QA).
-  for (let beat = 0; beat < 3; beat++) await clock.advance(5_000);
-  await expect(page.locator(".mode-badge")).not.toHaveText("CONTROL");
-  await expect(page.locator("#session-controls-reason")).toHaveText("Atlas · Linux needs pairing again. Re-pair it to take control and interrupt.");
-  await expect(page.locator(".terminal-disconnected-banner .banner-text")).toHaveText("Atlas · Linux needs pairing again.");
-  await expect(page.locator("[data-machine-latency]")).toHaveText("Needs pairing");
-  await expect(page.locator("#attention-panel .attention-title").filter({ hasText: "Machine needs pairing" })).toBeVisible();
-  await expect(page.getByText(/return when it reconnects|Reconnecting/).filter({ visible: true })).toHaveCount(0);
+test("HUB-J12 network switch: in Terminal view a refused pairing leaves no 'connection dropped' toast behind (cas-7b31)", journeyPart, async ({ page, journey }) => {
+  await journey.stage("In Terminal view, a refused pairing leaves no connection-dropped toast behind", async () => {
+    const { hub, clock } = await connected(page, true);
+    await page.locator("#conversation-terminal").click();
+    await expect(page.locator(".mode-badge")).toHaveText("CONTROL");
+    hub.refuseProofs("atlas", 1_000, "revoked", false);
+    await hub.down("atlas", { sockets: "close" });
+    await expect(page.locator("#toast")).toHaveText("Control released — the hub connection dropped");
+    await hub.up("atlas");
+    await clock.advance(1_000);
+    await expect(page.locator(".terminal-disconnected-banner .banner-text")).toHaveText("Atlas · Linux needs pairing again.");
+    await expect(page.locator("#toast")).not.toContainText("connection dropped");
+    expect(await page.locator("body").ariaSnapshot()).not.toContain("connection dropped");
+    // Nor does control come back by itself: the pairing must be repaired first,
+    // and the controls say so instead of promising a reconnect.
+    await expect(page.locator("#session-controls-reason")).toHaveText("Atlas · Linux needs pairing again. Re-pair it to take control and interrupt.");
+    // Heartbeats keep ticking: the refusal must stand on every surface (it
+    // turned "live" again on the next beat, cas-05c0 QA).
+    for (let beat = 0; beat < 3; beat++) await clock.advance(5_000);
+    await expect(page.locator(".mode-badge")).not.toHaveText("CONTROL");
+    await expect(page.locator("#session-controls-reason")).toHaveText("Atlas · Linux needs pairing again. Re-pair it to take control and interrupt.");
+    await expect(page.locator(".terminal-disconnected-banner .banner-text")).toHaveText("Atlas · Linux needs pairing again.");
+    await expect(page.locator("[data-machine-latency]")).toHaveText("Needs pairing");
+    await expect(page.locator("#attention-panel .attention-title").filter({ hasText: "Machine needs pairing" })).toBeVisible();
+    await expect(page.getByText(/return when it reconnects|Reconnecting/).filter({ visible: true })).toHaveCount(0);
+  });
 });
 
 // cas-f698: the old two-machine journey hid this behind the healthy STUDIO.
 // Exact failure: footer .machine-badge-state still says "Reconnecting" after
 // ATLAS alone reaches Needs pairing; the footer must use the same machine words.
-test("HUB-J12 network switch: single revoked machine stops promising reconnection (cas-f698)", async ({ page }) => {
-  const { hub, clock, header } = await connected(page);
-  // cas-5a8f: a send the supervisor has, awaiting its reply, reads "working"
-  // while the machine is live...
-  await accepted(page, hub, "Before the pairing is revoked");
-  // cas-71f4: the supervisor has it once it is delivered; until then the
-  // bubble's "Sending…" is the one signal.
-  hub.deliverLatest(PELICAN);
-  await expect(page.getByRole("log").getByText("Delivered")).toBeVisible();
-  const working = page.getByRole("log").locator(".working");
-  await expect(working).toHaveCount(1);
-  hub.refuseProofs("atlas", 1_000, "revoked", false);
-  await hub.down("atlas", { sockets: "close" });
-  await hub.up("atlas");
-  await clock.advance(1_000);
-  await expect(header).toHaveText(" · Needs pairing");
-  await expect(page.locator("#hub-footer-badges .machine-badge-state")).toHaveText("Needs pairing");
-  // ...and not beside "Needs pairing": the page can no longer know, on screen
-  // or to a screen reader.
-  await expect(working).toHaveCount(0);
-  expect(await page.getByRole("log").ariaSnapshot()).not.toContain("status: working");
+test("HUB-J12 network switch: single revoked machine stops promising reconnection (cas-f698)", journeyPart, async ({ page, journey }) => {
+  await journey.stage("A single revoked machine stops promising reconnection: Needs pairing, and no message reads working", async () => {
+    const { hub, clock, header } = await connected(page);
+    // cas-5a8f: a send the supervisor has, awaiting its reply, reads "working"
+    // while the machine is live...
+    await accepted(page, hub, "Before the pairing is revoked");
+    // cas-71f4: the supervisor has it once it is delivered; until then the
+    // bubble's "Sending…" is the one signal.
+    hub.deliverLatest(PELICAN);
+    await expect(page.getByRole("log").getByText("Delivered")).toBeVisible();
+    const working = page.getByRole("log").locator(".working");
+    await expect(working).toHaveCount(1);
+    hub.refuseProofs("atlas", 1_000, "revoked", false);
+    await hub.down("atlas", { sockets: "close" });
+    await hub.up("atlas");
+    await clock.advance(1_000);
+    await expect(header).toHaveText(" · Needs pairing");
+    await expect(page.locator("#hub-footer-badges .machine-badge-state")).toHaveText("Needs pairing");
+    // ...and not beside "Needs pairing": the page can no longer know, on screen
+    // or to a screen reader.
+    await expect(working).toHaveCount(0);
+    expect(await page.getByRole("log").ariaSnapshot()).not.toContain("status: working");
+  });
 });
 
 // cas-7752: drafts are kept on disk per conversation, so a revoked pairing
 // must take them with it — and the renders after it must not write them back.
-test("HUB-J12 network switch: a revoked pairing leaves no stored draft behind (cas-7752)", async ({ page }) => {
-  const { hub, clock, header } = await connected(page);
-  const stored = () => page.evaluate(() => localStorage.getItem("cas-commander-conversation:drafts:v1") ?? "");
-  await page.getByRole("textbox", { name: "Your message" }).fill("A private draft for Atlas");
-  await expect.poll(stored, { message: "the draft is stored while the pairing is good" }).toContain("A private draft for Atlas");
-  hub.refuseProofs("atlas", 1_000, "revoked", false);
-  await hub.down("atlas", { sockets: "close" });
-  await hub.up("atlas");
-  await clock.advance(1_000);
-  await expect(header).toHaveText(" · Needs pairing");
-  // Several heartbeat renders later, it has not been written back.
-  await clock.advance(15_000);
-  expect(await stored()).not.toContain("A private draft for Atlas");
-  // Nor is anything typed after the revoke, though it stays on screen.
-  await page.getByRole("textbox", { name: "Your message" }).pressSequentially(" and more");
-  await expect(page.getByRole("textbox", { name: "Your message" })).toHaveValue("A private draft for Atlas and more");
-  await clock.advance(15_000);
-  expect(await stored()).not.toContain("atlas:");
+test("HUB-J12 network switch: a revoked pairing leaves no stored draft behind (cas-7752)", journeyPart, async ({ page, journey }) => {
+  await journey.stage("A revoked pairing takes its stored draft with it, and nothing typed after is stored", async () => {
+    const { hub, clock, header } = await connected(page);
+    const stored = () => page.evaluate(() => localStorage.getItem("cas-commander-conversation:drafts:v1") ?? "");
+    await page.getByRole("textbox", { name: "Your message" }).fill("A private draft for Atlas");
+    await expect.poll(stored, { message: "the draft is stored while the pairing is good" }).toContain("A private draft for Atlas");
+    hub.refuseProofs("atlas", 1_000, "revoked", false);
+    await hub.down("atlas", { sockets: "close" });
+    await hub.up("atlas");
+    await clock.advance(1_000);
+    await expect(header).toHaveText(" · Needs pairing");
+    // Several heartbeat renders later, it has not been written back.
+    await clock.advance(15_000);
+    expect(await stored()).not.toContain("A private draft for Atlas");
+    // Nor is anything typed after the revoke, though it stays on screen.
+    await page.getByRole("textbox", { name: "Your message" }).pressSequentially(" and more");
+    await expect(page.getByRole("textbox", { name: "Your message" })).toHaveValue("A private draft for Atlas and more");
+    await clock.advance(15_000);
+    expect(await stored()).not.toContain("atlas:");
+  });
 });
 
 // cas-e7b1: a phone that discards the tab during a network switch reloads it.
 // The operator's unsettled messages come back as what they are: one still
 // waiting goes out once when the session is back; one whose receipt never
 // came stays "Not confirmed" and is not sent again by itself.
-test("HUB-J12 network switch: a waiting and a not-confirmed message survive a reload, and the waiting one goes once (cas-e7b1)", async ({ page }) => {
+test("HUB-J12 network switch: a waiting and a not-confirmed message survive a reload, and the waiting one goes once (cas-e7b1)", journeyPart, async ({ page, journey }) => {
   const { hub, clock, held } = await connected(page);
   const log = page.getByRole("log");
   const bubble = (text: string) => log.locator(".bub").filter({ hasText: text });
   const stored = () => page.evaluate(() => localStorage.getItem("cas-commander-conversation:sends:v1") ?? "");
-  await test.step("One message goes out and its receipt never comes; the next waits for the session", async () => {
+  await journey.stage("One message goes out and its receipt never comes; the next waits for the session", async () => {
     const first = hub.nextSend();
     await sendNow(page, "Did this one land?");
     expect((await first).text).toBe("Did this one land?");
@@ -564,7 +574,7 @@ test("HUB-J12 network switch: a waiting and a not-confirmed message survive a re
     await expect(held).toHaveText("Waiting for the connection — sends when it's back");
     expect(sentTimes(hub, "Send this when it's back")).toBe(0);
   });
-  await test.step("The tab reloads: both are still there, saying what they are", async () => {
+  await journey.stage("The tab reloads: both are still there, saying what they are", async () => {
     await page.reload();
     await chooseConversation(page);
     await expect(held).toHaveText("Waiting for the connection — sends when it's back");
@@ -573,7 +583,7 @@ test("HUB-J12 network switch: a waiting and a not-confirmed message survive a re
     await expect(bubble("Did this one land?")).not.toContainText(/Sending…|Delivered/);
     expect(sentTimes(hub, "Send this when it's back")).toBe(0);
   });
-  await test.step("The session is back: the waiting one goes out once, the other is not resent", async () => {
+  await journey.stage("The session is back: the waiting one goes out once, the other is not resent", async () => {
     hub.upstreamBack(PELICAN);
     const next = hub.nextSend();
     await clock.advance(10_000); // the reattach retry ceiling, in protocol time
@@ -588,7 +598,7 @@ test("HUB-J12 network switch: a waiting and a not-confirmed message survive a re
     expect(await stored()).not.toContain("Send this when it's back");
     expect(await stored()).toContain("Did this one land?");
   });
-  await test.step("The pairing is revoked: the kept message leaves the disk with it, and stays on screen", async () => {
+  await journey.stage("The pairing is revoked: the kept message leaves the disk with it, and stays on screen", async () => {
     hub.refuseProofs("atlas", 1_000, "revoked", false);
     await hub.down("atlas", { sockets: "close" });
     await hub.up("atlas");
@@ -605,7 +615,7 @@ test("HUB-J12 network switch: a waiting and a not-confirmed message survive a re
 // the code is made, with the command whose link would keep it, and once the
 // new credential is in, Attention says starting sessions needs allowing again
 // and New session leads with it until it is allowed.
-test("HUB-J12 network switch: re-pairing by code says plainly that starting sessions must be allowed again (cas-0e14)", async ({ page, journey }) => {
+test("HUB-J12 network switch: re-pairing by code says plainly that starting sessions must be allowed again (cas-0e14)", journeyPart, async ({ page, journey }) => {
   test.setTimeout(120_000);
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], scopes: { atlas: [...SCOPES, "session-launch"] }, relay: { machine: "atlas", claimAfter: 1, authorizeAfter: 2 } });
   const dialog = page.locator("#pair-dialog");
@@ -672,35 +682,37 @@ test("HUB-J12 network switch: re-pairing by code says plainly that starting sess
 // across a network switch, the thread says so once, with Review, instead of
 // stacking a warning card with its own Retry and × for each. The list row
 // says the last one is not confirmed and does not date the row by it.
-test("HUB-J12 network switch: three unconfirmed messages read as one notice (cas-b00c)", async ({ page }) => {
-  const { hub, clock } = await connected(page);
-  const log = page.getByRole("log");
-  const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ });
-  const when = row.locator(".conversation-when");
-  const whenBefore = (await when.count()) ? await when.textContent() : null;
-  for (const text of ["Is the gate green?", "Did the Mac tests start?", "Ship it if both are green"]) {
-    const next = hub.nextSend();
-    await sendNow(page, text);
-    expect((await next).text).toBe(text);
-  }
-  await clock.advance(15_000); // every receipt deadline passes
-  const notice = log.locator('.conversation-unconfirmed[role="status"]');
-  await expect(notice).toHaveCount(1);
-  await expect(notice).toHaveText("3 messages not confirmed · Cassy couldn't confirm delivery to the cas-src supervisor. Review them to retry.");
-  await expect(log.getByRole("button", { name: "Retry sending" })).toHaveCount(0);
-  await expect(log.getByRole("button", { name: /^Dismiss/ })).toHaveCount(0);
-  await expect(row).toContainText("Not confirmed: Ship it if both are green");
-  // Unconfirmed sends are not activity the supervisor saw: the row's time is unchanged.
-  if (whenBefore === null) await expect(when).toHaveCount(0); else await expect(when).toHaveText(whenBefore);
-  const review = log.getByRole("button", { name: "Review 3 messages not confirmed", exact: true });
-  await review.click();
-  await expect(log.getByRole("button", { name: "Retry sending" })).toHaveCount(3);
-  await expect(log.getByRole("button", { name: "Retry sending" }).first()).toBeFocused();
-  await expect(log.getByRole("button", { name: "Dismiss this notice", exact: true })).toHaveCount(3);
-  await log.getByRole("button", { name: /^Show 3 messages not confirmed as one notice$/ }).click();
-  await expect(review).toBeFocused();
-  // Nothing was sent twice.
-  expect(hub.sends).toHaveLength(3);
+test("HUB-J12 network switch: three unconfirmed messages read as one notice (cas-b00c)", journeyPart, async ({ page, journey }) => {
+  await journey.stage("Three unconfirmed messages read as one notice", async () => {
+    const { hub, clock } = await connected(page);
+    const log = page.getByRole("log");
+    const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ });
+    const when = row.locator(".conversation-when");
+    const whenBefore = (await when.count()) ? await when.textContent() : null;
+    for (const text of ["Is the gate green?", "Did the Mac tests start?", "Ship it if both are green"]) {
+      const next = hub.nextSend();
+      await sendNow(page, text);
+      expect((await next).text).toBe(text);
+    }
+    await clock.advance(15_000); // every receipt deadline passes
+    const notice = log.locator('.conversation-unconfirmed[role="status"]');
+    await expect(notice).toHaveCount(1);
+    await expect(notice).toHaveText("3 messages not confirmed · Cassy couldn't confirm delivery to the cas-src supervisor. Review them to retry.");
+    await expect(log.getByRole("button", { name: "Retry sending" })).toHaveCount(0);
+    await expect(log.getByRole("button", { name: /^Dismiss/ })).toHaveCount(0);
+    await expect(row).toContainText("Not confirmed: Ship it if both are green");
+    // Unconfirmed sends are not activity the supervisor saw: the row's time is unchanged.
+    if (whenBefore === null) await expect(when).toHaveCount(0); else await expect(when).toHaveText(whenBefore);
+    const review = log.getByRole("button", { name: "Review 3 messages not confirmed", exact: true });
+    await review.click();
+    await expect(log.getByRole("button", { name: "Retry sending" })).toHaveCount(3);
+    await expect(log.getByRole("button", { name: "Retry sending" }).first()).toBeFocused();
+    await expect(log.getByRole("button", { name: "Dismiss this notice", exact: true })).toHaveCount(3);
+    await log.getByRole("button", { name: /^Show 3 messages not confirmed as one notice$/ }).click();
+    await expect(review).toBeFocused();
+    // Nothing was sent twice.
+    expect(hub.sends).toHaveLength(3);
+  });
 });
 
 // cas-8f19: what is stored is read with the bounds it was written with. A

@@ -10,6 +10,64 @@ fn create_test_queue() -> (TempDir, SyncQueue) {
 }
 
 #[test]
+fn cas_8095_purge_removes_only_rejected_team_owned_personal_rows() {
+    let (_temp, queue) = create_test_queue();
+    for (id, outcome, reason) in [
+        ("retired-task", "rejected", "team_owned_project"),
+        ("retired-dependency", "rejected", "team_owned_project"),
+        ("other-rejection", "rejected", "revision_conflict"),
+        ("skipped-team-owned", "skipped", "team_owned_project"),
+        ("retryable", "", ""),
+    ] {
+        let kind = if id == "retired-dependency" {
+            EntityType::TaskDependency
+        } else {
+            EntityType::Task
+        };
+        queue
+            .enqueue(kind, id, SyncOperation::Upsert, Some("{}"))
+            .unwrap();
+        let row = queue
+            .list_all(100)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.entity_id == id)
+            .unwrap();
+        queue
+            .record_row_outcome(row.id, outcome, Some(reason))
+            .unwrap();
+    }
+    queue
+        .enqueue_for_team(
+            EntityType::Task,
+            "team-row",
+            SyncOperation::Upsert,
+            Some("{}"),
+            "team-1",
+        )
+        .unwrap();
+    let team_row = queue
+        .list_all(100)
+        .unwrap()
+        .into_iter()
+        .find(|row| row.entity_id == "team-row")
+        .unwrap();
+    queue
+        .record_row_outcome(team_row.id, "rejected", Some("team_owned_project"))
+        .unwrap();
+    assert_eq!(queue.purge_team_owned_personal_rejections().unwrap(), 2);
+    let survivors = queue.list_all(100).unwrap();
+    assert_eq!(survivors.len(), 4);
+    assert!(survivors.iter().any(|row| row.entity_id == "team-row"));
+    assert!(
+        !survivors
+            .iter()
+            .any(|row| row.entity_id.starts_with("retired-"))
+    );
+    assert_eq!(queue.purge_team_owned_personal_rejections().unwrap(), 0);
+}
+
+#[test]
 fn foreign_and_unknown_stored_entries_never_enter_personal_or_team_queue() {
     use rusqlite::Connection;
 

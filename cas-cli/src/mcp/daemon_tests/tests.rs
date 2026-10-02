@@ -11,6 +11,76 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::test_support::TestEnvGuard;
 
+#[tokio::test]
+async fn cas_8095_team_only_daemon_makes_only_team_calls() {
+    let server = MockServer::start().await;
+    let team = "550e8400-e29b-41d4-a716-446655440000";
+    for (verb, suffix, response) in [
+        (
+            "POST",
+            "push",
+            serde_json::json!({"synced": {"entries": 1}}),
+        ),
+        (
+            "GET",
+            "pull",
+            serde_json::json!({
+                "entries": [], "tasks": [], "rules": [], "skills": [],
+                "task_dependencies": [], "pulled_at": "2026-10-02T12:00:00Z",
+            }),
+        ),
+    ] {
+        Mock::given(method(verb))
+            .and(path(format!("/api/teams/{team}/sync/{suffix}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    let temp = TempDir::new().unwrap();
+    let root = init_cas_dir(temp.path()).unwrap();
+    crate::cloud::set_canonical_id_in_config_toml(&root, "daemon-team-only").unwrap();
+    let mut config = crate::config::Config::load(&root).unwrap();
+    config.set("cloud.team_only", "true").unwrap();
+    config.save(&root).unwrap();
+    let mut cloud = CloudConfig::default();
+    cloud.endpoint = server.uri();
+    cloud.token = Some("synthetic-test-token".into());
+    cloud.set_team(team, "fixture-team");
+    cloud.save_to_cas_dir(&root).unwrap();
+    let queue = SyncQueue::open(&root).unwrap();
+    queue.init().unwrap();
+    queue.enqueue_for_team(EntityType::Entry, "daemon-only-entry", SyncOperation::Upsert,
+        Some(r#"{"id":"daemon-only-entry","scope":"project","origin_project":"daemon-team-only","content":"queued"}"#), team).unwrap();
+    // Legacy personal rows and sessions must not cause even an empty personal request.
+    queue
+        .enqueue(
+            EntityType::Task,
+            "legacy-personal",
+            SyncOperation::Upsert,
+            Some(r#"{"scope":"project"}"#),
+        )
+        .unwrap();
+    let daemon = EmbeddedDaemon::new(EmbeddedDaemonConfig {
+        cas_root: root,
+        index_code: false,
+        ..Default::default()
+    });
+    let result = daemon.trigger_cloud_sync().await.unwrap();
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    assert_eq!(result.pushed_entries, 1);
+    assert!(queue.pending_for_team(team, 100, 5).unwrap().is_empty());
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests.iter().all(|request| {
+        request
+            .url
+            .path()
+            .starts_with(&format!("/api/teams/{team}/"))
+    }));
+    server.verify().await;
+}
+
 #[test]
 fn test_activity_tracker() {
     let tracker = ActivityTracker::new(5);

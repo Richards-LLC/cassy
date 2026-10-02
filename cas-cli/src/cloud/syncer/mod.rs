@@ -1053,6 +1053,9 @@ impl PushRowResult {
 /// and no move; an unknown reason is named honestly rather than guessed at.
 pub fn push_reason_hint(reason: &str) -> &'static str {
     match reason.trim().to_ascii_lowercase().as_str() {
+        "team_owned_project" => {
+            "this project belongs to a team; configure its active team, run `cas config set cloud.team_only true`, then `cas cloud queue --purge-team-owned` and `cas cloud sync`"
+        }
         "project_mismatch" => {
             "the cloud project identity conflicts; inspect `cas cloud projects`, then pin with `cas cloud project set <registered-canonical-id>` or have the cloud owner register the remote alias, run `cas cloud project --adopt-aliases` to merge server aliases without dropping local entries, `cas cloud queue --retry --retry-reason project_mismatch`, and `cas cloud push`"
         }
@@ -1086,6 +1089,7 @@ pub(crate) fn push_reason_from_error(error: &CasError) -> Option<String> {
     let rendered = error.to_string();
     let lower = rendered.to_ascii_lowercase();
     [
+        "team_owned_project",
         "project_identity_conflict",
         "project_mismatch",
         "scope_mismatch",

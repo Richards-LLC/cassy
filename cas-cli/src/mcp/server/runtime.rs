@@ -78,16 +78,62 @@ fn ensure_mcp_schema(cas_root: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Internal implementation for running the MCP server
-async fn run_server_impl() -> anyhow::Result<()> {
-    let enable_daemon = true;
-    use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, SyncQueue};
-    use crate::mcp::daemon::{EmbeddedDaemonConfig, spawn_daemon};
-    use crate::mcp::tools::CasService;
+// Kept at the startup call site so its scope and network behavior are tested
+// without starting an MCP transport or the background daemon.
+fn startup_cloud_pull(
+    cas_root: &std::path::Path,
+) -> crate::error::Result<crate::cloud::SyncResult> {
+    use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, SyncQueue, SyncResult};
     use crate::store::{
         open_commit_link_store, open_event_store, open_file_change_store, open_prompt_store,
         open_rule_store_local, open_skill_store_local, open_spec_store,
     };
+    let cloud_config = CloudConfig::load_from_cas_dir(cas_root)?;
+    if !cloud_config.is_logged_in() {
+        return Ok(SyncResult::default());
+    }
+    cloud_config
+        .validate_team_only()
+        .map_err(crate::error::CasError::Other)?;
+    let queue = SyncQueue::open(cas_root)?;
+    queue.init()?;
+    let syncer = CloudSyncer::new(
+        Arc::new(queue),
+        cloud_config,
+        CloudSyncerConfig {
+            timeout: std::time::Duration::from_secs(5),
+            ..Default::default()
+        },
+    );
+    let store = open_startup_pull_entry_store(cas_root)?;
+    let task_store = open_startup_pull_task_store(cas_root)?;
+    let rule_store = open_rule_store_local(cas_root)?;
+    let skill_store = open_skill_store_local(cas_root)?;
+    let spec_store = open_spec_store(cas_root)?;
+    let event_store = open_event_store(cas_root)?;
+    let prompt_store = open_prompt_store(cas_root)?;
+    let file_change_store = open_file_change_store(cas_root)?;
+    let commit_link_store = open_commit_link_store(cas_root)?;
+    // CloudSyncer::pull selects only pull_team when team_only is enabled.
+    syncer.pull(
+        store.as_ref(),
+        task_store.as_ref(),
+        rule_store.as_ref(),
+        skill_store.as_ref(),
+        spec_store.as_ref(),
+        event_store.as_ref(),
+        prompt_store.as_ref(),
+        file_change_store.as_ref(),
+        commit_link_store.as_ref(),
+    )
+}
+
+/// Internal implementation for running the MCP server
+async fn run_server_impl() -> anyhow::Result<()> {
+    let enable_daemon = true;
+    use crate::cloud::CloudConfig;
+    use crate::mcp::daemon::{EmbeddedDaemonConfig, spawn_daemon};
+    use crate::mcp::tools::CasService;
     use rmcp::ServiceExt;
     use rmcp::transport::stdio;
 
@@ -158,70 +204,14 @@ async fn run_server_impl() -> anyhow::Result<()> {
         tokio::task::spawn(async move {
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(5),
-                tokio::task::spawn_blocking(move || {
-                    let cloud_config = match CloudConfig::load_from_cas_dir(&cas_root_bg) {
-                        Ok(c) if c.is_logged_in() => c,
-                        _ => return,
-                    };
-                    let queue = match SyncQueue::open(&cas_root_bg) {
-                        Ok(q) => {
-                            let _ = q.init();
-                            q
-                        }
-                        Err(_) => return,
-                    };
-                    let config = CloudSyncerConfig {
-                        timeout: std::time::Duration::from_secs(5),
-                        ..Default::default()
-                    };
-                    let syncer = CloudSyncer::new(std::sync::Arc::new(queue), cloud_config, config);
-                    let Ok(store) = open_startup_pull_entry_store(&cas_root_bg) else {
-                        return;
-                    };
-                    let Ok(task_store) = open_startup_pull_task_store(&cas_root_bg) else {
-                        return;
-                    };
-                    let Ok(rule_store) = open_rule_store_local(&cas_root_bg) else {
-                        return;
-                    };
-                    let Ok(skill_store) = open_skill_store_local(&cas_root_bg) else {
-                        return;
-                    };
-                    let Ok(spec_store) = open_spec_store(&cas_root_bg) else {
-                        return;
-                    };
-                    let Ok(event_store) = open_event_store(&cas_root_bg) else {
-                        return;
-                    };
-                    let Ok(prompt_store) = open_prompt_store(&cas_root_bg) else {
-                        return;
-                    };
-                    let Ok(file_change_store) = open_file_change_store(&cas_root_bg) else {
-                        return;
-                    };
-                    let Ok(commit_link_store) = open_commit_link_store(&cas_root_bg) else {
-                        return;
-                    };
-
-                    match syncer.pull(
-                        store.as_ref(),
-                        task_store.as_ref(),
-                        rule_store.as_ref(),
-                        skill_store.as_ref(),
-                        spec_store.as_ref(),
-                        event_store.as_ref(),
-                        prompt_store.as_ref(),
-                        file_change_store.as_ref(),
-                        commit_link_store.as_ref(),
-                    ) {
-                        Ok(result) if result.total_pulled() > 0 => {
-                            eprintln!("[Cassy] Synced {} items from cloud", result.total_pulled());
-                        }
-                        Err(e) => {
-                            eprintln!("[Cassy] Cloud sync failed (continuing): {e}");
-                        }
-                        _ => {}
+                tokio::task::spawn_blocking(move || match startup_cloud_pull(&cas_root_bg) {
+                    Ok(result) if result.total_pulled() > 0 => {
+                        eprintln!("[Cassy] Synced {} items from cloud", result.total_pulled());
                     }
+                    Err(e) => {
+                        eprintln!("[Cassy] Cloud sync failed (continuing): {e}");
+                    }
+                    _ => {}
                 }),
             )
             .await;
@@ -1376,6 +1366,45 @@ pub async fn write_proxy_health_cache(cas_root: &std::path::Path, engine: &cmcp_
 // =============================================================================
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn cas_8095_team_only_startup_makes_only_team_pull_calls() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let team = "550e8400-e29b-41d4-a716-446655440000";
+        Mock::given(method("GET"))
+            .and(path(format!("/api/teams/{team}/sync/pull")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [], "tasks": [], "rules": [], "skills": [],
+                "task_dependencies": [], "pulled_at": "2026-10-02T12:00:00Z",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let temp = TempDir::new().unwrap();
+        let root = init_cas_dir(temp.path()).unwrap();
+        crate::cloud::set_canonical_id_in_config_toml(&root, "startup-team-only").unwrap();
+        let mut config = crate::config::Config::load(&root).unwrap();
+        config.set("cloud.team_only", "true").unwrap();
+        config.save(&root).unwrap();
+        let mut cloud = CloudConfig::default();
+        cloud.endpoint = server.uri();
+        cloud.token = Some("synthetic-test-token".into());
+        cloud.set_team(team, "fixture-team");
+        cloud.save_to_cas_dir(&root).unwrap();
+        let result = tokio::task::spawn_blocking(move || super::startup_cloud_pull(&root))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].url.path(),
+            format!("/api/teams/{team}/sync/pull")
+        );
+        server.verify().await;
+    }
     #[cfg(feature = "mcp-proxy")]
     use super::install_machine_viktor_credential;
     use super::{

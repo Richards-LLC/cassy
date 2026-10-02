@@ -9,10 +9,20 @@ fn cas_8095_team_only_config_roundtrips_through_registered_accessors() {
     assert_eq!(config.get("cloud.team_only").as_deref(), Some("false"));
     config.set("cloud.team_only", "true").unwrap();
     assert_eq!(config.get("cloud.team_only").as_deref(), Some("true"));
+    assert!(
+        config
+            .list()
+            .contains(&("cloud.team_only".into(), "true".into()))
+    );
     let source = toml::to_string(&config).unwrap();
     let mut parsed: crate::config::Config = toml::from_str(&source).unwrap();
     assert_eq!(parsed.get("cloud.team_only").as_deref(), Some("true"));
-    parsed.set("cloud.team_only", reg.get("cloud.team_only").unwrap().default).unwrap();
+    parsed
+        .set(
+            "cloud.team_only",
+            reg.get("cloud.team_only").unwrap().default,
+        )
+        .unwrap();
     assert_eq!(parsed.get("cloud.team_only").as_deref(), Some("false"));
 }
 

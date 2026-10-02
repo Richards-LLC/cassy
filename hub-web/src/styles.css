@@ -2167,10 +2167,12 @@ dialog::backdrop { background: var(--overlay-backdrop); }
 /* == Unit 3: command palette == */
 .command-palette {
   width: min(620px, calc(100vw - var(--space-6)));
-  max-height: min(76dvh, 680px);
+  /* cas-865c: at 1280×720 the full command list, Appearance rows included,
+     fits without scrolling (it used to cut "Appearance · Dark" in half). */
+  max-height: min(84dvh, 680px);
   /* Anchored near the top, not centred: filtering shrinks the list, and a
      centred dialog would jump its search field on every keystroke. */
-  margin-block: min(12dvh, 96px) auto;
+  margin-block: min(8dvh, 64px) auto;
   padding: 0;
   overflow: hidden;
   background: var(--bg-panel);
@@ -3185,7 +3187,13 @@ dialog form > *,
 /* P14: a codename is one word and never breaks at its hyphen; a list row may ellipsise it. */
 .codename { white-space: nowrap; }
 .conversation-supervisor.codename { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
-.conversation-list-title { display: flex; flex-direction: row; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); margin-top: var(--space-4); }
+/* cas-865c: one row, "Conversations" and New session; Pair a machine sits
+   with the appearance control in the top row, so nothing wraps at 1280 or 390. */
+.conversation-list-title { display: flex; flex-direction: row; flex-wrap: nowrap; align-items: center; justify-content: space-between; gap: var(--space-2); margin-top: var(--space-4); }
+.conversation-list-title h1 { min-width: 0; }
+.conversation-list-tools { display: inline-flex; align-items: center; gap: var(--space-1); margin-inline-start: auto; }
+.conversation-list-tools #pair-toggle { font-size: var(--fs-meta); color: var(--ink); background: var(--color-transparent); white-space: nowrap; }
+.conversation-list-tools #pair-toggle.primary { width: auto; color: var(--you-fg); background: var(--you-bg); }
 .conversation-list-title h1 { font: var(--weight-semibold) 22px/1.2 var(--font-ui); letter-spacing: -0.015em; margin: 0 6px; }
 /* Header controls are text buttons (P15, cas-9616): no chip on the paper, the hover step on hover. */
 .conversation-list-title button { font-size: var(--fs-meta); color: var(--ink); background: var(--color-transparent); }
@@ -3898,7 +3906,7 @@ button.chip:disabled { cursor: default; }
    Desktop: a 560px dialog anchored near the top like the palette, so the
    list filtering beneath the search never moves the field. Phone: the whole
    screen, with Start riding the bottom edge. */
-.conversation-list-actions { display: inline-flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-1); margin-inline-start: auto; }
+.conversation-list-actions { display: inline-flex; flex-wrap: nowrap; align-items: center; justify-content: flex-end; gap: var(--space-1); margin-inline-start: auto; flex: none; }
 .new-session-toggle { white-space: nowrap; }
 .new-session-toggle > span[aria-hidden] { font-weight: var(--weight-semibold); }
 .launch-sheet { width: min(600px, calc(100vw - var(--space-6))); max-height: min(92dvh, 820px); margin-block: min(4dvh, 32px) auto; padding: var(--space-4); background: var(--bg-raised); }

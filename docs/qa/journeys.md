@@ -411,8 +411,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 #### Steps
 
-1. A paired controller enables launch from Commander — "Allow new sessions" names the machine, confirms "Start new sessions", and opens the launch form without a new pairing
-2. The granted scope stays available — after reload "New session" replaces the grant path
+1. A paired controller enables launch from Commander — "+ New session" (named by its goal before the permission too) opens the sheet's grant view, which names the machine, confirms "Start new sessions", and opens the launch form without a new pairing
+2. The granted scope stays available — after reload "New session" opens the launch form instead of the grant view
 3. Open New session and find the project — the most recently used project leads, a running project offers Attach, Browse is offered because the machine has launch folders, filtering narrows the list, and Claude is marked as the machine's default
 4. Choose the account — every Claude account on the machine is listed with the default preselected; a logged-out one can't be picked and shows its `cas claude login <name>` command with Copy; a long address wraps; Grok has no account step; the summary names the chosen account
 5. Start it and land on its supervisor — Start shows progress ("Starting <project> with <supervisor> (<account>) on <machine>…"), sends the account, and lands in the new session's conversation once the machine lists it
@@ -424,7 +424,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 #### Expected experience
 
-- One obvious New session action beside Pair a machine, and in the command palette; a paired controller can allow it on the chosen machine while a read-only device sees invitation instructions.
+- One obvious New session action on the "Conversations" heading's row (Pair a machine sits with the appearance control above), and in the command palette; a paired controller can allow it on the chosen machine while a read-only device sees invitation instructions.
 - Nothing is started twice: a running project attaches.
 - A refusal names what to fix on which machine; it never reads as a lost pairing.
 

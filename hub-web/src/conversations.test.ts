@@ -322,6 +322,22 @@ describe('conversation evidence', () => {
     expect(toggle.querySelector('svg')?.getAttribute('aria-hidden')).toBe('true');
     expect(paired.querySelector('.conversation-sidebar footer #command-palette-toggle')).toBeNull();
   });
+  it('keeps the list heading to one row and names New session by its goal in both permission states (cas-865c)', () => {
+    for (const launch of ['ready', 'grant'] as const) {
+      const root = document.createElement('div');
+      root.innerHTML = conversationShellMarkup({ selected: false, loaded: true, paired: true, launch });
+      const title = root.querySelector('.conversation-list-title')!;
+      // The heading row holds the h1 and New session only; Pair a machine sits with the appearance control.
+      expect([...title.querySelectorAll('button')].map((button) => button.textContent)).toEqual(['+ New session']);
+      expect(root.querySelector('#pair-toggle')?.closest('.conversation-list-top')).not.toBeNull();
+      expect(root.textContent).not.toContain('Allow new sessions');
+      expect(root.querySelector('#new-session-toggle')?.hasAttribute('data-launch-grant')).toBe(launch === 'grant');
+    }
+    const unpaired = document.createElement('div');
+    unpaired.innerHTML = conversationShellMarkup({ selected: false, loaded: true, paired: false });
+    expect(unpaired.querySelector('.conversation-list-actions')).toBeNull();
+    expect(unpaired.querySelector('#pair-toggle')?.closest('.conversation-list-top')).not.toBeNull();
+  });
   it('names the palette shortcut the way this keyboard prints it, the same on every surface (journey F16)', () => {
     expect(applePlatform({ platform: 'Linux x86_64' })).toBe(false);
     expect(applePlatform({ platform: 'Win32' })).toBe(false);

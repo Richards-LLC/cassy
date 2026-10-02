@@ -22,12 +22,15 @@ export interface ConversationShellModel {
   launch?: "ready" | "grant";
 }
 
-/** The list header's New session control, or the grant path that replaces it. */
+/**
+ * The list header's New session control (cas-865c). It is named by its goal
+ * in both states: where no paired machine lets this browser start sessions
+ * yet, the same control opens the sheet's grant view, which explains the
+ * permission, instead of reading like a toggle ("Allow new sessions").
+ */
 export function newSessionButtonMarkup(launch: ConversationShellModel["launch"]): string {
   if (!launch) return "";
-  return launch === "ready"
-    ? '<button id="new-session-toggle" class="new-session-toggle" type="button" aria-haspopup="dialog"><span aria-hidden="true">+</span> New session</button>'
-    : '<button id="new-session-toggle" class="new-session-toggle" type="button" aria-haspopup="dialog" data-launch-grant="true">Allow new sessions</button>';
+  return `<button id="new-session-toggle" class="new-session-toggle" type="button" aria-haspopup="dialog"${launch === "grant" ? ' data-launch-grant="true"' : ""}><span aria-hidden="true">+</span> New session</button>`;
 }
 
 export const CONVERSATION_SEARCH_LABEL = "Search conversations";
@@ -316,7 +319,7 @@ export function conversationShellMarkup(model: ConversationShellModel): string {
   const welcomePairs = !model.selected && model.loaded && !model.paired;
   return `<div class="conversation-shell${model.selected ? " thread-open" : ""}${welcomePairs ? " welcome-pairs" : ""}${model.machineId ? ` ${machineAccentClass(model.machineId)}` : ""}">
     <aside class="conversation-sidebar" aria-label="Supervisor conversations">
-      <header class="conversation-list-heading"><div class="conversation-list-top">${cloudBrand()}${appearanceButtonMarkup()}</div><div class="conversation-list-title"><h1>Conversations</h1><span class="conversation-list-actions">${newSessionButtonMarkup(model.launch)}<button id="pair-toggle"${welcomePairs ? ' class="primary"' : ""} type="button">Pair a machine</button></span></div><p>Your projects. Your supervisors.</p>${model.paired ? conversationSearchMarkup(model.searchQuery, model.keyboardHint ?? true) : ""}</header>
+      <header class="conversation-list-heading"><div class="conversation-list-top">${cloudBrand()}<span class="conversation-list-tools"><button id="pair-toggle"${welcomePairs ? ' class="primary"' : ""} type="button">Pair a machine</button>${appearanceButtonMarkup()}</span></div><div class="conversation-list-title"><h1>Conversations</h1>${model.launch ? `<span class="conversation-list-actions">${newSessionButtonMarkup(model.launch)}</span>` : ""}</div><p>Your projects. Your supervisors.</p>${model.paired ? conversationSearchMarkup(model.searchQuery, model.keyboardHint ?? true) : ""}</header>
       <nav id="conversation-list" aria-label="Choose a supervisor"></nav>
       <div id="conversation-empty" class="conversation-empty" hidden></div>
       ${model.paired ? composeFabMarkup : ""}

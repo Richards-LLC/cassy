@@ -648,9 +648,11 @@ test("HUB-J12 network switch: re-pairing by code says plainly that starting sess
   await journey.stage("Told plainly that starting sessions needs allowing again", async () => {
     const notice = page.locator("#attention-panel").getByText("Starting sessions needs allowing again").filter({ visible: true });
     await expect(notice).toBeVisible();
-    await expect(page.locator("#attention-panel")).toContainText("Re-pairing Atlas · Linux with a code didn't include starting sessions. Open Allow new sessions to allow it again.");
-    await expect(page.getByRole("button", { name: "New session", exact: true })).toHaveCount(0);
-    await page.getByRole("button", { name: "Allow new sessions" }).filter({ visible: true }).first().click();
+    await expect(page.locator("#attention-panel")).toContainText("Re-pairing Atlas · Linux with a code didn't include starting sessions. Open New session to allow it again.");
+    // cas-865c: New session keeps its name; without the permission it opens the grant view.
+    const toggle = page.locator('#new-session-toggle[data-launch-grant="true"]');
+    await expect(toggle).toHaveText("+ New session");
+    await toggle.click();
     const sheet = page.getByRole("dialog", { name: "New session" });
     await expect(sheet.locator(".launch-grant .launch-lead")).toHaveText("Re-pairing Atlas · Linux didn't keep starting sessions. Allow it again from this browser.");
   });

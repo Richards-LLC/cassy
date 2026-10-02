@@ -1335,7 +1335,7 @@ async function pairMachine(form: HTMLFormElement): Promise<StoredMachine | false
   machines.set(machine.id, machine);
   // cas-0e14 F29: a code re-pair can't carry session launch. Say plainly that
   // starting sessions needs allowing again, rather than letting New session
-  // quietly turn back into "Allow new sessions".
+  // quietly open the permission view again (its label stays "New session", cas-865c).
   if (launchDropped(previousScopes, machine.scopes)) announceLaunchDropped(machine);
   else if (machine.scopes.includes("session-launch")) settleLaunchDropped(machine.id);
   // cas-7752: only a fresh pairing lets a revoked machine's drafts be stored
@@ -3577,8 +3577,9 @@ function render(captureDraft = true): void {
           </section>` : ""}
           <section class="palette-group" data-palette-group="machines" aria-labelledby="palette-group-machines">
             <h3 id="palette-group-machines" class="palette-group-heading">Machines</h3>
-            ${launchAvailability() === "ready" ? '<button type="button" class="palette-command" data-palette-action="new-session"><span>New session</span><small>Start a supervisor on a project</small></button>' : launchAvailability() === "grant" ? '<button type="button" class="palette-command" data-palette-action="new-session"><span>Allow new sessions</span><small>Let this browser start sessions</small></button>' : ""}
+            ${launchAvailability() === "ready" ? '<button type="button" class="palette-command" data-palette-action="new-session"><span>New session</span><small>Start a supervisor on a project</small></button>' : ""}
             <button type="button" class="palette-command" id="palette-paired-machines"><span>Paired machines</span><small>Hosts, connection and last seen</small></button>
+            ${launchAvailability() === "grant" ? '<button type="button" class="palette-command" data-palette-action="new-session" data-launch-grant="true"><span>New session</span><small>Asks this browser\'s permission first</small></button>' : ""}
             ${infoItems.length > 0 ? `<button type="button" class="palette-command" data-palette-action="dismiss-info"><span>Dismiss all info</span><small>${infoItems.length} outstanding</small></button>` : ""}
           </section>
           <section class="palette-group" data-palette-group="appearance" aria-labelledby="palette-group-appearance">

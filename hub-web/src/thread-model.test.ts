@@ -374,14 +374,32 @@ describe("a reload keeps each turn's time (cas-8d52, journey F11)", () => {
     expect(shownLabels(soon, at(9, 2))).toEqual(["09:02"]);
   });
 
-  it("places a turn this browser never saw by the machine's measured lead", () => {
+  it("measures the machine's lead from a live turn, and places a turn never seen by it", () => {
+    const visit = new ConversationHistory();
+    visit.currentSession = "live";
+    visit.receive(reply(7, "answer"), at(9, 0), "live");
+    // The reconnect replays it with the machine's stamp: the lead is measured.
+    visit.hydrateReply({ ...reply(7, "answer"), at: iso(at(9, 0) + AHEAD), session: "live" } as never, at(9, 1));
+    expect(visit.arrivalsRecord().skew).toBe(AHEAD);
     const later = at(10, 3);
     const history = new ConversationHistory();
     history.currentSession = "live";
-    history.seedArrivals({ at: { "r:7": at(9, 0) } });
+    history.seedArrivals(visit.arrivalsRecord());
     history.hydrateReply({ ...reply(7, "answer"), at: iso(at(9, 0) + AHEAD), session: "live" } as never, later);
     history.hydrateReply({ ...reply(9, "answer"), at: iso(at(9, 30) + AHEAD), session: "live" } as never, later);
     expect(shownLabels(history, later)).toEqual(["09:00", "09:30"]);
-    expect(history.arrivalsRecord().skew).toBe(AHEAD);
+  });
+
+  it("keeps a turn first shown from history at that time on the next reload", () => {
+    // First visit at 09:02: an old blocker stamped 09:05 by a clock five minutes ahead shows 09:02.
+    const first = new ConversationHistory();
+    first.hydrateReply({ ...reply(3, "blocker"), at: iso(at(9, 5)) } as never, at(9, 2));
+    expect(shownLabels(first, at(9, 2))).toEqual(["09:02"]);
+    // Reload at 09:20: it still shows 09:02, not 09:05 or 09:20.
+    const second = new ConversationHistory();
+    second.seedArrivals(first.arrivalsRecord());
+    second.hydrateReply({ ...reply(3, "blocker"), at: iso(at(9, 5)) } as never, at(9, 20));
+    expect(shownLabels(second, at(9, 20))).toEqual(["09:02"]);
+    expect(second.arrivalsRecord().skew, "a turn not seen live measures nothing").toBeUndefined();
   });
 });

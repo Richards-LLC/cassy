@@ -135,6 +135,8 @@ export class ConversationHistory {
    * thread shows each turn at the time the visit showed it.
    */
   private readonly arrivals = new Map<string, number>();
+  /** Turns this page saw arrive live: only they measure the machine's lead. */
+  private readonly liveArrivals = new Set<string>();
   private skewMs?: number;
 
   /** Seed the times a previous visit recorded (cas-8d52). */
@@ -158,11 +160,13 @@ export class ConversationHistory {
   private arrivalFor(key: string, stamped: number | undefined, now: number): number {
     const seen = this.arrivals.get(key);
     if (seen !== undefined) {
-      if (stamped !== undefined) this.skewMs = stamped - seen;
+      if (stamped !== undefined && this.liveArrivals.has(key)) this.skewMs = stamped - seen;
       return Math.min(seen, now);
     }
-    if (stamped !== undefined && this.skewMs !== undefined) return Math.min(stamped - this.skewMs, now);
-    return now;
+    const shown = stamped !== undefined && this.skewMs !== undefined ? Math.min(stamped - this.skewMs, now) : now;
+    // The time this visit shows it is the time the next visit shows it.
+    this.arrivals.set(key, shown);
+    return shown;
   }
   private insert(event: ConversationEvent): void {
     const at = event.at ?? Number.POSITIVE_INFINITY;
@@ -518,7 +522,7 @@ export class ConversationHistory {
     if (receipt.device_label) send.value.deviceLabel = receipt.device_label;
     // cas-8d52: the time this message shows, for the thread a reload rebuilds.
     const shown = send.shownAt ?? send.at;
-    if (shown !== undefined && Number.isFinite(shown) && !this.arrivals.has(`s:${receipt.notification_id}`)) this.arrivals.set(`s:${receipt.notification_id}`, shown);
+    if (shown !== undefined && Number.isFinite(shown) && !this.arrivals.has(`s:${receipt.notification_id}`)) { this.arrivals.set(`s:${receipt.notification_id}`, shown); this.liveArrivals.add(`s:${receipt.notification_id}`); }
     // A late receipt means it did go: a dismissed "failed" send is back in the thread as delivered.
     delete send.value.dismissed;
     send.value.state = this.events.some((event) => event.kind === "reply" && event.value.reply_to === receipt.notification_id) ? "replied" : "acknowledged";
@@ -680,7 +684,7 @@ export class ConversationHistory {
    * answer and read as already acknowledged.
    */
   receive(reply: OperatorReply, at: number = Date.now(), session?: string): void {
-    if (!this.arrivals.has(`r:${reply.notification_id}`)) this.arrivals.set(`r:${reply.notification_id}`, at);
+    if (!this.arrivals.has(`r:${reply.notification_id}`)) { this.arrivals.set(`r:${reply.notification_id}`, at); this.liveArrivals.add(`r:${reply.notification_id}`); }
     const key = Math.max(at, this.latestAt());
     this.reply(reply, key, session, key === at ? undefined : at, at, "time", this.machineAhead);
   }

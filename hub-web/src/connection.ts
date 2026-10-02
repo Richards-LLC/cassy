@@ -221,6 +221,12 @@ export class HubConnectionSupervisor {
   private machineSocketOpening?: Promise<boolean>;
   private machineMultiplex = false;
   private machineProtocolBlocked = false;
+  /**
+   * Bumped whenever the machine sockets are abandoned (cas-7b31). An opening
+   * that was waiting on its ticket when that happened must not go on to open
+   * a socket of its own beside the replacement's.
+   */
+  private machineSocketGeneration = 0;
   private readonly desiredSessions = new Set<string>();
   private readonly machineSubscriptions = new Set<string>();
   private readonly sessionPanes = new Map<string, PaneInfo[]>();
@@ -741,6 +747,7 @@ export class HubConnectionSupervisor {
    * here instead.
    */
   private abandonSockets(reason: string): void {
+    this.machineSocketGeneration += 1;
     const machineSocket = this.machineSocket;
     if (machineSocket) {
       machineSocket.onopen = null; machineSocket.onmessage = null; machineSocket.onerror = null; machineSocket.onclose = null;
@@ -952,6 +959,7 @@ export class HubConnectionSupervisor {
   }
 
   private async openMachineSocket(session: string): Promise<boolean> {
+    const generation = this.machineSocketGeneration;
     this.transitionAttach(session, "auth", "auth");
     let ticket: { ticket: string };
     try {
@@ -968,7 +976,9 @@ export class HubConnectionSupervisor {
       this.machineMultiplex = false;
       return false;
     }
-    if (!this.desired) return true;
+    // Abandoned while the ticket was on its way: the replacement opening owns
+    // the machine socket now (cas-7b31).
+    if (!this.desired || generation !== this.machineSocketGeneration) return true;
     const endpoint = new URL("/v1/attach", this.machine.baseUrl);
     endpoint.protocol = endpoint.protocol === "https:" ? "wss:" : "ws:";
     endpoint.searchParams.set("ticket", ticket.ticket);
@@ -1004,8 +1014,20 @@ export class HubConnectionSupervisor {
         handshakeTimer = undefined;
       };
       const protocolFailure = (detail: string) => {
-        this.machineProtocolBlocked = true;
         clearTimers();
+        // cas-7b31: a socket another opening has replaced says nothing about
+        // the hub's protocol. Its handshake timer used to fire after the
+        // replacement was ready, mark the protocol blocked and fail the live
+        // session, which then stayed "Reconnecting" for good.
+        if (this.machineSocket !== socket) {
+          if (!settled) {
+            settled = true;
+            resolve(true);
+          }
+          try { socket.close(4000, "replaced"); } catch { /* already closing */ }
+          return;
+        }
+        this.machineProtocolBlocked = true;
         for (const desired of this.desiredSessions) {
           this.transitionAttach(desired, "failed", "attaching", { reason: detail });
           this.callbacks.onSocketError(desired, detail);
@@ -1029,6 +1051,7 @@ export class HubConnectionSupervisor {
         }, STAGE_TIMEOUT_MS.attaching);
       };
       socket.onmessage = (event) => {
+        if (this.machineSocket !== socket) return;
         if (!this.machineSocketReady) {
           if (typeof event.data !== "string") {
             protocolFailure("Machine protocol mismatch: expected a proto 2 JSON handshake");

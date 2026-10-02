@@ -768,11 +768,14 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       // it again in transport terms. Only a failure that will not retry
       // earns a card, worded as the banner words it.
       if (state.phase === "failed" && state.fatal === true && !state.authFailure) {
+        // cas-be76: the card names the machine; the transport reason (raw
+        // host, stage) stays behind Details.
         void addAttention(machine, undefined, "hub_disconnected", {
           headline: lostConnectionBanner(machine.label, true),
-          detail: state.reason ?? lostConnectionBanner(machine.label, true),
+          detail: "Retry to connect again.",
           severity: "warning",
           action: "retry",
+          payload: { reason: state.reason, stage: state.stage },
           fingerprint: `${machine.id}:hub_disconnected`,
         });
       }

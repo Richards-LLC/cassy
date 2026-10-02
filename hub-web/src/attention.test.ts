@@ -338,3 +338,12 @@ describe("Commander attention triage queue", () => {
     });
   });
 });
+
+describe("connection cards name the machine, never the hub or its host (cas-be76)", () => {
+  it.each(["hub_disconnected", "reconnecting"])("%s", (kind) => {
+    const content = machineEventAttention(kind, { reason: "Stuck dialing atlas.test — node may be offline: Failed to fetch" });
+    expect(content.headline).toMatch(/the machine$/);
+    expect(content.headline).not.toMatch(/hub|atlas\.test/i);
+    expect(content.detail ?? "").not.toMatch(/atlas\.test/);
+  });
+});

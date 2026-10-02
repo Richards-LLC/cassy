@@ -1,7 +1,7 @@
 import type { Locator, Page } from "@playwright/test";
 import { test, expect } from "./journey";
 import { ATLAS, STUDIO, PELICAN } from "./world";
-import { HubDouble } from "./hub-double";
+import { HubDouble, SCOPES } from "./hub-double";
 import { ProtocolClock } from "./protocol-clock";
 
 // Every independent page must remain free of unhandled app errors too.
@@ -476,4 +476,68 @@ test("HUB-J12 network switch: a revoked pairing leaves no stored draft behind (c
   await expect(page.getByRole("textbox", { name: "Your message" })).toHaveValue("A private draft for Atlas and more");
   await clock.advance(15_000);
   expect(await stored()).not.toContain("atlas:");
+});
+
+// cas-0e14 (journey F29): a code re-pair requests only the default scopes, so
+// a browser that could start sessions loses that. The dialog says so before
+// the code is made, with the command whose link would keep it, and once the
+// new credential is in, Attention says starting sessions needs allowing again
+// and New session leads with it until it is allowed.
+test("HUB-J12 network switch: re-pairing by code says plainly that starting sessions must be allowed again (cas-0e14)", async ({ page, journey }) => {
+  test.setTimeout(120_000);
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], scopes: { atlas: [...SCOPES, "session-launch"] }, relay: { machine: "atlas", claimAfter: 1, authorizeAfter: 2 } });
+  const dialog = page.locator("#pair-dialog");
+  const header = page.locator("#conversation-connection");
+
+  await journey.stage("A pairing that could start sessions is revoked", async () => {
+    await journey.open();
+    await chooseConversation(page);
+    await expect(page.getByRole("button", { name: "New session", exact: true })).toBeVisible();
+    hub.refuseProofs("atlas", 1_000, "revoked", false);
+    await hub.down("atlas", { sockets: "close" });
+    await hub.up("atlas");
+    await expect(header).toHaveText(" · Needs pairing", { timeout: 30_000 });
+  });
+
+  await journey.stage("Re-pair says starting sessions won't come with a code, and how to keep it", async () => {
+    await page.getByRole("button", { name: "Re-pair Atlas · Linux" }).filter({ visible: true }).first().click();
+    await expect(dialog).toBeVisible();
+    await expect(dialog.locator(".pair-status")).toContainText("starting sessions will need to be allowed again");
+    await expect(dialog.locator(".pair-status")).toContainText("--scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,session:launch");
+  });
+
+  await journey.stage("Re-pair with a code anyway", async () => {
+    // The machine's new pairing is a default code pairing: no session launch.
+    hub.refuseProofs("atlas", 0);
+    hub.setScopes("atlas", [...SCOPES]);
+    await dialog.getByRole("button", { name: "Create pairing code" }).click();
+    await expect(dialog.getByRole("heading", { name: "Machine authorized" })).toBeVisible({ timeout: 15_000 });
+    await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Daniel");
+    await dialog.getByRole("button", { name: "Pair", exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await expect(page.locator("#hub-footer-badges .machine-badge-state")).toHaveText("Connected", { timeout: 30_000 });
+    // Pairing lands on the machine; open its conversation again.
+    await chooseConversation(page);
+    await expect(header).toHaveText(" · Live", { timeout: 30_000 });
+  });
+
+  await journey.stage("Told plainly that starting sessions needs allowing again", async () => {
+    const notice = page.locator("#attention-panel").getByText("Starting sessions needs allowing again").filter({ visible: true });
+    await expect(notice).toBeVisible();
+    await expect(page.locator("#attention-panel")).toContainText("Re-pairing Atlas · Linux with a code didn't include starting sessions. Open Allow new sessions to allow it again.");
+    await expect(page.getByRole("button", { name: "New session", exact: true })).toHaveCount(0);
+    await page.getByRole("button", { name: "Allow new sessions" }).filter({ visible: true }).first().click();
+    const sheet = page.getByRole("dialog", { name: "New session" });
+    await expect(sheet.locator(".launch-grant .launch-lead")).toHaveText("Re-pairing Atlas · Linux didn't keep starting sessions. Allow it again from this browser.");
+  });
+
+  await journey.stage("Allowing it again settles the notice", async () => {
+    const sheet = page.getByRole("dialog", { name: "New session" });
+    await sheet.getByRole("button", { name: "Allow starting sessions on Atlas · Linux" }).click();
+    await sheet.getByRole("button", { name: "Allow starting sessions", exact: true }).click();
+    await expect(sheet.locator('[data-launch-view="form"]')).toBeVisible();
+    await sheet.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(page.locator("#attention-panel").getByText("Starting sessions needs allowing again").filter({ visible: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "New session", exact: true })).toBeVisible();
+  });
 });

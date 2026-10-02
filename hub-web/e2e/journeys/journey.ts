@@ -11,7 +11,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HubDouble, type DoubleOptions } from "./hub-double";
-import { JOURNEY_NOW, JOURNEY_TIMEZONE, startJourneyClock } from "./clock";
+import { JOURNEY_NOW, JOURNEY_TIMEZONE, startJourneyClock, stopJourneyClock } from "./clock";
 
 export { expect };
 
@@ -38,7 +38,11 @@ export const test = base.extend<{ journey: Journey }>({
     // Install before navigation; time flows normally from a known instant.
     // Freezing Date would stop the app aging receipts and heartbeat deadlines.
     await page.clock.install({ time: startJourneyClock() });
-    await use(page);
+    try {
+      await use(page);
+    } finally {
+      stopJourneyClock();
+    }
   },
   journey: async ({ page }, use, testInfo) => {
     const id = /^([A-Z]+-J[0-9]+)\b/.exec(testInfo.title)?.[1];

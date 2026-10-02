@@ -432,5 +432,8 @@ export class ConversationList {
     });
     // Cancel first, where the pointer that opened this already is (cas-f60a).
     control.replaceChildren(question, cancel, confirm);
+    // A double-click's second press on the question would take focus off
+    // Cancel (and select a word): it does neither (cas-f60a).
+    control.onmousedown = (event) => { if (event.detail > 1) event.preventDefault(); };
   }
 }

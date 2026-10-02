@@ -317,6 +317,10 @@ describe("grouped project sessions (cas-55a4)", () => {
     const click = (node: Element, detail: number) => node.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, detail }));
     click(control.querySelector(".conversation-end-ask")!, 1);
     expect([...control.querySelectorAll("button")].map((node) => node.textContent)).toEqual(["Cancel", "End session"]);
+    // The double-click's second press keeps focus on Cancel and selects nothing.
+    const press = new MouseEvent("mousedown", { bubbles: true, cancelable: true, detail: 2 });
+    control.querySelector(".conversation-end-question")!.dispatchEvent(press);
+    expect(press.defaultPrevented).toBe(true);
     // The double-click's second click, wherever it lands, does nothing.
     click(control.querySelector(".conversation-end-confirm")!, 2);
     click(control.querySelector(".conversation-end-cancel")!, 2);

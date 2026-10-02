@@ -27192,6 +27192,106 @@ mod merge_state_gate_tests {
         assert!(failures.is_empty(), "historical delivery failures:\n{}", failures.join("\n"));
     }
 
+    /// cas-baf7 (cas-06e9 shape): two Commander tasks each commit source plus
+    /// a rebuilt `hub-web/dist` bundle. The second integration resolves the
+    /// bundle conflict by rebuilding dist from the merged source, so neither
+    /// branch's minified line survives verbatim. Both deliveries close on their
+    /// present source. A delivery whose source the integration dropped, or one
+    /// that delivered only bundle output, is still refused.
+    #[test]
+    fn rebuilt_dist_bundle_does_not_drop_source_deliveries_cas_baf7() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::create_dir_all(p.join("hub-web/src")).unwrap();
+        std::fs::create_dir_all(p.join("hub-web/dist")).unwrap();
+        std::fs::write(p.join("hub-web/src/a.ts"), "export const a = 0;\n").unwrap();
+        std::fs::write(p.join("hub-web/src/b.ts"), "export const b = 0;\n").unwrap();
+        std::fs::write(p.join("hub-web/dist/app.js"), "var bundle=\"a0b0\";\n").unwrap();
+        git(p, &["add", "hub-web"]);
+        git(p, &["commit", "-q", "-m", "build: seed Commander"]);
+        let delivery = |branch: &str, source: &str, line: &str, bundle: &str| {
+            git(p, &["checkout", "-q", "-B", branch, "main"]);
+            std::fs::write(p.join(source), line).unwrap();
+            std::fs::write(p.join("hub-web/dist/app.js"), bundle).unwrap();
+            git(p, &["add", "hub-web"]);
+            git(p, &["commit", "-q", "-m", &format!("feat: {source} with rebuilt bundle")]);
+            rev_parse_local(p, "HEAD")
+        };
+        let worker = delivery(
+            "factory/worker",
+            "hub-web/src/a.ts",
+            "export const a = 1;\n",
+            "var bundle=\"a1b0\";\n",
+        );
+        let other = delivery(
+            "factory/other",
+            "hub-web/src/b.ts",
+            "export const b = 1;\n",
+            "var bundle=\"a0b1\";\n",
+        );
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/other", "-m", "merge other"]);
+        // The bundle conflicts; the supervisor rebuilds dist from merged source.
+        let _ = git_command(p, &["merge", "--no-ff", "--no-commit", "factory/worker"]).status();
+        std::fs::write(p.join("hub-web/dist/app.js"), "var bundle=\"a1b1\";\n").unwrap();
+        git(p, &["add", "hub-web/dist/app.js"]);
+        git(p, &["commit", "-q", "--no-edit", "-m", "merge worker; rebuild Commander bundle"]);
+
+        for (assignee, anchor) in [("worker", &worker), ("other", &other)] {
+            let mut task = worker_task(assignee);
+            task.status = TaskStatus::AwaitingMerge;
+            task.deliverables.factory_branch_anchor = Some(anchor.clone());
+            let outcome = run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p);
+            match outcome {
+                MergeStateGateOutcome::ProceedWithNote(note) => assert!(
+                    note.contains("regenerated build artifact path(s) hub-web/dist/app.js")
+                        && note.contains("hub-web/src/"),
+                    "{note}"
+                ),
+                other => panic!("{assignee}: a rebuilt bundle must not drop source delivery: {other:?}"),
+            }
+        }
+
+        // The integration also discarded this delivery's source: still dropped.
+        let lost = delivery(
+            "factory/lost",
+            "hub-web/src/a.ts",
+            "export const a = 2;\n",
+            "var bundle=\"a2b1\";\n",
+        );
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "-s", "ours", "factory/lost", "-m", "merge lost (dropped)"]);
+        let mut task = worker_task("lost");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(lost);
+        match run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p) {
+            MergeStateGateOutcome::Reject(message) => {
+                assert!(message.contains("DELIVERY CONTENT DROPPED"), "{message}");
+                assert!(message.contains("hub-web/src/a.ts"), "{message}");
+            }
+            other => panic!("dropped source must still be refused: {other:?}"),
+        }
+
+        // A bundle-only delivery has no source to prove: still dropped.
+        git(p, &["checkout", "-q", "-B", "factory/bundle", "main"]);
+        std::fs::write(p.join("hub-web/dist/app.js"), "var bundle=\"hand-edited\";\n").unwrap();
+        git(p, &["add", "hub-web/dist/app.js"]);
+        git(p, &["commit", "-q", "-m", "build: hand-edited bundle"]);
+        let bundle = rev_parse_local(p, "HEAD");
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "-s", "ours", "factory/bundle", "-m", "merge bundle (dropped)"]);
+        let mut task = worker_task("bundle");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(bundle);
+        match run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p) {
+            MergeStateGateOutcome::Reject(message) => {
+                assert!(message.contains("DELIVERY CONTENT DROPPED"), "{message}")
+            }
+            other => panic!("a bundle-only drop has no source proof: {other:?}"),
+        }
+    }
+
     /// cas-3f8c: a real drop still rejects, and the refusal now names the
     /// delivered lines the target lacks. The earlier hunk survives the same
     /// task's later commit, but the integration discarded the delivery.

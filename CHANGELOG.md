@@ -7,6 +7,67 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.44.0] - 2026-10-02
+
+### Fixed
+
+- Commander keeps a steady, honest connection picture. One word, "Unsteady",
+  describes a machine that has missed heartbeats, and messages wait instead of
+  going out while it is unsteady. A machine that drops and retries is shown by
+  its banner alone, with no extra "Reconnecting to hub" card. Control held
+  before the drop comes back with the machine, and a session whose machine
+  socket is replaced mid-reconnect no longer sticks on "Reconnecting". Every
+  connection card names the machine, never the hub or its host.
+- A browser whose pairing is refused stays on "Needs pairing", with a re-pair
+  note and card that no longer revert to "Lost connection" a few seconds later.
+- Drafts survive a reload or navigation, per conversation. Waiting, unconfirmed
+  and not-sent messages survive a reload too, each in its own state: a waiting
+  one goes out exactly once when the session is back, and an unconfirmed one
+  is never resent by itself. Revoking or removing a machine clears what was
+  kept for it. Corrupted or oversized stored values are ignored safely and
+  never sent. After a reload during an outage, the kept messages show at once
+  instead of waiting for the session to come back.
+- A refused or unconfirmed message says so once. Retry is not pressable while
+  another device holds control, and several unconfirmed messages in a row
+  show as one notice with Review; a later batch starts collapsed. The
+  "not confirmed" marker uses a caution tone, and turns critical only when a
+  message was not sent. A "Control released" notice no longer lingers once
+  control comes back.
+- A reconnect keeps the reader's place in history, "Load earlier" no longer
+  comes back after the start is reached, and the start of history is shown.
+  Opening a conversation with tall file cards lands on the latest turn.
+- A reload keeps each turn's original time and keeps every turn in its own
+  session's section, instead of re-stamping them to the moment of the reload.
+- Opening a conversation shows one calm loading state, and an empty thread
+  shows a clear card. A message held locally while disconnected no longer
+  shows the supervisor as working.
+- The composer refers to "the <project> supervisor" rather than a generated
+  codename, shows a single "Sending…" while a message goes out, and returns
+  focus to the reply box after dictation.
+- The conversation header keeps the machine name whole and ahead of the
+  session codename; when space runs short it drops the OS word first, then
+  shortens the codename, and never cuts a word in half.
+- The conversation list: a project's grouped session rows lead with each
+  session's codename and what it last did; opening a lower row keeps it in
+  view; opening a search result clears the filter; the row Enter will open is
+  marked; each row's time is its latest message; and the list header stays on
+  one row, with a "New session" control that says what it does.
+- The Attention panel on a phone opens as a proper sheet from a badge, keeps
+  focus and open Details through refreshes and after the phone wakes from
+  sleep, and End session leaves focus on a sensible neighbour. Its "Last
+  event" time uses the same 24-hour format as the rest of Commander.
+- Re-pairing by code says plainly when starting sessions must be allowed
+  again, and New session says when a machine is offline instead of hanging.
+  That explanation survives a reload, and the re-pair command is shown whole,
+  never split inside a word, with a Copy button.
+- Paired machines lists a machine that can't be reached first, and the footer
+  names it.
+- Task close and verification bind to a parked delivery's own commit, so a
+  worker moving on to other work no longer invalidates the delivery's proof.
+- A message to a busy worker whose wake was declined is retried after the
+  turn instead of being marked delivered unread.
+- Release-gate checks no longer crash after a branch is force-pushed.
+
 ## [3.43.1] - 2026-10-01
 
 ### Fixed

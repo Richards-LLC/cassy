@@ -12,7 +12,9 @@ const SHARK = "gabber-studio-wild-shark-68";
 const session = (name: string, supervisor: string, lastActivityAt: string, lastActivity: string) => ({
   name, supervisor, project_dir: "/projects/gabber-studio", workers: [], liveness: "live" as const, last_activity_at: lastActivityAt, last_activity: lastActivity,
 });
-const ATLAS: Machine = {
+// Stamped per test, never at file load: a stamp taken between tests picks up
+// the previous test's elapsed time and lands late (cas-4e52 mechanism).
+const atlas = (): Machine => ({
   id: "atlas",
   label: "Atlas · Linux",
   sessions: [
@@ -20,14 +22,14 @@ const ATLAS: Machine = {
     session(PUMA, "calm-puma-34", journeyStamp(-2 * 60_000), "supervisor → bright-robin-85"),
     session(SHARK, "wild-shark-68", journeyStamp(-40 * 60_000), "Commander → supervisor"),
   ],
-};
+});
 
 const you = (id: number, text: string, from: string, at: string) => ({ notification_id: id, target: "supervisor", text, state: "acknowledged", stamped: true, device_id: "journey-device", operator_label: "Pixel 10", session: from, at });
 const sup = (id: number, message: string, from: string, at: string, kind = "answer") => ({ notification_id: id, reply_to: null, message, summary: "", device_id: "journey-device", kind, attachments: [], session: from, at });
 
 test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) => {
   const hub = await journey.hub({
-    machines: [ATLAS],
+    machines: [atlas()],
     paired: ["atlas"],
     scopes: { atlas: [...SCOPES, "factory-manage"] },
     history: {
@@ -56,20 +58,34 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
 
   await journey.stage("See a project's live sessions together", async () => {
     await journey.open();
-    await expect(list.locator(".conversation-group-head")).toHaveText("gabber-studio · 3 sessions on Atlas");
+    await expect(list.locator(".conversation-group-head")).toHaveText("gabber-studio · 3 conversations on Atlas");
     const rows = list.locator(".conversation-row");
     await expect(rows.locator(".conversation-supervisor")).toHaveText(["calm-puma-34Most recent", "wild-shark-68", "noble-cheetah-84"]);
     await expect(row("calm-puma-34")).toHaveAttribute("data-most-recent", "true");
     // Each row's time is its own session's last activity, not one shared time.
     await expect(rows.locator(".conversation-when")).toHaveText(["2m", "40m", /^\d+h$/]);
-    await expect(row("calm-puma-34").locator(".conversation-when")).toHaveAttribute("title", "Last activity 2m ago · supervisor → bright-robin-85");
+    await expect(row("calm-puma-34").locator(".conversation-when")).toHaveAttribute("title", "Last activity 2m ago · Messaged bright-robin-85");
+    // cas-5d2c: under a heading that names the project and machine once, each
+    // row leads with its codename and says what its session last did, before
+    // any of them is opened; the heading and footer count the same noun.
+    await expect(rows.locator(".conversation-title")).toHaveCount(3);
+    for (const title of await rows.locator(".conversation-title").all()) await expect(title).toBeHidden();
+    await expect(rows.locator(".conversation-preview")).toHaveText(["Messaged bright-robin-85", "You wrote to it", "Wrote to you"]);
+    await expect(page.locator(".hub-footer-meta")).toContainText("3 conversations");
+    // Every session of the group is in view at 1280×720.
+    for (const node of await rows.all()) await expect(node).toBeInViewport({ ratio: 1 });
   });
 
   await journey.stage("Open a session that has not written yet", async () => {
     await row("calm-puma-34").click();
     const empty = page.locator(".thread .empty");
-    await expect(empty.locator(".said")).toHaveText("No Commander messages from this session yet. The supervisor (calm-puma-34) will write here when it needs a decision.");
-    await expect(empty.locator(".empty-activity")).toHaveText("Last activity 2m ago · supervisor → bright-robin-85");
+    // cas-010f: plain words, no product codename or queue jargon, and
+    // Terminal view named as the header names it.
+    await expect(empty.locator(".said")).toHaveText("No messages from the gabber-studio supervisor in this session yet — nothing is waiting on you.");
+    await expect(empty.locator(".empty-activity")).toHaveText("Last active 2m ago");
+    await expect(empty).not.toContainText("Commander");
+    await expect(empty).not.toContainText("→");
+    await expect(empty.getByRole("button")).toHaveText(["Terminal view"]);
     await expect(page.locator(".thread .msgs")).not.toContainText("Mixdown preview rendered");
     await expect(page.locator(".pinned-ask")).toBeHidden();
     // The older session's thread is a collapsed, labelled section, with dates.
@@ -82,26 +98,66 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     await noble.locator("summary").click();
     await expect(noble.locator(".earlier-turn")).toHaveCount(2);
     await expect(noble.locator(".earlier-turn").nth(1)).toContainText("Mixdown preview rendered: 3 stems.");
-    await expect(noble.locator(".earlier-turn time").nth(1)).toHaveText("Yesterday 21:41");
+    await expect(noble.locator(".earlier-turn time").nth(1)).toHaveText("Sep 29, 21:41");
     await expect(noble.getByRole("button")).toHaveCount(0);
     await noble.locator("summary").click();
   });
 
-  await journey.stage("Open the Terminal from the empty session", async () => {
-    await page.locator(".thread .empty").getByRole("button", { name: "Open Terminal" }).click();
+  await journey.stage("Open Terminal view from the empty session", async () => {
+    await page.locator(".thread .empty").getByRole("button", { name: "Terminal view" }).click();
     await expect(page.locator("#conversation-return")).toBeVisible();
+    // The pane header says what it has seen, not "No activity" beside a
+    // session that was active two minutes ago (cas-010f).
+    for (const stamp of await page.locator(".pane-last-activity").filter({ visible: true }).allTextContents()) expect(stamp).not.toBe("No activity yet");
     await page.locator("#conversation-return").click();
     await expect(page.locator(".thread .empty .said")).toBeVisible();
   });
 
+  await journey.stage("The empty thread follows the connection", async () => {
+    // cas-010f: off the network, the card says why nothing new can arrive and
+    // stops offering Terminal view; back on, it is the plain live copy again.
+    const empty = page.locator(".thread .empty");
+    const header = page.locator("#conversation-connection");
+    await hub.down("atlas", { sockets: "close" });
+    await expect(header).toContainText("Reconnecting");
+    await expect(empty.locator(".said")).toHaveText("No messages from the gabber-studio supervisor in this session yet. Reconnecting to Atlas · Linux — anything new will show here once it's back.");
+    await expect(empty.getByRole("button", { name: "Terminal view" })).toHaveCount(0);
+    await hub.up("atlas");
+    await expect(header).toContainText("Live", { timeout: 20_000 });
+    await expect(empty.locator(".said")).toHaveText("No messages from the gabber-studio supervisor in this session yet — nothing is waiting on you.");
+    await expect(empty.getByRole("button", { name: "Terminal view" })).toBeVisible();
+  });
+
   await journey.stage("Each session shows its own conversation", async () => {
     await backToList();
+    // cas-010f: a conversation with history never claims, even for a frame,
+    // that it has no messages while its first page is on its way.
+    await page.evaluate(() => {
+      const claims: string[] = [];
+      (window as unknown as { emptyClaims: string[] }).emptyClaims = claims;
+      // Only wild-shark-68's own card counts: calm-puma-34's honest empty card
+      // can still be on screen for a frame while the switch mounts the next thread.
+      const check = () => {
+        for (const card of document.querySelectorAll<HTMLElement>(".thread .empty:not([hidden])")) {
+          if (!card.querySelector(".proj2")?.textContent?.includes("wild-shark-68")) continue;
+          const said = card.querySelector(".said")?.textContent ?? "";
+          if (/^No (Commander )?messages/.test(said)) claims.push(said);
+        }
+      };
+      new MutationObserver(check).observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ["hidden"] });
+    });
     await row("wild-shark-68").click();
     await expect(log).toContainText("Stem export is at 60%.");
+    expect(await page.evaluate(() => (window as unknown as { emptyClaims: string[] }).emptyClaims), "no empty claim while history loads").toEqual([]);
     await expect(log).not.toContainText("Mixdown preview rendered");
     await expect(earlier).toBeHidden();
     await backToList();
+    // cas-5d2c: the lowest row keeps its place when it opens; the list does
+    // not jump back to its top and leave it below the fold.
+    await row("noble-cheetah-84").scrollIntoViewIfNeeded();
     await row("noble-cheetah-84").click();
+    await expect(row("noble-cheetah-84")).toHaveAttribute("aria-current", "true");
+    await expect(row("noble-cheetah-84")).toBeInViewport({ ratio: 1 });
     await expect(log).toContainText("Mixdown preview rendered: 3 stems.");
     // The old daemon's project-wide page: wild-shark-68's turns are beside the thread.
     await expect(log).not.toContainText("Stem export is at 60%.");
@@ -113,10 +169,14 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     const end = list.locator(".conversation-end").nth(2);
     await end.getByRole("button", { name: "End session noble-cheetah-84 on Atlas" }).click();
     await expect(end.locator(".conversation-end-question")).toHaveText("End noble-cheetah-84 on Atlas? Its supervisor and workers stop.");
+    // cas-d6bf: the last row's confirmation is in view and focused, and the list stays whole.
+    await expect(end.getByRole("button", { name: "Cancel" })).toBeFocused();
+    await expect(end.getByRole("button", { name: "End session", exact: true })).toBeInViewport({ ratio: 1 });
+    await expect(list.locator(".conversation-row")).toHaveCount(3);
     expect(hub.ends).toEqual([]);
     await end.getByRole("button", { name: "End session", exact: true }).click();
     await expect(row("noble-cheetah-84")).toHaveCount(0);
     expect(hub.ends).toEqual([{ machine: "atlas", session: NOBLE, scopes: [...SCOPES, "factory-manage"] }]);
-    await expect(list.locator(".conversation-group-head")).toHaveText("gabber-studio · 2 sessions on Atlas");
+    await expect(list.locator(".conversation-group-head")).toHaveText("gabber-studio · 2 conversations on Atlas");
   });
 });

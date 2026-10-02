@@ -331,7 +331,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(main).toContain('function showComposerStatus(text: string, tone: "info" | "error", transport = false): void {');
     // A reconnecting refusal clears when the session is live again (cas-b789).
     // In the banner's words (journey F9).
-    expect(main).toContain("showComposerStatus(outageRefusal(machine.label), \"error\", true);");
+    expect(main).toContain(": outageRefusal(machine.label);\n    showComposerStatus(refused, \"error\", true);");
     expect(main).toContain("sessionsEverLive.add(key);\n        clearTransportStatus(key);");
     expect(css).toContain(".message-status {");
     expect(css).toContain(".message-status.error {");
@@ -431,7 +431,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     // Cassy Cloud has no pane drag-and-drop, so the empty slot must not promise one.
     expect(main).not.toContain("drag it here");
     expect(attentionView).toContain('message.textContent = options.outage ?? "All clear"');
-    expect(attentionView).toContain("Last event ${new Date(latest.createdAt).toLocaleString()}");
+    expect(attentionView).toContain("timestamp.textContent = lastEventLabel(latest.createdAt, options.now ?? Date.now());");
+    expect(attentionView).toContain("`Last event ${stampLabel(at, now)}`");
+    expect(attentionView).not.toContain("toLocaleString()");
   });
 
   // Contract: distinguishes a loading catalog from an unpaired Cassy Cloud drawer.
@@ -1098,7 +1100,10 @@ describe("binding Cassy Cloud browser invariants", () => {
       readSource("main.ts"),
       readFile(new URL("connection-state-view.ts", import.meta.url), "utf8"),
     ]);
-    expect(main).toContain('state.authFailure === "needs-pairing" ? "Machine needs pairing"');
+    // cas-a6f0 (journey F8): every refused pairing, revoked included, is headed
+    // as the header names it.
+    expect(main).toContain('headline: "Machine needs pairing",');
+    expect(main).not.toContain('"Authentication blocked"');
     expect(connectionView).toContain('snapshot.authFailure === "revoked" || snapshot.authFailure === "scope-mismatch" || snapshot.authFailure === "needs-pairing"');
     supervisor.stop();
   });
@@ -1314,8 +1319,14 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).not.toContain("Connection interrupted — ${view.retryLabel}");
     // Header, row and footer read one conversation connection, and the
     // transport alarm resolves itself once the socket is live again.
-    expect(source).toContain('fleetConnectionLabel(conversationConnection(machine.id, session.name), machine.id)');
-    expect(source).toContain('fleetConnectionLabel(conversationConnection(selectedMachineId, selectedSession), selectedMachineId)');
+    expect(source).toContain('conversationStatusLabel(machine.id, session.name)');
+    // The header and the empty thread read one helper (cas-010f).
+    expect(source).toContain('fleetConnectionLabel(conversationConnection(machineId, session), machineId)');
+    expect(source).toContain('const label = conversationHeaderLabel(selectedMachineId, selectedSession);');
+    expect(source).toContain('connection: () => conversationHeaderLabel(threadMachineId, threadSession),');
+    // The empty thread waits for this session's first page, requested or not yet (cas-010f).
+    expect(source).toContain("return !page.loaded && !page.unavailable;");
+    expect(source).not.toContain("return page.requested === true && !page.loaded;");
     expect(source).toContain("const state = machineFooterConnection(machine.id);");
     // The header status reads "Live", not "· Live": the dot is aria-hidden (cas-17e3).
     expect(source).toContain('const separator = document.createElement("span"); separator.setAttribute("aria-hidden", "true"); separator.textContent = " · ";');

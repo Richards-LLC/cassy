@@ -47,6 +47,8 @@ export interface ThreadCoalesce {
   replies: OperatorReply[];
   time: string | undefined;
   clockAhead?: boolean;
+  /** The session the folded statuses came from (cas-8d52): it names the speaker. */
+  session?: string;
 }
 
 export interface ThreadDay { type: "day"; key: string; label: string }
@@ -111,6 +113,22 @@ export function shownTimes(events: readonly ConversationEvent[], now: number): A
     shown[index] = { at: floor, clockAhead: event.clockAhead === true || Math.floor(stamp / 60_000) !== Math.floor(floor / 60_000) };
   }
   return shown;
+}
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/**
+ * A turn's time as it is shown (cas-e829): "17:20" today, "Sep 30, 17:20" on
+ * any other day, with the year when it is not this year. A bare clock time
+ * from yesterday read as today's.
+ */
+export function stampLabel(at: number | undefined, now: number): string | undefined {
+  const clock = clockLabel(at);
+  if (at === undefined || clock === undefined) return undefined;
+  if (dayKey(at) === dayKey(now)) return clock;
+  const date = new Date(at);
+  const year = date.getFullYear() === new Date(now).getFullYear() ? "" : ` ${date.getFullYear()}`;
+  return `${MONTHS[date.getMonth()]} ${date.getDate()}${year}, ${clock}`;
 }
 
 function dayKey(at: number): string {
@@ -191,7 +209,10 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
       items.push({ type: "day", key: `day:${lastDay}`, label: "Today" });
     }
 
-    const session = event.session;
+    // cas-8d52 (journey F13): a turn with no session recorded (an older
+    // daemon's history row) belongs to the session the thread is attached to,
+    // so it no longer opens a "session … started" line below itself.
+    const session = event.session ?? options.session;
     // The thread's own session opening the thread needs no line (cas-55a4).
     if (session && index === 0 && session === options.session) lastSession = session;
     if (session && session !== lastSession) {
@@ -207,13 +228,13 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
     if (event.kind === "reply" && (event.value.kind ?? "answer") === "status" && foldsAsStatus(event.value.message)) {
       closeGroup();
       if (!coalesce) {
-        coalesce = { type: "coalesce", key: `coalesce:${event.value.notification_id}`, count: 0, latest: "", replies: [], time: undefined };
+        coalesce = { type: "coalesce", key: `coalesce:${event.value.notification_id}`, count: 0, latest: "", replies: [], time: undefined, ...(event.session ? { session: event.session } : {}) };
         items.push(coalesce);
       }
       coalesce.count += 1;
       coalesce.latest = event.value.message;
       coalesce.replies.push(event.value);
-      coalesce.time = clockLabel(at) ?? coalesce.time;
+      coalesce.time = stampLabel(at, now) ?? coalesce.time;
       // The hint belongs to the time shown, which is the latest turn's.
       if (at !== undefined) coalesce.clockAhead = clockAhead;
       return;
@@ -227,7 +248,7 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
       items.push(group);
     }
     group.turns.push(turn);
-    group.time = clockLabel(at) ?? group.time;
+    group.time = stampLabel(at, now) ?? group.time;
     if (at !== undefined) group.clockAhead = clockAhead;
   });
   closeGroup();
@@ -235,7 +256,12 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
   // transient working signal turn it into a fake history marker/thread.
   if (events.length > 0) {
     if (options.historyEnd) items.unshift({ type: "history-end", key: "history-end", label: "No earlier history" });
-    if (options.working) items.push({ type: "working", key: "working" });
+    // cas-71f4 (journey F20): while the newest message still says "Sending…",
+    // that bubble is the one sending signal; the working line follows once the
+    // supervisor has it.
+    const newest = events.at(-1);
+    const sending = newest?.kind === "send" && newest.value.state === "sending" && !newest.value.held;
+    if (options.working && !sending) items.push({ type: "working", key: "working" });
   }
   return items;
 }

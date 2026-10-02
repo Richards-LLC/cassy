@@ -79,6 +79,16 @@
       "type": "content-overflow",
       "selector": ".obj.t-a.ask-collapsed .ask-excerpt",
       "reason": "cas-97ea accepts the one-line ellipsis on a pinned ask's flow reference: the pinned card above the composer carries the whole question and its answers."
+    },
+    {
+      "type": "clipped-content",
+      "selector": "#paired-machines-toggle > .machine-badge-state",
+      "reason": "cas-0739 accepts the single-line phone footer's outage-state ellipsis for a long machine name: the span carries the full words as its title and in the button's spoken name, and Paired machines opens on that machine."
+    },
+    {
+      "type": "content-overflow",
+      "selector": "#paired-machines-toggle > .machine-badge-state",
+      "reason": "cas-0739 accepts the single-line phone footer's outage-state ellipsis for a long machine name: the span carries the full words as its title and in the button's spoken name, and Paired machines opens on that machine."
     }
   ]
 }

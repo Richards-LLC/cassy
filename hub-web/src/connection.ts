@@ -19,7 +19,7 @@ import {
   type ConnectionStage,
   type AttachSnapshot,
 } from "./connection-state";
-import type { ConversationHistoryMessage, ConversationHistoryPage, HubSession, LeaseState, MessageQueued, OperatorReply, PaneInfo, SessionCardSummary, SessionState, StoredMachine } from "./types";
+import type { ConversationHistoryMessage, ConversationHistoryPage, HubSession, LeaseState, MessageQueued, OperatorNoticeResolved, OperatorReply, PaneInfo, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
 import { sessionsPath, workersRevealed } from "./worker-visibility";
 import { dormantRevealed } from "./dormant-visibility";
@@ -83,9 +83,13 @@ export interface HubCallbacks {
   onOperatorMessage?(session: string, message: ConversationHistoryMessage): void;
   onMessageRejected?(session: string, clientRef: string, detail: string, rejection?: MessageRejection): void;
   onOperatorReply?(session: string, reply: OperatorReply): void;
+  /** A system notice delivered earlier is over (cas-e829): retire its attention item. */
+  onOperatorNoticeResolved?(session: string, resolved: OperatorNoticeResolved): void;
   onConversationHistory?(session: string, page: ConversationHistoryPage): void;
   /** The first history page was requested on attach; its answer is onConversationHistory. */
   onConversationHistoryRequested?(session: string): void;
+  /** The session attached without durable history: no first page will come (cas-010f). */
+  onConversationHistoryUnavailable?(session: string): void;
   onSessionSummary?(session: string, summary: SessionCardSummary): void;
   onPaneKeyframe(session: string, paneId: string, data: Uint8Array): void;
   onPaneSize?(session: string, paneId: string, cols: number, rows: number, authority: string): void;
@@ -217,6 +221,12 @@ export class HubConnectionSupervisor {
   private machineSocketOpening?: Promise<boolean>;
   private machineMultiplex = false;
   private machineProtocolBlocked = false;
+  /**
+   * Bumped whenever the machine sockets are abandoned (cas-7b31). An opening
+   * that was waiting on its ticket when that happened must not go on to open
+   * a socket of its own beside the replacement's.
+   */
+  private machineSocketGeneration = 0;
   private readonly desiredSessions = new Set<string>();
   private readonly machineSubscriptions = new Set<string>();
   private readonly sessionPanes = new Map<string, PaneInfo[]>();
@@ -683,6 +693,11 @@ export class HubConnectionSupervisor {
   }
 
   private async heartbeat(): Promise<void> {
+    // cas-7b31 (cas-05c0 QA): a stopped or refused connection has no
+    // heartbeat. One that ran on after a pairing refusal turned the machine
+    // "live" again on its next beat, which erased "Needs pairing" from the
+    // controls and the rail while the header still said it.
+    if (!this.desired || this.lifecycle.phase !== "live") return;
     const started = performance.now();
     try {
       await this.refreshSessions(AbortSignal.timeout(3_000));
@@ -705,10 +720,14 @@ export class HubConnectionSupervisor {
         return;
       }
       await this.request("GET", "/v1/machine", undefined, AbortSignal.timeout(3_000));
+      const wasUnsteady = this.unsteady();
       this.missedHeartbeats = 0;
       this.lastHeartbeatAt = Date.now();
       this.transition("live", "live", { latencyMs: Math.round(performance.now() - started) });
+      if (wasUnsteady) this.releaseHeldMessages();
     } catch (error) {
+      // Stopped or refused while this beat was in flight: not a live machine.
+      if (!this.desired || this.lifecycle.phase !== "live") return;
       this.missedHeartbeats += 1;
       this.transition("live", "live", { reason: error instanceof Error ? error.message : "heartbeat failed" });
       if (this.missedHeartbeats >= RECONNECT_AFTER_MISSED_HEARTBEATS) this.connectionLostNow("Lost connection to the machine");
@@ -735,6 +754,7 @@ export class HubConnectionSupervisor {
    * here instead.
    */
   private abandonSockets(reason: string): void {
+    this.machineSocketGeneration += 1;
     const machineSocket = this.machineSocket;
     if (machineSocket) {
       machineSocket.onopen = null; machineSocket.onmessage = null; machineSocket.onerror = null; machineSocket.onclose = null;
@@ -946,6 +966,7 @@ export class HubConnectionSupervisor {
   }
 
   private async openMachineSocket(session: string): Promise<boolean> {
+    const generation = this.machineSocketGeneration;
     this.transitionAttach(session, "auth", "auth");
     let ticket: { ticket: string };
     try {
@@ -962,7 +983,9 @@ export class HubConnectionSupervisor {
       this.machineMultiplex = false;
       return false;
     }
-    if (!this.desired) return true;
+    // Abandoned while the ticket was on its way: the replacement opening owns
+    // the machine socket now (cas-7b31).
+    if (!this.desired || generation !== this.machineSocketGeneration) return true;
     const endpoint = new URL("/v1/attach", this.machine.baseUrl);
     endpoint.protocol = endpoint.protocol === "https:" ? "wss:" : "ws:";
     endpoint.searchParams.set("ticket", ticket.ticket);
@@ -998,8 +1021,20 @@ export class HubConnectionSupervisor {
         handshakeTimer = undefined;
       };
       const protocolFailure = (detail: string) => {
-        this.machineProtocolBlocked = true;
         clearTimers();
+        // cas-7b31: a socket another opening has replaced says nothing about
+        // the hub's protocol. Its handshake timer used to fire after the
+        // replacement was ready, mark the protocol blocked and fail the live
+        // session, which then stayed "Reconnecting" for good.
+        if (this.machineSocket !== socket) {
+          if (!settled) {
+            settled = true;
+            resolve(true);
+          }
+          try { socket.close(4000, "replaced"); } catch { /* already closing */ }
+          return;
+        }
+        this.machineProtocolBlocked = true;
         for (const desired of this.desiredSessions) {
           this.transitionAttach(desired, "failed", "attaching", { reason: detail });
           this.callbacks.onSocketError(desired, detail);
@@ -1008,7 +1043,9 @@ export class HubConnectionSupervisor {
           settled = true;
           resolve(true);
         }
-        socket.close(1002, "protocol mismatch");
+        // A page may close with 1000 or 3000–4999 only; 1002 threw
+        // InvalidAccessError from the handshake timer (cas-7b31).
+        socket.close(4002, "protocol mismatch");
       };
       socket.onopen = () => {
         if (this.machineSocket !== socket) return;
@@ -1021,6 +1058,7 @@ export class HubConnectionSupervisor {
         }, STAGE_TIMEOUT_MS.attaching);
       };
       socket.onmessage = (event) => {
+        if (this.machineSocket !== socket) return;
         if (!this.machineSocketReady) {
           if (typeof event.data !== "string") {
             protocolFailure("Machine protocol mismatch: expected a proto 2 JSON handshake");
@@ -1177,6 +1215,7 @@ export class HubConnectionSupervisor {
 
   private blockAuthentication(kind: AuthFailureKind, detail: string, session?: string): void {
     this.desired = false;
+    this.stopHeartbeat();
     this.eventAbort?.abort();
     if (this.retryTimer !== undefined) window.clearTimeout(this.retryTimer);
     this.retryTimer = undefined;
@@ -1265,11 +1304,36 @@ export class HubConnectionSupervisor {
     }
   }
 
+  /**
+   * Heartbeats are going unanswered on a machine that still reads live
+   * (cas-a6f0): the snapshot's `degraded`, the page's "Unsteady".
+   */
+  private unsteady(): boolean {
+    return this.lifecycle.phase === "live" && this.missedHeartbeats >= DEGRADED_AFTER_MISSED_HEARTBEATS;
+  }
+
+  /**
+   * Whether a supervisor message offered now would be held rather than put on
+   * the wire: a probe waits on a doubted socket, or the machine is unsteady.
+   */
+  holdsMessages(): boolean {
+    return this.probePingId !== undefined || this.unsteady();
+  }
+
+  /** Re-announce every live attach, so the page sends what it held (cas-0978, cas-a6f0). */
+  private releaseHeldMessages(): void {
+    for (const [session, snapshot] of this.attachLifecycles) {
+      if (snapshot.phase === "live") this.callbacks.onAttachState?.(session, snapshot);
+    }
+  }
+
   send(session: string, message: unknown, clientRef?: string): boolean {
-    // While a probe waits on the machine socket it may be half-open: a
-    // message sent into it could vanish, so it is refused here and the
-    // caller holds it until the socket answers or is replaced (cas-0978).
-    if (this.probePingId !== undefined && isSupervisorMessage(message)) return false;
+    // While a probe waits on the machine socket it may be half-open, and
+    // while heartbeats go unanswered (unsteady) it may be dead: a message
+    // sent into it could vanish, so it is refused here and the caller holds
+    // it until the machine answers or the socket is replaced (cas-0978,
+    // cas-a6f0, journey F9).
+    if (this.holdsMessages() && isSupervisorMessage(message)) return false;
     const outbound = withClientRef(message, clientRef);
     if (this.machineSocketReady && this.machineSocket?.readyState === WebSocket.OPEN) {
       const resize = typeof outbound === "object" && outbound !== null && "ResizePane" in outbound;
@@ -1401,17 +1465,18 @@ export class HubConnectionSupervisor {
       if (envelope.pong === this.probePingId) {
         // The doubted socket answered: messages held meanwhile can go now.
         this.probePingId = undefined;
-        for (const [session, snapshot] of this.attachLifecycles) {
-          if (snapshot.phase === "live") this.callbacks.onAttachState?.(session, snapshot);
-        }
+        if (!this.unsteady()) this.releaseHeldMessages();
       }
       if (this.healthPing?.id !== envelope.pong) return;
       const latencyMs = Math.max(0, Math.round(performance.now() - this.healthPing.startedAt));
       this.healthPing = undefined;
+      const wasUnsteady = this.unsteady();
       this.missedHeartbeats = 0;
       this.lastHeartbeatAt = Date.now();
       this.transition("live", "live", { latencyMs });
       this.callbacks.onLatency?.(latencyMs);
+      // cas-a6f0: the unsteady machine answered again; what it held goes now.
+      if (wasUnsteady && this.probePingId === undefined) this.releaseHeldMessages();
       return;
     }
     if (envelope.channel === "events" && envelope.event) {
@@ -1493,6 +1558,8 @@ export class HubConnectionSupervisor {
       const protocolVersion = Number(welcome.protocol_version ?? 1);
       if (protocolVersion >= 3 || (Array.isArray(welcome.capabilities) && welcome.capabilities.includes("conversation_history"))) {
         if (this.requestConversationHistory(session)) this.callbacks.onConversationHistoryRequested?.(session);
+      } else {
+        this.callbacks.onConversationHistoryUnavailable?.(session);
       }
       for (const key of this.keyframeRequests) {
         if (key.startsWith(`${session}:`)) this.keyframeRequests.delete(key);
@@ -1528,6 +1595,8 @@ export class HubConnectionSupervisor {
       if (queued) this.callbacks.onMessageQueued?.(session, queued);
     } else if (message.OperatorReply) {
       this.callbacks.onOperatorReply?.(session, message.OperatorReply as OperatorReply);
+    } else if (message.OperatorNoticeResolved) {
+      this.callbacks.onOperatorNoticeResolved?.(session, message.OperatorNoticeResolved as OperatorNoticeResolved);
     } else if (message.OperatorMessage) {
       this.callbacks.onOperatorMessage?.(session, message.OperatorMessage as ConversationHistoryMessage);
     } else if (message.ConversationHistory) {

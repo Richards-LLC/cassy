@@ -50,7 +50,7 @@ describe("failed sends in the history", () => {
     history.reply(reply(1, "answer", "Morning."), at(8, 0));
     history.submit("u", "sup", "Is the gate green?", at(9, 0));
     history.unconfirmSilent(at(9, 0) + 20_000);
-    expect(history.preview()).toBe("You: Is the gate green?");
+    expect(history.preview(), "an unconfirmed message says so in the list (cas-b00c)").toBe("Not confirmed: Is the gate green?");
     history.dismissSend("u");
     expect(history.preview()).toBe("Morning.");
     history.acknowledge({ client_ref: "u", notification_id: 70, target: "sup", stamped: true });

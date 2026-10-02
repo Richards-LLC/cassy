@@ -122,6 +122,7 @@ fn queue_team_tree_incident(
         operator_label: None,
         kind: crate::ui::factory::OperatorTurnKind::Blocker,
         attachments: Vec::new(),
+        reply_to_session: None,
     })?;
     let result = queue.enqueue_idempotent(
         "teams-recovery",

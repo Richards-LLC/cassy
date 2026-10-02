@@ -5,7 +5,7 @@ import {
   type LaunchProfiles, filterProjects, launchErrorCopy, parseWorkers, sortProjects,
   type BrowseListing, type LaunchHost, type LaunchMachine, type LaunchProject, type LaunchRequest, type LaunchResult, type ProjectCatalog,
 } from "./launch-session";
-import { canEnableSessionLaunch, launchGrantCommand, parseGrantedScopes, scopeChoices, scopeSummary } from "./pairing-scopes";
+import { canEnableSessionLaunch, launchDropped, launchDroppedNotice, launchGrantCommand, parseGrantedScopes, repairCommand, repairStatus, scopeChoices, scopeSummary } from "./pairing-scopes";
 import type { Scope } from "./types";
 
 const CONTROL: Scope[] = ["machine-read", "session-read", "pane-read", "pane-input", "message-send", "pane-interrupt"];
@@ -432,5 +432,131 @@ describe("accounts (cas-9666)", () => {
     expect(dialog().querySelector<HTMLInputElement>('input[name="launch-cli"][value="claude"]')!.checked).toBe(true);
     expect(dialog().querySelector<HTMLInputElement>('input[name="launch-workers"]')!.value).toBe("");
     expect(dialog().querySelector<HTMLInputElement>('input[name="launch-account"][value="main"]')!.checked).toBe(true);
+  });
+});
+
+describe("re-pairing and session launch (cas-0e14 F29)", () => {
+  it("names a dropped launch permission only when the old pairing had it and the new one does not", () => {
+    expect(launchDropped([...CONTROL, "session-launch"], CONTROL)).toBe(true);
+    expect(launchDropped([...CONTROL, "session-launch"], [...CONTROL, "session-launch"])).toBe(false);
+    expect(launchDropped(CONTROL, CONTROL)).toBe(false);
+    expect(launchDropped(undefined, CONTROL)).toBe(false);
+  });
+
+  it("warns before a code re-pair that starting sessions must be allowed again, and offers the link command that keeps it as its own code (cas-093d F02)", () => {
+    const copy = repairStatus("Atlas · Linux", [...CONTROL, "session-launch"]);
+    expect(copy).toContain("Re-pairing Atlas · Linux");
+    expect(copy).toContain("starting sessions will need to be allowed again");
+    expect(copy).toMatch(/run this on Atlas · Linux and open the link it prints instead:$/);
+    expect(copy, "the command is not set as prose").not.toContain("cas hub pair");
+    expect(repairCommand([...CONTROL, "session-launch"], "https://hub.example")).toBe("cas hub pair --origin https://hub.example --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,session:launch");
+    // Without launch there is nothing to lose: the plain wording stays, with no command.
+    expect(repairStatus("Atlas · Linux", CONTROL)).toBe("Re-pairing Atlas · Linux: create a new code and approve it on that machine. Its saved access here is replaced when the new credential is installed.");
+    expect(repairCommand(CONTROL, "https://hub.example")).toBeUndefined();
+  });
+
+  it("says plainly after a re-pair that starting sessions was not kept, and how to get it back", () => {
+    expect(launchDroppedNotice("Atlas · Linux")).toEqual({
+      headline: "Starting sessions needs allowing again",
+      detail: "Re-pairing Atlas · Linux with a code didn't include starting sessions. Open New session to allow it again.",
+    });
+  });
+
+  it("leads the grant view with the dropped permission", async () => {
+    const { sheet: s, dialog } = sheet({ machines: [{ id: "atlas", label: "Atlas", scopes: CONTROL, launchDropped: true }] });
+    s.open();
+    await flush();
+    expect(visibleView(dialog())).toEqual(["grant"]);
+    expect(dialog().querySelector(".launch-grant .launch-lead")!.textContent).toBe("Re-pairing Atlas didn't keep starting sessions. Allow it again from this browser.");
+  });
+});
+
+describe("New session and a machine's connection (cas-0e14 F30)", () => {
+  function offlineSheet(machines: LaunchMachine[], current?: string) {
+    const loads: string[] = [];
+    const host: LaunchHost = {
+      machines: () => machines,
+      currentMachineId: () => current ?? machines[0]?.id,
+      origin: "https://hub.example",
+      projects: async (machineId) => { loads.push(machineId); return { projects: [project("cas-src", "2026-09-27T00:00:00Z")], browse_roots: [] }; },
+      profiles: async () => ({}),
+      browse: async () => { throw new Error("unused"); },
+      launch: async () => ({ ok: true, session: "x", attached: false }),
+      grant: async () => undefined,
+      sessionListed: async () => true,
+      open: () => undefined,
+      copy: async () => undefined,
+    };
+    return { sheet: new LaunchSheet(host, document), loads, dialog: () => document.querySelector<HTMLDialogElement>("#launch-dialog")! };
+  }
+  const options = (dialog: HTMLDialogElement) => [...dialog.querySelectorAll<HTMLOptionElement>("select[name=launch-machine] option")].map((option) => option.textContent);
+
+  it("names each machine's connection state in the picker", async () => {
+    const { sheet: s, dialog } = offlineSheet([
+      { ...ATLAS, connection: "Reconnecting" },
+      { id: "studio", label: "Studio", scopes: [...CONTROL, "session-launch"], connection: "Needs pairing" },
+      { id: "forge", label: "Forge", scopes: [...CONTROL, "session-launch"], connection: "Live" },
+      { id: "shed", label: "Shed", scopes: CONTROL, connection: "Live" },
+    ]);
+    s.open();
+    await flush();
+    expect(options(dialog())).toEqual(["Atlas · reconnecting", "Studio · needs pairing", "Forge", "Shed · can't start sessions yet"]);
+  });
+
+  it("opens on a live machine that can launch rather than the current one that is reconnecting", async () => {
+    const { sheet: s, dialog, loads } = offlineSheet([
+      { ...ATLAS, connection: "Reconnecting" },
+      { id: "forge", label: "Forge", scopes: [...CONTROL, "session-launch"], connection: "Live" },
+    ], "atlas");
+    s.open();
+    await flush();
+    expect((dialog().querySelector("select[name=launch-machine]") as HTMLSelectElement).value).toBe("forge");
+    expect(loads).toEqual(["forge"]);
+  });
+
+  it("says a reconnecting machine is reconnecting instead of loading its projects, and loads them once it is back", async () => {
+    const machines: LaunchMachine[] = [{ ...ATLAS, connection: "Reconnecting" }];
+    const { sheet: s, dialog, loads } = offlineSheet(machines);
+    s.open();
+    await flush();
+    expect(visibleView(dialog())).toEqual(["form"]);
+    expect(dialog().querySelector('[data-launch-list="known"]')!.textContent).toBe("Lost connection to Atlas. Reconnecting… Its projects load once it's back.");
+    expect(loads).toEqual([]);
+    expect(dialog().querySelector('[data-launch-action="start"]')!.getAttribute("aria-disabled")).toBe("true");
+    // No "Loading accounts…" that can never finish.
+    expect(dialog().querySelector<HTMLElement>(".launch-account")!.hidden).toBe(true);
+    machines[0] = { ...machines[0]!, connection: "Live" };
+    s.refresh();
+    await flush();
+    expect(loads).toEqual(["atlas"]);
+    expect(dialog().querySelector('[data-launch-list="known"]')!.textContent).toContain("cas-src");
+  });
+
+  it("says a machine that needs pairing needs pairing, and never asks it for projects", async () => {
+    const { sheet: s, dialog, loads } = offlineSheet([{ ...ATLAS, connection: "Needs pairing" }]);
+    s.open();
+    await flush();
+    expect(dialog().querySelector('[data-launch-list="known"]')!.textContent).toBe("Atlas needs pairing again before it can start sessions.");
+    expect(loads).toEqual([]);
+  });
+
+  it("swaps the project list for the outage when the machine drops while the sheet is open", async () => {
+    const machines: LaunchMachine[] = [{ ...ATLAS, connection: "Live" }];
+    const { sheet: s, dialog, loads } = offlineSheet(machines);
+    s.open();
+    await flush();
+    expect(loads).toEqual(["atlas"]);
+    machines[0] = { ...machines[0]!, connection: "Reconnecting" };
+    s.refresh();
+    expect(dialog().querySelector('[data-launch-list="known"]')!.textContent).toBe("Lost connection to Atlas. Reconnecting… Its projects load once it's back.");
+    expect(dialog().querySelector('[data-launch-action="start"]')!.getAttribute("aria-disabled")).toBe("true");
+    expect(options(dialog())).toEqual(["Atlas · reconnecting"]);
+  });
+
+  it("treats an unsteady machine as reachable", async () => {
+    const { sheet: s, loads } = offlineSheet([{ ...ATLAS, connection: "Unsteady" }]);
+    s.open();
+    await flush();
+    expect(loads).toEqual(["atlas"]);
   });
 });

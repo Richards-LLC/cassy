@@ -67,8 +67,17 @@ const UNKNOWN: Refusal = {
   next: "Retry; if it keeps happening, re-pair this device.",
 };
 
+/**
+ * cas-a6f0 (journey F35): a held send whose machine's pairing the hub refused
+ * (connection-state-view.ts `pairingRefusal`). It names the machine to
+ * re-pair. Checked before RULES, since the label could contain their words.
+ */
+const PAIRING_REFUSED = /^Not sent: (.+) needs pairing again\.$/;
+
 export function refusal(detail: string | undefined): Refusal {
   const text = detail ?? "";
+  const pairing = PAIRING_REFUSED.exec(text);
+  if (pairing) return { reason: `${pairing[1]} needs pairing again.`, next: `Re-pair ${pairing[1]}, then retry.` };
   return RULES.find(([pattern]) => pattern.test(text))?.[1] ?? UNKNOWN;
 }
 

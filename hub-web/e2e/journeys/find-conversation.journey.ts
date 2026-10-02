@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { test, expect, RECEIPTS } from "./journey";
+import { journeyStamp } from "./clock";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
 import type { Machine } from "./hub-double";
 
@@ -8,16 +9,29 @@ import type { Machine } from "./hub-double";
 const FORGE: Machine = {
   id: "forge",
   label: "Forge build box with an unusual hostname · Linux",
-  sessions: [{ name: "quiet-heron-7", supervisor: "quiet-heron-7", project_dir: "/projects/lighthouse", workers: ["swift-lark-3"], liveness: "live" }],
+  sessions: [{ name: "quiet-heron-7", supervisor: "quiet-heron-7", project_dir: "/projects/lighthouse", workers: ["swift-lark-3"], liveness: "live", last_activity_at: journeyStamp(-3 * 3_600_000), last_activity: "supervisor → swift-lark-3" }],
 };
 
 test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => {
-  // Eight stages, two searches and the palette: under a loaded factory host it
-  // ran at the project's 60 s budget (QA N01/N3), so it gets its own headroom.
-  test.setTimeout(120_000);
+  // Fourteen stages, two searches, three page loads and the palette. On a
+  // quiet host the test takes about 72 s (50 s of stages); on the loaded
+  // merge-queue host its passing runs took up to 2.2 min and 6 of 10 at
+  // --workers=2 ran past a 120 s budget in the late palette stages (cas-dff1).
+  // Every wait inside is event-driven (hub double, DOM, page clock), so the
+  // whole-test budget is sized from that loaded runtime with headroom.
+  test.setTimeout(240_000);
   const hub = await journey.hub({ machines: [ATLAS, STUDIO, FORGE], paired: ["atlas", "studio", "forge"] });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
   const search = page.getByRole("searchbox", { name: "Search conversations" });
+  /** "Conversations" and its New session control sit on one line (cas-865c). */
+  const expectOneRowHeading = async () => {
+    const heading = page.locator(".conversation-list-title h1");
+    const control = page.locator(".conversation-list-title #new-session-toggle");
+    await expect(control).toHaveText("+ New session");
+    const [h1, button] = await Promise.all([heading.boundingBox(), control.boundingBox()]);
+    expect(Math.abs((h1!.y + h1!.height / 2) - (button!.y + button!.height / 2)), "heading and New session on one row").toBeLessThan(6);
+    await expect(page.locator(".conversation-list-top #pair-toggle")).toBeVisible();
+  };
   const filter = page.getByRole("searchbox", { name: "Filter commands" });
   // Ctrl/Cmd+K lands in the list search; pressed again from there, it opens
   // the command palette.
@@ -48,6 +62,8 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
   await journey.stage("See every machine's supervisors in one list", async () => {
     await journey.open();
     await expect(list.getByRole("button")).toHaveCount(3);
+    // cas-865c: the heading and New session share one row; nothing wraps.
+    await expectOneRowHeading();
     firstWelcome = await welcomeLayout();
     expect(firstWelcome).toMatchObject({ contextOpen: false, railWidth: 0, mainRight: 1280, centred: true });
     // Machines list in id order (atlas, forge, studio). Rows are titled by project, then machine; the codename is tertiary.
@@ -58,14 +74,33 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(search).toHaveAttribute("placeholder", "Search conversations (Ctrl K)");
   });
 
+  await journey.stage("Each row's time is its own session's activity", async () => {
+    // cas-6acf: a time comes only from the session's own activity, in words for
+    // assistive tech, and never the catalog check every poll refreshes to "now".
+    const lighthouse = list.getByRole("button", { name: /lighthouse/ });
+    await expect(lighthouse.locator(".conversation-when")).toHaveText("3h");
+    await expect(lighthouse).toHaveAccessibleName(/3 hours ago/);
+    await expect(lighthouse).not.toHaveAccessibleName(/\b3h\b/);
+    const times = () => list.locator(".conversation-row").evaluateAll((rows) => rows.map((node) => {
+      const time = node.querySelector<HTMLElement>(".conversation-when");
+      return time ? `${time.textContent}|${time.title}` : "none";
+    }));
+    const before = await times();
+    expect(before.some((entry) => entry.includes("Catalog checked")), before.join(", ")).toBe(false);
+    // Across a catalog poll nothing turns "now" and nothing runs backwards.
+    // the catalog refetch is driven by a machine event (cas-9772), not waited out.
+    await Promise.all([hub.announceCatalog("atlas"), hub.announceCatalog("studio"), hub.announceCatalog("forge")]);
+    expect(await times()).toEqual(before);
+  });
+
   await journey.stage("Notice a new reply while away", async () => {
     await list.getByRole("button", { name: /cas-src/ }).click();
-    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     // The list is on screen beside the thread, so there is no back step (F17):
     // moving to another conversation is one click on its row.
     await expect(page.getByRole("button", { name: "‹ Conversations", exact: true })).toBeHidden();
     await list.getByRole("button", { name: /gabber-studio/ }).click();
-    await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true })).toBeVisible();
     hub.supervisorSays(PELICAN, "The staging deploy finished; nothing needs you yet.", { kind: "status" });
     await expect(list.getByRole("button", { name: /cas-src/ }).getByLabel("1 unread")).toBeVisible();
   });
@@ -90,14 +125,22 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(search).toHaveValue("");
     await expect(list.getByRole("button")).toHaveCount(3);
     await search.fill("gabber-studio");
+    // cas-537f: the row Enter would open is marked, and named to assistive
+    // tech as the field's active descendant.
+    const target = list.locator('.conversation-row[data-enter-target="true"]');
+    await expect(target).toHaveCount(1);
+    await expect(target).toContainText("gabber-studio");
+    await expect(search).toHaveAttribute("aria-activedescendant", (await target.getAttribute("id"))!);
     await list.getByRole("button", { name: /gabber-studio/ }).click();
-    await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true })).toBeVisible();
     // The header names the project once; machine and codename sit beneath it.
     await expect(page.locator(".conversation-identity h1")).toHaveText("gabber-studio");
     await expect(page.locator(".conversation-host")).toContainText(`Studio Mac · macOS · ${OTTER}`);
-    await search.fill("");
-    await search.blur();
+    // cas-537f: opening a result clears the search, as Enter does; the whole
+    // list (and every other row's unread count) is back.
+    await expect(search).toHaveValue("");
     await expect(list.getByRole("button")).toHaveCount(3);
+    await expect(search).not.toHaveAttribute("aria-activedescendant");
   });
 
   // Catalog step titles verbatim (docs/qa/journeys.md HUB-J3, cas-0e5c).
@@ -122,7 +165,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await page.keyboard.type("cas-src");
     await expect(list.getByRole("button")).toHaveCount(1);
     await page.keyboard.press("Enter");
-    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     await expect(page.locator(".conversation-identity h1")).toHaveText("cas-src");
     await expect(page.getByRole("textbox", { name: "Your message" })).toBeFocused();
     await expect(search).toHaveValue("");
@@ -156,6 +199,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await page.setViewportSize({ width: 390, height: 844 });
     await page.getByRole("button", { name: "‹ Conversations", exact: true }).click();
     await expect(row).toBeVisible();
+    await expectOneRowHeading();
     expect(await clearOfTime()).toEqual({ ellipsised: true, clear: true });
     expect(await noLeadingDot()).toBe(true);
     // Receipt beside the stage screenshots: the 390 px list with the long name.
@@ -187,6 +231,14 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(palette.locator('[data-palette-action="terminal-view"] small')).toHaveText("Machines and terminal controls");
     await filter.fill("worker");
     await expect(palette.getByRole("button", { name: /Show worker panes/ })).toBeVisible();
+    // cas-537f: "light" matches a conversation and an appearance; the one
+    // Enter runs is marked, and named as the filter's active descendant.
+    await filter.fill("light");
+    const enterTarget = palette.locator('.palette-command[data-enter-target="true"]');
+    await expect(enterTarget).toHaveCount(1);
+    await expect(enterTarget).toContainText("Jump to lighthouse");
+    await expect(filter).toHaveAttribute("aria-activedescendant", (await enterTarget.getAttribute("id"))!);
+    expect(await enterTarget.evaluate((node) => getComputedStyle(node, "::after").content), "the Enter hint").toBe('"Enter ↵"');
     // A project name finds its session too, and the row names that project.
     const rows = palette.locator(".palette-command");
     await filter.fill("gabber");
@@ -205,7 +257,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(page.getByRole("button", { name: /Appearance · Dark/ })).toBeHidden();
     await page.getByRole("button", { name: /Jump to gabber-studio/ }).click();
     await expect(page.locator("#command-palette")).toBeHidden();
-    await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true })).toBeVisible();
     await expect(page.locator(".conversation-identity h1")).toHaveText("gabber-studio");
     // A mouse jump lands in the opened conversation's composer too, and
     // landing there must not freeze the shell at its pre-load state: once
@@ -233,7 +285,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     // Enter in the filter picks the leading "Jump to" row; the palette must
     // close with it rather than keep the modal up over the opened session.
     await expect(page.locator("#command-palette")).toBeHidden();
-    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     await expect(page.locator(".conversation-identity h1")).toHaveText("cas-src");
     // Focus lands in the opened conversation's composer, so the next keystroke
     // is part of the reply; the other conversation's draft stays its own.
@@ -251,7 +303,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(filter).toHaveValue(OTTER);
     await page.keyboard.press("Enter");
     await expect(page.locator("#command-palette")).toBeHidden();
-    await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true })).toBeVisible();
     await expect(composer).toBeFocused();
     await expect(composer).toHaveValue("Half a thought");
   });
@@ -275,12 +327,13 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     // Any render while the row has focus must leave the palette alone.
     hub.supervisorSays(OTTER, "Still here.", { kind: "status" });
     await expect(page.locator(".conversation-host")).toBeVisible();
-    await page.waitForTimeout(300);
+    // The render the update causes has happened (cas-dff1: on the turn itself, not 300 ms).
+    await expect(page.locator(".thread")).toContainText("Still here.");
     await expect(filter).toHaveValue(PELICAN);
     await expect(row).toBeFocused();
     await page.keyboard.press("Enter");
     await expect(page.locator("#command-palette")).toBeHidden();
-    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     await expect(composer).toBeFocused();
   });
 
@@ -299,7 +352,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     // rebuild happens to replace the dialog on close and hide the bug.
     await page.goto("./");
     await expect(palette).toHaveCount(1);
-    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     // Close with ×, which does not rebuild the shell: the dialog comes back.
     await openPaletteFromKeyboard();
     // The full list is every command on screen, Advanced still collapsed.
@@ -316,11 +369,11 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(palette).toBeHidden();
     await reopen();
     // So does jumping to the conversation that is already open.
-    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     await filter.fill(PELICAN);
     await filter.press("Enter");
     await expect(palette).toBeHidden();
-    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     await reopen();
     // Typing after the reopen filters from scratch.
     await filter.pressSequentially(OTTER.slice(0, 6));
@@ -344,11 +397,11 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await page.locator("#paired-machines-close").click();
     await expect(paired).toBeHidden();
     await list.getByRole("button", { name: /gabber-studio/ }).click();
-    await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true })).toBeVisible();
     await expect(palette).toBeHidden();
     // And once more from the other conversation: still closed.
     await list.getByRole("button", { name: /cas-src/ }).click();
-    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     await expect(palette).toBeHidden();
   });
 
@@ -361,40 +414,86 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     const footerState = page.locator("#hub-footer-badges .machine-badge-state");
     await expect(footerState).toHaveText("Connected");
     await page.evaluate(() => {
-      const seen = { footer: new Set<string>(), pane: new Set<string>() };
+      // cas-813a: also every loading look, where its line sits, the header
+      // and row words, and the composer's width, frame by frame.
+      const seen = { footer: new Set<string>(), pane: new Set<string>(), looks: new Set<string>(), centres: new Set<string>(), status: new Set<string>(), composer: new Set<number>(), details: new Set<string>() };
       (window as unknown as { __attachSeen: typeof seen }).__attachSeen = seen;
       const sample = () => {
         const footer = document.querySelector<HTMLElement>("#hub-footer-badges .machine-badge-state");
         if (footer) seen.footer.add(footer.innerText.trim());
         const pane = document.querySelector<HTMLElement>(".conversation-pane-slot");
         if (pane) seen.pane.add(pane.innerText.trim());
+        if (!pane) return;
+        for (const details of pane.querySelectorAll<HTMLDetailsElement>(".connection-details")) seen.details.add(`${details.querySelector("summary")?.innerText.trim()} ${details.open ? "open" : "closed"}`);
+        for (const verdict of pane.querySelectorAll(".terminal-state")) if ((verdict as HTMLElement).offsetParent) seen.looks.add("verdict card");
+        for (const line of pane.querySelectorAll<HTMLElement>(".conversation-loading")) {
+          if (!line.offsetParent) continue;
+          seen.looks.add(`line: ${line.innerText.trim()}`);
+          const box = line.getBoundingClientRect();
+          seen.centres.add(`${Math.round(box.x + box.width / 2)},${Math.round(box.y + box.height / 2)}`);
+        }
+        const header = document.querySelector<HTMLElement>("#conversation-connection")?.innerText.replace("·", "").trim();
+        const row = document.querySelector<HTMLElement>('.conversation-row[aria-current="true"] .conversation-preview')?.innerText.trim();
+        if (header) seen.status.add(`header: ${header}`);
+        if (row) seen.status.add(`row: ${row}`);
+        const composer = document.querySelector<HTMLElement>("#message-text");
+        if (composer?.offsetParent) seen.composer.add(Math.round(composer.getBoundingClientRect().width));
       };
       new MutationObserver(sample).observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true });
     });
     hub.delayAttach("quiet-heron-7", 2_000);
     await list.getByRole("button", { name: /lighthouse/ }).click();
-    const opening = page.locator(".conversation-pane-slot .terminal-connecting-title");
+    const opening = page.locator(".conversation-pane-slot .conversation-loading");
     await expect(opening).toHaveText("Opening the conversation…");
-    // Past the quiet window the attempt and stage are offered behind Details, closed.
-    const details = page.locator(".conversation-pane-slot .connection-details");
-    await expect(details.getByText("Details", { exact: true })).toBeVisible();
-    await expect(details).not.toHaveAttribute("open", "");
-    await expect(details.locator(".connection-timeline")).toBeHidden();
-    await expect(page.getByRole("button", { name: "Send to quiet-heron-7", exact: true })).toBeVisible();
+    // cas-813a: still for the first second, then a quiet pulse.
+    const dot = opening.locator(".dots i").first();
+    // Its first frames are still: the pulse is scheduled about a second after the open.
+    expect(parseInt(await dot.evaluate((element) => element.style.animationDelay), 10), "motion waits after the open").toBeGreaterThanOrEqual(500);
+    expect(await dot.evaluate((element) => element.getAnimations().map((animation) => (animation as CSSAnimation).animationName)), "the quiet pulse that follows").toEqual(["opening-dots"]);
+    await expect(page.getByRole("button", { name: "Send to the lighthouse supervisor", exact: true })).toBeVisible();
     await expect(page.locator(".thread .empty b")).toHaveText("lighthouse", { timeout: 10_000 });
     const seen = await page.evaluate(() => {
-      const { footer, pane } = (window as unknown as { __attachSeen: { footer: Set<string>; pane: Set<string> } }).__attachSeen;
-      return { footer: [...footer], pane: [...pane] };
+      const { footer, pane, looks, centres, status, composer, details } = (window as unknown as { __attachSeen: Record<string, Set<string | number>> }).__attachSeen;
+      return { footer: [...footer], pane: [...pane], looks: [...looks], centres: [...centres], status: [...status], composer: [...composer], details: [...details] };
     });
-    // cas-71af (e918 QA F02): the empty card's machine · codename line yields
-    // the 40-character machine name first; the codename stays whole on a phone.
+    // Past the quiet window the attempt and stage were offered behind Details, closed.
+    expect(seen.details, "Details while it opened").toEqual(["Details closed"]);
+    // cas-813a: one loading look, in one place, centred in the reading area;
+    // the header and row stay Live and the composer keeps its width.
+    expect(seen.looks, "loading looks while it opened").toEqual(["line: Opening the conversation…"]);
+    expect(seen.centres, "where the opening line sat").toHaveLength(1);
+    const slot = (await page.locator(".conversation-pane-slot").boundingBox())!;
+    const [cx, cy] = String(seen.centres[0]).split(",").map(Number);
+    expect(Math.abs(cx - (slot.x + slot.width / 2)), "line centred across the reading area").toBeLessThan(4);
+    expect(Math.abs(cy - (slot.y + slot.height / 2)), "line centred down the reading area").toBeLessThan(4);
+    expect(seen.status.filter((text) => String(text).startsWith("header:")), "header words while it opened").toEqual(["header: Live"]);
+    expect(seen.status.filter((text) => /Connecting|Opening/.test(String(text))), "row or header flipping while it opened").toEqual([]);
+    expect(seen.composer, "composer widths while it opened").toHaveLength(1);
+    // cas-766c: on a phone the empty card's machine · codename line keeps
+    // the 40-character machine name (at least 16ch, its OS word dropped, never
+    // cut mid-word) and the generated codename yields first.
+    // The header's host line, at desktop and phone: the machine is on it, and
+    // its OS word is whole or gone, never "· Lin…" (cas-766c).
+    const headerHost = () => page.locator(".conversation-identity .host-where").evaluate((line) => {
+      const machine = line.querySelector<HTMLElement>(".host-machine")!;
+      const ch = parseFloat(getComputedStyle(machine).fontSize) * 0.6;
+      return { machineChars: machine.getBoundingClientRect().width / ch, osCut: (machine.querySelector(".host-os")?.getClientRects().length ?? 0) > 0 && machine.scrollWidth > machine.clientWidth + 1 };
+    });
+    for (const header of [await headerHost()]) { expect(header.machineChars, "machine on the header at 1280").toBeGreaterThanOrEqual(15.5); expect(header.osCut, "OS word cut at 1280").toBe(false); }
     await page.setViewportSize({ width: 390, height: 844 });
+    for (const header of [await headerHost()]) { expect(header.machineChars, "machine on the header at 390").toBeGreaterThanOrEqual(4); expect(header.osCut, "OS word cut at 390").toBe(false); }
     const meta = page.locator(".thread .empty .proj2");
-    expect(await meta.locator(".codename").evaluate((element) => element.scrollWidth <= element.clientWidth + 1), "codename whole at 390px").toBe(true);
-    expect(await meta.locator(".proj2-machine").evaluate((element) => element.scrollWidth > element.clientWidth), "machine ellipsised at 390px").toBe(true);
+    const fitted = await meta.evaluate((line) => {
+      const machine = line.querySelector<HTMLElement>(".proj2-machine")!;
+      const ch = parseFloat(getComputedStyle(machine).fontSize) * 0.6;
+      return { machineChars: machine.getBoundingClientRect().width / ch, os: (machine.querySelector(".host-os")?.getClientRects().length ?? 0) > 0, title: line.getAttribute("title") };
+    });
+    expect(fitted.machineChars, "the machine keeps 16ch at 390px").toBeGreaterThanOrEqual(15.5);
+    expect(fitted.os, "the OS word goes before the name is cut").toBe(false);
+    expect(fitted.title).toBe("Forge build box with an unusual hostname · Linux · quiet-heron-7");
     await page.setViewportSize({ width: 1280, height: 720 });
     expect(seen.footer, "the footer while the conversation opened").toEqual(["Connected"]);
-    const jargon = seen.pane.filter((text) => /relay|attempt|authori[sz]ation|handshake|heartbeat|resolving|dialing/i.test(text));
+    const jargon = seen.pane.filter((text) => /relay|attempt|authori[sz]ation|handshake|heartbeat|resolving|dialing/i.test(String(text)));
     expect(jargon, "relay-stage words on the default attach surface").toEqual([]);
     await expect(footerState).toHaveText("Connected");
   });
@@ -420,7 +519,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     });
     hub.delayAttach("quiet-heron-7", 3_500);
     await page.reload();
-    const opening = page.locator(".conversation-pane-slot .terminal-connecting-title");
+    const opening = page.locator(".conversation-pane-slot .conversation-loading");
     await expect(opening).toHaveText("Opening the conversation…");
     await expect(page.locator(".thread .empty b")).toHaveText("lighthouse", { timeout: 15_000 });
     const seen = await page.evaluate(() => (window as unknown as { __retrySeen: { footer: string[]; pane: string[] } }).__retrySeen);

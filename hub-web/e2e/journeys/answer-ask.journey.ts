@@ -66,7 +66,7 @@ test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
   await journey.stage("Open the conversation", async () => {
     await journey.open();
     await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
-    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
   });
 
   await journey.stage("A question from an ended session does not wait", async () => {
@@ -80,6 +80,8 @@ test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
     await expect(earlier).not.toHaveAttribute("open", /.*/);
     await earlier.locator("summary").click();
     await expect(earlier).toContainText("open the PR to main and cut a release?");
+    // cas-8d52 (journey F13): the ended session's turn is its own supervisor's.
+    await expect(earlier.locator(".earlier-turn.supervisor b")).toHaveText("patient-pelican-8");
     await expect(earlier.getByRole("button")).toHaveCount(0);
     await earlier.locator("summary").click();
     await expect(pinned).toBeHidden();
@@ -107,16 +109,21 @@ test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
     await expect(page.getByRole("log").locator('.obj.blk[data-waiting="true"] .blk-hint')).toHaveText("Reply to unblock");
     await expect(waiting.locator('.context-jump[data-kind="blocker"] .context-hint')).toHaveText("Reply to unblock");
     // cas-1f13: the blocker the machine stamped five minutes ahead sorts at its
-    // arrival, above the session line and the question that came after it, and
-    // says its machine's clock is ahead instead of showing a time from the future.
+    // arrival, above the question that came after it, and says its machine's
+    // clock is ahead instead of showing a time from the future. cas-8d52
+    // (journey F13): it carries no session, so it is this session's own turn:
+    // no "session … started" line opens below it, and it is labelled by this
+    // session's supervisor.
     const order = await threadOrder(page);
     const blockerAt = order.findIndex((label) => label.startsWith(`${PELICAN}, `) && label.endsWith(", machine clock ahead"));
-    const sessionAt = order.findIndex((label) => label.startsWith(`session ${PELICAN} started`));
     expect(blockerAt, `blocker marked clock-ahead in ${JSON.stringify(order)}`).toBeGreaterThanOrEqual(0);
-    expect(sessionAt, "the session line follows the earlier blocker").toBeGreaterThan(blockerAt);
+    expect(order.filter((label) => label.startsWith("session ")), "the thread is this session's: no session line").toEqual([]);
+    await expect(page.getByRole("log").getByRole("group", { name: `Blocker from ${PELICAN}` }).filter({ hasText: "The release gate went red" })).toHaveCount(1);
     // The question arrives live from the same machine, so it is marked the
     // same way a reload would mark it (cas-1f13 review F02).
-    await expect(page.getByRole("log").locator("time .clock-ahead")).toHaveText([" · machine clock ahead", " · machine clock ahead"]);
+    // With no session line between them (cas-8d52) the blocker and the
+    // question are one turn group under one marked time.
+    await expect(page.getByRole("log").locator("time .clock-ahead")).toHaveText([" · machine clock ahead"]);
     const times = await page.getByRole("log").locator(".turn > time").evaluateAll((nodes) => nodes.map((node) => node.firstChild?.textContent ?? ""));
     expect(times, "times read in order down the thread").toEqual([...times].sort());
   });
@@ -147,11 +154,13 @@ test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
     expect(quiet.edge, "no attention edge").toBe("rgba(0, 0, 0, 0)");
     await expect(answered.locator(".chip.sent .tick")).toBeVisible();
     await expect(page.getByRole("log").locator(".blk-hint")).toHaveCount(0);
-    // cas-71af (aac8 QA F01): the acknowledged blocker is handled too. It
-    // quiets to the supervisor's colour and says so, instead of staying a red alarm.
-    const handled = page.getByRole("log").getByRole("group", { name: `Blocker from ${PELICAN}, acknowledged` });
-    await expect(handled.locator(".blk-handled")).toHaveText("Acknowledged — you replied");
-    await expect(handled.locator(".blk-handled .tick")).toBeVisible();
+    // cas-71af (aac8 QA F01): the earlier blocker stops waiting too. It
+    // quiets to the supervisor's colour instead of staying a red alarm, but
+    // the answer went to the question, not to it: it says only that the
+    // operator has written since, never that they replied (cas-e829).
+    const handled = page.getByRole("log").getByRole("group", { name: `Blocker from ${PELICAN}, you've written since` });
+    await expect(handled.locator(".blk-handled")).toHaveText("You've written since this");
+    await expect(handled.locator(".blk-handled .tick")).toHaveCount(0);
     expect(await handled.evaluate((object) => {
       const probe = document.createElement("span"); probe.style.background = "var(--sup-bg)"; object.append(probe);
       const supervisor = getComputedStyle(probe).backgroundColor; probe.remove();
@@ -251,7 +260,7 @@ test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
     const composer = page.getByRole("textbox", { name: "Your message" });
     await composer.fill("Thanks — ping me when it starts.");
     const sent = hub.nextSend();
-    await page.getByRole("button", { name: `Send to ${OTTER}`, exact: true }).click();
+    await page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true }).click();
     await sent;
     // cas-1f13: the machine's turn is not filed under tomorrow above Today. It
     // sits under Today at its arrival, marked "machine clock ahead", and the
@@ -264,6 +273,8 @@ test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
     const machineTurn = order.findIndex((label) => label.startsWith(`${OTTER}, `) && label.endsWith(", machine clock ahead"));
     expect(machineTurn, `machine turn marked clock-ahead in ${JSON.stringify(order)}`).toBeGreaterThanOrEqual(0);
     expect(order.lastIndexOf(reply.label), "the send sits below the machine's turn").toBeGreaterThan(machineTurn);
+    // cas-8d52 (journey F13): the machine's sessionless turn is this session's; no line splits it from the send.
+    expect(order.filter((label) => label.startsWith("session ")), JSON.stringify(order)).toEqual([]);
   });
 
   await journey.stage("Reopen the page", async () => {
@@ -275,11 +286,15 @@ test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
     await list.getByRole("button", { name: /cas-src/ }).click();
     await expect(page.getByRole("log").getByText("A second gate went red; the train is still held.")).toBeVisible();
     const before = await threadOrder(page);
+    // cas-8d52 (journey F11): the reload comes minutes later; every turn keeps
+    // the time the visit showed, not the reload's.
+    await page.clock.fastForward(180_000);
     await page.reload();
     await list.getByRole("button", { name: /cas-src/ }).click();
     await expect(page.getByRole("log").getByText("A second gate went red; the train is still held.")).toBeVisible();
     const after = await threadOrder(page);
     expect(shape(after), JSON.stringify({ before, after })).toEqual(shape(before));
+    expect(after, "the same times, not only the same order").toEqual(before);
     await expect(page.getByRole("log").locator(".day")).toHaveText(["Today"]);
     const times = await page.getByRole("log").locator(".turn > time").evaluateAll((nodes) => nodes.map((node) => node.firstChild?.textContent ?? ""));
     expect(times, "times read in order down the thread").toEqual([...times].sort());

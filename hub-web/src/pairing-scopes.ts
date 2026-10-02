@@ -128,3 +128,38 @@ export function launchGrantCommand(controllerOrigin: string, current: readonly S
   const scopes = [...current.filter((scope) => scope !== LAUNCH_SCOPE), LAUNCH_SCOPE];
   return pairCommand(controllerOrigin, scopes);
 }
+
+/**
+ * cas-0e14 (journey F29): a code pairing requests only the default scopes, so
+ * re-pairing by code replaces a credential that could start sessions with one
+ * that can't. True when that is what happened.
+ */
+export function launchDropped(previous: readonly Scope[] | undefined, next: readonly Scope[]): boolean {
+  return previous?.includes(LAUNCH_SCOPE) === true && !next.includes(LAUNCH_SCOPE);
+}
+
+/**
+ * What the Re-pair dialog says before a code is created. When the saved
+ * pairing can start sessions, it says the code won't keep that, and names the
+ * command whose link would (cas-0e14 F29).
+ */
+export function repairStatus(label: string, scopes: readonly Scope[]): string {
+  const plain = `Re-pairing ${label}: create a new code and approve it on that machine. Its saved access here is replaced when the new credential is installed.`;
+  if (!scopes.includes(LAUNCH_SCOPE)) return plain;
+  // cas-093d F02: the command is not set as prose (it broke mid-token when the
+  // sentence wrapped); it follows as its own copyable code (repairCommand).
+  return `Re-pairing ${label}: a new code replaces its saved access here, and starting sessions will need to be allowed again afterwards. To keep it, run this on ${label} and open the link it prints instead:`;
+}
+
+/** The command the Re-pair dialog offers to copy, when a code re-pair would drop session launch (cas-093d F02). */
+export function repairCommand(scopes: readonly Scope[], controllerOrigin: string): string | undefined {
+  return scopes.includes(LAUNCH_SCOPE) ? launchGrantCommand(controllerOrigin, scopes) : undefined;
+}
+
+/** The Attention item after a code re-pair dropped session launch (cas-0e14 F29). */
+export function launchDroppedNotice(label: string): { headline: string; detail: string } {
+  return {
+    headline: "Starting sessions needs allowing again",
+    detail: `Re-pairing ${label} with a code didn't include starting sessions. Open New session to allow it again.`,
+  };
+}

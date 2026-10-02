@@ -7,15 +7,31 @@ if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(instant) || !Numb
 }
 export const JOURNEY_NOW = Date.parse(instant);
 let started = performance.now();
+/** A test is running: its clock has started and not yet stopped. */
+let running = false;
 
 /** Each test gets the same starting instant, independent of worker lifetime. */
 export function startJourneyClock(): number {
   started = performance.now();
+  running = true;
   return JOURNEY_NOW;
 }
 
+/** The test is over; until the next one starts, time stands at its instant. */
+export function stopJourneyClock(): void {
+  running = false;
+}
+
+/**
+ * The journey's "now". Inside a test it runs from the test's start instant.
+ * Outside one, when Playwright imports a spec file between tests and its
+ * module-level fixtures call journeyStamp, it is the start instant itself:
+ * the time the previous test in the worker has spent no longer leaks into
+ * those fixtures (cas-4e52, cas-6acf QA F01 — "3h" read "2h" and "2m" read
+ * "1m" whenever the spec ran after another one in its worker).
+ */
 export function journeyNow(): number {
-  return JOURNEY_NOW + performance.now() - started;
+  return running ? JOURNEY_NOW + performance.now() - started : JOURNEY_NOW;
 }
 
 /** Machine clock skew or a recent turn, relative to the injected instant. */

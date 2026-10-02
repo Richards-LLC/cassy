@@ -257,6 +257,10 @@ pub struct FactoryDaemon {
     reported_unavailable_workers: std::collections::HashMap<String, String>,
     /// Last bounded rollout scan for terminal harness availability evidence.
     last_usage_limit_scan: Option<Instant>,
+    /// cas-e829: system notices (relay-watchdog alerts) Commander was shown
+    /// while their relay was still unseen, by alert id -> relay id. Each one
+    /// is announced resolved once, then dropped.
+    open_operator_notices: std::collections::HashMap<i64, i64>,
     /// cas-4143: last scan of Claude's team-lead mailbox for teammate
     /// permission requests parked for a lead nobody plays.
     last_permission_request_scan: Option<Instant>,

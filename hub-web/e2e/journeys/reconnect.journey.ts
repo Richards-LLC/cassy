@@ -8,7 +8,7 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
   await journey.stage("Open the conversation", async () => {
     await journey.open();
     await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
-    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
   });
 
   const header = page.locator("#conversation-connection");
@@ -16,6 +16,12 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
   const footer = page.locator("#hub-footer-badges");
   const banner = page.locator(".terminal-disconnected-banner");
   /** The thread as painted, top to bottom: day and session lines by text, message groups by their spoken label. */
+  /** The journey's own turns as painted, top to bottom (cas-eb4b). */
+  const SAID = ["Are you there?", "Are we back?", "Back. Nothing was lost."];
+  const turnOrder = () => page.getByRole("log").evaluate((log, said) => {
+    const text = log.textContent ?? "";
+    return said.map((line) => ({ line, at: text.indexOf(line) })).filter(({ at }) => at >= 0).sort((a, b) => a.at - b.at).map(({ line }) => line);
+  }, SAID);
   const threadOrder = () => page.locator(".msgs > *").evaluateAll((nodes) => nodes.filter((node) => node.matches(".day, .session-divider, [role=group]")).map((node) => node.getAttribute("role") === "group" ? node.getAttribute("aria-label") ?? "" : node.textContent ?? ""));
   let beforeOutage: string[] = [];
 
@@ -41,8 +47,8 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     expect(seen.banner).toBe("Lost connection to Atlas · Linux. Reconnecting…");
     expect(seen.header).toContain("Reconnecting");
     expect(seen.row).toContain("Reconnecting");
-    // Two machines, one of them down: the footer counts it and its dot is not all-clear (cas-b789).
-    expect(seen.footer).toContain("1 connected");
+    // Two machines, one of them down: the footer names it (cas-0739) and its dot is not all-clear (cas-b789).
+    expect(seen.footer).toContain("Atlas reconnecting");
     await expect(footer.locator(".pairing-dot")).toHaveClass("pairing-dot partial");
     // Only the terminal dims: the conversation stays readable while it
     // reconnects (cas-3446 measured 2.2-3.3:1 when the whole mount faded).
@@ -57,11 +63,16 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     // A send during the outage is held, not refused: it waits in the thread
     // and goes out by itself, once, when the session is back (cas-0978).
     await composer.fill("Are you there?");
-    await page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true }).click();
-    await expect(page.locator("#message-status")).toHaveText("Not connected to Atlas · Linux right now. Your message will go out by itself when it's back.");
+    await page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }).click();
+    await expect(page.locator("#message-status")).toHaveText("Lost connection to Atlas · Linux. Reconnecting… Your message will go out by itself when it's back.");
     await expect(composer).toHaveValue("");
     await expect(page.getByRole("log").locator(".conversation-held")).toHaveText("Waiting for the connection — sends when it's back");
     expect(hub.sends.filter((m) => m.text === "Are you there?")).toHaveLength(0);
+    // cas-5a8f: a send held in this browser is not supervisor execution: the
+    // thread does not say "working" beside "Waiting for the connection", on
+    // screen or to a screen reader.
+    await expect(page.getByRole("log").locator(".working")).toHaveCount(0);
+    expect(await page.getByRole("log").ariaSnapshot()).not.toContain("status: working");
     // The rail defers to the banner: no second, technical alarm about the same
     // drop, and whatever it does show counts the same in every place (cas-90d4).
     const rail = page.locator("#attention-panel");
@@ -92,8 +103,14 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     await expect.poll(() => hub.sends.filter((m) => m.text === "Are you there?").length, { timeout: 10_000 }).toBe(1);
     await expect(page.locator("#message-status")).toBeHidden();
     await expect(page.getByRole("log").locator(".conversation-held")).toHaveCount(0);
+    // cas-71f4: while it still says "Sending…", that bubble is the one
+    // sending signal; no working line beside it.
+    await expect(page.getByRole("log").locator(".working")).toHaveCount(0);
     hub.deliverLatest(PELICAN);
     await expect(page.getByRole("log").getByText("Delivered")).toBeVisible();
+    // cas-5a8f: once the held send is out on a live machine and delivered,
+    // the supervisor has it and the thread says it is working again.
+    await expect(page.getByRole("log").locator(".working")).toHaveCount(1);
     await page.waitForTimeout(1_000);
     expect(hub.sends.filter((m) => m.text === "Are you there?"), "sent once, not again").toHaveLength(1);
     // The transport alarm resolved itself with the reconnect.
@@ -103,19 +120,25 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
   await journey.stage("Sending works again", async () => {
     await composer.fill("Are we back?");
     const sent = hub.nextSend();
-    await page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true }).click();
+    await page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }).click();
     expect((await sent).text).toBe("Are we back?");
     hub.answerLatest(PELICAN, "Back. Nothing was lost.");
     await expect(page.getByRole("log").getByText("Back. Nothing was lost.")).toBeVisible();
     await expect(page.getByText("Terminal transport problem")).toHaveCount(0);
     beforeOutage = await threadOrder();
-    // The session line comes first in its session, above the message sent in it.
-    expect(beforeOutage.findIndex((line) => line.startsWith(`session ${PELICAN} started`))).toBeLessThan(beforeOutage.findIndex((line) => line.startsWith("You, ")));
+    // cas-eb4b: a session's own thread has no "session … started" line
+    // (cas-55a4), so the order is anchored on lines that exist: the day line
+    // heads the thread, and the turns stay in the order they were said.
+    expect(beforeOutage.filter((line) => line.startsWith("session ")), "no session line in the session's own thread").toEqual([]);
+    const today = beforeOutage.indexOf("Today");
+    expect(today, "the day line is painted").toBeGreaterThanOrEqual(0);
+    expect(today, "the day line comes before the first message").toBeLessThan(beforeOutage.findIndex((line) => line.startsWith("You, ")));
+    expect(await turnOrder(), "turns in the order they were said").toEqual(SAID);
   });
 
   await journey.stage("On a phone, the banner stays readable through an outage", async () => {
     await page.setViewportSize({ width: 390, height: 844 });
-    await expect(page.getByRole("button", { name: `Send to ${PELICAN}` })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor" })).toBeVisible();
     // Watch every frame of the outage: no toast may sit on the reconnect banner (cas-00cc).
     await page.evaluate(() => {
       const w = window as unknown as { __covered: string[] };
@@ -150,9 +173,11 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     await expect(banner).toBeHidden({ timeout: 15_000 });
     await page.emulateMedia({ colorScheme: null });
     // cas-1f13: the reconnect re-hydrates the thread from history, and every
-    // turn keeps its place: "Are we back?" stays below the session line.
+    // turn keeps its place: the day line still heads the thread and the held
+    // message stays above the ones sent after it (cas-eb4b).
     await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 30_000 }).toBe(true);
     await expect.poll(threadOrder, { message: "thread order after the reconnect" }).toEqual(beforeOutage);
+    await expect.poll(turnOrder, { message: "turns in the order they were said, after the reconnect" }).toEqual(SAID);
   });
 
   await journey.stage("In Terminal view, nothing claims all clear or live during an outage", async () => {
@@ -160,7 +185,7 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     // Attention rail used to say "All clear", the machine rail "live · 8ms",
     // and the header kept "CONTROL" and a latency chip.
     await page.setViewportSize({ width: 1280, height: 720 });
-    await page.getByRole("button", { name: "Terminal view" }).click();
+    await page.locator("#conversation-terminal").click();
     const atlas = page.locator("#machine-rail-list .machine-icon").filter({ hasText: "Atlas" });
     const read = () => page.evaluate(() => {
       const text = (selector: string) => document.querySelector<HTMLElement>(selector)?.innerText.trim() ?? "";

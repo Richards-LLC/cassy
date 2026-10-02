@@ -7,7 +7,7 @@ it.each([
   ['unknown key', { phase: 'failed', authFailure: 'needs-pairing' }, 'Needs pairing'],
   ['transient after a live visit', { phase: 'backoff' }, 'Reconnecting'],
   ['connected', { phase: 'live' }, 'Live'],
-  ['degraded', { phase: 'live', degraded: true }, 'Degraded'],
+  ['degraded', { phase: 'live', degraded: true }, 'Unsteady'],
   ['fatal', { phase: 'failed', fatal: true }, 'Unreachable'],
   ['first attempt', { phase: 'dialing' }, 'Connecting'],
 ] as const)('preserves the shared machine vocabulary for %s', (_case, state, expected) => {

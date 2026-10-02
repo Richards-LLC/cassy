@@ -3,7 +3,7 @@ import {
   attentionPayload,
   attentionSummary,
   groupAttention,
-  relativeTime,
+  attentionTimeLabel,
   type AttentionAction,
   type AttentionCard,
   type AttentionCounts,
@@ -12,6 +12,7 @@ import {
 } from "./attention";
 import type { AttentionItem } from "./types";
 import { absoluteTimestamp } from "./time";
+import { stampLabel } from "./thread-model";
 
 export interface AttentionPanelCallbacks {
   dismiss(items: AttentionItem[]): Promise<void> | void;
@@ -122,12 +123,15 @@ function renderPayload(card: AttentionCard, callbacks: AttentionPanelCallbacks):
   details.className = "attention-payload";
   const summary = document.createElement("summary");
   summary.textContent = "Details";
+  summary.dataset.role = "details";
   const body = document.createElement("div");
   body.className = "attention-payload-body";
   const payload = attentionPayload(card.latest);
   const pre = document.createElement("pre");
   pre.textContent = payload;
-  body.append(button("Copy", "attention-copy", () => void callbacks.copy(payload)), pre);
+  const copy = button("Copy", "attention-copy", () => void callbacks.copy(payload));
+  copy.dataset.role = "copy";
+  body.append(copy, pre);
   details.append(summary, body);
   return details;
 }
@@ -136,6 +140,9 @@ function renderCard(card: AttentionCard, callbacks: AttentionPanelCallbacks, opt
   const severity = card.content.severity;
   const article = document.createElement("article");
   article.className = `attention-item attention-item--${severity}`;
+  // cas-a5c6 QA round 3: a stable identity for this notice, so focus and an
+  // opened Details follow the notice across redraws, never its position.
+  article.dataset.attentionId = card.key;
   if (card.content.enrichmentPending) article.classList.add("attention-item--enriching");
   if (severity === "critical" && options.animateIds?.has(card.latest.id)) {
     article.classList.add("attention-item--new-critical");
@@ -179,7 +186,7 @@ function renderCard(card: AttentionCard, callbacks: AttentionPanelCallbacks, opt
   }
   const time = document.createElement("time");
   time.dateTime = card.latest.createdAt;
-  time.textContent = relativeTime(card.latest.createdAt, options.now);
+  time.textContent = attentionTimeLabel(card.latest.createdAt, options.now);
   time.title = absoluteTimestamp(card.latest.createdAt);
   time.className = "attention-time";
   eyebrow.append(time, identity);
@@ -202,14 +209,17 @@ function renderCard(card: AttentionCard, callbacks: AttentionPanelCallbacks, opt
   actions.className = "attention-actions";
   if (card.content.action !== "none") {
     const action = card.content.action;
-    actions.append(button(ACTION_LABEL[action], "attention-action", () => {
+    const act = button(ACTION_LABEL[action], "attention-action", () => {
       void Promise.resolve(callbacks.act(card.latest, action)).then(() => {
         if (severity === "critical") return callbacks.dismiss(card.items);
       });
-    }));
+    });
+    act.dataset.role = "action";
+    actions.append(act);
   }
   const dismiss = button("Dismiss", severity !== "critical" ? "attention-dismiss" : "attention-explicit-dismiss", () => void callbacks.dismiss(card.items));
   dismiss.setAttribute("aria-label", `Dismiss ${severity} event`);
+  dismiss.dataset.role = "dismiss";
   if (card.content.action === "none") dismiss.classList.add("attention-action");
   actions.append(dismiss);
   actions.append(renderPayload(card, callbacks));
@@ -220,6 +230,7 @@ function renderCard(card: AttentionCard, callbacks: AttentionPanelCallbacks, opt
 function renderGroup(group: AttentionGroup, callbacks: AttentionPanelCallbacks, options: AttentionPanelOptions): HTMLElement {
   const section = document.createElement("section");
   section.className = `attention-group${group.overflow ? " attention-group--overflow" : ""}`;
+  section.dataset.groupKey = group.key;
   const header = document.createElement("header");
   header.className = "attention-group-header";
   const toggle = button("", "attention-group-toggle", () => {
@@ -228,6 +239,7 @@ function renderGroup(group: AttentionGroup, callbacks: AttentionPanelCallbacks, 
     body.hidden = expanded;
   });
   toggle.setAttribute("aria-expanded", "true");
+  toggle.dataset.role = "group-toggle";
   toggle.append(severityDot(group.worstSeverity));
   const label = document.createElement("span");
   label.className = "attention-group-label";
@@ -239,7 +251,9 @@ function renderGroup(group: AttentionGroup, callbacks: AttentionPanelCallbacks, 
   count.textContent = String(group.count);
   toggle.append(label, count);
   const allItems = group.cards.flatMap((card) => card.items);
-  header.append(toggle, button("Dismiss group", "attention-dismiss-group", () => void callbacks.dismiss(allItems)));
+  const dismissGroup = button("Dismiss group", "attention-dismiss-group", () => void callbacks.dismiss(allItems));
+  dismissGroup.dataset.role = "group-dismiss";
+  header.append(toggle, dismissGroup);
   const body = document.createElement("div");
   body.className = "attention-group-body";
   const groupLabel = group.overflow ? group.machineLabel : group.session ?? group.machineLabel;
@@ -253,6 +267,160 @@ export function renderAttentionPanel(
   items: readonly AttentionItem[],
   callbacks: AttentionPanelCallbacks,
   options: AttentionPanelOptions = {},
+): void {
+  // cas-a5c6 QA F03 (rounds 2 and 3): a heartbeat redraw with nothing new
+  // rebuilt the panel every 5 s, and the minute's age change rebuilt it once a
+  // minute, taking the keyboard user's focus and any opened Details with it.
+  // Unchanged content is left alone; only the cards' ages are refreshed, in
+  // place.
+  const now = options.now ?? Date.now();
+  const signature = JSON.stringify([
+    items,
+    options.outage ?? null,
+    [...(options.animateIds ?? [])].filter((id) => items.some((item) => item.id === id)),
+    [...(options.reclassifyIds ?? [])].filter((id) => items.some((item) => item.id === id)),
+  ]);
+  if (container.dataset.panelSignature === signature && container.childElementCount > 0) {
+    for (const time of container.querySelectorAll<HTMLTimeElement>("time.attention-time")) {
+      const label = attentionTimeLabel(time.dateTime, now);
+      if (time.textContent !== label) time.textContent = label;
+    }
+    // The empty rail's last-event time names its day once it is no longer
+    // today, as thread times do, so it moves on in place too (cas-0cd1).
+    for (const time of container.querySelectorAll<HTMLTimeElement>("time.attention-last-event[datetime]")) {
+      const label = lastEventLabel(time.dateTime, now);
+      if (time.textContent !== label) time.textContent = label;
+    }
+    return;
+  }
+  container.dataset.panelSignature = signature;
+  // A real change redraws; what the operator had open, folded and focused is
+  // carried over by each notice's and group's own key, never by position.
+  // A panel the page has just rebuilt from scratch (a shell rebuild after a
+  // phone wakes or a throttled tab catches up, cas-f486) has nothing in it
+  // to read, so it takes what the panel it replaced last held.
+  const memory = container.id || "attention-panel";
+  const kept = container.childElementCount > 0
+    ? attentionPanelState(container)
+    : rememberedPanelState.get(memory) ?? { open: new Set<string>(), folded: new Set<string>() };
+  renderAttentionPanelContent(container, items, callbacks, options);
+  restoreAttentionPanelState(container, kept);
+  watchAttentionPanelState(container, memory);
+  rememberedPanelState.set(memory, attentionPanelState(container));
+}
+
+/**
+ * What each Attention panel last held (cas-f486), kept beside the page, not
+ * in it: the page can replace the panel element wholesale, and the operator's
+ * opened Details, folded groups and focus must outlive that.
+ */
+const rememberedPanelState = new Map<string, AttentionPanelState>();
+
+/** Keep the remembered state current as the operator opens, folds and moves focus. */
+function watchAttentionPanelState(container: HTMLElement, memory: string): void {
+  if (container.dataset.stateWatched === "true") return;
+  container.dataset.stateWatched = "true";
+  const save = () => { if (container.isConnected) rememberedPanelState.set(memory, attentionPanelState(container)); };
+  container.addEventListener("toggle", save, true);
+  container.addEventListener("focusin", save);
+  container.addEventListener("click", () => queueMicrotask(save));
+  // Focus the operator moves elsewhere on the page is theirs: the panel stops
+  // claiming it. (A panel removed with focus inside fires no focusin, so its
+  // focus is still remembered for its replacement.)
+  const document = container.ownerDocument;
+  if (!watchedDocuments.has(document)) {
+    watchedDocuments.add(document);
+    document.addEventListener("focusin", (event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      for (const [key, state] of rememberedPanelState) {
+        const panel = document.getElementById(key);
+        if (state.focus !== undefined && !(panel?.contains(target))) rememberedPanelState.set(key, { ...state, focus: undefined });
+      }
+    });
+  }
+}
+const watchedDocuments = new WeakSet<Document>();
+
+/** Opened Details, folded groups and the focused control, keyed by notice or group and role. */
+interface AttentionPanelState { open: Set<string>; folded: Set<string>; focus?: string }
+
+/** The key of a panel control: its notice (or group, or the panel) and its role (cas-a5c6). */
+export function attentionControlKey(node: Element): string | undefined {
+  if (!(node instanceof HTMLElement) || !node.dataset.role) return undefined;
+  const notice = node.closest<HTMLElement>("[data-attention-id]")?.dataset.attentionId;
+  const group = node.closest<HTMLElement>("[data-group-key]")?.dataset.groupKey;
+  const scope = notice !== undefined ? `notice:${notice}` : group !== undefined ? `group:${group}` : "panel";
+  return `${scope}|${node.dataset.role}`;
+}
+
+/** The control in `root` with this key, if it is there. */
+export function findAttentionControl(root: ParentNode, key: string): HTMLElement | undefined {
+  return [...root.querySelectorAll<HTMLElement>("[data-role]")].find((node) => attentionControlKey(node) === key);
+}
+
+function attentionPanelState(container: HTMLElement): AttentionPanelState {
+  const open = new Set<string>();
+  for (const details of container.querySelectorAll<HTMLDetailsElement>("[data-attention-id] details[open]")) {
+    const id = details.closest<HTMLElement>("[data-attention-id]")?.dataset.attentionId;
+    if (id !== undefined) open.add(id);
+  }
+  const folded = new Set<string>();
+  for (const toggle of container.querySelectorAll<HTMLElement>("[data-group-key] [data-role='group-toggle'][aria-expanded='false']")) {
+    const key = toggle.closest<HTMLElement>("[data-group-key]")?.dataset.groupKey;
+    if (key !== undefined) folded.add(key);
+  }
+  const active = container.ownerDocument.activeElement;
+  const focus = active && container.contains(active) ? attentionControlKey(active) : undefined;
+  return { open, folded, focus };
+}
+
+function restoreAttentionPanelState(container: HTMLElement, state: AttentionPanelState): void {
+  for (const article of container.querySelectorAll<HTMLElement>("[data-attention-id]")) {
+    if (!state.open.has(article.dataset.attentionId!)) continue;
+    const details = article.querySelector<HTMLDetailsElement>("details");
+    if (details) details.open = true;
+  }
+  for (const section of container.querySelectorAll<HTMLElement>("[data-group-key]")) {
+    if (!state.folded.has(section.dataset.groupKey!)) continue;
+    const toggle = section.querySelector<HTMLElement>("[data-role='group-toggle']");
+    const body = section.querySelector<HTMLElement>(".attention-group-body");
+    toggle?.setAttribute("aria-expanded", "false");
+    if (body) body.hidden = true;
+  }
+  if (state.focus === undefined) return;
+  const document = container.ownerDocument;
+  if (document.activeElement && document.activeElement !== document.body && container.contains(document.activeElement)) return;
+  // The same control of the same notice, or nothing: never a neighbour's
+  // look-alike, which could be another notice's Dismiss (QA round 3 F01).
+  const key = state.focus;
+  const land = () => {
+    const lost = !document.activeElement || document.activeElement === document.body;
+    if (lost && container.isConnected) findAttentionControl(container, key)?.focus({ preventScroll: true });
+  };
+  land();
+  // A rebuilt page can still be hiding the panel's column at this point (the
+  // phone sheet is reopened after the panel is drawn, cas-f486): try again
+  // once the frame is laid out.
+  if (document.activeElement === document.body) document.defaultView?.requestAnimationFrame(land);
+}
+
+/**
+ * The empty rail's last event in the app's clock (cas-0cd1): "Last event
+ * 12:01" today, "Last event Sep 30, 12:01" on another day, the same as a
+ * thread time. The browser's locale format ("9/30/2026, 12:01:32 PM") read as
+ * a different clock from everything beside it.
+ */
+function lastEventLabel(createdAt: string, now: number): string {
+  const at = Date.parse(createdAt);
+  return Number.isFinite(at) ? `Last event ${stampLabel(at, now)}` : `Last event ${createdAt}`;
+}
+
+function renderAttentionPanelContent(
+  container: HTMLElement,
+  items: readonly AttentionItem[],
+  callbacks: AttentionPanelCallbacks,
+  options: AttentionPanelOptions,
 ): void {
   container.replaceChildren();
   const counts = attentionCounts(items);
@@ -268,7 +436,9 @@ export function renderAttentionPanel(
   header.append(heading);
   const infoItems = items.filter((item) => !item.acknowledgedAt && attentionCounts([item]).info === 1);
   if (infoItems.length > 0) {
-    header.append(button("Dismiss all info", "attention-dismiss-info", () => void callbacks.dismiss(infoItems)));
+    const dismissInfo = button("Dismiss all info", "attention-dismiss-info", () => void callbacks.dismiss(infoItems));
+    dismissInfo.dataset.role = "dismiss-info";
+    header.append(dismissInfo);
   }
   container.append(header, summary);
 
@@ -283,7 +453,7 @@ export function renderAttentionPanel(
     timestamp.className = "attention-last-event";
     if (latest) {
       timestamp.dateTime = latest.createdAt;
-      timestamp.textContent = `Last event ${new Date(latest.createdAt).toLocaleString()}`;
+      timestamp.textContent = lastEventLabel(latest.createdAt, options.now ?? Date.now());
     } else {
       timestamp.textContent = "No events recorded yet";
     }

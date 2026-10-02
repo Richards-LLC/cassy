@@ -22,12 +22,15 @@ export interface ConversationShellModel {
   launch?: "ready" | "grant";
 }
 
-/** The list header's New session control, or the grant path that replaces it. */
+/**
+ * The list header's New session control (cas-865c). It is named by its goal
+ * in both states: where no paired machine lets this browser start sessions
+ * yet, the same control opens the sheet's grant view, which explains the
+ * permission, instead of reading like a toggle ("Allow new sessions").
+ */
 export function newSessionButtonMarkup(launch: ConversationShellModel["launch"]): string {
   if (!launch) return "";
-  return launch === "ready"
-    ? '<button id="new-session-toggle" class="new-session-toggle" type="button" aria-haspopup="dialog"><span aria-hidden="true">+</span> New session</button>'
-    : '<button id="new-session-toggle" class="new-session-toggle" type="button" aria-haspopup="dialog" data-launch-grant="true">Allow new sessions</button>';
+  return `<button id="new-session-toggle" class="new-session-toggle" type="button" aria-haspopup="dialog"${launch === "grant" ? ' data-launch-grant="true"' : ""}><span aria-hidden="true">+</span> New session</button>`;
 }
 
 export const CONVERSATION_SEARCH_LABEL = "Search conversations";
@@ -90,9 +93,9 @@ export const composeFabMarkup = '<button id="compose-fab" class="compose-fab" ty
  * keeps its accessible name ("‹ Conversations", "Terminal view") the same at
  * every width. The project ellipsises (its title carries it whole) and the
  * host line ellipsises its machine · codename part while the connection state
- * after it stays visible. The codename has priority over the machine name
- * (journey F14, QA round 1 F01): the machine name ellipsises first, and
- * below 500px its OS word is dropped before that.
+ * after it stays visible. The machine name has priority over the generated
+ * codename (cas-766c): its OS word goes first, then the codename ellipsises
+ * and, with no room left, steps aside (fitMachineLine).
  */
 /** A machine label's trailing operating-system word, as in "Studio Mac · macOS". */
 const HOST_OS = /^(.*\S)(\s·\s(?:macOS|Linux|Windows|FreeBSD|OpenBSD|NetBSD|ChromeOS|iPadOS|iOS|Android|Ubuntu|Debian|Fedora|WSL))$/i;
@@ -106,13 +109,26 @@ export function hostMarkup(host: string): string {
   return match ? `${escapeHtml(match[1])}<span class="host-os">${escapeHtml(match[2])}</span>` : escapeHtml(host);
 }
 
+/**
+ * The phone's way to this session's Attention (cas-5c22). The rail that lists
+ * attention beside the thread on a desktop is not shown on a phone, so a live
+ * delivery problem had no sign there. Hidden until the session has an open
+ * item; main.ts fills the count and opens the rail as a sheet.
+ */
+const CONVERSATION_ATTENTION_BUTTON = `<button id="conversation-attention" class="conversation-attention" type="button" aria-haspopup="dialog" hidden><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M10 3.2 18 17H2z"/><path d="M10 8.5v3.6"/><path d="M10 14.6v.1"/></svg><span class="conversation-attention-count"></span></button>`;
+
+/** Badge text and accessible name for the session's open attention items. */
+export function conversationAttentionBadge(count: number): { hidden: boolean; text: string; label: string } {
+  return { hidden: count < 1, text: String(count), label: `Attention: ${count} item${count === 1 ? "" : "s"} for this session` };
+}
+
 export function conversationHeaderMarkup(model: ConversationShellModel): string {
   const host = model.host || "";
   // No project named: the codename is the title and the host line names only the machine (cas-1ca1 F03).
   const project = projectTitle(model.projectDir);
   const supervisor = model.supervisor || "Supervisor unavailable";
   const title = project ?? supervisor;
-  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button" aria-label="‹ Conversations"><span class="back-glyph">‹</span><span class="back-label"> Conversations</span></button>${cloudBrand()}<button id="conversation-terminal" type="button" aria-label="Terminal view">Terminal<span class="terminal-suffix"> view</span></button></div><div class="conversation-identity"><span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(host || model.supervisor || "?"))}</span><div class="id"><h1><b title="${escapeHtml(title)}"${project ? "" : ' class="codename"'}>${escapeHtml(title)}</b></h1><span class="conversation-host"><span class="host-where" title="${escapeHtml(project ? [host, supervisor].filter(Boolean).join(" · ") : host)}">${project ? `${host ? `<span class="host-machine">${hostMarkup(host)}</span><span class="host-sep"> · </span>` : ""}<span class="codename">${escapeHtml(supervisor)}</span>` : `<span class="host-machine">${hostMarkup(host)}</span>`}</span><span id="conversation-connection" role="status"></span></span></div></div></header>`;
+  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button" aria-label="‹ Conversations"><span class="back-glyph">‹</span><span class="back-label"> Conversations</span></button>${cloudBrand()}${CONVERSATION_ATTENTION_BUTTON}<button id="conversation-terminal" type="button" aria-label="Terminal view">Terminal<span class="terminal-suffix"> view</span></button></div><div class="conversation-identity"><span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(host || model.supervisor || "?"))}</span><div class="id"><h1><b title="${escapeHtml(title)}"${project ? "" : ' class="codename"'}>${escapeHtml(title)}</b></h1><span class="conversation-host"><span class="host-where" title="${escapeHtml(project ? [host, supervisor].filter(Boolean).join(" · ") : host)}">${project ? `${host ? `<span class="host-machine">${hostMarkup(host)}</span><span class="host-sep"> · </span>` : ""}<span class="codename">${escapeHtml(supervisor)}</span>` : `<span class="host-machine">${hostMarkup(host)}</span>`}</span><span id="conversation-connection" role="status"></span></span></div></div></header>`;
 }
 
 /** Attaching files from this browser has no transport yet; the clip stays out of the composer until it does. */
@@ -131,8 +147,9 @@ const SEND_GLYPH = '<svg class="send-glyph" viewBox="0 0 20 20" fill="currentCol
  *
  * The field and the button lead with the project, never the generated
  * codename (journey F13): "Message the cas-src supervisor" and "Send". The
- * codename is an identifier, not a name to read in prose; the header shows it,
- * and the button's accessible name, "Send to <codename>", keeps it whole.
+ * codename is an identifier, not a name to read in prose; the header shows it.
+ * The button's accessible name names the project's supervisor too, "Send to
+ * the cas-src supervisor" (cas-71f4, journey F20).
  */
 export function dressComposer(composer: HTMLElement, supervisor?: string, project?: string): void {
   composer.classList.add("conversation-composer");
@@ -160,7 +177,7 @@ export function dressComposer(composer: HTMLElement, supervisor?: string, projec
   const button = composer.querySelector<HTMLElement>("#message-send");
   if (button) {
     button.classList.add("send");
-    button.setAttribute("aria-label", `Send to ${supervisor || "supervisor"}`);
+    button.setAttribute("aria-label", project ? `Send to the ${project} supervisor` : "Send to the supervisor");
     button.replaceChildren();
     button.insertAdjacentHTML("afterbegin", SEND_GLYPH);
     const text = composer.ownerDocument.createElement("span"); text.className = "send-label"; text.textContent = "Send";
@@ -170,12 +187,14 @@ export function dressComposer(composer: HTMLElement, supervisor?: string, projec
 
 /**
  * The composer's placeholder wordings, longest first: the project's
- * supervisor, then the project alone, then the role. Never the codename, and
+ * supervisor, then the role. Never the codename, and
  * never a name cut inside the text (cas-1e0f QA F02).
  */
 export function composerPlaceholders(project?: string): string[] {
   const name = project?.trim();
-  return name ? [`Message the ${name} supervisor`, `Message ${name}`, COMPOSER_ROLE_PLACEHOLDER] : [COMPOSER_ROLE_PLACEHOLDER];
+  // cas-71f4 (journey F20): no "Message <project>" step, which read as
+  // messaging the project itself; the role is the short wording.
+  return name ? [`Message the ${name} supervisor`, COMPOSER_ROLE_PLACEHOLDER] : [COMPOSER_ROLE_PLACEHOLDER];
 }
 
 export const COMPOSER_ROLE_PLACEHOLDER = "Message the supervisor";
@@ -285,7 +304,8 @@ function contextRailMarkup(selected: boolean): string {
       + '<section class="context-section" data-section="attachments" aria-labelledby="context-attachments-heading" hidden><h2 id="context-attachments-heading">Attachments</h2><ul class="context-list context-attachments"></ul></section>'
       + '<section class="context-section" data-section="attention" hidden><div id="conversation-attention-slot"></div></section>'
     : "";
-  return `<aside class="conversation-context" aria-label="Conversation context" data-open="false" aria-hidden="true">${sections}</aside>`;
+  const close = selected ? '<button class="context-sheet-close" type="button" aria-label="Close attention">×</button>' : "";
+  return `<aside class="conversation-context" aria-label="Conversation context" data-open="false" aria-hidden="true">${close}${sections}</aside>`;
 }
 
 /** Appearance & commands as a header icon button (P13): out of the phone thumb zone, named for assistive tech. */
@@ -299,7 +319,7 @@ export function conversationShellMarkup(model: ConversationShellModel): string {
   const welcomePairs = !model.selected && model.loaded && !model.paired;
   return `<div class="conversation-shell${model.selected ? " thread-open" : ""}${welcomePairs ? " welcome-pairs" : ""}${model.machineId ? ` ${machineAccentClass(model.machineId)}` : ""}">
     <aside class="conversation-sidebar" aria-label="Supervisor conversations">
-      <header class="conversation-list-heading"><div class="conversation-list-top">${cloudBrand()}${appearanceButtonMarkup()}</div><div class="conversation-list-title"><h1>Conversations</h1><span class="conversation-list-actions">${newSessionButtonMarkup(model.launch)}<button id="pair-toggle"${welcomePairs ? ' class="primary"' : ""} type="button">Pair a machine</button></span></div><p>Your projects. Your supervisors.</p>${model.paired ? conversationSearchMarkup(model.searchQuery, model.keyboardHint ?? true) : ""}</header>
+      <header class="conversation-list-heading"><div class="conversation-list-top">${cloudBrand()}<span class="conversation-list-tools"><button id="pair-toggle"${welcomePairs ? ' class="primary"' : ""} type="button">Pair a machine</button>${appearanceButtonMarkup()}</span></div><div class="conversation-list-title"><h1>Conversations</h1>${model.launch ? `<span class="conversation-list-actions">${newSessionButtonMarkup(model.launch)}</span>` : ""}</div><p>Your projects. Your supervisors.</p>${model.paired ? conversationSearchMarkup(model.searchQuery, model.keyboardHint ?? true) : ""}</header>
       <nav id="conversation-list" aria-label="Choose a supervisor"></nav>
       <div id="conversation-empty" class="conversation-empty" hidden></div>
       ${model.paired ? composeFabMarkup : ""}
@@ -313,21 +333,39 @@ export function conversationShellMarkup(model: ConversationShellModel): string {
 }
 
 /** Rehouse existing owned regions; retain terminal surfaces and composer APIs. */
+/** The room a machine name keeps on a "machine · codename" line, in ch (cas-766c). */
+export const MACHINE_KEEP_CH = 16;
+/** The least a codename shows before it steps aside for the machine, in ch (cas-766c). */
+export const CODENAME_KEEP_CH = 8;
+
 /**
- * cas-71af (e918 QA F01): a "machine · codename" line whose machine name cannot
- * keep a letter and its ellipsis (2ch) beside the whole codename drops the
- * machine and its separator instead of shrinking it to a glyph sliver; the
- * line's title still names it. `available` is the width the line may take.
- * Decided from widths that do not depend on the current state (the codename's
- * full width, the space on offer), so it never flips back and forth.
+ * Fit a "machine · codename" line to `available` px (cas-766c). The machine
+ * name is the one thing that says where a conversation runs, so it holds its
+ * place; the generated codename yields:
+ * 1. everything whole, if it fits;
+ * 2. else the machine's OS word goes ("Studio Mac · macOS" → "Studio Mac"),
+ *    so it is never cut mid-word;
+ * 3. the codename ellipsises (CSS), down to CODENAME_KEEP_CH, while the
+ *    machine keeps up to MACHINE_KEEP_CH;
+ * 4. with no room even for that, the codename and its separator step aside
+ *    and the machine ellipsises alone.
+ * The line's title always carries the whole "machine · codename". Decided
+ * from widths that don't depend on the current state, so it never flips.
  */
 export function fitMachineLine(line: HTMLElement | null | undefined, available: number): void {
   if (!line) return;
+  line.classList.remove("os-dropped", "codename-squeezed", "machine-long", "machine-squeezed");
   const codename = line.querySelector<HTMLElement>(":scope > .codename");
   const machine = line.querySelector<HTMLElement>(":scope > .host-machine, :scope > .proj2-machine");
-  if (!codename || !machine || !(available > 0)) { line.classList.remove("machine-squeezed"); return; }
+  if (!codename || !machine || !(available > 0)) return;
   const ch = parseFloat(getComputedStyle(codename).fontSize) * 0.6;
-  line.classList.toggle("machine-squeezed", codename.scrollWidth + 5 * ch > available + 1);
+  const separator = line.querySelector<HTMLElement>(":scope > .host-sep, :scope > .proj2-sep");
+  const gap = separator?.getBoundingClientRect().width || 3 * ch;
+  if (machine.scrollWidth + gap + codename.scrollWidth <= available + 1) return;
+  if (machine.querySelector(".host-os")) line.classList.add("os-dropped");
+  if (machine.scrollWidth > MACHINE_KEEP_CH * ch) line.classList.add("machine-long");
+  const kept = Math.min(machine.scrollWidth, MACHINE_KEEP_CH * ch);
+  if (kept + gap + Math.min(codename.scrollWidth, CODENAME_KEEP_CH * ch) > available + 1) line.classList.add("codename-squeezed");
 }
 
 /** The conversation header's host line, fitted to the room beside its connection state. */

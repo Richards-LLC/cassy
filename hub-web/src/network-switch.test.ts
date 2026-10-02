@@ -114,6 +114,95 @@ describe("network hints (cas-0978)", () => {
     expect(sup.send("patient-pelican-9", "GetState")).toBe(true);
   });
 
+  it("holds a supervisor message while the machine is unsteady, and lets it go when a heartbeat answers (cas-a6f0)", async () => {
+    vi.stubGlobal("window", globalThis);
+    const onAttachState = vi.fn();
+    const { sup, internals } = supervisor({ onAttachState });
+    const machine = fakeSocket();
+    internals.machineSocket = machine;
+    internals.machineSocketReady = true;
+    const fields = internals as unknown as {
+      missedHeartbeats: number;
+      healthPing?: { id: number; startedAt: number };
+      attachLifecycles: Map<string, { phase: string }>;
+      handleMachineMessage(input: string): Promise<void>;
+    };
+    internals.lifecycle = { phase: "live", stage: "live" };
+    fields.attachLifecycles.set("patient-pelican-9", { phase: "live" });
+    const message = { SendMessage: { target: "t", text: "x" } };
+
+    // One unanswered heartbeat is not yet unsteady: the message goes.
+    fields.missedHeartbeats = 1;
+    expect(sup.holdsMessages()).toBe(false);
+    expect(sup.send("patient-pelican-9", message, "ref-1")).toBe(true);
+
+    // Two are: the header says Unsteady, and the message is held, not lost.
+    fields.missedHeartbeats = 2;
+    machine.send.mockClear();
+    expect(sup.holdsMessages()).toBe(true);
+    expect(sup.send("patient-pelican-9", message, "ref-2")).toBe(false);
+    expect(machine.send).not.toHaveBeenCalled();
+    expect(sup.send("patient-pelican-9", "GetState"), "reads and keystrokes are not held").toBe(true);
+
+    // The heartbeat answers: steady again, and every live attach is announced
+    // so the page sends what it held.
+    fields.healthPing = { id: 41, startedAt: performance.now() };
+    onAttachState.mockClear();
+    await fields.handleMachineMessage(JSON.stringify({ channel: "health", pong: 41 }));
+    expect(sup.holdsMessages()).toBe(false);
+    expect(onAttachState).toHaveBeenCalledWith("patient-pelican-9", expect.objectContaining({ phase: "live" }));
+  });
+
+  it("does not announce attaches when a heartbeat answers a steady machine", async () => {
+    vi.stubGlobal("window", globalThis);
+    const onAttachState = vi.fn();
+    const { internals } = supervisor({ onAttachState });
+    const fields = internals as unknown as { healthPing?: { id: number; startedAt: number }; attachLifecycles: Map<string, { phase: string }>; handleMachineMessage(input: string): Promise<void> };
+    internals.lifecycle = { phase: "live", stage: "live" };
+    fields.attachLifecycles.set("patient-pelican-9", { phase: "live" });
+    fields.healthPing = { id: 42, startedAt: performance.now() };
+    await fields.handleMachineMessage(JSON.stringify({ channel: "health", pong: 42 }));
+    expect(onAttachState).not.toHaveBeenCalled();
+  });
+
+  it("opens no machine socket for an opening abandoned while its ticket was on the way (cas-7b31)", async () => {
+    vi.stubGlobal("window", globalThis);
+    const opened: string[] = [];
+    vi.stubGlobal("WebSocket", class { static CONNECTING = 0; static OPEN = 1; readyState = 0; constructor(url: string) { opened.push(String(url)); } close() {} send() {} });
+    const { internals } = supervisor();
+    (internals as unknown as { desired: boolean; machine: { baseUrl: string } }).desired = true;
+    let answer!: (value: unknown) => void;
+    vi.spyOn(internals, "request").mockReturnValue(new Promise((resolve) => { answer = resolve; }));
+    const opening = internals.openMachineSocket("patient-pelican-9");
+    // The network changed: every socket, and this opening, is abandoned.
+    internals.abandonSockets("Reconnected after the network changed");
+    answer({ ticket: "late" });
+    expect(await opening).toBe(true);
+    expect(opened, "the stale opening opened nothing").toEqual([]);
+    // A fresh opening still opens its socket.
+    vi.spyOn(internals, "request").mockResolvedValue({ ticket: "fresh" });
+    void internals.openMachineSocket("patient-pelican-9");
+    await vi.waitFor(() => expect(opened).toHaveLength(1));
+    expect(opened[0]).toContain("ticket=fresh");
+  });
+
+  it("beats no heartbeat after a pairing refusal, so the machine never reads live again by itself (cas-7b31)", async () => {
+    vi.stubGlobal("window", globalThis);
+    const onState = vi.fn();
+    const { internals } = supervisor({ onState });
+    const fields = internals as unknown as { desired: boolean; heartbeat(): Promise<void>; startHeartbeat(): void; heartbeatTimer?: number; blockAuthentication(kind: string, detail: string): void };
+    fields.desired = true;
+    internals.lifecycle = { phase: "live", stage: "live" };
+    fields.startHeartbeat();
+    vi.spyOn(internals, "request").mockRejectedValue(new Error("401"));
+    fields.blockAuthentication("revoked", "pairing was revoked");
+    expect(fields.heartbeatTimer, "the heartbeat stops with the refusal").toBeUndefined();
+    onState.mockClear();
+    await fields.heartbeat();
+    expect(onState, "a stray beat changes nothing").not.toHaveBeenCalled();
+    expect(internals.lifecycle).toMatchObject({ phase: "failed", authFailure: "revoked" });
+  });
+
   it("waits at most 10 s between reconnects and gives a doubted socket 3 s to answer", () => {
     expect(MACHINE_RETRY_CEILING_MS).toBe(10_000);
     expect(SOCKET_PROBE_TIMEOUT_MS).toBe(3_000);
@@ -134,6 +223,16 @@ describe("held sends (cas-0978)", () => {
     expect("held" in held.value && held.value.held).toBeFalsy();
     expect(history.nextReceiptCheck(9_000)).toBeGreaterThan(0);
     expect(history.release("send-1"), "released once").toBe(false);
+  });
+
+  it("settles in-flight sends as Not confirmed when no receipt can come, leaving held ones alone (cas-a6f0)", () => {
+    const history = new ConversationHistory();
+    history.submit("on-wire", "patient-pelican-9", "Sent before the revoke", 1_000);
+    history.hold("held", "patient-pelican-9", "Waiting", 2_000);
+    expect(history.unconfirmInFlight(3_000)).toEqual(["on-wire"]);
+    const states = Object.fromEntries(history.events.flatMap((event) => event.kind === "send" ? [[event.value.id, event.value.state]] : []));
+    expect(states).toEqual({ "on-wire": "unconfirmed", held: "sending" });
+    expect(history.unconfirmInFlight(4_000), "once").toEqual([]);
   });
 
   it("turns a held send that never went out into Not sent", () => {

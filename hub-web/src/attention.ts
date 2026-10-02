@@ -1,4 +1,5 @@
 import type { AttentionItem } from "./types";
+import { stampLabel } from "./thread-model";
 
 export type AttentionSeverity = "critical" | "warning" | "info";
 export type AttentionAction = "repair" | "view_pane" | "retry" | "open_pr" | "none";
@@ -75,13 +76,17 @@ const MACHINE_EVENT_TEMPLATES: Record<string, DeterministicTemplate> = {
   session_unreachable: { headline: "Session unreachable", severity: "critical", action: "view_pane" },
   pane_exited: { headline: "Worker stopped", detail: "Open the session to inspect the worker and its terminal output.", severity: "critical", action: "view_pane" },
   awaiting_merge: { headline: "Change is ready to merge", severity: "warning", action: "open_pr" },
+  // cas-e829: a relay-watchdog notice; the supervisor never saw an update.
+  delivery_stall: { headline: "The supervisor missed an update", severity: "warning", action: "view_pane" },
   retry: { headline: "Operation will retry", severity: "warning", action: "retry" },
   retry_loop: { headline: "Operation is retrying", severity: "warning", action: "retry" },
   retrying: { headline: "Operation is retrying", severity: "warning", action: "retry" },
-  hub_disconnected: { headline: "Hub connection lost", severity: "warning", action: "retry" },
-  reconnecting: { headline: "Reconnecting to hub", severity: "warning", action: "retry" },
-  connection_degraded: { headline: "Connection degraded", severity: "warning", action: "none" },
-  degraded_connection: { headline: "Connection degraded", severity: "warning", action: "none" },
+  // cas-be76: the machine, as the banner names it (the rail groups cards
+  // under the machine's label), never "the hub" or its raw host.
+  hub_disconnected: { headline: "Lost connection to the machine", severity: "warning", action: "retry" },
+  reconnecting: { headline: "Reconnecting to the machine", severity: "warning", action: "retry" },
+  connection_degraded: { headline: "Connection unsteady", severity: "warning", action: "none" },
+  degraded_connection: { headline: "Connection unsteady", severity: "warning", action: "none" },
   config_drift: { headline: "Configuration changed", severity: "warning", action: "none" },
   checkpoint: { headline: "Checkpoint saved", severity: "info", action: "none" },
   checkpoint_recorded: { headline: "Checkpoint saved", severity: "info", action: "none" },
@@ -426,6 +431,19 @@ export function attentionSummary(counts: AttentionCounts): AttentionSummary {
 
 export function dismissableInfoItems(items: readonly AttentionItem[]): AttentionItem[] {
   return items.filter((item) => !item.acknowledgedAt && severityForEvent(item.kind, item.severity) === "info");
+}
+
+/**
+ * An Attention card's time (cas-5c22): its age today ("now", "23m", "4h"),
+ * and its date and time on any earlier day ("Sep 30, 17:49"), as conversation
+ * turns read (cas-e829). "1d" told the operator nothing about when.
+ */
+export function attentionTimeLabel(createdAt: string, now = Date.now()): string {
+  const at = Date.parse(createdAt);
+  if (!Number.isFinite(at)) return relativeTime(createdAt, now);
+  const date = new Date(at); const today = new Date(now);
+  const sameDay = date.getFullYear() === today.getFullYear() && date.getMonth() === today.getMonth() && date.getDate() === today.getDate();
+  return sameDay ? relativeTime(createdAt, now) : stampLabel(at, now) ?? relativeTime(createdAt, now);
 }
 
 export function relativeTime(createdAt: string, now = Date.now()): string {

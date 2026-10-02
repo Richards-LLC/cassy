@@ -73,7 +73,7 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await expect(composer).toHaveValue("");
     await composer.fill("Is the Mac build green?");
     const sent = hub.nextSend();
-    await page.getByRole("button", { name: `Send to ${OTTER}`, exact: true }).click();
+    await page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true }).click();
     expect(await sent).toMatchObject({ machine: "studio", target: OTTER, text: "Is the Mac build green?" });
   });
 
@@ -81,7 +81,7 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await list.getByRole("button", { name: /cas-src/ }).click();
     await expect(page.locator(".conversation-host")).toContainText("Atlas · Linux");
     await expect(composer).toHaveValue("Draft: ask about the flaky pairing test");
-    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
   });
 
   await journey.stage("Reopen the session picker after closing it", async () => {
@@ -91,7 +91,7 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     // The list search and the Terminal view button name the palette chord the
     // same way on this (Linux) browser: Ctrl K, not ⌘K (journey F16).
     await expect(page.getByRole("searchbox", { name: "Search conversations" })).toHaveAttribute("placeholder", "Search conversations (Ctrl K)");
-    await page.getByRole("button", { name: "Terminal view" }).click();
+    await page.locator("#conversation-terminal").click();
     await expect(toggle).toBeVisible();
     // Its accessible name carries the visible chord, so "click Ctrl K" works
     // for a voice user (label in name, cas-3400 QA F02).
@@ -281,7 +281,7 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await expect(composer).toHaveValue("Back from the terminal");
     await composer.fill("");
     // With the mouse: the same.
-    await page.getByRole("button", { name: "Terminal view" }).click();
+    await page.locator("#conversation-terminal").click();
     await expect(back).toBeVisible();
     await back.click();
     await expect(composer).toBeFocused();
@@ -290,7 +290,7 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
   await journey.stage("Keyboard focus lands somewhere real on every route", async () => {
     // cas-7eaf: none of these routes leaves focus on <body>.
     const offBody = () => page.evaluate(() => document.activeElement !== document.body && document.activeElement !== null);
-    const terminal = page.getByRole("button", { name: "Terminal view" });
+    const terminal = page.locator("#conversation-terminal");
     const back = page.locator("#conversation-return");
     // Entering Terminal view from the keyboard lands in the terminal (or, before
     // a pane attaches, on the way back), never on <body>.
@@ -326,15 +326,15 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     // The list stays beside the thread on a desktop (cas-479a).
     await list.getByRole("button", { name: /cas-src/ }).focus();
     await page.keyboard.press("Enter");
-    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     await expect(composer).toBeFocused();
     await list.getByRole("button", { name: /gabber-studio/ }).click();
-    await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true })).toBeVisible();
     await expect(composer).toBeFocused();
   });
 
   await journey.stage("Read every session's details on a phone", async () => {
-    await page.getByRole("button", { name: "Terminal view" }).click();
+    await page.locator("#conversation-terminal").click();
     await page.setViewportSize({ width: 390, height: 844 });
     const picker = page.locator("#session-picker");
     await page.locator("#session-picker-toggle").click();
@@ -393,6 +393,19 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await page.reload();
     await expect(list.getByRole("button", { name: /orion/ })).toBeVisible();
     expect([await colour(/cas-src/), await colour(/gabber-studio/)]).toEqual([atlas, studio]);
+    // cas-7752: the draft started on the Linux machine survived the pair link
+    // opened in this tab and the reload: it is there when I return to it...
+    await list.getByRole("button", { name: /cas-src/ }).click();
+    await expect(composer).toHaveValue("Draft: ask about the flaky pairing test");
+    // ...and once it is sent, it does not come back after another reload.
+    const sent = hub.nextSend();
+    await page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }).click();
+    expect(await sent).toMatchObject({ machine: "atlas", target: PELICAN, text: "Draft: ask about the flaky pairing test" });
+    await expect(composer).toHaveValue("");
+    await page.reload();
+    await list.getByRole("button", { name: /cas-src/ }).click();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
+    await expect(composer).toHaveValue("");
   });
 
   await journey.stage("Know each session and machine by name in Terminal view", async () => {
@@ -400,7 +413,7 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     // and the conversation header do, and the machine rail's letters come from
     // the machine's own name ("Atlas · Linux" read "A·").
     await list.getByRole("button", { name: /cas-src/ }).click();
-    await page.getByRole("button", { name: "Terminal view" }).click();
+    await page.locator("#conversation-terminal").click();
     await expect(page.locator(".session-picker-name")).toHaveText("cas-src");
     // Just after the reload there is no latency sample yet: the header says it
     // is checking, never "Status unavailable" beside a green dot, and then
@@ -424,17 +437,19 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     let refused = 0;
     await page.route(heartbeat, (route) => { refused += 1; return route.abort(); });
     const shows = (text: string) => async () => (await latency.textContent()) === text;
-    // Degraded after two missed heartbeats (DEGRADED_AFTER_MISSED_HEARTBEATS).
-    await within(page, "Degraded after missed heartbeats", () => refused, 3, shows("Degraded"));
+    // Unsteady after two missed heartbeats (DEGRADED_AFTER_MISSED_HEARTBEATS; cas-a6f0 renamed the word).
+    await within(page, "Unsteady after missed heartbeats", () => refused, 3, shows("Unsteady"));
     await expect(chip).toHaveClass(/\bdegraded\b/);
     await expect(railDot).toHaveClass(/\bdegraded\b/);
     // cas-71af (bf07 QA F01): the chip's tooltip reads the same machine state
     // as the chip, not the terminal attach's "live".
-    await expect(chip).toHaveAttribute("title", /^degraded · \d+ missed$/);
-    // bf07 QA F02: a longer outage does not leave the chip Degraded. After
+    await expect(chip).toHaveAttribute("title", /^unsteady · \d+ missed$/);
+    // cas-a6f0 (journey F9): the rail beside it does not say All clear.
+    await expect(page.locator("#attention-panel .attention-empty")).toHaveText(/^Not all clear\. Atlas · Linux: connection unsteady — checking\./);
+    // bf07 QA F02: a longer outage does not leave the chip Unsteady. After
     // four missed heartbeats the machine reconnects, and it comes back.
     // Reconnecting after four (RECONNECT_AFTER_MISSED_HEARTBEATS).
-    await within(page, "no longer Degraded once the machine reconnects", () => refused, 6, async () => !(await shows("Degraded")()));
+    await within(page, "no longer Unsteady once the machine reconnects", () => refused, 6, async () => !(await shows("Unsteady")()));
     await page.unroute(heartbeat);
     await within(page, "a latency sample again after the outage", probes, 4, sample);
     await expect(chip).not.toHaveClass(/\bdegraded\b/);
@@ -545,7 +560,7 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     const jumpCount = await jumps.count();
     await page.keyboard.press("Escape");
     await expect(palette).toBeHidden();
-    await page.getByRole("button", { name: "Terminal view" }).click();
+    await page.locator("#conversation-terminal").click();
     const toggle = page.locator("#session-picker-toggle");
     await toggle.click();
     const picker = page.locator("#session-picker");
@@ -720,7 +735,7 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     hub.machine("alpha").sessions.push(twin(), { name: PELICAN, supervisor: PELICAN, project_dir: "/projects/cas-src", workers: [], liveness: "live" });
     hub.machine("atlas").sessions.push(twin());
     await page.reload();
-    const terminal = page.getByRole("button", { name: "Terminal view" });
+    const terminal = page.locator("#conversation-terminal");
     if (await terminal.isVisible()) await terminal.click();
     await page.locator("#machine-rail-list .machine-icon").filter({ hasText: "AT" }).first().click();
     const board = page.locator("#fleet-board");

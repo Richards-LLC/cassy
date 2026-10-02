@@ -1,4 +1,4 @@
-import { machineFooterMarkup, pairedMachinesDialogMarkup, renderPairedMachines } from '../src/paired-machines';
+import { machineFooterMarkup, orderPairedMachines, pairedMachinesDialogMarkup, renderPairedMachines } from '../src/paired-machines';
 import { ConversationList, groupConversationRows, type ConversationRow } from '../src/conversation-list';
 import { ConversationHistory } from '../src/conversation-history';
 import { ConversationView } from '../src/conversation-view';
@@ -92,7 +92,7 @@ export function fixtureManySessionRows(): ConversationRow[] {
 export function renderConversationFixture(app: HTMLElement, state: string): void {
   const sessions = state === 'conversation-sessions' || state === 'conversation-earlier';
   const supervisor = sessions ? 'calm-puma-34' : FIXTURE_SUPERVISOR;
-  const selected = !['conversations-list', 'conversations-sessions', 'conversations-loading', 'conversations-unpaired', 'paired-machines'].includes(state);
+  const selected = !['conversations-list', 'conversations-sessions', 'conversations-loading', 'conversations-unpaired', 'paired-machines', 'paired-machines-down'].includes(state);
   // Catalog loading: nothing is known yet, so no machine, no row, no pairing offer.
   const loading = state === 'conversations-loading';
   // First run: the catalog is loaded and empty, so the welcome offers pairing.
@@ -112,7 +112,10 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
   new ConversationList().render(app.querySelector('#conversation-list')!, listRows, () => {}, async () => {});
   // The End session confirmation, open on the idle session (cas-55a4).
   if (state === 'conversation-sessions') app.querySelectorAll<HTMLButtonElement>('#conversation-list .conversation-end-ask')[1]?.click();
-  const machines = loading || unpaired ? [] : FIXTURE_MACHINES;
+  // cas-0739: Bench can't be reached; the register lists it first and the footer names it.
+  const machines = loading || unpaired ? [] : state === 'paired-machines-down'
+    ? orderPairedMachines(FIXTURE_MACHINES.map((machine) => machine.id === 'bench-1' ? { ...machine, connection: "Can't reach · retrying", connected: false, lastSeen: 'Not yet seen in this visit' } : machine))
+    : FIXTURE_MACHINES;
   // The list's empty line, exactly as main.ts renderConversationList sets it.
   const empty = app.querySelector<HTMLElement>('#conversation-empty')!;
   empty.hidden = listRows.length > 0;
@@ -127,7 +130,7 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
   const dialog = app.querySelector<HTMLDialogElement>('#paired-machines-dialog')!;
   app.querySelector<HTMLElement>('#paired-machines-toggle')!.onclick = () => dialog.showModal();
   app.querySelector<HTMLElement>('#paired-machines-close')!.onclick = () => dialog.close();
-  if (state === 'paired-machines') dialog.showModal();
+  if (state === 'paired-machines' || state === 'paired-machines-down') dialog.showModal();
   if (!selected) return;
   if (state === 'conversation-pairs') { renderPairsSheet(app, supervisor); return; }
   const history = new ConversationHistory();

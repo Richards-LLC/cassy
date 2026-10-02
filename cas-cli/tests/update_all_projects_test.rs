@@ -460,15 +460,18 @@ fn all_projects_migrates_a_legacy_store_before_reading_its_rules() {
         let _ = std::fs::remove_file(project.join(".cas").join(name));
     }
     {
+        // The current entries/rules schema without the columns m259/m260 add.
+        // (SQLite's DROP COLUMN cannot rewrite this commented CREATE TABLE.)
+        let legacy = cas_store::ENTRIES_RULES_SCHEMA
+            .lines()
+            .filter(|line| !line.contains("operator_authority") && !line.contains("cas-5372"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .replace(",\n    origin_project TEXT\n)", "\n)");
+        assert!(!legacy.contains("origin_project") && !legacy.contains("operator_authority"));
         let conn = open_project_db(&project);
-        conn.execute_batch(cas_store::ENTRIES_RULES_SCHEMA)
-            .expect("create the entries/rules-only store");
-        conn.execute_batch(
-            "ALTER TABLE rules DROP COLUMN origin_project;
-             ALTER TABLE rules DROP COLUMN operator_authority;
-             ALTER TABLE entries DROP COLUMN origin_project;",
-        )
-        .expect("rewind rules and entries to their legacy shape");
+        conn.execute_batch(&legacy)
+            .expect("create the legacy entries/rules-only store");
         assert!(!column_exists(&conn, "rules", "operator_authority"));
     }
 

@@ -30962,7 +30962,7 @@ mod epic_status_gate_tests {
     #[test]
     fn epic_close_fetches_a_missing_child_anchor_by_sha_cas_ba4a() {
         let remote = tempfile::tempdir().unwrap();
-        git(remote.path(), &["init", "-q", "--bare"]);
+        git(remote.path(), &["init", "-q", "--bare", "-b", "main"]);
         git(
             remote.path(),
             &["config", "uploadpack.allowAnySHA1InWant", "true"],
@@ -30986,6 +30986,9 @@ mod epic_status_gate_tests {
         // The PR ref keeps the delivery on origin after the lane moves on.
         git(a, &["push", "-q", "origin", "HEAD:refs/pull/1/head"]);
 
+        // `--no-local` transfers only objects reachable from the cloned
+        // heads; a local-path clone would hardlink the whole object store,
+        // anchor included.
         let clone = tempfile::tempdir().unwrap();
         let p = clone.path();
         git(
@@ -30993,6 +30996,7 @@ mod epic_status_gate_tests {
             &[
                 "clone",
                 "-q",
+                "--no-local",
                 remote.path().to_str().unwrap(),
                 p.to_str().unwrap(),
             ],

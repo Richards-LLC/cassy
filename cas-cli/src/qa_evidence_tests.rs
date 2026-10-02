@@ -1427,6 +1427,46 @@ fn deployed_bundle_for_another_commit_or_without_proof_is_refused() {
 }
 
 #[test]
+fn secret_scan_accepts_exact_redaction_placeholders_in_each_shape() {
+    for value in ["REDACTED", "[REDACTED]", "<redacted>", "***", ""] {
+        let json_value = serde_json::to_string(value).unwrap();
+        for text in [
+            format!(r#"{{"name":"Authorization","value":{json_value}}}"#),
+            format!("Cookie: {value}\n"),
+            format!(r#"{{"cookies":[{{"name":"session","value":{json_value}}}]}}"#),
+        ] {
+            assert_eq!(first_secret(&text), None, "placeholder in {text}");
+        }
+    }
+}
+
+#[test]
+fn secret_scan_refuses_real_values_in_each_shape() {
+    for value in ["12345678", "REDACTED-real", "[REDACTED]suffix", "REDACTED real"] {
+        let json_value = serde_json::to_string(value).unwrap();
+        for text in [
+            format!(r#"{{"name":"Set-Cookie","value":{json_value}}}"#),
+            format!("Authorization: {value}\n"),
+            format!(r#"{{"cookies":[{{"value":{json_value}}}]}}"#),
+        ] {
+            assert!(first_secret(&text).is_some(), "real value in {text}");
+        }
+    }
+}
+
+#[test]
+fn secret_scan_checks_every_value_next_to_redactions() {
+    for text in [
+        r#"[{"name":"Cookie","value":"REDACTED"},{"name":"Authorization","value":"12345678"}]"#,
+        "Cookie: REDACTED\nAuthorization: 12345678\n",
+        r#"{"cookies":[{"value":"12345678"},{"value":"[REDACTED]"}]}"#,
+        r#"{"cookies":[{"value":"[REDACTED]"},{"value":"12345678"}]}"#,
+    ] {
+        assert!(first_secret(text).is_some(), "mixed values in {text}");
+    }
+}
+
+#[test]
 fn deployed_bundle_carrying_credentials_is_refused_without_echoing_them() {
     // A session cookie copied into a text artifact.
     let fx = Fixture::new();

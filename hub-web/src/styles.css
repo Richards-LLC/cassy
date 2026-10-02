@@ -4192,6 +4192,13 @@ button.chip:disabled { cursor: default; }
 /* Details hangs below the line, so the line never moves when it appears or opens. */
 .conversation-pane-slot .pane-grid > .conversation-opening { position: relative; }
 .conversation-opening > .connection-details { position: absolute; top: calc(50% + 22px); left: 50%; translate: -50% 0; width: min(calc(100% - 80px), 34ch); max-height: calc(50% - 30px); overflow: auto; color: var(--ink-mid); font-size: 12px; }
+/* cas-fc2c: kept messages show before the session attaches. The thread takes
+ * the space and the opening/reconnecting card sits under it as one compact
+ * block, its details in flow rather than overlaid on the centre. */
+.conversation-pane-slot .pane-grid.has-early-thread { display: flex; flex-direction: column; }
+.conversation-pane-slot .pane-grid.has-early-thread > .conversation-early { flex: 1 1 auto; height: auto; min-height: 0; }
+.conversation-pane-slot .pane-grid.has-early-thread > .empty { flex: none; height: auto; padding: 12px 20px 16px; gap: 6px; border-top: 1px solid var(--line-subtle); }
+.conversation-pane-slot .pane-grid.has-early-thread > .conversation-opening > .connection-details { position: static; translate: none; width: auto; max-height: none; }
 
 /* cas-537f: what Enter in a search field opens is marked while the field has
    focus: a raised fill and an "Enter" hint. The same row is the field's

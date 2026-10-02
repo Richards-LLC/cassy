@@ -799,3 +799,36 @@ test("HUB-J12 network switch: an oversized stored waiting message is not sent af
     expect(errors).toEqual([]);
   });
 });
+
+// cas-fc2c: a phone that reloads the tab while the session cannot attach yet
+// still shows the conversation's kept messages straight away: the waiting
+// message is on screen, saying it waits, before the session is back, and it
+// goes out once when the session attaches.
+test("HUB-J12 network switch: kept messages show before the session attaches after a reload (cas-fc2c)", async ({ page }) => {
+  const { hub, clock, held } = await connected(page);
+  hub.upstreamLost(PELICAN);
+  await sendNow(page, "Kept while the session is away");
+  await expect(held).toHaveText("Waiting for the connection — sends when it's back");
+  // The reloaded page's attach is held: the session cannot attach yet.
+  const releaseAttach = hub.holdAttach(PELICAN);
+  await page.reload();
+  await chooseConversation(page);
+  await expect(held).toHaveText("Waiting for the connection — sends when it's back");
+  await expect(page.getByRole("log").locator(".bub").filter({ hasText: "Kept while the session is away" })).not.toContainText(/Sending…|Delivered/);
+  expect(sentTimes(hub, "Kept while the session is away")).toBe(0);
+  // A keyboard reader is in the thread when the session comes back.
+  await page.locator(".conversation-reading.thread").focus();
+  // The session comes back: the thread is the same one, and the message goes once.
+  hub.upstreamBack(PELICAN);
+  const next = hub.nextSend();
+  releaseAttach();
+  await clock.advance(1_000);
+  expect((await next).text).toBe("Kept while the session is away");
+  await expect(held).toHaveCount(0);
+  // The reader stays in the thread that took over, not on the page.
+  await expect(page.locator(".conversation-reading.thread")).toBeFocused();
+  await expect(page.getByRole("log")).toHaveCount(1);
+  await expect(page.getByRole("log").locator(".bub").filter({ hasText: "Kept while the session is away" })).toHaveCount(1);
+  await clock.advance(15_000);
+  expect(sentTimes(hub, "Kept while the session is away")).toBe(1);
+});

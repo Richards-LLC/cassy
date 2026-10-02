@@ -12,7 +12,9 @@ const SHARK = "gabber-studio-wild-shark-68";
 const session = (name: string, supervisor: string, lastActivityAt: string, lastActivity: string) => ({
   name, supervisor, project_dir: "/projects/gabber-studio", workers: [], liveness: "live" as const, last_activity_at: lastActivityAt, last_activity: lastActivity,
 });
-const ATLAS: Machine = {
+// Stamped per test, never at file load: a stamp taken between tests picks up
+// the previous test's elapsed time and lands late (cas-4e52 mechanism).
+const atlas = (): Machine => ({
   id: "atlas",
   label: "Atlas · Linux",
   sessions: [
@@ -20,14 +22,14 @@ const ATLAS: Machine = {
     session(PUMA, "calm-puma-34", journeyStamp(-2 * 60_000), "supervisor → bright-robin-85"),
     session(SHARK, "wild-shark-68", journeyStamp(-40 * 60_000), "Commander → supervisor"),
   ],
-};
+});
 
 const you = (id: number, text: string, from: string, at: string) => ({ notification_id: id, target: "supervisor", text, state: "acknowledged", stamped: true, device_id: "journey-device", operator_label: "Pixel 10", session: from, at });
 const sup = (id: number, message: string, from: string, at: string, kind = "answer") => ({ notification_id: id, reply_to: null, message, summary: "", device_id: "journey-device", kind, attachments: [], session: from, at });
 
 test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) => {
   const hub = await journey.hub({
-    machines: [ATLAS],
+    machines: [atlas()],
     paired: ["atlas"],
     scopes: { atlas: [...SCOPES, "factory-manage"] },
     history: {

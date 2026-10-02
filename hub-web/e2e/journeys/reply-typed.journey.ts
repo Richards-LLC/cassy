@@ -49,10 +49,14 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     await page.waitForResponse((response) => new URL(response.url()).pathname === "/v1/sessions");
     await expectDraft(page, composer, "Please verify the gate first.\nKeep this half-written reply.", testInfo);
     await expect(composer).toBeFocused();
+    // The same field keeps the caret where it was: a collapsed selection at 7.
+    // selectionDirection is not part of that: for a collapsed caret it is
+    // platform-defined ("none" on macOS Chromium, "forward" elsewhere), so
+    // pinning it failed every macOS run without saying anything (cas-d2b5).
     expect(await composer.evaluate((field: HTMLTextAreaElement) => ({
       sameNode: field === (window as unknown as { __draftField: HTMLTextAreaElement }).__draftField,
-      start: field.selectionStart, end: field.selectionEnd, direction: field.selectionDirection,
-    }))).toEqual({ sameNode: true, start: 7, end: 7, direction: "forward" });
+      start: field.selectionStart, end: field.selectionEnd,
+    }))).toEqual({ sameNode: true, start: 7, end: 7 });
   });
 
   await journey.stage("Restore the draft and focus after switching conversations rebuilds the shell", async () => {

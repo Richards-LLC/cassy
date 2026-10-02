@@ -4276,6 +4276,42 @@ mod tests {
         assert!(!receipt.contains("CI state: green"), "{receipt}");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn moved_origin_with_upstream_uses_canonical_ci_and_refuses_red_cas_28c8() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let (repo, _, tip) = delivery_ci_fixture(true, Some("success"));
+        for args in [
+            ["remote", "add", "origin", "https://github.com/pippenz/cas.git"],
+            ["remote", "add", "upstream", "https://github.com/codingagentsystem/cas.git"],
+        ] {
+            assert!(std::process::Command::new("git").current_dir(repo.path()).args(args).status().unwrap().success());
+        }
+        let gh = repo.path().join("gh-fixture");
+        std::fs::write(&gh, format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> canonical-requests.log\ncase \"$1 $2 $3\" in\n'repo view pippenz/cas') printf '%s\\n' '{{\"nameWithOwner\":\"Richards-LLC/cassy\"}}'; exit 0 ;;\nesac\ncase \"$4\" in\nrepos/Richards-LLC/cassy/commits/{tip}/check-runs) printf '%s\\n' '{{\"check_runs\":[{{\"name\":\"Scoped Validation\",\"status\":\"completed\",\"conclusion\":\"failure\"}}]}}' ;;\n*) printf '%s\\n' 'HTTP 422: No commit found for SHA' >&2; exit 1 ;;\nesac\n"
+        )).unwrap();
+        env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
+        let state = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path());
+        let refusal = admit_branch_ci(&state, false, None).unwrap_err();
+        assert!(refusal.contains("CI RED"), "{refusal}");
+        let requests = std::fs::read_to_string(repo.path().join("canonical-requests.log")).unwrap();
+        assert_eq!(requests.lines().filter(|line| line.starts_with("repo view")).count(), 1, "{requests}");
+        assert!(requests.contains(&format!("repos/Richards-LLC/cassy/commits/{tip}/check-runs")), "{requests}");
+        assert!(!requests.contains("codingagentsystem"), "{requests}");
+    }
+
+    #[test]
+    fn no_commit_http_422_is_lookup_misconfiguration_cas_28c8() {
+        let state = lookup_branch_ci_with("factory/fox", "abc123", |_, _| {
+            gh_output(false, "exit status: 1", br#"{"message":"No commit found for SHA"}"#, "HTTP 422: No commit found for SHA")
+        });
+        let receipt = describe_branch_ci_state("factory/fox", &state);
+        assert!(receipt.contains("CI lookup misconfiguration"), "{receipt}");
+        assert!(receipt.contains("origin"), "{receipt}");
+        assert_eq!(admit_branch_ci(&state, false, None), Ok(false));
+    }
+
     #[test]
     fn delivery_docs_paths_match_ci_classifier_cas_a9bd() {
         for path in ["docs/guide.md", "README.md", "scripts/ci_tiers/README.md"] {

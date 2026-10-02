@@ -1510,6 +1510,56 @@ pub(super) fn claude_redelivery_decision_after_turn(
     }
 }
 
+/// cas-913c: the longest a declined Claude wake waits for the recipient's turn
+/// to end before falling back to the bounded redelivery cadence (and, if that
+/// is refused too, the wake-starved escalation). A turn this long is treated
+/// as possibly wedged.
+pub(super) const CLAUDE_TURN_END_WAIT_MAX: std::time::Duration =
+    std::time::Duration::from_secs(15 * 60);
+
+/// cas-913c: how a declined Claude inbox wake is re-offered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TurnAwareRetry {
+    /// The recipient is still in the turn that caused the decline, or its
+    /// pane has not settled since: wait without spending the budget on a
+    /// re-offer the wake gate is certain to refuse.
+    Wait,
+    /// The turn has ended and the pane has settled: re-offer now.
+    OfferNow,
+    /// No transcript to read turns from (or the wait outlived
+    /// [`CLAUDE_TURN_END_WAIT_MAX`]): the bounded redelivery cadence decides.
+    UseCadence,
+}
+
+/// cas-913c: turn-aware retry for a declined Claude inbox wake. Before this,
+/// re-offers ran on a 30s/60s cadence regardless of the recipient's turn, so
+/// a worker in a long turn refused three of them and the message was marked
+/// undelivered; one that went idle had to wait out the cadence.
+/// `recipient_mid_turn` is `None` when no transcript can be read.
+pub(super) fn claude_turn_aware_retry(
+    attempts: u32,
+    recipient_mid_turn: Option<bool>,
+    pane_settled: bool,
+    last_attempt: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> TurnAwareRetry {
+    let Some(mid_turn) = recipient_mid_turn else {
+        return TurnAwareRetry::UseCadence;
+    };
+    let waiting = last_attempt.is_some_and(|attempt| {
+        (now - attempt)
+            .to_std()
+            .is_ok_and(|waited| waited < CLAUDE_TURN_END_WAIT_MAX)
+    });
+    if attempts == 0 || !waiting {
+        TurnAwareRetry::UseCadence
+    } else if mid_turn || !pane_settled {
+        TurnAwareRetry::Wait
+    } else {
+        TurnAwareRetry::OfferNow
+    }
+}
+
 /// Whether a completed harness turn is newer than the wake attempt that
 /// declined to interrupt it. Kept pure so timestamp ordering stays explicit
 /// and testable at the queue boundary.
@@ -1788,6 +1838,57 @@ pub(super) fn deferred_inbox_outcome(
         UrgentWakeOutcome::Unobserved => DeferredInboxOutcome::DrainedAwaitingWake,
     }
 }
+
+/// cas-913c: the drain phase of a wake-deferred inbox row, deliberately blind
+/// to pane output. The row was written because its wake was declined, mostly
+/// for a pane still rendering its current turn, so output after the write is
+/// that turn's, not evidence the message surfaced. Never `Observed`: the row
+/// is held inside the window, then handed to the nudge path, whose wake gate
+/// waits for the turn to end. A vanished pane is `Unobserved` at once.
+pub(super) fn deferred_inbox_drain_phase(
+    pane_present: bool,
+    elapsed: std::time::Duration,
+    window: std::time::Duration,
+) -> UrgentWakeOutcome {
+    if !pane_present || elapsed >= window {
+        UrgentWakeOutcome::Unobserved
+    } else {
+        UrgentWakeOutcome::Pending
+    }
+}
+
+/// cas-913c: a supervisor attention relay is due for a still-unread message
+/// once its recipient has been idle for [`IDLE_UNACKED_RELAY_AFTER`]: its
+/// turn ended after the message arrived (transcript), or — with no transcript
+/// — its pane has been silent that long. A recipient that is working again is
+/// not idle and is left to the wake path.
+pub(super) fn idle_unacked_relay_due(
+    now: chrono::DateTime<chrono::Utc>,
+    message_created_at: chrono::DateTime<chrono::Utc>,
+    turn_completed_at: Option<chrono::DateTime<chrono::Utc>>,
+    pane_silent_for: Option<std::time::Duration>,
+) -> bool {
+    let after = IDLE_UNACKED_RELAY_AFTER;
+    let pane_quiet =
+        |at_least: std::time::Duration| pane_silent_for.is_some_and(|silent| silent >= at_least);
+    match turn_completed_at.filter(|completed| *completed > message_created_at) {
+        Some(completed) => {
+            pane_quiet(SILENCE_FOR_ACTIVE_RECIPIENT_WAKE)
+                && (now - completed).to_std().is_ok_and(|idle| idle >= after)
+        }
+        None => {
+            pane_quiet(after)
+                && (now - message_created_at)
+                    .to_std()
+                    .is_ok_and(|age| age >= after)
+        }
+    }
+}
+
+/// cas-913c: how long a recipient may sit idle with a message it has not
+/// acknowledged before the supervisor is told.
+pub(super) const IDLE_UNACKED_RELAY_AFTER: std::time::Duration =
+    std::time::Duration::from_secs(5 * 60);
 
 /// A transcript reaction is a message-specific consumption signal. Keep the
 /// predicate separate from inbox-file and pane-byte heuristics so the GH #751
@@ -2421,6 +2522,83 @@ impl FactoryDaemon {
     /// not reached the supervisor after [`RELAY_OPERATOR_ESCALATION_AFTER_SECS`].
     /// See [`escalate_undelivered_supervisor_relays`]; this adds the desktop
     /// notification (when enabled) and the coordination log line.
+    /// cas-913c: tell the supervisor, once per message, when a worker has sat
+    /// idle for [`IDLE_UNACKED_RELAY_AFTER`] with a direct message it never
+    /// read or acknowledged. Notification 3539008 sat 22 minutes on an idle
+    /// worker; the sender bounce waits 30 minutes for a normal message and
+    /// cannot tell an idle recipient from a busy one.
+    fn relay_idle_unacked_messages(&mut self, queue: &dyn cas_store::PromptQueueStore) {
+        let after = i64::try_from(IDLE_UNACKED_RELAY_AFTER.as_secs()).unwrap_or(i64::MAX);
+        let candidates =
+            match queue.delivery_stalled_candidates(&self.session_name, after, after, 50) {
+                Ok(candidates) => candidates,
+                Err(error) => {
+                    tracing::warn!(%error, "cas-913c: failed to scan idle unacked messages");
+                    return;
+                }
+            };
+        let supervisor_name = self.app.supervisor_name().to_string();
+        let now = chrono::Utc::now();
+        for queued in candidates {
+            let target = queued.target.as_str();
+            if target == "supervisor" || target.eq_ignore_ascii_case(&supervisor_name) {
+                continue;
+            }
+            let turn_completed_at = self.recipient_turn_completion_after(target, queued.created_at);
+            let pane_silent_for = self
+                .pane_silent_since
+                .get(target)
+                .map(|since| since.elapsed());
+            if !idle_unacked_relay_due(now, queued.created_at, turn_completed_at, pane_silent_for) {
+                continue;
+            }
+            let summary: String = queued
+                .summary
+                .as_deref()
+                .unwrap_or("(no summary)")
+                .chars()
+                .take(240)
+                .collect();
+            let idle_since = turn_completed_at
+                .map(|at| at.to_rfc3339())
+                .unwrap_or_else(|| "its pane went silent".to_string());
+            let notice = format!(
+                "<system-notice>Unread message on an idle worker: notification_id={id}; target='{target}';                  from='{source}'; summary='{summary}'. The worker has been idle since {idle_since} and has                  not read or acknowledged it. Check `message_status notification_id={id}` and re-send it                  urgently (`coordination action=interrupt`) if the worker should act on it.</system-notice>",
+                id = queued.id,
+                source = queued.source,
+            );
+            let summary_line = format!("Unread on idle worker {target}: #{}", queued.id);
+            match queue.enqueue_idempotent(
+                "daemon",
+                &supervisor_name,
+                &notice,
+                Some(self.session_name.as_str()),
+                Some(&summary_line),
+                Some(cas_store::NotificationPriority::High),
+                &format!("idle-unacked:{}", queued.id),
+                None,
+            ) {
+                Ok(cas_store::EnqueueIdempotentResult::Created(relay_id)) => {
+                    super::delivery::wake_daemon_after_enqueue(self.app.cas_dir());
+                    tracing::warn!(
+                        target: "cas::coordination",
+                        stage = "idle_unacked_relayed",
+                        message_id = queued.id,
+                        relay_id,
+                        target_agent = %target,
+                        "cas-913c: relayed an unread message on an idle worker to the supervisor"
+                    );
+                }
+                Ok(cas_store::EnqueueIdempotentResult::AlreadyExists(_)) => {}
+                Err(error) => tracing::warn!(
+                    message_id = queued.id,
+                    %error,
+                    "cas-913c: failed to relay an unread message on an idle worker"
+                ),
+            }
+        }
+    }
+
     fn escalate_undelivered_supervisor_relays(&mut self, queue: &dyn cas_store::PromptQueueStore) {
         let supervisor_name = self.app.supervisor_name().to_string();
         let harness = format!("{:?}", self.app.harness_for(&supervisor_name));
@@ -2736,12 +2914,15 @@ impl FactoryDaemon {
         } else {
             pane_target
         };
-        // cas-ef14 (GH #139): the consume decision needs pane-output evidence,
-        // not the drain. Same classifier as the cas-ac7e urgent probe so the
-        // two wake proofs cannot drift.
-        let pane_turn = classify_urgent_wake(
-            written.bytes_at_write,
-            self.app.mux.pane_bytes_received(&written.pane),
+        // cas-913c: every row on this path was written because its wake was
+        // DECLINED — usually for a busy pane, which keeps printing its own
+        // turn. Pane output after the write therefore proves nothing about
+        // this message (3539008 was consumed 0.86s after the write and its
+        // recipient never saw it). Only the transcript match above, or the
+        // delivered nudge the drained-awaiting-wake path sends once the wake
+        // gate allows it, may consume the row.
+        let pane_turn = deferred_inbox_drain_phase(
+            self.app.mux.pane_bytes_received(&written.pane).is_some(),
             written.written_at.elapsed(),
             INBOX_DRAIN_TURN_WINDOW,
         );
@@ -2783,20 +2964,47 @@ impl FactoryDaemon {
         ) else {
             return false;
         };
-        crate::mcp::tools::service::harness_observation::observations_after_delivery(
+        // cas-913c: the matched user record is the message surfacing into a
+        // turn; with the reaction, the only evidence that consumes a deferred
+        // inbox row.
+        let observed = crate::mcp::tools::service::harness_observation::observations_after_delivery(
             &path,
             cli,
             delivered_at,
             prompt,
-        )
-        .reaction
-        .is_some()
+        );
+        observed.reaction.is_some() || observed.wake.is_some()
     }
 
     /// Whether a recipient completed a harness turn after the last wake-gate
     /// attempt for this row. A completed turn is the precise retry boundary:
     /// it does not prove this message was consumed, but it proves the busy
     /// turn that caused the decline is over.
+    /// cas-913c: whether `pane_target` is inside a turn by its harness
+    /// transcript (latest turn start not yet followed by a turn end), or
+    /// `None` when no transcript can be read.
+    fn recipient_mid_turn(&self, pane_target: &str) -> Option<bool> {
+        let store = open_agent_store(self.app.cas_dir()).ok()?;
+        let agent = store
+            .list(None)
+            .ok()?
+            .into_iter()
+            .find(|agent| agent.name == pane_target)?;
+        let cli = crate::mcp::tools::service::factory_ops::worker_cli_from_agent(&agent);
+        let path = crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(
+            self.app.cas_dir(),
+            &agent,
+        )
+        .filter(|path| path.exists())?;
+        let latest =
+            crate::mcp::tools::service::harness_observation::latest_turn_observations(&path, cli);
+        Some(match (latest.wake, latest.completion) {
+            (Some(start), Some(end)) => start.at > end.at,
+            (Some(_), None) => true,
+            _ => false,
+        })
+    }
+
     fn recipient_turn_completion_after(
         &self,
         pane_target: &str,
@@ -4536,6 +4744,7 @@ impl FactoryDaemon {
         if prompt_poison_sweep_due(self.last_prompt_poison_sweep, now) {
             self.last_prompt_poison_sweep = Some(now);
             self.enqueue_delivery_stalled_bounces(queue.as_ref());
+            self.relay_idle_unacked_messages(queue.as_ref());
             self.escalate_undelivered_supervisor_relays(queue.as_ref());
             if let Ok(expired) = queue.abandon_ineligible_session_targets(
                 &valid_targets,
@@ -5217,6 +5426,20 @@ impl FactoryDaemon {
             if claude_redelivery_applies {
                 let (attempts, last_attempt) =
                     queue.wake_gate_state(queued.id).unwrap_or((0, None));
+                // cas-913c: a declined wake waits for the busy turn to END
+                // instead of spending its bounded budget on re-offers the
+                // still-busy pane is certain to refuse. Three such refusals
+                // used to mark the row undelivered, so a worker in a long turn
+                // never got the message at all.
+                let turn_aware = claude_turn_aware_retry(
+                    attempts,
+                    self.recipient_mid_turn(pane_target),
+                    self.pane_wake_state(pane_target)
+                        .silent_for
+                        .is_some_and(|silent| silent >= SILENCE_FOR_IDLE_RECIPIENT_WAKE),
+                    last_attempt,
+                    chrono::Utc::now(),
+                );
                 if retry_at_turn_end {
                     tracing::debug!(
                         target: "cas::coordination",
@@ -5226,13 +5449,24 @@ impl FactoryDaemon {
                         "wake gate retry granted by the recipient's completed turn"
                     );
                 }
-                match claude_redelivery_decision_after_turn(
-                    queued.acked_at.is_some(),
-                    attempts,
-                    last_attempt,
-                    chrono::Utc::now(),
-                    retry_at_turn_end,
-                ) {
+                let decision = match turn_aware {
+                    TurnAwareRetry::Wait if queued.acked_at.is_none() => ClaudeRedelivery::Cooldown,
+                    TurnAwareRetry::OfferNow => claude_redelivery_decision_after_turn(
+                        queued.acked_at.is_some(),
+                        attempts,
+                        last_attempt,
+                        chrono::Utc::now(),
+                        true,
+                    ),
+                    _ => claude_redelivery_decision_after_turn(
+                        queued.acked_at.is_some(),
+                        attempts,
+                        last_attempt,
+                        chrono::Utc::now(),
+                        retry_at_turn_end,
+                    ),
+                };
+                match decision {
                     ClaudeRedelivery::Deliver => {}
                     ClaudeRedelivery::Cooldown => {
                         let _ = queue.record_pending_reason(
@@ -13704,5 +13938,201 @@ mod supervisor_decision_wake_tests {
                 "{sender:?} falls back to the ordinary policy, which declines"
             );
         }
+    }
+}
+
+/// cas-913c: notification 3539008. The supervisor's message reached
+/// zen-condor-99 while its pane was still rendering a turn; the wake was
+/// declined, Claude Code's file watcher drained the inbox copy, the busy pane
+/// kept printing, and the row was consumed 0.86s after the write. The worker
+/// then finished its turn and idled for 22 minutes without the message.
+#[cfg(test)]
+mod declined_wake_retry_tests_cas_913c {
+    use super::{
+        ClaudeRedelivery, DeferredInboxOutcome, INBOX_DRAIN_TURN_WINDOW, PaneWakeState,
+        ToolCallEvidence, TurnAwareRetry, UrgentWakeOutcome, claude_redelivery_decision_after_turn,
+        claude_turn_aware_retry, deferred_inbox_drain_phase, deferred_inbox_outcome,
+        idle_unacked_relay_due, wake_retry_due_to_turn_end,
+    };
+    use chrono::{Duration as Chrono, TimeZone, Utc};
+    use std::time::Duration;
+
+    fn pane(silent_for: Duration) -> PaneWakeState {
+        PaneWakeState {
+            composer_dirty: false,
+            ready_for_injection: true,
+            silent_for: Some(silent_for),
+            tool_call: ToolCallEvidence::Idle,
+        }
+    }
+
+    #[test]
+    fn declined_wake_is_retried_when_the_recipients_turn_ends_cas_913c() {
+        let written = Utc
+            .with_ymd_and_hms(2026, 10, 2, 0, 15, 58)
+            .single()
+            .unwrap();
+
+        // 00:15:58 — the pane is mid-turn, so the wake is declined.
+        assert!(
+            pane(Duration::from_millis(200))
+                .veto_for_idle_recipient()
+                .is_some(),
+            "precondition: a rendering pane declines the wake"
+        );
+
+        // +0.86s — the inbox copy is drained and the busy pane has printed.
+        // The row must stay pending: that output is the in-flight turn's.
+        let drained = deferred_inbox_outcome(
+            true,
+            false,
+            deferred_inbox_drain_phase(true, Duration::from_millis(860), INBOX_DRAIN_TURN_WINDOW),
+        );
+        assert_eq!(drained, DeferredInboxOutcome::DrainedProbing);
+        assert_ne!(drained, DeferredInboxOutcome::HarnessConsumed);
+
+        // Past the window it is handed to the nudge path, never consumed.
+        assert_eq!(
+            deferred_inbox_outcome(
+                true,
+                false,
+                deferred_inbox_drain_phase(true, INBOX_DRAIN_TURN_WINDOW, INBOX_DRAIN_TURN_WINDOW),
+            ),
+            DeferredInboxOutcome::DrainedAwaitingWake
+        );
+
+        // While the turn runs, a transcript-backed retry waits for its end
+        // instead of spending the budget on refusals...
+        let mid_run = written + Chrono::seconds(10 * 60);
+        assert_eq!(
+            claude_turn_aware_retry(1, Some(true), false, Some(written), mid_run),
+            TurnAwareRetry::Wait
+        );
+        // ...and right after the turn ends it waits for the pane to settle,
+        // then re-offers at once.
+        assert_eq!(
+            claude_turn_aware_retry(1, Some(false), false, Some(written), mid_run),
+            TurnAwareRetry::Wait
+        );
+        assert_eq!(
+            claude_turn_aware_retry(2, Some(false), true, Some(written), mid_run),
+            TurnAwareRetry::OfferNow
+        );
+        assert_eq!(
+            claude_turn_aware_retry(1, None, true, Some(written), mid_run),
+            TurnAwareRetry::UseCadence,
+            "without a transcript the bounded cadence applies"
+        );
+        assert_eq!(
+            claude_turn_aware_retry(
+                1,
+                Some(true),
+                false,
+                Some(written),
+                written + Chrono::seconds(16 * 60)
+            ),
+            TurnAwareRetry::UseCadence,
+            "a possibly wedged turn falls back to the cadence and its escalation"
+        );
+
+        // Before the turn ends the retry waits on its cooldown.
+        let before_turn_end = written + Chrono::seconds(10);
+        assert_eq!(
+            claude_redelivery_decision_after_turn(false, 1, Some(written), before_turn_end, false),
+            ClaudeRedelivery::Cooldown
+        );
+
+        // The turn ends; the retry is granted at once and the now-quiet pane
+        // passes the wake gate: a wake attempt is made.
+        let turn_end = written + Chrono::seconds(20);
+        assert!(wake_retry_due_to_turn_end(Some(written), Some(turn_end)));
+        assert_eq!(
+            claude_redelivery_decision_after_turn(
+                false,
+                1,
+                Some(written),
+                turn_end + Chrono::seconds(3),
+                true
+            ),
+            ClaudeRedelivery::Deliver
+        );
+        assert!(
+            pane(Duration::from_secs(3)).is_safe_to_type_into(),
+            "the idle pane accepts the retried wake"
+        );
+
+        // Still unread five minutes after the idle turn end: the supervisor
+        // is told, once (the relay is keyed per message).
+        let quiet = Some(Duration::from_secs(5 * 60));
+        assert!(!idle_unacked_relay_due(
+            turn_end + Chrono::seconds(4 * 60),
+            written,
+            Some(turn_end),
+            quiet
+        ));
+        assert!(idle_unacked_relay_due(
+            turn_end + Chrono::seconds(5 * 60),
+            written,
+            Some(turn_end),
+            quiet
+        ));
+        assert!(
+            !idle_unacked_relay_due(
+                turn_end + Chrono::seconds(10 * 60),
+                written,
+                Some(turn_end),
+                Some(Duration::from_secs(2))
+            ),
+            "a recipient working again is not idle"
+        );
+    }
+
+    /// No transcript (a Claude session under an unresolvable config dir):
+    /// pane output while the wake was declined never consumes the row; only
+    /// the nudge the wake gate later delivers does. The idle relay falls back
+    /// to sustained pane silence.
+    #[test]
+    fn pane_output_after_a_declined_wake_never_consumes_without_a_transcript_cas_913c() {
+        for elapsed_ms in [100, 860, 5_000, 14_900] {
+            let phase = deferred_inbox_drain_phase(
+                true,
+                Duration::from_millis(elapsed_ms),
+                INBOX_DRAIN_TURN_WINDOW,
+            );
+            assert_eq!(phase, UrgentWakeOutcome::Pending, "{elapsed_ms}ms");
+            assert_ne!(
+                deferred_inbox_outcome(true, false, phase),
+                DeferredInboxOutcome::HarnessConsumed
+            );
+        }
+        assert_eq!(
+            deferred_inbox_drain_phase(false, Duration::from_millis(100), INBOX_DRAIN_TURN_WINDOW),
+            UrgentWakeOutcome::Unobserved,
+            "a vanished pane goes straight to the nudge/escalation path"
+        );
+
+        let written = Utc
+            .with_ymd_and_hms(2026, 10, 2, 0, 15, 58)
+            .single()
+            .unwrap();
+        let later = written + Chrono::seconds(6 * 60);
+        assert!(idle_unacked_relay_due(
+            later,
+            written,
+            None,
+            Some(Duration::from_secs(5 * 60))
+        ));
+        assert!(!idle_unacked_relay_due(
+            later,
+            written,
+            None,
+            Some(Duration::from_secs(60))
+        ));
+        assert!(!idle_unacked_relay_due(
+            written + Chrono::seconds(4 * 60),
+            written,
+            None,
+            Some(Duration::from_secs(4 * 60))
+        ));
     }
 }

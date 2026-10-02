@@ -1,5 +1,5 @@
 import { cloudBrand, projectTitle } from "./cloud-brand";
-import { CANT_REACH_RETRYING, machineFooterMarkup, pairedMachinesDialogMarkup, renderPairedMachines, type PairedMachineRow } from "./paired-machines";
+import { CANT_REACH_RETRYING, machineFooterMarkup, orderPairedMachines, pairedMachinesDialogMarkup, renderPairedMachines, type PairedMachineRow } from "./paired-machines";
 import { retainPendingSessions, visibleCatalog } from "./worker-visibility";
 import "./styles.css";
 import { activityTime, ConversationList, filterConversationRows, groupConversationRows, plainActivity, type ConversationRow } from "./conversation-list";
@@ -4951,7 +4951,8 @@ render(false);
 void boot();
 
 function pairedMachineRows(): PairedMachineRow[] {
-  return [...machines.values()].map(machine => {
+  // cas-0739 (journey F10): machines that aren't connected come first.
+  return orderPairedMachines([...machines.values()].map(machine => {
     const state = machineFooterConnection(machine.id);
     const updated = fleetCatalogUpdatedAt.get(machine.id);
     const fresh = Date.now() < (catalogExpiresAt.get(machine.id) ?? Infinity);
@@ -4962,7 +4963,7 @@ function pairedMachineRows(): PairedMachineRow[] {
       connectionState: state,
       lastSeen: updated ? `Last seen ${relativeTimestamp(Date.parse(updated))} · ${clockLabel(Date.parse(updated))}` : 'Not yet seen in this visit',
       runtime: machineInfo.get(machine.id)?.version };
-  });
+  }));
 }
 
 function renderMachineRegister(): void {
@@ -4985,7 +4986,11 @@ function renderMachineRegister(): void {
   const dialog = document.querySelector<HTMLDialogElement>('#paired-machines-dialog');
   if (!dialog) return;
   const list = dialog.querySelector<HTMLElement>('#paired-machines-list')!;
-  renderPairedMachines(list, rows, forgetPairedMachine);
+  // cas-0739: a closed register is kept in order (not connected first) and
+  // scrolled to its top, so it opens on the machine the footer names; an open
+  // one keeps its order so a status tick never moves a row under the operator.
+  renderPairedMachines(list, rows, forgetPairedMachine, { reorder: !dialog.open });
+  if (!dialog.open) { list.scrollTop = 0; dialog.scrollTop = 0; }
   // Paired machines replaces the palette: clear its open flag too, or the
   // next render reopens it over whatever the operator opens next (cas-dfc8).
   const open = () => { commandPaletteOpen = false; document.querySelector<HTMLDialogElement>('#command-palette')?.close(); dialog.showModal(); };

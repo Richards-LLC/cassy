@@ -5,6 +5,7 @@ mod neon_sql_guard;
 mod notifications;
 mod pre_tool;
 mod slack_transport;
+mod publication_gate;
 pub(crate) mod project_overview;
 
 pub use attribution::{capture_file_change_for_attribution, detect_and_link_git_commit};

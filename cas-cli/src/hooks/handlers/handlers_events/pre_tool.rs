@@ -27,6 +27,13 @@ pub fn handle_pre_tool_use(
     {
         return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
     }
+    // cas-f6ad (GH #1057): no deliverable share before its epic's
+    // verification passes, for every harness and role.
+    if let Some(reason) =
+        super::publication_gate::denial(tool_name, input.tool_input.as_ref(), cas_root)
+    {
+        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+    }
 
     let is_factory_agent = crate::harness_policy::is_factory_agent(input);
 

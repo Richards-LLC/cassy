@@ -1,7 +1,26 @@
+import type { Page } from "@playwright/test";
 import { journeyStamp } from "./clock";
 import { test, expect, expectWholeFocusRing } from "./journey";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
 import type { Machine } from "./hub-double";
+
+/**
+ * cas-9772: wait for `ready` bounded by protocol events, not wall time. It
+ * fails once `events()` has advanced more than `allowance` past where it stood
+ * (catalog fetches, heartbeats) with `ready` still false — however slow the
+ * host. On a loaded CI runner the fixed 12–30 s budgets here ran out while the
+ * page was still on its way; a count of the page's own requests does not.
+ * The test timeout remains only as a hang guard.
+ */
+async function within(page: Page, what: string, events: () => number, allowance: number, ready: () => Promise<boolean>): Promise<void> {
+  const start = events();
+  for (;;) {
+    if (await ready()) return;
+    const seen = events() - start;
+    if (seen > allowance) throw new Error(`${what}: still not so after ${seen} protocol events (allowance ${allowance})`);
+    await page.waitForTimeout(100);
+  }
+}
 
 // A third machine, paired mid-journey. Its id sorts before both others and
 // hashes to Atlas's accent, which is exactly what used to re-colour the fleet.
@@ -20,11 +39,12 @@ const ALPHA: Machine = {
 };
 
 test("HUB-J8 switch between machines without losing my place", async ({ page, journey }) => {
-  // Fourteen stages including a pairing, palette/picker sweeps, two render
-  // waits (6 s each) and a phone viewport: past the 60 s default, and a loaded
-  // factory host needs the headroom.
-  // Plus a failing-heartbeat window (cas-bf07): about 25 s more.
-  test.setTimeout(160_000);
+  // Fourteen stages including a pairing, palette/picker sweeps, a phone
+  // viewport and a failing-heartbeat window (cas-bf07) that runs on the app's
+  // real 5 s heartbeat: about two minutes idle. cas-9772: this is a hang
+  // guard, not a budget for the work — every wait below is bounded by the
+  // page's own requests, so a loaded CI host (2.7 m) is no longer a failure.
+  test.setTimeout(360_000);
   const hub = await journey.hub({ machines: [ATLAS, STUDIO, ALPHA], paired: ["atlas", "studio"] });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
   const composer = page.getByRole("textbox", { name: "Your message" });
@@ -82,17 +102,20 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await expect(page).toHaveTitle("cas-src patient-pelican-9 — Cassy Cloud");
     // Closing the picker does not rebuild the shell, and the next periodic
     // render papers over a stale "open" state within a few seconds. So each
-    // check is short: the picker must open, and say so, at once — not when a
-    // later render happens to rebuild the shell.
-    const soon = { timeout: 1_000 };
+    // check reads the state once, as the click or key leaves it: the picker
+    // must open, and say so, at once — not when a later render happens to
+    // rebuild the shell. cas-9772: a one-shot read, not a 1 s retry window
+    // that a loaded host could outrun.
+    const now = async (locator: typeof picker, visible: boolean, expanded: "true" | "false") => {
+      expect(await locator.isVisible(), "the picker's visibility, read at once").toBe(visible);
+      expect(await toggle.getAttribute("aria-expanded"), "aria-expanded at once").toBe(expanded);
+    };
     const open = async () => {
       await toggle.click();
-      await expect(picker).toBeVisible(soon);
-      await expect(toggle).toHaveAttribute("aria-expanded", "true", soon);
+      await now(picker, true, "true");
     };
     const closed = async () => {
-      await expect(picker).toBeHidden(soon);
-      await expect(toggle).toHaveAttribute("aria-expanded", "false", soon);
+      await now(picker, false, "false");
     };
     await open();
     await page.keyboard.press("Escape");
@@ -153,7 +176,7 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await page.keyboard.press("Escape");
     await closed();
     await page.keyboard.press("ControlOrMeta+k");
-    await expect(palette).toBeVisible(soon);
+    expect(await palette.isVisible(), "the palette opens at once").toBe(true);
     await expect(picker).toBeHidden();
     await page.keyboard.press("Escape");
     await expect(palette).toBeHidden();
@@ -175,7 +198,11 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     const firstSession = await first.getAttribute("data-picker-session");
     await expect(first).toBeFocused();
     hub.supervisorSays(OTTER, "Tests are running on the Mac.", { kind: "status" });
-    await page.waitForTimeout(6_000);
+    // cas-9772: "several renders" is a full heartbeat round on both paired
+    // machines — each answers another catalog fetch, and each fetch renders —
+    // rather than six seconds of wall time.
+    const round = { atlas: hub.catalogFetchCount("atlas"), studio: hub.catalogFetchCount("studio") };
+    await hub.waitFor(() => hub.catalogFetchCount("atlas") >= round.atlas + 2 && hub.catalogFetchCount("studio") >= round.studio + 2);
     await expect(entry(firstSession!)).toBeFocused();
     // Tab to the next session: the same holds there.
     await page.keyboard.press("Tab");
@@ -286,7 +313,11 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     // waits for the terminal must not pull it back (cas-7eaf QA F01).
     const interrupt = page.locator("#interrupt");
     await interrupt.focus();
-    await page.waitForTimeout(2_500);
+    // cas-9772: the landing waits for the terminal; let it attach and a full
+    // render round pass, counted in the page's requests, not 2.5 s.
+    await hub.waitFor(() => hub.attaches.includes(OTTER));
+    const settled = hub.catalogFetchCount("studio");
+    await hub.waitFor(() => hub.catalogFetchCount("studio") >= settled + 1);
     await expect(interrupt).toBeFocused();
     // Back in the conversation list: Enter on a row, and a mouse click on a
     // row, land in its reply box.
@@ -353,7 +384,7 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await expect(dialog).toBeHidden();
     const back = page.getByRole("button", { name: "‹ Conversations", exact: true });
     if (await back.isVisible().catch(() => false)) await back.click();
-    await expect(list.getByRole("button", { name: /orion/ })).toBeVisible({ timeout: 15_000 });
+    await within(page, "the paired machine's sessions are listed", () => hub.catalogFetchCount("alpha"), 3, () => list.getByRole("button", { name: /orion/ }).isVisible());
     expect(await colour(/cas-src/), "Atlas keeps its accent").toBe(atlas);
     expect(await colour(/gabber-studio/), "Studio keeps its accent").toBe(studio);
     expect(await colour(/orion/), "the new machine gets its own accent").not.toBe(atlas);
@@ -380,15 +411,21 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     // says Checking… the dot is neutral, not green (cas-bf07 QA F02).
     const early = await page.locator(".connection-summary").evaluate((summary) => ({ text: summary.querySelector("[data-machine-latency]")?.textContent, live: summary.classList.contains("live") }));
     if (early.text === "Checking…") expect(early.live, "no green dot beside Checking…").toBe(false);
-    await expect(latency).toHaveText(/^\d+ms$/, { timeout: 12_000 });
+    const sample = async () => /^\d+ms$/.test((await latency.textContent()) ?? "");
+    const probes = () => hub.machineProbes.get("atlas") ?? 0;
+    await within(page, "the first latency sample shows", probes, 3, sample);
     // Heartbeats that keep failing: the header names the degradation with the
     // amber dot, as the rail does for the same machine, rather than promising a
     // check beside a green dot (cas-bf07 QA F01). Then it recovers.
     const chip = page.locator(".connection-summary");
     const railDot = page.locator("#machine-rail-list .machine-icon").filter({ hasText: "AT" }).locator(".machine-state");
     const heartbeat = "https://atlas.test/v1/machine";
-    await page.route(heartbeat, (route) => route.abort());
-    await expect(latency).toHaveText("Degraded", { timeout: 20_000 });
+    // cas-9772: the outage is measured in refused heartbeats, not seconds.
+    let refused = 0;
+    await page.route(heartbeat, (route) => { refused += 1; return route.abort(); });
+    const shows = (text: string) => async () => (await latency.textContent()) === text;
+    // Degraded after two missed heartbeats (DEGRADED_AFTER_MISSED_HEARTBEATS).
+    await within(page, "Degraded after missed heartbeats", () => refused, 3, shows("Degraded"));
     await expect(chip).toHaveClass(/\bdegraded\b/);
     await expect(railDot).toHaveClass(/\bdegraded\b/);
     // cas-71af (bf07 QA F01): the chip's tooltip reads the same machine state
@@ -396,9 +433,10 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await expect(chip).toHaveAttribute("title", /^degraded · \d+ missed$/);
     // bf07 QA F02: a longer outage does not leave the chip Degraded. After
     // four missed heartbeats the machine reconnects, and it comes back.
-    await expect(latency).not.toHaveText("Degraded", { timeout: 20_000 });
+    // Reconnecting after four (RECONNECT_AFTER_MISSED_HEARTBEATS).
+    await within(page, "no longer Degraded once the machine reconnects", () => refused, 6, async () => !(await shows("Degraded")()));
     await page.unroute(heartbeat);
-    await expect(latency).toHaveText(/^\d+ms$/, { timeout: 30_000 });
+    await within(page, "a latency sample again after the outage", probes, 4, sample);
     await expect(chip).not.toHaveClass(/\bdegraded\b/);
     await expect(chip).toHaveAttribute("title", /^live · \d+ms$/);
     await expect(page.locator(".session-picker-codename")).toHaveText(PELICAN);
@@ -608,8 +646,13 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     const twin = { ...extra[0]!, workers: [] } as Machine["sessions"][number];
     atlasSessions.push(twin);
     const plotName = (session: string) => board.locator(`.fleet-plot-row[data-fleet-session="${session}"] .fleet-plot-name`);
-    await expect(plotName("quiet-heron-8")).toBeVisible({ timeout: 15_000 });
-    await expect(plotName("brisk-otter-5")).toHaveCount(2, { timeout: 15_000 });
+    // cas-9772: announce the change as the hub does and bound the wait by the
+    // page's catalog fetches; the 5 s heartbeat (whose fetch aborts at 3 s)
+    // timed out here at 15 s on a loaded host.
+    await hub.announceCatalog("alpha", { added: extra.map((session) => session.name) });
+    await hub.announceCatalog("atlas", { added: [twin.name] });
+    const fetches = () => hub.catalogFetchCount("alpha") + hub.catalogFetchCount("atlas");
+    await within(page, "the new plot rows are drawn", fetches, 4, async () => await plotName("quiet-heron-8").isVisible() && await plotName("brisk-otter-5").count() === 2);
     const plotLabels = async () => board.locator(".fleet-plot-row").evaluateAll((rows) => rows.map((row) => {
       const name = row.querySelector<HTMLElement>(".fleet-plot-name")!;
       const tag = name.querySelector<HTMLElement>(".fleet-plot-tag");
@@ -631,8 +674,9 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await page.setViewportSize(viewport);
     alpha.splice(alpha.length - extra.length, extra.length);
     atlasSessions.splice(atlasSessions.indexOf(twin), 1);
-    await expect(plotName("quiet-heron-8")).toHaveCount(0, { timeout: 15_000 });
-    await expect(plotName("brisk-otter-5")).toHaveCount(0, { timeout: 15_000 });
+    await hub.announceCatalog("alpha", { removed: extra.map((session) => session.name) });
+    await hub.announceCatalog("atlas", { removed: [twin.name] });
+    await within(page, "the stopped sessions' plot rows clear", fetches, 4, async () => await plotName("quiet-heron-8").count() === 0 && await plotName("brisk-otter-5").count() === 0);
     await expect(board.locator(".fleet-plot-tag")).toHaveCount(0);
   });
 
@@ -681,7 +725,7 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await page.locator("#machine-rail-list .machine-icon").filter({ hasText: "AT" }).first().click();
     const board = page.locator("#fleet-board");
     const rows = board.locator(`.fleet-plot-row:is([data-fleet-session="brisk-otter-5"], [data-fleet-session="${PELICAN}"])`);
-    await expect(rows).toHaveCount(4, { timeout: 20_000 });
+    await within(page, "both machines' twins are plotted after the reload", () => hub.catalogFetchCount(), 8, async () => await rows.count() === 4);
     const viewport = page.viewportSize()!;
     for (const width of [viewport.width, 390]) {
       await page.setViewportSize({ width, height: viewport.height });

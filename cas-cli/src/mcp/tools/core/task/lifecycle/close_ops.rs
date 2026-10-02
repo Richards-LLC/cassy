@@ -6708,8 +6708,23 @@ impl CasCore {
                 &context.target_branch,
             )
         });
+        // cas-f01b (GH #1068): the same holds for a delivery that never
+        // parked, merged by a batch squash and named by the supervisor's
+        // commit_receipt. The worker may already be on its next task's
+        // branch; the receipt on the declared target is the delivery, so the
+        // worker checkout is not consulted. A worker's own close, or one
+        // without the override, still validates its branch.
+        let supervisor_closing_merged_receipt = declared_repo_context.as_ref().is_some_and(|context| {
+            supervisor_merged_anchor_close(
+                supervisor_override,
+                req.commit_receipt.as_deref().map(str::trim),
+                &context.repo_root,
+                &context.target_branch,
+            )
+        });
         let worker_worktree_path = if close_disposition == TaskCloseDisposition::Decision
             || supervisor_closing_merged_anchor
+            || supervisor_closing_merged_receipt
         {
             None
         } else {
@@ -23903,6 +23918,138 @@ mod merge_state_gate_tests {
             "{}",
             closed.notes
         );
+    }
+
+    /// cas-f01b (GH #1068): the gabber-studio cas-cfd8 sequence through the
+    /// real handler. A worker delivers on its recorded System-A branch, the
+    /// delivery lands on the target by squash, and the worker starts its next
+    /// task on a per-task branch in the same checkout. The task never parked.
+    /// A close without override is still refused on the branch mismatch; a
+    /// supervisor override close naming the merged commit closes it.
+    #[tokio::test]
+    async fn override_close_with_merged_receipt_ignores_workers_next_branch_cas_f01b() {
+        use crate::mcp::CasService;
+        use crate::store::{
+            open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store,
+            open_worktree_store,
+        };
+        use cas_types::{Agent, AgentRole, WorkTarget, Worktree};
+
+        let mut env = TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        git(p, &["init", "-q", "-b", "main"]);
+        std::fs::write(p.join("seed.txt"), "seed\n").unwrap();
+        git(p, &["add", "seed.txt"]);
+        git(p, &["commit", "-q", "-m", "seed"]);
+        let cas_dir = p.join(".cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        std::fs::write(
+            cas_dir.join("config.toml"),
+            "[project]\ncanonical_id = \"cas-f01b-fixture\"\n\n[verification]\nenabled = false\n",
+        )
+        .unwrap();
+        std::fs::write(p.join(".gitignore"), ".cas/\n").unwrap();
+        git(p, &["add", ".gitignore"]);
+        git(p, &["commit", "-q", "-m", "ignore store"]);
+
+        // The worker's System-A checkout, recorded on factory/rapid-cobra-76.
+        let worktrees = tempfile::tempdir().unwrap();
+        let wt = worktrees.path().join("rapid-cobra-76");
+        git(
+            p,
+            &["worktree", "add", "-q", "-b", "factory/rapid-cobra-76", wt.to_str().unwrap(), "main"],
+        );
+        std::fs::write(wt.join("delivery.rs"), "// cas-cfd8 delivery\n").unwrap();
+        git(&wt, &["add", "delivery.rs"]);
+        git(&wt, &["commit", "-q", "-m", "feat(cas-f01b-a): delivery"]);
+        // Batch squash onto the target; the task never parked.
+        git(p, &["merge", "-q", "--squash", "factory/rapid-cobra-76"]);
+        git(p, &["commit", "-q", "-m", "squash: batch delivery (cas-f01b-a)"]);
+        let squash = rev_parse_local(p, "HEAD");
+        // The worker moved on to its next task in the same checkout.
+        git(&wt, &["checkout", "-q", "-b", "factory/rapid-cobra-76-1ae5"]);
+
+        env.set("CAS_ROOT", &cas_dir);
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        open_store(&cas_dir).unwrap().init().unwrap();
+        open_rule_store(&cas_dir).unwrap().init().unwrap();
+        open_skill_store(&cas_dir).unwrap().init().unwrap();
+        let store = open_task_store(&cas_dir).unwrap();
+        store.init().unwrap();
+        let worktree_store = open_worktree_store(&cas_dir).unwrap();
+        worktree_store.init().unwrap();
+        worktree_store
+            .add(&Worktree::new(
+                "wt-f01b".into(),
+                "factory/rapid-cobra-76".into(),
+                "main".into(),
+                wt.clone(),
+            ))
+            .unwrap();
+        let agents = open_agent_store(&cas_dir).unwrap();
+        agents.init().unwrap();
+        let actor = "cas-f01b-supervisor";
+        agents
+            .register(&Agent::new_with_role(
+                actor.into(),
+                "supervisor".into(),
+                AgentRole::Supervisor,
+            ))
+            .unwrap();
+        let core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        core.set_agent_id_for_testing(actor.into());
+        let service = CasService::new(core, None);
+
+        let mut task = worker_task("rapid-cobra-76");
+        task.id = "cas-f01b-a".into();
+        task.task_type = TaskType::Bug;
+        task.risk = vec![TaskRisk::None];
+        task.worktree_id = Some("wt-f01b".into());
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:cas-f01b-fixture".into(),
+            target_branch: "main".into(),
+        });
+        store.add(&task).unwrap();
+        let text = |response: rmcp::model::CallToolResult| {
+            response
+                .content
+                .into_iter()
+                .filter_map(|content| match content.raw {
+                    rmcp::model::RawContent::Text(text) => Some(text.text),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        // Without the override the worktree branch mismatch still refuses.
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "close", "id": task.id, "reason": "delivered",
+            "commit_receipt": squash,
+        }))
+        .unwrap();
+        let refused = text(service.task(Parameters(request)).await.unwrap());
+        assert!(
+            refused.contains("expected task worktree branch `factory/rapid-cobra-76`")
+                && refused.contains("factory/rapid-cobra-76-1ae5"),
+            "{refused}"
+        );
+        assert_ne!(store.get(&task.id).unwrap().status, TaskStatus::Closed);
+
+        // The supervisor's override close of the merged receipt succeeds.
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "close", "id": task.id, "supervisor_override": true,
+            "reason": "merged by batch squash; worker is on its next task",
+            "commit_receipt": squash,
+        }))
+        .unwrap();
+        let response = service.task(Parameters(request)).await.unwrap();
+        let is_error = response.is_error == Some(true);
+        let closed = text(response);
+        assert!(!is_error, "{closed}");
+        assert!(!closed.contains("PRE-CLOSE HOOK CONTEXT REJECTED"), "{closed}");
+        assert_eq!(store.get(&task.id).unwrap().status, TaskStatus::Closed, "{closed}");
     }
 
     /// What one cas-74cb handler close of a fixture epic produced.

@@ -439,12 +439,13 @@ async fn jev_files_mock_http_globs_secrets_ignores_binary_and_hash_only() {
         .mount(&server)
         .await;
     let client = fixture(&server, &dir, false);
+    let absolute_path = dir.path().join("src/one.rs").to_string_lossy().into_owned();
     let result = tokio::task::spawn_blocking(move || {
         client.files(
             &root,
             &FilesOptions {
                 paths: vec![
-                    dir.path().join("src/one.rs").to_string_lossy().into(),
+                    absolute_path,
                     "ignored.txt".into(),
                     ".env.local".into(),
                     "server.pem".into(),
@@ -657,6 +658,13 @@ async fn jev_files_refuses_outside_and_symlinked_secrets_before_http() {
     let outside = TempDir::new().unwrap();
     fs::write(outside.path().join("private.txt"), "outside-token").unwrap();
     fs::write(dir.path().join(".env"), "inside-secret").unwrap();
+    fs::write(dir.path().join(".gitignore"), "ignored.txt\n").unwrap();
+    fs::write(dir.path().join("ignored.txt"), "ignored-target").unwrap();
+    symlink(
+        dir.path().join("ignored.txt"),
+        dir.path().join("ignored-alias.txt"),
+    )
+    .unwrap();
     symlink(
         outside.path().join("private.txt"),
         dir.path().join("escape.txt"),
@@ -680,6 +688,7 @@ async fn jev_files_refuses_outside_and_symlinked_secrets_before_http() {
                         "escape.txt".into(),
                         "alias.txt".into(),
                         ".env".into(),
+                        "ignored-alias.txt".into(),
                     ],
                     globs: vec!["../**/*".into()],
                     ..Default::default()
@@ -690,7 +699,7 @@ async fn jev_files_refuses_outside_and_symlinked_secrets_before_http() {
             )
             .unwrap();
         let value = serde_json::to_value(result).unwrap();
-        assert_eq!(value["files"].as_array().unwrap().len(), 6);
+        assert_eq!(value["files"].as_array().unwrap().len(), 7);
         assert_eq!(
             value["files"]
                 .as_array()
@@ -709,6 +718,7 @@ async fn jev_files_refuses_outside_and_symlinked_secrets_before_http() {
                 .count(),
             2
         );
+        assert!(value.to_string().contains("symlink file (not followed)"));
         assert!(!value.to_string().contains("outside-token"));
         assert!(!value.to_string().contains("inside-secret"));
         assert!(!dir.path().join("jev-decisions.jsonl").exists());

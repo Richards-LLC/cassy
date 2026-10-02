@@ -93,7 +93,9 @@ quoted project-relative patterns. Paths/globs may be combined. Globs support
 `**` recursively; directory paths include immediate files unless `recursive`
 is true. Paths resolve relative to the project containing `.cas`, rather than
 the shell's working directory. Outside-root paths/globs and symlinks resolving
-outside that root are reported as skipped. Symlink directories are not followed.
+outside that root are reported as skipped. Other symlinks are also skipped,
+preventing an alias from exposing an ignored target. Symlink directories are
+not followed.
 
 Selection respects `.gitignore`, local Git exclusions and nested ignore files,
 including explicit file paths. Hidden files are considered. The following path

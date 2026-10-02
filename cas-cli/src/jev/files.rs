@@ -167,6 +167,12 @@ impl JevClient {
                 output.files.push(skipped(label(&rel), "secret path"));
                 continue;
             }
+            if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+                output
+                    .files
+                    .push(skipped(label(&rel), "symlink file (not followed)"));
+                continue;
+            }
             if resolved.is_dir() {
                 directories.push(rel);
             } else {
@@ -267,6 +273,12 @@ impl JevClient {
             };
             if secret(&rel) || secret(resolved.strip_prefix(&root).expect("contained path")) {
                 output.files.push(skipped(path, "secret path"));
+                continue;
+            }
+            if fs::symlink_metadata(root.join(&rel)).is_ok_and(|m| m.file_type().is_symlink()) {
+                output
+                    .files
+                    .push(skipped(path, "symlink file (not followed)"));
                 continue;
             }
             if !fs::metadata(&resolved).is_ok_and(|m| m.is_file()) {

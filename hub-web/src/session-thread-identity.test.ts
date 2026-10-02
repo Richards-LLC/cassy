@@ -191,6 +191,38 @@ describe("grouped project sessions (cas-55a4)", () => {
     expect(plain.querySelector(".conversation-row.endable")).toBeNull();
   });
 
+  it("lands focus on the next row, the one before, then the list once a session ends from the keyboard (cas-e634)", async () => {
+    const container = document.createElement("nav"); container.id = "conversation-list"; document.body.replaceChildren(container);
+    const list = new ConversationList();
+    let live = [row("calm-puma-34", 300, { canEnd: true }), row("wild-shark-68", 200, { canEnd: true }), row("noble-cheetah-84", 100, { canEnd: true })];
+    const open = vi.fn();
+    // As main.ts does: the hub ends it, the catalog drops it, the list redraws.
+    const end = vi.fn(async (ended: ConversationRow) => {
+      await new Promise((ok) => setTimeout(ok, 0));
+      live = live.filter((item) => item.key !== ended.key);
+      list.render(container, groupConversationRows(live), open, end);
+    });
+    const draw = () => list.render(container, groupConversationRows(live), open, end);
+    const endFromKeyboard = async (session: string) => {
+      const control = [...container.querySelectorAll<HTMLElement>(".conversation-end")].find((node) => node.previousElementSibling?.textContent?.includes(session))!;
+      control.querySelector<HTMLButtonElement>(".conversation-end-ask")!.click();
+      const confirm = control.querySelector<HTMLButtonElement>(".conversation-end-confirm")!;
+      confirm.focus();
+      confirm.click();
+      // While it ends, focus waits on the status line, not the page.
+      expect(document.activeElement?.textContent).toBe(`Ending ${session}…`);
+      await new Promise((ok) => setTimeout(ok, 5));
+    };
+    draw();
+    await endFromKeyboard("wild-shark-68");
+    expect((document.activeElement as HTMLElement).dataset.threadKey).toBe("atlas:noble-cheetah-84");
+    await endFromKeyboard("noble-cheetah-84");
+    // The last row ended: the one before it. One session left is no longer a group.
+    expect((document.activeElement as HTMLElement).dataset.threadKey).toBe("atlas:calm-puma-34");
+    expect(container.querySelector(".conversation-group-head")).toBeNull();
+    expect(document.activeElement).not.toBe(document.body);
+  });
+
   it("offers no End session without the callback or the scope", () => {
     const container = document.createElement("nav"); document.body.replaceChildren(container);
     new ConversationList().render(container, groupConversationRows([row("a-b-1", 2), row("c-d-2", 1)]), vi.fn(), vi.fn());

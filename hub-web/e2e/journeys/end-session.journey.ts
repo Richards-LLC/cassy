@@ -74,14 +74,20 @@ test("HUB-J16 end a session from my phone", async ({ page, journey }) => {
     await expect(last.getByRole("button", { name: "Cancel" })).toBeInViewport({ ratio: 1 });
   });
 
-  await journey.stage("Cancel, then end it", async () => {
+  await journey.stage("Cancel, then end it from the keyboard", async () => {
     const last = list.locator(".conversation-end").last();
     await last.getByRole("button", { name: "Cancel" }).tap();
     await expect(last.getByRole("button", { name: "End session amber-fox-29 on Atlas" })).toBeFocused();
     expect(hub.ends).toEqual([]);
-    await last.getByRole("button", { name: "End session amber-fox-29 on Atlas" }).tap();
-    await last.getByRole("button", { name: "End session", exact: true }).tap();
+    // cas-e634: keyboard only — Enter on End, Shift+Tab from Cancel to confirm, Enter.
+    await page.keyboard.press("Enter");
+    await expect(last.getByRole("button", { name: "Cancel" })).toBeFocused();
+    await page.keyboard.press("Shift+Tab");
+    await expect(last.getByRole("button", { name: "End session", exact: true })).toBeFocused();
+    await page.keyboard.press("Enter");
     await expect(row("amber-fox-29")).toHaveCount(0);
+    // The ended row was the last: focus lands on the row before it, never on the page.
+    await expect(row("swift-heron-51")).toBeFocused();
     expect(hub.ends).toEqual([{ machine: "atlas", session: "gabber-studio-amber-fox-29", scopes: [...SCOPES, "factory-manage"] }]);
     await expect(list.locator(".conversation-group-head")).toHaveText("gabber-studio · 6 sessions on Atlas");
   });

@@ -512,7 +512,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 1. See six sessions at once — under "gabber-studio · 7 sessions on Atlas", each row leads with its codename, End session is a glyph button in its own column at the row's end, and at least six rows are fully in view
 2. Tap a session's time to open it, then come back — the time belongs to the row (End is a 44px column of its own beside it), the session opens, and back on the list all seven are still there
 3. End session asks at once, focused on Cancel — on the last row the confirmation is present in the same task as the tap, Cancel has focus, both buttons are fully in view, and no row leaves the list
-4. Cancel, then end it — Cancel returns focus to End session; confirming ends the session, and the heading reads 6 sessions
+4. Cancel, then end it from the keyboard — Cancel returns focus to End session; Enter, Shift+Tab to the confirmation's End session and Enter end it, the heading reads 6 sessions, and focus lands on the row before the ended last row, never on the page
 
 #### Expected experience
 

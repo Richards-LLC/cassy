@@ -216,6 +216,33 @@ export class ConversationList {
   }
 
   /**
+   * Where focus goes once a session is ended (cas-e634): the row after it,
+   * else the row before it, else its group's heading, else the list. Keys
+   * and the group heading are taken before the row leaves the list.
+   */
+  private neighbours(key: string): { after?: string; before?: string; group?: string } {
+    const rows = this.latest?.rows ?? [];
+    const index = rows.findIndex((candidate) => candidate.key === key);
+    const group = rows[index]?.group?.key;
+    return { after: rows[index + 1]?.key, before: index > 0 ? rows[index - 1]?.key : undefined, group: group === undefined ? undefined : `group:${group}` };
+  }
+
+  /** The ended row is gone; if focus went with it, land it on the nearest thing left. */
+  private landAfterEnd(control: HTMLElement, neighbours: { after?: string; before?: string; group?: string }): void {
+    const document = control.ownerDocument;
+    const active = document.activeElement;
+    const lost = !active || active === document.body || !active.isConnected || control.contains(active);
+    if (!lost) return;
+    const row = (key?: string) => (key === undefined ? undefined : this.nodes.get(key));
+    const live = (node?: HTMLElement) => (node?.isConnected ? node : undefined);
+    const heading = live(neighbours.group === undefined ? undefined : this.extras.get(neighbours.group));
+    const target = live(row(neighbours.after)) ?? live(row(neighbours.before)) ?? heading ?? live(this.latest?.container);
+    if (!target) return;
+    if (!(target instanceof HTMLButtonElement) && !target.hasAttribute("tabindex")) target.tabIndex = -1;
+    target.focus({ preventScroll: false });
+  }
+
+  /**
    * End session, then a confirmation that names what stops (cas-55a4). Only
    * the confirmation's own button ends anything.
    */
@@ -258,11 +285,24 @@ export class ConversationList {
     question.textContent = state === "ending"
       ? `Ending ${row.supervisor}…`
       : `End ${row.supervisor} on ${machineName(row.host)}? Its supervisor and workers stop.`;
-    if (state === "ending") { question.setAttribute("role", "status"); control.replaceChildren(question); return; }
+    if (state === "ending") {
+      question.setAttribute("role", "status");
+      // Focus waits on the status line while the end is in flight: the
+      // confirmation that held it is gone (cas-e634).
+      question.tabIndex = -1;
+      control.replaceChildren(question);
+      return;
+    }
     const confirm = button("End session", "conversation-end-confirm danger", () => {
+      const keyboard = control.contains(control.ownerDocument.activeElement);
+      const neighbours = this.neighbours(row.key);
       this.ending.set(row.key, "ending");
       rerender();
-      void end(row).then(() => { this.ending.delete(row.key); }, (error: unknown) => {
+      if (keyboard) control.querySelector<HTMLElement>(".conversation-end-question")?.focus({ preventScroll: true });
+      void end(row).then(() => {
+        this.ending.delete(row.key);
+        this.landAfterEnd(control, neighbours);
+      }, (error: unknown) => {
         this.ending.set(row.key, { error: `Could not end ${row.supervisor}: ${error instanceof Error ? error.message : String(error)}` });
         rerender();
       });

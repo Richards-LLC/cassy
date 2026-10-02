@@ -308,6 +308,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - One column at a time; every target is big enough to tap.
 - The composer stays visible above the keyboard.
+- The header always names the machine: a long machine name keeps its place (its OS word goes first, never cut mid-word) and the generated codename yields, ellipsised and then stepped aside; the line's title keeps both (cas-766c; suite stage "A long machine name keeps its place ahead of the codename in the header").
 
 #### Edge paths
 

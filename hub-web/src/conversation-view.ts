@@ -1,4 +1,4 @@
-import { fitMachineLine } from "./conversation-shell";
+import { fitMachineLine, hostMarkup } from "./conversation-shell";
 import { machineMonogram } from "./machine-accent";
 import { plainTextMarkdown, renderMarkdown } from "./markdown-renderer";
 import { refusal } from "./refusal";
@@ -871,9 +871,9 @@ export class ConversationView {
     if (!project) name.className = "codename";
     const where = document.createElement("span"); where.className = "proj2";
     where.title = [machine, project ? supervisor : undefined].filter(Boolean).join(" · ");
-    // cas-71af (e918 QA F02): as in the header, the machine name yields to the
-    // codename: it ellipsises in its own span, down to a letter and "…".
-    const host = document.createElement("span"); host.className = "proj2-machine"; host.textContent = machine ?? "";
+    // cas-766c: as in the header, the machine name holds its place; its OS
+    // word goes first, then the codename yields (fitMachineLine).
+    const host = document.createElement("span"); host.className = "proj2-machine"; host.innerHTML = hostMarkup(machine ?? "");
     if (machine) where.append(host);
     if (project) {
       const secondary = document.createElement("span"); secondary.className = "codename"; secondary.textContent = supervisor;

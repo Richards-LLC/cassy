@@ -576,40 +576,59 @@ describe("hostMarkup (journey F14)", () => {
     expect(hostMarkup("pippenz-desktop")).toBe("pippenz-desktop");
     expect(hostMarkup("<b> · Windows")).toBe('&lt;b&gt;<span class="host-os"> · Windows</span>');
   });
-  it("lets the machine name ellipsise before the codename at every width", () => {
+  it("keeps the machine ahead of the codename at every width (cas-766c)", () => {
     const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
-    expect(css).toContain(".conversation-identity .host-machine { flex: 0 1 auto; min-width: 2ch; overflow: hidden; text-overflow: ellipsis; }");
-    expect(css).toContain(".conversation-identity .host-machine ~ .codename { flex: none; max-width: calc(100% - 5ch); overflow: hidden; text-overflow: ellipsis; }");
-  });
-  it("hides the OS word below 500px, after the phone block in the cascade", () => {
-    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
-    const rule = css.indexOf("@media (max-width: 500px) {\n  .conversation-identity .host-os { display: none; }");
-    expect(rule).toBeGreaterThan(css.indexOf("  .conversation-identity .host-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; }\n  #conversation-connection"));
+    expect(css).toContain(".conversation-identity .host-machine { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }");
+    expect(css).toContain(".conversation-identity .host-where.machine-long > .host-machine { min-width: 16ch; }");
+    expect(css).toContain(".conversation-identity .host-machine ~ .codename { flex: 0 1000 auto; min-width: min(8ch, 100%); overflow: hidden; text-overflow: ellipsis; }");
+    // The OS word goes whenever the line is short of room, not only on a phone.
+    expect(css).toContain(".conversation-identity .host-where.os-dropped .host-os { display: none; }");
+    expect(css).not.toContain("  .conversation-identity .host-os { display: none; }");
   });
 });
 
-describe("fitMachineLine (cas-71af, e918 QA F01)", () => {
-  const line = (codenameWidth: number) => {
+describe("fitMachineLine (cas-766c)", () => {
+  // 10px mono: 1ch is 6px, so the machine keeps up to 96px and the codename 48px.
+  const line = (sizes: { machine: number; machineNoOs?: number; codename: number; separator?: number }) => {
     const where = document.createElement("span"); where.className = "host-where";
-    where.innerHTML = '<span class="host-machine">Daniel\'s MacBook Pro</span><span class="host-sep"> · </span><span class="codename">vigilant-kingfisher-12</span>';
+    where.innerHTML = '<span class="host-machine">Forge build box with an unusual hostname<span class="host-os"> · Linux</span></span><span class="host-sep"> · </span><span class="codename">an-extraordinarily-long-supervisor-name</span>';
     const codename = where.querySelector<HTMLElement>(".codename")!;
+    const machine = where.querySelector<HTMLElement>(".host-machine")!;
     codename.style.fontSize = "10px";
-    Object.defineProperty(codename, "scrollWidth", { configurable: true, get: () => codenameWidth });
+    Object.defineProperty(codename, "scrollWidth", { configurable: true, get: () => sizes.codename });
+    Object.defineProperty(machine, "scrollWidth", { configurable: true, get: () => (where.classList.contains("os-dropped") ? sizes.machineNoOs ?? sizes.machine : sizes.machine) });
+    const separator = where.querySelector<HTMLElement>(".host-sep")!;
+    separator.getBoundingClientRect = () => ({ width: sizes.separator ?? 18 } as DOMRect);
     document.body.append(where);
     return where;
   };
-  it("drops the machine and separator when they cannot keep 2ch beside the whole codename", () => {
-    // 5ch at 10px mono is 30px.
-    const where = line(132);
-    fitMachineLine(where, 150);
-    expect(where.classList.contains("machine-squeezed")).toBe(true);
-    fitMachineLine(where, 170);
-    expect(where.classList.contains("machine-squeezed")).toBe(false);
+  const state = (where: HTMLElement) => ["os-dropped", "machine-long", "codename-squeezed"].filter((name) => where.classList.contains(name));
+
+  it("leaves a line that fits whole alone", () => {
+    const where = line({ machine: 80, codename: 100 });
+    fitMachineLine(where, 200);
+    expect(state(where)).toEqual([]);
   });
-  it("hides it in the stylesheet, header and empty card alike, and gives the codename the line", () => {
+  it("drops the OS word first, then lets the codename ellipsise beside the machine", () => {
+    const where = line({ machine: 240, machineNoOs: 200, codename: 300 });
+    // Machine kept at 16ch (96px) + 18px separator + 8ch (48px) codename = 162px fits in 200.
+    fitMachineLine(where, 200);
+    expect(state(where)).toEqual(["os-dropped", "machine-long"]);
+  });
+  it("steps the codename aside only when the machine and 8ch of codename cannot share the line", () => {
+    const where = line({ machine: 240, machineNoOs: 200, codename: 300 });
+    fitMachineLine(where, 150);
+    expect(state(where)).toEqual(["os-dropped", "machine-long", "codename-squeezed"]);
+    // A short machine leaves the codename its 8ch.
+    const short = line({ machine: 40, codename: 300 });
+    fitMachineLine(short, 120);
+    expect(state(short)).toEqual(["os-dropped"]);
+  });
+  it("hides the codename, not the machine, in the stylesheet, header and empty card alike", () => {
     const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
-    expect(css).toContain(".conversation-identity .host-where.machine-squeezed > :is(.host-machine, .host-sep) { display: none; }");
-    expect(css).toContain(".thread .empty .proj2.machine-squeezed > :is(.proj2-machine, .proj2-sep) { display: none; }");
+    expect(css).toContain(".conversation-identity .host-where.codename-squeezed > :is(.codename, .host-sep) { display: none; }");
+    expect(css).toContain(".thread .empty .proj2.codename-squeezed > :is(.codename, .proj2-sep) { display: none; }");
+    expect(css).not.toContain("machine-squeezed > :is(");
   });
 });
 

@@ -3230,7 +3230,10 @@ dialog form > *,
 .conversation-title { display: inline-flex; flex-wrap: wrap; align-items: center; column-gap: 0; min-width: 0; max-width: 100%; overflow-x: clip; }
 .conversation-project { min-width: 0; max-width: 100%; margin-inline-end: 17px; font: var(--weight-semibold) var(--fs-md)/1.35 var(--font-ui); overflow-wrap: anywhere; }
 .conversation-sep { width: 3px; height: 3px; border-radius: var(--radius-pill); background: var(--ink-soft); flex: none; }
-.conversation-machine { display: inline-flex; align-items: center; gap: 7px; min-width: 0; max-width: calc(100% + 10px); margin-inline-start: -10px; color: var(--ink-mid); font: var(--weight-medium) var(--fs-meta)/1.35 var(--font-ui); white-space: nowrap; }
+/* cas-766c: the machine stays on the title line beside the project (basis 0,
+   growing into the room left), ellipsised there; it wraps only when under 6ch
+   would be left. */
+.conversation-machine { display: inline-flex; flex: 1 1 0; align-items: center; gap: 7px; min-width: 6ch; max-width: calc(100% + 10px); margin-inline-start: -10px; color: var(--ink-mid); font: var(--weight-medium) var(--fs-meta)/1.35 var(--font-ui); white-space: nowrap; }
 /* cas-1ca1: a long machine name ellipsises inside the title column, clear of the time stamp. */
 /* cas-1ca1 F01: the glyph box of a 13px/1.35 line sits about 1px taller than
    the line, so the clipping span gets 2px of block padding (given back by the
@@ -3287,22 +3290,21 @@ dialog form > *,
    state after it stays visible, instead of the line wrapping to three. */
 .conversation-identity .conversation-host { display: flex; margin-top: 1px; font: var(--weight-regular) 13px/1.25 var(--font-mono); color: var(--ink-mid); white-space: nowrap; }
 .conversation-identity .host-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-/* The codename is who the operator is talking to, so the machine name yields
-   first (journey F14, QA round 1 F01). The machine ellipsises, and the codename
-   keeps its full width up to the line less the 3ch separator (the reserve can
-   never exceed machine + separator, so a short label never cuts it); only a
-   codename that long ellipsises itself. */
+/* cas-766c: the machine name says where a conversation runs, so it holds its
+   place and the generated codename yields: the machine's OS word goes first
+   (.os-dropped); then the codename shrinks (its shrink weight dwarfs the
+   machine's) down to 8ch while a long machine name keeps 16ch
+   (.machine-long); then the codename steps aside (.codename-squeezed) and
+   the machine ellipsises alone. The title keeps the whole line
+   (fitMachineLine). */
 .conversation-identity .host-where:has(> .host-machine) { display: flex; }
-/* cas-71af (e918 QA F01): with no room the machine name used to shrink to a
-   2px glyph sliver. It keeps 2ch, one letter and its ellipsis ("D…"), and the
-   codename's reserve is that plus the 3ch separator. */
-.conversation-identity .host-machine { flex: 0 1 auto; min-width: 2ch; overflow: hidden; text-overflow: ellipsis; }
+.conversation-identity .host-machine { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.conversation-identity .host-where.machine-long > .host-machine { min-width: 16ch; }
 .conversation-identity .host-sep { flex: none; white-space: pre; }
-.conversation-identity .host-machine ~ .codename { flex: none; max-width: calc(100% - 5ch); overflow: hidden; text-overflow: ellipsis; }
-/* With less room than that, the machine and its separator step aside
-   (fitMachineLine); the title keeps the whole "machine · codename". */
-.conversation-identity .host-where.machine-squeezed > :is(.host-machine, .host-sep) { display: none; }
-.conversation-identity .host-where.machine-squeezed > .codename { max-width: 100%; }
+.conversation-identity .host-machine ~ .codename { flex: 0 1000 auto; min-width: min(8ch, 100%); overflow: hidden; text-overflow: ellipsis; }
+.conversation-identity .host-where.os-dropped .host-os { display: none; }
+.conversation-identity .host-where.codename-squeezed > :is(.codename, .host-sep) { display: none; }
+.conversation-identity .host-where.codename-squeezed > .host-machine { min-width: 0; }
 #conversation-connection { flex: none; white-space: pre; }
 .conversation-pane-slot { flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
 .conversation-pane-slot .pane-grid { display: block; padding: 0; height: 100%; min-height: 0; background: var(--bg-root); color: var(--text-hi); }
@@ -3638,14 +3640,15 @@ button.chip:disabled { cursor: default; }
 .thread .empty b.codename { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.35; }
 .thread .empty .proj2 { max-width: 100%; font: var(--weight-regular) 13px/1.4 var(--font-mono); color: var(--ink-mid); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .thread .empty .proj2:empty { display: none; }
-/* cas-71af (e918 QA F02): the empty card's machine · codename line yields the
-   machine first, as the header does; the codename stays whole. */
 .thread .empty .proj2:has(> .proj2-machine) { display: flex; }
-.thread .empty .proj2-machine { flex: 0 1 auto; min-width: 2ch; overflow: hidden; text-overflow: ellipsis; }
+/* cas-766c: the same order as the header's host line. */
+.thread .empty .proj2-machine { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.thread .empty .proj2.machine-long > .proj2-machine { min-width: 16ch; }
 .thread .empty .proj2-sep { flex: none; white-space: pre; }
-.thread .empty .proj2-machine ~ .codename { flex: none; max-width: calc(100% - 5ch); overflow: hidden; text-overflow: ellipsis; }
-.thread .empty .proj2.machine-squeezed > :is(.proj2-machine, .proj2-sep) { display: none; }
-.thread .empty .proj2.machine-squeezed > .codename { max-width: 100%; }
+.thread .empty .proj2-machine ~ .codename { flex: 0 1000 auto; min-width: min(8ch, 100%); overflow: hidden; text-overflow: ellipsis; }
+.thread .empty .proj2.os-dropped .host-os { display: none; }
+.thread .empty .proj2.codename-squeezed > :is(.codename, .proj2-sep) { display: none; }
+.thread .empty .proj2.codename-squeezed > .proj2-machine { min-width: 0; }
 .thread .empty .said { margin: 0; max-width: 34ch; color: var(--ink-mid); font-size: 15px; overflow-wrap: anywhere; }
 .thread .empty .quiet { max-width: min(100%, 56ch); background: var(--sup-bg); color: var(--sup-fg); border-radius: 22px; padding: 12px 22px; box-shadow: var(--lift); overflow-wrap: anywhere; }
 
@@ -3827,13 +3830,11 @@ button.chip:disabled { cursor: default; }
   /* 4px of the 19px inset is the tint edge (P9). */
   .obj.t-a .obj-body { padding-left: 15px; }
 }
-/* Below 500px the conversation header drops the machine's OS word before it
-   truncates the supervisor's codename (journey F14); .host-where's title keeps
-   the full label. A generated codename ("patient-pelican-9") beside its
-   machine then fits whole: the meta line is a touch smaller and Terminal a
-   touch narrower. After the phone block so it wins the cascade. */
+/* Below 500px the meta line is a touch smaller and Terminal a touch narrower,
+   so a generated codename ("patient-pelican-9") fits beside its machine more
+   often. The OS word goes at any width once the line is short of room
+   (cas-766c, fitMachineLine). After the phone block so it wins the cascade. */
 @media (max-width: 500px) {
-  .conversation-identity .host-os { display: none; }
   .conversation-identity .conversation-host { font-size: 11.5px; }
   #conversation-terminal { padding: 0 6px; }
 }

@@ -47,19 +47,29 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
   await page.routeWebSocket(/shed\.test/, (ws) => { void ws.close({ code: 1006 }); });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
   const composer = page.getByRole("textbox", { name: "Your message" });
-  /** At 390 px the header reads "<machine> · <codename> · <state>": no OS word, the codename whole, the state visible. */
-  const expectHeaderKeepsCodename = async (machine: string, codename: string, machineWhole = true) => {
+  /**
+   * cas-766c: the header's host line always shows some of the machine name;
+   * its OS word is shown whole or not at all, never cut; and the machine is
+   * only ever cut once the codename has stepped aside. The title keeps both.
+   */
+  const expectHeaderKeepsMachine = async (machine: string, codename: string) => {
     const where = page.locator(".conversation-identity .host-where");
-    await expect(where).toHaveAttribute("title", new RegExp(`· ${codename}$`));
-    await expect(page.locator(".conversation-identity .host-os")).toBeHidden();
-    // Rendered text only (the hidden OS word drops out); flex items come back one per line.
-    expect((await where.innerText()).split("\n").join("")).toBe(`${machine} · ${codename}`);
-    // The codename is never the part that is cut (QA F01); the machine name yields first.
-    const name = where.locator(".codename");
-    expect(await name.evaluate((element) => element.scrollWidth > element.clientWidth + 1), `the header shows ${codename} whole at 390 px`).toBe(false);
-    const machineCut = await where.locator(".host-machine").evaluate((element) => element.scrollWidth > element.clientWidth + 1);
-    if (machineWhole) expect(machineCut, `${machine} fits beside ${codename}`).toBe(false);
-    else expect(machineCut, `${machine} is the part that ellipsises`).toBe(true);
+    await expect(where).toHaveAttribute("title", `${machine} · ${codename}`);
+    const shown = await where.evaluate((line) => {
+      const host = line.querySelector<HTMLElement>(".host-machine")!;
+      const os = host.querySelector<HTMLElement>(".host-os");
+      const name = line.querySelector<HTMLElement>(".codename");
+      const ch = parseFloat(getComputedStyle(host).fontSize) * 0.6;
+      return {
+        machineChars: host.getBoundingClientRect().width / ch,
+        machineCut: host.scrollWidth > host.clientWidth + 1,
+        osShown: os !== null && os.getClientRects().length > 0,
+        codenameShown: name !== null && name.getClientRects().length > 0,
+      };
+    });
+    expect(shown.machineChars, `some of ${machine} is on the line`).toBeGreaterThanOrEqual(4);
+    expect(shown.osShown && shown.machineCut, "the OS word is never cut mid-word").toBe(false);
+    if (shown.machineCut) expect(shown.codenameShown, `${codename} steps aside before ${machine} is cut`).toBe(false);
     await expect(page.locator("#conversation-connection")).toBeVisible();
   };
 
@@ -98,7 +108,7 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     await expect(list).toBeHidden();
     await expect(page.getByRole("button", { name: "‹ Conversations", exact: true })).toBeVisible();
     // The header drops the OS word before it cuts the codename (journey F14).
-    await expectHeaderKeepsCodename("Atlas", PELICAN);
+    await expectHeaderKeepsMachine("Atlas · Linux", PELICAN);
   });
 
   await journey.stage("Reply with the phone keyboard", async () => {
@@ -132,7 +142,7 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     await page.getByRole("button", { name: /Jump to gabber-studio/ }).tap();
     await expect(page.locator("#command-palette")).toBeHidden();
     await expect(page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true })).toBeVisible();
-    await expectHeaderKeepsCodename("Studio Mac", OTTER);
+    await expectHeaderKeepsMachine("Studio Mac · macOS", OTTER);
     // Like a tap on a list row: land to read, with no soft keyboard raised
     // over the conversation just opened.
     await expect(composer).not.toBeFocused();
@@ -188,15 +198,15 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     expect(ring).toMatchObject({ style: "solid", width: "2px", color: ring.focus });
   });
 
-  await journey.stage("A long machine name yields to the codename in the header", async () => {
-    // cas-e918 QA F01: hostname-style names of 19–23 characters used to keep
-    // their room and cut the codename to "ti…" or drop it entirely.
-    for (const [project, machine, codename] of [["lab", "pippenz-workstation", "tiny-wren-3"], ["notes", "Daniel's MacBook Pro", "brisk-lark-5"], ["infra", "Build Server Rack Seven", "patient-heron-12"]] as const) {
+  await journey.stage("A long machine name keeps its place ahead of the codename in the header", async () => {
+    // cas-766c: on a phone the header is the only place that names the
+    // machine, so the generated codename yields to it, not the other way round.
+    for (const [project, machine, codename] of [["lab", "pippenz-workstation · Linux", "tiny-wren-3"], ["notes", "Daniel's MacBook Pro · macOS", "brisk-lark-5"], ["infra", "Build Server Rack Seven · Windows", "patient-heron-12"]] as const) {
       const back = page.getByRole("button", { name: "‹ Conversations", exact: true });
       if (await back.isVisible()) await back.tap();
       await list.getByRole("button", { name: new RegExp(project) }).tap();
       await expect(page.locator(".conversation-identity h1")).toHaveText(project);
-      await expectHeaderKeepsCodename(machine, codename, false);
+      await expectHeaderKeepsMachine(machine, codename);
     }
   });
 

@@ -438,15 +438,14 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     for (const width of [desktop.width, 390]) {
       await page.setViewportSize({ width, height: desktop.height });
       expect(await oneLineCodename(".thread .empty .proj2"), `meta line at ${width}px`).toMatchObject({ lines: 1, oneLine: true, title: `Forge · Linux · ${LONG_NAME}` });
-      // The machine name yields first; a codename this long still ellipsises on a phone.
+      // cas-766c: the codename yields to the machine; a codename this long ellipsises.
       expect(await oneLineCodename(".thread .empty .proj2 > .codename"), `meta codename at ${width}px`).toMatchObject({ lines: 1, oneLine: true, ...(width === 390 ? { ellipsised: true } : {}) });
-      // cas-71af (e918 QA F01): the machine name keeps at least a letter and
-      // its ellipsis ("F…"), or steps aside with its separator when even that
-      // does not fit beside the codename; never a 2px glyph sliver. Header
-      // and empty card alike.
+      // cas-766c: the header and the empty card always show the machine,
+      // and its OS word is shown whole or not at all, never cut.
       for (const machine of [".conversation-identity .host-machine", ".thread .empty .proj2-machine"]) {
-        const shown = await page.locator(machine).evaluate((element) => ({ width: element.getBoundingClientRect().width, ch: parseFloat(getComputedStyle(element).fontSize) * 0.5 }));
-        if (shown.width > 0) expect(shown.width, `${machine} at ${width}px`).toBeGreaterThanOrEqual(shown.ch * 2 - 1);
+        const shown = await page.locator(machine).evaluate((element) => ({ width: element.getBoundingClientRect().width, ch: parseFloat(getComputedStyle(element).fontSize) * 0.5, cut: element.scrollWidth > element.clientWidth + 1, os: (element.querySelector(".host-os")?.getClientRects().length ?? 0) > 0 }));
+        expect(shown.width, `${machine} at ${width}px`).toBeGreaterThanOrEqual(shown.ch * 4);
+        expect(shown.os && shown.cut, `${machine}'s OS word cut at ${width}px`).toBe(false);
       }
     }
     await page.setViewportSize(desktop);

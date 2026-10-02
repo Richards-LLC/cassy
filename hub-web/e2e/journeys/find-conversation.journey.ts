@@ -469,12 +469,28 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     expect(seen.status.filter((text) => String(text).startsWith("header:")), "header words while it opened").toEqual(["header: Live"]);
     expect(seen.status.filter((text) => /Connecting|Opening/.test(String(text))), "row or header flipping while it opened").toEqual([]);
     expect(seen.composer, "composer widths while it opened").toHaveLength(1);
-    // cas-71af (e918 QA F02): the empty card's machine · codename line yields
-    // the 40-character machine name first; the codename stays whole on a phone.
+    // cas-766c: on a phone the empty card's machine · codename line keeps
+    // the 40-character machine name (at least 16ch, its OS word dropped, never
+    // cut mid-word) and the generated codename yields first.
+    // The header's host line, at desktop and phone: the machine is on it, and
+    // its OS word is whole or gone, never "· Lin…" (cas-766c).
+    const headerHost = () => page.locator(".conversation-identity .host-where").evaluate((line) => {
+      const machine = line.querySelector<HTMLElement>(".host-machine")!;
+      const ch = parseFloat(getComputedStyle(machine).fontSize) * 0.6;
+      return { machineChars: machine.getBoundingClientRect().width / ch, osCut: (machine.querySelector(".host-os")?.getClientRects().length ?? 0) > 0 && machine.scrollWidth > machine.clientWidth + 1 };
+    });
+    for (const header of [await headerHost()]) { expect(header.machineChars, "machine on the header at 1280").toBeGreaterThanOrEqual(15.5); expect(header.osCut, "OS word cut at 1280").toBe(false); }
     await page.setViewportSize({ width: 390, height: 844 });
+    for (const header of [await headerHost()]) { expect(header.machineChars, "machine on the header at 390").toBeGreaterThanOrEqual(4); expect(header.osCut, "OS word cut at 390").toBe(false); }
     const meta = page.locator(".thread .empty .proj2");
-    expect(await meta.locator(".codename").evaluate((element) => element.scrollWidth <= element.clientWidth + 1), "codename whole at 390px").toBe(true);
-    expect(await meta.locator(".proj2-machine").evaluate((element) => element.scrollWidth > element.clientWidth), "machine ellipsised at 390px").toBe(true);
+    const fitted = await meta.evaluate((line) => {
+      const machine = line.querySelector<HTMLElement>(".proj2-machine")!;
+      const ch = parseFloat(getComputedStyle(machine).fontSize) * 0.6;
+      return { machineChars: machine.getBoundingClientRect().width / ch, os: (machine.querySelector(".host-os")?.getClientRects().length ?? 0) > 0, title: line.getAttribute("title") };
+    });
+    expect(fitted.machineChars, "the machine keeps 16ch at 390px").toBeGreaterThanOrEqual(15.5);
+    expect(fitted.os, "the OS word goes before the name is cut").toBe(false);
+    expect(fitted.title).toBe("Forge build box with an unusual hostname · Linux · quiet-heron-7");
     await page.setViewportSize({ width: 1280, height: 720 });
     expect(seen.footer, "the footer while the conversation opened").toEqual(["Connected"]);
     const jargon = seen.pane.filter((text) => /relay|attempt|authori[sz]ation|handshake|heartbeat|resolving|dialing/i.test(String(text)));

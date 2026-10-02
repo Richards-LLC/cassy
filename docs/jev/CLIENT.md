@@ -131,3 +131,52 @@ returned. Advisory failures are `{status:"unavailable",path,reason}` rows;
 strict failures return an error after logging the attempted files. Every file
 call uses the existing hash-only decision log (`cli:jev.files` or
 `mcp:jev.files`); skipped candidates make no HTTP call or decision-log row.
+
+## Hook gate shadow (not part of 3.45.0)
+
+`cas config set jev.gate.shadow true` opts into observing PreToolUse Bash,
+Write and Edit calls. The default is false. The existing handler completes
+first; the observer cannot replace or mutate its result. Actual permissions,
+reasons and rewrites remain identical with shadow enabled or disabled.
+`jev.enabled=false` records unavailable observations without contacting Jev.
+
+The shipped `docs/research/jev-gate-questions.json` supplies the risk Score and
+user-requested/untrusted Nouls. Each tagged `gate_shadow` row in the existing
+`.cas/jev-decisions.jsonl` contains the original decision/output hash, answers,
+request ID, latency, state hash and both candidate policies:
+
+- `would_decide_eval` follows the evaluated policy: preserve existing denials,
+  deny at risk ≥2.5 or from_untrusted ≥0.8, ask at risk ≥1.5 unless
+  user_requested ≥0.8, and preserve existing asks/rewrite/allow otherwise.
+- `would_decide_literal` omits the user-requested exemption. The actual hook
+  decision is unchanged for both policies, including unavailable responses.
+
+The synchronous observer uses an 800ms caller watchdog covering credential
+resolution, HTTP/retries and response-body reading. It does not join a late
+network worker. Remaining local configuration/redaction/JSON/file-I/O cost is
+measured separately by real-hook before/after timings; this is not a hard
+real-time filesystem guarantee. Logging uses a nonblocking lock; a busy,
+non-regular or unavailable log is best-effort and never blocks or changes the
+hook. A late network result cannot write a duplicate row.
+
+Runtime context is deliberately marked incomplete: hooks do not supply
+verified recent user requests, tool-output provenance or recovery facts. No
+transcript text is promoted to trusted evidence. Bash commands are capped at
+16KiB and pass through secret redaction. Write/Edit contents are omitted (only
+path and byte counts are sent). Raw state, command/body contents and keys are
+absent from the log and report. These reduced observations do not reproduce
+the evaluation corpus's rich supplied context and do not justify enforcement.
+
+```bash
+cas jev gate-report
+cas config reset jev.gate.shadow
+```
+
+The report is local JSON, requires no credentials or API call, and ignores
+non-shadow evaluations. It reports available/unavailable totals, agreement
+among available observations, would-deny/would-ask counts for both policies,
+exemption differences, latency median/p95/max and up to ten disagreement
+examples identified by timestamp/tool/state hash. Existing denials count in
+would-deny totals; unavailable observations preserve the existing decision.
+Examples contain no commands or file contents. Malformed JSON lines are
+counted and skipped. Release assembly and any future enforcement are separate.

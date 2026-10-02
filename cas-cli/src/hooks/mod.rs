@@ -159,7 +159,11 @@ pub fn handle_hook(event_name: &str, mut input: HookInput) -> Result<HookOutput,
         "PostToolUseFailure" | "PermissionDenied" => {
             handle_verifier_spawn_cleanup(&input, cas_root.as_deref())
         }
-        "PreToolUse" => handle_pre_tool_use(&input, cas_root.as_deref()),
+        "PreToolUse" => {
+            let result = handle_pre_tool_use(&input, cas_root.as_deref());
+            crate::jev::gate::observe(&input, cas_root.as_deref(), result.as_ref().ok());
+            result
+        },
         "UserPromptSubmit" => handle_user_prompt_submit(&input, cas_root.as_deref()),
         "PermissionRequest" => handle_permission_request(&input, cas_root.as_deref()),
         "Notification" => handle_notification(&input, cas_root.as_deref()),

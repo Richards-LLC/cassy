@@ -3,6 +3,11 @@
 # be able to start together without mutating the same rustup home concurrently.
 set -euo pipefail
 
+if [[ "$(uname -s)" == Darwin ]]; then
+    printf 'SKIP shared-home rustup fixture on Darwin: Linux flock is required to serialize the shared runner toolchain\n'
+    exit 0
+fi
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/cassy-rustup-setup.XXXXXX")"
 trap 'rm -rf "$fixture_root"' EXIT
@@ -35,11 +40,25 @@ case "${1:-}:${2:-}" in
         printf '%s\n' "$((count + 1))" >"$RUSTUP_HOME/install-count"
         : >"$RUSTUP_HOME/installed"
         ;;
-    run:stable)
-        test "${3:-}" = rustc
-        test "${4:-}" = --version
+    target:list)
+        test "$*" = 'target list --toolchain stable --installed'
         test -f "$RUSTUP_HOME/installed"
-        printf '%s\n' 'rustc 1.88.0 (fixture)'
+        printf '%s\n' 'x86_64-unknown-linux-gnu'
+        ;;
+    run:stable)
+        test -f "$RUSTUP_HOME/installed"
+        case "${3:-}:${4:-}" in
+            rustc:--version) printf '%s\n' 'rustc 1.88.0 (fixture)' ;;
+            rustc:-vV) printf '%s\n' 'rustc 1.88.0 (fixture)' 'host: x86_64-unknown-linux-gnu' ;;
+            rustc:--print)
+                test "${5:-}" = target-libdir
+                mkdir -p "$RUSTUP_HOME/lib"
+                : >"$RUSTUP_HOME/lib/libstd-fixture.rlib"
+                printf '%s\n' "$RUSTUP_HOME/lib"
+                ;;
+            cargo:--version) printf '%s\n' 'cargo 1.88.0 (fixture)' ;;
+            *) echo "unexpected run fixture invocation: $*" >&2; exit 1 ;;
+        esac
         ;;
     *)
         echo "unexpected rustup fixture invocation: $*" >&2

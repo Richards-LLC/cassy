@@ -6045,7 +6045,7 @@ impl CasCore {
             &close_project_root,
         ) {
             MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_) => Ok(()),
-            MergeStateGateOutcome::Reject(message) => {
+            MergeStateGateOutcome::Reject(message) | MergeStateGateOutcome::Unresolved(message) => {
                 Err(TaskLifecycleGateError::UnmergedChildBranch { message })
             }
         }
@@ -7018,6 +7018,9 @@ impl CasCore {
                 // on the task and let the close continue.
                 MergeStateGateOutcome::ProceedWithNote(note) => {
                     append_close_decision_note(task_store.as_ref(), &mut task, &note);
+                }
+                MergeStateGateOutcome::Unresolved(message) => {
+                    return Ok(Self::tool_error(message));
                 }
                 MergeStateGateOutcome::Reject(msg) => {
                     // cas-a844: "MERGE REQUIRED" alone doesn't say whether the
@@ -11217,6 +11220,9 @@ pub(crate) enum MergeStateGateOutcome {
     ProceedWithNote(String),
     /// Close must be rejected with this user-facing error message.
     Reject(String),
+    /// The delivery branch cannot be resolved. Return the evidence error
+    /// without a merge preflight or AwaitingMerge projection.
+    Unresolved(String),
 }
 
 /// cas-e74c: evidence that scopes the merge-state guard to the closing
@@ -11254,10 +11260,13 @@ pub(crate) struct TaskCommitAttribution<'a> {
 /// - `task.task_type == Epic` — epic close is already covered by
 ///   [`check_unmerged_epic_branches`] at the epic-id branch namespace.
 /// - `task.assignee.is_none()` — orphaned task; nothing to check.
-/// - `factory/<assignee>` does not exist locally and merge-base
-///   computation fails — graceful pass. We do not false-reject when
-///   the worktree predates the convention or the branch was already
-///   pruned post-merge.
+/// - A branch-less local-only legacy store has no delivery anchor.
+///   Its later zero-commit and proof gates decide the delivery requirement.
+///
+/// A branch missing both locally and on origin is never assigned a commit
+/// count. Cleared no-code tasks use external_ref proof; recorded code anchors
+/// and validated receipts remain binding. Other remote-backed missing-ref
+/// cases return Unresolved, without a merge preflight or parking mutation.
 ///
 /// Rejects (Reject) when the factory branch has > 0 commits not on
 /// `parent_branch`. The error message includes the stranded count,
@@ -12293,8 +12302,25 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
             validate_task_commit_receipt(repo_path, receipt, parent_branch, window).is_ok()
         })
     });
+    // A missing local ref can still be measured through origin. Resolve
+    // both before count helpers: Unknown must never become a fictitious 1.
+    let origin_factory_branch = if factory_branch.starts_with("origin/") {
+        factory_branch.clone()
+    } else {
+        format!("origin/{factory_branch}")
+    };
+    let branch_ref = if git_ref_exists(repo_path, &factory_branch) {
+        Some(factory_branch.as_str())
+    } else if git_ref_exists(repo_path, &origin_factory_branch) {
+        Some(origin_factory_branch.as_str())
+    } else {
+        None
+    };
     let trusted_anchor = match task.deliverables.factory_branch_anchor.as_deref() {
-        Some(tip) if task.status == TaskStatus::AwaitingMerge && git_ref_exists(repo_path, tip) => {
+        Some(tip)
+            if (task.status == TaskStatus::AwaitingMerge || branch_ref.is_none())
+                && git_ref_exists(repo_path, tip) =>
+        {
             Some(tip)
         }
         _ => None,
@@ -12327,32 +12353,74 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
             ));
         }
     }
-    let mut commit_ish = trusted_anchor.unwrap_or(factory_branch.as_str());
+    let commit_ish = trusted_anchor
+        .or(branch_ref)
+        .unwrap_or(factory_branch.as_str());
     // cas-e33f (GH #1004): a task that changed hands and has no resolvable
     // branch left is measured by its recorded delivery anchor. With neither,
     // there are no deliverable commits to strand — the new assignee's
     // non-existent branch is not unmerged work.
     if trusted_anchor.is_none()
         && task_changed_hands(task)
-        && !git_ref_exists(repo_path, &factory_branch)
+        && branch_ref.is_none()
+        && task.deliverables.factory_branch_anchor.is_none()
+        && task.execution_note.as_deref() != Some("no-code")
+        && attribution.receipt.is_none()
     {
-        match task
-            .deliverables
-            .factory_branch_anchor
-            .as_deref()
-            .map(str::trim)
-            .filter(|anchor| is_safe_git_refname(anchor) && git_ref_exists(repo_path, anchor))
-        {
-            Some(anchor) => commit_ish = anchor,
-            None => {
-                return MergeStateGateOutcome::ProceedWithNote(format!(
-                    "decision: merge-state guard cleared — this task changed hands and no \
-                     branch holding its commits exists ({factory_branch} is absent and no \
-                     handoff or parked branch resolves), so there are no deliverable \
-                     commits to strand on {parent_branch}."
-                ));
-            }
+        return MergeStateGateOutcome::ProceedWithNote(format!(
+            "decision: merge-state guard cleared — this task changed hands and no \
+             branch holding its commits exists ({factory_branch} is absent and no \
+             handoff or parked branch resolves), so there are no deliverable \
+             commits to strand on {parent_branch}."
+        ));
+    }
+
+    if !git_ref_exists(repo_path, commit_ish) {
+        if let (Some(receipt), Some(window)) = (validated_content_receipt, attribution.window) {
+            // An integrated receipt remains valid after branch cleanup.
+            return match validate_task_commit_receipt(repo_path, receipt, parent_branch, window) {
+                Ok(note) => MergeStateGateOutcome::ProceedWithNote(format!(
+                    "{note} The factory branch `{factory_branch}` is missing locally and on origin; its delivery is proven by the receipt."
+                )),
+                Err(reason) => MergeStateGateOutcome::Unresolved(format!(
+                    "FACTORY BRANCH MISSING: `{factory_branch}` cannot be measured and its commit_receipt no longer proves delivery: {reason}"
+                )),
+            };
         }
+        if task.execution_note.as_deref() == Some("no-code")
+            && task.deliverables.work_target.is_none()
+            && task.deliverables.factory_branch_anchor.is_none()
+            && attribution.receipt.is_none()
+        {
+            return match no_code_close_proof(
+                &task.id,
+                Some("no-code"),
+                task.external_ref.as_deref(),
+                false,
+            ) {
+                Ok(Some(proof)) => MergeStateGateOutcome::ProceedWithNote(format!(
+                    "decision: factory branch `{factory_branch}` is missing locally and on origin. This no-code task has no active code target or delivery anchor; external_ref `{proof}` is its delivery proof. No branch commit count was measured."
+                )),
+                Err(message) => MergeStateGateOutcome::Unresolved(message),
+                Ok(None) => unreachable!("explicit no-code intent requires a proof"),
+            };
+        }
+        // Preserve branch-less local-only legacy stores, including an
+        // unvalidated receipt on a per-task worktree branch (cas-8f1b).
+        // The receipt is not integration proof: later proof/verification
+        // gates still bind the delivery to that worktree's current head.
+        if !origin_remote_configured(repo_path)
+            && task.deliverables.factory_branch_anchor.is_none()
+            && task.execution_note.as_deref() != Some("no-code")
+        {
+            return MergeStateGateOutcome::Proceed;
+        }
+        return MergeStateGateOutcome::Unresolved(format!(
+            "⚠️ FACTORY BRANCH MISSING\n\nTask {} cannot be measured: `{factory_branch}` is missing locally and on origin, and no usable delivery anchor or validated commit_receipt resolves. No branch commit count was obtained.\n\nAsk the supervisor to restore the recorded delivery evidence, or retry with commit_receipt=<integrated-delivery-sha>. If this task delivers only external work, a live registered supervisor can clear the stale code scope with `{supervisor}task action=update id={} proof_scope_fix=true target_repo=\"\" reason=\"reviewed external-only delivery\"` after recording execution_note=no-code, then close with external_ref=<portable-proof-reference>.",
+            task.id,
+            task.id,
+            supervisor = crate::mcp::tools::core::guidance::supervisor_prefix(),
+        ));
     }
     let local_merge = task.delivery_mode == cas_types::DeliveryMode::LocalMerge;
     let origin_parent_branch = format!("origin/{parent_branch}");
@@ -12409,7 +12477,9 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
                 attribution.window,
                 content_identity,
                 validated_content_receipt,
-                attribution.window.and_then(|window| window.supervisor_override_reason.as_deref()),
+                attribution
+                    .window
+                    .and_then(|window| window.supervisor_override_reason.as_deref()),
             ) {
                 return rejection;
             }
@@ -12473,7 +12543,9 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
                 attribution.window,
                 content_identity,
                 validated_content_receipt,
-                attribution.window.and_then(|window| window.supervisor_override_reason.as_deref()),
+                attribution
+                    .window
+                    .and_then(|window| window.supervisor_override_reason.as_deref()),
             ) {
                 return rejection;
             }
@@ -12511,7 +12583,9 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
                 attribution.window,
                 content_identity,
                 validated_content_receipt,
-                attribution.window.and_then(|window| window.supervisor_override_reason.as_deref()),
+                attribution
+                    .window
+                    .and_then(|window| window.supervisor_override_reason.as_deref()),
             ) {
                 return rejection;
             }
@@ -12689,6 +12763,12 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
         ));
     }
     let stranded = attributable.unwrap_or(stranded);
+    if branch_ref.is_none() {
+        return MergeStateGateOutcome::Unresolved(format!(
+            "⚠️ FACTORY BRANCH MISSING\n\nTask {} has a resolvable recorded delivery `{commit_ish}` with {stranded} measured commit(s) not on {parent_branch}, but `{factory_branch}` is missing locally and on origin. Ask the supervisor to restore the branch from the recorded delivery or provide a validated integrated commit_receipt. The missing branch itself was not counted or parked for merge.",
+            task.id,
+        ));
+    }
 
     // cas-c631: `epic/<slug>` branches are created locally by the supervisor
     // (see cas-supervisor EPIC workflow) and the epic ships to `main` as a
@@ -16195,6 +16275,12 @@ pub(crate) const EPIC_STATUS_BUDGET: std::time::Duration = std::time::Duration::
 /// with an unknown mutation outcome.
 pub(crate) const EPIC_CLOSE_GATE_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
 
+/// One complete child proof may exceed the soft collection budget, so retries
+/// make progress under load. Metadata is capped at 8 s separately; a bounded
+/// close/status collection thus takes at most 8 + max(budget, 20) s, leaving
+/// headroom below the 55 s MCP deadline. A hung proof still stays unchecked.
+const EPIC_CHILD_PROOF_CAP: std::time::Duration = std::time::Duration::from_secs(20);
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct EpicStatusOptions {
     pub offset: usize,
@@ -16699,12 +16785,14 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
     repo_path: &std::path::Path,
     options: EpicStatusOptions,
 ) -> EpicStatusCollection {
-    // A zero proof budget still supports validating/reusing cached verdicts.
-    // Bound its metadata prelude independently; it must never fetch or prove.
-    let _measurement_scope = epic_measurement::Scope::new(if options.budget.is_zero() {
-        EPIC_CLOSE_GATE_BUDGET
-    } else {
+    // Ref/cache metadata has its own bound; host load during this prelude must
+    // not consume the entire proof budget before any child can start.
+    let _measurement_scope = epic_measurement::Scope::new(if options.summary {
         options.budget
+    } else if options.budget == std::time::Duration::MAX {
+        std::time::Duration::MAX
+    } else {
+        EPIC_CLOSE_GATE_BUDGET
     });
     let total_children = subtasks.len();
     let git_snapshot = EpicGitSnapshot::collect(repo_path, parent_branch, subtasks);
@@ -16722,11 +16810,17 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
     } else {
         epic_verdict_cache::EpicVerdictCache::load(repo_path)
     };
-    let _zero_proof_scope = options
-        .budget
-        .is_zero()
+    if epic_measurement::expired() {
+        // Incomplete metadata must not become a reusable proof input.
+        return EpicStatusCollection {
+            statuses, total_children, offset, requested_limit: options.limit,
+            summary: options.summary, budget_exhausted: true, reused_verdicts: 0,
+        };
+    }
+    let _proof_scope = (!options.summary)
         .then(|| epic_measurement::Scope::new(options.budget));
     let mut reused_verdicts = 0;
+    let mut proven_now = 0;
     // Children assigned to the same worker share one live lane. Within one
     // collection the ref snapshot is fixed, so each (branch, target) content
     // direction is measured once rather than once per child.
@@ -16798,11 +16892,17 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
         }
         // The deadline bounds proof work only; a reused verdict costs no Git
         // subprocess, so it is taken even after the budget is spent.
-        if epic_measurement::expired() {
+        let first_proof = proven_now == 0 && !options.summary
+            && !options.budget.is_zero() && options.budget != std::time::Duration::MAX;
+        if epic_measurement::expired() && !first_proof {
             budget_exhausted = true;
             break;
         }
-        if resolved_anchor.is_none() && !options.summary {
+        if resolved_anchor.is_none() && recorded_anchor.is_some() && !options.summary {
+            if epic_measurement::expired() {
+                budget_exhausted = true;
+                break;
+            }
             resolved_anchor =
                 recorded_anchor.filter(|anchor| resolve_or_fetch_commit(repo_path, anchor).is_ok());
             if resolved_anchor.is_some() {
@@ -16816,17 +16916,31 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                     &git_snapshot,
                 ));
             }
+            if epic_measurement::expired() {
+                budget_exhausted = true;
+                break;
+            }
         }
-        if epic_measurement::expired() {
-            budget_exhausted = true;
-            break;
-        }
+        // cas-4151: killing the first proof at the soft call deadline causes
+        // every retry to discard the same child. Finish one unchecked child
+        // under a separate hard cap; all later children retain the call
+        // deadline. Fetch above stays on the original budget. Zero-budget
+        // requests and summary views never opt into this progress allowance.
+        let _child_scope = first_proof.then(|| {
+            #[cfg(test)]
+            let cap = epic_measurement::test_load::child_cap();
+            #[cfg(not(test))]
+            let cap = EPIC_CHILD_PROOF_CAP;
+            epic_measurement::Scope::new(cap)
+        });
         // The table's stranded count is a live Git measurement of the
         // current lane tip, never a historical count from the task's
         // recorded anchor. An anchor is delivery evidence below; it is
         // not a substitute for the branch state the operator needs to
         // act on now. Fall back to an anchor only when there is no live
         // branch receipt at all.
+        #[cfg(test)]
+        epic_measurement::test_load::delay();
         let checked_refs: Vec<&str> = if fallback_branches.is_empty() {
             resolved_anchor.into_iter().collect()
         } else {
@@ -17206,6 +17320,7 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
             verdict_cache.record(key, t, &status);
         }
         statuses.push(status);
+        proven_now += 1;
     }
     verdict_cache.persist();
 
@@ -18010,7 +18125,7 @@ fn run_epic_close_merge_gate_with_budget(
         return EpicCloseGateOutcome::Incomplete(format!(
             "⚠️ EPIC CLOSE CHECK INCOMPLETE\n\n\
              Partial evaluation: checked {checked} of {total} child task(s) in the \
-             {budget:?} close-gate budget ({reused} verdict(s) reused from earlier \
+             {budget:?} soft close-gate budget ({reused} verdict(s) reused from earlier \
              attempts, {proven} proven now). The gate did not proceed and no close \
              mutation was attempted.\n\n\
              Child task(s) not checked:\n{unchecked}\n\n\
@@ -22196,8 +22311,9 @@ mod merge_state_gate_tests {
     //! [`check_unmerged_epic_branches`] guard for epic-type tasks, and
     //! BEFORE the close review policy / `supervisor_override` plumbing.
     //!
-    //! Why these tests are pure-helper instead of end-to-end
-    //! `cas_task_close` calls:
+    //! Most tests isolate the merge-state helper. The missing-lane scope
+    //! repair regression also exercises the real update and close handlers.
+    //! Why the other tests use helpers:
     //!
     //! - The integration call site is mechanical (one
     //!   `pattern-match { Proceed => {} | Reject(msg) => return tool_error(msg) }`
@@ -23389,6 +23505,324 @@ mod merge_state_gate_tests {
         );
     }
 
+    #[test]
+    fn cleared_no_code_missing_factory_branch_closes_on_external_proof_cas_3067() {
+        let bare = tempfile::tempdir().unwrap();
+        git(bare.path(), &["init", "-q", "--bare"]);
+        let dir = init_factory_repo("deleted-worker");
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["branch", "-D", "factory/deleted-worker"]);
+        git(p, &["remote", "add", "origin", bare.path().to_str().unwrap()]);
+        git(p, &["push", "-q", "origin", "main"]);
+        let mut task = worker_task("deleted-worker");
+        task.status = TaskStatus::Open;
+        task.task_type = TaskType::Chore;
+        task.execution_note = Some("no-code".into());
+        task.external_ref = Some("https://github.com/example/cloud/pull/123".into());
+        // Result of the supervisor's proof_scope_fix target_repo="": the
+        // active code target and delivery anchor have been cleared.
+        task.deliverables.work_target = None;
+        task.deliverables.factory_branch_anchor = None;
+        task.deliverables.parked_branch = Some("factory/deleted-worker".into());
+        let outcome = run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p);
+        match outcome {
+            MergeStateGateOutcome::ProceedWithNote(note) => {
+                assert!(note.contains(task.external_ref.as_deref().unwrap()), "{note}");
+                assert!(note.contains("factory/deleted-worker"), "{note}");
+                assert!(note.contains("missing"), "{note}");
+            }
+            other => panic!("cleared no-code delivery must use external proof, not count a missing ref: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_lane_scope_repair_closes_through_handler_cas_3067() {
+        use crate::mcp::CasService;
+        use crate::store::{
+            open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store,
+        };
+        use cas_types::{Agent, AgentRole, WorkTarget};
+
+        let mut env = TestEnvGuard::temp_home();
+        let (dir, _bare) = handoff_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["branch", "-D", "factory/worker"]);
+        let cas_dir = p.join(".cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        env.set("CAS_ROOT", &cas_dir);
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        std::fs::write(
+            cas_dir.join("config.toml"),
+            "[verification]\nenabled = false\n",
+        )
+        .unwrap();
+        open_store(&cas_dir).unwrap().init().unwrap();
+        open_rule_store(&cas_dir).unwrap().init().unwrap();
+        open_skill_store(&cas_dir).unwrap().init().unwrap();
+        let store = open_task_store(&cas_dir).unwrap();
+        store.init().unwrap();
+        let agents = open_agent_store(&cas_dir).unwrap();
+        agents.init().unwrap();
+        let actor = "cas-3067-supervisor";
+        agents
+            .register(&Agent::new_with_role(
+                actor.into(),
+                "supervisor".into(),
+                AgentRole::Supervisor,
+            ))
+            .unwrap();
+        let core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        core.set_agent_id_for_testing(actor.into());
+        let service = CasService::new(core, None);
+        let mut task = worker_task("worker");
+        task.task_type = TaskType::Chore;
+        task.risk = vec![TaskRisk::None];
+        store.add(&task).unwrap();
+
+        // Missing code evidence must leave the task active, without parking
+        // a nonexistent branch or attempting merge-tree preflight.
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "close", "id": task.id, "reason": "Delivery claimed"
+        }))
+        .unwrap();
+        let response = service.task(Parameters(request)).await.unwrap();
+        let text = response
+            .content
+            .into_iter()
+            .filter_map(|content| match content.raw {
+                rmcp::model::RawContent::Text(text) => Some(text.text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("FACTORY BRANCH MISSING"), "{text}");
+        assert!(
+            !text.contains("MERGE REQUIRED")
+                && !text.contains("merge-tree")
+                && !text.contains("git push"),
+            "{text}"
+        );
+        assert_eq!(store.get(&task.id).unwrap().status, TaskStatus::InProgress);
+        assert!(
+            store
+                .get(&task.id)
+                .unwrap()
+                .deliverables
+                .parked_branch
+                .is_none()
+        );
+
+        // Reproduce the supervisor's real correction of stale code scope.
+        task.status = TaskStatus::AwaitingMerge;
+        task.execution_note = Some("no-code".into());
+        task.external_ref = Some("https://example.test/cloud/pull/123".into());
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: p.to_str().unwrap().into(),
+            target_branch: "main".into(),
+        });
+        // The deleted lane had no usable anchor; scope repair must not
+        // discard a retained code anchor to authorize external delivery.
+        task.deliverables.factory_branch_anchor = None;
+        task.deliverables.parked_branch = Some("factory/worker".into());
+        store.update(&task).unwrap();
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "update", "id": task.id, "proof_scope_fix": true,
+            "target_repo": "", "reason": "Reviewed external-only delivery"
+        }))
+        .unwrap();
+        let corrected = service.task(Parameters(request)).await.unwrap();
+        assert_ne!(corrected.is_error, Some(true), "{corrected:?}");
+        let repaired = store.get(&task.id).unwrap();
+        assert_eq!(repaired.status, TaskStatus::Open);
+        assert!(repaired.deliverables.work_target.is_none());
+        assert!(repaired.deliverables.factory_branch_anchor.is_none());
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "close", "id": task.id, "reason": "External delivery proven"
+        }))
+        .unwrap();
+        let response = service.task(Parameters(request)).await.unwrap();
+        assert_ne!(response.is_error, Some(true), "{response:?}");
+        let closed = store.get(&task.id).unwrap();
+        assert_eq!(closed.status, TaskStatus::Closed, "{response:?}");
+        assert!(
+            closed.notes.contains("external_ref")
+                && closed.notes.contains("missing locally and on origin"),
+            "{}",
+            closed.notes
+        );
+    }
+
+    #[test]
+    fn missing_factory_branch_reports_unresolved_evidence_cas_3067() {
+        let (dir, _bare) = handoff_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["branch", "-D", "factory/worker"]);
+        let task = worker_task("worker");
+        match run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p) {
+            MergeStateGateOutcome::Unresolved(message) => {
+                assert!(
+                    message.contains("factory/worker")
+                        && message.contains("missing locally and on origin"),
+                    "{message}"
+                );
+                assert!(
+                    !message.contains("has 1 commit")
+                        && !message.contains("git push")
+                        && !message.contains("MERGE REQUIRED"),
+                    "{message}"
+                );
+                assert!(
+                    message.contains("supervisor") && message.contains("commit_receipt"),
+                    "{message}"
+                );
+            }
+            other => panic!("missing evidence must not become a merge count: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_no_code_branch_still_requires_portable_proof_cas_3067() {
+        let (dir, _bare) = handoff_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["branch", "-D", "factory/worker"]);
+        for reference in [None, Some("token=secret-shaped")] {
+            let mut task = worker_task("worker");
+            task.execution_note = Some("no-code".into());
+            task.external_ref = reference.map(str::to_string);
+            match run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p) {
+                MergeStateGateOutcome::Unresolved(message) => {
+                    assert!(message.contains("NO-CODE PROOF REQUIRED"), "{message}")
+                }
+                other => panic!("missing lane does not waive portable proof: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn missing_no_code_branch_does_not_waive_retained_anchor_cas_3067() {
+        let (dir, _bare) = handoff_repo();
+        let p = dir.path();
+        let anchor = head_sha(p);
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["branch", "-D", "factory/worker"]);
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.execution_note = Some("no-code".into());
+        task.external_ref = Some("https://example.test/proof".into());
+        task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        match run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p) {
+            MergeStateGateOutcome::Unresolved(message) => {
+                assert!(
+                    message.contains(&anchor) && message.contains("1 measured commit"),
+                    "{message}"
+                );
+                assert!(
+                    message.contains("missing locally and on origin")
+                        && !message.contains("git push"),
+                    "{message}"
+                );
+            }
+            other => panic!("recorded code delivery stays binding: {other:?}"),
+        }
+        task.deliverables.factory_branch_anchor =
+            Some("1234567890123456789012345678901234567890".into());
+        assert!(
+            matches!(
+                run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p),
+                MergeStateGateOutcome::Unresolved(_)
+            ),
+            "an unavailable retained anchor must not authorize no-code close"
+        );
+    }
+
+    #[test]
+    fn missing_lane_requires_integrated_receipt_cas_3067() {
+        let (dir, _bare) = handoff_repo();
+        let p = dir.path();
+        let receipt = head_sha(p);
+        let task = worker_task("worker");
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["branch", "-D", "factory/worker"]);
+        let window = TaskCommitReceiptWindow {
+            supervisor_override_reason: None,
+            not_before: chrono::Utc::now() - chrono::Duration::hours(1),
+            basis: "task work cycle",
+            task_floor: chrono::Utc::now() - chrono::Duration::hours(1),
+            identity: TaskCommitIdentity {
+                task_id: Some(task.id.clone()),
+                known_commits: vec![receipt.clone()],
+            },
+        };
+        let outcome = || {
+            run_factory_branch_merge_gate_with_attribution(
+                &task,
+                &base_req(&task.id),
+                "main",
+                p,
+                TaskCommitAttribution {
+                    receipt: Some(&receipt),
+                    window: Some(&window),
+                },
+            )
+        };
+        assert!(
+            matches!(outcome(), MergeStateGateOutcome::Unresolved(_)),
+            "unmerged receipt cannot replace missing branch evidence"
+        );
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "-m",
+                "integrated receipt",
+                &receipt,
+            ],
+        );
+        git(p, &["push", "-q", "origin", "main"]);
+        match outcome() {
+            MergeStateGateOutcome::ProceedWithNote(note) => {
+                assert!(
+                    note.contains(&receipt) && note.contains("missing locally and on origin"),
+                    "{note}"
+                );
+            }
+            other => panic!("validated integrated receipt survives lane deletion: {other:?}"),
+        }
+    }
+    #[test]
+    fn pruned_local_lane_uses_origin_evidence_cas_3067() {
+        let (dir, _bare) = handoff_repo();
+        let p = dir.path();
+        git(p, &["push", "-q", "origin", "factory/worker"]);
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "-m",
+                "integrate delivery",
+                "factory/worker",
+            ],
+        );
+        git(p, &["push", "-q", "origin", "main"]);
+        git(p, &["branch", "-D", "factory/worker"]);
+        let task = worker_task("worker");
+        assert!(
+            matches!(
+                run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p),
+                MergeStateGateOutcome::Proceed
+            ),
+            "remote-only delivered lane must remain measurable"
+        );
+    }
     // --- cas-e33f (GH #1004): close after a worker → supervisor handoff -----
 
     /// A `main` repo with a bare `origin` (so the trunk target is
@@ -23510,7 +23944,7 @@ mod merge_state_gate_tests {
         let req = base_req(&task.id);
         let out = run_factory_branch_merge_gate(&task, &req, "main", p);
         assert!(
-            matches!(out, MergeStateGateOutcome::Reject(_)),
+            matches!(out, MergeStateGateOutcome::Unresolved(ref message) if message.contains("1 measured commit") && !message.contains("git push")),
             "an unmerged anchored delivery must still reject, got {out:?}"
         );
     }
@@ -27619,7 +28053,7 @@ mod merge_state_gate_tests {
         let req = base_req(&task.id);
         let out = run_factory_branch_merge_gate(&task, &req, "main", p);
         assert!(
-            matches!(out, MergeStateGateOutcome::Reject(_)),
+            matches!(out, MergeStateGateOutcome::Unresolved(_)),
             "missing live factory ref must not authorize close via live-ref \
              fallback (unknown Git state ≠ KnownZero), got {out:?}"
         );
@@ -29351,6 +29785,9 @@ mod epic_status_gate_tests {
 
     #[test]
     fn epic_override_budget_bounds_reanchor_scan_cas_9069() {
+        let _cap = epic_measurement::test_load::Guard::new(
+            std::time::Duration::ZERO, std::time::Duration::from_millis(100),
+        );
         let dir = init_epic_repo(&[("squashed", 1)]);
         let p = dir.path();
         let anchor = epic_git_stdout(p, &["rev-parse", "factory/squashed"]);
@@ -29544,6 +29981,70 @@ mod epic_status_gate_tests {
         }
     }
 
+    #[test]
+    fn epic_child_cost_above_budget_makes_progress_cas_4151() {
+        let dir = init_epic_repo(&[]);
+        let p = dir.path();
+        let delivered = merged_epic_children(p, 1, 1).pop().unwrap();
+        let children = (0..4).map(|index| {
+            let mut child = delivered.clone();
+            child.id = format!("cas-cost-{index}");
+            child
+        }).collect::<Vec<_>>();
+        let _load = epic_measurement::test_load::Guard::new(
+            std::time::Duration::from_millis(150),
+            EPIC_CHILD_PROOF_CAP,
+        );
+        for expected in 1..=children.len() {
+            let started = std::time::Instant::now();
+            let result = collect_epic_branch_statuses_with_options(
+                &children, "main", p, full_view(std::time::Duration::from_millis(100)),
+            );
+            assert_eq!(result.statuses.len(), expected, "each call must finish one expensive child");
+            assert_eq!(result.reused_verdicts, expected - 1);
+            assert!(result.statuses.iter().all(|row| !row.blocks_epic_close()));
+            assert!(started.elapsed() < EPIC_CLOSE_GATE_BUDGET + EPIC_CHILD_PROOF_CAP
+                + std::time::Duration::from_secs(2));
+        }
+        let reused = collect_epic_branch_statuses_with_options(
+            &children, "main", p, full_view(std::time::Duration::ZERO),
+        );
+        assert_eq!(reused.reused_verdicts, children.len());
+        assert!(!reused.budget_exhausted);
+    }
+
+    #[test]
+    fn epic_child_hard_cap_discards_unfinished_proof_cas_4151() {
+        let dir = init_epic_repo(&[]);
+        let p = dir.path();
+        let children = merged_epic_children(p, 1, 1);
+        let started = std::time::Instant::now();
+        {
+            let _load = epic_measurement::test_load::Guard::new(
+                std::time::Duration::from_millis(100),
+                std::time::Duration::from_millis(50),
+            );
+            let partial = collect_epic_branch_statuses_with_options(
+                &children, "main", p, full_view(std::time::Duration::from_millis(20)),
+            );
+            assert!(partial.budget_exhausted);
+            assert!(partial.statuses.is_empty(), "unfinished proof must stay unchecked");
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        let no_proof = collect_epic_branch_statuses_with_options(
+            &children, "main", p, full_view(std::time::Duration::ZERO),
+        );
+        assert_eq!(no_proof.reused_verdicts, 0, "partial verdict must never be cached");
+        assert!(no_proof.statuses.is_empty());
+        let retry = collect_epic_branch_statuses_with_options(
+            &children, "main", p, full_view(std::time::Duration::from_millis(20)),
+        );
+        assert_eq!(retry.statuses.len(), 1);
+        assert!(!retry.statuses[0].blocks_epic_close());
+        assert!(EPIC_CLOSE_GATE_BUDGET + EPIC_CHILD_PROOF_CAP < std::time::Duration::from_secs(55));
+        assert!(EPIC_STATUS_BUDGET < EPIC_CHILD_PROOF_CAP);
+    }
+
     /// cas-b412: v34 (cas-459b) had 141 children; every close retry restarted
     /// at child zero and stopped in the same place, so the shipped epic could
     /// never close. Verdicts proven by one attempt are reused by the next
@@ -29552,10 +30053,9 @@ mod epic_status_gate_tests {
     fn epic_close_gate_resumes_across_calls_for_150_children_cas_b412() {
         let dir = init_epic_repo(&[]);
         let p = dir.path();
-        // Keep each proof smaller than the artificial retry budget. A long
-        // per-child history can now be interrupted inside a proof instead of
-        // overrunning it; that behavior is covered by cas-9069's scan test.
-        // Distinct child IDs still require 150 separately cached verdicts.
+        // Every child deliberately costs more than the soft retry budget.
+        // Distinct child IDs require 150 separately cached, complete proofs;
+        // the first proof's hard cap prevents host load from starving retries.
         let delivered = merged_epic_children(p, 1, 1).pop().unwrap();
         let subtasks = (0..150).map(|index| {
             let mut child = delivered.clone();
@@ -29567,13 +30067,22 @@ mod epic_status_gate_tests {
 
         // A budget far below the full proof cost forces partial attempts,
         // the same shape as the 8 s budget against the real 141-child epic.
-        let budget = std::time::Duration::from_millis(300);
+        let budget = std::time::Duration::from_millis(20);
+        let _load = epic_measurement::test_load::Guard::new(
+            std::time::Duration::from_millis(30), EPIC_CHILD_PROOF_CAP,
+        );
         let mut last_checked = 0usize;
         let mut partial_attempts = 0;
         let mut completed = false;
-        for _ in 0..200 {
-            match run_epic_close_merge_gate_with_budget(&task, &req, "main", p, &subtasks, budget)
-            {
+        let mut max_call = std::time::Duration::ZERO;
+        for _ in 0..150 {
+            let started = std::time::Instant::now();
+            let outcome = run_epic_close_merge_gate_with_budget(&task, &req, "main", p, &subtasks, budget);
+            let elapsed = started.elapsed();
+            max_call = max_call.max(elapsed);
+            assert!(elapsed < EPIC_CLOSE_GATE_BUDGET + EPIC_CHILD_PROOF_CAP
+                + std::time::Duration::from_secs(2), "single call exceeded hard bound: {elapsed:?}");
+            match outcome {
                 EpicCloseGateOutcome::Incomplete(message) => {
                     assert!(message.contains("EPIC CLOSE CHECK INCOMPLETE"), "{message}");
                     assert!(message.contains("The check is resumable"), "{message}");
@@ -29584,8 +30093,8 @@ mod epic_status_gate_tests {
                         .and_then(|number| number.parse().ok())
                         .expect("partial message names the checked count");
                     assert!(
-                        checked >= last_checked,
-                        "a retry must never lose proven progress: {checked} < {last_checked}"
+                        checked > last_checked,
+                        "a retry must add proven progress: {checked} <= {last_checked}"
                     );
                     // Every child checked by earlier attempts is closed and
                     // proven, so all of them are reused rather than re-proven.
@@ -29610,6 +30119,7 @@ mod epic_status_gate_tests {
             "150 merged children must close within bounded retries (stopped at {last_checked})"
         );
         assert!(partial_attempts >= 1, "the budget must force at least one partial attempt");
+        eprintln!("cas-4151 injected child delay=30ms > soft budget=20ms; proved 150 children; partial calls={partial_attempts}; max call={max_call:?}");
 
         // Every verdict is now stored: even a zero budget completes, and the
         // reused verdicts are identical to a fresh unbounded proof.

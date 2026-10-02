@@ -17,6 +17,11 @@ mkdir -p target
 cargo check -p affected-crate --tests > target/worker-check.log 2>&1 &
 ```
 
+The shell creates the log before admission checks the commit. Logs inside the
+repository must be Git-ignored, such as `target/worker-check.log`; a bare
+`worker-check.log` is refused. Task artifact directories remain valid outside
+the checkout. Create the parent directory before invoking the check.
+
 The PreToolUse hook routes this command through the capped runner. It uses your
 private seeded target cache, holds a builder slot for the Cargo process lifetime,
 and refuses when the existing build guard or `max_concurrent_builders` cap is

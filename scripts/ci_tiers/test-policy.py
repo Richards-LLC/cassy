@@ -157,7 +157,8 @@ fi
                     if mode == 'venv-failure': self.assertEqual(calls, ['import', 'venv'])
                 else:
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertIn('parsed policy/prose: 709 passed; 0 failed', result.stdout)
+                    count = len(self.entries) + len(json.loads((policy.HERE / 'prose-pins.json').read_text()))
+                    self.assertIn(f'parsed policy/prose: {count} passed; 0 failed', result.stdout)
                     if mode == 'present':
                         self.assertEqual(calls, ['import', 'make', str(bin_dir / 'python3')])
                         self.assertFalse((runner_temp / 'ci-tiers-venv').exists())
@@ -221,7 +222,103 @@ fi
     def run_body(self, body, values):
         environment = os.environ.copy();environment.update(values)
         environment['HOME'] = str(self.root)
-        return subprocess.run(['bash', '-euo', 'pipefail', '-c', body], env=environment, cwd=self.root, capture_output=True, text=True)
+        # Resolve the host-selected Bash before fixture PATH isolation. On
+        # Darwin /usr/bin:/bin otherwise replaces Homebrew Bash with Bash 3.2,
+        # which cannot execute these Ubuntu workflow bodies (e.g. mapfile).
+        bash = shutil.which('bash')
+        return subprocess.run([bash, '-euo', 'pipefail', '-c', body], env=environment, cwd=self.root, capture_output=True, text=True)
+
+    def test_release_shared_rustup_wiring_rejects_unsafe_route_mutations(self):
+        self.assertEqual(policy.validate(self.root, verbose=False), [])
+        for file, job in [('.github/workflows/release.yml', 'verify'),
+                          ('.github/workflows/release.yml', 'build'),
+                          ('.github/workflows/release-prebuild.yml', 'build')]:
+            original = copy.deepcopy(policy.load(self.root / file))
+            for mutation in ['remove-helper', 'unguarded-action', 'wrong-helper-route']:
+                with self.subTest(job=job, mutation=mutation):
+                    data = copy.deepcopy(original)
+                    steps = data['jobs'][job]['steps']
+                    helper = next(s for s in steps if s.get('run') == './scripts/setup-cassy-actions-rust.sh')
+                    action = next(s for s in steps if s.get('uses') == 'dtolnay/rust-toolchain@stable')
+                    if mutation == 'remove-helper': steps.remove(helper)
+                    elif mutation == 'unguarded-action': action.pop('if')
+                    else: helper['if'] = helper['if'].replace("'self-hosted'", "'hosted'")
+                    self.write(file, data)
+                    failures = policy.validate(self.root, verbose=False)
+                    self.assertTrue(any('shared Rust' in e['consumer'] for e, _ in failures))
+            self.write(file, original)
+
+    def rustup_fixture(self, state):
+        fixture = self.root / state
+        fixture.mkdir()
+        rustup_home = fixture / 'rustup'; rustup_home.mkdir()
+        bin_dir = fixture / 'bin'; bin_dir.mkdir()
+        # Exercise the actual shell helper with the host's POSIX file locks,
+        # without requiring Linux's flock executable on Darwin.
+        flock = bin_dir / 'flock'
+        flock.write_text(f'#!{sys.executable}\nimport fcntl, sys\nassert len(sys.argv) == 3\nfcntl.flock(int(sys.argv[2]), fcntl.LOCK_EX if sys.argv[1] == "-x" else fcntl.LOCK_UN)\n')
+        fake = fixture / 'rustup-fixture'
+        fake.write_text(f'''#!{sys.executable}
+import os, sys, time
+from pathlib import Path
+home = Path(os.environ['RUSTUP_HOME'])
+state = os.environ['FIXTURE_STATE']
+args = sys.argv[1:]
+with (home / 'calls').open('a') as log: log.write(' '.join(args) + '\\n')
+if args == ['toolchain', 'list']:
+    if state != 'missing' or (home / 'installed').exists(): print('stable-x86_64-unknown-linux-gnu (default)')
+elif args == ['toolchain', 'install', 'stable', '--profile', 'minimal']:
+    (home / 'mutating').mkdir()
+    time.sleep(0.15)
+    with (home / 'install-count').open('a') as log: log.write('install\\n')
+    (home / 'installed').touch()
+    (home / 'mutating').rmdir()
+elif args == ['run', 'stable', 'rustc', '-vV']:
+    print('rustc 1.88.0 (fixture)\\nhost: x86_64-unknown-linux-gnu')
+elif args == ['run', 'stable', 'rustc', '--version']:
+    print('rustc 1.88.0 (fixture)')
+elif args == ['run', 'stable', 'cargo', '--version']:
+    sys.exit(1 if state == 'broken-cargo' else 0)
+elif args == ['target', 'list', '--toolchain', 'stable', '--installed']:
+    if state != 'missing-registry': print('x86_64-unknown-linux-gnu')
+elif args == ['run', 'stable', 'rustc', '--print', 'target-libdir']:
+    lib = home / 'lib'; lib.mkdir(exist_ok=True)
+    if state != 'missing-files': (lib / 'libstd-fixture.rlib').touch()
+    print(lib)
+else:
+    sys.exit('unexpected rustup fixture call: ' + ' '.join(args))
+''')
+        for path in [flock, fake]: path.chmod(0o755)
+        environment = os.environ.copy()
+        environment.update(PATH=f'{bin_dir}:{environment["PATH"]}', RUSTUP=str(fake),
+                           RUSTUP_HOME=str(rustup_home), FIXTURE_STATE=state,
+                           GITHUB_ENV=str(fixture / 'github-env'))
+        environment.pop('CASSY_RUSTUP_LOCK_FILE', None)
+        return fixture, environment
+
+    def test_shared_rustup_helper_serializes_install_and_exports_toolchain(self):
+        fixture, environment = self.rustup_fixture('missing')
+        command = [str(policy.ROOT / 'scripts/setup-cassy-actions-rust.sh')]
+        processes = [subprocess.Popen(command, env=environment, stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, text=True) for _ in range(2)]
+        outputs = [p.communicate(timeout=10) for p in processes]
+        for process, output in zip(processes, outputs):
+            self.assertEqual(process.returncode, 0, output)
+        self.assertEqual((fixture / 'rustup/install-count').read_text(), 'install\n')
+        self.assertIn('already installed', ''.join(out for out, _ in outputs))
+        self.assertEqual((fixture / 'github-env').read_text().splitlines(), ['RUSTUP_TOOLCHAIN=stable'] * 2)
+
+    def test_shared_rustup_helper_rejects_corrupt_registry_and_files(self):
+        for state in ['missing-registry', 'missing-files', 'broken-cargo']:
+            with self.subTest(state=state):
+                fixture, environment = self.rustup_fixture(state)
+                result = subprocess.run([str(policy.ROOT / 'scripts/setup-cassy-actions-rust.sh')],
+                                        env=environment, capture_output=True, text=True, timeout=10)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn('shared stable Rust toolchain is incomplete', result.stderr)
+                self.assertIn('all runner slots are idle', result.stderr)
+                self.assertNotIn('toolchain install', (fixture / 'rustup/calls').read_text())
+                self.assertFalse((fixture / 'github-env').exists())
 
     def test_real_required_rollup_rejects_every_failed_or_cancelled_dependency(self):
         job = self.ci()['jobs']['fast-validation']

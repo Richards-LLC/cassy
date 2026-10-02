@@ -24,6 +24,55 @@ fn deny_reason(out: &HookOutput) -> Option<String> {
         .map(str::to_string)
 }
 
+fn init_ignored_log_repo(dir: &std::path::Path) {
+    assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(dir).status().unwrap().success());
+    std::fs::write(dir.join(".gitignore"), "/target/\n").unwrap();
+}
+
+#[test]
+fn cas_c0ec_rewritten_worker_logs_require_ignored_or_external_paths() {
+    use crate::test_support::TestEnvGuard;
+    let dir = tempfile::tempdir().unwrap();
+    let worktree = dir.path().to_str().unwrap();
+    init_ignored_log_repo(dir.path());
+    let root = dir.path().join(".cas");
+    std::fs::create_dir(&root).unwrap();
+    let _env = TestEnvGuard::with_vars(&[("CAS_HOOK_HARNESS", "claude"), ("CAS_CLONE_PATH", worktree)]);
+    for command in [
+        "cargo check -p cas --lib > worker-check.log 2>&1 &",
+        "cargo check -p cas --tests >> worker-check.log 2>&1 &",
+        "cargo nextest run -p cas --lib -E 'test(one)' > worker-tests.log 2>&1 &",
+    ] {
+        let mut request = input(command, "worker");
+        request.cwd = worktree.into();
+        let out = handle_pre_tool_use(&request, Some(&root)).unwrap();
+        let reason = deny_reason(&out).expect("unignored log would dirty the admitted check");
+        assert!(reason.contains("WORKER CHECK LOG"), "{reason}");
+        assert!(reason.contains("target/worker-check.log"), "{reason}");
+    }
+    #[cfg(unix)]
+    {
+        std::fs::create_dir(dir.path().join("target")).unwrap();
+        std::fs::write(dir.path().join("source.rs"), "// source").unwrap();
+        std::os::unix::fs::symlink("../source.rs", dir.path().join("target/source.log")).unwrap();
+        let mut request = input("cargo check -p cas --lib > target/source.log 2>&1 &", "worker");
+        request.cwd = worktree.into();
+        let reason = deny_reason(&handle_pre_tool_use(&request, Some(&root)).unwrap()).unwrap();
+        assert!(reason.contains("WORKER CHECK LOG"));
+    }
+    let artifacts = tempfile::tempdir().unwrap();
+    let mut config = crate::config::Config::default();
+    let mut factory = config.factory();
+    factory.artifacts_root = Some(artifacts.path().to_string_lossy().into_owned());
+    config.factory = Some(factory);
+    config.save(&root).unwrap();
+    let task_artifacts = crate::config::project_factory_artifacts_root(&root, artifacts.path()).join("cas-c0ec");
+    let mut request = input(&format!("cargo check -p cas --tests > {}/worker-check.log 2>&1 &", task_artifacts.display()), "worker");
+    request.cwd = worktree.into();
+    let out = handle_pre_tool_use(&request, Some(&root)).unwrap();
+    assert!(deny_reason(&out).is_none(), "sanctioned artifact log: {out:?}");
+}
+
 /// Only the literal package-scoped check shape is exempt from assembly.
 #[test]
 fn worker_rust_builds_are_denied_naming_the_assembly_rule() {
@@ -105,6 +154,7 @@ fn literal_worker_check_is_rewritten_to_the_capped_runner_for_both_harnesses() {
     use crate::test_support::TestEnvGuard;
     for harness in ["claude", "codex"] {
         let dir = tempfile::tempdir().unwrap();
+        init_ignored_log_repo(dir.path());
         let worktree = dir.path().to_str().unwrap();
         let _env =
             TestEnvGuard::with_vars(&[("CAS_HOOK_HARNESS", harness), ("CAS_CLONE_PATH", worktree)]);
@@ -113,10 +163,10 @@ fn literal_worker_check_is_rewritten_to_the_capped_runner_for_both_harnesses() {
         for command in [
             "cargo check -p cas --lib",
             "cargo check -p cas -p cas-pty --lib",
-            "cargo check --lib -p cas > worker-check.log 2>&1 &",
+            "cargo check --lib -p cas > target/worker-check.log 2>&1 &",
             "cargo check -p cas --tests",
             "cargo check -p cas -p cas-pty --tests",
-            "cargo check --tests -p cas > worker-check.log 2>&1 &",
+            "cargo check --tests -p cas > target/worker-check.log 2>&1 &",
         ] {
             let mut request = input(command, "worker");
             request.cwd = worktree.into();
@@ -165,6 +215,7 @@ fn targeted_nextest_rewrite_preserves_filter_literals_and_workspace_guard() {
     use crate::test_support::TestEnvGuard;
     for harness in ["claude", "codex"] {
         let dir = tempfile::tempdir().unwrap();
+        init_ignored_log_repo(dir.path());
         let cwd = dir.path().to_str().unwrap();
         let _env =
             TestEnvGuard::with_vars(&[("CAS_HOOK_HARNESS", harness), ("CAS_CLONE_PATH", cwd)]);
@@ -223,6 +274,9 @@ fn check_without_a_shared_root_fails_closed() {
 
 #[test]
 fn worker_read_only_and_non_build_commands_are_not_denied() {
+    // The explicit HookInput role exercises the Rust command guard. Ambient
+    // factory identity would additionally reject this fixture's /test Git cwd.
+    let _env = crate::test_support::TestEnvGuard::new();
     for command in [
         "cargo fmt --all -- --check",
         "rustfmt --edition 2024 --check --config skip_children=true src/lib.rs",
@@ -240,7 +294,7 @@ fn worker_read_only_and_non_build_commands_are_not_denied() {
         let out = handle_pre_tool_use(&input(command, "worker"), None).expect("handler ok");
         assert!(
             deny_reason(&out).is_none(),
-            "read-only/non-Rust command must not be denied: {command:?}"
+            "read-only/non-Rust command must not be denied: {command:?}: {out:?}"
         );
     }
 }

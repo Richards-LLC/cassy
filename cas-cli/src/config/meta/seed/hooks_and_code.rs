@@ -2,6 +2,19 @@ use crate::config::meta::registry::ConfigRegistry;
 use crate::config::meta::types::{ConfigMeta, ConfigType, Constraint};
 
 pub(super) fn register_hooks_and_code(registry: &mut ConfigRegistry) {
+    registry.register(ConfigMeta {
+        key: "cloud.team_only",
+        section: "cloud",
+        name: "Team-only Project Sync",
+        description: "Sync this project's rows only through the active team. Requires an active team; personal project push and pull requests are disabled.",
+        value_type: ConfigType::Bool,
+        default: "false",
+        constraint: Constraint::None,
+        advanced: false,
+        requires_feature: None,
+        keywords: &["cloud", "team", "scope", "personal", "sync"],
+        use_cases: &["Keep a team-owned project out of personal cloud scope"],
+    });
     // ============================================================
     // SYNC SECTION
     // ============================================================

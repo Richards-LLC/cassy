@@ -1793,9 +1793,11 @@ mod tests {
     fn full_cassy_sweep_uses_assembly_proof_but_filtered_and_configured_runs_do_not() {
         let temp = tempfile::tempdir().unwrap();
         fs::create_dir(temp.path().join("scripts")).unwrap();
+        // Match the real helper's root.resolve(): macOS /var and /private/var
+        // may name the same worktree even though Python's cwd uses the latter.
         fs::write(
             temp.path().join("scripts/assembly-proof.py"),
-            "import pathlib, sys\nassert sys.argv[1] == 'prove'\nassert pathlib.Path(sys.argv[2]) == pathlib.Path.cwd()\npathlib.Path('assembly-called').write_text('both contexts')\n",
+            "import pathlib, sys\nassert sys.argv[1] == 'prove'\nassert pathlib.Path(sys.argv[2]).resolve() == pathlib.Path.cwd().resolve()\npathlib.Path('assembly-called').write_text('both contexts')\n",
         )
         .unwrap();
         let log = File::create(temp.path().join("runner.log")).unwrap();
@@ -1919,12 +1921,13 @@ mod tests {
         .unwrap();
         let mut config = FactoryConfig::default();
         config.merge_sweep_cwd = Some("web".to_owned());
+        let canonical_web = web.canonicalize().unwrap();
         let runner = resolve_sweep_runner(temp.path(), &SweepSettings::from(&config)).unwrap();
-        assert_eq!(runner.cwd, web);
+        assert_eq!(runner.cwd, canonical_web);
         config.merge_sweep_command = Some("echo configured".to_owned());
         let runner = resolve_sweep_runner(temp.path(), &SweepSettings::from(&config)).unwrap();
         assert_eq!(runner.kind, TestRunnerKind::Configured);
-        assert_eq!(runner.cwd, web);
+        assert_eq!(runner.cwd, canonical_web);
         config.merge_sweep_cwd = Some("../outside".to_owned());
         assert!(resolve_sweep_runner(temp.path(), &SweepSettings::from(&config)).is_err());
     }

@@ -69,6 +69,9 @@ pub fn handle_pre_tool_use(
                     "Worker check needs a Cassy root for max_concurrent_builders admission",
                 ));
             };
+            if let Some(reason) = worker_check_log_denial(input, &suffix) {
+                return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+            }
             let executable = std::env::current_exe()?;
             let rewritten = format!(
                 "{} factory worker-check --cas-root {} -- {}{}",
@@ -1159,6 +1162,44 @@ fn worker_check_command(command: &str) -> Option<(Vec<String>, String)> {
 
 fn shell_quote_path(path: &Path) -> String {
     format!("'{}'", path.to_string_lossy().replace('\'', "'\"'\"'"))
+}
+
+/// The shell creates the log before the runner can inspect HEAD. An ignored
+/// outbox is compatible with its clean-commit evidence; an untracked source
+/// file is not. External logs still pass through the workspace guard below.
+fn worker_check_log_denial(input: &HookInput, suffix: &str) -> Option<String> {
+    let pattern = regex::Regex::new(r"^\s*>{1,2}\s*([A-Za-z0-9_/.-]+)").ok()?;
+    let matched = pattern.captures(suffix)?;
+    let cwd = std::path::PathBuf::from(&input.cwd);
+    let path = canonicalize_for_containment(&cwd.join(&matched[1]))?;
+    if is_non_creation_stream_device(&path) {
+        return None;
+    }
+    let root = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(&cwd)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| {
+            canonicalize_for_containment(std::path::Path::new(
+                String::from_utf8(output.stdout).ok()?.trim(),
+            ))
+        })
+        .or_else(|| canonicalize_for_containment(&cwd))?;
+    if !path.starts_with(&root) {
+        return None;
+    }
+    let ignored = std::process::Command::new("git")
+        .args(["check-ignore", "--quiet", "--"])
+        .arg(&path)
+        .current_dir(&cwd)
+        .output()
+        .is_ok_and(|output| output.status.success());
+    (!ignored).then(|| format!(
+        "WORKER CHECK LOG: {} would dirty the checkout before the clean-commit gate. Use an ignored target/worker-check.log (create target/ first) or your task artifacts directory. Tracked and untracked source changes still require a commit.",
+        path.display()
+    ))
 }
 
 /// The Rust build a worker command would start, if any (cas-4cbb): a cargo

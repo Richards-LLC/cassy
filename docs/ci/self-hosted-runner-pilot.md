@@ -134,8 +134,16 @@ listeners share the read-only toolchain but not mutable build state. Every
 self-hosted workflow calls `scripts/setup-cassy-actions-rust.sh`: it takes a
 shared `flock` around the exceptional `rustup toolchain install` and otherwise
 only verifies the pre-provisioned stable toolchain, without changing the shared
-rustup default. This keeps concurrent merge-queue lanes safe even when the
-runner image needs a one-time toolchain repair:
+rustup default. Release verification, Linux fallback builds, and Linux release
+prebuilds use this same helper; hosted jobs retain their isolated Rust installer.
+It checks the host rust-std registry entry, standard library files, and runnable
+rustc/cargo before exporting the stable toolchain. An incomplete installation
+fails with an explicit diagnostic: stop jobs and repair stable only when all
+runner slots are idle. The helper never updates or repairs an existing shared
+toolchain while another slot may be compiling against it.
+
+This keeps concurrent lanes safe when stable changes upstream or the runner
+image needs an initial install:
 
 | Slot | Runner | Checkout | Cargo target | sccache | Port |
 | --- | --- | --- | --- | --- | ---: |

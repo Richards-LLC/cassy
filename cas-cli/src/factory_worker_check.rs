@@ -508,6 +508,91 @@ fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Res
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn cas_c0ec_documented_redirect_passes_clean_gate_without_compilation() {
+        use cas_core::hooks::types::HookInput;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        std::fs::create_dir_all(repo.join("target")).unwrap();
+        git(&repo, &["init", "-q"]).unwrap();
+        std::fs::write(repo.join(".gitignore"), "/target/\n").unwrap();
+        std::fs::write(repo.join("source.rs"), "// committed fixture\n").unwrap();
+        git(&repo, &["add", "."]).unwrap();
+        git(
+            &repo,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-q",
+                "-m",
+                "fixture",
+            ],
+        )
+        .unwrap();
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("CAS_FACTORY_BUILD_GUARD", "off"),
+            ("CAS_HOOK_HARNESS", "claude"),
+            ("CAS_CLONE_PATH", repo.to_str().unwrap()),
+        ]);
+        let request = HookInput {
+            session_id: "worker-log-fixture".into(),
+            cwd: repo.to_string_lossy().into_owned(),
+            hook_event_name: "PreToolUse".into(),
+            tool_name: Some("Bash".into()),
+            tool_input: Some(
+                serde_json::json!({"command": "cargo check -p cas --tests > target/worker-check.log 2>&1 &"}),
+            ),
+            agent_role: Some("worker".into()),
+            ..Default::default()
+        };
+        let output = crate::hooks::handlers::handle_pre_tool_use(&request, Some(&root)).unwrap();
+        let value = serde_json::to_value(output).unwrap();
+        let rewritten = value
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|value| value.as_str())
+            .unwrap();
+        assert!(rewritten.contains("factory worker-check"));
+        assert!(rewritten.ends_with("> target/worker-check.log 2>&1 &"));
+        let head = clean_head(&repo).unwrap();
+        // Execute the admitted shell suffix before invoking the real runner
+        // boundary. The Cargo stand-in exits zero and compiles nothing.
+        let suffix = rewritten.split_once('>').unwrap().1;
+        assert!(
+            Command::new("sh")
+                .args(["-c", &format!(": >{suffix} wait")])
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(repo.join("target/worker-check.log").exists());
+        assert_eq!(clean_head(&repo).unwrap(), head);
+        let fake = dir.path().join("fake-cargo");
+        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let args = vec!["-p".into(), "cas".into(), "--tests".into()];
+        execute_at(&root, &args, &repo, &fake).unwrap();
+        assert!(passing_receipt(&root, &repo, &head).is_some());
+        for path in ["untracked.rs", "source.rs"] {
+            std::fs::write(repo.join(path), "// dirt\n").unwrap();
+            assert!(
+                execute_at(&root, &args, &repo, &fake)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Commit the worker change")
+            );
+            if path == "untracked.rs" {
+                std::fs::remove_file(repo.join(path)).unwrap();
+            }
+        }
+    }
+
     #[test]
     fn only_package_scoped_lib_or_tests_checks_are_accepted() {
         let args = |text: &str| {

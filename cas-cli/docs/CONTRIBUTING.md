@@ -28,7 +28,10 @@ always runs when logged in.
 ### Team-only project sync
 
 Set `[cloud] team_only = true` in a project's `.cas/config.toml` after linking
-that project to a team with `cas cloud team set`. The default is `false`:
+that project to a team with `cas cloud team set`.
+The registered `cas config set cloud.team_only true` command sets the same key;
+`cas config get cloud.team_only` and reset/list use that configuration too.
+The default is `false`:
 team-eligible project tasks, dependencies, memories, rules, and skills keep
 their existing personal plus team queue behavior. With the opt-in enabled,
 those project rows use only the team queue. Global rows and private memories
@@ -39,6 +42,13 @@ an active team, sync refuses and `cas doctor` reports an error.
 The personal push API requires a project identity, so global and private rows
 from a team-only root remain queued rather than re-registering its retired
 personal project. `cas cloud status` and `cas doctor` show the held count.
+
+Standalone push/pull, the daemon cycle, and MCP startup use the same team-only
+scope policy. To remove stale personal outbox rows rejected by the server with
+`team_owned_project`, run `cas cloud queue --purge-team-owned`. It removes only
+personal rows with that exact structured rejection, keeps local entities and
+team queue rows, and makes no cloud calls. `--json` reports the purged count,
+scope and reason. This cleanup does not backfill or delete remote cloud data.
 
 ## Canonical install path
 
@@ -177,6 +187,11 @@ The runner requires a clean committed worktree, forces its private seeded
 copies matching exact-delivery receipts into worker evidence. Dirty trees,
 failed retries, other worktrees and other SHAs cannot supply this receipt.
 Check receipts are optional compile-only evidence and do not waive test proof.
+
+Shell redirection opens logs before the runner checks that commit. Use a
+Git-ignored `target/worker-check.log` or the task's artifacts directory; create
+the parent directory first. In-repo logs that Git does not ignore are refused
+by the hook. The clean-head gate still rejects source changes.
 
 Rust-touching supervisor lane merges require separate combined-tree evidence.
 Run `python3 scripts/check-lane-compile.py . <target> <source> --prove` as a
@@ -543,6 +558,18 @@ commit receipt caps the displayed history and includes unnamed predecessor
 commits within the work window, stopping at another task's commit. Receipt
 inputs remain hexadecimal commit IDs, including unambiguous abbreviations.
 
+The close gate resolves the recorded factory branch locally or on origin before
+counting commits. An unavailable branch produces a missing-evidence error and
+is not parked for merge. A no-code task whose stale code target and delivery
+anchor were cleared closes on a portable `external_ref`; retained code anchors
+and commit receipts still require delivery proof.
+
+A passed or waived independent QA round remains bound to its reviewed tip after
+a squash merge. Close proves that the integrated receipt carries the same trees
+over the aggregate delivered paths, or the same stable aggregate patch ID.
+Unrelated target files do not change coverage. An unresolved or changed delivery
+still refuses, with review coverage and integration proof reported separately.
+
 A live registered supervisor may use `supervisor_override=true` with a non-empty
 reason to waive additive-only/value-only posture checks and the receipt epoch
 check for a retroactive record task. Close records the decision. Repository
@@ -564,10 +591,16 @@ Each named commit must be the delivery anchor or a descendant of it, be
 reachable on the target, and carry a non-empty first-parent diff. Cassy records
 the resolved commits, anchor, target and review as a decision note.
 
-The epic close gate proves every child within an 8 s budget, shared by ref
-reads, missing-anchor fetches and nested delivery/history proofs. A probe that
-runs out of time is terminated with its descendants, and its unfinished child
-remains unchecked rather than becoming a measured verdict. When it stops
+The epic close gate bounds ref/cache metadata at 8 s, then uses an 8 s soft
+proof budget. The first uncached child's delivery/history proof may finish
+beyond that soft budget under a separate 20 s hard cap, guaranteeing progress
+when a loaded host takes longer than a call's budget to prove one child.
+Missing-anchor fetches and subsequent proofs retain the soft budget; summary
+views and zero-budget cache-only calls never receive this allowance. Bounded
+close/status collection takes at most 8 + max(soft budget, 20) s (28 s for
+the production budgets), leaving room below the 55 s MCP deadline. A probe that
+exhausts its hard deadline is terminated with its descendants, and its unfinished
+child remains unchecked rather than becoming a measured verdict. When it stops
 early (`EPIC CLOSE CHECK INCOMPLETE`), the verdicts it already proved for
 closed children are saved under the repository's common Git directory
 (`cas/epic-close-verdicts.json`), keyed by the exact refs and anchor each proof

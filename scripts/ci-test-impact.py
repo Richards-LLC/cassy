@@ -72,7 +72,11 @@ def inventory(root, data):
         subprocess.check_call([sys.executable, str(helper), str(root / "cas-cli"), "--check"], stdout=subprocess.DEVNULL)
         output = subprocess.check_output([sys.executable, str(helper), str(root / "cas-cli")], text=True)
         mapping = dict(line.split("|", 1) for line in output.splitlines())
-        mapping = {stem: target for stem, target in mapping.items() if (root / f"cas-cli/tests/{stem}.rs").is_file()}
+        # Retain source aliases in both layouts recognised by cas-test-targets.
+        # Grouped harness names themselves are not source suites.
+        tests = root / "cas-cli/tests"
+        mapping = {stem: target for stem, target in mapping.items()
+                   if (tests / f"{stem}.rs").is_file() or (tests / stem / "main.rs").is_file()}
         if not mapping or any(not SAFE.fullmatch(x) for pair in mapping.items() for x in pair):
             raise ValueError("invalid integration inventory")
         return mapping

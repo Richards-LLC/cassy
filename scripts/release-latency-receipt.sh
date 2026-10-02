@@ -136,8 +136,26 @@ epoch_delta() {
 gh_bin="${GH_BIN:-gh}"
 repo="${RELEASE_REPO:-Richards-LLC/cassy}"
 
+# Keep GNU date results unchanged; BSD date requires the ISO fallback.
 epoch_of() {
-    date -u -d "$1" +%s 2>/dev/null || return 1
+    local epoch
+    if epoch="$(date -u -d "$1" +%s 2>/dev/null)"; then
+        printf '%s\n' "$epoch"
+        return 0
+    fi
+    python3 - "$1" <<'PY_TIMESTAMP'
+import datetime
+import math
+import sys
+
+try:
+    timestamp = datetime.datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
+    if timestamp.tzinfo is None:
+        raise ValueError("timestamp must carry a timezone")
+    print(math.floor(timestamp.timestamp()))
+except (ValueError, OverflowError, OSError):
+    sys.exit(1)
+PY_TIMESTAMP
 }
 
 published_at="$("$gh_bin" release view "$tag" --repo "$repo" --json publishedAt --jq '.publishedAt // empty')"

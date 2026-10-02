@@ -23654,6 +23654,137 @@ mod merge_state_gate_tests {
         );
     }
 
+    /// cas-74cb: the cas-f0c7 production shape through the real handler. A
+    /// supervisor override close of an epic whose terminal children point at
+    /// factory lanes and anchors deleted both locally and on origin must
+    /// return inside the 55 s MCP deadline and close the epic. On 3.45.0 the
+    /// epic merge gate finished in about 8.5 s (cas-9069 bounds it), then the
+    /// scoped-proof gate spawned the project's surface checker over the
+    /// epic's whole attributed diff with no bound: 38 s for 1228 paths, then a
+    /// second run to build the suggested command. This fixture's checker
+    /// sleeps past the deadline instead.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn epic_override_close_with_deleted_child_lanes_closes_in_budget_cas_74cb() {
+        use crate::mcp::CasService;
+        use crate::store::{
+            open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store,
+        };
+        use cas_types::{Agent, AgentRole, Dependency, DependencyType, WorkTarget};
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut env = TestEnvGuard::temp_home();
+        let (dir, _bare) = handoff_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::create_dir_all(p.join("scripts")).unwrap();
+        let checker = p.join("scripts/check-scoped-test-surface.sh");
+        std::fs::write(&checker, "#!/usr/bin/env bash\nsleep 60\n").unwrap();
+        std::fs::set_permissions(&checker, std::fs::Permissions::from_mode(0o755)).unwrap();
+        git(p, &["add", "scripts/check-scoped-test-surface.sh"]);
+        git(p, &["commit", "-q", "-m", "chore: project surface checker"]);
+        git(p, &["push", "-q", "origin", "main"]);
+        // Every child lane is gone locally and was never on origin.
+        git(p, &["branch", "-D", "factory/worker"]);
+
+        let cas_dir = p.join(".cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        env.set("CAS_ROOT", &cas_dir);
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        std::fs::write(
+            cas_dir.join("config.toml"),
+            "[verification]\nenabled = false\n",
+        )
+        .unwrap();
+        open_store(&cas_dir).unwrap().init().unwrap();
+        open_rule_store(&cas_dir).unwrap().init().unwrap();
+        open_skill_store(&cas_dir).unwrap().init().unwrap();
+        let store = open_task_store(&cas_dir).unwrap();
+        store.init().unwrap();
+        let agents = open_agent_store(&cas_dir).unwrap();
+        agents.init().unwrap();
+        let actor = "cas-74cb-supervisor";
+        agents
+            .register(&Agent::new_with_role(
+                actor.into(),
+                "supervisor".into(),
+                AgentRole::Supervisor,
+            ))
+            .unwrap();
+        let core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        core.set_agent_id_for_testing(actor.into());
+        let service = CasService::new(core, None);
+
+        let mut epic = Task {
+            id: "cas-74cb-epic".to_string(),
+            title: "deleted-lane epic".to_string(),
+            task_type: TaskType::Epic,
+            status: TaskStatus::Open,
+            branch: Some("main".to_string()),
+            risk: vec![TaskRisk::None],
+            ..Default::default()
+        };
+        epic.deliverables.work_target = Some(WorkTarget {
+            repo_selector: p.to_str().unwrap().into(),
+            target_branch: "main".into(),
+        });
+        epic.deliverables.files_changed = vec!["delivery.rs".to_string()];
+        store.add(&epic).unwrap();
+        let children = 64;
+        for index in 0..children {
+            let mut child = Task {
+                id: format!("cas-74cb-child-{index:02}"),
+                title: format!("deleted lane child {index}"),
+                status: TaskStatus::Closed,
+                assignee: Some(format!("gone-{index:02}")),
+                ..Default::default()
+            };
+            child.deliverables.factory_branch_anchor = Some(format!("{:040x}", index + 1));
+            child.deliverables.parked_branch = Some(format!("factory/gone-{index:02}"));
+            store.add(&child).unwrap();
+            store
+                .add_dependency(&Dependency::new(
+                    child.id.clone(),
+                    epic.id.clone(),
+                    DependencyType::ParentChild,
+                ))
+                .unwrap();
+        }
+
+        let started = std::time::Instant::now();
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "close",
+            "id": epic.id,
+            "supervisor_override": true,
+            "reason": "inspected every terminal child delivery against main",
+            "stranded_branch_override": "inspected all 64 child lanes: each factory branch and anchor is deleted locally and on origin after its delivery shipped to main",
+        }))
+        .unwrap();
+        let response = service.task(Parameters(request)).await.unwrap();
+        let elapsed = started.elapsed();
+        let text = response
+            .content
+            .iter()
+            .filter_map(|content| match &content.raw {
+                rmcp::model::RawContent::Text(text) => Some(text.text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            elapsed < std::time::Duration::from_secs(30),
+            "epic override close must answer inside the MCP deadline, took {elapsed:?}: {text}"
+        );
+        assert_ne!(response.is_error, Some(true), "{text}");
+        let closed = store.get(&epic.id).unwrap();
+        assert_eq!(closed.status, TaskStatus::Closed, "{text}");
+        assert!(
+            closed.notes.contains("BUILD PROOF deferred to epic assembly"),
+            "the epic's build proof is its assembly, recorded on close: {}",
+            closed.notes
+        );
+    }
+
     #[test]
     fn missing_factory_branch_reports_unresolved_evidence_cas_3067() {
         let (dir, _bare) = handoff_repo();

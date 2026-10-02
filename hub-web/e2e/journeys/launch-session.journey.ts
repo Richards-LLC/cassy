@@ -180,3 +180,37 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
     ATLAS.label = originalLabel;
   });
 });
+
+// cas-0e14 (journey F30): New session follows the machine's connection. A
+// machine that is reconnecting says so in the sheet, in the banner's words,
+// instead of failing a project load; once it is back its projects load.
+test("HUB-J13 New session says a reconnecting machine is reconnecting, then loads once it's back (cas-0e14)", async ({ page, journey }) => {
+  test.setTimeout(120_000);
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], scopes: { atlas: [...SCOPES, "session-launch"] }, launch: { atlas: atlasLaunch() } });
+  const sheet = page.getByRole("dialog", { name: "New session" });
+  const list = page.getByRole("navigation", { name: "Choose a supervisor" });
+
+  await journey.stage("The machine drops while I am about to start a session", async () => {
+    await journey.open();
+    await expect(page.getByRole("button", { name: "New session", exact: true })).toBeVisible();
+    await hub.down("atlas", { sockets: "close" });
+    await expect(list.getByRole("button", { name: /cas-src/ })).toContainText("Reconnecting", { timeout: 20_000 });
+  });
+
+  await journey.stage("New session says it is reconnecting and offers nothing that can only fail", async () => {
+    await page.getByRole("button", { name: "New session", exact: true }).tap();
+    await expect(sheet).toBeVisible();
+    await expect(sheet.locator('[data-launch-list="known"]')).toHaveText("Lost connection to Atlas · Linux. Reconnecting… Its projects load once it's back.");
+    await expect(sheet.getByText(/Couldn't load/)).toHaveCount(0);
+    await expect(sheet.getByRole("button", { name: "Start", exact: true })).toHaveAttribute("aria-disabled", "true");
+    expect(hub.launches).toEqual([]);
+  });
+
+  await journey.stage("Back online, its projects load in the same sheet", async () => {
+    await hub.up("atlas");
+    await expect(sheet.getByRole("radio", { name: /ledger-api/ })).toBeVisible({ timeout: 30_000 });
+    await expect(sheet.locator(".launch-offline")).toHaveCount(0);
+    await sheet.getByRole("radio", { name: /ledger-api/ }).tap();
+    await expect(sheet.getByRole("button", { name: "Start", exact: true })).toHaveAttribute("aria-disabled", "false");
+  });
+});

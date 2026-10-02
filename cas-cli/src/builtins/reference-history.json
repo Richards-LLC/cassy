@@ -381,6 +381,12 @@
     "skills/cas-improve-architecture/agents/openai.yaml": [
       "a1499d95abd8447558c535fe5554adcc3c9b988a0a39264a6283d430effe1e94"
     ],
+    "skills/cas-jev/references/triage-questions.json": [
+      "0b2acab7924ecfb7904b6075ab41019ffd9e8b8a8c51a8c25f2e99133e9a3133"
+    ],
+    "skills/cas-jev/references/triage.md": [
+      "c33c016edbe1638df3504001648f45588d3ec7c1c1a0ccd8e4cc2710fe77c4e9"
+    ],
     "skills/cas-memory-management/references/body-templates.md": [
       "1f4e4f8739271932bf6e89400ffde8d38b63da093571b39df1e3bc0e5a76f8a8",
       "26c880a2e172c7c1846b817ea4b844e6476b26d694a7de3f812b678b256fdfd4",

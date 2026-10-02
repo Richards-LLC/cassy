@@ -91,7 +91,7 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     // The list search and the Terminal view button name the palette chord the
     // same way on this (Linux) browser: Ctrl K, not ⌘K (journey F16).
     await expect(page.getByRole("searchbox", { name: "Search conversations" })).toHaveAttribute("placeholder", "Search conversations (Ctrl K)");
-    await page.getByRole("button", { name: "Terminal view" }).click();
+    await page.locator("#conversation-terminal").click();
     await expect(toggle).toBeVisible();
     // Its accessible name carries the visible chord, so "click Ctrl K" works
     // for a voice user (label in name, cas-3400 QA F02).
@@ -281,7 +281,7 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await expect(composer).toHaveValue("Back from the terminal");
     await composer.fill("");
     // With the mouse: the same.
-    await page.getByRole("button", { name: "Terminal view" }).click();
+    await page.locator("#conversation-terminal").click();
     await expect(back).toBeVisible();
     await back.click();
     await expect(composer).toBeFocused();
@@ -290,7 +290,7 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
   await journey.stage("Keyboard focus lands somewhere real on every route", async () => {
     // cas-7eaf: none of these routes leaves focus on <body>.
     const offBody = () => page.evaluate(() => document.activeElement !== document.body && document.activeElement !== null);
-    const terminal = page.getByRole("button", { name: "Terminal view" });
+    const terminal = page.locator("#conversation-terminal");
     const back = page.locator("#conversation-return");
     // Entering Terminal view from the keyboard lands in the terminal (or, before
     // a pane attaches, on the way back), never on <body>.
@@ -334,7 +334,7 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
   });
 
   await journey.stage("Read every session's details on a phone", async () => {
-    await page.getByRole("button", { name: "Terminal view" }).click();
+    await page.locator("#conversation-terminal").click();
     await page.setViewportSize({ width: 390, height: 844 });
     const picker = page.locator("#session-picker");
     await page.locator("#session-picker-toggle").click();
@@ -400,7 +400,7 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     // and the conversation header do, and the machine rail's letters come from
     // the machine's own name ("Atlas · Linux" read "A·").
     await list.getByRole("button", { name: /cas-src/ }).click();
-    await page.getByRole("button", { name: "Terminal view" }).click();
+    await page.locator("#conversation-terminal").click();
     await expect(page.locator(".session-picker-name")).toHaveText("cas-src");
     // Just after the reload there is no latency sample yet: the header says it
     // is checking, never "Status unavailable" beside a green dot, and then
@@ -545,7 +545,7 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     const jumpCount = await jumps.count();
     await page.keyboard.press("Escape");
     await expect(palette).toBeHidden();
-    await page.getByRole("button", { name: "Terminal view" }).click();
+    await page.locator("#conversation-terminal").click();
     const toggle = page.locator("#session-picker-toggle");
     await toggle.click();
     const picker = page.locator("#session-picker");
@@ -720,7 +720,7 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     hub.machine("alpha").sessions.push(twin(), { name: PELICAN, supervisor: PELICAN, project_dir: "/projects/cas-src", workers: [], liveness: "live" });
     hub.machine("atlas").sessions.push(twin());
     await page.reload();
-    const terminal = page.getByRole("button", { name: "Terminal view" });
+    const terminal = page.locator("#conversation-terminal");
     if (await terminal.isVisible()) await terminal.click();
     await page.locator("#machine-rail-list .machine-icon").filter({ hasText: "AT" }).first().click();
     const board = page.locator("#fleet-board");

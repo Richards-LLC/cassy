@@ -375,18 +375,17 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     await page.setViewportSize(desktop);
     const title = page.locator(".thread .empty b");
     expect(await title.evaluate((element) => element.scrollWidth <= element.clientWidth + 1), "the empty-thread title is not clipped").toBe(true);
-    // The empty state names the role and gives the codename in brackets; the
-    // codename never breaks at its hyphens, in the sentence or the meta line,
-    // at desktop or on a phone (journey F13).
+    // The empty state names the role; the codename is in the meta line only
+    // (cas-010f) and never breaks at its hyphens, at desktop or on a phone
+    // (journey F13).
     const said = page.locator(".thread .empty .said");
-    await expect(said).toHaveText(`No Commander messages from this session yet. The supervisor (${LONG_NAME}) will write here when it needs a decision.`);
+    await expect(said).toHaveText("No messages from the forge-tools supervisor in this session yet — nothing is waiting on you.");
     const oneLineCodename = (selector: string) => page.locator(selector).evaluate((element) => {
       const lineHeight = parseFloat(getComputedStyle(element).lineHeight);
       return { lines: element.getClientRects().length, oneLine: element.getBoundingClientRect().height < lineHeight * 1.5, ellipsised: element.scrollWidth > element.clientWidth, title: element.getAttribute("title") };
     });
     for (const width of [desktop.width, 390]) {
       await page.setViewportSize({ width, height: desktop.height });
-      expect(await oneLineCodename(".thread .empty .said .codename"), `sentence codename at ${width}px`).toEqual({ lines: 1, oneLine: true, ellipsised: true, title: LONG_NAME });
       expect(await oneLineCodename(".thread .empty .proj2"), `meta line at ${width}px`).toMatchObject({ lines: 1, oneLine: true, title: `Forge · Linux · ${LONG_NAME}` });
       // The machine name yields first; a codename this long still ellipsises on a phone.
       expect(await oneLineCodename(".thread .empty .proj2 > .codename"), `meta codename at ${width}px`).toMatchObject({ lines: 1, oneLine: true, ...(width === 390 ? { ellipsised: true } : {}) });

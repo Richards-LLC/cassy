@@ -142,8 +142,12 @@ function conversationHistory(key: string, session?: string): ConversationHistory
 function dismissedAskStorage(): DismissedAsksStorage | undefined {
   try { return window.localStorage; } catch { return undefined; }
 }
-const conversationHistoryPages = new Map<string, { hasEarlier: boolean; nextBefore?: number; loading: boolean; loaded: boolean; requested?: boolean }>();
-function conversationHistoryPage(key: string): { hasEarlier: boolean; nextBefore?: number; loading: boolean; loaded: boolean; requested?: boolean } {
+/**
+ * `unavailable`: the session attached without durable history (a daemon
+ * from before conversation_history), so no first page will ever arrive.
+ */
+const conversationHistoryPages = new Map<string, { hasEarlier: boolean; nextBefore?: number; loading: boolean; loaded: boolean; requested?: boolean; unavailable?: boolean }>();
+function conversationHistoryPage(key: string): { hasEarlier: boolean; nextBefore?: number; loading: boolean; loaded: boolean; requested?: boolean; unavailable?: boolean } {
   let page = conversationHistoryPages.get(key);
   if (!page) {
     page = { hasEarlier: false, loading: false, loaded: false };
@@ -408,11 +412,16 @@ function mountConversation(key: string, mount: HTMLElement): void {
       // way into its Terminal view, instead of another session's thread.
       activity: () => sessionActivity(threadMachineId, threadSession),
       openTerminal: () => { document.querySelector<HTMLButtonElement>("#conversation-terminal")?.click(); },
+      // cas-010f: the empty thread reads the header's own connection words.
+      connection: () => conversationHeaderLabel(threadMachineId, threadSession),
       hasEarlier: () => conversationHistoryPage(threadKey).hasEarlier,
       loadingEarlier: () => conversationHistoryPage(threadKey).loading,
+      // cas-010f: until this session's first page resolves, "no messages"
+      // would be a guess, before the request goes out as much as after; a
+      // session whose daemon keeps no history resolves on attach.
       loadingHistory: () => {
         const page = conversationHistoryPage(threadKey);
-        return page.requested === true && !page.loaded;
+        return !page.loaded && !page.unavailable;
       },
       historyEnd: () => {
         const page = conversationHistoryPage(threadKey);
@@ -539,13 +548,18 @@ function goBack(): void {
   else render();
 }
 
+/**
+ * A pane header's time is the pane's last output seen by this page. With
+ * none yet it says so, rather than "No activity", which contradicted the
+ * session's own last activity on the empty thread (cas-010f).
+ */
 function lastActivityLabel(timestamp: number | undefined): string {
-  return relativeTimestamp(timestamp);
+  return timestamp === undefined ? "No output yet" : relativeTimestamp(timestamp);
 }
 
 function updatePaneActivity(element: HTMLElement, timestamp: number | undefined): void {
   element.textContent = lastActivityLabel(timestamp);
-  element.title = timestamp === undefined ? "No activity received" : absoluteTimestamp(timestamp);
+  element.title = timestamp === undefined ? "No output received since this page opened" : absoluteTimestamp(timestamp);
 }
 
 function focusPane(machineId: string, session: string, paneId: string): void {
@@ -872,6 +886,12 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       // The first page, not an earlier one: the thread shows its own loading
       // line, and the "Load earlier" control stays out of it.
       cursor.requested = true;
+      updateConversationViews();
+    },
+    onConversationHistoryUnavailable: (session) => {
+      const cursor = conversationHistoryPage(sessionKey(machine.id, session));
+      if (cursor.loaded || cursor.unavailable) return;
+      cursor.unavailable = true;
       updateConversationViews();
     },
     onOperatorNoticeResolved: (session, resolved) => {
@@ -3379,12 +3399,12 @@ function renderMachineNavigation(): void {
  * newest queue row for it, or this page's last pane output when that is
  * newer. Undefined when neither is known.
  */
-function sessionActivity(machineId: string, session: string): { at?: number; label?: string } | undefined {
+function sessionActivity(machineId: string, session: string): { at?: number; label?: string; terminal?: boolean } | undefined {
   const hubSession = sessions.get(machineId)?.find((item) => item.name === session);
   const listed = hubSession?.last_activity_at ? Date.parse(hubSession.last_activity_at) : NaN;
   const prefix = `${sessionKey(machineId, session)}:`;
   const pane = Math.max(-Infinity, ...[...paneLastActivity].flatMap(([key, at]) => key.startsWith(prefix) ? [at] : []));
-  if (Number.isFinite(pane) && (!Number.isFinite(listed) || pane > listed)) return { at: pane, label: "terminal output" };
+  if (Number.isFinite(pane) && (!Number.isFinite(listed) || pane > listed)) return { at: pane, label: "terminal output", terminal: true };
   if (Number.isFinite(listed)) return { at: listed, ...(hubSession?.last_activity ? { label: hubSession.last_activity } : {}) };
   return undefined;
 }
@@ -3451,7 +3471,7 @@ function renderConversationList(): void {
   }
   const state = document.querySelector<HTMLElement>("#conversation-connection");
   if (state && selectedMachineId) {
-    const label = visibleSessions(selectedMachineId).find(session => session.name === selectedSession)?.unreachable ? "Unreachable · message pending" : fleetConnectionLabel(conversationConnection(selectedMachineId, selectedSession), selectedMachineId);
+    const label = conversationHeaderLabel(selectedMachineId, selectedSession);
     // The dot separates it from the codename on screen; the status reads just
     // the state ("Live", not "· Live") (cas-17e3).
     if (state.dataset.label !== label) {
@@ -3462,6 +3482,11 @@ function renderConversationList(): void {
   }
   // The state's width changes the room the machine · codename line has.
   fitConversationHost(document);
+}
+
+/** The conversation header's connection words; the empty thread reads the same (cas-010f). */
+function conversationHeaderLabel(machineId: string, session: string | undefined): string {
+  return visibleSessions(machineId).find((item) => item.name === session)?.unreachable ? "Unreachable · message pending" : fleetConnectionLabel(conversationConnection(machineId, session), machineId);
 }
 
 /**

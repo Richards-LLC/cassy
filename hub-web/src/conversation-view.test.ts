@@ -81,7 +81,7 @@ describe("ConversationView (Pebble thread)", () => {
     view.update();
 
     expect(view.element.querySelector<HTMLElement>(".empty")?.hidden).toBe(false);
-    expect(view.element.querySelector(".said")?.textContent).toBe("No Commander messages from this session yet. The supervisor (sup) will write here when it needs a decision.");
+    expect(view.element.querySelector(".said")?.textContent).toBe("No messages from this supervisor in this session yet — nothing is waiting on you.");
     expect(view.element.querySelector(".history-end")).toBeNull();
     expect(view.element.querySelector(".working")).toBeNull();
   });
@@ -99,8 +99,8 @@ describe("ConversationView (Pebble thread)", () => {
     expect(empty.textContent).not.toContain("Nothing waiting");
     // The page lands empty: now the empty state is the truth.
     loading = false; view.update();
-    expect(empty.dataset.state).toBeUndefined();
-    expect(empty.querySelector(".said")?.textContent).toBe("No Commander messages from this session yet. The supervisor (sup) will write here when it needs a decision.");
+    expect(empty.dataset.state).toBe("empty");
+    expect(empty.querySelector(".said")?.textContent).toBe("No messages from this supervisor in this session yet — nothing is waiting on you.");
     // A page with turns shows the turns, whatever the flag says.
     loading = true; history.reply(reply(1, "answer", "Ready."), at(9, 0)); view.update();
     expect(empty.hidden).toBe(true);
@@ -561,10 +561,9 @@ describe("ConversationView (Pebble thread)", () => {
     expect(empty.querySelector("b")?.textContent).toBe("cas-hub-static");
     expect(empty.querySelector(".proj2")?.textContent).toBe("Bench · calm-heron-5");
     expect(empty.querySelector(".proj2 > .codename")?.textContent).toBe("calm-heron-5");
-    expect(empty.querySelector(".said")?.textContent).toBe("No Commander messages from this session yet. The supervisor (calm-heron-5) will write here when it needs a decision.");
-    // The codename in the sentence is an identifier span that never breaks at its hyphen.
-    expect(empty.querySelector(".said .codename")?.textContent).toBe("calm-heron-5");
-    expect(empty.querySelector<HTMLElement>(".said .codename")?.title).toBe("calm-heron-5");
+    // The sentence names the project's supervisor; the codename is only in the meta line (cas-010f).
+    expect(empty.querySelector(".said")?.textContent).toBe("No messages from the cas-hub-static supervisor in this session yet — nothing is waiting on you.");
+    expect(empty.querySelector(".said .codename")).toBeNull();
     expect(empty.querySelector<HTMLElement>(".proj2")?.title).toBe("Bench · calm-heron-5");
     expect(empty.querySelector("b")?.classList.contains("codename")).toBe(false);
     expect(empty.querySelector(".quiet")?.textContent).toBe("Promoted the hub to production on Monday.");

@@ -5,7 +5,7 @@
 // sessions are grouped with the most recent one marked.
 import { describe, expect, it, vi } from "vitest";
 import { ConversationHistory, sessionCodename } from "./conversation-history";
-import { ConversationView, earlierSessionLabel, emptyActivityText } from "./conversation-view";
+import { ConversationView, earlierSessionLabel, emptyActivityText, emptyCardActivityText, emptyThreadCopy } from "./conversation-view";
 import { activityTime, ConversationList, conversationRowMarkup, groupConversationRows, type ConversationRow } from "./conversation-list";
 import type { ConversationHistoryMessage, ConversationHistoryReply } from "./types";
 
@@ -78,27 +78,89 @@ describe("session-bound thread history (cas-55a4)", () => {
     expect(section.querySelector<HTMLDetailsElement>("details.earlier-session")!.open).toBe(true);
   });
 
-  it("says a session has not written yet, shows its last activity, and offers its Terminal", () => {
+  it("says a session has not written yet, shows its last activity, and offers its Terminal view", () => {
     const history = new ConversationHistory();
     history.currentSession = "gabber-studio-calm-puma-34";
     history.hydrateReply(said(2, "Old answer", "gabber-studio-noble-cheetah-84", at(29, 21, 41)));
     const openTerminal = vi.fn();
     const now = Date.now();
-    const view = new ConversationView(document, history, { supervisor: "calm-puma-34", project: "gabber-studio", header: false, activity: () => ({ at: now - 3 * 60_000, label: "supervisor → wild-shark-68" }), openTerminal });
+    let activity: { at: number; label?: string; terminal?: boolean } = { at: now - 3 * 60_000, label: "supervisor → wild-shark-68" };
+    const view = new ConversationView(document, history, { supervisor: "calm-puma-34", project: "gabber-studio", header: false, activity: () => activity, openTerminal });
     document.body.replaceChildren(view.element);
     view.update();
     const empty = view.element.querySelector<HTMLElement>(".empty")!;
     expect(empty.hidden).toBe(false);
-    expect(empty.querySelector(".said")?.textContent).toBe("No Commander messages from this session yet. The supervisor (calm-puma-34) will write here when it needs a decision.");
-    expect(empty.querySelector(".empty-activity")?.textContent).toBe("Last activity 3m ago · supervisor → wild-shark-68");
-    empty.querySelector<HTMLButtonElement>(".empty-terminal")!.click();
+    expect(empty.querySelector(".said")?.textContent).toBe("No messages from the gabber-studio supervisor in this session yet — nothing is waiting on you.");
+    // cas-010f: no product codename and no queue jargon; one line holds the
+    // activity and Terminal view, named as the header names it.
+    expect(empty.textContent).not.toContain("Commander");
+    expect(empty.textContent).not.toContain("→");
+    expect(empty.querySelector(".empty-activity")?.textContent).toBe("Last active 3m ago");
+    expect(empty.querySelector(".empty-foot")?.textContent).toBe("Last active 3m ago·Terminal view");
+    const terminal = empty.querySelector<HTMLButtonElement>(".empty-foot > button.empty-terminal")!;
+    expect(terminal.textContent).toBe("Terminal view");
+    terminal.click();
     expect(openTerminal).toHaveBeenCalledOnce();
+    // Terminal output is the time Terminal view's pane header shows.
+    activity = { at: now - 60_000, label: "terminal output", terminal: true }; view.update();
+    expect(empty.querySelector(".empty-activity")?.textContent).toBe("Terminal output 1m ago");
     // The other session's thread is not shown as this one's: it is the
     // collapsed section under the card.
     expect(view.element.querySelector('[role="log"]')!.textContent).not.toContain("Old answer");
     const section = view.element.querySelector<HTMLElement>("section.earlier-sessions")!;
     expect(section.hidden).toBe(false);
     expect(section.previousElementSibling).toBe(empty);
+  });
+
+  it("reads the header's connection state, and claims nothing before the first page resolves (cas-010f)", () => {
+    const history = new ConversationHistory();
+    let connection = "Live";
+    let loading = true;
+    const openTerminal = vi.fn();
+    const view = new ConversationView(document, history, { supervisor: "calm-puma-34", machine: "Atlas · Linux", project: "gabber-studio", header: false, connection: () => connection, loadingHistory: () => loading, openTerminal });
+    document.body.replaceChildren(view.element);
+    view.update();
+    const empty = view.element.querySelector<HTMLElement>(".empty")!;
+    // Live, page on its way: the loading line, never "No messages".
+    expect(empty.dataset.state).toBe("loading");
+    expect(empty.textContent).not.toContain("No messages");
+    // Not live and the page cannot come: say why, offer no Terminal view.
+    connection = "Needs pairing"; view.update();
+    expect(empty.dataset.state).toBe("waiting");
+    expect(empty.querySelector(".said")?.textContent).toBe("Atlas · Linux needs pairing again before messages from the gabber-studio supervisor can load.");
+    expect(empty.textContent).not.toContain("No messages");
+    expect(empty.querySelector(".empty-terminal")).toBeNull();
+    connection = "Live"; loading = false; view.update();
+    expect(empty.dataset.state).toBe("empty");
+    expect(empty.querySelector(".said")?.textContent).toBe("No messages from the gabber-studio supervisor in this session yet — nothing is waiting on you.");
+    expect(empty.querySelector(".empty-terminal")?.textContent).toBe("Terminal view");
+    connection = "Reconnecting"; view.update();
+    expect(empty.querySelector(".said")?.textContent).toBe("No messages from the gabber-studio supervisor in this session yet. Reconnecting to Atlas · Linux — anything new will show here once it's back.");
+    expect(empty.querySelector(".empty-terminal")).toBeNull();
+    connection = "Degraded"; view.update();
+    expect(empty.querySelector(".said")?.textContent).toBe("No messages from the gabber-studio supervisor in this session yet. The connection is unsteady, so a new one may arrive late.");
+    expect(empty.querySelector(".empty-terminal")).not.toBeNull();
+  });
+
+  it("words every connection state for the empty thread", () => {
+    const base = { project: "cas-src", machine: "Atlas · Linux" };
+    expect(emptyThreadCopy({ ...base, connection: "Live", resolved: true })).toEqual({ state: "empty", said: "No messages from the cas-src supervisor in this session yet — nothing is waiting on you.", terminal: true });
+    expect(emptyThreadCopy({ ...base, connection: undefined, resolved: true }).terminal).toBe(true);
+    expect(emptyThreadCopy({ ...base, connection: "Needs pairing", resolved: true })).toEqual({ state: "empty", said: "No messages from the cas-src supervisor in this session yet. Atlas · Linux needs pairing again before new ones can arrive.", terminal: false });
+    expect(emptyThreadCopy({ ...base, connection: "Unreachable · message pending", resolved: true }).said).toBe("No messages from the cas-src supervisor in this session yet. Atlas · Linux can't be reached — anything new will show here once it's back.");
+    expect(emptyThreadCopy({ ...base, connection: "Can't reach · retrying", resolved: true }).said).toContain("Reconnecting to Atlas · Linux");
+    for (const connection of ["Live", "Degraded", "Connecting", "Idle", undefined]) expect(emptyThreadCopy({ ...base, connection, resolved: false }).state).toBe("loading");
+    expect(emptyThreadCopy({ ...base, connection: "Reconnecting", resolved: false })).toEqual({ state: "waiting", said: "Reconnecting to Atlas · Linux — messages from the cas-src supervisor will load once it's back.", terminal: false });
+    expect(emptyThreadCopy({ ...base, connection: "Unreachable", resolved: false }).said).toBe("Atlas · Linux can't be reached — messages from the cas-src supervisor will load once it's back.");
+    expect(emptyThreadCopy({ connection: "Needs pairing", resolved: false }).said).toBe("This machine needs pairing again before messages from this supervisor can load.");
+    expect(emptyThreadCopy({ connection: "Reconnecting", resolved: true }).said).toContain("Reconnecting to this machine");
+  });
+
+  it("words the empty thread's activity plainly", () => {
+    const now = new Date(2026, 8, 30, 12, 0).getTime();
+    expect(emptyCardActivityText({ at: now - 2 * 60_000 }, now)).toBe("Last active 2m ago");
+    expect(emptyCardActivityText({ at: now - 30_000, terminal: true }, now)).toBe("Terminal output just now");
+    expect(emptyCardActivityText({}, now)).toBe("");
   });
 
   it("words last activity plainly", () => {

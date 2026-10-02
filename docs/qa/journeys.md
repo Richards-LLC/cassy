@@ -42,7 +42,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 2. Ask for a pairing code — "Pair a machine", then "Create pairing code" shows `cas hub authorize <code>`
 3. Approve on the machine — the dialog follows the machine: waiting, claimed, authorized
 4. Confirm and pair this browser — enter the operator label, then press Pair
-5. See the machine's supervisor ready to talk to — a toast says the machine is connected without covering the composer or any heading, and its row opens a conversation
+5. See the machine's supervisor ready to talk to — a toast says the machine is connected without covering the composer or any heading, and its row opens a conversation that says, in plain words, "No messages from the cas-src supervisor in this session yet — nothing is waiting on you", with one "Terminal view" link named as the header names it
 
 #### Expected experience
 
@@ -448,11 +448,12 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 #### Steps
 
 1. See a project's live sessions together — the project's rows sit under one heading naming the session count, the most recently active one is marked "Most recent", and each row's time is its own last activity
-2. Open a session that has not written yet — the thread says "No Commander messages from this session yet", shows its last activity, and the older session's thread is only a collapsed "Earlier session noble-cheetah-84, Yesterday" section
+2. Open a session that has not written yet — the thread says "No messages from the gabber-studio supervisor in this session yet — nothing is waiting on you", shows "Last active 2m ago" with no internal jargon, and the older session's thread is only a collapsed "Earlier session noble-cheetah-84, Yesterday" section
 3. Read an earlier session's messages — the section opens to its turns, each with its day and time, and offers no actions
-4. Open the Terminal from the empty session — "Open Terminal" switches to the session's Terminal view and back
-5. Each session shows its own conversation — another session's turns, even from a daemon that still sends project-wide history, appear only in its earlier section
-6. End a stale session — End session asks first, names what stops, and only the confirmation ends it; the row leaves the group
+4. Open Terminal view from the empty session — its "Terminal view" link switches to the session's Terminal view and back; the pane header never says "No activity" for a session that was just active
+5. The empty thread follows the connection — off the network it says it is reconnecting to Atlas · Linux and offers no Terminal view; back on, the plain copy and the link return
+6. Each session shows its own conversation — another session's turns, even from a daemon that still sends project-wide history, appear only in its earlier section; a conversation with history never flashes a "no messages" card while its first page loads
+7. End a stale session — End session asks first, names what stops, and only the confirmation ends it; the row leaves the group
 
 #### Expected experience
 
@@ -464,6 +465,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - A turn with no session recorded is filed under "Earlier messages with no session recorded".
 - A device without `factory:manage` sees no End session; the hub refuses the call with 403 `scope_denied`.
+- Under Needs pairing, Reconnecting or Unreachable the empty thread says why new messages cannot arrive and offers no Terminal view; before its first page has loaded it claims no messages at all (cas-010f).
 - Ending a session whose daemon PID now belongs to another process only cleans up its metadata.
 
 ### HUB-J15 · See a delivery problem as attention, not conversation

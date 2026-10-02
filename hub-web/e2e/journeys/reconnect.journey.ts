@@ -160,7 +160,7 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     // Attention rail used to say "All clear", the machine rail "live · 8ms",
     // and the header kept "CONTROL" and a latency chip.
     await page.setViewportSize({ width: 1280, height: 720 });
-    await page.getByRole("button", { name: "Terminal view" }).click();
+    await page.locator("#conversation-terminal").click();
     const atlas = page.locator("#machine-rail-list .machine-icon").filter({ hasText: "Atlas" });
     const read = () => page.evaluate(() => {
       const text = (selector: string) => document.querySelector<HTMLElement>(selector)?.innerText.trim() ?? "";

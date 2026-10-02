@@ -4,6 +4,7 @@ import { plainTextMarkdown, renderMarkdown } from "./markdown-renderer";
 import { refusal } from "./refusal";
 import { shouldFollowTail } from "./transcript";
 import { bindSwipeDismiss } from "./swipe-dismiss";
+import { CANT_REACH_RETRYING, NEEDS_PAIRING } from "./connection-state";
 import { sessionCodename, type ConversationEvent, type ConversationHistory, type ConversationSend, type EarlierSession } from "./conversation-history";
 import type { ArtifactRef, OperatorReply, OperatorTurnKind } from "./types";
 import {
@@ -141,9 +142,16 @@ export interface ConversationViewOptions {
    * (cas-55a4): when it last did anything and between whom. The empty
    * thread shows it, so a live session never reads as idle or as a copy.
    */
-  activity?: () => { at?: number; label?: string } | undefined;
+  activity?: () => { at?: number; label?: string; terminal?: boolean } | undefined;
   /** The empty thread offers the session's Terminal view (cas-55a4). */
   openTerminal?: () => void;
+  /**
+   * The conversation header's connection label ("Live", "Degraded",
+   * "Reconnecting", "Needs pairing", …). The empty thread reads it, so it
+   * never promises new messages or offers Terminal view over a connection
+   * that cannot carry them (cas-010f). Unset reads as live.
+   */
+  connection?: () => string | undefined;
   /** Requests the next older durable page when history has more turns. */
   loadEarlier?: () => void;
   /** Whether the daemon reported an older page still available. */
@@ -204,7 +212,52 @@ function landFocusIn(bubble: HTMLElement, className: string): void {
   bubble.focus({ preventScroll: true });
 }
 
-/** "Last activity 3m ago · supervisor → worker-1" for the empty thread (cas-55a4). */
+/**
+ * What the empty thread says (cas-010f), from the header's connection label
+ * and whether this session's first history page has resolved:
+ * - `loading`: the page is on its way over a connection that can bring it;
+ * - `waiting`: it cannot arrive until the connection is back, so the card
+ *   says why instead of claiming there is nothing;
+ * - `empty`: the page resolved with no turns of this session's own.
+ * Plain words only: no product codename, and the generated session codename
+ * stays in the card's meta line. Terminal view is offered only while the
+ * connection can carry it.
+ */
+export function emptyThreadCopy(input: { project?: string; machine?: string; connection?: string; resolved: boolean }): { state: "loading" | "waiting" | "empty"; said: string; terminal: boolean } {
+  const subject = input.project ? `the ${input.project} supervisor` : "this supervisor";
+  const where = input.machine || "this machine";
+  const subjectMachine = input.machine || "This machine";
+  const label = input.connection;
+  const kind = label === undefined || label === "Live" ? "live"
+    : label === "Degraded" ? "degraded"
+      : label === NEEDS_PAIRING ? "pairing"
+        : label === "Reconnecting" || label === "Connecting" || label === "Idle" || label === CANT_REACH_RETRYING ? "reconnecting"
+          : "unreachable";
+  const none = `No messages from ${subject} in this session yet`;
+  if (!input.resolved) {
+    if (kind === "live" || kind === "degraded" || label === "Connecting" || label === "Idle") return { state: "loading", said: "", terminal: false };
+    if (kind === "pairing") return { state: "waiting", said: `${subjectMachine} needs pairing again before messages from ${subject} can load.`, terminal: false };
+    if (kind === "reconnecting") return { state: "waiting", said: `Reconnecting to ${where} — messages from ${subject} will load once it's back.`, terminal: false };
+    return { state: "waiting", said: `${subjectMachine} can't be reached — messages from ${subject} will load once it's back.`, terminal: false };
+  }
+  if (kind === "live") return { state: "empty", said: `${none} — nothing is waiting on you.`, terminal: true };
+  if (kind === "degraded") return { state: "empty", said: `${none}. The connection is unsteady, so a new one may arrive late.`, terminal: true };
+  if (kind === "pairing") return { state: "empty", said: `${none}. ${subjectMachine} needs pairing again before new ones can arrive.`, terminal: false };
+  if (kind === "reconnecting") return { state: "empty", said: `${none}. Reconnecting to ${where} — anything new will show here once it's back.`, terminal: false };
+  return { state: "empty", said: `${none}. ${subjectMachine} can't be reached — anything new will show here once it's back.`, terminal: false };
+}
+
+/**
+ * The empty thread's activity line (cas-010f): plain words, no queue jargon.
+ * Terminal output is the same time Terminal view's pane header shows;
+ * otherwise the session's own last activity.
+ */
+export function emptyCardActivityText(activity: { at?: number; terminal?: boolean }, now: number): string {
+  if (activity.at === undefined) return "";
+  return `${activity.terminal ? "Terminal output" : "Last active"} ${relativeAgo(activity.at, now)}`;
+}
+
+/** "Last activity 3m ago · supervisor → worker-1": a conversation row's title (cas-55a4). */
 export function emptyActivityText(activity: { at?: number; label?: string }, now: number): string {
   const when = activity.at === undefined ? undefined : relativeAgo(activity.at, now);
   return ["Last activity", when, activity.label ? `· ${activity.label}` : undefined].filter(Boolean).join(" ");
@@ -671,7 +724,10 @@ export class ConversationView {
     this.msgs.hidden = show;
     if (!show) { this.empty.replaceChildren(); delete this.empty.dataset.signature; delete this.empty.dataset.state; return; }
     const { supervisor, machine, project } = this.options;
-    if (loading) {
+    // cas-010f: "no messages" only once this session's first page resolved
+    // empty, and in words that match the header's connection state.
+    const copy = emptyThreadCopy({ project, machine, connection: this.options.connection?.(), resolved: !loading });
+    if (copy.state === "loading") {
       // Until the first page lands, "Nothing waiting" would be a guess.
       if (this.empty.dataset.state === "loading") return;
       this.empty.dataset.state = "loading";
@@ -686,12 +742,12 @@ export class ConversationView {
       this.empty.replaceChildren(line);
       return;
     }
-    delete this.empty.dataset.state;
+    this.empty.dataset.state = copy.state;
     const echo = this.options.echo?.()?.trim() || "";
     const activity = this.options.activity?.();
-    const activityText = activity?.at !== undefined || activity?.label ? emptyActivityText(activity, Date.now()) : "";
-    const terminal = this.options.openTerminal !== undefined;
-    const signature = JSON.stringify([supervisor, machine, project, echo, activityText, terminal]);
+    const activityText = activity ? emptyCardActivityText(activity, Date.now()) : "";
+    const terminal = copy.terminal && this.options.openTerminal !== undefined;
+    const signature = JSON.stringify([supervisor, machine, project, echo, activityText, terminal, copy.said]);
     if (this.empty.dataset.signature === signature) return;
     this.empty.dataset.signature = signature;
     const document = this.element.ownerDocument;
@@ -713,23 +769,25 @@ export class ConversationView {
       const separator = document.createElement("span"); separator.className = "proj2-sep"; separator.textContent = " · ";
       where.append(...(machine ? [separator] : []), secondary);
     }
-    const said = document.createElement("p"); said.className = "said"; said.setAttribute("role", "status");
-    // The sentence names the role, not the generated codename (journey F13).
-    // The codename follows in brackets as an identifier: mono, one unbroken
-    // line, ellipsised past a cap, and whole in its title and the DOM.
-    const codename = document.createElement("span"); codename.className = "codename"; codename.textContent = supervisor; codename.title = supervisor;
-    // The brackets travel with it: no line break between "(" and the name.
-    const who = document.createElement("span"); who.className = "said-who"; who.append("(", codename, ")");
     // cas-55a4: an honest empty state. This session has said nothing here
-    // yet; another session's thread is never shown in its place.
-    said.append("No Commander messages from this session yet. The supervisor ", who, " will write here when it needs a decision.");
+    // yet; another session's thread is never shown in its place. The sentence
+    // names the role (journey F13); the codename is in the line above it.
+    const said = document.createElement("p"); said.className = "said"; said.setAttribute("role", "status");
+    said.textContent = copy.said;
     const children: HTMLElement[] = [mono, name, where, said];
-    if (activityText) { const live = document.createElement("p"); live.className = "empty-activity"; live.textContent = activityText; children.push(live); }
-    if (this.options.openTerminal) {
-      const open = document.createElement("button"); open.type = "button"; open.className = "empty-terminal";
-      open.textContent = "Open Terminal";
-      open.onclick = () => this.options.openTerminal?.();
-      children.push(open);
+    if (activityText || terminal) {
+      // One quiet line: when the session last did anything, then the way into
+      // Terminal view, named as the header names it (cas-010f).
+      const foot = document.createElement("p"); foot.className = "empty-foot";
+      if (activityText) { const live = document.createElement("span"); live.className = "empty-activity"; live.textContent = activityText; foot.append(live); }
+      if (terminal) {
+        if (activityText) { const dot = document.createElement("span"); dot.className = "empty-foot-sep"; dot.setAttribute("aria-hidden", "true"); dot.textContent = "·"; foot.append(dot); }
+        const open = document.createElement("button"); open.type = "button"; open.className = "empty-terminal";
+        open.textContent = "Terminal view";
+        open.onclick = () => this.options.openTerminal?.();
+        foot.append(open);
+      }
+      children.push(foot);
     }
     if (echo) { const quiet = document.createElement("div"); quiet.className = "quiet"; quiet.textContent = echo; children.push(quiet); }
     this.empty.replaceChildren(...children);

@@ -12,7 +12,9 @@ const SHARK = "gabber-studio-wild-shark-68";
 const session = (name: string, supervisor: string, lastActivityAt: string, lastActivity: string) => ({
   name, supervisor, project_dir: "/projects/gabber-studio", workers: [], liveness: "live" as const, last_activity_at: lastActivityAt, last_activity: lastActivity,
 });
-const ATLAS: Machine = {
+// Stamped per test, never at file load: a stamp taken between tests picks up
+// the previous test's elapsed time and lands late (cas-4e52 mechanism).
+const atlas = (): Machine => ({
   id: "atlas",
   label: "Atlas · Linux",
   sessions: [
@@ -20,14 +22,14 @@ const ATLAS: Machine = {
     session(PUMA, "calm-puma-34", journeyStamp(-2 * 60_000), "supervisor → bright-robin-85"),
     session(SHARK, "wild-shark-68", journeyStamp(-40 * 60_000), "Commander → supervisor"),
   ],
-};
+});
 
 const you = (id: number, text: string, from: string, at: string) => ({ notification_id: id, target: "supervisor", text, state: "acknowledged", stamped: true, device_id: "journey-device", operator_label: "Pixel 10", session: from, at });
 const sup = (id: number, message: string, from: string, at: string, kind = "answer") => ({ notification_id: id, reply_to: null, message, summary: "", device_id: "journey-device", kind, attachments: [], session: from, at });
 
 test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) => {
   const hub = await journey.hub({
-    machines: [ATLAS],
+    machines: [atlas()],
     paired: ["atlas"],
     scopes: { atlas: [...SCOPES, "factory-manage"] },
     history: {
@@ -68,8 +70,13 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
   await journey.stage("Open a session that has not written yet", async () => {
     await row("calm-puma-34").click();
     const empty = page.locator(".thread .empty");
-    await expect(empty.locator(".said")).toHaveText("No Commander messages from this session yet. The supervisor (calm-puma-34) will write here when it needs a decision.");
-    await expect(empty.locator(".empty-activity")).toHaveText("Last activity 2m ago · supervisor → bright-robin-85");
+    // cas-010f: plain words, no product codename or queue jargon, and
+    // Terminal view named as the header names it.
+    await expect(empty.locator(".said")).toHaveText("No messages from the gabber-studio supervisor in this session yet — nothing is waiting on you.");
+    await expect(empty.locator(".empty-activity")).toHaveText("Last active 2m ago");
+    await expect(empty).not.toContainText("Commander");
+    await expect(empty).not.toContainText("→");
+    await expect(empty.getByRole("button")).toHaveText(["Terminal view"]);
     await expect(page.locator(".thread .msgs")).not.toContainText("Mixdown preview rendered");
     await expect(page.locator(".pinned-ask")).toBeHidden();
     // The older session's thread is a collapsed, labelled section, with dates.
@@ -87,17 +94,44 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     await noble.locator("summary").click();
   });
 
-  await journey.stage("Open the Terminal from the empty session", async () => {
-    await page.locator(".thread .empty").getByRole("button", { name: "Open Terminal" }).click();
+  await journey.stage("Open Terminal view from the empty session", async () => {
+    await page.locator(".thread .empty").getByRole("button", { name: "Terminal view" }).click();
     await expect(page.locator("#conversation-return")).toBeVisible();
+    // The pane header says what it has seen, not "No activity" beside a
+    // session that was active two minutes ago (cas-010f).
+    for (const stamp of await page.locator(".pane-last-activity").filter({ visible: true }).allTextContents()) expect(stamp).not.toBe("No activity yet");
     await page.locator("#conversation-return").click();
     await expect(page.locator(".thread .empty .said")).toBeVisible();
   });
 
+  await journey.stage("The empty thread follows the connection", async () => {
+    // cas-010f: off the network, the card says why nothing new can arrive and
+    // stops offering Terminal view; back on, it is the plain live copy again.
+    const empty = page.locator(".thread .empty");
+    const header = page.locator("#conversation-connection");
+    await hub.down("atlas", { sockets: "close" });
+    await expect(header).toContainText("Reconnecting");
+    await expect(empty.locator(".said")).toHaveText("No messages from the gabber-studio supervisor in this session yet. Reconnecting to Atlas · Linux — anything new will show here once it's back.");
+    await expect(empty.getByRole("button", { name: "Terminal view" })).toHaveCount(0);
+    await hub.up("atlas");
+    await expect(header).toContainText("Live", { timeout: 20_000 });
+    await expect(empty.locator(".said")).toHaveText("No messages from the gabber-studio supervisor in this session yet — nothing is waiting on you.");
+    await expect(empty.getByRole("button", { name: "Terminal view" })).toBeVisible();
+  });
+
   await journey.stage("Each session shows its own conversation", async () => {
     await backToList();
+    // cas-010f: a conversation with history never claims, even for a frame,
+    // that it has no messages while its first page is on its way.
+    await page.evaluate(() => {
+      const claims: string[] = [];
+      (window as unknown as { emptyClaims: string[] }).emptyClaims = claims;
+      const check = () => { for (const said of document.querySelectorAll(".thread .empty:not([hidden]) .said")) if (/^No (Commander )?messages/.test(said.textContent ?? "")) claims.push(said.textContent ?? ""); };
+      new MutationObserver(check).observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ["hidden"] });
+    });
     await row("wild-shark-68").click();
     await expect(log).toContainText("Stem export is at 60%.");
+    expect(await page.evaluate(() => (window as unknown as { emptyClaims: string[] }).emptyClaims), "no empty claim while history loads").toEqual([]);
     await expect(log).not.toContainText("Mixdown preview rendered");
     await expect(earlier).toBeHidden();
     await backToList();

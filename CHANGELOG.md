@@ -47,13 +47,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   are study-authored and sparse real-command coverage limits generalization.
   This is shadow-only research: no Jev gate or runtime hook behavior changed.
 
-### Pending — credential-write protection
-
-- **DRAFT PENDING — cas-5c83:** Bash writes to `.env` and credential files are
-  blocked like direct writes. This fix remains in progress; replace this line
-  with delivered behavior and proof before publishing the release.
-
 ### Fixed — proposed 3.45.0 scope
+
+- PreToolUse denies parsed Bash writes to `.env` and configured credential files,
+  consistently with direct Write. Protection covers redirects, `tee`, `cp`/`mv`
+  destinations and recognized Python/Node file writes. Reads and quoted command
+  text are unaffected.
 
 - Visual QA redacts authorization and cookie headers and token values from
   its logs, and scrubs authentication data from traces it creates. If an

@@ -23389,6 +23389,37 @@ mod merge_state_gate_tests {
         );
     }
 
+    #[test]
+    fn cleared_no_code_missing_factory_branch_closes_on_external_proof_cas_3067() {
+        let bare = tempfile::tempdir().unwrap();
+        git(bare.path(), &["init", "-q", "--bare"]);
+        let dir = init_factory_repo("deleted-worker");
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["branch", "-D", "factory/deleted-worker"]);
+        git(p, &["remote", "add", "origin", bare.path().to_str().unwrap()]);
+        git(p, &["push", "-q", "origin", "main"]);
+        let mut task = worker_task("deleted-worker");
+        task.status = TaskStatus::Open;
+        task.task_type = TaskType::Chore;
+        task.execution_note = Some("no-code".into());
+        task.external_ref = Some("https://github.com/example/cloud/pull/123".into());
+        // Result of the supervisor's proof_scope_fix target_repo="": the
+        // active code target and delivery anchor have been cleared.
+        task.deliverables.work_target = None;
+        task.deliverables.factory_branch_anchor = None;
+        task.deliverables.parked_branch = Some("factory/deleted-worker".into());
+        let outcome = run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p);
+        match outcome {
+            MergeStateGateOutcome::ProceedWithNote(note) => {
+                assert!(note.contains(task.external_ref.as_deref().unwrap()), "{note}");
+                assert!(note.contains("factory/deleted-worker"), "{note}");
+                assert!(note.contains("missing"), "{note}");
+            }
+            other => panic!("cleared no-code delivery must use external proof, not count a missing ref: {other:?}"),
+        }
+    }
+
     // --- cas-e33f (GH #1004): close after a worker → supervisor handoff -----
 
     /// A `main` repo with a bare `origin` (so the trunk target is

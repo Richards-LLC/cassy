@@ -53,6 +53,8 @@ The code-history document index has a separate source setting. Configure
 `history.github_repo` for an override, or leave it empty to use the checkout's
 GitHub `origin`; never set `issues.repo` to make history indexing work.
 
+For reviewed triage suggestions during a sweep, use [cas-jev](../cas-jev/SKILL.md) and its evidence-based triage recipe.
+
 ## 1. List open issues
 
 Fetch the open issues with their bodies **and comment counts**. An issue whose

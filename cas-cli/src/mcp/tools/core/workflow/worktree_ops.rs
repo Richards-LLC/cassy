@@ -112,15 +112,16 @@ fn ci_docs_path(path: &str) -> bool {
     !path.starts_with("cas-cli/src/") && (path.starts_with("docs/") || path.ends_with(".md"))
 }
 
-fn ci_git(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+fn ci_git(
+    cwd: &Path,
+    args: &[&str],
+    deadline: crate::bounded_process::Deadline,
+) -> Result<Vec<u8>, String> {
     let mut command = Command::new("git");
     command.current_dir(cwd).args(args);
-    let output = crate::bounded_process::run_command(
-        &mut command,
-        crate::bounded_process::Deadline::after(BRANCH_CI_LOOKUP_TIMEOUT),
-        BRANCH_CI_LOOKUP_TIMEOUT,
-    )
-    .map_err(|_| "could not inspect delivery Git range".to_string())?;
+    let output =
+        crate::bounded_process::run_command(&mut command, deadline, BRANCH_CI_LOOKUP_TIMEOUT)
+            .map_err(|_| "could not inspect delivery Git range".to_string())?;
     if !output.status.success() {
         return Err("could not inspect delivery Git range".to_string());
     }
@@ -130,13 +131,18 @@ fn ci_git(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
 /// Walk the complete delivery history, including merged side branches and
 /// reverted edits. Topological order chooses a descendant before its parents.
 fn delivery_ci_commit(branch: &str, target: &str, cwd: &Path) -> Result<(String, bool), String> {
-    let tip = crate::worktree::GitOperations::new(cwd.to_path_buf())
-        .resolve_commit(branch)
-        .ok_or_else(|| "could not resolve source tip".to_string())?;
-    let base = ci_git(cwd, &["merge-base", target, &tip])?;
+    // One budget for the whole walk, so a long docs tail cannot multiply it.
+    let deadline = crate::bounded_process::Deadline::after(BRANCH_CI_LOOKUP_TIMEOUT);
+    let tip = ci_git(
+        cwd,
+        &["rev-parse", "--verify", &format!("{branch}^{{commit}}")],
+        deadline,
+    )?;
+    let tip = String::from_utf8_lossy(&tip).trim().to_string();
+    let base = ci_git(cwd, &["merge-base", target, &tip], deadline)?;
     let base = String::from_utf8_lossy(&base);
     let range = format!("{}..{tip}", base.trim());
-    let commits = ci_git(cwd, &["rev-list", "--topo-order", &range])?;
+    let commits = ci_git(cwd, &["rev-list", "--topo-order", &range], deadline)?;
     for commit in String::from_utf8_lossy(&commits).lines() {
         let paths = ci_git(
             cwd,
@@ -149,6 +155,7 @@ fn delivery_ci_commit(branch: &str, target: &str, cwd: &Path) -> Result<(String,
                 "-z",
                 commit,
             ],
+            deadline,
         )?;
         if paths
             .split(|byte| *byte == 0)
@@ -4131,6 +4138,58 @@ mod tests {
         ] {
             assert!(!super::ci_docs_path(path), "{path}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unresolved_delivery_range_never_falls_back_to_docs_tip_cas_a9bd() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let (repo, _, _) = delivery_ci_fixture(true, Some("success"));
+        env.set(
+            crate::github_issue_attach::GH_BIN_ENV,
+            repo.path().join("gh-fixture"),
+        );
+        let state = super::lookup_branch_ci("factory/ci-fixture", "missing-target", repo.path());
+        assert!(admit_branch_ci(&state, false, None).is_err(), "{state:?}");
+        assert!(!repo.path().join("gh-requests.log").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delivery_range_selects_latest_embedded_code_below_docs_cas_a9bd() {
+        let _env = crate::test_support::TestEnvGuard::new();
+        let (repo, original_code, _) = delivery_ci_fixture(true, Some("success"));
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(repo.path())
+                .args([
+                    "-c",
+                    "user.name=CI fixture",
+                    "-c",
+                    "user.email=ci@example.test",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        std::fs::create_dir_all(repo.path().join("cas-cli/src/builtins")).unwrap();
+        std::fs::write(
+            repo.path().join("cas-cli/src/builtins/guide.md"),
+            "embedded\n",
+        )
+        .unwrap();
+        git(&["add", "cas-cli/src/builtins/guide.md"]);
+        git(&["commit", "-qm", "embedded Markdown is code"]);
+        let latest_code = git(&["rev-parse", "HEAD"]);
+        std::fs::write(repo.path().join("README.md"), "last docs\n").unwrap();
+        git(&["add", "README.md"]);
+        git(&["commit", "-qm", "docs tail"]);
+        let selected =
+            super::delivery_ci_commit("factory/ci-fixture", "main", repo.path()).unwrap();
+        assert_eq!(selected, (latest_code.clone(), true));
+        assert_ne!(latest_code, original_code);
     }
 
     #[test]

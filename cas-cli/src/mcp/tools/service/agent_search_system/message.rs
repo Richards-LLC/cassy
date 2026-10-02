@@ -1602,8 +1602,34 @@ impl CasService {
                         MergeRequestDecision::AlreadyIntegrated { .. }
                     )
                 });
+                // cas-ba4a: the live tip replaces a parked anchor only when it
+                // descends from it with this task's commits alone. A sibling
+                // task that is Open or Blocked (no active lease) or a force-
+                // pushed lane would otherwise be requested as this delivery.
+                let live_tip_continues_delivery = task.status
+                    == cas_types::TaskStatus::AwaitingMerge
+                    && recorded_anchor.is_some()
+                    && branch
+                        .as_deref()
+                        .and_then(|branch| {
+                            crate::prompt_revalidation::resolve_live_branch_tip(
+                                &repo.repo_root,
+                                branch,
+                                recorded_anchor.as_deref(),
+                            )
+                        })
+                        .and_then(|live_tip| {
+                            let store = open_task_store_local(&self.inner.cas_root).ok()?;
+                            self.inner.eligible_awaiting_merge_advance(
+                                store.as_ref(),
+                                &task,
+                                &repo.repo_root,
+                                Some(&live_tip),
+                            )
+                        })
+                        .is_some();
                 let frozen_anchor = (task.status == cas_types::TaskStatus::AwaitingMerge
-                    && (other_task_active || anchor_integrated))
+                    && (other_task_active || anchor_integrated || !live_tip_continues_delivery))
                     .then(|| recorded_anchor.clone())
                     .flatten();
                 // GH #1022: only a landed anchor with no other active task can

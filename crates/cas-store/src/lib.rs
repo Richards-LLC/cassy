@@ -718,6 +718,13 @@ pub trait TaskStore: Send + Sync {
     /// List tasks with optional status filter
     fn list(&self, status: Option<TaskStatus>) -> Result<Vec<Task>>;
 
+    /// List the board and rows suppressed by a local visibility policy.
+    /// Audit callers use the second collection to explain exclusions; ordinary
+    /// board callers must continue using `list`. Both collections are disjoint.
+    fn list_with_suppressed(&self, status: Option<TaskStatus>) -> Result<(Vec<Task>, Vec<Task>)> {
+        Ok((self.list(status)?, Vec::new()))
+    }
+
     /// List tasks that are ready to work on (open, not blocked)
     fn list_ready(&self) -> Result<Vec<Task>>;
 

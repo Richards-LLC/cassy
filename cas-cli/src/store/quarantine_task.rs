@@ -139,13 +139,18 @@ impl TaskStore for QuarantineFilteringTaskStore {
     }
 
     fn list(&self, status: Option<TaskStatus>) -> Result<Vec<Task>> {
+        self.list_with_suppressed(status)
+            .map(|(visible, _)| visible)
+    }
+
+    fn list_with_suppressed(&self, status: Option<TaskStatus>) -> Result<(Vec<Task>, Vec<Task>)> {
         let hidden = self.quarantined();
-        Ok(self
-            .inner
-            .list(status)?
+        let (tasks, mut suppressed) = self.inner.list_with_suppressed(status)?;
+        let (newly_suppressed, visible): (Vec<_>, Vec<_>) = tasks
             .into_iter()
-            .filter(|task| !hidden.contains(&task.id))
-            .collect())
+            .partition(|task| hidden.contains(&task.id));
+        suppressed.extend(newly_suppressed);
+        Ok((visible, suppressed))
     }
 
     fn list_ready(&self) -> Result<Vec<Task>> {

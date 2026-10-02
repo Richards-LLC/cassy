@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ConversationStore, draftStore, MAX_PENDING_SENDS, pendingSendStore, purgeConversations, validDraft, type PendingSend } from "./conversation-store";
+import { ConversationStore, draftStore, MAX_PENDING_SENDS, PENDING_SEND_BOUNDS, pendingSendStore, purgeConversations, validDraft, validPendingSend, validPendingSends, type PendingSend } from "./conversation-store";
 
 function memoryStorage(initial: Record<string, string> = {}) {
   const values = new Map(Object.entries(initial));
@@ -154,5 +154,47 @@ describe("unsettled messages store (cas-e7b1)", () => {
     pendingSendStore(storage).save("studio:s", [send("studio")]);
     purgeConversations(storage, "atlas");
     expect([...pendingSendStore(storage).load().keys()]).toEqual(["studio:s"]);
+  });
+});
+
+describe("stored values this page could not have written are dropped on read (cas-8f19)", () => {
+  const key = "cas-commander-conversation:sends:v1";
+  const held = (id: string, text: string) => ({ id, target: "sup", text, state: "held", at: 1, heldAt: 1 });
+
+  it("a 2 MB planted waiting message is not read back, so nothing restores or sends it", () => {
+    const storage = memoryStorage({
+      [key]: JSON.stringify({
+        "atlas:pelican": { value: [held("planted", "x".repeat(2_000_000))], updatedAt: 2 },
+        "atlas:otter": { value: [held("ok", "Ship it when green")], updatedAt: 1 },
+      }),
+    });
+    const loaded = pendingSendStore(storage).load();
+    expect(loaded.has("atlas:pelican"), "the oversized conversation is dropped").toBe(false);
+    expect(loaded.get("atlas:otter")?.map((send) => send.id), "a valid conversation beside it is kept").toEqual(["ok"]);
+    // The same entry is refused by the shape check alone, without the store's bound.
+    expect(validPendingSend(held("planted", "x".repeat(2_000_000)))).toBeUndefined();
+  });
+
+  it("checks every field's bound on read, as on write", () => {
+    const ok = { id: "a", target: "sup", text: "hi", state: "error", at: 1, error: "Not sent", session: "pelican" };
+    expect(validPendingSend(ok)).toBeDefined();
+    for (const [field, length] of Object.entries(PENDING_SEND_BOUNDS)) {
+      expect(validPendingSend({ ...ok, [field]: "y".repeat(length + 1) }), `${field} over ${length}`).toBeUndefined();
+      expect(validPendingSend({ ...ok, [field]: "y".repeat(length) }), `${field} at ${length}`).toBeDefined();
+    }
+  });
+
+  it("keeps at most the newest MAX_PENDING_SENDS of a planted list, and the store's conversation bound", () => {
+    const many = Array.from({ length: MAX_PENDING_SENDS + 30 }, (_, index) => held(`m${index}`, `message ${index}`));
+    expect(validPendingSends(many)?.map((send) => send.id)).toEqual(many.slice(-MAX_PENDING_SENDS).map((send) => send.id));
+    const storage = memoryStorage({
+      "cas-commander-conversation:test:v1": JSON.stringify(Object.fromEntries(Array.from({ length: 5 }, (_, index) => [`a:${index}`, { value: `v${index}`, updatedAt: index }]))),
+    });
+    expect([...new ConversationStore(storage, "test", text, { maxConversations: 2 }).entries().keys()]).toEqual(["a:3", "a:4"]);
+  });
+
+  it("an oversized planted draft is not restored either", () => {
+    const storage = memoryStorage({ "cas-commander-conversation:drafts:v1": JSON.stringify({ "atlas:pelican": { value: { text: "z".repeat(70_000), caret: 0 }, updatedAt: 1 } }) });
+    expect(draftStore(storage).load().size).toBe(0);
   });
 });

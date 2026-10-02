@@ -787,7 +787,7 @@ pub fn publish_not_required(cas_root: &Path, repo: &Path, head: &str) {
     );
 }
 
-/// The `gh api` arguments that publish one status on an explicit canonical repo.
+/// The `gh api` arguments that publish one status on an explicit repo.
 pub fn status_publish_args(
     repo: &str,
     sha: &str,
@@ -814,17 +814,27 @@ fn spawn_publish(repo: PathBuf, sha: String, state: QaCommitState, description: 
     let spawned = std::thread::Builder::new()
         .name("cas-qa-github-status".to_string())
         .spawn(move || {
-            let canonical = match crate::github_repo::resolve_origin(&repo, Path::new(&gh), Duration::from_secs(2)) {
+            let timeout = Duration::from_secs(2);
+            let origin = match crate::github_repo::origin_slug(&repo, timeout) {
+                Ok(Some(origin)) => origin,
+                result => {
+                    tracing::warn!(target: "cas::qa", ?result, "QA STATUS PUBLISH FAILED: GitHub origin unavailable; required check stays unmet");
+                    return;
+                }
+            };
+            let publish_repo = match crate::github_repo::resolve_slug(&origin, &repo, Path::new(&gh), timeout) {
                 Ok(repo) => repo.canonical,
                 Err(error) => {
-                    tracing::warn!(target: "cas::qa", %error, "independent QA status repository lookup failed; required check stays unmet");
-                    return;
+                    // Try the explicit origin endpoint when metadata is unavailable;
+                    // upstream/default selection must never suppress the status.
+                    tracing::warn!(target: "cas::qa", %error, %origin, "independent QA canonical repository lookup failed; publishing against explicit origin");
+                    origin
                 }
             };
             let mut command = Command::new(gh);
             command
                 .env("GH_HOST", "github.com")
-                .args(status_publish_args(&canonical, &sha, state, &description))
+                .args(status_publish_args(&publish_repo, &sha, state, &description))
                 .current_dir(&repo);
             match run_bounded(command, GH_PUBLISH_TIMEOUT) {
                 Some(_) => tracing::info!(

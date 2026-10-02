@@ -1254,12 +1254,18 @@ impl GhStub {
         let gh = dir.join("gh");
         let log = dir.join("gh.log");
         // `gh pr view 2546` knows PR #2546 (head factory/test-agent); every
-        // other lookup fails like an unknown PR. `gh api --method POST` is a
-        // status publication and succeeds. Every call is logged.
+        // other PR lookup fails like an unknown PR. `repo view` follows an
+        // origin rename unless the failure marker is present. Status POSTs
+        // succeed. Every call is logged.
         cas::test_paths::warm_stub(
             &gh,
             r#"#!/bin/sh
 printf '%s\n' "$*" >> "$CAS_TEST_GH_LOG"
+if [ "$1" = "repo" ] && [ "$2" = "view" ] && [ "$3" = "acme/gabber" ]; then
+  if [ -f "$CAS_TEST_GH_LOG.lookup-fails" ]; then exit 1; fi
+  printf '{"nameWithOwner":"canonical-owner/gabber"}'
+  exit 0
+fi
 if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "2546" ]; then
   printf '{"headRefName":"factory/test-agent","headRefOid":"%s"}' "$CAS_TEST_GH_HEAD"
   exit 0
@@ -1313,6 +1319,17 @@ fn wait_for_gh_call(log: &Path, needles: &[&str]) -> String {
 /// round (pending → success on waiver).
 #[tokio::test]
 async fn raw_github_merges_wait_for_the_independent_verdict_cas_2ee2() {
+    raw_github_merges_with_status_lookup(false).await;
+}
+
+/// cas-28c8: a failed metadata lookup still publishes the required status
+/// against the explicit origin, even with an upstream repository present.
+#[tokio::test]
+async fn independent_qa_status_falls_back_to_explicit_origin_cas_28c8() {
+    raw_github_merges_with_status_lookup(true).await;
+}
+
+async fn raw_github_merges_with_status_lookup(lookup_fails: bool) {
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, core, repo, task_id) = fixture(&mut test_env);
     let cas_dir = repo.join(".cas");
@@ -1331,9 +1348,21 @@ async fn raw_github_merges_wait_for_the_independent_verdict_cas_2ee2() {
             "https://github.com/acme/gabber.git",
         ],
     );
+    git(
+        &repo,
+        &["remote", "add", "upstream", "https://github.com/upstream/wrong.git"],
+    );
     let stub_dir = repo.join("stub-bin");
     std::fs::create_dir_all(&stub_dir).unwrap();
     let (mut gh, gh_log) = GhStub::install(&mut test_env, &stub_dir, &head);
+    if lookup_fails {
+        std::fs::write(gh_log.with_extension("log.lookup-fails"), "fail repo view\n").unwrap();
+    }
+    let publish_repo = if lookup_fails {
+        "acme/gabber"
+    } else {
+        "canonical-owner/gabber"
+    };
 
     let parked = close_text(&core, &task_id).await;
     assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
@@ -1343,7 +1372,7 @@ async fn raw_github_merges_wait_for_the_independent_verdict_cas_2ee2() {
     wait_for_gh_call(
         &gh_log,
         &[
-            &format!("statuses/{head}"),
+            &format!("repos/{publish_repo}/statuses/{head}"),
             "state=pending",
             "context=cassy/independent-qa",
         ],
@@ -1451,7 +1480,7 @@ async fn raw_github_merges_wait_for_the_independent_verdict_cas_2ee2() {
     wait_for_gh_call(
         &gh_log,
         &[
-            &format!("statuses/{head}"),
+            &format!("repos/{publish_repo}/statuses/{head}"),
             "state=success",
             "waived by supervisor: copy-only hotfix",
         ],

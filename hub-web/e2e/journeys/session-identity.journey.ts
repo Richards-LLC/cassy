@@ -58,13 +58,22 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
 
   await journey.stage("See a project's live sessions together", async () => {
     await journey.open();
-    await expect(list.locator(".conversation-group-head")).toHaveText("gabber-studio · 3 sessions on Atlas");
+    await expect(list.locator(".conversation-group-head")).toHaveText("gabber-studio · 3 conversations on Atlas");
     const rows = list.locator(".conversation-row");
     await expect(rows.locator(".conversation-supervisor")).toHaveText(["calm-puma-34Most recent", "wild-shark-68", "noble-cheetah-84"]);
     await expect(row("calm-puma-34")).toHaveAttribute("data-most-recent", "true");
     // Each row's time is its own session's last activity, not one shared time.
     await expect(rows.locator(".conversation-when")).toHaveText(["2m", "40m", /^\d+h$/]);
-    await expect(row("calm-puma-34").locator(".conversation-when")).toHaveAttribute("title", "Last activity 2m ago · supervisor → bright-robin-85");
+    await expect(row("calm-puma-34").locator(".conversation-when")).toHaveAttribute("title", "Last activity 2m ago · Messaged bright-robin-85");
+    // cas-5d2c: under a heading that names the project and machine once, each
+    // row leads with its codename and says what its session last did, before
+    // any of them is opened; the heading and footer count the same noun.
+    await expect(rows.locator(".conversation-title")).toHaveCount(3);
+    for (const title of await rows.locator(".conversation-title").all()) await expect(title).toBeHidden();
+    await expect(rows.locator(".conversation-preview")).toHaveText(["Messaged bright-robin-85", "You wrote to it", "Wrote to you"]);
+    await expect(page.locator(".hub-footer-meta")).toContainText("3 conversations");
+    // Every session of the group is in view at 1280×720.
+    for (const node of await rows.all()) await expect(node).toBeInViewport({ ratio: 1 });
   });
 
   await journey.stage("Open a session that has not written yet", async () => {
@@ -126,7 +135,15 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     await page.evaluate(() => {
       const claims: string[] = [];
       (window as unknown as { emptyClaims: string[] }).emptyClaims = claims;
-      const check = () => { for (const said of document.querySelectorAll(".thread .empty:not([hidden]) .said")) if (/^No (Commander )?messages/.test(said.textContent ?? "")) claims.push(said.textContent ?? ""); };
+      // Only wild-shark-68's own card counts: calm-puma-34's honest empty card
+      // can still be on screen for a frame while the switch mounts the next thread.
+      const check = () => {
+        for (const card of document.querySelectorAll<HTMLElement>(".thread .empty:not([hidden])")) {
+          if (!card.querySelector(".proj2")?.textContent?.includes("wild-shark-68")) continue;
+          const said = card.querySelector(".said")?.textContent ?? "";
+          if (/^No (Commander )?messages/.test(said)) claims.push(said);
+        }
+      };
       new MutationObserver(check).observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ["hidden"] });
     });
     await row("wild-shark-68").click();
@@ -135,7 +152,12 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     await expect(log).not.toContainText("Mixdown preview rendered");
     await expect(earlier).toBeHidden();
     await backToList();
+    // cas-5d2c: the lowest row keeps its place when it opens; the list does
+    // not jump back to its top and leave it below the fold.
+    await row("noble-cheetah-84").scrollIntoViewIfNeeded();
     await row("noble-cheetah-84").click();
+    await expect(row("noble-cheetah-84")).toHaveAttribute("aria-current", "true");
+    await expect(row("noble-cheetah-84")).toBeInViewport({ ratio: 1 });
     await expect(log).toContainText("Mixdown preview rendered: 3 stems.");
     // The old daemon's project-wide page: wild-shark-68's turns are beside the thread.
     await expect(log).not.toContainText("Stem export is at 60%.");
@@ -155,6 +177,6 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     await end.getByRole("button", { name: "End session", exact: true }).click();
     await expect(row("noble-cheetah-84")).toHaveCount(0);
     expect(hub.ends).toEqual([{ machine: "atlas", session: NOBLE, scopes: [...SCOPES, "factory-manage"] }]);
-    await expect(list.locator(".conversation-group-head")).toHaveText("gabber-studio · 2 sessions on Atlas");
+    await expect(list.locator(".conversation-group-head")).toHaveText("gabber-studio · 2 conversations on Atlas");
   });
 });

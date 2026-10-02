@@ -30,7 +30,7 @@ test("HUB-J16 end a session from my phone", async ({ page, journey }) => {
 
   await journey.stage("See six sessions at once", async () => {
     await journey.open();
-    await expect(list.locator(".conversation-group-head")).toHaveText("gabber-studio · 7 sessions on Atlas");
+    await expect(list.locator(".conversation-group-head")).toHaveText("gabber-studio · 7 conversations on Atlas");
     await expect(list.locator(".conversation-row")).toHaveCount(7);
     expect(await rowsInView(), "at least six sessions fit the phone list").toBeGreaterThanOrEqual(6);
     // End session is in each row's corner, not a line of its own.
@@ -89,6 +89,6 @@ test("HUB-J16 end a session from my phone", async ({ page, journey }) => {
     // The ended row was the last: focus lands on the row before it, never on the page.
     await expect(row("swift-heron-51")).toBeFocused();
     expect(hub.ends).toEqual([{ machine: "atlas", session: "gabber-studio-amber-fox-29", scopes: [...SCOPES, "factory-manage"] }]);
-    await expect(list.locator(".conversation-group-head")).toHaveText("gabber-studio · 6 sessions on Atlas");
+    await expect(list.locator(".conversation-group-head")).toHaveText("gabber-studio · 6 conversations on Atlas");
   });
 });

@@ -2,7 +2,7 @@ import { cloudBrand, projectTitle } from "./cloud-brand";
 import { CANT_REACH_RETRYING, machineFooterMarkup, pairedMachinesDialogMarkup, renderPairedMachines, type PairedMachineRow } from "./paired-machines";
 import { retainPendingSessions, visibleCatalog } from "./worker-visibility";
 import "./styles.css";
-import { activityTime, ConversationList, filterConversationRows, groupConversationRows, type ConversationRow } from "./conversation-list";
+import { activityTime, ConversationList, filterConversationRows, groupConversationRows, plainActivity, type ConversationRow } from "./conversation-list";
 import { controlCommandCopy, sessionJumpCommandMarkup } from "./palette-commands";
 import { ConversationHistory, supervisorWorking } from "./conversation-history";
 import { draftStore, pendingSendStore, purgeConversations, type Draft, type PendingSend } from "./conversation-store";
@@ -3644,6 +3644,39 @@ async function endConversationSession(row: ConversationRow): Promise<void> {
 
 /** Each row's newest activity seen this visit, so its time never moves backwards (cas-6acf). */
 const rowActivityHighWater = new Map<string, number>();
+/** Where the operator left the conversation list (cas-5d2c). */
+let conversationListScroll = 0;
+/** The selection last brought into view, so a heartbeat never fights the operator's scrolling. */
+let revealedConversation: string | undefined;
+
+/**
+ * Opening a conversation rebuilds the shell, list included. The new list
+ * starts where the old one was, and the open row is brought into view once
+ * per selection (cas-5d2c), instead of the list jumping to its top and
+ * leaving the row just opened below the fold.
+ */
+function keepConversationListPlace(container: HTMLElement, selectedKey: string | undefined): void {
+  if (container.dataset.placeKept !== "true") {
+    container.dataset.placeKept = "true";
+    container.scrollTop = conversationListScroll;
+    container.addEventListener("scroll", () => { conversationListScroll = container.scrollTop; }, { passive: true });
+  }
+  if (selectedKey === revealedConversation) return;
+  if (!selectedKey) { revealedConversation = undefined; return; }
+  const row = [...container.querySelectorAll<HTMLElement>(".conversation-row")].find((node) => node.dataset.threadKey === selectedKey);
+  // A list that isn't on screen (a phone's open thread) reveals it when it is.
+  if (!row || container.clientHeight === 0) return;
+  revealedConversation = selectedKey;
+  // Its End session line belongs to it, so it comes into view too.
+  const end = row.nextElementSibling instanceof HTMLElement && row.nextElementSibling.classList.contains("conversation-end") ? row.nextElementSibling : row;
+  const box = container.getBoundingClientRect();
+  const top = row.getBoundingClientRect().top - box.top;
+  const bottom = end.getBoundingClientRect().bottom - box.top;
+  if (top < 0) container.scrollTop += top;
+  else if (bottom > container.clientHeight) container.scrollTop += Math.min(top, bottom - container.clientHeight);
+  conversationListScroll = container.scrollTop;
+}
+
 function renderConversationList(): void {
   renderMachineRegister();
   const container = document.querySelector<HTMLElement>("#conversation-list");
@@ -3671,8 +3704,10 @@ function renderConversationList(): void {
     // that every poll refreshes made idle rows read "now" forever.
     const time = active === undefined ? undefined : activityTime(active);
     const started = session.started_at === undefined ? NaN : Date.parse(session.started_at);
-    const activityLabel = active === undefined ? undefined : emptyActivityText({ at: active, ...(active === activity?.at && activity?.label ? { label: activity.label } : {}) }, Date.now());
-    return { key, machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: machine.scopes.includes("factory-manage"), freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), unreachable: Boolean(session.unreachable), connection: session.unreachable ? "Unreachable · message pending" : session.dormant ? "Dormant" : session.liveness === "live" ? conversationStatusLabel(machine.id, session.name) : "Session unavailable", interrupted: session.liveness === "live" && INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name)), attention: waiting, unread: Math.max(0, replies - (readReplies.get(key) ?? 0)), selected };
+    // cas-5d2c: the title's activity in plain words, never "supervisor → x".
+    const plainLabel = activity?.terminal ? activity.label : plainActivity(activity?.label);
+    const activityLabel = active === undefined ? undefined : emptyActivityText({ at: active, ...(active === activity?.at && plainLabel ? { label: plainLabel } : {}) }, Date.now());
+    return { key, machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: machine.scopes.includes("factory-manage"), freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: session.unreachable ? "Unreachable · message pending" : session.dormant ? "Dormant" : session.liveness === "live" ? conversationStatusLabel(machine.id, session.name) : "Session unavailable", interrupted: session.liveness === "live" && INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name)), attention: waiting, unread: Math.max(0, replies - (readReplies.get(key) ?? 0)), selected };
   }));
   conversationRows = rows;
   // cas-55a4: a project's live sessions on one machine sit together, most
@@ -3682,6 +3717,7 @@ function renderConversationList(): void {
     canEnd: row.canEnd === true && (row.group !== undefined || sessions.get(row.machineId)?.find((item) => item.name === row.session)?.dormant === true),
   }));
   conversationList.render(container, shown, (row, event) => { landAfterOpen(openSession(row.machineId, row.session), event); }, endConversationSession);
+  keepConversationListPlace(container, shown.find((row) => row.selected)?.key);
   const empty = document.querySelector<HTMLElement>("#conversation-empty");
   if (empty) {
     empty.hidden = shown.length > 0;

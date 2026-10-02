@@ -6,7 +6,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { ConversationHistory, sessionCodename } from "./conversation-history";
 import { ConversationView, earlierSessionLabel, emptyActivityText, emptyCardActivityText, emptyThreadCopy } from "./conversation-view";
-import { activityTime, ConversationList, conversationRowMarkup, groupConversationRows, type ConversationRow } from "./conversation-list";
+import { activityTime, ConversationList, conversationRowMarkup, groupConversationRows, plainActivity, type ConversationRow } from "./conversation-list";
 import type { ConversationHistoryMessage, ConversationHistoryReply } from "./types";
 
 const at = (day: number, hh: number, mm: number) => new Date(2026, 8, day, hh, mm).toISOString();
@@ -183,9 +183,33 @@ describe("grouped project sessions (cas-55a4)", () => {
     ]);
     expect(rows.map((item) => item.session)).toEqual(["calm-puma-34", "wild-shark-68", "noble-cheetah-84", "solo"]);
     expect(rows.map((item) => item.group?.active ?? null)).toEqual([true, false, false, null]);
-    expect(rows[0]!.group).toMatchObject({ first: true, size: 3, label: "gabber-studio · 3 sessions on Atlas" });
+    expect(rows[0]!.group).toMatchObject({ first: true, size: 3, label: "gabber-studio · 3 conversations on Atlas" });
     expect(conversationRowMarkup(rows[0]!)).toContain('<span class="conversation-session-mark">Most recent</span>');
     expect(conversationRowMarkup(rows[1]!)).not.toContain("Most recent");
+  });
+
+  it("tells grouped rows apart before any is opened: what each session last did, in plain words (cas-5d2c)", () => {
+    const rows = groupConversationRows([
+      row("calm-puma-34", 300, { activityLine: "Messaged bright-robin-85" }),
+      row("wild-shark-68", 200, { activityLine: "You wrote to it", preview: "Stem export is at 60%." }),
+      row("noble-cheetah-84", 100),
+    ]);
+    const preview = (index: number) => new DOMParser().parseFromString(conversationRowMarkup(rows[index]!), "text/html").querySelector(".conversation-preview")?.textContent;
+    // The catalog's activity until the thread has a turn; the turn once it has; the state when neither.
+    expect([preview(0), preview(1), preview(2)]).toEqual(["Messaged bright-robin-85", "Stem export is at 60%.", "Live"]);
+    // An ungrouped row keeps its connection words.
+    expect(new DOMParser().parseFromString(conversationRowMarkup({ ...row("solo", 1), activityLine: "Wrote to you" }), "text/html").querySelector(".conversation-preview")?.textContent).toBe("Live");
+  });
+
+  it("words the catalog's activity label plainly", () => {
+    expect(plainActivity("supervisor → bright-robin-85")).toBe("Messaged bright-robin-85");
+    expect(plainActivity("supervisor → Commander")).toBe("Wrote to you");
+    expect(plainActivity("Commander → supervisor")).toBe("You wrote to it");
+    expect(plainActivity("daring-robin-43 → supervisor")).toBe("Heard from daring-robin-43");
+    expect(plainActivity("lifecycle-wake → supervisor")).toBe("Woken up");
+    expect(plainActivity("supervisor → supervisor")).toBe("Typed at its terminal");
+    expect(plainActivity(undefined)).toBeUndefined();
+    expect(plainActivity("something else")).toBe("something else");
   });
 
   it("keeps sessions of one project on different machines apart", () => {
@@ -200,7 +224,7 @@ describe("grouped project sessions (cas-55a4)", () => {
     let resolve!: () => void;
     const end = vi.fn((_row: ConversationRow) => new Promise<void>((ok) => { resolve = ok; }));
     list.render(container, rows, vi.fn(), end);
-    expect(container.querySelector(".conversation-group-head")?.textContent).toBe("gabber-studio · 2 sessions on Atlas");
+    expect(container.querySelector(".conversation-group-head")?.textContent).toBe("gabber-studio · 2 conversations on Atlas");
     expect([...container.children].map((node) => node.className.split(" ")[0])).toEqual(["conversation-group-head", "conversation-row", "conversation-end", "conversation-row", "conversation-end"]);
     const control = container.querySelectorAll<HTMLElement>(".conversation-end")[1]!;
     const ask = control.querySelector<HTMLButtonElement>(".conversation-end-ask")!;

@@ -110,7 +110,7 @@ fn ci_override_note(
             url.as_deref().unwrap_or("unavailable"),
         ),
         BranchCiState::UnvalidatedCode { sha, reason } => {
-            format!("docs-only lane CI for {branch} (sha {sha}, {reason})",)
+            format!("docs-only lane CI for {branch} (sha {sha}, {reason})")
         }
         _ => unreachable!("override note requires gated CI"),
     };
@@ -458,10 +458,7 @@ fn classify_branch_ci_response(_branch: &str, sha: &str, output: GhApiOutput) ->
     } else if passed_test_checks.is_empty() {
         BranchCiState::Unknown {
             sha: sha.to_string(),
-            reason: format!(
-                "test check-runs did not execute successfully: {}",
-                test_checks.join(", ")
-            ),
+            reason: format!("test check-runs did not execute successfully: {}", test_checks.join(", ")),
         }
     } else {
         BranchCiState::Green {
@@ -1060,9 +1057,7 @@ fn protected_default_branch_pr_error(
         return None;
     };
     let remote = remote_sha.as_deref().map(short_sha).unwrap_or("unresolved");
-    let task_flag = task_id
-        .map(|id| format!(" --task {id}"))
-        .unwrap_or_default();
+    let task_flag = task_id.map(|id| format!(" --task {id}")).unwrap_or_default();
 
     Some(format!(
         "PROTECTED_DEFAULT_BRANCH_REQUIRES_PR\n\n\
@@ -4513,15 +4508,9 @@ mod tests {
         });
         let receipt = describe_branch_ci_state("factory/fox", &with_tests);
         assert!(receipt.contains("CI state: green"), "{receipt}");
-        assert!(
-            receipt.contains("Frontend Vitest, TypeScript, ESLint"),
-            "{receipt}"
-        );
+        assert!(receipt.contains("Frontend Vitest, TypeScript, ESLint"), "{receipt}");
         assert!(!receipt.contains("passed: Vercel"), "{receipt}");
-        assert!(
-            receipt.contains("Receipt id: https://github.com/acme/cas/actions/runs/43"),
-            "{receipt}"
-        );
+        assert!(receipt.contains("Receipt id: https://github.com/acme/cas/actions/runs/43"), "{receipt}");
         assert!(!receipt.contains("vercel.com"), "{receipt}");
 
         let skipped_tests = lookup_branch_ci_with("factory/fox", "80ce2914d", |_, _| {
@@ -4534,10 +4523,7 @@ mod tests {
         });
         let receipt = describe_branch_ci_state("factory/fox", &skipped_tests);
         assert!(!receipt.contains("CI state: green"), "{receipt}");
-        assert!(
-            receipt.contains("test check-runs did not execute successfully"),
-            "{receipt}"
-        );
+        assert!(receipt.contains("test check-runs did not execute successfully"), "{receipt}");
     }
 
     #[test]
@@ -5044,17 +5030,11 @@ mod tests {
         );
         assert_eq!(
             super::system_b_merge_source("factory/daring-jay-42-cas-1e7d", Some("cas-1e7d")),
-            (
-                "daring-jay-42".to_string(),
-                "factory/daring-jay-42-cas-1e7d".to_string()
-            ),
+            ("daring-jay-42".to_string(), "factory/daring-jay-42-cas-1e7d".to_string()),
         );
         assert_eq!(
             super::system_b_merge_source("factory/daring-jay-42", Some("cas-1e7d")),
-            (
-                "daring-jay-42".to_string(),
-                "factory/daring-jay-42".to_string()
-            ),
+            ("daring-jay-42".to_string(), "factory/daring-jay-42".to_string()),
         );
     }
 

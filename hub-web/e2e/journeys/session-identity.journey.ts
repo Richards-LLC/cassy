@@ -167,8 +167,16 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
   await journey.stage("End a stale session", async () => {
     await backToList();
     const end = list.locator(".conversation-end").nth(2);
-    await end.getByRole("button", { name: "End session noble-cheetah-84 on Atlas" }).click();
+    // cas-f60a: a double-click on End session opens the confirmation and
+    // nothing more. Its destructive button is never where the pointer was.
+    const ask = end.getByRole("button", { name: "End session noble-cheetah-84 on Atlas" });
+    const box = (await ask.boundingBox())!;
+    const point = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    await ask.dblclick();
     await expect(end.locator(".conversation-end-question")).toHaveText("End noble-cheetah-84 on Atlas? Its supervisor and workers stop.");
+    expect(hub.ends).toEqual([]);
+    expect(await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.closest("button")?.className ?? null, point), "the confirm is not under the pointer").not.toContain("conversation-end-confirm");
+    expect(await end.locator("button").allTextContents()).toEqual(["Cancel", "End session"]);
     // cas-d6bf: the last row's confirmation is in view and focused, and the list stays whole.
     await expect(end.getByRole("button", { name: "Cancel" })).toBeFocused();
     await expect(end.getByRole("button", { name: "End session", exact: true })).toBeInViewport({ ratio: 1 });
@@ -178,5 +186,8 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     await expect(row("noble-cheetah-84")).toHaveCount(0);
     expect(hub.ends).toEqual([{ machine: "atlas", session: NOBLE, scopes: [...SCOPES, "factory-manage"] }]);
     await expect(list.locator(".conversation-group-head")).toHaveText("gabber-studio · 2 conversations on Atlas");
+    // cas-f60a: the list says it ended where the row was, and so does a polite live region.
+    await expect(list.locator(".conversation-ended")).toHaveText("noble-cheetah-84 on Atlas ended.");
+    await expect(page.locator(".conversation-ended-status[role=status]")).toHaveText("noble-cheetah-84 on Atlas ended.");
   });
 });

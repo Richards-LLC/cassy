@@ -92,7 +92,7 @@ export function fixtureManySessionRows(): ConversationRow[] {
 export function renderConversationFixture(app: HTMLElement, state: string): void {
   const sessions = state === 'conversation-sessions' || state === 'conversation-earlier';
   const supervisor = sessions ? 'calm-puma-34' : FIXTURE_SUPERVISOR;
-  const selected = !['conversations-list', 'conversations-sessions', 'conversations-loading', 'conversations-unpaired', 'paired-machines', 'paired-machines-down', 'conversations-machine-down-long'].includes(state);
+  const selected = !['conversations-list', 'conversations-sessions', 'conversations-session-ended', 'conversations-loading', 'conversations-unpaired', 'paired-machines', 'paired-machines-down', 'conversations-machine-down-long'].includes(state);
   // Catalog loading: nothing is known yet, so no machine, no row, no pairing offer.
   const loading = state === 'conversations-loading';
   // First run: the catalog is loaded and empty, so the welcome offers pairing.
@@ -108,10 +108,24 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
         ? { id: 'atlas-linux', label: 'Atlas', host: 'Atlas · Linux', projectDir: '/projects/gabber-studio', project: 'gabber-studio' }
       : { id: 'atlas-linux', label: 'Atlas', host: 'Atlas · Linux', projectDir: '/projects/cas-src', project: 'cas-src' };
   app.innerHTML = conversationShellMarkup({ selected, supervisor, projectDir: machine.projectDir, host: machine.host, machineId: machine.id, loaded: !loading, paired: !loading && !unpaired });
-  const listRows = loading || unpaired ? [] : sessions ? fixtureSessionRows() : state === 'conversations-sessions' ? fixtureManySessionRows() : fixtureConversationRows(selected);
-  new ConversationList().render(app.querySelector('#conversation-list')!, listRows, () => {}, async () => {});
+  const listRows = loading || unpaired ? [] : sessions ? fixtureSessionRows() : state === 'conversations-sessions' || state === 'conversations-session-ended' ? fixtureManySessionRows() : fixtureConversationRows(selected);
+  const conversationList = new ConversationList();
+  const listNode = app.querySelector<HTMLElement>('#conversation-list')!;
+  // Ending a session drops its row, as main.ts does once the hub confirms.
+  let shownRows = listRows;
+  const endSession = async (ended: ConversationRow): Promise<void> => {
+    shownRows = groupConversationRows(shownRows.filter((row) => row.key !== ended.key));
+    conversationList.render(listNode, shownRows, () => {}, endSession);
+  };
+  conversationList.render(listNode, listRows, () => {}, endSession);
   // The End session confirmation, open on the idle session (cas-55a4).
   if (state === 'conversation-sessions') app.querySelectorAll<HTMLButtonElement>('#conversation-list .conversation-end-ask')[1]?.click();
+  // cas-f60a: noble-cheetah-84 just ended; the list says so where its row was.
+  if (state === 'conversations-session-ended') {
+    const control = [...listNode.querySelectorAll<HTMLElement>('.conversation-end')].find((node) => node.previousElementSibling?.textContent?.includes('noble-cheetah-84'));
+    control?.querySelector<HTMLButtonElement>('.conversation-end-ask')?.click();
+    control?.querySelector<HTMLButtonElement>('.conversation-end-confirm')?.click();
+  }
   // cas-0739: Bench can't be reached; the register lists it first and the footer names it.
   const machines = loading || unpaired ? [] : state === 'paired-machines-down'
     ? orderPairedMachines(FIXTURE_MACHINES.map((machine) => machine.id === 'bench-1' ? { ...machine, connection: "Can't reach · retrying", connected: false, lastSeen: 'Not yet seen in this visit' } : machine))

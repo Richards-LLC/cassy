@@ -13465,6 +13465,41 @@ fn run_bounded_git_fetch(repo_path: &std::path::Path, args: &[&str]) -> BoundedF
     }
 }
 
+/// cas-ba4a: resolve `sha` to a commit, fetching it from `origin` by SHA
+/// through the bounded runner when this checkout lacks it (a force-pushed or
+/// deleted lane, or a squash-merged PR whose head lives only on the remote).
+/// The error says why it could not be resolved.
+pub(crate) fn resolve_or_fetch_commit(
+    repo_path: &std::path::Path,
+    sha: &str,
+) -> Result<String, String> {
+    let resolve = || resolve_branch_sha(repo_path, &format!("{sha}^{{commit}}"));
+    if let Some(head) = resolve() {
+        return Ok(head);
+    }
+    if !is_safe_git_refname(sha) || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("it is not a commit SHA, so it was not fetched".to_string());
+    }
+    if !origin_remote_configured(repo_path) {
+        return Err("this checkout has no origin remote to fetch it from".to_string());
+    }
+    Err(
+        match run_bounded_git_fetch(repo_path, &["fetch", "--quiet", "--no-tags", "origin", sha]) {
+            BoundedFetch::Succeeded => match resolve() {
+                Some(head) => return Ok(head),
+                None => "`git fetch origin <sha>` succeeded but the commit still does not resolve"
+                    .to_string(),
+            },
+            BoundedFetch::Failed => "`git fetch origin <sha>` failed".to_string(),
+            BoundedFetch::TimedOut => format!(
+                "`git fetch origin <sha>` did not finish within {}s",
+                FETCH_TIMEOUT.as_secs()
+            ),
+            BoundedFetch::NotStarted(error) => format!("git could not be started: {error}"),
+        },
+    )
+}
+
 /// cas-ba4a: the delivery a parked task answers for.
 ///
 /// A task parked for merge recorded its delivery anchor. That SHA, not the
@@ -13491,33 +13526,9 @@ pub(crate) fn parked_delivery_head(
     else {
         return Ok(None);
     };
-    let resolve = || resolve_branch_sha(repo_path, &format!("{anchor}^{{commit}}"));
-    if let Some(head) = resolve() {
-        return Ok(Some(head));
-    }
-    let fetch = if !is_safe_git_refname(anchor) || !anchor.bytes().all(|b| b.is_ascii_hexdigit()) {
-        "the anchor is not a commit SHA, so it was not fetched".to_string()
-    } else if !origin_remote_configured(repo_path) {
-        "this checkout has no origin remote to fetch it from".to_string()
-    } else {
-        match run_bounded_git_fetch(
-            repo_path,
-            &["fetch", "--quiet", "--no-tags", "origin", anchor],
-        ) {
-            BoundedFetch::Succeeded => {
-                if let Some(head) = resolve() {
-                    return Ok(Some(head));
-                }
-                "`git fetch origin <sha>` succeeded but the commit still does not resolve"
-                    .to_string()
-            }
-            BoundedFetch::Failed => "`git fetch origin <sha>` failed".to_string(),
-            BoundedFetch::TimedOut => format!(
-                "`git fetch origin <sha>` did not finish within {}s",
-                FETCH_TIMEOUT.as_secs()
-            ),
-            BoundedFetch::NotStarted(error) => format!("git could not be started: {error}"),
-        }
+    let fetch = match resolve_or_fetch_commit(repo_path, anchor) {
+        Ok(head) => return Ok(Some(head)),
+        Err(reason) => reason,
     };
     Err(format!(
         "PARKED DELIVERY UNRESOLVED: {} is parked for merge at anchor {anchor}, but that commit \
@@ -16691,7 +16702,13 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
         let recorded_anchor = has_delivery
             .then_some(t.deliverables.factory_branch_anchor.as_deref())
             .flatten();
-        let resolved_anchor = recorded_anchor.filter(|anchor| git_snapshot.commit_exists(anchor));
+        // cas-ba4a: a recorded anchor this checkout lacks (the worker lane
+        // was force-pushed or deleted) is fetched by SHA before the gate
+        // falls back to measuring live lanes that no longer hold it.
+        let resolved_anchor = recorded_anchor.filter(|anchor| {
+            git_snapshot.commit_exists(anchor)
+                || (!options.summary && resolve_or_fetch_commit(repo_path, anchor).is_ok())
+        });
 
         let mut fallback_branches = Vec::new();
         if let Some(branch) = parked_branch.as_ref() {
@@ -16851,6 +16868,10 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                     }
                 }
                 DeliveryContentPresence::Superseded { paths, commits } => {
+                    // cas-ba4a: a merged, intentionally evolved delivery is
+                    // integrated exactly like a present one; later commits on
+                    // the reusable live lane are another task's work.
+                    unmerged_count = 0;
                     content_evolution_note = Some(format!(
                         "decision: recorded factory_branch_anchor `{anchor}` for child task `{}` \
                              is merged and its delivered path(s) {} were intentionally evolved by \
@@ -30891,6 +30912,117 @@ mod epic_status_gate_tests {
             "epic 1 must close based on task A's merged anchor, regardless of \
              task B's later commit on the reused worker branch; got {out:?}"
         );
+    }
+
+    /// cas-ba4a: A's anchor merged into the epic and a later epic commit
+    /// evolved the same file (Superseded); the worker lane was then
+    /// force-pushed to unrelated next-task work. The lane is not A's
+    /// delivery, so the child is not stranded and the epic may close.
+    #[test]
+    fn epic_close_measures_a_merged_superseded_anchor_not_a_force_pushed_lane_cas_ba4a() {
+        let dir = init_epic_repo(&[("worker", 1)]);
+        let p = dir.path();
+        let seed = epic_git_stdout(p, &["rev-parse", "main"]);
+        let task_a_anchor = epic_git_stdout(p, &["rev-parse", "factory/worker"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/worker"]);
+        std::fs::write(p.join("worker-0.rs"), "// worker 0, evolved on the epic\n").unwrap();
+        git(p, &["add", "worker-0.rs"]);
+        git(p, &["commit", "-q", "-m", "refactor: evolve worker-0"]);
+
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git(p, &["reset", "-q", "--hard", &seed]);
+        std::fs::write(p.join("next-task.rs"), "// next task\n").unwrap();
+        git(p, &["add", "next-task.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: next task"]);
+        git(p, &["checkout", "-q", "main"]);
+        assert!(!git_commit_is_ancestor(p, &task_a_anchor, "factory/worker"));
+
+        let mut task_a = child("cas-task-a", TaskStatus::Closed, Some("worker"));
+        task_a.deliverables.factory_branch_anchor = Some(task_a_anchor);
+        let rows = collect_epic_branch_statuses(&[task_a.clone()], "main", p);
+        assert_eq!(rows[0].unmerged_count, 0, "{:?}", rows[0]);
+        assert!(rows[0].content_evolution_note.is_some(), "{:?}", rows[0]);
+
+        let task = epic("cas-epic-1");
+        let out = run_epic_close_merge_gate(&task, &base_req(&task.id), "main", p, &[task_a]);
+        assert!(
+            matches!(
+                out,
+                EpicCloseGateOutcome::Proceed | EpicCloseGateOutcome::ProceedWithNote(_)
+            ),
+            "got {out:?}"
+        );
+    }
+
+    /// cas-ba4a: the child's anchor exists only on origin (its lane was
+    /// force-pushed locally and the delivery squash-merged into the epic). The
+    /// gate fetches the anchor by SHA and proves its content instead of
+    /// reading the force-pushed lane as "content absent".
+    #[test]
+    fn epic_close_fetches_a_missing_child_anchor_by_sha_cas_ba4a() {
+        let remote = tempfile::tempdir().unwrap();
+        git(remote.path(), &["init", "-q", "--bare"]);
+        git(
+            remote.path(),
+            &["config", "uploadpack.allowAnySHA1InWant", "true"],
+        );
+        let author = tempfile::tempdir().unwrap();
+        let a = author.path();
+        git(a, &["init", "-q", "-b", "main"]);
+        std::fs::write(a.join("seed.txt"), "seed\n").unwrap();
+        git(a, &["add", "seed.txt"]);
+        git(a, &["commit", "-q", "-m", "seed"]);
+        git(
+            a,
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
+        git(a, &["push", "-q", "origin", "main"]);
+        git(a, &["checkout", "-q", "-b", "factory/worker"]);
+        std::fs::write(a.join("delivery.rs"), "// task A delivery\n").unwrap();
+        git(a, &["add", "delivery.rs"]);
+        git(a, &["commit", "-q", "-m", "feat: task A delivery"]);
+        let task_a_anchor = epic_git_stdout(a, &["rev-parse", "HEAD"]);
+        // The PR ref keeps the delivery on origin after the lane moves on.
+        git(a, &["push", "-q", "origin", "HEAD:refs/pull/1/head"]);
+
+        let clone = tempfile::tempdir().unwrap();
+        let p = clone.path();
+        git(
+            p,
+            &[
+                "clone",
+                "-q",
+                remote.path().to_str().unwrap(),
+                p.to_str().unwrap(),
+            ],
+        );
+        assert!(
+            resolve_branch_sha(p, &format!("{task_a_anchor}^{{commit}}")).is_none(),
+            "precondition: the anchor is not in this checkout"
+        );
+        // Squash-merge A's content into the epic, then force the lane to
+        // unrelated next-task work.
+        std::fs::write(p.join("delivery.rs"), "// task A delivery\n").unwrap();
+        git(p, &["add", "delivery.rs"]);
+        git(p, &["commit", "-q", "-m", "squash: task A delivery (#1)"]);
+        git(
+            p,
+            &["checkout", "-q", "-b", "factory/worker", "origin/main"],
+        );
+        std::fs::write(p.join("next-task.rs"), "// next task\n").unwrap();
+        git(p, &["add", "next-task.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: next task"]);
+        git(p, &["checkout", "-q", "main"]);
+
+        let mut task_a = child("cas-task-a", TaskStatus::Closed, Some("worker"));
+        task_a.deliverables.factory_branch_anchor = Some(task_a_anchor.clone());
+        let rows = collect_epic_branch_statuses(&[task_a], "main", p);
+        assert!(
+            resolve_branch_sha(p, &format!("{task_a_anchor}^{{commit}}")).is_some(),
+            "the gate fetched the anchor by SHA"
+        );
+        assert_eq!(rows[0].unmerged_count, 0, "{:?}", rows[0]);
+        assert!(!rows[0].blocks_epic_close(), "{:?}", rows[0]);
     }
 
     #[test]

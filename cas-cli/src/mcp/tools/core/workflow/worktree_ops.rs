@@ -16,7 +16,7 @@ struct GhApiOutput {
     stderr: Vec<u8>,
 }
 
-/// CI for the latest code commit in a delivery, or its tip for pure docs.
+/// CI evidence at the tip when it validates code, otherwise at the latest code commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum BranchCiState {
     Green {
@@ -50,6 +50,10 @@ enum BranchCiState {
         sha: String,
         reason: String,
     },
+    CodeValidationUnconfirmed {
+        sha: String,
+        reason: String,
+    },
 }
 
 const BRANCH_CI_ENDPOINT: &str = "repos/{owner}/{repo}/commits/{sha}/check-runs";
@@ -57,10 +61,12 @@ const BRANCH_CI_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
 const CI_ADVISORY_POLICY_NOTICE: &str = "Merge policy: merge proceeded because CI is advisory.\n\n";
 const CI_OVERRIDE_POLICY_NOTICE: &str =
     "Merge policy: red CI was explicitly overridden by a registered supervisor.\n\n";
+const CI_CODE_OVERRIDE_POLICY_NOTICE: &str =
+    "Merge policy: docs-only code CI was explicitly overridden by a registered supervisor.\n\n";
 const CI_VALIDATED_POLICY_NOTICE: &str =
     "Merge policy: merge proceeded on successful validation.\n\n";
 
-/// Decide admission from the one bounded lookup; never poll for pending CI.
+/// Decide admission from bounded evidence; never poll for pending CI.
 fn admit_branch_ci(
     state: &BranchCiState,
     override_requested: bool,
@@ -73,9 +79,12 @@ fn admit_branch_ci(
         );
     }
     if let BranchCiState::UnvalidatedCode { sha, reason } = state {
-        return Err(format!(
-            "CODE CI REQUIRED: refusing worktree_merge for {sha}: {reason}. A completed, successful code-validation check is required for the latest code commit in the delivery. No merge was attempted."
-        ));
+        if !override_requested {
+            return Err(format!(
+                "CODE CI REQUIRED: refusing worktree_merge for {sha}: {reason}. Documentation-only success does not validate a code delivery. A registered supervisor may retry with supervisor_override=true, task_id=<task>, and a non-empty reason. No merge was attempted."
+            ));
+        }
+        return Ok(true);
     }
     if let BranchCiState::Red { sha, url } = state {
         if !override_requested {
@@ -89,19 +98,25 @@ fn admit_branch_ci(
     Ok(false)
 }
 
-fn red_ci_override_note(
+fn ci_override_note(
     supervisor_id: &str,
     branch: &str,
     state: &BranchCiState,
     reason: &str,
 ) -> String {
-    let BranchCiState::Red { sha, url } = state else {
-        unreachable!("override note requires red CI");
+    let evidence = match state {
+        BranchCiState::Red { sha, url } => format!(
+            "red lane CI for {branch} (sha {sha}, failing run {})",
+            url.as_deref().unwrap_or("unavailable"),
+        ),
+        BranchCiState::UnvalidatedCode { sha, reason } => {
+            format!("docs-only lane CI for {branch} (sha {sha}, {reason})",)
+        }
+        _ => unreachable!("override note requires gated CI"),
     };
     format!(
-        "[{}] ✅ DECISION Supervisor {supervisor_id} overrode red lane CI for {branch} (sha {sha}, failing run {}) before worktree_merge: {}",
+        "[{}] ✅ DECISION Supervisor {supervisor_id} overrode {evidence} before worktree_merge: {}",
         chrono::Utc::now().format("%Y-%m-%d %H:%M"),
-        url.as_deref().unwrap_or("unavailable"),
         reason.trim(),
     )
 }
@@ -130,7 +145,11 @@ fn ci_git(
 
 /// Walk the complete delivery history, including merged side branches and
 /// reverted edits. Topological order chooses a descendant before its parents.
-fn delivery_ci_commit(branch: &str, target: &str, cwd: &Path) -> Result<(String, bool), String> {
+fn delivery_ci_commit(
+    branch: &str,
+    target: &str,
+    cwd: &Path,
+) -> Result<(String, Option<String>), String> {
     // One budget for the whole walk, so a long docs tail cannot multiply it.
     let deadline = crate::bounded_process::Deadline::after(BRANCH_CI_LOOKUP_TIMEOUT);
     let tip = ci_git(
@@ -162,103 +181,149 @@ fn delivery_ci_commit(branch: &str, target: &str, cwd: &Path) -> Result<(String,
             .filter(|path| !path.is_empty())
             .any(|path| !ci_docs_path(&String::from_utf8_lossy(path)))
         {
-            return Ok((commit.to_string(), true));
+            return Ok((tip, Some(commit.to_string())));
         }
     }
-    Ok((tip, false))
+    Ok((tip, None))
+}
+
+fn is_code_check_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    !name.contains("docs") && !name.contains("documentation") && !name.contains("markdown")
+}
+
+/// Only executed/pending code checks at the push tip cover the delivery range.
+/// A skipped validation job beside Docs Lint provides no code evidence.
+fn has_code_check_runs(output: &GhApiOutput) -> bool {
+    if !output.success {
+        return false;
+    }
+    let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+        return false;
+    };
+    parsed
+        .get("check_runs")
+        .or_else(|| parsed.get("workflow_runs"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|runs| {
+            runs.iter().any(|run| {
+                run.get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|name| {
+                        is_test_check_run(run, name)
+                            && is_code_check_name(name)
+                            && !matches!(
+                                run.get("conclusion").and_then(serde_json::Value::as_str),
+                                Some("skipped" | "neutral")
+                            )
+                    })
+            })
+        })
 }
 
 fn require_code_validation(state: BranchCiState) -> BranchCiState {
     let (sha, reason) = match state {
         BranchCiState::Green {
             ref test_checks, ..
-        } if test_checks.iter().any(|name| {
-            let name = name.to_ascii_lowercase();
-            !name.contains("docs") && !name.contains("documentation") && !name.contains("markdown")
-        }) =>
-        {
-            return state;
-        }
-        BranchCiState::Red { .. } => return state,
+        } if test_checks.iter().any(|name| is_code_check_name(name)) => return state,
+        BranchCiState::Red { .. }
+        | BranchCiState::UnvalidatedCode { .. }
+        | BranchCiState::CodeValidationUnconfirmed { .. } => return state,
         BranchCiState::Green { sha, .. } => {
-            (sha, "only documentation checks succeeded".to_string())
+            return BranchCiState::UnvalidatedCode {
+                sha,
+                reason: "only documentation checks succeeded".to_string(),
+            };
         }
         BranchCiState::Pending { sha, url } => (
             sha,
             format!(
                 "code checks are pending ({})",
-                url.as_deref().unwrap_or("run URL unavailable")
+                url.as_deref().unwrap_or("run URL unavailable"),
             ),
         ),
-        BranchCiState::NoChecks { sha, reason, .. }
-        | BranchCiState::Unknown { sha, reason }
-        | BranchCiState::UnvalidatedCode { sha, reason } => (sha, reason),
+        BranchCiState::NoChecks {
+            sha,
+            reason,
+            stderr,
+        } => (
+            sha,
+            format!(
+                "{reason}{}",
+                stderr
+                    .map(|stderr| format!("; gh stderr: {stderr}"))
+                    .unwrap_or_default(),
+            ),
+        ),
+        BranchCiState::Unknown { sha, reason } => (sha, reason),
         BranchCiState::GhFailure {
             sha,
             status,
             stderr,
         } => (sha, format!("CI lookup failed ({status}): {stderr}")),
     };
-    BranchCiState::UnvalidatedCode { sha, reason }
+    BranchCiState::CodeValidationUnconfirmed { sha, reason }
 }
 
-/// Query the latest non-docs commit in merge-base..tip. A pure docs delivery
-/// uses the tip's Docs Lint; a docs-only tip cannot cover unvalidated code.
-///
-/// `gh api` expands `{owner}` and `{repo}` from the repository at `cwd`, so
-/// this avoids guessing an origin URL and continues to work for task-declared
-/// repositories. The commit SHA is part of the endpoint, preventing a stale
-/// branch run from being reported as the current lane's result.
+/// Prefer tip CI that contains code checks: a multi-commit push runs CI there.
+/// Otherwise query the latest code commit in merge-base..tip, or Docs Lint at
+/// the tip for a pure docs delivery. Both lookups are bounded and never poll.
 fn lookup_branch_ci(branch: &str, target: &str, cwd: &Path) -> BranchCiState {
-    let (sha, requires_code) = match delivery_ci_commit(branch, target, cwd) {
+    let (tip, code_sha) = match delivery_ci_commit(branch, target, cwd) {
         Ok(selected) => selected,
         Err(reason) => {
-            return BranchCiState::UnvalidatedCode {
+            return BranchCiState::CodeValidationUnconfirmed {
                 sha: "unresolved".to_string(),
                 reason,
             };
         }
     };
-    let state = lookup_branch_ci_with(branch, &sha, |_, sha| {
-        let endpoint = BRANCH_CI_ENDPOINT.replace("{sha}", sha);
-        // The shared `CAS_GH_BIN` override (operator and test seam) selects
-        // the binary without touching PATH.
-        let binary = std::env::var_os(crate::github_issue_attach::GH_BIN_ENV)
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "gh".into());
-        let mut command = Command::new(binary);
-        command.current_dir(cwd).args(["api", "--method", "GET"]);
-        command.arg(&endpoint).args(["-F", "per_page=100"]);
-        let response = match crate::bounded_process::run_command(
-            &mut command,
-            crate::bounded_process::Deadline::after(BRANCH_CI_LOOKUP_TIMEOUT),
-            BRANCH_CI_LOOKUP_TIMEOUT,
-        ) {
-            Ok(output) => GhApiOutput {
-                success: output.status.success(),
-                status: output.status.to_string(),
-                stdout: output.stdout,
-                stderr: output.stderr,
-            },
-            Err(crate::bounded_process::BoundedCommandError::TimedOut) => GhApiOutput {
-                success: false,
-                status: "timed out".to_string(),
-                stdout: Vec::new(),
-                stderr: b"gh api timed out".to_vec(),
-            },
-            Err(crate::bounded_process::BoundedCommandError::Io) => GhApiOutput {
-                success: false,
-                status: "unavailable".to_string(),
-                stdout: Vec::new(),
-                stderr: b"gh api is unavailable".to_vec(),
-            },
-        };
-        response
-    });
-    if requires_code {
-        require_code_validation(state)
-    } else {
-        state
+    let tip_output = fetch_branch_ci(&tip, cwd);
+    match code_sha {
+        None => classify_branch_ci_response(branch, &tip, tip_output),
+        Some(code_sha) => {
+            let state = if code_sha == tip || has_code_check_runs(&tip_output) {
+                classify_branch_ci_response(branch, &tip, tip_output)
+            } else {
+                classify_branch_ci_response(branch, &code_sha, fetch_branch_ci(&code_sha, cwd))
+            };
+            require_code_validation(state)
+        }
+    }
+}
+
+/// `gh api` resolves {owner}/{repo} from cwd, including task-declared repos.
+fn fetch_branch_ci(sha: &str, cwd: &Path) -> GhApiOutput {
+    let endpoint = BRANCH_CI_ENDPOINT.replace("{sha}", sha);
+    let binary = std::env::var_os(crate::github_issue_attach::GH_BIN_ENV)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "gh".into());
+    let mut command = Command::new(binary);
+    command.current_dir(cwd).args(["api", "--method", "GET"]);
+    command.arg(&endpoint).args(["-F", "per_page=100"]);
+    match crate::bounded_process::run_command(
+        &mut command,
+        crate::bounded_process::Deadline::after(BRANCH_CI_LOOKUP_TIMEOUT),
+        BRANCH_CI_LOOKUP_TIMEOUT,
+    ) {
+        Ok(output) => GhApiOutput {
+            success: output.status.success(),
+            status: output.status.to_string(),
+            stdout: output.stdout,
+            stderr: output.stderr,
+        },
+        Err(crate::bounded_process::BoundedCommandError::TimedOut) => GhApiOutput {
+            success: false,
+            status: "timed out".to_string(),
+            stdout: Vec::new(),
+            stderr: b"gh api timed out".to_vec(),
+        },
+        Err(crate::bounded_process::BoundedCommandError::Io) => GhApiOutput {
+            success: false,
+            status: "unavailable".to_string(),
+            stdout: Vec::new(),
+            stderr: b"gh api is unavailable".to_vec(),
+        },
     }
 }
 
@@ -393,7 +458,10 @@ fn classify_branch_ci_response(_branch: &str, sha: &str, output: GhApiOutput) ->
     } else if passed_test_checks.is_empty() {
         BranchCiState::Unknown {
             sha: sha.to_string(),
-            reason: format!("test check-runs did not execute successfully: {}", test_checks.join(", ")),
+            reason: format!(
+                "test check-runs did not execute successfully: {}",
+                test_checks.join(", ")
+            ),
         }
     } else {
         BranchCiState::Green {
@@ -566,14 +634,20 @@ fn describe_branch_ci_state(branch: &str, state: &BranchCiState) -> String {
         BranchCiState::UnvalidatedCode { sha, reason } => (
             sha,
             format!("CI state: unvalidated code for {sha}: {reason}."),
-            "code validation missing (merge gated)",
+            "docs-only code CI (merge gated; supervisor override available)",
+            "unavailable",
+        ),
+        BranchCiState::CodeValidationUnconfirmed { sha, reason } => (
+            sha,
+            format!("code validation not confirmed for {sha}: {reason}."),
+            "code CI receipt unconfirmed (advisory)",
             "unavailable",
         ),
     };
     format!(
         "gh endpoint queried: GET {}\nCI SHA: {sha}\n{detail}\n\
          Branch: {branch}\nAdmission path: {admission_path}\nReceipt id: {receipt_id}\n\
-         Merge policy: red CI requires an explicit supervisor override; code deliveries require completed code validation; docs-only pending and unavailable receipts remain advisory.\n\n",
+         Merge policy: red CI and documentation-only success for code deliveries require an explicit supervisor override; pending, unavailable and no-checks receipts remain advisory.\n\n",
         BRANCH_CI_ENDPOINT.replace("{sha}", sha)
     )
 }
@@ -986,7 +1060,9 @@ fn protected_default_branch_pr_error(
         return None;
     };
     let remote = remote_sha.as_deref().map(short_sha).unwrap_or("unresolved");
-    let task_flag = task_id.map(|id| format!(" --task {id}")).unwrap_or_default();
+    let task_flag = task_id
+        .map(|id| format!(" --task {id}"))
+        .unwrap_or_default();
 
     Some(format!(
         "PROTECTED_DEFAULT_BRANCH_REQUIRES_PR\n\n\
@@ -3194,7 +3270,7 @@ impl CasCore {
         // for unfinished CI or let a docs-only tip mask earlier code.
         let branch_ci_state = lookup_branch_ci(&worktree.branch, &worktree.parent_branch, &cwd);
         let ci_prefix = describe_branch_ci_state(&worktree.branch, &branch_ci_state);
-        let red_override =
+        let ci_override =
             admit_branch_ci(&branch_ci_state, supervisor_override, reason).map_err(|message| {
                 McpError {
                     code: ErrorCode::INVALID_PARAMS,
@@ -3211,10 +3287,10 @@ impl CasCore {
         } else {
             None
         };
-        let ci_policy_notice = if red_override {
+        let ci_policy_notice = if ci_override {
             let supervisor = override_authority
                 .as_ref()
-                .expect("red override has authority");
+                .expect("CI override has authority");
             let task_id = task_id.ok_or_else(|| McpError {
                 code: ErrorCode::INVALID_PARAMS,
                 message: Cow::from(
@@ -3230,7 +3306,7 @@ impl CasCore {
                 )),
                 data: None,
             })?;
-            let note = red_ci_override_note(
+            let note = ci_override_note(
                 &supervisor.id,
                 &worktree.branch,
                 &branch_ci_state,
@@ -3241,7 +3317,11 @@ impl CasCore {
                 message: Cow::from(format!("SUPERVISOR OVERRIDE REJECTED: failed to log decision on task {task_id}: {error}")),
                 data: None,
             })?;
-            CI_OVERRIDE_POLICY_NOTICE
+            if matches!(branch_ci_state, BranchCiState::Red { .. }) {
+                CI_OVERRIDE_POLICY_NOTICE
+            } else {
+                CI_CODE_OVERRIDE_POLICY_NOTICE
+            }
         } else if matches!(branch_ci_state, BranchCiState::Green { .. }) {
             CI_VALIDATED_POLICY_NOTICE
         } else {
@@ -3973,11 +4053,11 @@ impl CasCore {
 mod tests {
     use super::{
         CI_ADVISORY_POLICY_NOTICE, DeliveryMergePreflight, GhApiOutput, admit_branch_ci,
-        authorize_explicit_task_for_system_b_worker, classify_delivery_merge_preflight,
-        declared_system_b_merge_target, derive_delivery_supervisor_authority,
-        describe_branch_ci_state, describe_target_push_state, describe_target_reconcile,
-        is_cas_pattern_worktree, is_factory_style_worktree, is_git_worktree, lookup_branch_ci_with,
-        path_is_under, protected_default_branch_pr_error, red_ci_override_note,
+        authorize_explicit_task_for_system_b_worker, ci_override_note,
+        classify_delivery_merge_preflight, declared_system_b_merge_target,
+        derive_delivery_supervisor_authority, describe_branch_ci_state, describe_target_push_state,
+        describe_target_reconcile, is_cas_pattern_worktree, is_factory_style_worktree,
+        is_git_worktree, lookup_branch_ci_with, path_is_under, protected_default_branch_pr_error,
         resolve_worktree_merge_cleanup, target_diverged_error, worktree_merge_mcp_error,
     };
     use crate::worktree::git::{TargetPushOutcome, TargetReconcile};
@@ -4060,8 +4140,10 @@ mod tests {
                 assert!(admit_branch_ci(&state, false, None).is_err(), "{state:?}");
             } else {
                 assert_eq!(admit_branch_ci(&state, false, None), Ok(false));
-                assert!(describe_branch_ci_state("factory/ci-fixture", &state)
-                    .contains("code validation not confirmed for"));
+                assert!(
+                    describe_branch_ci_state("factory/ci-fixture", &state)
+                        .contains("code validation not confirmed for")
+                );
             }
             let receipt = describe_branch_ci_state("factory/ci-fixture", &state);
             assert!(
@@ -4132,7 +4214,10 @@ mod tests {
             } else {
                 assert_eq!(admit_branch_ci(&state, false, None), Ok(false));
                 let receipt = describe_branch_ci_state("factory/ci-fixture", &state);
-                assert!(receipt.contains(&format!("code validation not confirmed for {code_sha}")), "{receipt}");
+                assert!(
+                    receipt.contains(&format!("code validation not confirmed for {code_sha}")),
+                    "{receipt}"
+                );
                 assert!(!receipt.contains("CI state: green"), "{receipt}");
             }
         }
@@ -4178,12 +4263,19 @@ mod tests {
         let mut env = crate::test_support::TestEnvGuard::new();
         let (repo, code_sha, _) = delivery_ci_fixture(true, Some("success"));
         let fake_gh = repo.path().join("gh-fixture");
-        std::fs::write(&fake_gh, "#!/bin/sh\nprintf '%s\\n' 'HTTP 422: No commit found for SHA' >&2\nexit 1\n").unwrap();
+        std::fs::write(
+            &fake_gh,
+            "#!/bin/sh\nprintf '%s\\n' 'HTTP 422: No commit found for SHA' >&2\nexit 1\n",
+        )
+        .unwrap();
         env.set(crate::github_issue_attach::GH_BIN_ENV, &fake_gh);
         let state = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path());
         assert_eq!(admit_branch_ci(&state, false, None), Ok(false));
         let receipt = describe_branch_ci_state("factory/ci-fixture", &state);
-        assert!(receipt.contains(&format!("code validation not confirmed for {code_sha}")), "{receipt}");
+        assert!(
+            receipt.contains(&format!("code validation not confirmed for {code_sha}")),
+            "{receipt}"
+        );
         assert!(receipt.contains("HTTP 422"), "{receipt}");
         assert!(receipt.contains("advisory"), "{receipt}");
         assert!(!receipt.contains("CI state: green"), "{receipt}");
@@ -4215,7 +4307,9 @@ mod tests {
         );
         let state = super::lookup_branch_ci("factory/ci-fixture", "missing-target", repo.path());
         assert_eq!(admit_branch_ci(&state, false, None), Ok(false));
-        assert!(!describe_branch_ci_state("factory/ci-fixture", &state).contains("CI state: green"));
+        assert!(
+            !describe_branch_ci_state("factory/ci-fixture", &state).contains("CI state: green")
+        );
         assert!(!repo.path().join("gh-requests.log").exists());
     }
 
@@ -4253,7 +4347,10 @@ mod tests {
         git(&["commit", "-qm", "docs tail"]);
         let selected =
             super::delivery_ci_commit("factory/ci-fixture", "main", repo.path()).unwrap();
-        assert_eq!(selected, (latest_code.clone(), true));
+        assert_eq!(
+            selected,
+            (git(&["rev-parse", "HEAD"]), Some(latest_code.clone()))
+        );
         assert_ne!(latest_code, original_code);
     }
 
@@ -4416,9 +4513,15 @@ mod tests {
         });
         let receipt = describe_branch_ci_state("factory/fox", &with_tests);
         assert!(receipt.contains("CI state: green"), "{receipt}");
-        assert!(receipt.contains("Frontend Vitest, TypeScript, ESLint"), "{receipt}");
+        assert!(
+            receipt.contains("Frontend Vitest, TypeScript, ESLint"),
+            "{receipt}"
+        );
         assert!(!receipt.contains("passed: Vercel"), "{receipt}");
-        assert!(receipt.contains("Receipt id: https://github.com/acme/cas/actions/runs/43"), "{receipt}");
+        assert!(
+            receipt.contains("Receipt id: https://github.com/acme/cas/actions/runs/43"),
+            "{receipt}"
+        );
         assert!(!receipt.contains("vercel.com"), "{receipt}");
 
         let skipped_tests = lookup_branch_ci_with("factory/fox", "80ce2914d", |_, _| {
@@ -4431,7 +4534,10 @@ mod tests {
         });
         let receipt = describe_branch_ci_state("factory/fox", &skipped_tests);
         assert!(!receipt.contains("CI state: green"), "{receipt}");
-        assert!(receipt.contains("test check-runs did not execute successfully"), "{receipt}");
+        assert!(
+            receipt.contains("test check-runs did not execute successfully"),
+            "{receipt}"
+        );
     }
 
     #[test]
@@ -4480,7 +4586,7 @@ mod tests {
             admit_branch_ci(&red, true, Some("incident reviewed")),
             Ok(true)
         );
-        let note = red_ci_override_note("supervisor-1", "factory/fox", &red, " incident reviewed ");
+        let note = ci_override_note("supervisor-1", "factory/fox", &red, " incident reviewed ");
         assert!(
             note.contains("✅ DECISION Supervisor supervisor-1"),
             "{note}"
@@ -4938,11 +5044,17 @@ mod tests {
         );
         assert_eq!(
             super::system_b_merge_source("factory/daring-jay-42-cas-1e7d", Some("cas-1e7d")),
-            ("daring-jay-42".to_string(), "factory/daring-jay-42-cas-1e7d".to_string()),
+            (
+                "daring-jay-42".to_string(),
+                "factory/daring-jay-42-cas-1e7d".to_string()
+            ),
         );
         assert_eq!(
             super::system_b_merge_source("factory/daring-jay-42", Some("cas-1e7d")),
-            ("daring-jay-42".to_string(), "factory/daring-jay-42".to_string()),
+            (
+                "daring-jay-42".to_string(),
+                "factory/daring-jay-42".to_string()
+            ),
         );
     }
 

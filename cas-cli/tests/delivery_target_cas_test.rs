@@ -212,7 +212,10 @@ async fn arm_delivery(slug: &str, repo_host: &str, env: &mut TestEnvGuard) -> De
     // Keep deliberate CI doubles (notably the red-override regression).
     // Other target-CAS fixtures need explicit successful code validation.
     if std::env::var_os(cas::github_issue_attach::GH_BIN_ENV).is_none() {
-        env.set(cas::github_issue_attach::GH_BIN_ENV, ci_check_run::green_ci(&cas_root));
+        env.set(
+            cas::github_issue_attach::GH_BIN_ENV,
+            ci_check_run::green_ci(&cas_root),
+        );
     }
     let artifact_root = cas_root.join("durable-artifacts");
     std::fs::write(
@@ -322,11 +325,8 @@ async fn arm_delivery(slug: &str, repo_host: &str, env: &mut TestEnvGuard) -> De
         .get_lease(&task.id)
         .expect("fixture lease lookup")
         .expect("worker lease remains after merge-gate rejection");
-    let durable_receipt = cas_store::build_worker_completion_receipt(
-        &receipt,
-        slug,
-        chrono::Utc::now(),
-    );
+    let durable_receipt =
+        cas_store::build_worker_completion_receipt(&receipt, slug, chrono::Utc::now());
     cas_store::create_worker_delivery_with_dispatch_for_lease(
         &cas_root,
         &durable_receipt,
@@ -436,13 +436,24 @@ async fn cas8d38_worktree_merge_records_observed_work_target_delivery() {
     let repo = GitRepo::new();
     run_git(&["branch", "integration"], &repo.root);
     run_git(
-        &["remote", "add", "origin", "git@github.com:org/cas8d38-observed.git"],
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:org/cas8d38-observed.git",
+        ],
         &repo.root,
     );
     let cas_root = init_cas_dir(&repo.root).expect("init CAS");
-    env.set(cas::github_issue_attach::GH_BIN_ENV, ci_check_run::green_ci(&cas_root));
-    std::fs::write(cas_root.join("config.toml"), "[worktrees]\nenabled = false\n")
-        .expect("write config");
+    env.set(
+        cas::github_issue_attach::GH_BIN_ENV,
+        ci_check_run::green_ci(&cas_root),
+    );
+    std::fs::write(
+        cas_root.join("config.toml"),
+        "[worktrees]\nenabled = false\n",
+    )
+    .expect("write config");
     let supervisor_id = "cas8d38-supervisor-session";
     register_delivery_agent(
         &cas_root,
@@ -465,7 +476,10 @@ async fn cas8d38_worktree_merge_records_observed_work_target_delivery() {
     run_git(&["commit", "-m", "observed delivery"], &worker_path);
 
     let task_store = open_task_store(&cas_root).unwrap();
-    let mut task = Task::new("cas-cas8d38-observed".to_string(), "Observed merge correction".to_string());
+    let mut task = Task::new(
+        "cas-cas8d38-observed".to_string(),
+        "Observed merge correction".to_string(),
+    );
     task.task_type = TaskType::Task;
     task.status = TaskStatus::InProgress;
     task.depth = TaskDepth::Light;
@@ -482,11 +496,21 @@ async fn cas8d38_worktree_merge_records_observed_work_target_delivery() {
     merge.id = Some("factory/cas8d38-worker".to_string());
     merge.task_id = Some(task.id.clone());
     merge.cleanup = Some(false);
-    let merged = service.coordination(Parameters(merge)).await.expect("merge call");
-    assert!(get_text(&merged).contains("Merged"), "{}", get_text(&merged));
-    assert!(cas_store::get_latest_worker_delivery(&cas_root, &task.id)
-        .unwrap()
-        .is_none(), "observation must not fabricate a worker receipt");
+    let merged = service
+        .coordination(Parameters(merge))
+        .await
+        .expect("merge call");
+    assert!(
+        get_text(&merged).contains("Merged"),
+        "{}",
+        get_text(&merged)
+    );
+    assert!(
+        cas_store::get_latest_worker_delivery(&cas_root, &task.id)
+            .unwrap()
+            .is_none(),
+        "observation must not fabricate a worker receipt"
+    );
 
     let corrected = service
         .task(Parameters(task_req(serde_json::json!({
@@ -499,7 +523,10 @@ async fn cas8d38_worktree_merge_records_observed_work_target_delivery() {
         .await
         .expect("supervisor correction");
     assert!(get_text(&corrected).contains("Corrected proof scope"));
-    assert_eq!(task_store.get(&task.id).unwrap().risk, [cas::types::TaskRisk::None]);
+    assert_eq!(
+        task_store.get(&task.id).unwrap().risk,
+        [cas::types::TaskRisk::None]
+    );
 }
 
 // =============================================================================
@@ -624,7 +651,11 @@ async fn red_ci_worktree_merge_accepts_supervisor_override_end_to_end_cas_4150()
         Err(error) => format!("MCP_ERROR: {error}"),
     };
 
-    let refused = outcome(supervisor_service.coordination(Parameters(merge_with(None, None))).await);
+    let refused = outcome(
+        supervisor_service
+            .coordination(Parameters(merge_with(None, None)))
+            .await,
+    );
     assert!(refused.contains("CI RED"), "{refused}");
     assert!(refused.contains("supervisor_override=true"), "{refused}");
     // Refusals happen after merge authorization but before Git: the target
@@ -647,9 +678,15 @@ async fn red_ci_worktree_merge_accepts_supervisor_override_end_to_end_cas_4150()
     };
     unmerged("red CI without override");
 
-    let no_reason =
-        outcome(supervisor_service.coordination(Parameters(merge_with(Some(true), None))).await);
-    assert!(!no_reason.contains("Unsupported parameter(s)"), "{no_reason}");
+    let no_reason = outcome(
+        supervisor_service
+            .coordination(Parameters(merge_with(Some(true), None)))
+            .await,
+    );
+    assert!(
+        !no_reason.contains("Unsupported parameter(s)"),
+        "{no_reason}"
+    );
     assert!(no_reason.contains("non-empty reason"), "{no_reason}");
     unmerged("override without reason");
 
@@ -722,7 +759,11 @@ async fn docs_only_code_ci_supervisor_override_is_logged_cas_a9bd() {
         Err(error) => format!("MCP_ERROR: {error}"),
     };
 
-    let refused = outcome(supervisor_service.coordination(Parameters(merge_with(None, None))).await);
+    let refused = outcome(
+        supervisor_service
+            .coordination(Parameters(merge_with(None, None)))
+            .await,
+    );
     assert!(refused.contains("CODE CI REQUIRED"), "{refused}");
     assert!(refused.contains("supervisor_override=true"), "{refused}");
     // Refusals happen after merge authorization but before Git: the target
@@ -745,9 +786,15 @@ async fn docs_only_code_ci_supervisor_override_is_logged_cas_a9bd() {
     };
     unmerged("docs-only code CI without override");
 
-    let no_reason =
-        outcome(supervisor_service.coordination(Parameters(merge_with(Some(true), None))).await);
-    assert!(!no_reason.contains("Unsupported parameter(s)"), "{no_reason}");
+    let no_reason = outcome(
+        supervisor_service
+            .coordination(Parameters(merge_with(Some(true), None)))
+            .await,
+    );
+    assert!(
+        !no_reason.contains("Unsupported parameter(s)"),
+        "{no_reason}"
+    );
     assert!(no_reason.contains("non-empty reason"), "{no_reason}");
     unmerged("override without reason");
 

@@ -2551,6 +2551,9 @@ dialog form > *,
 .pair-status {
   padding: var(--space-3) 0;
   color: var(--text-hi);
+  /* cas-0e14: the re-pair copy can carry a long `cas hub pair --scopes …`
+     command; it wraps instead of running out of the dialog. */
+  overflow-wrap: anywhere;
   background: transparent;
   border-top: var(--line-width) solid var(--line-subtle);
   border-bottom: var(--line-width) solid var(--line-subtle);

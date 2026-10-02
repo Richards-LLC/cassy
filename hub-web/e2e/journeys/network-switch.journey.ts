@@ -504,6 +504,8 @@ test("HUB-J12 network switch: re-pairing by code says plainly that starting sess
     await expect(dialog).toBeVisible();
     await expect(dialog.locator(".pair-status")).toContainText("starting sessions will need to be allowed again");
     await expect(dialog.locator(".pair-status")).toContainText("--scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,session:launch");
+    // The long command wraps inside the dialog rather than running out of it.
+    expect(await dialog.locator(".pair-status").evaluate((element) => element.scrollWidth <= element.clientWidth), "the re-pair copy fits the dialog").toBe(true);
   });
 
   await journey.stage("Re-pair with a code anyway", async () => {

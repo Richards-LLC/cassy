@@ -670,13 +670,16 @@ test("HUB-J12 network switch: re-pairing by code says plainly that starting sess
     await page.setViewportSize({ width: 1280, height: 720 });
     // QA F03: a second copy is announced again (the status empties, then speaks).
     await expect(dialog.getByRole("button", { name: "Copy command", exact: true })).toBeVisible({ timeout: 5_000 });
+    // Two copies in a row: each one sets the status anew, so each is spoken.
     const announcements = await dialog.locator(".pair-command-status").evaluate((status) => new Promise<string[]>((resolve) => {
       const seen: string[] = [];
       new MutationObserver(() => seen.push(status.textContent ?? "")).observe(status, { childList: true, characterData: true, subtree: true });
-      (status.parentElement!.querySelector("button") as HTMLButtonElement).click();
-      setTimeout(() => resolve(seen), 500);
+      const button = status.parentElement!.querySelector("button") as HTMLButtonElement;
+      button.click();
+      setTimeout(() => button.click(), 400);
+      setTimeout(() => resolve(seen), 900);
     }));
-    expect(announcements).toEqual(["", "Command copied"]);
+    expect(announcements.filter((text) => text === "Command copied"), JSON.stringify(announcements)).toHaveLength(2);
   });
 
   await journey.stage("Re-pair with a code anyway", async () => {

@@ -69,12 +69,7 @@ fn resolve_commit(repo: &Path, reference: &str) -> Option<String> {
         return None;
     }
     std::process::Command::new("git")
-        .args([
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("{reference}^{{commit}}"),
-        ])
+        .args(["rev-parse", "--verify", "--quiet", &format!("{reference}^{{commit}}")])
         .current_dir(repo)
         .output()
         .ok()
@@ -87,6 +82,44 @@ fn resolve_commit(repo: &Path, reference: &str) -> Option<String> {
 fn trunk_containing(repo: &Path, commit: &str) -> Option<String> {
     let trunk = crate::mcp::tools::core::task::repo_context::resolve_default_branch(repo).ok()?;
     is_ancestor(repo, commit, &trunk).then_some(trunk)
+}
+
+fn patch_id_between(repo: &Path, base: &str, head: &str) -> Option<String> {
+    use std::io::Write;
+    let diff = std::process::Command::new("git")
+        .args([
+            "diff",
+            "--binary",
+            "--no-ext-diff",
+            "--no-textconv",
+            base,
+            head,
+            "--",
+        ])
+        .current_dir(repo)
+        .output()
+        .ok()?;
+    if !diff.status.success() || diff.stdout.is_empty() {
+        return None;
+    }
+    // File-fed input avoids blocking on Git's pipe buffers for large diffs.
+    let mut input = tempfile::NamedTempFile::new().ok()?;
+    input.write_all(&diff.stdout).ok()?;
+    let output = std::process::Command::new("git")
+        .args(["patch-id", "--stable"])
+        .current_dir(repo)
+        .stdin(std::fs::File::open(input.path()).ok()?)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let id = String::from_utf8(output.stdout)
+        .ok()?
+        .split_whitespace()
+        .next()?
+        .to_string();
+    (!id.is_empty() && id.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(id)
 }
 
 /// A rewritten delivery retains the QA identity of the reviewed tip. Prove
@@ -147,8 +180,21 @@ fn reviewed_tip_carried_by(repo: &Path, reviewed: &str, integrated: &str, target
         .current_dir(repo)
         .status()
         .is_ok_and(|status| status.success());
-    matches
-        || super::close_ops::commit_patches_cherry_equivalent_on_parent(repo, reviewed, integrated)
+    if matches {
+        return true;
+    }
+    let Some(parent) = resolve_commit(repo, &format!("{integrated}^1")) else {
+        return false;
+    };
+    // Compare S itself, not any older target commit which may since have
+    // been changed or reverted. Unknown/empty patches never match.
+    match (
+        patch_id_between(repo, &base, reviewed),
+        patch_id_between(repo, &parent, integrated),
+    ) {
+        (Some(reviewed_patch), Some(integrated_patch)) => reviewed_patch == integrated_patch,
+        _ => false,
+    }
 }
 
 fn qa_pass_covers_integrated_delivery(
@@ -174,7 +220,11 @@ fn qa_pass_covers_integrated_delivery(
         return true;
     }
     let head = head.and_then(|head| resolve_commit(repo, head));
-    let receipt = receipt.and_then(|receipt| resolve_commit(repo, receipt));
+    let resolved_receipt = receipt.and_then(|receipt| resolve_commit(repo, receipt));
+    if receipt.is_some() && resolved_receipt.is_none() {
+        return false;
+    }
+    let receipt = resolved_receipt;
     // A recorded newer pre-merge tip needs its own verdict. A squash receipt
     // can carry the old reviewed identity when it is the delivery being closed.
     if head.as_deref() != Some(reviewed.as_str()) && !(head.is_some() && head == receipt) {
@@ -221,10 +271,7 @@ impl CasCore {
 
     /// cas-619f: starting a QA work item claims its round for the caller,
     /// and refuses the delivery's implementer (under either identity).
-    pub(crate) fn claim_qa_round_on_start(
-        &self,
-        qa_task: &Task,
-    ) -> Result<Option<String>, McpError> {
+    pub(crate) fn claim_qa_round_on_start(&self, qa_task: &Task) -> Result<Option<String>, McpError> {
         if !qa_task.labels.iter().any(|label| label == QA_PASS_LABEL) {
             return Ok(None);
         }
@@ -237,8 +284,8 @@ impl CasCore {
         // Check the session id too: an assignee recorded as an id must not
         // slip past a name-only comparison.
         cas_store::assert_may_review_qa_task(&self.cas_root, &qa_task.id, &id).map_err(reject)?;
-        let Some(pass) = cas_store::assert_may_review_qa_task(&self.cas_root, &qa_task.id, &name)
-            .map_err(reject)?
+        let Some(pass) =
+            cas_store::assert_may_review_qa_task(&self.cas_root, &qa_task.id, &name).map_err(reject)?
         else {
             return Ok(None);
         };
@@ -273,9 +320,8 @@ impl CasCore {
                 data: None,
             });
         }
-        let claimed =
-            cas_store::claim_qa_pass(&self.cas_root, &pass.task_id, &name, chrono::Utc::now())
-                .map_err(reject)?;
+        let claimed = cas_store::claim_qa_pass(&self.cas_root, &pass.task_id, &name, chrono::Utc::now())
+            .map_err(reject)?;
         let preflight_note = preflight
             .map(|report| format!("\nQA preflight:\n{}", report.render()))
             .unwrap_or_default();
@@ -687,12 +733,7 @@ impl CasCore {
     }
 
     /// Tell the reviewer of a superseded round to stop (cas-ce39).
-    fn notify_superseded_reviewer(
-        &self,
-        retired: &QaPass,
-        reviewer: &str,
-        next_desc: &str,
-    ) -> String {
+    fn notify_superseded_reviewer(&self, retired: &QaPass, reviewer: &str, next_desc: &str) -> String {
         let queue = match crate::store::open_prompt_queue_store(&self.cas_root) {
             Ok(queue) => queue,
             Err(error) => {
@@ -756,11 +797,7 @@ impl CasCore {
             task.deliverables
                 .parked_branch
                 .clone()
-                .or_else(|| {
-                    task.assignee
-                        .as_deref()
-                        .map(|name| format!("factory/{name}"))
-                })
+                .or_else(|| task.assignee.as_deref().map(|name| format!("factory/{name}")))
                 .unwrap_or_else(|| format!("factory/{merge_id}"))
         };
         let Some(head) = super::close_ops::resolve_branch_sha(repo, &branch) else {
@@ -984,15 +1021,10 @@ impl CasCore {
         config: &crate::config::Config,
         location: QaDeliveryLocation<'_>,
     ) -> String {
-        let artifacts_root = crate::config::project_factory_artifacts_root(
-            &self.cas_root,
-            &crate::config::resolved_factory_artifacts_root(
-                config.factory().artifacts_root.as_deref(),
-            ),
-        );
+        let artifacts_root =
+            crate::config::project_factory_artifacts_root(&self.cas_root, &crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref()));
         let ledger_dir = round_dir(&artifacts_root, &pass);
-        let qa_task_id = match self.create_qa_task(task, &pass, reasons, &ledger_dir, parent_branch)
-        {
+        let qa_task_id = match self.create_qa_task(task, &pass, reasons, &ledger_dir, parent_branch) {
             Ok(id) => id,
             Err(error) => {
                 tracing::error!(task_id = %task.id, pass_id = %pass.id, error = %error, "cas-619f: QA task not created");
@@ -1224,11 +1256,7 @@ mod delivery_location_tests {
                 .env("GIT_CONFIG_SYSTEM", "/dev/null")
                 .output()
                 .unwrap();
-            assert!(
-                output.status.success(),
-                "git {args:?}: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
             String::from_utf8_lossy(&output.stdout).trim().to_string()
         };
         git(&["init", "-q", "-b", "epic/ui"]);
@@ -1449,5 +1477,168 @@ mod squash_close_tests {
     #[tokio::test]
     async fn worker_squash_close_honors_passed_round_cas_fe7b() {
         worker_close_after_squash(QaPassState::Passed).await;
+    }
+    #[test]
+    fn squash_qa_does_not_clear_changed_delivery_content_cas_fe7b() {
+        for state in [QaPassState::Passed, QaPassState::Waived] {
+            let mut env = TestEnvGuard::temp_home();
+            let (dir, core, task, _squash) = squash_fixture(&mut env, state);
+            let repo = dir.path();
+            git(repo, &["checkout", "-q", "main"]);
+            // The last pre-squash commit added JS; changing the earlier CSS
+            // must also fail aggregate delivery coverage.
+            std::fs::write(repo.join("web/composer.css"), ".composer{gap:2px}\n").unwrap();
+            git(repo, &["add", "web/composer.css"]);
+            git(repo, &["commit", "-q", "-m", "changed integration"]);
+            let wrong = git(repo, &["rev-parse", "HEAD"]);
+            match core.independent_qa_close_gate(&task, repo, "main", Some(&wrong), None) {
+                QaCloseGate::Refuse(text) => {
+                    assert!(
+                        text.contains("cannot prove") && !text.contains("INDEPENDENT QA REQUIRED"),
+                        "{text}"
+                    );
+                    assert!(!text.contains("Ready for the supervisor"), "{text}");
+                }
+                _ => panic!("a verdict for T cannot prove changed delivered files"),
+            }
+            assert_eq!(
+                cas_store::list_qa_passes(&repo.join(".cas"), &task.id)
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn squash_qa_uses_origin_when_local_target_is_stale_cas_fe7b() {
+        let mut env = TestEnvGuard::temp_home();
+        let (dir, core, task, squash) = squash_fixture(&mut env, QaPassState::Waived);
+        let repo = dir.path();
+        git(repo, &["update-ref", "refs/remotes/origin/main", &squash]);
+        let base = git(repo, &["rev-parse", "main~2"]);
+        git(repo, &["branch", "-f", "main", &base]);
+        assert!(!is_ancestor(repo, &squash, "main"));
+        assert!(matches!(
+            core.independent_qa_close_gate(&task, repo, "main", Some(&squash), None),
+            QaCloseGate::Clear
+        ));
+    }
+
+    #[test]
+    fn squash_qa_receipt_resolves_reviewed_tip_without_anchor_cas_fe7b() {
+        let mut env = TestEnvGuard::temp_home();
+        let (dir, core, mut task, squash) = squash_fixture(&mut env, QaPassState::Passed);
+        task.deliverables.factory_branch_anchor = None;
+        assert!(matches!(
+            core.independent_qa_close_gate(&task, dir.path(), "main", Some(&squash), None),
+            QaCloseGate::Clear
+        ));
+    }
+
+    #[test]
+    fn squash_qa_does_not_cover_a_newer_task_anchor_cas_fe7b() {
+        let mut env = TestEnvGuard::temp_home();
+        let (dir, core, mut task, squash) = squash_fixture(&mut env, QaPassState::Passed);
+        let repo = dir.path();
+        std::fs::write(repo.join("web/new.css"), "new unreviewed feature\n").unwrap();
+        git(repo, &["add", "web/new.css"]);
+        git(repo, &["commit", "-q", "-m", "new task delivery"]);
+        task.deliverables.factory_branch_anchor = Some(git(repo, &["rev-parse", "HEAD"]));
+        open_task_store(&repo.join(".cas"))
+            .unwrap()
+            .update(&task)
+            .unwrap();
+        match core.independent_qa_close_gate(&task, repo, "main", Some(&squash), None) {
+            QaCloseGate::Refuse(text) => {
+                assert!(text.contains("INDEPENDENT QA REQUIRED"), "{text}");
+                assert!(
+                    !text.contains("INDEPENDENT QA PASSED")
+                        && !text.contains("INDEPENDENT QA WAIVED"),
+                    "{text}"
+                );
+            }
+            _ => panic!("old QA verdict cannot cover a newer recorded delivery"),
+        }
+    }
+
+    #[test]
+    fn squash_qa_rejects_missing_or_unintegrated_receipts_cas_fe7b() {
+        let mut env = TestEnvGuard::temp_home();
+        let (dir, core, task, _squash) = squash_fixture(&mut env, QaPassState::Waived);
+        let repo = dir.path();
+        let tree = git(repo, &["rev-parse", "factory/worker^{tree}"]);
+        let base = git(repo, &["rev-parse", "factory/worker~2"]);
+        let detached = git(
+            repo,
+            &["commit-tree", &tree, "-p", &base, "-m", "not integrated"],
+        );
+        for receipt in [
+            detached.as_str(),
+            "0000000000000000000000000000000000000000",
+        ] {
+            assert!(
+                matches!(
+                    core.independent_qa_close_gate(&task, repo, "main", Some(receipt), None),
+                    QaCloseGate::Refuse(_)
+                ),
+                "receipt must identify integrated content: {receipt}"
+            );
+        }
+    }
+
+    #[test]
+    fn squash_qa_accepts_patch_equivalent_reviewed_tip_cas_fe7b() {
+        let mut env = TestEnvGuard::temp_home();
+        let (dir, core, mut task, squash) = squash_fixture(&mut env, QaPassState::Passed);
+        let repo = dir.path();
+        // Collapse T into one reviewed aggregate patch, with different
+        // whitespace from S. Tree identity fails; stable patch-id still holds.
+        let base = git(repo, &["rev-parse", "factory/worker~2"]);
+        git(repo, &["reset", "-q", "--soft", &base]);
+        std::fs::write(
+            repo.join("web/composer.js"),
+            "export  const ready = true;\n",
+        )
+        .unwrap();
+        git(repo, &["add", "web/composer.js"]);
+        git(repo, &["commit", "-q", "-m", "reviewed aggregate delivery"]);
+        let reviewed = git(repo, &["rev-parse", "HEAD"]);
+        task.deliverables.factory_branch_anchor = Some(reviewed.clone());
+        cas_store::waive_qa_pass(
+            &repo.join(".cas"),
+            &task.id,
+            "supervisor",
+            "worker",
+            "factory/worker",
+            &reviewed,
+            "Reviewed formatting",
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        assert_ne!(
+            git(
+                repo,
+                &[
+                    "diff",
+                    "--name-only",
+                    &reviewed,
+                    &squash,
+                    "--",
+                    "web/composer.js"
+                ]
+            ),
+            ""
+        );
+        assert!(matches!(
+            core.independent_qa_close_gate(&task, repo, "main", Some(&squash), None),
+            QaCloseGate::Clear
+        ));
+        git(repo, &["checkout", "-q", "main"]);
+        std::fs::write(repo.join("web/composer.css"), ".composer{gap:2px}\n").unwrap();
+        git(repo, &["add", "web/composer.css"]);
+        git(repo, &["commit", "-q", "-m", "changed delivery after squash"]);
+        let changed = git(repo, &["rev-parse", "HEAD"]);
+        assert!(matches!(core.independent_qa_close_gate(&task, repo, "main", Some(&changed), None), QaCloseGate::Refuse(_)), "a matching older patch must not prove the supplied changed receipt");
     }
 }

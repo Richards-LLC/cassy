@@ -13044,7 +13044,7 @@ fn live_factory_tip_known_fully_merged(
 /// Fail-closed: missing refs, unsafe names, failed `git cherry`, empty
 /// output (no positive evidence), or any `+` (non-equivalent) line →
 /// false.
-pub(crate) fn commit_patches_cherry_equivalent_on_parent(
+fn commit_patches_cherry_equivalent_on_parent(
     repo_path: &std::path::Path,
     commit_ish: &str,
     parent_ref: &str,

@@ -114,14 +114,22 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(search).toHaveValue("");
     await expect(list.getByRole("button")).toHaveCount(3);
     await search.fill("gabber-studio");
+    // cas-537f: the row Enter would open is marked, and named to assistive
+    // tech as the field's active descendant.
+    const target = list.locator('.conversation-row[data-enter-target="true"]');
+    await expect(target).toHaveCount(1);
+    await expect(target).toContainText("gabber-studio");
+    await expect(search).toHaveAttribute("aria-activedescendant", (await target.getAttribute("id"))!);
     await list.getByRole("button", { name: /gabber-studio/ }).click();
     await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();
     // The header names the project once; machine and codename sit beneath it.
     await expect(page.locator(".conversation-identity h1")).toHaveText("gabber-studio");
     await expect(page.locator(".conversation-host")).toContainText(`Studio Mac · macOS · ${OTTER}`);
-    await search.fill("");
-    await search.blur();
+    // cas-537f: opening a result clears the search, as Enter does; the whole
+    // list (and every other row's unread count) is back.
+    await expect(search).toHaveValue("");
     await expect(list.getByRole("button")).toHaveCount(3);
+    await expect(search).not.toHaveAttribute("aria-activedescendant");
   });
 
   // Catalog step titles verbatim (docs/qa/journeys.md HUB-J3, cas-0e5c).
@@ -211,6 +219,14 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(palette.locator('[data-palette-action="terminal-view"] small')).toHaveText("Machines and terminal controls");
     await filter.fill("worker");
     await expect(palette.getByRole("button", { name: /Show worker panes/ })).toBeVisible();
+    // cas-537f: "light" matches a conversation and an appearance; the one
+    // Enter runs is marked, and named as the filter's active descendant.
+    await filter.fill("light");
+    const enterTarget = palette.locator('.palette-command[data-enter-target="true"]');
+    await expect(enterTarget).toHaveCount(1);
+    await expect(enterTarget).toContainText("Jump to lighthouse");
+    await expect(filter).toHaveAttribute("aria-activedescendant", (await enterTarget.getAttribute("id"))!);
+    expect(await enterTarget.evaluate((node) => getComputedStyle(node, "::after").content), "the Enter hint").toBe('"Enter ↵"');
     // A project name finds its session too, and the row names that project.
     const rows = palette.locator(".palette-command");
     await filter.fill("gabber");

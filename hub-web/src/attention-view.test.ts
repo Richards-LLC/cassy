@@ -82,3 +82,26 @@ describe("attention timeline", () => {
     expect(toggle.getAttribute("aria-expanded")).toBe("true");
   });
 });
+
+describe("heartbeat redraws (cas-a5c6 QA F03)", () => {
+  it("leaves an unchanged panel, its focus and an opened Details alone, and redraws when something changes", () => {
+    const root = document.createElement("div"); document.body.replaceChildren(root);
+    renderAttentionPanel(root, [event("1")], callbacks(), { now });
+    const dismiss = root.querySelector<HTMLButtonElement>(".attention-dismiss-group")!;
+    const details = root.querySelector<HTMLDetailsElement>("details")!;
+    details.open = true;
+    dismiss.focus();
+    // The 5 s heartbeat: same items, same minute.
+    renderAttentionPanel(root, [event("1")], callbacks(), { now: now + 5_000 });
+    expect(root.querySelector(".attention-dismiss-group")).toBe(dismiss);
+    expect(document.activeElement).toBe(dismiss);
+    expect(details.open).toBe(true);
+    // A new item is a real change.
+    renderAttentionPanel(root, [event("1"), event("2")], callbacks(), { now: now + 10_000 });
+    expect(root.querySelector(".attention-dismiss-group")).not.toBe(dismiss);
+    // So is the next minute: the cards' ages move on.
+    const before = root.querySelector(".attention-dismiss-group");
+    renderAttentionPanel(root, [event("1"), event("2")], callbacks(), { now: now + 70_000 });
+    expect(root.querySelector(".attention-dismiss-group")).not.toBe(before);
+  });
+});

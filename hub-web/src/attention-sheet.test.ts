@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
-import { applySheetSemantics, layerAboveSheet, sheetFocusables, sheetKeydown } from "./attention-sheet";
+import { applySheetSemantics, findByFocusKey, focusKey, layerAboveSheet, sheetFocusables, sheetKeydown } from "./attention-sheet";
 
 /** A conversation shell as conversationShellMarkup builds it: sidebar, main (badge), rail (sheet). */
 function shell(): { root: HTMLElement; badge: HTMLButtonElement; rail: HTMLElement; close: HTMLButtonElement; details: HTMLElement; send: HTMLButtonElement } {
@@ -101,5 +101,21 @@ describe("phone Attention sheet (cas-a5c6)", () => {
     close.focus();
     expect(sheetKeydown({ key: "Escape", shiftKey: false }, rail, document.activeElement, shut, all)).toBe(true);
     expect(shut).toHaveBeenCalledOnce();
+  });
+
+  it("finds the same control again after the panel is rebuilt (QA F03)", () => {
+    const { rail } = shell();
+    const section = rail.querySelector("section")!;
+    section.insertAdjacentHTML("beforeend", '<button class="dismiss">Dismiss</button>');
+    const second = section.querySelectorAll<HTMLButtonElement>(".dismiss")[1]!;
+    const key = focusKey(rail, second);
+    // A redraw replaces every control with an equal new one.
+    section.innerHTML = section.innerHTML;
+    const found = findByFocusKey(rail, key, all)!;
+    expect(found).not.toBe(second);
+    expect(found).toBe(section.querySelectorAll(".dismiss")[1]);
+    // A control that is gone has no match; the caller falls back to Close.
+    section.querySelectorAll(".dismiss")[1]!.remove();
+    expect(findByFocusKey(rail, key, all)).toBeUndefined();
   });
 });

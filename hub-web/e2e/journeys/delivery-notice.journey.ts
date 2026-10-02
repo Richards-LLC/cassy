@@ -22,6 +22,9 @@ const notice = (id: number, at: string, resolved = false) => ({
 });
 
 test("HUB-J15 see a delivery problem as attention, not conversation", async ({ page, journey }) => {
+  // Ten stages, two of them waiting out a catalog heartbeat: give it the same
+  // headroom HUB-J3 has under a loaded factory host.
+  test.setTimeout(120_000);
   const hub = await journey.hub({
     machines: [ATLAS],
     paired: ["atlas"],
@@ -110,6 +113,11 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     const lap = stops.indexOf(close, 1);
     expect(lap, `Tab comes back round to Close: ${stops.join(" → ")}`).toBeGreaterThan(1);
     expect(new Set(stops.slice(0, lap)).size, `each Tab moves on: ${stops.join(" → ")}`).toBe(lap);
+    // QA F03: a heartbeat redraw (every 5 s) never moves the keyboard user.
+    while (!(await focused()).startsWith("button.attention-dismiss-group")) await page.keyboard.press("Tab");
+    const resting = await focused();
+    await page.waitForTimeout(6_000);
+    expect(await focused(), "focus stays put across a heartbeat").toBe(resting);
     await expect(page.locator(".conversation-main")).toHaveAttribute("inert", "");
     await expect(sheet).toBeVisible();
   });
@@ -125,7 +133,8 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await page.keyboard.press("Escape");
     await expect(palette).not.toHaveAttribute("open", "");
     await expect(sheet).toBeVisible();
-    await expect(page.locator(".conversation-context .context-sheet-close")).toBeFocused();
+    // Focus is back in the sheet, on the control it left (Dismiss group).
+    await expect(sheet.locator(".attention-dismiss-group")).toBeFocused();
   });
 
   await journey.stage("Close it and keep reading", async () => {

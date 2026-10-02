@@ -99,3 +99,23 @@ export function sheetKeydown(event: Pick<KeyboardEvent, "key" | "shiftKey">, she
   next.focus();
   return true;
 }
+
+/**
+ * A sheet control's identity that survives a redraw (cas-a5c6 QA F03): its
+ * kind, its words and which of the controls with the same kind and words it
+ * is. The panel can be rebuilt (its content changed, or a minute passed), so
+ * the element that held focus is gone; the same control in the new panel is
+ * found by this key.
+ */
+export function focusKey(sheet: HTMLElement, node: HTMLElement): string {
+  const describe = (candidate: HTMLElement) => `${candidate.tagName}.${candidate.classList[0] ?? ""}|${candidate.textContent?.trim() ?? ""}`;
+  const own = describe(node);
+  const same = [...sheet.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((candidate) => describe(candidate) === own);
+  return `${own}#${Math.max(0, same.indexOf(node))}`;
+}
+
+/** The control in the (redrawn) sheet with this key, if it is still a stop. */
+export function findByFocusKey(sheet: HTMLElement, key: string, visible?: (node: HTMLElement) => boolean): HTMLElement | undefined {
+  const stops = sheetFocusables(sheet, visible);
+  return stops.find((candidate) => focusKey(sheet, candidate) === key);
+}

@@ -254,6 +254,19 @@ export function renderAttentionPanel(
   callbacks: AttentionPanelCallbacks,
   options: AttentionPanelOptions = {},
 ): void {
+  // cas-a5c6 QA F03: a heartbeat redraw with nothing new rebuilt the panel
+  // every 5 s, taking the keyboard user's focus (and any opened Details or
+  // folded group) with it. Redraw only when what it shows has changed; the
+  // minute keeps the cards' ages current.
+  const signature = JSON.stringify([
+    items,
+    options.outage ?? null,
+    Math.floor((options.now ?? Date.now()) / 60_000),
+    [...(options.animateIds ?? [])].filter((id) => items.some((item) => item.id === id)),
+    [...(options.reclassifyIds ?? [])].filter((id) => items.some((item) => item.id === id)),
+  ]);
+  if (container.dataset.panelSignature === signature && container.childElementCount > 0) return;
+  container.dataset.panelSignature = signature;
   container.replaceChildren();
   const counts = attentionCounts(items);
   const header = document.createElement("header");

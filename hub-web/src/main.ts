@@ -7,7 +7,7 @@ import { controlCommandCopy, sessionJumpCommandMarkup } from "./palette-commands
 import { ConversationHistory } from "./conversation-history";
 import { loadDismissedAsks, saveDismissedAsks, type DismissedAsksStorage } from "./dismissed-asks";
 import { ConversationView, emptyActivityText } from "./conversation-view";
-import { applySheetSemantics, layerAboveSheet, sheetFocusables, sheetKeydown } from "./attention-sheet";
+import { applySheetSemantics, findByFocusKey, focusKey, layerAboveSheet, sheetFocusables, sheetKeydown } from "./attention-sheet";
 import { isOperatorNotice, NOTICE_KIND, noticeFingerprint, noticeTime, planNotice } from "./operator-notices";
 import { REFUSED_SEE_ABOVE, refusalSentence, refusal } from "./refusal";
 import { installAttentionObjects } from "./attention-objects";
@@ -3776,14 +3776,20 @@ function syncConversationAttention(count: number): void {
 }
 /** The sheet control that last held focus, so a redraw that moves it hands focus back (cas-a5c6). */
 let sheetFocus: HTMLElement | undefined;
+/** The same control's redraw-proof key (cas-a5c6 QA F03). */
+let sheetFocusKey: string | undefined;
 function applyAttentionSheet(): void {
   applySheetSemantics(document.querySelector<HTMLElement>(".conversation-shell"), attentionSheetOpen);
-  if (!attentionSheetOpen) { sheetFocus = undefined; return; }
+  if (!attentionSheetOpen) { sheetFocus = undefined; sheetFocusKey = undefined; return; }
   // A redraw (a catalog poll, a new turn) rebuilds the shell and moves the
   // rail's panel, which drops focus to the page. Put it back where it was.
   const sheet = document.querySelector<HTMLElement>(".conversation-shell.attention-sheet-open > .conversation-context");
   if (!sheet || sheet.contains(document.activeElement) || layerAboveSheet(sheet)) return;
-  const back = sheetFocus?.isConnected && sheet.contains(sheetFocus) ? sheetFocus : sheetFocusables(sheet)[0];
+  // The same element if it survived; else the same control in the redrawn
+  // panel; only when that control is gone, the sheet's first stop.
+  const back = (sheetFocus?.isConnected && sheet.contains(sheetFocus) ? sheetFocus : undefined)
+    ?? (sheetFocusKey === undefined ? undefined : findByFocusKey(sheet, sheetFocusKey))
+    ?? sheetFocusables(sheet)[0];
   back?.focus({ preventScroll: true });
 }
 // cas-a5c6: while the sheet is modal, Escape closes it from anywhere and Tab
@@ -3797,11 +3803,17 @@ document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") event.stopPropagation();
   }
 }, true);
+// A layer that was over the sheet (the palette) has closed: focus goes back
+// into the sheet, to the control it left, rather than to the page.
+document.addEventListener("close", () => {
+  if (!attentionSheetOpen) return;
+  window.setTimeout(() => { if (attentionSheetOpen) applyAttentionSheet(); }, 0);
+}, true);
 document.addEventListener("focusin", (event) => {
   if (!attentionSheetOpen) return;
   const sheet = document.querySelector<HTMLElement>(".conversation-shell.attention-sheet-open > .conversation-context");
   if (!sheet || !(event.target instanceof HTMLElement)) return;
-  if (sheet.contains(event.target)) sheetFocus = event.target;
+  if (sheet.contains(event.target)) { sheetFocus = event.target; sheetFocusKey = focusKey(sheet, event.target); }
   // A palette opened over the sheet keeps its focus (cas-a5c6 QA F02).
   else if (layerAboveSheet(sheet)) return;
   else sheetFocusables(sheet)[0]?.focus();

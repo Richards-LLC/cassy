@@ -29552,7 +29552,16 @@ mod epic_status_gate_tests {
     fn epic_close_gate_resumes_across_calls_for_150_children_cas_b412() {
         let dir = init_epic_repo(&[]);
         let p = dir.path();
-        let subtasks = merged_epic_children(p, 150, 8);
+        // Keep each proof smaller than the artificial retry budget. A long
+        // per-child history can now be interrupted inside a proof instead of
+        // overrunning it; that behavior is covered by cas-9069's scan test.
+        // Distinct child IDs still require 150 separately cached verdicts.
+        let delivered = merged_epic_children(p, 1, 1).pop().unwrap();
+        let subtasks = (0..150).map(|index| {
+            let mut child = delivered.clone();
+            child.id = format!("cas-big-{index:03}");
+            child
+        }).collect::<Vec<_>>();
         let task = epic("cas-big-epic");
         let req = base_req(&task.id);
 

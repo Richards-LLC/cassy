@@ -268,10 +268,11 @@ Rust build and suite run once, at Phase 4 assembly.
    `git grep -n '<old contract token>' -- '*test*'` (narrow the path/spec as needed).
    Update or reject the lane when those tests prove an unreviewed caller contract.
 2. **Read the lane CI signal.** Inspect `gh run list --branch factory/<worker>` at
-   review time. `worktree_merge` also reports its best-effort CI workflow verdict, but
-   this explicit review check catches a new run or a result that arrived after the
-   merge command's lookup. A red or unknown result is a review signal, not a v1 merge
-   refusal: investigate and record the decision rather than silently ignoring it.
+   review time. `worktree_merge` inspects the delivery range and names the latest
+   non-docs commit whose CI it used; a docs-only tip cannot cover code beneath it.
+   Code requires completed validation, while a pure docs delivery can use Docs
+   Lint at its tip. Red CI requires a logged supervisor override. Investigate a
+   refused or unavailable result and record the decision; the lookup never polls.
 
 Three flags that are routinely confused — they are independent (cas-0b32 / cas-369f):
 

@@ -16,10 +16,7 @@ struct GhApiOutput {
     stderr: Vec<u8>,
 }
 
-/// A best-effort verdict for the CI checks associated with a factory lane.
-///
-/// A known red result gates merges. Missing or unfinished receipts remain
-/// advisory, so GitHub availability never introduces a wait.
+/// CI for the latest code commit in a delivery, or its tip for pure docs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum BranchCiState {
     Green {
@@ -49,6 +46,10 @@ enum BranchCiState {
         sha: String,
         reason: String,
     },
+    UnvalidatedCode {
+        sha: String,
+        reason: String,
+    },
 }
 
 const BRANCH_CI_ENDPOINT: &str = "repos/{owner}/{repo}/commits/{sha}/check-runs";
@@ -56,6 +57,8 @@ const BRANCH_CI_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
 const CI_ADVISORY_POLICY_NOTICE: &str = "Merge policy: merge proceeded because CI is advisory.\n\n";
 const CI_OVERRIDE_POLICY_NOTICE: &str =
     "Merge policy: red CI was explicitly overridden by a registered supervisor.\n\n";
+const CI_VALIDATED_POLICY_NOTICE: &str =
+    "Merge policy: merge proceeded on successful validation.\n\n";
 
 /// Decide admission from the one bounded lookup; never poll for pending CI.
 fn admit_branch_ci(
@@ -68,6 +71,11 @@ fn admit_branch_ci(
             "SUPERVISOR OVERRIDE REJECTED: supervisor_override=true requires a non-empty reason."
                 .to_string(),
         );
+    }
+    if let BranchCiState::UnvalidatedCode { sha, reason } = state {
+        return Err(format!(
+            "CODE CI REQUIRED: refusing worktree_merge for {sha}: {reason}. A completed, successful code-validation check is required for the latest code commit in the delivery. No merge was attempted."
+        ));
     }
     if let BranchCiState::Red { sha, url } = state {
         if !override_requested {
@@ -98,17 +106,113 @@ fn red_ci_override_note(
     )
 }
 
-/// Query CI checks for the exact source-branch tip that is about to merge.
+/// Match the docs-only policy in scripts/classify-ci-diff.sh. Embedded source
+/// Markdown still affects compilation; unknown paths require code validation.
+fn ci_docs_path(path: &str) -> bool {
+    !path.starts_with("cas-cli/src/") && (path.starts_with("docs/") || path.ends_with(".md"))
+}
+
+fn ci_git(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    let mut command = Command::new("git");
+    command.current_dir(cwd).args(args);
+    let output = crate::bounded_process::run_command(
+        &mut command,
+        crate::bounded_process::Deadline::after(BRANCH_CI_LOOKUP_TIMEOUT),
+        BRANCH_CI_LOOKUP_TIMEOUT,
+    )
+    .map_err(|_| "could not inspect delivery Git range".to_string())?;
+    if !output.status.success() {
+        return Err("could not inspect delivery Git range".to_string());
+    }
+    Ok(output.stdout)
+}
+
+/// Walk the complete delivery history, including merged side branches and
+/// reverted edits. Topological order chooses a descendant before its parents.
+fn delivery_ci_commit(branch: &str, target: &str, cwd: &Path) -> Result<(String, bool), String> {
+    let tip = crate::worktree::GitOperations::new(cwd.to_path_buf())
+        .resolve_commit(branch)
+        .ok_or_else(|| "could not resolve source tip".to_string())?;
+    let base = ci_git(cwd, &["merge-base", target, &tip])?;
+    let base = String::from_utf8_lossy(&base);
+    let range = format!("{}..{tip}", base.trim());
+    let commits = ci_git(cwd, &["rev-list", "--topo-order", &range])?;
+    for commit in String::from_utf8_lossy(&commits).lines() {
+        let paths = ci_git(
+            cwd,
+            &[
+                "show",
+                "--format=",
+                "--name-only",
+                "--diff-merges=first-parent",
+                "--no-renames",
+                "-z",
+                commit,
+            ],
+        )?;
+        if paths
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+            .any(|path| !ci_docs_path(&String::from_utf8_lossy(path)))
+        {
+            return Ok((commit.to_string(), true));
+        }
+    }
+    Ok((tip, false))
+}
+
+fn require_code_validation(state: BranchCiState) -> BranchCiState {
+    let (sha, reason) = match state {
+        BranchCiState::Green {
+            ref test_checks, ..
+        } if test_checks.iter().any(|name| {
+            let name = name.to_ascii_lowercase();
+            !name.contains("docs") && !name.contains("documentation") && !name.contains("markdown")
+        }) =>
+        {
+            return state;
+        }
+        BranchCiState::Red { .. } => return state,
+        BranchCiState::Green { sha, .. } => {
+            (sha, "only documentation checks succeeded".to_string())
+        }
+        BranchCiState::Pending { sha, url } => (
+            sha,
+            format!(
+                "code checks are pending ({})",
+                url.as_deref().unwrap_or("run URL unavailable")
+            ),
+        ),
+        BranchCiState::NoChecks { sha, reason, .. }
+        | BranchCiState::Unknown { sha, reason }
+        | BranchCiState::UnvalidatedCode { sha, reason } => (sha, reason),
+        BranchCiState::GhFailure {
+            sha,
+            status,
+            stderr,
+        } => (sha, format!("CI lookup failed ({status}): {stderr}")),
+    };
+    BranchCiState::UnvalidatedCode { sha, reason }
+}
+
+/// Query the latest non-docs commit in merge-base..tip. A pure docs delivery
+/// uses the tip's Docs Lint; a docs-only tip cannot cover unvalidated code.
 ///
 /// `gh api` expands `{owner}` and `{repo}` from the repository at `cwd`, so
 /// this avoids guessing an origin URL and continues to work for task-declared
 /// repositories. The commit SHA is part of the endpoint, preventing a stale
 /// branch run from being reported as the current lane's result.
-fn lookup_branch_ci(branch: &str, cwd: &Path) -> BranchCiState {
-    let sha = crate::worktree::GitOperations::new(cwd.to_path_buf())
-        .resolve_commit(branch)
-        .unwrap_or_else(|| "unresolved".to_string());
-    lookup_branch_ci_with(branch, &sha, |_, sha| {
+fn lookup_branch_ci(branch: &str, target: &str, cwd: &Path) -> BranchCiState {
+    let (sha, requires_code) = match delivery_ci_commit(branch, target, cwd) {
+        Ok(selected) => selected,
+        Err(reason) => {
+            return BranchCiState::UnvalidatedCode {
+                sha: "unresolved".to_string(),
+                reason,
+            };
+        }
+    };
+    let state = lookup_branch_ci_with(branch, &sha, |_, sha| {
         let endpoint = BRANCH_CI_ENDPOINT.replace("{sha}", sha);
         // The shared `CAS_GH_BIN` override (operator and test seam) selects
         // the binary without touching PATH.
@@ -143,7 +247,12 @@ fn lookup_branch_ci(branch: &str, cwd: &Path) -> BranchCiState {
             },
         };
         response
-    })
+    });
+    if requires_code {
+        require_code_validation(state)
+    } else {
+        state
+    }
 }
 
 /// Isolate response classification from process execution so its output
@@ -447,11 +556,17 @@ fn describe_branch_ci_state(branch: &str, state: &BranchCiState) -> String {
             "CI receipt unknown (advisory)",
             "unavailable",
         ),
+        BranchCiState::UnvalidatedCode { sha, reason } => (
+            sha,
+            format!("CI state: unvalidated code for {sha}: {reason}."),
+            "code validation missing (merge gated)",
+            "unavailable",
+        ),
     };
     format!(
         "gh endpoint queried: GET {}\nCI SHA: {sha}\n{detail}\n\
          Branch: {branch}\nAdmission path: {admission_path}\nReceipt id: {receipt_id}\n\
-         Merge policy: red CI requires an explicit supervisor override; pending and unavailable receipts remain advisory.\n\n",
+         Merge policy: red CI requires an explicit supervisor override; code deliveries require completed code validation; docs-only pending and unavailable receipts remain advisory.\n\n",
         BRANCH_CI_ENDPOINT.replace("{sha}", sha)
     )
 }
@@ -3068,9 +3183,9 @@ impl CasCore {
         let do_cleanup =
             resolve_worktree_merge_cleanup(cleanup, is_system_b, wt_config.cleanup_on_close);
 
-        // Inspect the exact source tip before Git changes the target. A red
-        // receipt is a gate; pending and unavailable receipts never wait.
-        let branch_ci_state = lookup_branch_ci(&worktree.branch, &cwd);
+        // Inspect the delivery range before Git changes the target. Never poll
+        // for unfinished CI or let a docs-only tip mask earlier code.
+        let branch_ci_state = lookup_branch_ci(&worktree.branch, &worktree.parent_branch, &cwd);
         let ci_prefix = describe_branch_ci_state(&worktree.branch, &branch_ci_state);
         let red_override =
             admit_branch_ci(&branch_ci_state, supervisor_override, reason).map_err(|message| {
@@ -3120,6 +3235,8 @@ impl CasCore {
                 data: None,
             })?;
             CI_OVERRIDE_POLICY_NOTICE
+        } else if matches!(branch_ci_state, BranchCiState::Green { .. }) {
+            CI_VALIDATED_POLICY_NOTICE
         } else {
             CI_ADVISORY_POLICY_NOTICE
         };
@@ -3877,7 +3994,12 @@ mod tests {
         let git = |args: &[&str]| {
             let output = std::process::Command::new("git")
                 .current_dir(temp.path())
-                .args(["-c", "user.name=CI fixture", "-c", "user.email=ci@example.test"])
+                .args([
+                    "-c",
+                    "user.name=CI fixture",
+                    "-c",
+                    "user.email=ci@example.test",
+                ])
                 .args(args)
                 .output()
                 .unwrap();
@@ -3886,6 +4008,7 @@ mod tests {
         };
         git(&["init", "-q", "-b", "main"]);
         std::fs::write(temp.path().join("README.md"), "base\n").unwrap();
+        std::fs::write(temp.path().join("base.rs"), "// already integrated\n").unwrap();
         git(&["add", "."]);
         git(&["commit", "-qm", "base"]);
         git(&["switch", "-qc", "factory/ci-fixture"]);
@@ -3904,7 +4027,8 @@ mod tests {
             "status": if conclusion.is_some() { "completed" } else { "in_progress" },
             "conclusion": conclusion,
             "html_url": "https://github.com/acme/cas/actions/runs/100"
-        }]}).to_string();
+        }]})
+        .to_string();
         let docs_response = r#"{"check_runs":[{"name":"Docs Lint","status":"completed","conclusion":"success"},{"name":"Scoped Validation (factory/PR)","status":"completed","conclusion":"skipped"}]}"#;
         let fake_gh = temp.path().join("gh-fixture");
         std::fs::write(&fake_gh, format!(
@@ -3920,11 +4044,17 @@ mod tests {
         let mut env = crate::test_support::TestEnvGuard::new();
         for conclusion in [Some("failure"), None] {
             let (repo, code_sha, tip) = delivery_ci_fixture(true, conclusion);
-            env.set(crate::github_issue_attach::GH_BIN_ENV, repo.path().join("gh-fixture"));
-            let state = super::lookup_branch_ci("factory/ci-fixture", repo.path());
+            env.set(
+                crate::github_issue_attach::GH_BIN_ENV,
+                repo.path().join("gh-fixture"),
+            );
+            let state = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path());
             assert!(admit_branch_ci(&state, false, None).is_err(), "{state:?}");
             let receipt = describe_branch_ci_state("factory/ci-fixture", &state);
-            assert!(receipt.contains(&format!("CI SHA: {code_sha}")), "{receipt}");
+            assert!(
+                receipt.contains(&format!("CI SHA: {code_sha}")),
+                "{receipt}"
+            );
             assert!(!receipt.contains(&format!("CI SHA: {tip}")), "{receipt}");
         }
     }
@@ -3934,8 +4064,11 @@ mod tests {
     fn pure_docs_delivery_is_admitted_on_docs_lint_cas_a9bd() {
         let mut env = crate::test_support::TestEnvGuard::new();
         let (repo, _, tip) = delivery_ci_fixture(false, None);
-        env.set(crate::github_issue_attach::GH_BIN_ENV, repo.path().join("gh-fixture"));
-        let state = super::lookup_branch_ci("factory/ci-fixture", repo.path());
+        env.set(
+            crate::github_issue_attach::GH_BIN_ENV,
+            repo.path().join("gh-fixture"),
+        );
+        let state = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path());
         assert_eq!(admit_branch_ci(&state, false, None), Ok(false));
         let receipt = describe_branch_ci_state("factory/ci-fixture", &state);
         assert!(receipt.contains("CI state: green"), "{receipt}");
@@ -3948,12 +4081,56 @@ mod tests {
     fn docs_tip_receipt_names_successful_delivery_code_cas_a9bd() {
         let mut env = crate::test_support::TestEnvGuard::new();
         let (repo, code_sha, _) = delivery_ci_fixture(true, Some("success"));
-        env.set(crate::github_issue_attach::GH_BIN_ENV, repo.path().join("gh-fixture"));
-        let state = super::lookup_branch_ci("factory/ci-fixture", repo.path());
+        env.set(
+            crate::github_issue_attach::GH_BIN_ENV,
+            repo.path().join("gh-fixture"),
+        );
+        let state = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path());
         assert_eq!(admit_branch_ci(&state, false, None), Ok(false));
         let receipt = describe_branch_ci_state("factory/ci-fixture", &state);
-        assert!(receipt.contains(&format!("CI SHA: {code_sha}")), "{receipt}");
+        assert!(
+            receipt.contains(&format!("CI SHA: {code_sha}")),
+            "{receipt}"
+        );
         assert!(receipt.contains("passed: Scoped Validation"), "{receipt}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn docs_tip_cannot_mask_missing_or_docs_only_code_ci_cas_a9bd() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        for response in [
+            r#"{"check_runs":[]}"#,
+            r#"{"check_runs":[{"name":"Docs Lint","status":"completed","conclusion":"success"},{"name":"Scoped Validation (fast)","status":"completed","conclusion":"skipped"}]}"#,
+        ] {
+            let (repo, code_sha, _) = delivery_ci_fixture(true, Some("success"));
+            let fake_gh = repo.path().join("gh-fixture");
+            std::fs::write(
+                &fake_gh,
+                format!("#!/bin/sh\ncat <<'JSON'\n{response}\nJSON\n"),
+            )
+            .unwrap();
+            env.set(crate::github_issue_attach::GH_BIN_ENV, &fake_gh);
+            let state = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path());
+            let refusal = admit_branch_ci(&state, false, None).unwrap_err();
+            assert!(refusal.contains("CODE CI REQUIRED"), "{refusal}");
+            assert!(refusal.contains(&code_sha), "{refusal}");
+        }
+    }
+
+    #[test]
+    fn delivery_docs_paths_match_ci_classifier_cas_a9bd() {
+        for path in ["docs/guide.md", "README.md", "scripts/ci_tiers/README.md"] {
+            assert!(super::ci_docs_path(path), "{path}");
+        }
+        for path in [
+            "cas-cli/src/builtins/skills/guide.md",
+            ".github/workflows/ci.yml",
+            "scripts/ci_tiers/check.py",
+            "hub-web/app.vue",
+        ] {
+            assert!(!super::ci_docs_path(path), "{path}");
+        }
     }
 
     #[test]

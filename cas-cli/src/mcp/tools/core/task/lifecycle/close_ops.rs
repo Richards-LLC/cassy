@@ -23983,7 +23983,7 @@ mod merge_state_gate_tests {
     /// cas-74cb: the cas-f0c7 production shape through the real handler. A
     /// supervisor override close of an epic whose 64 terminal children point
     /// at factory lanes and anchors deleted both locally and on origin must
-    /// return inside the 55 s MCP deadline and close the epic. On 3.45.0 the
+    /// return inside the 55 s MCP deadline and close the epic. On the released runtime the
     /// epic merge gate finished in about 8.5 s (cas-9069 bounds it), then the
     /// scoped-proof gate spawned the project's surface checker over the
     /// epic's whole attributed diff with no bound: 38 s for 1228 paths, then a

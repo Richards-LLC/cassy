@@ -16275,6 +16275,12 @@ pub(crate) const EPIC_STATUS_BUDGET: std::time::Duration = std::time::Duration::
 /// with an unknown mutation outcome.
 pub(crate) const EPIC_CLOSE_GATE_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
 
+/// One complete child proof may exceed the soft collection budget, so retries
+/// make progress under load. Metadata is capped at 8 s separately; a bounded
+/// close/status collection thus takes at most 8 + max(budget, 20) s, leaving
+/// headroom below the 55 s MCP deadline. A hung proof still stays unchecked.
+const EPIC_CHILD_PROOF_CAP: std::time::Duration = std::time::Duration::from_secs(20);
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct EpicStatusOptions {
     pub offset: usize,
@@ -16779,12 +16785,14 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
     repo_path: &std::path::Path,
     options: EpicStatusOptions,
 ) -> EpicStatusCollection {
-    // A zero proof budget still supports validating/reusing cached verdicts.
-    // Bound its metadata prelude independently; it must never fetch or prove.
-    let _measurement_scope = epic_measurement::Scope::new(if options.budget.is_zero() {
-        EPIC_CLOSE_GATE_BUDGET
-    } else {
+    // Ref/cache metadata has its own bound; host load during this prelude must
+    // not consume the entire proof budget before any child can start.
+    let _measurement_scope = epic_measurement::Scope::new(if options.summary {
         options.budget
+    } else if options.budget == std::time::Duration::MAX {
+        std::time::Duration::MAX
+    } else {
+        EPIC_CLOSE_GATE_BUDGET
     });
     let total_children = subtasks.len();
     let git_snapshot = EpicGitSnapshot::collect(repo_path, parent_branch, subtasks);
@@ -16802,11 +16810,17 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
     } else {
         epic_verdict_cache::EpicVerdictCache::load(repo_path)
     };
-    let _zero_proof_scope = options
-        .budget
-        .is_zero()
+    if epic_measurement::expired() {
+        // Incomplete metadata must not become a reusable proof input.
+        return EpicStatusCollection {
+            statuses, total_children, offset, requested_limit: options.limit,
+            summary: options.summary, budget_exhausted: true, reused_verdicts: 0,
+        };
+    }
+    let _proof_scope = (!options.summary)
         .then(|| epic_measurement::Scope::new(options.budget));
     let mut reused_verdicts = 0;
+    let mut proven_now = 0;
     // Children assigned to the same worker share one live lane. Within one
     // collection the ref snapshot is fixed, so each (branch, target) content
     // direction is measured once rather than once per child.
@@ -16878,11 +16892,17 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
         }
         // The deadline bounds proof work only; a reused verdict costs no Git
         // subprocess, so it is taken even after the budget is spent.
-        if epic_measurement::expired() {
+        let first_proof = proven_now == 0 && !options.summary
+            && !options.budget.is_zero() && options.budget != std::time::Duration::MAX;
+        if epic_measurement::expired() && !first_proof {
             budget_exhausted = true;
             break;
         }
-        if resolved_anchor.is_none() && !options.summary {
+        if resolved_anchor.is_none() && recorded_anchor.is_some() && !options.summary {
+            if epic_measurement::expired() {
+                budget_exhausted = true;
+                break;
+            }
             resolved_anchor =
                 recorded_anchor.filter(|anchor| resolve_or_fetch_commit(repo_path, anchor).is_ok());
             if resolved_anchor.is_some() {
@@ -16896,11 +16916,23 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                     &git_snapshot,
                 ));
             }
+            if epic_measurement::expired() {
+                budget_exhausted = true;
+                break;
+            }
         }
-        if epic_measurement::expired() {
-            budget_exhausted = true;
-            break;
-        }
+        // cas-4151: killing the first proof at the soft call deadline causes
+        // every retry to discard the same child. Finish one unchecked child
+        // under a separate hard cap; all later children retain the call
+        // deadline. Fetch above stays on the original budget. Zero-budget
+        // requests and summary views never opt into this progress allowance.
+        let _child_scope = first_proof.then(|| {
+            #[cfg(test)]
+            let cap = epic_measurement::test_load::child_cap();
+            #[cfg(not(test))]
+            let cap = EPIC_CHILD_PROOF_CAP;
+            epic_measurement::Scope::new(cap)
+        });
         // The table's stranded count is a live Git measurement of the
         // current lane tip, never a historical count from the task's
         // recorded anchor. An anchor is delivery evidence below; it is
@@ -17288,6 +17320,7 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
             verdict_cache.record(key, t, &status);
         }
         statuses.push(status);
+        proven_now += 1;
     }
     verdict_cache.persist();
 
@@ -18092,7 +18125,7 @@ fn run_epic_close_merge_gate_with_budget(
         return EpicCloseGateOutcome::Incomplete(format!(
             "⚠️ EPIC CLOSE CHECK INCOMPLETE\n\n\
              Partial evaluation: checked {checked} of {total} child task(s) in the \
-             {budget:?} close-gate budget ({reused} verdict(s) reused from earlier \
+             {budget:?} soft close-gate budget ({reused} verdict(s) reused from earlier \
              attempts, {proven} proven now). The gate did not proceed and no close \
              mutation was attempted.\n\n\
              Child task(s) not checked:\n{unchecked}\n\n\
@@ -29752,6 +29785,9 @@ mod epic_status_gate_tests {
 
     #[test]
     fn epic_override_budget_bounds_reanchor_scan_cas_9069() {
+        let _cap = epic_measurement::test_load::Guard::new(
+            std::time::Duration::ZERO, std::time::Duration::from_millis(100),
+        );
         let dir = init_epic_repo(&[("squashed", 1)]);
         let p = dir.path();
         let anchor = epic_git_stdout(p, &["rev-parse", "factory/squashed"]);
@@ -29976,6 +30012,38 @@ mod epic_status_gate_tests {
         assert!(!reused.budget_exhausted);
     }
 
+    #[test]
+    fn epic_child_hard_cap_discards_unfinished_proof_cas_4151() {
+        let dir = init_epic_repo(&[]);
+        let p = dir.path();
+        let children = merged_epic_children(p, 1, 1);
+        let started = std::time::Instant::now();
+        {
+            let _load = epic_measurement::test_load::Guard::new(
+                std::time::Duration::from_millis(100),
+                std::time::Duration::from_millis(50),
+            );
+            let partial = collect_epic_branch_statuses_with_options(
+                &children, "main", p, full_view(std::time::Duration::from_millis(20)),
+            );
+            assert!(partial.budget_exhausted);
+            assert!(partial.statuses.is_empty(), "unfinished proof must stay unchecked");
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        let no_proof = collect_epic_branch_statuses_with_options(
+            &children, "main", p, full_view(std::time::Duration::ZERO),
+        );
+        assert_eq!(no_proof.reused_verdicts, 0, "partial verdict must never be cached");
+        assert!(no_proof.statuses.is_empty());
+        let retry = collect_epic_branch_statuses_with_options(
+            &children, "main", p, full_view(std::time::Duration::from_millis(20)),
+        );
+        assert_eq!(retry.statuses.len(), 1);
+        assert!(!retry.statuses[0].blocks_epic_close());
+        assert!(EPIC_CLOSE_GATE_BUDGET + EPIC_CHILD_PROOF_CAP < std::time::Duration::from_secs(55));
+        assert!(EPIC_STATUS_BUDGET < EPIC_CHILD_PROOF_CAP);
+    }
+
     /// cas-b412: v34 (cas-459b) had 141 children; every close retry restarted
     /// at child zero and stopped in the same place, so the shipped epic could
     /// never close. Verdicts proven by one attempt are reused by the next
@@ -29984,10 +30052,9 @@ mod epic_status_gate_tests {
     fn epic_close_gate_resumes_across_calls_for_150_children_cas_b412() {
         let dir = init_epic_repo(&[]);
         let p = dir.path();
-        // Keep each proof smaller than the artificial retry budget. A long
-        // per-child history can now be interrupted inside a proof instead of
-        // overrunning it; that behavior is covered by cas-9069's scan test.
-        // Distinct child IDs still require 150 separately cached verdicts.
+        // Every child deliberately costs more than the soft retry budget.
+        // Distinct child IDs require 150 separately cached, complete proofs;
+        // the first proof's hard cap prevents host load from starving retries.
         let delivered = merged_epic_children(p, 1, 1).pop().unwrap();
         let subtasks = (0..150).map(|index| {
             let mut child = delivered.clone();
@@ -29999,11 +30066,14 @@ mod epic_status_gate_tests {
 
         // A budget far below the full proof cost forces partial attempts,
         // the same shape as the 8 s budget against the real 141-child epic.
-        let budget = std::time::Duration::from_millis(300);
+        let budget = std::time::Duration::from_millis(20);
+        let _load = epic_measurement::test_load::Guard::new(
+            std::time::Duration::from_millis(30), EPIC_CHILD_PROOF_CAP,
+        );
         let mut last_checked = 0usize;
         let mut partial_attempts = 0;
         let mut completed = false;
-        for _ in 0..200 {
+        for _ in 0..150 {
             match run_epic_close_merge_gate_with_budget(&task, &req, "main", p, &subtasks, budget)
             {
                 EpicCloseGateOutcome::Incomplete(message) => {
@@ -30016,8 +30086,8 @@ mod epic_status_gate_tests {
                         .and_then(|number| number.parse().ok())
                         .expect("partial message names the checked count");
                     assert!(
-                        checked >= last_checked,
-                        "a retry must never lose proven progress: {checked} < {last_checked}"
+                        checked > last_checked,
+                        "a retry must add proven progress: {checked} <= {last_checked}"
                     );
                     // Every child checked by earlier attempts is closed and
                     // proven, so all of them are reused rather than re-proven.

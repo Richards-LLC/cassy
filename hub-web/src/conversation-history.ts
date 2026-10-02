@@ -160,6 +160,16 @@ export class ConversationHistory {
   hasPending(): boolean {
     return this.events.some(event => event.kind === "send" && (event.value.state === "sending" || event.value.state === "acknowledged"));
   }
+
+  /**
+   * A send that left this browser and has no reply yet (cas-5a8f). Unlike
+   * `hasPending`, a send still held here because the machine is unreachable
+   * does not count: the supervisor has not seen it, so it cannot be working
+   * on it.
+   */
+  awaitingReply(): boolean {
+    return this.events.some(event => event.kind === "send" && !event.value.held && (event.value.state === "sending" || event.value.state === "acknowledged"));
+  }
   /**
    * A new send comes after everything already in the thread, whatever the
    * clocks say (cas-ce17). Turns hydrated from the machine carry its clock;
@@ -547,4 +557,22 @@ export class ConversationHistory {
     this.observeStamp(stamped, now);
     this.reply(live, stamped, reply.session, undefined, now, "durable");
   }
+}
+
+/**
+ * Whether the thread may say the supervisor is "working" (cas-5a8f). Real
+ * pane output is independent evidence and always counts. A send awaiting its
+ * reply counts only while the machine is live and paired: during an outage or
+ * a revoked pairing the page cannot know, and a send held in this browser was
+ * never seen at all, so "working" beside "Waiting for the connection" or
+ * "Needs pairing" contradicted itself.
+ */
+export function supervisorWorking(
+  history: Pick<ConversationHistory, "awaitingReply">,
+  machine: { phase: string; authFailure?: unknown } | undefined,
+  recentPaneOutput: boolean,
+): boolean {
+  if (recentPaneOutput) return true;
+  const reachable = machine?.phase === "live" && !machine.authFailure;
+  return reachable && history.awaitingReply();
 }

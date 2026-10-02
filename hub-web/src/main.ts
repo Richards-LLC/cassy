@@ -4,7 +4,7 @@ import { retainPendingSessions, visibleCatalog } from "./worker-visibility";
 import "./styles.css";
 import { activityTime, ConversationList, filterConversationRows, groupConversationRows, type ConversationRow } from "./conversation-list";
 import { controlCommandCopy, sessionJumpCommandMarkup } from "./palette-commands";
-import { ConversationHistory } from "./conversation-history";
+import { ConversationHistory, supervisorWorking } from "./conversation-history";
 import { loadDismissedAsks, saveDismissedAsks, type DismissedAsksStorage } from "./dismissed-asks";
 import { ConversationView, emptyActivityText } from "./conversation-view";
 import { applySheetSemantics, findByFocusKey, focusKey, layerAboveSheet, sheetFocusables, sheetKeydown } from "./attention-sheet";
@@ -360,9 +360,14 @@ function mountConversation(key: string, mount: HTMLElement): void {
       machine: machines.get(selectedMachineId!)?.label,
       project: projectTitle(hubSession?.project_dir),
       header: false,
-      // The supervisor is executing while a send awaits its reply or the
-      // pane produced output in the last half minute.
-      working: () => history.hasPending() || [...paneLastActivity].some(([paneId, at]) => paneId.startsWith(`${threadKey}:`) && Date.now() - at < WORKING_WINDOW_MS),
+      // The supervisor is executing while a send it received awaits its
+      // reply on a reachable machine, or the pane produced output in the last
+      // half minute (cas-5a8f: never on a held send or an unreachable machine).
+      working: () => supervisorWorking(
+        history,
+        connectionStates.get(threadMachineId),
+        [...paneLastActivity].some(([paneId, at]) => paneId.startsWith(`${threadKey}:`) && Date.now() - at < WORKING_WINDOW_MS),
+      ),
       editMessage: (text, send) => {
         const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
         if (!composer || composer.dataset.threadKey !== threadKey) return;

@@ -11581,6 +11581,70 @@ fn enrich_merge_required_with_conflict_check(
     }
 }
 
+/// cas-baf7: committed build output that is regenerated from source, never
+/// merged line by line. `hub-web/dist/**` is the Commander bundle; a project
+/// may mark any other output `linguist-generated` in `.gitattributes`.
+fn regenerable_build_artifact(repo_path: &std::path::Path, path: &str) -> bool {
+    if path.starts_with("hub-web/dist/") {
+        return true;
+    }
+    std::process::Command::new("git")
+        .args(["check-attr", "linguist-generated", "--", path])
+        .current_dir(repo_path)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .is_some_and(|output| {
+            let line = String::from_utf8_lossy(&output.stdout);
+            matches!(line.trim().rsplit(": ").next(), Some("set" | "true"))
+        })
+}
+
+/// cas-baf7: when the only "dropped" paths are regenerable build artifacts,
+/// the integration rebuilt them from the merged source of several deliveries
+/// (the standard fix for bundle merge conflicts), so minified output can never
+/// match one branch verbatim. The delivery still has to carry source, and every
+/// source path it delivered was proven present (it is not in `dropped`).
+/// Returns the decision note, or `None` when the drop must stand.
+fn regenerated_artifact_drop_note(
+    repo_path: &std::path::Path,
+    anchor: &str,
+    dropped: &[String],
+) -> Option<String> {
+    if dropped.is_empty()
+        || !dropped
+            .iter()
+            .all(|path| regenerable_build_artifact(repo_path, path))
+    {
+        return None;
+    }
+    let base = if git_commit_parent_count(repo_path, anchor) >= 2 {
+        format!("{anchor}^2")
+    } else {
+        format!("{anchor}^1")
+    };
+    let output = std::process::Command::new("git")
+        .args(["diff", "--name-only", "--no-renames", &base, anchor, "--"])
+        .current_dir(repo_path)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    let delivered = String::from_utf8_lossy(&output.stdout);
+    let source: Vec<&str> = delivered
+        .lines()
+        .map(str::trim)
+        .filter(|path| !path.is_empty() && !regenerable_build_artifact(repo_path, path))
+        .collect();
+    if source.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "only regenerated build artifact path(s) {} differ from delivery `{anchor}`; the target rebuilt them from merged source, and the delivery's source path(s) {} are present on the target (cas-baf7)",
+        dropped.join(", "),
+        source.join(", "),
+    ))
+}
+
 /// cas-3f8c: name the delivered lines the target lacks, so a supervisor can
 /// confirm a DELIVERY CONTENT DROPPED in seconds instead of diffing trees.
 /// The delivery's own effect is measured against its first parent, or
@@ -11907,6 +11971,11 @@ fn anchored_delivery_content_gate(
             None
         }
         DeliveryContentPresence::Dropped { paths } => {
+            if let Some(note) = regenerated_artifact_drop_note(repo_path, anchor, &paths) {
+                return Some(MergeStateGateOutcome::ProceedWithNote(format!(
+                    "DECISION: delivery content accepted for task {task_id}: {note}."
+                )));
+            }
             match validated_delivery_drop_review(
                 repo_path,
                 anchor,
@@ -15641,6 +15710,12 @@ pub(crate) fn validate_task_commit_receipt(
         DeliveryContentPresence::Present { .. } | DeliveryContentPresence::Superseded { .. } => {
             None
         }
+        DeliveryContentPresence::Dropped { paths }
+            if regenerated_artifact_drop_note(repo_path, &full_receipt, &paths).is_some() =>
+        {
+            regenerated_artifact_drop_note(repo_path, &full_receipt, &paths)
+                .map(|note| format!(" Regenerated build artifacts: {note}."))
+        }
         DeliveryContentPresence::Dropped { paths } => {
             let review = validated_delivery_drop_review(
                 repo_path,
@@ -15655,7 +15730,7 @@ pub(crate) fn validate_task_commit_receipt(
                     paths.join(", ")
                 ));
             }
-            review
+            review.map(|review| format!(" Explicit reviewed-drop authorization: {review}."))
         }
         DeliveryContentPresence::Unknown { reason } => {
             return Err(format!(
@@ -15663,9 +15738,7 @@ pub(crate) fn validate_task_commit_receipt(
             ));
         }
     };
-    let drop_review = drop_review
-        .map(|review| format!(" Explicit reviewed-drop authorization: {review}."))
-        .unwrap_or_default();
+    let drop_review = drop_review.unwrap_or_default();
     Ok(format!(
         "decision: accepted commit_receipt `{receipt}` resolved to full commit `{full_receipt}` \
          as task-attributed merge evidence; \
@@ -17239,11 +17312,20 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                     ));
                 }
                 DeliveryContentPresence::Dropped { paths } => {
-                    // Keep the live branch count honest: history can be
-                    // fully integrated while content proof independently
-                    // rejects the delivery. `blocks_epic_close()` carries
-                    // the fail-closed dropped-content verdict.
-                    dropped_paths = paths;
+                    if let Some(note) = regenerated_artifact_drop_note(repo_path, anchor, &paths) {
+                        // cas-baf7: rebuilt bundle output, source present.
+                        unmerged_count = 0;
+                        content_evolution_note = Some(format!(
+                            "decision: recorded factory_branch_anchor `{anchor}` for child task `{}`: {note}.",
+                            t.id,
+                        ));
+                    } else {
+                        // Keep the live branch count honest: history can be
+                        // fully integrated while content proof independently
+                        // rejects the delivery. `blocks_epic_close()` carries
+                        // the fail-closed dropped-content verdict.
+                        dropped_paths = paths;
+                    }
                 }
                 DeliveryContentPresence::Unknown { reason } => {
                     // Unknown content evidence is fail-closed through
@@ -27190,6 +27272,110 @@ mod merge_state_gate_tests {
             }
         }
         assert!(failures.is_empty(), "historical delivery failures:\n{}", failures.join("\n"));
+    }
+
+    /// cas-baf7 (cas-06e9 shape): two Commander tasks each commit source plus
+    /// a rebuilt `hub-web/dist` bundle. The second integration resolves the
+    /// bundle conflict by rebuilding dist from the merged source, so neither
+    /// branch's minified line survives verbatim. Both deliveries close on their
+    /// present source. A delivery whose source the integration dropped, or one
+    /// that delivered only bundle output, is still refused.
+    #[test]
+    fn rebuilt_dist_bundle_does_not_drop_source_deliveries_cas_baf7() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::create_dir_all(p.join("hub-web/src")).unwrap();
+        std::fs::create_dir_all(p.join("hub-web/dist")).unwrap();
+        std::fs::write(p.join("hub-web/src/a.ts"), "export const a = 0;\n").unwrap();
+        std::fs::write(p.join("hub-web/src/b.ts"), "export const b = 0;\n").unwrap();
+        std::fs::write(p.join("hub-web/dist/app.js"), "var bundle=\"a0b0\";\n").unwrap();
+        git(p, &["add", "hub-web"]);
+        git(p, &["commit", "-q", "-m", "build: seed Commander"]);
+        let delivery = |branch: &str, source: &str, line: &str, bundle: &str| {
+            git(p, &["checkout", "-q", "-B", branch, "main"]);
+            std::fs::write(p.join(source), line).unwrap();
+            std::fs::write(p.join("hub-web/dist/app.js"), bundle).unwrap();
+            git(p, &["add", "hub-web"]);
+            git(p, &["commit", "-q", "-m", &format!("feat: {source} with rebuilt bundle")]);
+            rev_parse_local(p, "HEAD")
+        };
+        let worker = delivery(
+            "factory/worker",
+            "hub-web/src/a.ts",
+            "export const a = 1;\n",
+            "var bundle=\"a1b0\";\n",
+        );
+        let other = delivery(
+            "factory/other",
+            "hub-web/src/b.ts",
+            "export const b = 1;\n",
+            "var bundle=\"a0b1\";\n",
+        );
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/other", "-m", "merge other"]);
+        // The bundle conflicts; the supervisor rebuilds dist from merged source.
+        let _ = git_command(p, &["merge", "--no-ff", "--no-commit", "factory/worker"]).status();
+        std::fs::write(p.join("hub-web/dist/app.js"), "var bundle=\"a1b1\";\n").unwrap();
+        git(p, &["add", "hub-web/dist/app.js"]);
+        git(p, &["commit", "-q", "--no-edit", "-m", "merge worker; rebuild Commander bundle"]);
+
+        for (assignee, anchor) in [("worker", &worker), ("other", &other)] {
+            let mut task = worker_task(assignee);
+            task.status = TaskStatus::AwaitingMerge;
+            task.deliverables.factory_branch_anchor = Some(anchor.clone());
+            let outcome = run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p);
+            match outcome {
+                MergeStateGateOutcome::ProceedWithNote(note) => assert!(
+                    note.contains("regenerated build artifact path(s) hub-web/dist/app.js")
+                        && note.contains("hub-web/src/")
+                        || assignee == "other",
+                    "{note}"
+                ),
+                // The first integration's bundle was evolved by a later
+                // first-parent commit, which the gate already accepts.
+                MergeStateGateOutcome::Proceed if assignee == "other" => {}
+                other => panic!("{assignee}: a rebuilt bundle must not drop source delivery: {other:?}"),
+            }
+        }
+
+        // The integration also discarded this delivery's source: still dropped.
+        let lost = delivery(
+            "factory/lost",
+            "hub-web/src/a.ts",
+            "export const a = 2;\n",
+            "var bundle=\"a2b1\";\n",
+        );
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "-s", "ours", "factory/lost", "-m", "merge lost (dropped)"]);
+        let mut task = worker_task("lost");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(lost);
+        match run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p) {
+            MergeStateGateOutcome::Reject(message) => {
+                assert!(message.contains("DELIVERY CONTENT DROPPED"), "{message}");
+                assert!(message.contains("hub-web/src/a.ts"), "{message}");
+            }
+            other => panic!("dropped source must still be refused: {other:?}"),
+        }
+
+        // A bundle-only delivery has no source to prove: still dropped.
+        git(p, &["checkout", "-q", "-B", "factory/bundle", "main"]);
+        std::fs::write(p.join("hub-web/dist/app.js"), "var bundle=\"hand-edited\";\n").unwrap();
+        git(p, &["add", "hub-web/dist/app.js"]);
+        git(p, &["commit", "-q", "-m", "build: hand-edited bundle"]);
+        let bundle = rev_parse_local(p, "HEAD");
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "-s", "ours", "factory/bundle", "-m", "merge bundle (dropped)"]);
+        let mut task = worker_task("bundle");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(bundle);
+        match run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p) {
+            MergeStateGateOutcome::Reject(message) => {
+                assert!(message.contains("DELIVERY CONTENT DROPPED"), "{message}")
+            }
+            other => panic!("a bundle-only drop has no source proof: {other:?}"),
+        }
     }
 
     /// cas-3f8c: a real drop still rejects, and the refusal now names the

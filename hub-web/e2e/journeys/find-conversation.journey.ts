@@ -73,7 +73,8 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     const before = await times();
     expect(before.some((entry) => entry.includes("Catalog checked")), before.join(", ")).toBe(false);
     // Across a catalog poll nothing turns "now" and nothing runs backwards.
-    await page.waitForTimeout(5_500);
+    // the catalog refetch is driven by a machine event (cas-9772), not waited out.
+    await Promise.all([hub.announceCatalog("atlas"), hub.announceCatalog("studio"), hub.announceCatalog("forge")]);
     expect(await times()).toEqual(before);
   });
 

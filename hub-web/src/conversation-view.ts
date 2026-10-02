@@ -29,7 +29,13 @@ import {
 
 /** What a kind-specific renderer receives. */
 /** A message's place in a run of unconfirmed messages shown as one notice (cas-b00c). */
-type UnconfirmedRun = { count: number; last: boolean; expanded: boolean };
+/**
+ * `key`: the run's first message, and `members` every message in it
+ * (cas-ca7f): Review opens this run only, and the run stays open while any
+ * message the operator opened it on is still in it (dismissing one must not
+ * close the rest).
+ */
+type UnconfirmedRun = { count: number; last: boolean; expanded: boolean; key: string; members: string[] };
 
 export interface TurnRenderContext {
   readonly document: Document;
@@ -363,8 +369,13 @@ export class ConversationView {
   private nodes = new Map<string, HTMLElement>();
   /** Coalesced status lines the operator opened with "Show full update"; survives repaints. */
   private expanded = new Set<string>();
-  /** cas-b00c: runs of several unconfirmed messages are shown one by one (Review) instead of as one notice. */
-  private reviewUnconfirmed = false;
+  /**
+   * cas-b00c: messages in the unconfirmed runs the operator opened with
+   * Review (cas-ca7f): a run is open while any of its messages is here, so a
+   * later, separate run starts as one notice instead of opening already
+   * expanded, and dismissing one message keeps the rest of its run open.
+   */
+  private readonly reviewedRuns = new Set<string>();
   private following = true;
   /**
    * Where the reader was, by turn, while not following the tail (cas-2093).
@@ -775,6 +786,11 @@ export class ConversationView {
     const signature = `${count}:${unconfirmed}`;
     if (this.unsent.dataset.count === signature) return;
     this.unsent.dataset.count = signature;
+    // cas-ca7f (cas-b00c QA F02): the chip's tone is decided, not inherited.
+    // Only messages that may well have arrived (not confirmed) take the
+    // caution tone the thread gives them; any message known not to be sent
+    // keeps the critical tone, because that one certainly needs the operator.
+    this.unsent.dataset.tone = unconfirmed === count ? "caution" : "critical";
     const noun = unconfirmed === 0 ? (count === 1 ? "1 unsent message" : `${count} unsent messages`)
       : unconfirmed === count ? (count === 1 ? "1 message not confirmed" : `${count} messages not confirmed`)
       : `${count} messages not sent or not confirmed`;
@@ -824,7 +840,7 @@ export class ConversationView {
     // An unconfirmed send settles once the supervisor speaks after it (journey F10).
     const settled = turn.event.kind === "send" && turn.event.value.state === "unconfirmed" ? this.history.repliedSince(turn.event.value) : undefined;
     // cas-b00c: a run of unconfirmed messages repaints when Review opens or closes it.
-    const review = settled === false ? this.reviewUnconfirmed : undefined;
+    const review = settled === false ? [...this.reviewedRuns].join(",") : undefined;
     return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting, pinned, retired, delivered, held, holder, settled, live, review]);
   }
 
@@ -1071,7 +1087,9 @@ export class ConversationView {
       while (end < actionable.length && actionable[end]) end += 1;
       if (end - start >= 2) {
         for (let index = start; index < end; index += 1) {
-          runs.set(index, { count: end - start, last: index === end - 1, expanded: this.reviewUnconfirmed });
+          const members = group.turns.slice(start, end).map((turn) => turn.key);
+          const expanded = members.some((member) => this.reviewedRuns.has(member));
+          runs.set(index, { count: end - start, last: index === end - 1, expanded, key: members[0]!, members });
         }
       }
       start = Math.max(end, start + 1);
@@ -1079,13 +1097,14 @@ export class ConversationView {
     return runs;
   }
 
-  /** Open (or close) the unconfirmed runs, and keep the keyboard user's place. */
-  private toggleUnconfirmedReview(open: boolean): void {
-    this.reviewUnconfirmed = open;
+  /** Open (or close) one unconfirmed run, and keep the keyboard user's place. */
+  private toggleUnconfirmedReview(run: UnconfirmedRun, open: boolean): void {
+    for (const member of run.members) if (open) this.reviewedRuns.add(member); else this.reviewedRuns.delete(member);
     this.update();
-    const turns = [...this.msgs.querySelectorAll<HTMLElement>('.conversation-turn[data-state="unconfirmed"]:not([data-settled="true"])')];
-    if (open) { if (turns[0]) landFocusIn(turns[0], "conversation-retry"); return; }
-    this.msgs.querySelector<HTMLElement>(".conversation-review")?.focus({ preventScroll: true });
+    const first = [...this.msgs.querySelectorAll<HTMLElement>(".conversation-turn")].find((node) => node.dataset.key === run.key);
+    if (open) { if (first) landFocusIn(first, "conversation-retry"); return; }
+    const notice = [...this.msgs.querySelectorAll<HTMLElement>(".conversation-review")].find((button) => button.dataset.run === run.key) ?? this.msgs.querySelector<HTMLElement>(".conversation-review");
+    notice?.focus({ preventScroll: true });
   }
 
   private renderSend(document: Document, turn: ThreadTurn, send: ConversationSend, run?: UnconfirmedRun): HTMLElement {
@@ -1137,7 +1156,8 @@ export class ConversationView {
         const review = document.createElement("button"); review.type = "button"; review.className = "conversation-review"; review.textContent = "Review";
         review.setAttribute("aria-label", `Review ${run.count} messages not confirmed`);
         review.setAttribute("aria-expanded", "false");
-        review.onclick = () => this.toggleUnconfirmedReview(true);
+        review.dataset.run = run.key;
+        review.onclick = () => this.toggleUnconfirmedReview(run, true);
         actions.append(review);
         bubble.append(state, actions);
       }
@@ -1195,7 +1215,7 @@ export class ConversationView {
         const close = document.createElement("button"); close.type = "button"; close.className = "conversation-review-less conversation-send-again"; close.textContent = "Show less";
         close.setAttribute("aria-label", `Show ${run.count} messages not confirmed as one notice`);
         close.setAttribute("aria-expanded", "true");
-        close.onclick = () => this.toggleUnconfirmedReview(false);
+        close.onclick = () => this.toggleUnconfirmedReview(run, false);
         less.append(close);
         bubble.append(less);
       }

@@ -150,6 +150,7 @@ inherits the chosen page scheme; code scrolls locally without clipping prose.
 - `--color-focus` supplies the sole focus outline. `--state-ok`, `--state-warn` and `--state-crit` inherit `good`, `warning` and `danger`; info text is muted evidence.
 - `--state-idle` and `--color-series-neutral` inherit `color.series-neutral`; idle text uses `--text-mid`, while dots use the neutral mark value.
 - `--tint-warn` and `--tint-crit` inherit the corresponding house tints for actionable warnings and critical events. `.danger` actions remain text on a normal control surface.
+- Message delivery states (cas-ca7f): a message known **not sent** is critical (`--crit-bg` outline, glyph and label); a message only **not confirmed** — it may well have arrived — is caution (`--warn-text`), in the thread and on the dismissed-messages chip alike. The chip turns critical as soon as it counts any message known not sent; a settled record (the supervisor replied since) drops to `--ink-mid`.
 - `--bg-terminal` stays #0C0E13 in both schemes. The generated dark-well scope supplies `color.dark.*` and `color.series-neutral.dark` to transcript, terminal mount, search/dialog inputs, pairing code and log/payload `pre` elements.
 - Dark-well descendants inherit matching dark control surfaces, lines and foregrounds; the generated scope repeats the derived surface expressions so they resolve against its own dark roles.
 - `--overlay-backdrop` derives from page `bg`; `--overlay-shadow-color` is extracted from `elevation.overlay`. Neither borrows an ANSI colour.

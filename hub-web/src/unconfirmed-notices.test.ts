@@ -55,6 +55,35 @@ describe("several unconfirmed messages (cas-b00c, journey F19)", () => {
     expect(document.activeElement).toBe(view.element.querySelector(".conversation-review"));
   });
 
+  it("opens only the run Review was pressed on: a later, separate run starts as one notice (cas-ca7f)", () => {
+    const history = new ConversationHistory();
+    unconfirmed(history, "a", "First", at(9, 0));
+    unconfirmed(history, "b", "Second", at(9, 0) + 20_000);
+    unconfirmed(history, "f", "Second and a half", at(9, 0) + 40_000);
+    const { view, bubbles } = mount(history);
+    view.element.querySelector<HTMLButtonElement>(".conversation-review")!.click();
+    expect(bubbles().map((bubble) => bubble.dataset.grouped)).toEqual([undefined, undefined, undefined]);
+    // A delivered message ends that run; two more unconfirmed ones start another.
+    history.submit("d", "sup", "Delivered", at(9, 2));
+    history.acknowledge({ client_ref: "d", notification_id: 5, target: "sup", stamped: true });
+    unconfirmed(history, "c", "Third", at(9, 3));
+    unconfirmed(history, "e", "Fourth", at(9, 4));
+    view.update();
+    expect(bubbles().map((bubble) => bubble.dataset.grouped), "the first run stays open, the new one is one notice").toEqual([undefined, undefined, undefined, "member", "last"]);
+    const reviews = view.element.querySelectorAll<HTMLButtonElement>(".conversation-review");
+    expect(reviews).toHaveLength(1);
+    expect(reviews[0]!.getAttribute("aria-expanded")).toBe("false");
+    // Dismissing one message of the open run keeps the rest of it open.
+    view.element.querySelector<HTMLButtonElement>(".conversation-dismiss")!.click();
+    expect(bubbles().map((bubble) => bubble.dataset.grouped)).toEqual([undefined, undefined, "member", "last"]);
+    // Closing the first run leaves the second alone, and focus lands on the first run's notice.
+    view.element.querySelector<HTMLButtonElement>(".conversation-review-less")!.click();
+    expect(bubbles().map((bubble) => bubble.dataset.grouped)).toEqual(["member", "last", "member", "last"]);
+    const notices = view.element.querySelectorAll<HTMLButtonElement>(".conversation-review");
+    expect([...notices].map((button) => button.getAttribute("aria-expanded"))).toEqual(["false", "false"]);
+    expect(document.activeElement, "focus returns to the closed run's own notice").toBe(notices[0]);
+  });
+
   it("groups only consecutive ones: a single unconfirmed message keeps its own card", () => {
     const history = new ConversationHistory();
     unconfirmed(history, "a", "Alone", at(9, 0));
@@ -73,11 +102,14 @@ describe("several unconfirmed messages (cas-b00c, journey F19)", () => {
     const { view } = mount(history);
     view.element.querySelector<HTMLButtonElement>(".conversation-dismiss")!.click();
     expect(view.unsent.getAttribute("aria-label")).toBe("Show 1 message not confirmed");
+    // cas-ca7f: only not-confirmed messages take the caution tone; one known not sent is critical.
+    expect(view.unsent.dataset.tone).toBe("caution");
     history.submit("r", "sup", "Refused", at(9, 1));
     history.reject("r", "forbidden");
     view.update();
     view.element.querySelector<HTMLButtonElement>('.bub[data-state="error"] .conversation-dismiss')!.click();
     expect(view.unsent.getAttribute("aria-label")).toBe("Show 2 messages not sent or not confirmed");
+    expect(view.unsent.dataset.tone).toBe("critical");
   });
 
   it("the list preview says a message is not confirmed until the supervisor replies after it", () => {

@@ -773,6 +773,44 @@ test("HUB-J12 network switch: three unconfirmed messages read as one notice (cas
     await expect(review).toBeFocused();
     // Nothing was sent twice.
     expect(hub.sends).toHaveLength(3);
+    // cas-ca7f (cas-b00c QA F01): Review opens one run. With the first run
+    // left open, a delivered message and then a new run of two: the new run is
+    // one collapsed notice of its own.
+    await review.click();
+    await expect(log.getByRole("button", { name: "Retry sending" })).toHaveCount(3);
+    const delivered = hub.nextSend();
+    await sendNow(page, "Status, please");
+    expect((await delivered).text).toBe("Status, please");
+    hub.deliverLatest(PELICAN);
+    for (const text of ["Gate still red?", "Hold the train"]) {
+      const next = hub.nextSend();
+      await sendNow(page, text);
+      expect((await next).text).toBe(text);
+    }
+    await clock.advance(15_000);
+    await expect(log.getByRole("button", { name: "Review 2 messages not confirmed", exact: true })).toHaveAttribute("aria-expanded", "false");
+    await expect(log.getByRole("button", { name: "Retry sending" }), "only the first run's three are open").toHaveCount(3);
+    // The dismissed-messages chip takes the caution tone for messages only not confirmed.
+    for (let index = 0; index < 3; index += 1) await log.getByRole("button", { name: "Dismiss this notice", exact: true }).first().click();
+    await expect(page.locator(".conversation-unsent")).toHaveAttribute("data-tone", "caution");
+  });
+});
+
+// cas-ca7f (cas-7b31 QA F01): once control is taken back after a machine
+// drop, no "Control released" toast stays on screen or in the accessibility
+// tree, where a screen reader would still read it.
+test("HUB-J12 network switch: control taken back retires the 'Control released' toast (cas-ca7f)", journeyPart, async ({ page, journey }) => {
+  await journey.stage("Control taken back retires the 'Control released' toast", async () => {
+    const { hub, clock } = await connected(page);
+    await page.locator("#conversation-terminal").click();
+    await expect(page.locator(".mode-badge")).toHaveText("CONTROL");
+    await hub.down("atlas", { sockets: "close" });
+    await expect(page.locator("#toast")).toHaveText("Control released — the hub connection dropped");
+    await hub.up("atlas");
+    await clock.advance(10_000);
+    await expect(page.locator(".mode-badge")).toHaveText("CONTROL");
+    await expect(page.locator("#toast")).toHaveText("Control is back");
+    expect(await page.locator("body").ariaSnapshot()).not.toContain("Control released");
   });
 });
 

@@ -29993,7 +29993,7 @@ mod epic_status_gate_tests {
         }).collect::<Vec<_>>();
         let _load = epic_measurement::test_load::Guard::new(
             std::time::Duration::from_millis(150),
-            std::time::Duration::from_secs(2),
+            EPIC_CHILD_PROOF_CAP,
         );
         for expected in 1..=children.len() {
             let started = std::time::Instant::now();
@@ -30003,7 +30003,8 @@ mod epic_status_gate_tests {
             assert_eq!(result.statuses.len(), expected, "each call must finish one expensive child");
             assert_eq!(result.reused_verdicts, expected - 1);
             assert!(result.statuses.iter().all(|row| !row.blocks_epic_close()));
-            assert!(started.elapsed() < std::time::Duration::from_secs(3));
+            assert!(started.elapsed() < EPIC_CLOSE_GATE_BUDGET + EPIC_CHILD_PROOF_CAP
+                + std::time::Duration::from_secs(2));
         }
         let reused = collect_epic_branch_statuses_with_options(
             &children, "main", p, full_view(std::time::Duration::ZERO),
@@ -30073,9 +30074,15 @@ mod epic_status_gate_tests {
         let mut last_checked = 0usize;
         let mut partial_attempts = 0;
         let mut completed = false;
+        let mut max_call = std::time::Duration::ZERO;
         for _ in 0..150 {
-            match run_epic_close_merge_gate_with_budget(&task, &req, "main", p, &subtasks, budget)
-            {
+            let started = std::time::Instant::now();
+            let outcome = run_epic_close_merge_gate_with_budget(&task, &req, "main", p, &subtasks, budget);
+            let elapsed = started.elapsed();
+            max_call = max_call.max(elapsed);
+            assert!(elapsed < EPIC_CLOSE_GATE_BUDGET + EPIC_CHILD_PROOF_CAP
+                + std::time::Duration::from_secs(2), "single call exceeded hard bound: {elapsed:?}");
+            match outcome {
                 EpicCloseGateOutcome::Incomplete(message) => {
                     assert!(message.contains("EPIC CLOSE CHECK INCOMPLETE"), "{message}");
                     assert!(message.contains("The check is resumable"), "{message}");
@@ -30112,6 +30119,7 @@ mod epic_status_gate_tests {
             "150 merged children must close within bounded retries (stopped at {last_checked})"
         );
         assert!(partial_attempts >= 1, "the budget must force at least one partial attempt");
+        eprintln!("cas-4151 injected child delay=30ms > soft budget=20ms; proved 150 children; partial calls={partial_attempts}; max call={max_call:?}");
 
         // Every verdict is now stored: even a zero budget completes, and the
         // reused verdicts are identical to a fresh unbounded proof.

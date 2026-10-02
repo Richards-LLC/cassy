@@ -7,17 +7,25 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
-### Pending — Jev MVP for 3.45.0
+### Added — Jev decision support
 
-- **DRAFT PENDING — cas-1799:** authenticated cloud Jev proxy with the upstream
-  key kept on the server. Replace with the delivered route, deployment and
-  live smoke-test evidence; the route is awaiting merge.
-- **DRAFT PENDING — cas-7555:** `cas jev ask` / `batch`, the `jev` MCP tool,
-  advisory unavailable results and a decision log. Confirm final commands,
-  configuration, transport behavior and tests from the delivered client.
-- **DRAFT PENDING — cas-63fa:** the builtin `cas-jev` skill and triage recipe.
-  Confirm shipped harness catalogs, final question set and confidence policy
-  after the client and evaluation land.
+- Jev is available through the live Cassy cloud proxy using Cassy-login
+  authentication. The upstream key stays on the server; team/user rate limits
+  and request-size caps bound calls. Live checks verified unauthorized requests
+  return 401 and authenticated requests return the pinned model and request id.
+- `cas jev ask` / `batch` and the `jev` MCP tool share one client with typed
+  answers, probabilities and confidence. Advisory callers receive an unavailable
+  result when evaluation cannot run; bounded retries honor rate-limit delays.
+  The local decision log records answers, request ids and a state hash, without
+  recording state content or credentials.
+- `cas jev files` and the MCP `files` action ask Jev about selected project files
+  and return answers without returning file contents. Selection respects ignore
+  rules and refuses secret paths, outside-project paths and symlinks before
+  reads; file/byte caps and explicit skipped reasons bound each batch.
+- The builtin `cas-jev` skill ships question-writing rules, confidence routing
+  and the evaluated triage question set across supported integrations. Triage
+  suggestions always require independent review, including at high confidence;
+  Jev alone never authorizes destructive actions.
 
 ### Added — Jev evaluation
 
@@ -31,6 +39,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   question set and retrieval failures. Its recommendation is human-reviewed
   suggestions; this result does not establish an automatic-action threshold
   or a general benefit from wording tuning.
+
+- A reproducible 208-case Bash/Write risk study compares Jev, the existing hook
+  and a composite policy across two runs. At the prespecified default on the
+  158-case held-out subset, the composite detects 60/60 destructive cases versus
+  16/60 for the hook alone, while passing 71/78 trusted safe cases. The labels
+  are study-authored and sparse real-command coverage limits generalization.
+  This is shadow-only research: no Jev gate or runtime hook behavior changed.
+
+### Pending — credential-write protection
+
+- **DRAFT PENDING — cas-5c83:** Bash writes to `.env` and credential files are
+  blocked like direct writes. This fix remains in progress; replace this line
+  with delivered behavior and proof before publishing the release.
 
 ### Fixed — proposed 3.45.0 scope
 
@@ -72,7 +93,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   to one shared deadline. Unchecked children stay unchecked and appear in the
   decision audit; a supervisor override still cannot waive a measured blocker
   (PR #1092).
-
+- Self-hosted release and Linux prebuild jobs serialize shared Rust toolchain
+  setup. Existing stable installations are reused rather than auto-updated by
+  concurrent jobs; incomplete installations fail with an all-slots-idle repair
+  instruction. Hosted toolchain setup remains unchanged.
 - Release-gate scripts work on macOS with portable timestamp parsing, native
   Bash installer handling and exact-tree journey validation. Linux-only
   behavior fixtures explicitly skip on Darwin; Linux runner implementations

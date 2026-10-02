@@ -23704,6 +23704,62 @@ mod merge_state_gate_tests {
     }
 
     #[test]
+    fn missing_lane_requires_integrated_receipt_cas_3067() {
+        let (dir, _bare) = handoff_repo();
+        let p = dir.path();
+        let receipt = head_sha(p);
+        let task = worker_task("worker");
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["branch", "-D", "factory/worker"]);
+        let window = TaskCommitReceiptWindow {
+            supervisor_override_reason: None,
+            not_before: chrono::Utc::now() - chrono::Duration::hours(1),
+            basis: "task work cycle",
+            task_floor: chrono::Utc::now() - chrono::Duration::hours(1),
+            identity: TaskCommitIdentity {
+                task_id: Some(task.id.clone()),
+                known_commits: vec![receipt.clone()],
+            },
+        };
+        let outcome = || {
+            run_factory_branch_merge_gate_with_attribution(
+                &task,
+                &base_req(&task.id),
+                "main",
+                p,
+                TaskCommitAttribution {
+                    receipt: Some(&receipt),
+                    window: Some(&window),
+                },
+            )
+        };
+        assert!(
+            matches!(outcome(), MergeStateGateOutcome::Unresolved(_)),
+            "unmerged receipt cannot replace missing branch evidence"
+        );
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "-m",
+                "integrated receipt",
+                &receipt,
+            ],
+        );
+        git(p, &["push", "-q", "origin", "main"]);
+        match outcome() {
+            MergeStateGateOutcome::ProceedWithNote(note) => {
+                assert!(
+                    note.contains(&receipt) && note.contains("missing locally and on origin"),
+                    "{note}"
+                );
+            }
+            other => panic!("validated integrated receipt survives lane deletion: {other:?}"),
+        }
+    }
+    #[test]
     fn pruned_local_lane_uses_origin_evidence_cas_3067() {
         let (dir, _bare) = handoff_repo();
         let p = dir.path();
@@ -27961,7 +28017,7 @@ mod merge_state_gate_tests {
         let req = base_req(&task.id);
         let out = run_factory_branch_merge_gate(&task, &req, "main", p);
         assert!(
-            matches!(out, MergeStateGateOutcome::Reject(_)),
+            matches!(out, MergeStateGateOutcome::Unresolved(_)),
             "missing live factory ref must not authorize close via live-ref \
              fallback (unknown Git state ≠ KnownZero), got {out:?}"
         );

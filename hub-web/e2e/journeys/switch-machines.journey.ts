@@ -393,6 +393,19 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await page.reload();
     await expect(list.getByRole("button", { name: /orion/ })).toBeVisible();
     expect([await colour(/cas-src/), await colour(/gabber-studio/)]).toEqual([atlas, studio]);
+    // cas-7752: the draft started on the Linux machine survived the pair link
+    // opened in this tab and the reload: it is there when I return to it...
+    await list.getByRole("button", { name: /cas-src/ }).click();
+    await expect(composer).toHaveValue("Draft: ask about the flaky pairing test");
+    // ...and once it is sent, it does not come back after another reload.
+    const sent = hub.nextSend();
+    await page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true }).click();
+    expect(await sent).toMatchObject({ machine: "atlas", target: PELICAN, text: "Draft: ask about the flaky pairing test" });
+    await expect(composer).toHaveValue("");
+    await page.reload();
+    await list.getByRole("button", { name: /cas-src/ }).click();
+    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(composer).toHaveValue("");
   });
 
   await journey.stage("Know each session and machine by name in Terminal view", async () => {

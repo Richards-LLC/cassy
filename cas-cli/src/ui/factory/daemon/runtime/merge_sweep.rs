@@ -1793,9 +1793,11 @@ mod tests {
     fn full_cassy_sweep_uses_assembly_proof_but_filtered_and_configured_runs_do_not() {
         let temp = tempfile::tempdir().unwrap();
         fs::create_dir(temp.path().join("scripts")).unwrap();
+        // Match the real helper's root.resolve(): macOS /var and /private/var
+        // may name the same worktree even though Python's cwd uses the latter.
         fs::write(
             temp.path().join("scripts/assembly-proof.py"),
-            "import pathlib, sys\nassert sys.argv[1] == 'prove'\nassert pathlib.Path(sys.argv[2]) == pathlib.Path.cwd()\npathlib.Path('assembly-called').write_text('both contexts')\n",
+            "import pathlib, sys\nassert sys.argv[1] == 'prove'\nassert pathlib.Path(sys.argv[2]).resolve() == pathlib.Path.cwd().resolve()\npathlib.Path('assembly-called').write_text('both contexts')\n",
         )
         .unwrap();
         let log = File::create(temp.path().join("runner.log")).unwrap();

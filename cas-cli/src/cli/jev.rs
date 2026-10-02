@@ -1,5 +1,5 @@
 //! JSON-only CLI parity for the Jev MCP and library client.
-use crate::jev::JevClient;
+use crate::jev::{FilesOptions, JevClient};
 use anyhow::Context;
 use clap::{Args, Subcommand};
 use serde_json::Value;
@@ -15,6 +15,8 @@ pub enum JevCommands {
     Ask(JevAskArgs),
     /// Evaluate 1–50 JSONL records and print an ordered JSON response array.
     Batch(JevBatchArgs),
+    /// Ask about project files without printing their contents.
+    Files(JevFilesArgs),
 }
 #[derive(Debug, Clone, Args)]
 pub struct JevAskArgs {
@@ -42,6 +44,25 @@ pub struct JevBatchArgs {
     #[arg(long)]
     pub advisory: bool,
 }
+#[derive(Debug, Clone, Args)]
+pub struct JevFilesArgs {
+    /// Project-relative files or directories (repeatable).
+    #[arg(long = "path", alias = "paths")]
+    pub paths: Vec<String>,
+    /// Project-relative glob (repeatable); quote it to prevent shell expansion.
+    #[arg(long = "glob")]
+    pub globs: Vec<String>,
+    #[arg(long)]
+    pub recursive: bool,
+    #[arg(long, default_value_t = 50)]
+    pub max_files: usize,
+    #[arg(long, default_value_t = crate::jev::DEFAULT_FILE_BYTES)]
+    pub max_bytes: usize,
+    #[arg(long)]
+    pub questions: String,
+    #[arg(long)]
+    pub advisory: bool,
+}
 pub fn execute(command: &JevCommands, cas_root: &Path) -> anyhow::Result<()> {
     let client = JevClient::from_project(cas_root)?;
     let (value, out) = match command {
@@ -54,6 +75,26 @@ pub fn execute(command: &JevCommands, cas_root: &Path) -> anyhow::Result<()> {
                     &state,
                     &questions,
                     "cli:jev.ask",
+                    args.advisory,
+                )?)?,
+                None,
+            )
+        }
+        JevCommands::Files(args) => {
+            let questions: Value = serde_json::from_str(&read_argument(&args.questions, false)?)
+                .context("Invalid Jev questions JSON")?;
+            (
+                serde_json::to_value(client.files(
+                    cas_root.parent().context("Missing project root")?,
+                    &FilesOptions {
+                        paths: args.paths.clone(),
+                        globs: args.globs.clone(),
+                        recursive: args.recursive,
+                        max_files: args.max_files,
+                        max_bytes: args.max_bytes,
+                    },
+                    &questions,
+                    "cli:jev.files",
                     args.advisory,
                 )?)?,
                 None,
@@ -167,5 +208,47 @@ mod tests {
                 .to_string()
                 .contains("line 2")
         );
+    }
+    #[test]
+    fn jev_cli_parses_files_globs_paths_and_caps() {
+        let cli = crate::cli::Cli::try_parse_from([
+            "cas",
+            "jev",
+            "files",
+            "--glob",
+            "cas-cli/src/**/*.rs",
+            "--path",
+            "docs",
+            "--recursive",
+            "--max-files",
+            "2",
+            "--max-bytes",
+            "100",
+            "--questions",
+            "@q.json",
+            "--advisory",
+        ])
+        .unwrap();
+        let Some(crate::cli::Commands::Jev(JevCommands::Files(args))) = cli.command else {
+            panic!("files command missing")
+        };
+        assert_eq!(args.globs, ["cas-cli/src/**/*.rs"]);
+        assert_eq!(args.paths, ["docs"]);
+        assert!(args.recursive && args.advisory);
+        assert_eq!((args.max_files, args.max_bytes), (2, 100));
+        let cli = crate::cli::Cli::try_parse_from([
+            "cas",
+            "jev",
+            "files",
+            "--path",
+            "a.txt",
+            "--questions",
+            "{}",
+        ])
+        .unwrap();
+        let Some(crate::cli::Commands::Jev(JevCommands::Files(args))) = cli.command else {
+            panic!("files command missing")
+        };
+        assert_eq!((args.max_files, args.max_bytes), (50, 24576));
     }
 }

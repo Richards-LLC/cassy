@@ -79,3 +79,53 @@ callers or an error for strict callers.
 
 Release impact: new `cas jev ask|batch`, `jev` MCP tool and shared advisory
 library; integration into existing policy callers belongs to follow-up tasks.
+
+## File questions
+
+```bash
+cas jev files --glob 'cas-cli/src/**/*.rs' --questions @questions.json
+cas jev files --path docs --recursive --max-files 10 --max-bytes 8192 --questions @questions.json --advisory
+```
+
+The MCP equivalent is `{action:"files", paths:["docs"], recursive:true,
+max_files:10, max_bytes:8192, questions, advisory:true}`; `globs` is an array of
+quoted project-relative patterns. Paths/globs may be combined. Globs support
+`**` recursively; directory paths include immediate files unless `recursive`
+is true. Paths resolve relative to the project containing `.cas`, rather than
+the shell's working directory. Outside-root paths/globs and symlinks resolving
+outside that root are reported as skipped. Symlink directories are not followed.
+
+Selection respects `.gitignore`, local Git exclusions and nested ignore files,
+including explicit file paths. Hidden files are considered. The following path
+components are refused before content is read: `.env*`, `*.pem`, `creds`,
+`credentials`, `.credentials`, `secrets`, `.secrets`, `.ssh`, `.aws`, `.gnupg`,
+`.git` and `.cas` (case-insensitive). Both supplied and canonical target paths
+are checked, preventing a benign symlink name from bypassing secret refusal.
+Git/Cassy internals are also excluded from walking.
+
+`max_files` defaults to 50 and accepts 1–50 matching candidates (including
+candidates later skipped); overlapping selectors are deduplicated. Selection
+is deterministic by path. `limit_reached:true` reports more matches than the
+cap or scan deadline exhaustion. Empty matches return an empty list. Explicit
+ignored, missing, refused and unreadable paths have skip reasons. No ignored
+file is read to classify it. Binaries (NUL-containing/non-UTF-8 prefixes) and
+non-regular files are skipped. Classification inspects only the capped prefix.
+
+`max_bytes` defaults to 24 KiB and accepts 1–128 KiB. Reads stop after cap + 1
+bytes; over-cap text is truncated at a UTF-8 boundary and ends with
+`[Jev: file truncated at byte cap]`. The marker is additional to the byte cap.
+Questions are validated before reading/evaluation. All file calls and scanning
+share a 45-second deadline, each request also bounded by 15 seconds.
+
+For each accepted file, only code reads its content and sends
+`{path, content}` as state to Jev. The agent receives compact JSON:
+
+```json
+{"files":[{"status":"available","path":"src/example.rs","truncated":false,"model":"jev-1.13.0","answers":{"urgent":{"type":"noul","noul":0.1}},"usage":{"input_tokens":123,"output_tokens":20}},{"status":"skipped","path":".env.local","reason":"secret path"}],"limit_reached":false}
+```
+
+Available rows preserve typed probabilities/confidence. No content/state is
+returned. Advisory failures are `{status:"unavailable",path,reason}` rows;
+strict failures return an error after logging the attempted files. Every file
+call uses the existing hash-only decision log (`cli:jev.files` or
+`mcp:jev.files`); skipped candidates make no HTTP call or decision-log row.

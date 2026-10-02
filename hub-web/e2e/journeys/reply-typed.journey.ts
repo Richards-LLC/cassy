@@ -179,12 +179,18 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     await expect(waiting).toBeFocused();
     expect(await waiting.evaluate((element) => getComputedStyle(element).cursor), "the waiting pill does not look pressable").toBe("default");
     await expect(take).toHaveCount(0);
+    // cas-b00c (journey F18): Retry beside it would only be refused again, so
+    // it is not pressable either while the iPad holds control.
+    const retryWhileWaiting = bubble.getByRole("button", { name: "Retry sending", exact: true });
+    await expect(retryWhileWaiting).toHaveAttribute("aria-disabled", "true");
+    await expect(retryWhileWaiting).toHaveAccessibleDescription("Waiting for Studio iPad to release control");
     // When the iPad releases control, Take control comes back on its own,
     // and the keyboard user parked on the pill is on it (cas-88d86 QA F01).
     await page.unroute(lease);
     await expect(take).toBeVisible({ timeout: 10_000 });
     await expect(take).not.toHaveAttribute("aria-disabled", "true");
     await expect(take).toBeFocused();
+    await expect(retryWhileWaiting).not.toHaveAttribute("aria-disabled", "true");
   });
 
   await journey.stage("Take control from the message, then retry", async () => {
@@ -197,7 +203,8 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     await bubble.getByRole("button", { name: "Take control of the session", exact: true }).focus();
     await page.keyboard.press("Enter");
     await leaseRequest;
-    await expect(page.locator("#message-status")).toHaveText("You control this session now. Retry to send the message.");
+    // cas-b00c (journey F18): the message says it once; the composer does not repeat it.
+    await expect(page.locator("#message-status")).toBeHidden();
     // cas-8e0a: the message itself agrees. Take control leaves it, and it no
     // longer says this device isn't in control.
     await expect(bubble.getByRole("button", { name: "Take control of the session", exact: true })).toHaveCount(0);

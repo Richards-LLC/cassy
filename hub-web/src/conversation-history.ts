@@ -612,6 +612,8 @@ export class ConversationHistory {
       if (event.kind === "reply") return event.value.message;
       // A failed send the operator dismissed is out of the thread, so out of the preview too.
       if (event.value.dismissed && this.isFailedSend(event.value)) continue;
+      // cas-b00c: a message whose delivery was never confirmed says so in the list too.
+      if (event.value.state === "unconfirmed" && !this.repliedSince(event.value)) return `Not confirmed: ${event.value.text}`;
       if (event.value.state !== "error") return `You: ${event.value.text}`;
       if (!event.value.replaced) return `Not sent: ${event.value.text}`;
     }

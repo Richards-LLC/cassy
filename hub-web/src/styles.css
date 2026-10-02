@@ -4133,6 +4133,7 @@ button.chip:disabled { cursor: default; }
 .conversation-loading > .dots > i:nth-child(3) { animation-delay: 1.4s; }
 @keyframes opening-dots { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .conversation-loading > .dots > i { animation: none; opacity: 0.6; } }
+@media (forced-colors: active) { .conversation-loading > .dots > i { background: CanvasText; } }
 /* Details hangs below the line, so the line never moves when it appears or opens. */
 .conversation-pane-slot .pane-grid > .conversation-opening { position: relative; }
 .conversation-opening > .connection-details { position: absolute; top: calc(50% + 22px); left: 50%; translate: -50% 0; width: min(calc(100% - 80px), 34ch); max-height: calc(50% - 30px); overflow: auto; color: var(--ink-mid); font-size: 12px; }

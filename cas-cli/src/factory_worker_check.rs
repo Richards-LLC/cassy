@@ -31,12 +31,27 @@ fn relay_progress(path: PathBuf, done: Arc<AtomicBool>) {
         return;
     };
     let mut buffer = [0; 8192];
+    let mut relayed = 0;
+    let mut final_length = None;
     loop {
+        if done.load(Ordering::Acquire) && final_length.is_none() {
+            // Snapshot once: descendants can still append to stdout after
+            // Cargo exits, but cannot keep this relay (and its lane) alive.
+            final_length = Some(
+                file.metadata()
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(relayed),
+            );
+        }
+        if final_length.is_some_and(|end| relayed >= end) {
+            break;
+        }
         match file.read(&mut buffer) {
             Ok(0) if done.load(Ordering::Acquire) => break,
             Ok(0) => std::thread::sleep(std::time::Duration::from_millis(30)),
             Ok(count) => {
                 let _ = std::io::stdout().write_all(&buffer[..count]);
+                relayed += count as u64;
             }
             Err(_) => break,
         }

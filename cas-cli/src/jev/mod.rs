@@ -28,6 +28,7 @@ pub struct JevConfig {
     pub model: String,
     pub key_file: Option<String>,
     pub enabled: bool,
+    pub gate: JevGateConfig,
 }
 impl Default for JevConfig {
     fn default() -> Self {
@@ -35,8 +36,15 @@ impl Default for JevConfig {
             model: "jev-1.13.0".into(),
             key_file: None,
             enabled: true,
+            gate: JevGateConfig::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct JevGateConfig {
+    pub shadow: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -559,6 +567,7 @@ fn append_log(path: &Path, row: &Value) -> std::io::Result<()> {
 }
 
 mod files;
+pub mod gate;
 pub use files::{DEFAULT_FILE_BYTES, FileRow, FilesOptions, FilesResponse, MAX_FILE_BYTES};
 
 #[cfg(test)]

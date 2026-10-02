@@ -7,6 +7,14 @@ pub(super) fn register_jev(registry: &mut ConfigRegistry) {
         .insert("jev", "Calibrated Jev decision evaluations");
     for (key, name, description, value_type, default, constraint) in [
         (
+            "jev.gate.shadow",
+            "Jev gate shadow",
+            "Observe Bash/Write/Edit risk without changing hook decisions; default off.",
+            ConfigType::Bool,
+            "false",
+            Constraint::None,
+        ),
+        (
             "jev.model",
             "Jev model",
             "Pinned TypeSafe decision model.",

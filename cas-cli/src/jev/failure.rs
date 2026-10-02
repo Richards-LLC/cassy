@@ -146,10 +146,21 @@ pub fn log_evidence(
 
 /// Code-derived paths only; invalid/missing refs silently provide no overlap evidence.
 pub fn touched_paths(repo: &Path, base: &str, head: &str) -> Vec<String> {
+    // CLI-supplied refs must never become Git options (e.g. --output).
+    if base.starts_with('-') || head.starts_with('-') {
+        return Vec::new();
+    }
     let mut command = Command::new("git");
-    command
-        .current_dir(repo)
-        .args(["diff", "--name-only", "-z", base, head, "--"]);
+    command.current_dir(repo).args([
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--name-only",
+        "-z",
+        base,
+        head,
+        "--",
+    ]);
     let Ok(output) = crate::bounded_process::run_command(
         &mut command,
         crate::bounded_process::Deadline::after(PROBE_BUDGET),

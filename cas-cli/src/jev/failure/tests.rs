@@ -102,6 +102,10 @@ fn failure_log_reads_bounded_windows_and_real_git_paths() {
     ]);
     assert_eq!(touched_paths(repo.path(), "HEAD^", "HEAD"), ["touched.rs"]);
     assert!(touched_paths(repo.path(), "missing-ref", "HEAD").is_empty());
+    let injected = format!("--output={}", repo.path().join("must-not-write").display());
+    assert!(touched_paths(repo.path(), &injected, "HEAD").is_empty());
+    assert!(touched_paths(repo.path(), "HEAD^", &injected).is_empty());
+    assert!(!repo.path().join("must-not-write").exists());
     let log = repo.path().join("failure.log");
     std::fs::write(
         &log,

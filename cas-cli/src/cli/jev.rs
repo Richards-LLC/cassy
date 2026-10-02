@@ -261,4 +261,12 @@ mod tests {
         };
         assert_eq!((args.max_files, args.max_bytes), (50, 24576));
     }
+    #[test]
+    fn jev_cli_parses_local_gate_report() {
+        let cli = crate::cli::Cli::try_parse_from(["cas", "jev", "gate-report"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(crate::cli::Commands::Jev(JevCommands::GateReport))
+        ));
+    }
 }

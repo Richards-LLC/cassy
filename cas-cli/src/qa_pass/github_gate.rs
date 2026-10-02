@@ -76,18 +76,20 @@ fn is_gh(token: &str) -> bool {
     token == "gh" || token.ends_with("/gh")
 }
 
-/// Programs whose here-document is data, not shell: text in their bodies is
-/// never executed by the shell, so it cannot be a merge. Shells, `ssh`,
-/// `sudo` and anything unknown keep their bodies (fail closed).
-const HEREDOC_DATA_CONSUMERS: [&str; 20] = [
-    "cat", "tee", "python", "python3", "python2", "node", "deno", "ruby", "perl", "git", "jq",
-    "sed", "awk", "grep", "wc", "diff", "patch", "psql", "sqlite3", "rustfmt",
+/// Programs whose here-document is data, not code: text in their bodies is
+/// never executed, so it cannot be a merge. Shells, `ssh`, `sudo`,
+/// interpreters (`python3`, `node`, … run their body as a program) and
+/// anything unknown keep their bodies (fail closed).
+const HEREDOC_DATA_CONSUMERS: [&str; 13] = [
+    "cat", "tee", "git", "jq", "sed", "awk", "grep", "wc", "diff", "patch", "psql", "sqlite3",
+    "rustfmt",
 ];
 
 /// The command with here-document bodies removed when the program reading
-/// them is a known data consumer (cas-0169: a Python edit script whose body
-/// quoted a merge command was refused as a merge). A body whose terminator
-/// never appears is kept, because the shell may not read it as a heredoc.
+/// them is a known data consumer (cas-0169: a file written through a heredoc
+/// whose body quoted a merge command was refused as a merge). A body whose
+/// terminator never appears is kept, because the shell may not read it as a
+/// heredoc.
 fn strip_data_heredoc_bodies(command: &str) -> String {
     let lines: Vec<&str> = command.lines().collect();
     let mut kept = Vec::with_capacity(lines.len());
@@ -990,23 +992,29 @@ mod tests {
 
     #[test]
     fn data_heredoc_bodies_are_not_merges_but_shell_heredocs_are() {
-        // cas-0169 live repro: an edit script's body quoted a merge command.
-        let edit = "python3 - <<'EOF'\nrefusal = run(\"gh pr merge 77 --squash\")\nEOF\necho done";
+        // cas-0169: a file written through a data heredoc whose body quotes a
+        // merge command.
+        let edit =
+            "cat > fixture.rs <<'EOF'\nrefusal = run(\"gh pr merge 77 --squash\")\nEOF\necho done";
         assert!(github_merges_in(edit).is_empty(), "{edit}");
         let tabbed = "cat > notes.md <<-EOF\n\tgh pr merge 12 --squash\n\tEOF\n";
         assert!(github_merges_in(tabbed).is_empty());
         let two = "git commit -F - <<A && cat <<B\ngh pr merge 1\nA\ngh pr merge 2\nB\n";
         assert!(github_merges_in(two).is_empty());
 
-        // A merge after the body, a shell-fed body, an unknown consumer, and
-        // an unterminated body are still merges (fail closed).
-        let after = "python3 - <<'EOF'\nprint(1)\nEOF\ngh pr merge 5 --squash";
+        // A merge after the body, a shell-fed body, an interpreter's body
+        // (code, not data), an unknown consumer, and an unterminated body are
+        // still merges (fail closed).
+        let after = "cat > notes.md <<'EOF'\nnotes\nEOF\ngh pr merge 5 --squash";
         assert_eq!(only(after).selector, MergeSelector::Number(5));
         for command in [
             "bash <<'EOF'\ngh pr merge 6 --squash\nEOF",
             "ssh host <<EOF\ngh pr merge 6 --squash\nEOF",
             "sudo tee x <<EOF\ngh pr merge 6 --squash\nEOF",
-            "python3 - <<'EOF'\ngh pr merge 6 --squash\n",
+            "python3 - <<'EOF'\nimport subprocess\nsubprocess.run([\"sh\", \"-c\", \"gh pr merge 6 --squash\"])\nEOF",
+            "python3 <<EOF\ncmd = \"gh pr merge 6 --squash\"\nEOF",
+            "node <<'EOF'\nconst merge = \"gh pr merge 6 --squash\";\nEOF",
+            "cat <<'EOF'\ngh pr merge 6 --squash\n",
         ] {
             assert_eq!(
                 only(command).selector,

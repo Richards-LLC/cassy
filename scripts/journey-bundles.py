@@ -41,22 +41,50 @@ def main(argv: list[str]) -> int:
     journeys = artifacts / "journeys"
     created = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     rows = []
-    for result in sorted(journeys.glob("*/result.json"), key=order):
-        bundle = result.parent
-        data = json.loads(result.read_text())
-        stages = data.get("stages", [])
-        files: dict[str, object] = {
-            "receipt": "receipt.webm",
-            "aria_yaml": "final.aria.yml",
-            "aria_json": "final.aria.json",
-            "cells": [stage["screenshot"] for stage in stages],
-        }
-        trace = Path(data.get("output_dir", "")) / "trace.zip"
-        if trace.is_file():
-            shutil.copyfile(trace, bundle / "trace.zip")
-            (bundle / "trace-actions.txt").write_text(trace_actions(bundle, hub))
-            files["trace"] = "trace.zip"
-            files["trace_actions"] = "trace-actions.txt"
+    # A journey run as several tests (cas-1f7e) keeps its extra tests'
+    # receipts under <ID>/parts/<slug>/. Each part gets its own trace; the
+    # <ID> bundle folds every part's stages, cells and verdict into one.
+    ids = sorted({path.parent.name for path in journeys.glob("*/result.json")}
+                 | {path.parent.parent.parent.name for path in journeys.glob("*/parts/*/result.json")},
+                 key=lambda name: order(journeys / name / "result.json"))
+    for ident in ids:
+        bundle = journeys / ident
+        result = bundle / "result.json"
+        parts = sorted(bundle.glob("parts/*/result.json"))
+        data = json.loads(result.read_text()) if result.is_file() else None
+        stages = [dict(stage) for stage in (data or {}).get("stages", [])]
+        files: dict[str, object] = {"cells": [stage["screenshot"] for stage in stages]}
+        if data is not None:
+            files.update({"receipt": "receipt.webm", "aria_yaml": "final.aria.yml", "aria_json": "final.aria.json"})
+            trace = Path(data.get("output_dir", "")) / "trace.zip"
+            if trace.is_file():
+                shutil.copyfile(trace, bundle / "trace.zip")
+                (bundle / "trace-actions.txt").write_text(trace_actions(bundle, hub))
+                files["trace"] = "trace.zip"
+                files["trace_actions"] = "trace-actions.txt"
+        verdicts = [data["status"]] if data is not None else []
+        folded = []
+        for part_result in parts:
+            part_dir = part_result.parent
+            rel = part_dir.relative_to(bundle).as_posix()
+            part = json.loads(part_result.read_text())
+            verdicts.append(part["status"])
+            part_files = {"receipt": f"{rel}/receipt.webm", "aria_yaml": f"{rel}/final.aria.yml", "aria_json": f"{rel}/final.aria.json"}
+            part_trace = Path(part.get("output_dir", "")) / "trace.zip"
+            if part_trace.is_file():
+                shutil.copyfile(part_trace, part_dir / "trace.zip")
+                (part_dir / "trace-actions.txt").write_text(trace_actions(part_dir, hub))
+                part_files.update({"trace": f"{rel}/trace.zip", "trace_actions": f"{rel}/trace-actions.txt"})
+            for stage in part.get("stages", []):
+                stage = dict(stage, screenshot=f"{rel}/{stage['screenshot']}")
+                stages.append(stage)
+                files["cells"].append(stage["screenshot"])
+            folded.append({"title": part.get("title"), "verdict": part["status"], **part_files})
+        if folded:
+            files["parts"] = folded
+        if data is None:
+            data = {"id": ident, "title": json.loads(parts[0].read_text()).get("title", ident), "label": "real-bundle, protocol-double"}
+        data["status"] = "PASS" if verdicts and all(verdict == "PASS" for verdict in verdicts) else "FAIL"
         (bundle / "bundle.json").write_text(json.dumps({
             "schema": 1,
             "task_id": artifacts.name,

@@ -7682,6 +7682,32 @@ impl CasCore {
                                 })
                                 .map(|_| close_project_root.clone())
                         };
+                        // cas-5200: a never-parked task merged through a PR
+                        // names its delivery with commit_receipt. Once that
+                        // receipt is on the target, bind the dispatch exactly
+                        // like the post-merge case. Measuring the worker
+                        // worktree instead bound its HEAD — already the next
+                        // task's local commit — as a delivered anchor, and a
+                        // rebase of that next task voided the verdict
+                        // (cas-3e66, cas-ba4a).
+                        let merged_receipt = if post_merge_target.is_none() {
+                            req.commit_receipt.as_deref().and_then(|receipt| {
+                                let resolved =
+                                    resolve_task_commit_receipt_sha(&close_project_root, receipt)
+                                        .ok()?;
+                                commit_is_merged_into_parent(
+                                    &close_project_root,
+                                    &resolved,
+                                    &resolved_parent_branch,
+                                )
+                                .then_some(resolved)
+                            })
+                        } else {
+                            None
+                        };
+                        let post_merge_target = post_merge_target.or_else(|| {
+                            merged_receipt.as_ref().map(|_| close_project_root.clone())
+                        });
                         let use_target_branch_proof = post_merge_target.is_some();
                         let proof_worktree = match post_merge_target {
                             Some(target) => target,
@@ -7711,8 +7737,13 @@ impl CasCore {
                                 // strict whole-boundary contract still holds.
                                 let anchor_commits = crate::mcp::tools::core::task::lifecycle::repository_proof::delivered_anchor_commits(
                                     &proof_worktree,
-                                    Some(resolved_parent_branch.as_str()),
-                                    req.commit_receipt.as_deref(),
+                                    // cas-5200: a merged receipt is the whole
+                                    // delivery; never add the checkout HEAD.
+                                    (merged_receipt.is_none())
+                                        .then_some(resolved_parent_branch.as_str()),
+                                    merged_receipt
+                                        .as_deref()
+                                        .or(req.commit_receipt.as_deref()),
                                     task.deliverables.factory_branch_anchor.as_deref(),
                                 );
                                 let repository_proof = if use_target_branch_proof {

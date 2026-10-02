@@ -23511,7 +23511,6 @@ mod merge_state_gate_tests {
         let mut env = TestEnvGuard::temp_home();
         let (dir, _bare) = handoff_repo();
         let p = dir.path();
-        let anchor = head_sha(p);
         git(p, &["checkout", "-q", "main"]);
         git(p, &["branch", "-D", "factory/worker"]);
         let cas_dir = p.join(".cas");
@@ -23587,7 +23586,9 @@ mod merge_state_gate_tests {
             repo_selector: p.to_str().unwrap().into(),
             target_branch: "main".into(),
         });
-        task.deliverables.factory_branch_anchor = Some(anchor);
+        // The deleted lane had no usable anchor; scope repair must not
+        // discard a retained code anchor to authorize external delivery.
+        task.deliverables.factory_branch_anchor = None;
         task.deliverables.parked_branch = Some("factory/worker".into());
         store.update(&task).unwrap();
         let request = serde_json::from_value(serde_json::json!({
@@ -23851,7 +23852,7 @@ mod merge_state_gate_tests {
         let req = base_req(&task.id);
         let out = run_factory_branch_merge_gate(&task, &req, "main", p);
         assert!(
-            matches!(out, MergeStateGateOutcome::Reject(_)),
+            matches!(out, MergeStateGateOutcome::Unresolved(ref message) if message.contains("1 measured commit") && !message.contains("git push")),
             "an unmerged anchored delivery must still reject, got {out:?}"
         );
     }

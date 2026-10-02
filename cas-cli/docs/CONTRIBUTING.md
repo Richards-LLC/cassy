@@ -591,10 +591,16 @@ Each named commit must be the delivery anchor or a descendant of it, be
 reachable on the target, and carry a non-empty first-parent diff. Cassy records
 the resolved commits, anchor, target and review as a decision note.
 
-The epic close gate proves every child within an 8 s budget, shared by ref
-reads, missing-anchor fetches and nested delivery/history proofs. A probe that
-runs out of time is terminated with its descendants, and its unfinished child
-remains unchecked rather than becoming a measured verdict. When it stops
+The epic close gate bounds ref/cache metadata at 8 s, then uses an 8 s soft
+proof budget. The first uncached child's delivery/history proof may finish
+beyond that soft budget under a separate 20 s hard cap, guaranteeing progress
+when a loaded host takes longer than a call's budget to prove one child.
+Missing-anchor fetches and subsequent proofs retain the soft budget; summary
+views and zero-budget cache-only calls never receive this allowance. Bounded
+close/status collection takes at most 8 + max(soft budget, 20) s (28 s for
+the production budgets), leaving room below the 55 s MCP deadline. A probe that
+exhausts its hard deadline is terminated with its descendants, and its unfinished
+child remains unchecked rather than becoming a measured verdict. When it stops
 early (`EPIC CLOSE CHECK INCOMPLETE`), the verdicts it already proved for
 closed children are saved under the repository's common Git directory
 (`cas/epic-close-verdicts.json`), keyed by the exact refs and anchor each proof

@@ -3733,6 +3733,31 @@ async function endConversationSession(row: ConversationRow): Promise<void> {
 
 /** Each row's newest activity seen this visit, so its time never moves backwards (cas-6acf). */
 const rowActivityHighWater = new Map<string, number>();
+/** Empty the list search and its field, and show every row again (cas-537f). */
+function clearConversationSearch(): void {
+  conversationSearchQuery = "";
+  const search = document.querySelector<HTMLInputElement>("#conversation-search");
+  if (search) search.value = "";
+  renderConversationList();
+}
+
+/**
+ * The row Enter in the list search opens (cas-537f): the first row on screen
+ * while there is a query. It is marked for the eye (data-enter-target) and
+ * named to assistive tech as the field's active descendant.
+ */
+function markConversationEnterTarget(container: HTMLElement): HTMLButtonElement | undefined {
+  const search = document.querySelector<HTMLInputElement>("#conversation-search");
+  const target = conversationSearchQuery.trim() ? container.querySelector<HTMLButtonElement>(".conversation-row") ?? undefined : undefined;
+  for (const row of container.querySelectorAll<HTMLElement>(".conversation-row[data-enter-target]")) if (row !== target) delete row.dataset.enterTarget;
+  if (target) {
+    target.dataset.enterTarget = "true";
+    if (!target.id) target.id = `conversation-row-${(target.dataset.threadKey ?? "").replace(/[^A-Za-z0-9_-]/g, "-")}`;
+    search?.setAttribute("aria-activedescendant", target.id);
+  } else search?.removeAttribute("aria-activedescendant");
+  return target;
+}
+
 /** Where the operator left the conversation list (cas-5d2c). */
 let conversationListScroll = 0;
 /** The selection last brought into view, so a heartbeat never fights the operator's scrolling. */
@@ -3808,8 +3833,14 @@ function renderConversationList(): void {
     ...row,
     canEnd: row.canEnd === true && (row.group !== undefined || sessions.get(row.machineId)?.find((item) => item.name === row.session)?.dormant === true),
   }));
-  conversationList.render(container, shown, (row, event) => { landAfterOpen(openSession(row.machineId, row.session), event); }, endConversationSession);
+  conversationList.render(container, shown, (row, event) => {
+    // cas-537f: a result opened from the list search is a jump, as Enter is:
+    // the full list is back for the next visit.
+    if (conversationSearchQuery) clearConversationSearch();
+    landAfterOpen(openSession(row.machineId, row.session), event);
+  }, endConversationSession);
   keepConversationListPlace(container, shown.find((row) => row.selected)?.key);
+  markConversationEnterTarget(container);
   const empty = document.querySelector<HTMLElement>("#conversation-empty");
   if (empty) {
     empty.hidden = shown.length > 0;
@@ -4496,7 +4527,11 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
         return;
       }
       if (event.key !== "Enter" || event.isComposing) return;
-      const row = filterConversationRows(conversationRows, conversationSearchQuery)[0];
+      // cas-537f: Enter opens the marked row, the first on screen (grouped
+      // order), and only for a query: an empty field opens nothing.
+      const list = document.querySelector<HTMLElement>("#conversation-list");
+      const target = list ? markConversationEnterTarget(list) : undefined;
+      const row = target ? conversationRows.find((candidate) => candidate.key === target.dataset.threadKey) : undefined;
       if (!row) return;
       event.preventDefault();
       // The search was a jump: the full list is back for the next visit, and
@@ -4554,6 +4589,7 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
       if (wanted && !paletteAdvanced.open) { paletteAdvanced.open = true; paletteAdvanced.dataset.autoOpened = "true"; }
       else if (!wanted && paletteAdvanced.dataset.autoOpened) { paletteAdvanced.open = false; delete paletteAdvanced.dataset.autoOpened; }
     }
+    markPaletteEnterTarget();
     const noMatch = palette.querySelector<HTMLElement>("#palette-no-match");
     if (noMatch) {
       const anyVisible = [...palette.querySelectorAll<HTMLElement>(".palette-command")].some((command) => !command.hidden);
@@ -4561,13 +4597,28 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
       noMatch.textContent = noMatch.hidden ? "" : `No commands or conversations match “${paletteQuery.value.trim()}”.`;
     }
   };
-  if (paletteAdvanced) paletteAdvanced.ontoggle = () => { if (!paletteAdvanced.open) delete paletteAdvanced.dataset.autoOpened; };
+  /**
+   * The command Enter in the filter runs (cas-537f): the first one on screen.
+   * It is marked for the eye and named as the filter's active descendant, so
+   * "light" visibly lands on "Jump to lighthouse", not "Appearance · Light".
+   */
+  const markPaletteEnterTarget = (): HTMLButtonElement | undefined => {
+    const commands = [...palette.querySelectorAll<HTMLButtonElement>(".palette-command")];
+    const first = commands.find((command) => paletteRowShown(command) && !command.disabled);
+    commands.forEach((command, index) => {
+      if (!command.id) command.id = `palette-command-${index}`;
+      if (command === first) command.dataset.enterTarget = "true"; else delete command.dataset.enterTarget;
+    });
+    if (first) paletteQuery.setAttribute("aria-activedescendant", first.id); else paletteQuery.removeAttribute("aria-activedescendant");
+    return first;
+  };
+  markPaletteEnterTarget();
+  if (paletteAdvanced) paletteAdvanced.ontoggle = () => { if (!paletteAdvanced.open) delete paletteAdvanced.dataset.autoOpened; markPaletteEnterTarget(); };
   paletteQuery.onkeydown = (event) => {
     if (event.key !== "ArrowDown" && event.key !== "Enter") return;
     // Session "Jump to" rows lead the Conversations group, so a query that
     // names a session lands Enter and ArrowDown on the conversation.
-    const first = [...palette.querySelectorAll<HTMLButtonElement>(".palette-command")]
-      .find((command) => paletteRowShown(command) && !command.disabled);
+    const first = markPaletteEnterTarget();
     if (!first) return;
     event.preventDefault();
     if (event.key === "Enter") first.click();

@@ -4146,3 +4146,16 @@ button.chip:disabled { cursor: default; }
 /* Details hangs below the line, so the line never moves when it appears or opens. */
 .conversation-pane-slot .pane-grid > .conversation-opening { position: relative; }
 .conversation-opening > .connection-details { position: absolute; top: calc(50% + 22px); left: 50%; translate: -50% 0; width: min(calc(100% - 80px), 34ch); max-height: calc(50% - 30px); overflow: auto; color: var(--ink-mid); font-size: 12px; }
+
+/* cas-537f: what Enter in a search field opens is marked while the field has
+   focus: a raised fill and an "Enter" hint. The same row is the field's
+   aria-activedescendant. */
+#command-palette:has(#command-palette-query:focus) .palette-command[data-enter-target] { position: relative; padding-right: 72px; background: var(--accent-soft); outline: var(--line-width) solid var(--line-subtle); outline-offset: -1px; }
+.conversation-sidebar:has(#conversation-search:focus) .conversation-row[data-enter-target] { background: var(--bg-hover); outline: var(--line-width) solid var(--line-subtle); outline-offset: -1px; }
+#command-palette:has(#command-palette-query:focus) .palette-command[data-enter-target]::after,
+.conversation-sidebar:has(#conversation-search:focus) .conversation-row[data-enter-target]::after { content: "Enter ↵"; position: absolute; right: 12px; top: 50%; translate: 0 -50%; padding: 1px 6px; border: var(--line-width) solid var(--line-subtle); border-radius: 6px; color: var(--ink-mid); font: var(--weight-medium) 10px/1.4 var(--font-ui); white-space: nowrap; }
+@media (forced-colors: active) {
+  #command-palette:has(#command-palette-query:focus) .palette-command[data-enter-target],
+  .conversation-sidebar:has(#conversation-search:focus) .conversation-row[data-enter-target] { outline: 2px solid Highlight; outline-offset: -2px; }
+}
+.conversation-sidebar:has(#conversation-search:focus) .conversation-row[data-enter-target]::after { top: auto; bottom: 6px; translate: none; }

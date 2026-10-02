@@ -558,5 +558,8 @@ fn append_log(path: &Path, row: &Value) -> std::io::Result<()> {
     result.and(unlock)
 }
 
+mod files;
+pub use files::{DEFAULT_FILE_BYTES, FileRow, FilesOptions, FilesResponse, MAX_FILE_BYTES};
+
 #[cfg(test)]
 mod tests;

@@ -416,3 +416,365 @@ async fn jev_batch_deadline_logs_all_unavailable_without_more_requests() {
     assert!(start.elapsed() < Duration::from_secs(1));
     assert_eq!(rows(&dir).len(), 3);
 }
+
+#[tokio::test]
+async fn jev_files_mock_http_globs_secrets_ignores_binary_and_hash_only() {
+    let server = MockServer::start().await;
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    fs::create_dir(root.join("src")).unwrap();
+    fs::create_dir(root.join("creds")).unwrap();
+    fs::write(root.join(".gitignore"), "ignored.txt\n").unwrap();
+    fs::write(root.join("src/one.rs"), "private-file-one").unwrap();
+    fs::write(root.join("src/two.rs"), "private-file-two").unwrap();
+    fs::write(root.join("ignored.txt"), "ignored-private").unwrap();
+    fs::write(root.join(".env.local"), "secret-token").unwrap();
+    fs::write(root.join("server.pem"), "private-key").unwrap();
+    fs::write(root.join("creds/password.txt"), "password-token").unwrap();
+    fs::write(root.join("binary.dat"), [0, 1, 2]).unwrap();
+    fs::write(root.join("invalid.dat"), [0xff, 0xfe]).unwrap();
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(response()))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let client = fixture(&server, &dir, false);
+    let absolute_path = dir.path().join("src/one.rs").to_string_lossy().into_owned();
+    let result = tokio::task::spawn_blocking(move || {
+        client.files(
+            &root,
+            &FilesOptions {
+                paths: vec![
+                    absolute_path,
+                    "ignored.txt".into(),
+                    ".env.local".into(),
+                    "server.pem".into(),
+                    "creds/password.txt".into(),
+                    "binary.dat".into(),
+                    "invalid.dat".into(),
+                ],
+                globs: vec!["src/**/*".into(), "src/*.rs".into()],
+                ..Default::default()
+            },
+            &questions(),
+            "test:files",
+            false,
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let encoded = serde_json::to_value(&result).unwrap();
+    let available: Vec<_> = encoded["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["status"] == "available")
+        .collect();
+    assert_eq!(available.len(), 2);
+    assert_eq!(available[0]["path"], "src/one.rs");
+    assert_eq!(available[0]["answers"]["urgent"]["noul"], 0.95);
+    for name in [".env.local", "server.pem", "creds/password.txt"] {
+        assert!(
+            encoded["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["path"] == name && r["reason"] == "secret path")
+        );
+    }
+    assert!(
+        encoded
+            .to_string()
+            .contains("ignored by file selection rules")
+    );
+    assert!(encoded.to_string().contains("binary file"));
+    assert!(encoded.to_string().contains("binary or non-UTF-8 file"));
+    let requests = server.received_requests().await.unwrap();
+    for request in &requests {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        assert!(
+            body["state"]["content"]
+                .as_str()
+                .unwrap()
+                .starts_with("private-file-")
+        );
+        assert!(body["state"]["path"].as_str().unwrap().starts_with("src/"));
+    }
+    let log = fs::read_to_string(dir.path().join("jev-decisions.jsonl")).unwrap();
+    assert_eq!(log.lines().count(), 2);
+    assert!(rows(&dir).iter().all(|r| r["caller"] == "test:files"));
+    for token in [
+        "private-file-one",
+        "private-file-two",
+        "secret-token",
+        "private-key",
+        "password-token",
+        "ignored-private",
+    ] {
+        assert!(!encoded.to_string().contains(token));
+        assert!(!log.contains(token));
+        assert!(
+            !requests
+                .iter()
+                .any(|r| String::from_utf8_lossy(&r.body).contains(token)
+                    && !token.starts_with("private-file-"))
+        );
+    }
+}
+
+#[tokio::test]
+async fn jev_files_caps_truncate_utf8_and_bound_selection() {
+    let server = MockServer::start().await;
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("a.txt"), "abésecret-after-cap").unwrap();
+    fs::write(dir.path().join("b.txt"), "never-read").unwrap();
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(response()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = fixture(&server, &dir, false);
+    let result = tokio::task::spawn_blocking(move || {
+        for options in [
+            FilesOptions {
+                max_files: 0,
+                paths: vec!["a.txt".into()],
+                ..Default::default()
+            },
+            FilesOptions {
+                max_files: 51,
+                paths: vec!["a.txt".into()],
+                ..Default::default()
+            },
+            FilesOptions {
+                max_bytes: 0,
+                paths: vec!["a.txt".into()],
+                ..Default::default()
+            },
+            FilesOptions {
+                max_bytes: MAX_FILE_BYTES + 1,
+                paths: vec!["a.txt".into()],
+                ..Default::default()
+            },
+            FilesOptions::default(),
+        ] {
+            assert!(
+                client
+                    .files(dir.path(), &options, &questions(), "caps", false)
+                    .is_err()
+            );
+        }
+        client.files(
+            dir.path(),
+            &FilesOptions {
+                globs: vec!["*.txt".into()],
+                max_files: 1,
+                max_bytes: 3,
+                ..Default::default()
+            },
+            &questions(),
+            "caps",
+            false,
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(result.limit_reached);
+    let encoded = serde_json::to_value(result).unwrap();
+    assert_eq!(encoded["files"].as_array().unwrap().len(), 1);
+    assert_eq!(encoded["files"][0]["truncated"], true);
+    let requests = server.received_requests().await.unwrap();
+    let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(
+        body["state"]["content"],
+        "ab\n[Jev: file truncated at byte cap]"
+    );
+    assert!(!String::from_utf8_lossy(&requests[0].body).contains("secret-after-cap"));
+}
+
+#[tokio::test]
+async fn jev_files_directory_recursion_and_no_matches() {
+    let server = MockServer::start().await;
+    let dir = TempDir::new().unwrap();
+    fs::create_dir_all(dir.path().join("src/nested")).unwrap();
+    fs::write(dir.path().join("src/a.txt"), "first").unwrap();
+    fs::write(dir.path().join("src/nested/b.txt"), "second").unwrap();
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(response()))
+        .expect(3)
+        .mount(&server)
+        .await;
+    let client = fixture(&server, &dir, false);
+    tokio::task::spawn_blocking(move || {
+        let mut options = FilesOptions {
+            paths: vec!["src".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            client
+                .files(dir.path(), &options, &questions(), "dirs", false)
+                .unwrap()
+                .files
+                .len(),
+            1
+        );
+        options.recursive = true;
+        assert_eq!(
+            client
+                .files(dir.path(), &options, &questions(), "dirs", false)
+                .unwrap()
+                .files
+                .len(),
+            2
+        );
+        options.paths.clear();
+        options.globs = vec!["missing/*.txt".into()];
+        assert!(
+            client
+                .files(dir.path(), &options, &questions(), "dirs", false)
+                .unwrap()
+                .files
+                .is_empty()
+        );
+        options.globs = vec!["[".into()];
+        assert!(
+            client
+                .files(dir.path(), &options, &questions(), "dirs", false)
+                .is_err()
+        );
+    })
+    .await
+    .unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn jev_files_refuses_outside_and_symlinked_secrets_before_http() {
+    use std::os::unix::fs::symlink;
+    let server = MockServer::start().await;
+    let dir = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    fs::write(outside.path().join("private.txt"), "outside-token").unwrap();
+    fs::write(dir.path().join(".env"), "inside-secret").unwrap();
+    fs::write(dir.path().join(".gitignore"), "ignored.txt\n").unwrap();
+    fs::write(dir.path().join("ignored.txt"), "ignored-target").unwrap();
+    symlink(
+        dir.path().join("ignored.txt"),
+        dir.path().join("ignored-alias.txt"),
+    )
+    .unwrap();
+    symlink(
+        outside.path().join("private.txt"),
+        dir.path().join("escape.txt"),
+    )
+    .unwrap();
+    symlink(dir.path().join(".env"), dir.path().join("alias.txt")).unwrap();
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(response()))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let client = fixture(&server, &dir, false);
+    tokio::task::spawn_blocking(move || {
+        let result = client
+            .files(
+                dir.path(),
+                &FilesOptions {
+                    paths: vec![
+                        outside.path().join("private.txt").to_string_lossy().into(),
+                        "../private.txt".into(),
+                        "escape.txt".into(),
+                        "alias.txt".into(),
+                        ".env".into(),
+                        "ignored-alias.txt".into(),
+                    ],
+                    globs: vec!["../**/*".into()],
+                    ..Default::default()
+                },
+                &questions(),
+                "refused",
+                false,
+            )
+            .unwrap();
+        let value = serde_json::to_value(result).unwrap();
+        assert_eq!(value["files"].as_array().unwrap().len(), 7);
+        assert_eq!(
+            value["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|r| r["reason"] == "outside project root")
+                .count(),
+            4
+        );
+        assert_eq!(
+            value["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|r| r["reason"] == "secret path")
+                .count(),
+            2
+        );
+        assert!(value.to_string().contains("symlink file (not followed)"));
+        assert!(!value.to_string().contains("outside-token"));
+        assert!(!value.to_string().contains("inside-secret"));
+        assert!(!dir.path().join("jev-decisions.jsonl").exists());
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn jev_files_choice_confidence_and_strict_advisory_log_all_calls() {
+    use wiremock::matchers::body_partial_json;
+    let server = MockServer::start().await;
+    let dir = TempDir::new().unwrap();
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        fs::write(dir.path().join(name), "private-choice-state").unwrap();
+    }
+    let q = json!({"area":{"type":"choice", "instructions":"Select area", "criteria":{"ui":null,"core":null}}});
+    Mock::given(method("POST")).and(body_partial_json(json!({"state":{"path":"a.txt"}})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"model":"jev-1.13.0", "answers":{"area":{"type":"choice", "choice":"core", "probabilities":{"core":0.9,"ui":0.1}, "confidence":0.9}}, "usage":{"input_tokens":10,"output_tokens":1}})))
+        .expect(2).with_priority(1).mount(&server).await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(4)
+        .with_priority(2)
+        .mount(&server)
+        .await;
+    let client = fixture(&server, &dir, false);
+    tokio::task::spawn_blocking(move || {
+        let options = FilesOptions {
+            globs: vec!["*.txt".into()],
+            ..Default::default()
+        };
+        assert!(matches!(
+            client.files(dir.path(), &options, &q, "files", false),
+            Err(JevError::Unavailable(_))
+        ));
+        assert_eq!(rows(&dir).len(), 3);
+        let result = client
+            .files(dir.path(), &options, &q, "files", true)
+            .unwrap();
+        let result = serde_json::to_value(result).unwrap();
+        assert_eq!(
+            result["files"][0]["answers"]["area"]["probabilities"]["core"],
+            0.9
+        );
+        assert_eq!(result["files"][0]["answers"]["area"]["confidence"], 0.9);
+        assert_eq!(result["files"][1]["status"], "unavailable");
+        assert_eq!(result["files"][2]["status"], "unavailable");
+        assert_eq!(rows(&dir).len(), 6);
+        assert!(!result.to_string().contains("private-choice-state"));
+        assert!(
+            !fs::read_to_string(dir.path().join("jev-decisions.jsonl"))
+                .unwrap()
+                .contains("private-choice-state")
+        );
+    })
+    .await
+    .unwrap();
+}

@@ -784,7 +784,7 @@ impl CasService {
     }
 
     #[tool(
-        description = "Evaluate calibrated decisions with Jev. ask evaluates state; batch evaluates 1–50 records with shared typed questions. Returns TypeSafe JSON answers, probabilities, confidence and usage. advisory=true returns unavailable when the service is unreachable. Every evaluation records a decision log with a state hash."
+        description = "Evaluate calibrated decisions with Jev. ask evaluates state; batch evaluates 1–50 records; files evaluates project paths/globs with secret refusals, ignore rules and caps, returning no content. Shared typed questions. Returns TypeSafe JSON answers, probabilities, confidence and usage. advisory=true returns unavailable when the service is unreachable. Every evaluation records a decision log with a state hash."
     )]
     pub async fn jev(
         &self,
@@ -794,10 +794,10 @@ impl CasService {
         panic_catch::dispatch_with_catch("jev", async move {
             let action = req.action.clone();
             let result = match action.as_str() {
-                "ask" | "batch" => this.inner.jev_evaluate(req).await,
+                "ask" | "batch" | "files" => this.inner.jev_evaluate(req).await,
                 _ => Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
-                    "Unknown Jev action; use ask or batch",
+                    "Unknown Jev action; use ask, batch or files",
                 )),
             };
             crate::telemetry::track_mcp_tool("jev", &action, result.is_ok());

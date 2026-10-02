@@ -354,7 +354,7 @@ fn feature_gated(base: &[&'static str], proxy_only: &[&'static str]) -> Vec<&'st
     actions
 }
 
-pub const JEV_ACTIONS: &[&str] = &["ask", "batch"];
+pub const JEV_ACTIONS: &[&str] = &["ask", "batch", "files"];
 pub fn jev_action_schema(_: &mut SchemaGenerator) -> Schema {
     string_enum(JEV_ACTIONS)
 }

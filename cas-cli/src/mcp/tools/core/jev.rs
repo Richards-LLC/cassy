@@ -1,5 +1,5 @@
 //! All harnesses share this MCP handler and the CLI/library decision client.
-use crate::jev::{JevClient, JevError};
+use crate::jev::{FilesOptions, JevClient, JevError};
 use crate::mcp::tools::core::imports::*;
 use cas_mcp::JevRequest;
 
@@ -8,17 +8,28 @@ impl CasCore {
         // Validate before scheduling blocking I/O; all other MCP tools remain
         // responsive during the bounded HTTP retries and log writes.
         match req.action.as_str() {
-            "ask" if req.state.is_some() && req.records.is_none() => {}
+            "ask"
+                if req.state.is_some()
+                    && req.records.is_none()
+                    && req.paths.is_none()
+                    && req.globs.is_none() => {}
             "batch"
                 if req.state.is_none()
+                    && req.paths.is_none()
+                    && req.globs.is_none()
                     && req
                         .records
                         .as_ref()
                         .is_some_and(|r| (1..=50).contains(&r.len())) => {}
+            "files"
+                if req.state.is_none()
+                    && req.records.is_none()
+                    && (req.paths.as_ref().is_some_and(|p| !p.is_empty())
+                        || req.globs.as_ref().is_some_and(|p| !p.is_empty())) => {}
             _ => {
                 return Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
-                    "Jev ask requires state; batch requires 1–50 records; use exactly one input",
+                    "Jev ask requires state; batch requires 1–50 records; files requires paths/globs; do not mix inputs",
                 ));
             }
         }
@@ -38,6 +49,22 @@ impl CasCore {
                     "mcp:jev.batch",
                     req.advisory,
                 )?),
+                "files" => serde_json::to_value(
+                    client.files(
+                        root.parent()
+                            .ok_or_else(|| JevError::InvalidInput("Missing project root".into()))?,
+                        &FilesOptions {
+                            paths: req.paths.unwrap_or_default(),
+                            globs: req.globs.unwrap_or_default(),
+                            recursive: req.recursive,
+                            max_files: req.max_files.unwrap_or(50),
+                            max_bytes: req.max_bytes.unwrap_or(crate::jev::DEFAULT_FILE_BYTES),
+                        },
+                        &req.questions,
+                        "mcp:jev.files",
+                        req.advisory,
+                    )?,
+                ),
                 _ => unreachable!("validated action"),
             };
             value.map_err(|_| JevError::Unavailable("Could not encode Jev result".into()))
@@ -75,6 +102,11 @@ mod tests {
             action: "ask".into(),
             state: Some(json!("secret-state")),
             records: None,
+            paths: None,
+            globs: None,
+            recursive: false,
+            max_files: None,
+            max_bytes: None,
             questions: json!({"urgent":{"type":"noul","instructions":"Urgent?"}}),
             advisory: true,
         };
@@ -105,7 +137,61 @@ mod tests {
             .unwrap();
         assert_eq!(
             tool.input_schema["properties"]["action"]["enum"],
-            json!(["ask", "batch"])
+            json!(["ask", "batch", "files"])
+        );
+    }
+    #[tokio::test]
+    async fn jev_mcp_files_mock_http_and_input_parity() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.remove("TYPESAFE_API_KEY");
+        let server = MockServer::start().await;
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join(".cas");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(dir.path().join("source.rs"), "mcp-private-content").unwrap();
+        std::fs::write(dir.path().join(".env.local"), "mcp-secret").unwrap();
+        crate::cloud::CloudConfig {
+            endpoint: server.uri(),
+            token: Some("mock-token".into()),
+            ..Default::default()
+        }
+        .save_to_cas_dir(&root)
+        .unwrap();
+        Mock::given(method("POST")).and(path("/api/jev"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"model":"jev-1.13.0", "answers":{"urgent":{"type":"noul","noul":0.8}}, "usage":{"input_tokens":10,"output_tokens":1}})))
+            .expect(1).mount(&server).await;
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = crate::mcp::tools::CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = crate::mcp::tools::CasService::new(core);
+        let req: JevRequest = serde_json::from_value(json!({"action":"files", "paths":["source.rs", ".env.local"], "questions":{"urgent":{"type":"noul","instructions":"Urgent?"}}, "max_files":2})).unwrap();
+        let result = service.jev(Parameters(req.clone())).await.unwrap();
+        let encoded = serde_json::to_string(&result).unwrap();
+        assert!(encoded.contains("available") && encoded.contains("secret path"));
+        assert!(!encoded.contains("mcp-private-content") && !encoded.contains("mcp-secret"));
+        let log = std::fs::read_to_string(root.join("jev-decisions.jsonl")).unwrap();
+        assert_eq!(log.lines().count(), 1);
+        assert!(log.contains("mcp:jev.files"));
+        assert!(!log.contains("mcp-private-content"));
+        let mut invalid = req.clone();
+        invalid.state = Some(json!("mixed"));
+        assert!(service.jev(Parameters(invalid)).await.is_err());
+        let mut invalid = req.clone();
+        invalid.max_files = Some(51);
+        assert!(service.jev(Parameters(invalid)).await.is_err());
+        let mut invalid = req;
+        invalid.paths = None;
+        assert!(service.jev(Parameters(invalid)).await.is_err());
+        let requests = server.received_requests().await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(
+            body["state"],
+            json!({"path":"source.rs","content":"mcp-private-content"})
         );
     }
 }

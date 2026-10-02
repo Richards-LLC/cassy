@@ -2219,6 +2219,52 @@ fn matching_assembly_proof(
     git_commit_is_ancestor(repo, delivered?, &head).then_some(line)
 }
 
+/// cas-74cb: the tip an epic close answers for. A supplied commit receipt
+/// wins; otherwise the epic's branch, locally or as `origin/<branch>` once
+/// the lane was deleted after release.
+fn epic_close_tip(task: &Task, commit_receipt: Option<&str>, repo: &std::path::Path) -> Option<String> {
+    if let Some(receipt) = commit_receipt.filter(|receipt| is_safe_git_refname(receipt)) {
+        return resolve_branch_sha(repo, &format!("{receipt}^{{commit}}"));
+    }
+    let branch = task.branch.as_deref().filter(|branch| is_safe_git_refname(branch))?;
+    resolve_branch_sha(repo, &format!("{branch}^{{commit}}"))
+        .or_else(|| resolve_branch_sha(repo, &format!("origin/{branch}^{{commit}}")))
+}
+
+/// cas-74cb: why an epic's own close may defer its build proof to assembly,
+/// or `None` when it must still carry the scoped proof. Either the epic's
+/// latest passing ASSEMBLY_PROOF head contains the epic tip, or the tip is
+/// already contained in the default branch, whose release ran the full
+/// assembly gate (cas-459b / cas-a25c: lane deleted, content on main).
+fn epic_build_proof_basis(
+    task: &Task,
+    commit_receipt: Option<&str>,
+    repo: &std::path::Path,
+) -> Option<String> {
+    let tip = epic_close_tip(task, commit_receipt, repo)?;
+    let short = &tip[..tip.len().min(12)];
+    if let Some(line) = matching_assembly_proof(&task.notes, repo, Some(&tip)) {
+        return Some(format!("the epic's own {line} covers its tip {short}"));
+    }
+    let default = resolve_close_gate_default_branch(repo).ok()?;
+    [format!("origin/{default}"), default]
+        .into_iter()
+        .find(|target| git_ref_exists(repo, target) && git_commit_is_ancestor(repo, &tip, target))
+        .map(|target| {
+            format!(
+                "its tip {short} is already contained in {target}, whose release ran the full assembly gate"
+            )
+        })
+}
+
+/// cas-74cb: appended when an epic without an assembly basis is refused by
+/// the scoped-proof gate, naming the proof an epic is expected to carry.
+fn epic_assembly_proof_instruction(epic_id: &str) -> String {
+    format!(
+        "An epic's build proof is its assembly (CONTRIBUTING): run the full build and suite on the epic tip and record `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>` as a note on {epic_id}, or merge the epic into the default branch, then retry close. Epic {epic_id} has no passing ASSEMBLY_PROOF covering its tip and its tip is not contained in the default branch."
+    )
+}
+
 /// The Git range the snapshot-approval gate measures for one close.
 #[derive(Debug, PartialEq, Eq)]
 struct SnapshotGateRange {
@@ -2296,19 +2342,21 @@ enum BuildProofs {
 
 /// cas-4cbb / cas-2664: which closes carry their own Rust build proofs.
 ///
-/// cas-74cb: an epic's build proof is the supervisor's assembly of the epic
-/// tip (CONTRIBUTING: one full build and suite per epic, recorded as
-/// `ASSEMBLY_PROOF` on the epic). Its children already deferred to that same
-/// assembly. Re-deriving scoped targets for the epic's whole attributed range
-/// duplicated it and, on a large epic, ran the surface checker past the MCP
-/// deadline (1228 paths took 38 s on cas-f0c7).
+/// cas-74cb: an epic's own close defers only with an assembly basis from
+/// [`epic_build_proof_basis`]: its own ASSEMBLY_PROOF covers the epic tip, or
+/// the tip is already contained in the default branch. Otherwise it still
+/// owes the scoped proof.
 fn close_build_proofs(
     is_factory_worker: bool,
     epic_assembly_proof_covers_delivery: bool,
     merged_epic_child: bool,
-    is_epic: bool,
+    epic_has_assembly_basis: bool,
 ) -> BuildProofs {
-    if is_factory_worker || epic_assembly_proof_covers_delivery || merged_epic_child || is_epic {
+    if is_factory_worker
+        || epic_assembly_proof_covers_delivery
+        || merged_epic_child
+        || epic_has_assembly_basis
+    {
         BuildProofs::DeferredToAssembly
     } else {
         BuildProofs::Required
@@ -2520,7 +2568,7 @@ mod risk_proof_tests {
         assert_eq!(close_build_proofs(true, false, false, false), BuildProofs::DeferredToAssembly);
         assert_eq!(close_build_proofs(false, true, false, false), BuildProofs::DeferredToAssembly);
         assert_eq!(close_build_proofs(false, false, false, false), BuildProofs::Required);
-        // cas-74cb: an epic's own close defers to its assembly.
+        // cas-74cb: an epic with an assembly basis defers to its assembly.
         assert_eq!(close_build_proofs(false, false, false, true), BuildProofs::DeferredToAssembly);
 
         let task = Task {
@@ -8795,23 +8843,31 @@ impl CasCore {
                 && delivered_tip.as_deref().is_some_and(|tip| {
                     commit_is_merged_into_parent(proof_repo, tip, &resolved_parent_branch)
                 });
+            // cas-74cb: an epic's own close answers with its assembly when it
+            // has one; otherwise its scoped proof stays required.
             let closing_epic = task.task_type == TaskType::Epic;
+            let epic_assembly_basis = closing_epic
+                .then(|| epic_build_proof_basis(&task, req.commit_receipt.as_deref(), proof_repo))
+                .flatten();
             let build_proofs = close_build_proofs(
                 is_factory_worker,
                 assembly_proof.is_some(),
                 merged_epic_child,
-                closing_epic,
+                epic_assembly_basis.is_some(),
             );
+            let refusal_epic_id = closing_epic.then(|| task.id.clone());
+            let epic_refusal = move |message: String| {
+                if let Some(epic_id) = refusal_epic_id.as_deref() {
+                    format!("{message}\n\n{}", epic_assembly_proof_instruction(epic_id))
+                } else {
+                    message
+                }
+            };
             if build_proofs == BuildProofs::DeferredToAssembly {
                 let reference = match (&assembly_proof, parent_epic.as_ref()) {
-                    // cas-74cb: the epic answers with its own assembly.
-                    _ if closing_epic => match assembly_proof_line(&task.notes) {
-                        Some(line) => format!("the epic's own latest {line}"),
-                        None => format!(
-                            "no passing ASSEMBLY_PROOF is recorded on {} itself; its build proof is the supervisor's assembly of the epic tip",
-                            task.id
-                        ),
-                    },
+                    _ if epic_assembly_basis.is_some() => {
+                        epic_assembly_basis.clone().unwrap_or_default()
+                    }
                     (Some((epic_id, line)), _) => format!("covered by {epic_id}'s {line}"),
                     (None, Some(epic)) => format!(
                         "pending the supervisor's ASSEMBLY_PROOF on {} (one build and test of the epic tip)",
@@ -8854,7 +8910,7 @@ impl CasCore {
             ) {
                 let measured_gaps = declared_risk_close_gaps(&task, &changed_paths);
                 if !supervisor_override {
-                    return Ok(Self::tool_error(message));
+                    return Ok(Self::tool_error(epic_refusal(message)));
                 }
                 // Supervisor authority and a non-empty reason were checked at
                 // entry. Waive only the declared-risk mismatch; the mandatory
@@ -8879,10 +8935,10 @@ impl CasCore {
                         &changed_paths,
                         &mut scoped_proof_cache,
                     ) else {
-                        return Ok(Self::tool_error(scoped_error));
+                        return Ok(Self::tool_error(epic_refusal(scoped_error)));
                     };
                     if required_targets.is_empty() {
-                        return Ok(Self::tool_error(scoped_error));
+                        return Ok(Self::tool_error(epic_refusal(scoped_error)));
                     }
                     match validate_inherited_scoped_failures(
                         &task,
@@ -8893,9 +8949,9 @@ impl CasCore {
                     ) {
                         Ok(measurement) => accepted_inherited_scoped_failures = Some(measurement),
                         Err(audit_error) => {
-                            return Ok(Self::tool_error(format!(
+                            return Ok(Self::tool_error(epic_refusal(format!(
                                 "{scoped_error} Inherited base-red audit rejected: {audit_error}"
-                            )));
+                            ))));
                         }
                     }
                 }
@@ -23767,18 +23823,27 @@ mod merge_state_gate_tests {
         );
     }
 
-    /// cas-74cb: the cas-f0c7 production shape through the real handler. A
-    /// supervisor override close of an epic whose terminal children point at
-    /// factory lanes and anchors deleted both locally and on origin must
-    /// return inside the 55 s MCP deadline and close the epic. On 3.45.0 the
-    /// epic merge gate finished in about 8.5 s (cas-9069 bounds it), then the
-    /// scoped-proof gate spawned the project's surface checker over the
-    /// epic's whole attributed diff with no bound: 38 s for 1228 paths, then a
-    /// second run to build the suggested command. This fixture's checker
-    /// sleeps past the deadline instead.
+    /// What one cas-74cb handler close of a fixture epic produced.
+    struct EpicCloseRun {
+        is_error: bool,
+        text: String,
+        elapsed: std::time::Duration,
+        task: Task,
+    }
+
+    /// Close an epic through the real handler with supervisor_override and a
+    /// stranded-branch override, as the cas-f0c7 and cas-459b closes did.
+    /// `children` terminal children point at lanes and anchors that are gone
+    /// locally and on origin. `checker` is the project's committed
+    /// `scripts/check-scoped-test-surface.sh`. `setup` receives the
+    /// repository (on `main`, pushed to origin) and returns the epic branch
+    /// and its notes.
     #[cfg(unix)]
-    #[tokio::test]
-    async fn epic_override_close_with_deleted_child_lanes_closes_in_budget_cas_74cb() {
+    async fn run_epic_override_close_cas_74cb(
+        children: usize,
+        checker: &str,
+        setup: impl FnOnce(&std::path::Path) -> (String, String),
+    ) -> EpicCloseRun {
         use crate::mcp::CasService;
         use crate::store::{
             open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store,
@@ -23791,14 +23856,20 @@ mod merge_state_gate_tests {
         let p = dir.path();
         git(p, &["checkout", "-q", "main"]);
         std::fs::create_dir_all(p.join("scripts")).unwrap();
-        let checker = p.join("scripts/check-scoped-test-surface.sh");
-        std::fs::write(&checker, "#!/usr/bin/env bash\nsleep 60\n").unwrap();
-        std::fs::set_permissions(&checker, std::fs::Permissions::from_mode(0o755)).unwrap();
-        git(p, &["add", "scripts/check-scoped-test-surface.sh"]);
+        std::fs::create_dir_all(p.join("cas-cli/tests")).unwrap();
+        // A real integration target, so a resolving checker yields a
+        // required target the epic has no receipt for.
+        std::fs::write(p.join("cas-cli/tests/epic_proof_test.rs"), "// target\n").unwrap();
+        let checker_path = p.join("scripts/check-scoped-test-surface.sh");
+        std::fs::write(&checker_path, checker).unwrap();
+        std::fs::set_permissions(&checker_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        git(p, &["add", "scripts", "cas-cli"]);
         git(p, &["commit", "-q", "-m", "chore: project surface checker"]);
         git(p, &["push", "-q", "origin", "main"]);
         // Every child lane is gone locally and was never on origin.
         git(p, &["branch", "-D", "factory/worker"]);
+        let (epic_branch, epic_notes) = setup(p);
+        git(p, &["checkout", "-q", "main"]);
 
         let cas_dir = p.join(".cas");
         std::fs::create_dir_all(&cas_dir).unwrap();
@@ -23828,20 +23899,20 @@ mod merge_state_gate_tests {
         core.set_agent_id_for_testing(actor.into());
         let service = CasService::new(core, None);
 
+        // The epic binds to the store's own repository (`<repo>/.cas`), as a
+        // supervisor's epic in the project checkout does.
         let mut epic = Task {
             id: "cas-74cb-epic".to_string(),
             title: "deleted-lane epic".to_string(),
             task_type: TaskType::Epic,
             status: TaskStatus::Open,
-            branch: Some("main".to_string()),
+            branch: Some(epic_branch),
             risk: vec![TaskRisk::None],
+            notes: epic_notes,
             ..Default::default()
         };
-        // The epic binds to the store's own repository (`<repo>/.cas`), as a
-        // supervisor's epic in the project checkout does.
         epic.deliverables.files_changed = vec!["delivery.rs".to_string()];
         store.add(&epic).unwrap();
-        let children = 64;
         for index in 0..children {
             let mut child = Task {
                 id: format!("cas-74cb-child-{index:02}"),
@@ -23868,7 +23939,7 @@ mod merge_state_gate_tests {
             "id": epic.id,
             "supervisor_override": true,
             "reason": "inspected every terminal child delivery against main",
-            "stranded_branch_override": "inspected all 64 child lanes: each factory branch and anchor is deleted locally and on origin after its delivery shipped to main",
+            "stranded_branch_override": "inspected every child lane: each factory branch and anchor is deleted locally and on origin after its delivery shipped",
         }))
         .unwrap();
         let response = service.task(Parameters(request)).await.unwrap();
@@ -23882,17 +23953,147 @@ mod merge_state_gate_tests {
             })
             .collect::<Vec<_>>()
             .join("\n");
+        EpicCloseRun {
+            is_error: response.is_error == Some(true),
+            text,
+            elapsed,
+            task: store.get(&epic.id).unwrap(),
+        }
+    }
+
+    /// A surface checker that resolves at once and requires a real target.
+    #[cfg(unix)]
+    const FAST_REQUIRING_CHECKER_CAS_74CB: &str = concat!(
+        "#!/usr/bin/env bash\n",
+        "cat > /dev/null\n",
+        "printf '%s\\n' 'SCOPED_PROOF_TARGET_ARGS: --test epic_proof_test'\n",
+    );
+
+    /// Commit an unreleased epic lane `epic/unreleased` and return its tip.
+    #[cfg(unix)]
+    fn unreleased_epic_lane_cas_74cb(p: &std::path::Path) -> String {
+        git(p, &["checkout", "-q", "-b", "epic/unreleased", "main"]);
+        std::fs::write(p.join("epic.rs"), "// unreleased epic work\n").unwrap();
+        git(p, &["add", "epic.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: unreleased epic work"]);
+        let tip = git_command(p, &["rev-parse", "HEAD"]).output().unwrap();
+        String::from_utf8(tip.stdout).unwrap().trim().to_string()
+    }
+
+    /// cas-74cb: the cas-f0c7 production shape through the real handler. A
+    /// supervisor override close of an epic whose 64 terminal children point
+    /// at factory lanes and anchors deleted both locally and on origin must
+    /// return inside the 55 s MCP deadline and close the epic. On 3.45.0 the
+    /// epic merge gate finished in about 8.5 s (cas-9069 bounds it), then the
+    /// scoped-proof gate spawned the project's surface checker over the
+    /// epic's whole attributed diff with no bound: 38 s for 1228 paths, then a
+    /// second run to build the suggested command. This fixture's checker
+    /// sleeps past the deadline instead. The epic tip is contained in main
+    /// (released), so the close defers its build proof to that assembly.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn epic_override_close_with_deleted_child_lanes_closes_in_budget_cas_74cb() {
+        let run = run_epic_override_close_cas_74cb(
+            64,
+            "#!/usr/bin/env bash\nsleep 60\n",
+            |_| ("main".to_string(), String::new()),
+        )
+        .await;
         assert!(
-            elapsed < std::time::Duration::from_secs(30),
-            "epic override close must answer inside the MCP deadline, took {elapsed:?}: {text}"
+            run.elapsed < std::time::Duration::from_secs(30),
+            "epic override close must answer inside the MCP deadline, took {:?}: {}",
+            run.elapsed,
+            run.text
         );
-        assert_ne!(response.is_error, Some(true), "{text}");
-        let closed = store.get(&epic.id).unwrap();
-        assert_eq!(closed.status, TaskStatus::Closed, "{text}");
+        assert!(!run.is_error, "{}", run.text);
+        assert_eq!(run.task.status, TaskStatus::Closed, "{}", run.text);
         assert!(
-            closed.notes.contains("BUILD PROOF deferred to epic assembly"),
-            "the epic's build proof is its assembly, recorded on close: {}",
-            closed.notes
+            run.task.notes.contains("BUILD PROOF deferred to epic assembly")
+                && run.task.notes.contains("already contained in"),
+            "the released epic defers to the release's assembly: {}",
+            run.task.notes
+        );
+    }
+
+    /// cas-74cb case (b), the cas-459b / cas-a25c shape: the epic's lane was
+    /// deleted after release and its tip is contained in the default branch.
+    /// A resolving checker would demand a scoped proof the epic does not
+    /// carry; release containment stands for it instead.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn released_epic_tip_defers_build_proof_cas_74cb() {
+        let run = run_epic_override_close_cas_74cb(8, FAST_REQUIRING_CHECKER_CAS_74CB, |p| {
+            unreleased_epic_lane_cas_74cb(p);
+            git(p, &["checkout", "-q", "main"]);
+            git(p, &["merge", "-q", "--no-ff", "epic/unreleased", "-m", "release epic"]);
+            git(p, &["push", "-q", "origin", "main"]);
+            // The epic lane was never kept on origin; only the local ref the
+            // supervisor recreated at the released tip remains.
+            git(p, &["branch", "-m", "epic/unreleased", "epic/released"]);
+            ("epic/released".to_string(), String::new())
+        })
+        .await;
+        assert!(!run.is_error, "{}", run.text);
+        assert_eq!(run.task.status, TaskStatus::Closed, "{}", run.text);
+        assert!(
+            run.task.notes.contains("already contained in")
+                && !run.text.contains("SCOPED_PROOF"),
+            "release containment must replace the scoped proof: {}\n{}",
+            run.text,
+            run.task.notes
+        );
+    }
+
+    /// cas-74cb case (a): an unreleased epic whose own passing ASSEMBLY_PROOF
+    /// head is the epic tip defers to that assembly.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn epic_with_covering_assembly_proof_defers_build_proof_cas_74cb() {
+        let run = run_epic_override_close_cas_74cb(8, FAST_REQUIRING_CHECKER_CAS_74CB, |p| {
+            let tip = unreleased_epic_lane_cas_74cb(p);
+            let notes = format!(
+                "[2026-10-02 20:00] PROGRESS ASSEMBLY_PROOF: head={tip} result=PASS command=assembly-proof log=/tmp/assembly.log"
+            );
+            ("epic/unreleased".to_string(), notes)
+        })
+        .await;
+        assert!(!run.is_error, "{}", run.text);
+        assert_eq!(run.task.status, TaskStatus::Closed, "{}", run.text);
+        assert!(
+            run.task.notes.contains("BUILD PROOF deferred to epic assembly")
+                && run.task.notes.contains("covers its tip"),
+            "{}",
+            run.task.notes
+        );
+    }
+
+    /// cas-74cb case (c): an unreleased epic with no covering ASSEMBLY_PROOF
+    /// still owes its scoped proof, now under the bounded checker, and the
+    /// refusal names the assembly proof an epic should carry.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn epic_without_assembly_basis_still_owes_build_proof_cas_74cb() {
+        let run = run_epic_override_close_cas_74cb(8, FAST_REQUIRING_CHECKER_CAS_74CB, |p| {
+            unreleased_epic_lane_cas_74cb(p);
+            // A passing proof of some other head does not cover this tip.
+            (
+                "epic/unreleased".to_string(),
+                "[2026-10-02 20:00] PROGRESS ASSEMBLY_PROOF: head=0000000000000000000000000000000000000001 result=PASS command=x log=/tmp/x".to_string(),
+            )
+        })
+        .await;
+        assert!(run.is_error, "an unassembled epic must not close: {}", run.text);
+        assert_ne!(run.task.status, TaskStatus::Closed, "{}", run.text);
+        assert!(
+            run.text.contains("TASK CLOSE REJECTED")
+                && run.text.contains("ASSEMBLY_PROOF: head=<epic tip sha>"),
+            "{}",
+            run.text
+        );
+        assert!(
+            run.elapsed < std::time::Duration::from_secs(30),
+            "{:?}",
+            run.elapsed
         );
     }
 

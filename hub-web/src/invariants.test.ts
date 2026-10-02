@@ -1319,6 +1319,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain('fleetConnectionLabel(conversationConnection(machineId, session), machineId)');
     expect(source).toContain('const label = conversationHeaderLabel(selectedMachineId, selectedSession);');
     expect(source).toContain('connection: () => conversationHeaderLabel(threadMachineId, threadSession),');
+    // The empty thread waits for this session's first page, requested or not yet (cas-010f).
+    expect(source).toContain("return !page.loaded && !page.unavailable;");
+    expect(source).not.toContain("return page.requested === true && !page.loaded;");
     expect(source).toContain("const state = machineFooterConnection(machine.id);");
     // The header status reads "Live", not "· Live": the dot is aria-hidden (cas-17e3).
     expect(source).toContain('const separator = document.createElement("span"); separator.setAttribute("aria-hidden", "true"); separator.textContent = " · ";');

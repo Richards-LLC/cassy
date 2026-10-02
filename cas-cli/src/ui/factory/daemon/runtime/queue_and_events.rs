@@ -14087,6 +14087,56 @@ mod declined_wake_retry_tests_cas_913c {
         );
     }
 
+    /// The mid-turn wait spends no budget however long the turn runs (up to
+    /// the 15-minute bound), and the re-offer after the turn ends bypasses the
+    /// cadence while still honouring the attempt budget and acknowledgement.
+    #[test]
+    fn turn_aware_retry_waits_mid_turn_and_reoffers_once_the_turn_ends_cas_913c() {
+        let declined = Utc
+            .with_ymd_and_hms(2026, 10, 2, 0, 15, 58)
+            .single()
+            .unwrap();
+        for minutes in [0, 1, 5, 14] {
+            let now = declined + Chrono::seconds(minutes * 60 + 30);
+            assert_eq!(
+                claude_turn_aware_retry(1, Some(true), true, Some(declined), now),
+                TurnAwareRetry::Wait,
+                "mid-turn at +{minutes}m"
+            );
+            assert_eq!(
+                claude_turn_aware_retry(1, Some(true), false, Some(declined), now),
+                TurnAwareRetry::Wait
+            );
+        }
+
+        let turn_end = declined + Chrono::seconds(8 * 60);
+        let settled = turn_end + Chrono::seconds(3);
+        assert_eq!(
+            claude_turn_aware_retry(1, Some(false), true, Some(declined), settled),
+            TurnAwareRetry::OfferNow
+        );
+        // The re-offer is granted inside what would have been a cadence
+        // cooldown (attempt 2 waits 60s on the cadence)...
+        assert_eq!(
+            claude_redelivery_decision_after_turn(false, 2, Some(settled), settled, true),
+            ClaudeRedelivery::Deliver
+        );
+        // ...but never past the budget or after an acknowledgement.
+        assert_eq!(
+            claude_redelivery_decision_after_turn(false, 3, Some(settled), settled, true),
+            ClaudeRedelivery::StopUndelivered
+        );
+        assert_eq!(
+            claude_redelivery_decision_after_turn(true, 1, Some(settled), settled, true),
+            ClaudeRedelivery::StopAcknowledged
+        );
+        // A first offer (no decline yet) is never held.
+        assert_eq!(
+            claude_turn_aware_retry(0, Some(true), false, None, settled),
+            TurnAwareRetry::UseCadence
+        );
+    }
+
     /// No transcript (a Claude session under an unresolvable config dir):
     /// pane output while the wake was declined never consumes the row; only
     /// the nudge the wake gate later delivers does. The idle relay falls back

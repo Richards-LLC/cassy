@@ -133,15 +133,16 @@ describe("mic state styling (P6)", () => {
 
 describe("a long supervisor name keeps the composer one line (3.30.0 journey F9)", () => {
   const LONG = "an-extraordinarily-long-supervisor-name-for-truncation-checks-77";
-  it("offers the full wording, then the project alone, then the role; never a name cut inside the text (cas-1e0f QA F01/F02)", () => {
+  it("offers the full wording, then the role; never a project alone or a name cut inside the text (cas-1e0f QA F01/F02, cas-71f4)", () => {
     expect(LONG).toHaveLength(64);
-    expect(composerPlaceholders("gabber-studio")).toEqual(["Message the gabber-studio supervisor", "Message gabber-studio", "Message the supervisor"]);
+    // cas-71f4 (journey F20): "Message gabber-studio" read as messaging a project.
+    expect(composerPlaceholders("gabber-studio")).toEqual(["Message the gabber-studio supervisor", "Message the supervisor"]);
     expect(composerPlaceholders(undefined)).toEqual([COMPOSER_ROLE_PLACEHOLDER]);
     expect(composerPlaceholders(LONG).some((text) => text.includes("…"))).toBe(false);
-    // 8px a character: a 245px phone field takes the second wording, a desktop field the first.
+    // 8px a character: a 245px phone field takes the role, a desktop field the full wording.
     const measure = (text: string) => text.length * 8;
     const wordings = composerPlaceholders("gabber-studio");
-    expect(fittingPlaceholder(wordings, 245, measure)).toBe("Message gabber-studio");
+    expect(fittingPlaceholder(wordings, 245, measure)).toBe("Message the supervisor");
     expect(fittingPlaceholder(wordings, 400, measure)).toBe("Message the gabber-studio supervisor");
     expect(fittingPlaceholder(composerPlaceholders("petra-stella-cloud-staging-mirror"), 245, measure)).toBe("Message the supervisor");
     // Nothing fits: the shortest, still whole.
@@ -153,10 +154,14 @@ describe("a long supervisor name keeps the composer one line (3.30.0 journey F9)
     const composer = slot.querySelector<HTMLElement>(".message")!;
     dressComposer(composer, "patient-pelican-9", "gabber-studio");
     const field = slot.querySelector<HTMLTextAreaElement>("#message-text")!;
-    field.placeholder = "Message gabber-studio"; // as fitted on a phone
+    field.placeholder = "Message the supervisor"; // as fitted on a phone
     dressComposer(composer, "patient-pelican-9", "gabber-studio");
-    expect(field.placeholder).toBe("Message gabber-studio");
-    // Another project's candidates replace it.
+    expect(field.placeholder).toBe("Message the supervisor");
+    // The role wording is every project's short wording, so it stays (cas-71f4)...
+    dressComposer(composer, "calm-otter-4", "cas-src");
+    expect(field.placeholder).toBe("Message the supervisor");
+    // ...while another project's full wording replaces this one's.
+    field.placeholder = "Message the gabber-studio supervisor";
     dressComposer(composer, "calm-otter-4", "cas-src");
     expect(field.placeholder).toBe("Message the cas-src supervisor");
     // While dictation holds the placeholder, a refit only updates what it restores.
@@ -165,7 +170,7 @@ describe("a long supervisor name keeps the composer one line (3.30.0 journey F9)
     expect(field.placeholder).toBe("Listening…");
     expect(field.dataset.restingPlaceholder).toBe("Message the cas-src supervisor");
   });
-  it("addresses the project's supervisor, never the codename, and keeps the full name in Send's accessible name (journey F13)", () => {
+  it("addresses the project's supervisor, never the codename, in the field and in Send's accessible name (journey F13, cas-71f4)", () => {
     const slot = document.createElement("div");
     slot.innerHTML = composerMarkup(LONG);
     dressComposer(slot.querySelector<HTMLElement>(".message")!, LONG, "forge-tools");
@@ -174,10 +179,11 @@ describe("a long supervisor name keeps the composer one line (3.30.0 journey F9)
     expect(field.placeholder).not.toContain("truncation");
     const send = slot.querySelector("#message-send")!;
     expect(send.querySelector(".send-label")?.textContent).toBe("Send");
-    expect(send.getAttribute("aria-label")).toBe(`Send to ${LONG}`);
+    expect(send.getAttribute("aria-label")).toBe("Send to the forge-tools supervisor");
     // No project: the role alone, still no codename.
     dressComposer(slot.querySelector<HTMLElement>(".message")!, LONG);
     expect(field.placeholder).toBe("Message the supervisor");
+    expect(send.getAttribute("aria-label")).toBe("Send to the supervisor");
     // The unmeasured default is the fullest wording, whole.
     expect(composerPlaceholder(LONG)).toBe(`Message the ${LONG} supervisor`);
     expect(composerPlaceholder("  ")).toBe("Message the supervisor");

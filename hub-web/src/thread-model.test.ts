@@ -135,6 +135,16 @@ describe("threadModel", () => {
     expect(items.map((item) => item.type)).toEqual(["day", "coalesce", "group", "coalesce"]);
     expect((items[2] as ThreadGroup).turns.map((turn) => turn.kind)).toEqual(["status", "answer"]);
   });
+  it("leaves the working line out while the newest message still says Sending… (cas-71f4, journey F20)", () => {
+    const history = new ConversationHistory();
+    history.reply(reply(1, "answer", "Ready."), at(9, 0));
+    history.submit("b", "sup", "Ship it", at(9, 1));
+    // One sending signal: the bubble's own "Sending…".
+    expect(threadModel(history.events, { now: NOW, working: true }).some((item) => item.type === "working")).toBe(false);
+    // Once the supervisor has it, the working line says it is on it.
+    history.acknowledge({ client_ref: "b", notification_id: 7, target: "sup", stamped: true });
+    expect(threadModel(history.events, { now: NOW, working: true }).at(-1)?.type).toBe("working");
+  });
   it("adds day separators, an undated Today, and the working line only when executing", () => {
     const history = new ConversationHistory();
     history.submit("a", "sup", "Yesterday's ask", at(18, 0, -1));

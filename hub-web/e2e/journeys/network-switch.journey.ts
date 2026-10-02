@@ -42,7 +42,7 @@ async function chooseConversation(page: Page): Promise<void> {
 }
 async function sendNow(page: Page, text: string): Promise<void> {
   await page.getByRole("textbox", { name: "Your message" }).fill(text);
-  await page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true }).click();
+  await page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }).click();
 }
 function sentTimes(hub: HubDouble, text: string): number { return hub.sends.filter(m => m.text === text).length; }
 
@@ -504,6 +504,10 @@ test("HUB-J12 network switch: single revoked machine stops promising reconnectio
   // cas-5a8f: a send the supervisor has, awaiting its reply, reads "working"
   // while the machine is live...
   await accepted(page, hub, "Before the pairing is revoked");
+  // cas-71f4: the supervisor has it once it is delivered; until then the
+  // bubble's "Sending…" is the one signal.
+  hub.deliverLatest(PELICAN);
+  await expect(page.getByRole("log").getByText("Delivered")).toBeVisible();
   const working = page.getByRole("log").locator(".working");
   await expect(working).toHaveCount(1);
   hub.refuseProofs("atlas", 1_000, "revoked", false);
@@ -680,7 +684,7 @@ test("HUB-J12 network switch: three unconfirmed messages read as one notice (cas
   await clock.advance(15_000); // every receipt deadline passes
   const notice = log.locator('.conversation-unconfirmed[role="status"]');
   await expect(notice).toHaveCount(1);
-  await expect(notice).toHaveText(`3 messages not confirmed · Cassy couldn't confirm delivery to ${PELICAN}. Review them to retry.`);
+  await expect(notice).toHaveText("3 messages not confirmed · Cassy couldn't confirm delivery to the cas-src supervisor. Review them to retry.");
   await expect(log.getByRole("button", { name: "Retry sending" })).toHaveCount(0);
   await expect(log.getByRole("button", { name: /^Dismiss/ })).toHaveCount(0);
   await expect(row).toContainText("Not confirmed: Ship it if both are green");

@@ -29,7 +29,8 @@ describe("several unconfirmed messages (cas-b00c, journey F19)", () => {
     expect(bubbles().map((bubble) => bubble.dataset.grouped)).toEqual(["member", "member", "last"]);
     const notices = view.element.querySelectorAll<HTMLElement>('.conversation-unconfirmed[role="status"]');
     expect(notices).toHaveLength(1);
-    expect(notices[0]!.textContent).toBe("3 messages not confirmed · Cassy couldn't confirm delivery to sup. Review them to retry.");
+    // cas-71f4: the supervisor by role (no project in this view), never the codename "sup".
+    expect(notices[0]!.textContent).toBe("3 messages not confirmed · Cassy couldn't confirm delivery to the supervisor. Review them to retry.");
     expect(view.element.querySelectorAll(".conversation-retry, .conversation-dismiss")).toHaveLength(0);
     // Each message is still there to read.
     expect(bubbles().map((bubble) => bubble.querySelector("p")?.textContent)).toEqual(["First", "Second", "Third"]);

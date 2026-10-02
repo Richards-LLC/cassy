@@ -87,7 +87,7 @@ test("HUB-J2 pair a machine from a cas hub pair link", async ({ page, journey })
     const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ });
     await expect(row).toBeVisible({ timeout: 15_000 });
     await row.click();
-    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     await expect(page.locator("#toast")).toHaveText(/connected/);
     // It covers no heading either: at the top right it used to land on the
     // context rail's "Tasks & progress" (3.30.0 journey F8).

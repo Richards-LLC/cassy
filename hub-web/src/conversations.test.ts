@@ -476,7 +476,7 @@ describe('conversation evidence', () => {
     const send = composer.querySelector<HTMLButtonElement>('#message-send')!;
     expect(send.classList.contains('send')).toBe(true);
     expect(send.textContent).toBe('Send');
-    expect(send.getAttribute('aria-label')).toBe('Send to patient-pelican-9');
+    expect(send.getAttribute('aria-label')).toBe('Send to the cas-src supervisor');
     expect(send.querySelector('.send-glyph')).not.toBeNull();
     expect(app.querySelector('.conversation-shell')?.classList.contains('machine-accent-0')).toBe(true);
     // Dressing twice (every re-render) never stacks a second clip or label.

@@ -384,7 +384,7 @@ describe("ConversationView (Pebble thread)", () => {
   it("turns a send whose receipt never came into Not confirmed with Retry, not Sending… forever (cas-1622)", () => {
     const history = new ConversationHistory();
     const retry = vi.fn();
-    const view = new ConversationView(document, history, { supervisor: "sup", editMessage: vi.fn(), retryMessage: retry }); document.body.replaceChildren(view.element);
+    const view = new ConversationView(document, history, { supervisor: "sup", project: "cas-src", editMessage: vi.fn(), retryMessage: retry }); document.body.replaceChildren(view.element);
     history.submit("x", "sup", "Is the gate green?", at(9, 0), 52);
     expect(history.unconfirmSilent(at(9, 0) + RECEIPT_TIMEOUT_MS - 1)).toEqual([]);
     view.update();
@@ -395,7 +395,8 @@ describe("ConversationView (Pebble thread)", () => {
     const label = bubble.querySelector<HTMLElement>(".conversation-unconfirmed")!;
     expect(label.getAttribute("role")).toBe("status");
     expect(label.querySelector("svg.warn")?.getAttribute("aria-hidden")).toBe("true");
-    expect(label.textContent).toBe("Not confirmed · Cassy couldn't confirm delivery to sup. Retry sends it again.");
+    // cas-71f4 (journey F20): the project's supervisor, never the codename.
+    expect(label.textContent).toBe("Not confirmed · Cassy couldn't confirm delivery to the cas-src supervisor. Retry sends it again.");
     // Journey F10: the operator's words, not "the hub".
     expect(label.textContent).not.toMatch(/\bhub\b/i);
     // It may have arrived: no "Not sent", and only Retry (an edit could reach the supervisor twice as easily).

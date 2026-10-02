@@ -256,7 +256,12 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
   // transient working signal turn it into a fake history marker/thread.
   if (events.length > 0) {
     if (options.historyEnd) items.unshift({ type: "history-end", key: "history-end", label: "No earlier history" });
-    if (options.working) items.push({ type: "working", key: "working" });
+    // cas-71f4 (journey F20): while the newest message still says "Sending…",
+    // that bubble is the one sending signal; the working line follows once the
+    // supervisor has it.
+    const newest = events.at(-1);
+    const sending = newest?.kind === "send" && newest.value.state === "sending" && !newest.value.held;
+    if (options.working && !sending) items.push({ type: "working", key: "working" });
   }
   return items;
 }

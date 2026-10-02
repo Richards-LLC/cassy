@@ -38,6 +38,15 @@ export function selectSelection(state: SelectionState, next: SessionSelection): 
   return { current: next, history };
 }
 
+/**
+ * Where a pairing lands (cas-b452, journey F39). A first pairing lands on the
+ * new machine. A re-pair started from an open conversation returns to that
+ * conversation, on whichever machine it is, instead of the landing page.
+ */
+export function selectionAfterPairing(machineId: string, repairing: boolean, current: SessionSelection | undefined): SessionSelection {
+  return repairing && current?.session !== undefined ? { machineId: current.machineId, session: current.session } : { machineId };
+}
+
 export function previousSelection(state: SelectionState): SessionSelection | undefined {
   return state.history.at(-1);
 }

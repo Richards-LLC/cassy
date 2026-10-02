@@ -1094,15 +1094,15 @@ fn secret_patterns() -> &'static [(&'static str, regex::Regex)] {
             ),
             (
                 "a cookie or authorization header value",
-                r#"(?i)"name"\s*:\s*"(?:cookie|set-cookie|authorization)"\s*,\s*"value"\s*:\s*"[^"]{8,}""#,
+                r#"(?i)"name"\s*:\s*"(?:cookie|set-cookie|authorization)"\s*,\s*"value"\s*:\s*(?P<json_value>"(?:\\.|[^"\\])*")"#,
             ),
             (
                 "a cookie or authorization header value",
-                r"(?im)^\s*(?:cookie|set-cookie|authorization)\s*:\s*\S{8,}",
+                r"(?im)^[\t ]*(?:cookie|set-cookie|authorization)[\t ]*:[\t ]*(?P<header_value>[^\r\n]*)",
             ),
             (
                 "a saved browser storage state (cookies)",
-                r#""cookies"\s*:\s*\[\s*\{[^\]]*"value"\s*:\s*"[^"]{8,}""#,
+                r#""cookies"\s*:\s*\[(?P<cookie_values>(?:[^"\]]|"(?:\\.|[^"\\])*")*)"#,
             ),
         ]
         .into_iter()
@@ -1117,8 +1117,42 @@ const SECRET_SCAN_MAX_BYTES: u64 = 64 * 1024 * 1024;
 fn first_secret(text: &str) -> Option<&'static str> {
     secret_patterns()
         .iter()
-        .find(|(_, pattern)| pattern.is_match(text))
+        .find(|(_, pattern)| {
+            pattern.captures_iter(text).any(|captures| {
+                if let Some(value) = captures.name("json_value") {
+                    json_value_has_secret(value.as_str())
+                } else if let Some(value) = captures.name("header_value") {
+                    // HTTP optional whitespace is outside the header value.
+                    value_has_secret(value.as_str().trim_matches([' ', '\t']))
+                } else if let Some(values) = captures.name("cookie_values") {
+                    static VALUES: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+                    VALUES
+                        .get_or_init(|| {
+                            regex::Regex::new(r#""value"\s*:\s*("(?:\\.|[^"\\])*")"#)
+                                .expect("cookie value pattern")
+                        })
+                        .captures_iter(values.as_str())
+                        .any(|value| json_value_has_secret(&value[1]))
+                } else {
+                    // JWT, bearer and API token detection has no exemptions.
+                    true
+                }
+            })
+        })
         .map(|(kind, _)| *kind)
+}
+
+fn value_has_secret(value: &str) -> bool {
+    value.chars().count() >= 8
+        && !matches!(value, "REDACTED" | "[REDACTED]" | "<redacted>" | "***" | "")
+}
+
+fn json_value_has_secret(quoted_value: &str) -> bool {
+    match serde_json::from_str::<String>(quoted_value) {
+        Ok(value) => value_has_secret(&value),
+        // Malformed JSON must not turn into a redaction exemption.
+        Err(_) => quoted_value.trim_matches('"').chars().count() >= 8,
+    }
 }
 
 /// cas-a6ab: an authenticated deployed run must not carry credentials into
@@ -1127,7 +1161,7 @@ fn first_secret(text: &str) -> Option<&'static str> {
 /// the kind of secret, never its value. A saved storage-state file anywhere
 /// in the bundle is refused by name.
 fn check_no_secrets(bundle_dir: &Path, listed: &[(String, PathBuf)]) -> Result<(), EvidenceRefusal> {
-    let fix = "re-record without credentials: never copy a storage state, cookie, token or auth header into the bundle; redact header values from the trace before listing it".to_string();
+    let fix = "re-record without credentials: saved storage-state files and real cookie/authorization values of 8 or more characters are refused; redact each entire value to exactly REDACTED, [REDACTED], <redacted>, ***, or empty before listing the trace; JWT, bearer and API tokens remain refused".to_string();
     if let Ok(entries) = std::fs::read_dir(bundle_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_ascii_lowercase();

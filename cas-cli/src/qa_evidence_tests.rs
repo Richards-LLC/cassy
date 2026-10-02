@@ -1427,6 +1427,107 @@ fn deployed_bundle_for_another_commit_or_without_proof_is_refused() {
 }
 
 #[test]
+fn secret_scan_accepts_exact_redaction_placeholders_in_each_shape() {
+    for value in ["REDACTED", "[REDACTED]", "<redacted>", "***", ""] {
+        let json_value = serde_json::to_string(value).unwrap();
+        for text in [
+            format!(r#"{{"name":"Authorization","value":{json_value}}}"#),
+            format!("Cookie: {value}\n"),
+            format!(r#"{{"cookies":[{{"name":"session","value":{json_value}}}]}}"#),
+        ] {
+            assert_eq!(first_secret(&text), None, "placeholder in {text}");
+        }
+    }
+}
+
+#[test]
+fn secret_scan_refuses_real_values_in_each_shape() {
+    for value in [
+        "12345678",
+        "REDACTED-real",
+        "[REDACTED]suffix",
+        "REDACTED real",
+    ] {
+        let json_value = serde_json::to_string(value).unwrap();
+        for text in [
+            format!(r#"{{"name":"Set-Cookie","value":{json_value}}}"#),
+            format!("Authorization: {value}\n"),
+            format!(r#"{{"cookies":[{{"value":{json_value}}}]}}"#),
+        ] {
+            assert!(first_secret(&text).is_some(), "real value in {text}");
+        }
+    }
+}
+
+#[test]
+fn secret_scan_checks_every_value_next_to_redactions() {
+    for text in [
+        r#"[{"name":"Cookie","value":"REDACTED"},{"name":"Authorization","value":"12345678"}]"#,
+        "Cookie: REDACTED\nAuthorization: 12345678\n",
+        r#"{"cookies":[{"value":"12345678"},{"value":"[REDACTED]"}]}"#,
+        r#"{"cookies":[{"value":"[REDACTED]"},{"value":"12345678"}]}"#,
+    ] {
+        assert!(first_secret(text).is_some(), "mixed values in {text}");
+    }
+}
+
+#[test]
+fn secret_scan_decodes_json_values_without_exempting_partial_redactions() {
+    for text in [
+        r#"{"name":"Cookie","value":"\u005bREDACTED\u005d"}"#,
+        r#"{"cookies":[{"value":"\u005bREDACTED\u005d"}]}"#,
+        "Cookie: \tREDACTED\t \r\n",
+    ] {
+        assert_eq!(first_secret(text), None, "exact value in {text}");
+    }
+    for text in [
+        r#"{"name":"Cookie","value":" REDACTED "}"#,
+        r#"{"cookies":[{"value":"escaped\"real-value"},{"value":"[REDACTED]"}]}"#,
+    ] {
+        assert!(first_secret(text).is_some(), "real value in {text}");
+    }
+}
+
+#[test]
+fn secret_scan_applies_redaction_rule_to_text_and_trace_without_echoing_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let text_path = dir.path().join("actions.txt");
+    let trace_path = dir.path().join("trace.zip");
+    let listed = [
+        ("trace_actions".to_string(), text_path.clone()),
+        ("trace".to_string(), trace_path.clone()),
+    ];
+    for value in ["REDACTED", "[REDACTED]", "<redacted>", "***", ""] {
+        let event = format!(r#"{{"name":"Authorization","value":"{value}"}}"#);
+        std::fs::write(&text_path, format!("Cookie: {value}\n")).unwrap();
+        trace_zip(&trace_path, &[&event]);
+        assert!(check_no_secrets(dir.path(), &listed).is_ok());
+    }
+    for key in ["trace_actions", "trace"] {
+        std::fs::write(&text_path, "Cookie: REDACTED\n").unwrap();
+        trace_zip(&trace_path, &[r#"{"name":"Cookie","value":"REDACTED"}"#]);
+        let real_value = "real-secret-123";
+        if key == "trace_actions" {
+            std::fs::write(&text_path, format!("Cookie: {real_value}\n")).unwrap();
+        } else {
+            let event = format!(r#"{{"name":"Cookie","value":"{real_value}"}}"#);
+            trace_zip(&trace_path, &[&event]);
+        }
+        let refusal = check_no_secrets(dir.path(), &listed).unwrap_err();
+        let message = format!("{refusal:?}");
+        assert!(refusal.problem.contains(key), "{message}");
+        assert!(message.contains("8 or more characters"), "{message}");
+        for placeholder in ["REDACTED", "[REDACTED]", "<redacted>", "***", "empty"] {
+            assert!(message.contains(placeholder), "{message}");
+        }
+        assert!(
+            !message.contains(real_value),
+            "the value must not be echoed"
+        );
+    }
+}
+
+#[test]
 fn deployed_bundle_carrying_credentials_is_refused_without_echoing_them() {
     // A session cookie copied into a text artifact.
     let fx = Fixture::new();

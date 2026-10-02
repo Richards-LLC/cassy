@@ -696,3 +696,24 @@ test("HUB-J12 network switch: three unconfirmed messages read as one notice (cas
   // Nothing was sent twice.
   expect(hub.sends).toHaveLength(3);
 });
+
+// cas-8f19: what is stored is read with the bounds it was written with. A
+// corrupted or foreign-written "waiting" message far over the store's size
+// bound is dropped on read: it is never shown as waiting and never sent on
+// the operator's behalf when the session is live.
+test("HUB-J12 network switch: an oversized stored waiting message is not sent after a reload (cas-8f19)", async ({ page }) => {
+  const { hub, clock, header, held } = await connected(page);
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.evaluate(([key, target]) => {
+    const now = Date.now();
+    localStorage.setItem("cas-commander-conversation:sends:v1", JSON.stringify({ [key]: { value: [{ id: "planted", target, text: "x".repeat(2_000_000), state: "held", at: now, heldAt: now }], updatedAt: now } }));
+  }, [`atlas:${PELICAN}`, PELICAN] as const);
+  await page.reload();
+  await chooseConversation(page);
+  await expect(header).toHaveText(" · Live");
+  await expect(held).toHaveCount(0);
+  await clock.advance(15_000); // a reattach and a receipt window later
+  expect(hub.sends, "nothing was sent on the operator's behalf").toHaveLength(0);
+  expect(errors).toEqual([]);
+});

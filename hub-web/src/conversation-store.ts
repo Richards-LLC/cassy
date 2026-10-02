@@ -80,11 +80,16 @@ export class ConversationStore<T> {
     for (const [conversation, entry] of Object.entries(parsed as Record<string, unknown>)) {
       if (!entry || typeof entry !== "object") continue;
       const { value, updatedAt } = entry as { value?: unknown; updatedAt?: unknown };
+      // cas-8f19: the bounds `set` keeps are kept on read too. A value this
+      // page could not have written (corrupted, or written by something
+      // else) is dropped, never acted on.
+      if (JSON.stringify(value ?? null).length > this.maxValueChars) continue;
       const narrowed = this.validate(value);
       if (narrowed === undefined) continue;
       records.set(conversation, { value: narrowed, updatedAt: typeof updatedAt === "number" && Number.isFinite(updatedAt) ? updatedAt : 0 });
     }
-    return records;
+    if (records.size <= this.maxConversations) return records;
+    return new Map([...records].sort(([, a], [, b]) => a.updatedAt - b.updatedAt).slice(-this.maxConversations));
   }
 
   private write(records: Map<string, Record_<T>>): void {
@@ -180,6 +185,12 @@ export type PendingSend = {
 const PENDING_STATES = new Set<PendingSend["state"]>(["held", "sending", "unconfirmed", "error"]);
 /** At most this many unsettled messages are kept per conversation, the newest. */
 export const MAX_PENDING_SENDS = 20;
+/**
+ * Field bounds for a stored unsettled message (cas-8f19), checked on read as
+ * well as write. The text bound is the store's per-conversation bound: a
+ * longer message is not stored, so a longer stored one is not this page's.
+ */
+export const PENDING_SEND_BOUNDS = { id: 128, target: 256, text: 64_000, error: 2_000, session: 256 } as const;
 
 const finite = (value: unknown): number | undefined => (typeof value === "number" && Number.isFinite(value) ? value : undefined);
 
@@ -188,6 +199,9 @@ export function validPendingSend(raw: unknown): PendingSend | undefined {
   if (!raw || typeof raw !== "object") return undefined;
   const { id, target, text, state, at, heldAt, sentAt, replyTo, error, session } = raw as Record<string, unknown>;
   if (typeof id !== "string" || !id || typeof target !== "string" || typeof text !== "string" || !text.trim()) return undefined;
+  const B = PENDING_SEND_BOUNDS;
+  if (id.length > B.id || target.length > B.target || text.length > B.text) return undefined;
+  if ((typeof error === "string" && error.length > B.error) || (typeof session === "string" && session.length > B.session)) return undefined;
   if (typeof state !== "string" || !PENDING_STATES.has(state as PendingSend["state"])) return undefined;
   const when = finite(at);
   if (when === undefined) return undefined;
@@ -204,7 +218,7 @@ export function validPendingSend(raw: unknown): PendingSend | undefined {
 /** A conversation's stored unsettled messages; malformed ones are dropped, the rest kept. */
 export function validPendingSends(raw: unknown): PendingSend[] | undefined {
   if (!Array.isArray(raw)) return undefined;
-  const sends = raw.flatMap((send) => validPendingSend(send) ?? []);
+  const sends = raw.flatMap((send) => validPendingSend(send) ?? []).slice(-MAX_PENDING_SENDS);
   return sends.length ? sends : undefined;
 }
 

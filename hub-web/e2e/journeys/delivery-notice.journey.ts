@@ -131,6 +131,21 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await hub.announceCatalog("atlas");
     expect(await focused(), "focus stays on Copy across a minute").toBe(copy);
     await expect(notice.locator("details")).toHaveAttribute("open", "");
+    // cas-f486: a phone that wakes after ten minutes, with the session list
+    // changed meanwhile, rebuilds the whole page. The rebuilt sheet has the
+    // same Details open and the same Copy focused, in new elements.
+    await page.evaluate(() => document.querySelector(".conversation-shell")!.setAttribute("data-before-wake", ""));
+    const atlas = hub.machine("atlas").sessions;
+    atlas.push({ name: "Accounting-calm-wren-4", supervisor: "calm-wren-4", project_dir: "/projects/Payroll", workers: [], liveness: "live" });
+    await page.clock.fastForward(600_000);
+    await hub.announceCatalog("atlas");
+    await expect(page.locator(".conversation-shell[data-before-wake]")).toHaveCount(0);
+    const sameControl = (label: string) => label.replace(/#\d+$/, "");
+    await expect.poll(async () => sameControl(await focused()), { message: "focus is on Copy again after the page is rebuilt" }).toBe(sameControl(copy));
+    await expect(sheet.locator("article.attention-item").first().locator("details")).toHaveAttribute("open", "");
+    atlas.pop();
+    await hub.announceCatalog("atlas");
+    await expect.poll(async () => sameControl(await focused())).toBe(sameControl(copy));
     await sheet.locator(".attention-dismiss-group").focus();
     await expect(page.locator(".conversation-main")).toHaveAttribute("inert", "");
     await expect(sheet).toBeVisible();

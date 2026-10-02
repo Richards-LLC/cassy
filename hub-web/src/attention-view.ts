@@ -289,10 +289,51 @@ export function renderAttentionPanel(
   container.dataset.panelSignature = signature;
   // A real change redraws; what the operator had open, folded and focused is
   // carried over by each notice's and group's own key, never by position.
-  const kept = attentionPanelState(container);
+  // A panel the page has just rebuilt from scratch (a shell rebuild after a
+  // phone wakes or a throttled tab catches up, cas-f486) has nothing in it
+  // to read, so it takes what the panel it replaced last held.
+  const memory = container.id || "attention-panel";
+  const kept = container.childElementCount > 0
+    ? attentionPanelState(container)
+    : rememberedPanelState.get(memory) ?? { open: new Set<string>(), folded: new Set<string>() };
   renderAttentionPanelContent(container, items, callbacks, options);
   restoreAttentionPanelState(container, kept);
+  watchAttentionPanelState(container, memory);
+  rememberedPanelState.set(memory, attentionPanelState(container));
 }
+
+/**
+ * What each Attention panel last held (cas-f486), kept beside the page, not
+ * in it: the page can replace the panel element wholesale, and the operator's
+ * opened Details, folded groups and focus must outlive that.
+ */
+const rememberedPanelState = new Map<string, AttentionPanelState>();
+
+/** Keep the remembered state current as the operator opens, folds and moves focus. */
+function watchAttentionPanelState(container: HTMLElement, memory: string): void {
+  if (container.dataset.stateWatched === "true") return;
+  container.dataset.stateWatched = "true";
+  const save = () => { if (container.isConnected) rememberedPanelState.set(memory, attentionPanelState(container)); };
+  container.addEventListener("toggle", save, true);
+  container.addEventListener("focusin", save);
+  container.addEventListener("click", () => queueMicrotask(save));
+  // Focus the operator moves elsewhere on the page is theirs: the panel stops
+  // claiming it. (A panel removed with focus inside fires no focusin, so its
+  // focus is still remembered for its replacement.)
+  const document = container.ownerDocument;
+  if (!watchedDocuments.has(document)) {
+    watchedDocuments.add(document);
+    document.addEventListener("focusin", (event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      for (const [key, state] of rememberedPanelState) {
+        const panel = document.getElementById(key);
+        if (state.focus !== undefined && !(panel?.contains(target))) rememberedPanelState.set(key, { ...state, focus: undefined });
+      }
+    });
+  }
+}
+const watchedDocuments = new WeakSet<Document>();
 
 /** Opened Details, folded groups and the focused control, keyed by notice or group and role. */
 interface AttentionPanelState { open: Set<string>; folded: Set<string>; focus?: string }
@@ -345,7 +386,16 @@ function restoreAttentionPanelState(container: HTMLElement, state: AttentionPane
   if (document.activeElement && document.activeElement !== document.body && container.contains(document.activeElement)) return;
   // The same control of the same notice, or nothing: never a neighbour's
   // look-alike, which could be another notice's Dismiss (QA round 3 F01).
-  findAttentionControl(container, state.focus)?.focus({ preventScroll: true });
+  const key = state.focus;
+  const land = () => {
+    const lost = !document.activeElement || document.activeElement === document.body;
+    if (lost && container.isConnected) findAttentionControl(container, key)?.focus({ preventScroll: true });
+  };
+  land();
+  // A rebuilt page can still be hiding the panel's column at this point (the
+  // phone sheet is reopened after the panel is drawn, cas-f486): try again
+  // once the frame is laid out.
+  if (document.activeElement === document.body) document.defaultView?.requestAnimationFrame(land);
 }
 
 function renderAttentionPanelContent(

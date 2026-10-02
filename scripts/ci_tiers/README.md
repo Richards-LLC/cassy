@@ -36,7 +36,12 @@ passed cases; it still checks the scripts and fixtures are executable. Linux
 runs all three unchanged. Parsed cache policy contracts run on both platforms.
 The separate `test-self-hosted-rust-setup.sh` Make cohort fixture also reports
 an explicit Darwin skip because its Linux shared-toolchain concurrency contract
-requires `flock`; the production setup script and Linux fixture are unchanged.
+requires `flock`. Python policy tests exercise the real setup helper on both
+platforms using POSIX file locks with isolated rustup fixtures: two simultaneous
+lanes perform one install; incomplete registries, missing standard-library files,
+and broken cargo fail clearly without mutating a preprovisioned toolchain.
+Release and prebuild route mutation tests reject missing helpers and unguarded
+Rust installers on the shared runner pool.
 
 Both cancellation watchdogs run their full fixtures on macOS and Linux. They
 retain GNU `date -u -d` parsing when it succeeds and fall back to Python 3's

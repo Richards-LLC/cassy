@@ -232,7 +232,7 @@ fi
         self.assertEqual(policy.validate(self.root, verbose=False), [])
         for file, job in [('.github/workflows/release.yml', 'verify'),
                           ('.github/workflows/release.yml', 'build'),
-                          ('.github/workflows/release-prebuild.yml', 'build-linux')]:
+                          ('.github/workflows/release-prebuild.yml', 'build')]:
             original = copy.deepcopy(policy.load(self.root / file))
             for mutation in ['remove-helper', 'unguarded-action', 'wrong-helper-route']:
                 with self.subTest(job=job, mutation=mutation):

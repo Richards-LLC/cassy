@@ -38,7 +38,7 @@ if printf '%s\n' "$toolchains" | awk '$1 == "stable" || $1 ~ /^stable-/ { found 
     echo 'stable Rust toolchain is already installed; skipped rustup mutation'
 else
     echo 'stable Rust toolchain is missing; installing under the shared rustup lock'
-    "$rustup_bin" toolchain install stable --profile minimal
+    "$rustup_bin" toolchain install stable --profile minimal || incomplete_toolchain 'stable installation failed; inspect the rustup diagnostic above'
 fi
 
 # A rustc binary alone does not prove that a raced rustup install left the

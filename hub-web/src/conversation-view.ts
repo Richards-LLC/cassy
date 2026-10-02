@@ -1363,7 +1363,7 @@ export class ConversationView {
     });
   }
 
-  dispose(): void { this.disposed = true; this.resize?.disconnect(); this.element.remove(); this.pinned.remove(); }
+  dispose(): void { this.disposed = true; this.resize?.disconnect(); this.element.remove(); this.pinned.remove(); this.unsent.remove(); this.jump.remove(); }
 }
 
 /** Show the expand pill on a lone folded status only while the three-line clamp is hiding text. */

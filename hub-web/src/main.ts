@@ -5,6 +5,7 @@ import "./styles.css";
 import { activityTime, ConversationList, filterConversationRows, groupConversationRows, plainActivity, type ConversationRow } from "./conversation-list";
 import { controlCommandCopy, sessionJumpCommandMarkup } from "./palette-commands";
 import { applyHistoryCursor, ConversationHistory, supervisorWorking } from "./conversation-history";
+import { gridPlaceholder, threadBeforePanes } from "./early-thread";
 import { arrivalStore, draftStore, pendingSendStore, purgeConversations, type Arrivals, type Draft, type PendingSend } from "./conversation-store";
 import { loadDismissedAsks, saveDismissedAsks, type DismissedAsksStorage } from "./dismissed-asks";
 import { ConversationView, emptyActivityText } from "./conversation-view";
@@ -162,7 +163,7 @@ function conversationHistoryPage(key: string): { hasEarlier: boolean; nextBefore
   }
   return page;
 }
-function updateConversationViews(): void { for (const view of conversationViews.values()) view.update(); syncConversationContext(); persistPendingSends(); persistArrivals(); }
+function updateConversationViews(): void { for (const view of conversationViews.values()) view.update(); syncConversationContext(); persistPendingSends(); persistArrivals(); syncEarlyThread(); }
 // What the desktop context rail can show beyond the header (P10): the last
 // status and attention renders record whether they had anything for the open
 // thread; asks, blockers and attachments are read from its history.
@@ -468,6 +469,47 @@ function mountConversation(key: string, mount: HTMLElement): void {
   // it never floats over a turn in the thread (cas-97ea).
   if (composerSlot && conversation.jump.parentElement !== composerSlot) composerSlot.prepend(conversation.jump);
   conversation.update();
+  // cas-fc2c: the reader was in the thread shown before the panes; they stay in the thread.
+  if (earlyThreadHadFocus && !key.endsWith(`:${EARLY_THREAD}`)) {
+    earlyThreadHadFocus = false;
+    conversation.element.focus({ preventScroll: true });
+  }
+}
+
+/** The view key of a thread shown before its session's panes (cas-fc2c). */
+const EARLY_THREAD = "early-thread";
+const earlyThreadKey = (threadKey: string): string => `${threadKey}:${EARLY_THREAD}`;
+/** Focus was in the early thread when it gave way: the pane's thread takes it. */
+let earlyThreadHadFocus = false;
+
+/**
+ * cas-fc2c: while the selected conversation is still opening or reconnecting,
+ * a thread that already holds something to show (the messages this browser
+ * kept across a reload) goes up on its own above the connecting card,
+ * instead of waiting for the session's panes. Once the panes are up, or there
+ * is nothing to show, it goes away and the pane's thread takes over.
+ */
+function syncEarlyThread(): void {
+  const grid = document.querySelector<HTMLElement>("#pane-grid");
+  const threadKey = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : undefined;
+  const wanted = Boolean(grid && threadKey && grid.dataset.sessionKey === threadKey)
+    && threadBeforePanes({ presentation: hubPresentation, placeholder: gridPlaceholder(grid!), history: conversationHistories.get(threadKey!) });
+  for (const [key, view] of [...conversationViews]) {
+    if (!key.endsWith(`:${EARLY_THREAD}`) || (wanted && key === earlyThreadKey(threadKey!))) continue;
+    if (view.element.contains(document.activeElement)) earlyThreadHadFocus = true;
+    view.dispose();
+    conversationViews.delete(key);
+  }
+  const existing = grid?.querySelector<HTMLElement>(":scope > .conversation-early") ?? undefined;
+  if (!wanted) { existing?.remove(); grid?.classList.remove("has-early-thread"); return; }
+  let mount = existing;
+  if (!mount) {
+    mount = document.createElement("div");
+    mount.className = "terminal-mount conversation-early";
+    grid!.prepend(mount);
+    grid!.classList.add("has-early-thread");
+  }
+  mountConversation(earlyThreadKey(threadKey!), mount);
 }
 
 function applyPaneView(key: string, mount: HTMLElement, surface: TerminalSurface, view: TranscriptViewMode): void {
@@ -1917,6 +1959,7 @@ async function renderSessionState(machineId: string, session: string, state: Ses
     empty.replaceChildren(emptyTitle, emptyHint);
     grid.classList.remove("pane-layout", "single-pane", "workers-hidden");
     grid.replaceChildren(empty);
+    syncEarlyThread();
     return;
   }
   // Only the grid's own placeholder: a bare ".empty" also matched the
@@ -1944,6 +1987,9 @@ async function renderSessionState(machineId: string, session: string, state: Ses
     secondaryStrip = document.createElement("div"); secondaryStrip.className = "secondary-pane-strip";
     grid.replaceChildren(primarySlot, secondaryStrip);
   }
+  // cas-fc2c: the panes are up, so the thread shown before them gives way to
+  // the one mounted over the supervisor pane below.
+  syncEarlyThread();
   for (const [key, surface] of surfaces) {
     if (key.startsWith(`${machineId}:${session}:`) && !active.has(key.split(":").at(-1)!)) releaseSurface(key, surface);
   }
@@ -3689,6 +3735,7 @@ function renderRegions(context: RegionContext): void {
     renderConnectionSurface(context.selected.id, context.session, context.connectionSnapshot);
   }
   syncConnectionViewTicker();
+  syncEarlyThread();
   if (context.selected && context.session) {
     const machineId = context.selected.id;
     const session = context.session;

@@ -543,6 +543,12 @@ commit receipt caps the displayed history and includes unnamed predecessor
 commits within the work window, stopping at another task's commit. Receipt
 inputs remain hexadecimal commit IDs, including unambiguous abbreviations.
 
+The close gate resolves the recorded factory branch locally or on origin before
+counting commits. An unavailable branch produces a missing-evidence error and
+is not parked for merge. A no-code task whose stale code target and delivery
+anchor were cleared closes on a portable `external_ref`; retained code anchors
+and commit receipts still require delivery proof.
+
 A live registered supervisor may use `supervisor_override=true` with a non-empty
 reason to waive additive-only/value-only posture checks and the receipt epoch
 check for a retroactive record task. Close records the decision. Repository

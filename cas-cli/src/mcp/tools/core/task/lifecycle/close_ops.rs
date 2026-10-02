@@ -6045,7 +6045,7 @@ impl CasCore {
             &close_project_root,
         ) {
             MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_) => Ok(()),
-            MergeStateGateOutcome::Reject(message) => {
+            MergeStateGateOutcome::Reject(message) | MergeStateGateOutcome::Unresolved(message) => {
                 Err(TaskLifecycleGateError::UnmergedChildBranch { message })
             }
         }
@@ -7018,6 +7018,9 @@ impl CasCore {
                 // on the task and let the close continue.
                 MergeStateGateOutcome::ProceedWithNote(note) => {
                     append_close_decision_note(task_store.as_ref(), &mut task, &note);
+                }
+                MergeStateGateOutcome::Unresolved(message) => {
+                    return Ok(Self::tool_error(message));
                 }
                 MergeStateGateOutcome::Reject(msg) => {
                     // cas-a844: "MERGE REQUIRED" alone doesn't say whether the
@@ -11217,6 +11220,9 @@ pub(crate) enum MergeStateGateOutcome {
     ProceedWithNote(String),
     /// Close must be rejected with this user-facing error message.
     Reject(String),
+    /// The delivery branch cannot be resolved. Return the evidence error
+    /// without a merge preflight or AwaitingMerge projection.
+    Unresolved(String),
 }
 
 /// cas-e74c: evidence that scopes the merge-state guard to the closing
@@ -11254,10 +11260,13 @@ pub(crate) struct TaskCommitAttribution<'a> {
 /// - `task.task_type == Epic` — epic close is already covered by
 ///   [`check_unmerged_epic_branches`] at the epic-id branch namespace.
 /// - `task.assignee.is_none()` — orphaned task; nothing to check.
-/// - `factory/<assignee>` does not exist locally and merge-base
-///   computation fails — graceful pass. We do not false-reject when
-///   the worktree predates the convention or the branch was already
-///   pruned post-merge.
+/// - A branch-less local-only legacy store has no delivery anchor.
+///   Its later zero-commit and proof gates decide the delivery requirement.
+///
+/// A branch missing both locally and on origin is never assigned a commit
+/// count. Cleared no-code tasks use external_ref proof; recorded code anchors
+/// and validated receipts remain binding. Other remote-backed missing-ref
+/// cases return Unresolved, without a merge preflight or parking mutation.
 ///
 /// Rejects (Reject) when the factory branch has > 0 commits not on
 /// `parent_branch`. The error message includes the stranded count,
@@ -12293,8 +12302,25 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
             validate_task_commit_receipt(repo_path, receipt, parent_branch, window).is_ok()
         })
     });
+    // A missing local ref can still be measured through origin. Resolve
+    // both before count helpers: Unknown must never become a fictitious 1.
+    let origin_factory_branch = if factory_branch.starts_with("origin/") {
+        factory_branch.clone()
+    } else {
+        format!("origin/{factory_branch}")
+    };
+    let branch_ref = if git_ref_exists(repo_path, &factory_branch) {
+        Some(factory_branch.as_str())
+    } else if git_ref_exists(repo_path, &origin_factory_branch) {
+        Some(origin_factory_branch.as_str())
+    } else {
+        None
+    };
     let trusted_anchor = match task.deliverables.factory_branch_anchor.as_deref() {
-        Some(tip) if task.status == TaskStatus::AwaitingMerge && git_ref_exists(repo_path, tip) => {
+        Some(tip)
+            if (task.status == TaskStatus::AwaitingMerge || branch_ref.is_none())
+                && git_ref_exists(repo_path, tip) =>
+        {
             Some(tip)
         }
         _ => None,
@@ -12327,32 +12353,73 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
             ));
         }
     }
-    let mut commit_ish = trusted_anchor.unwrap_or(factory_branch.as_str());
+    let commit_ish = trusted_anchor
+        .or(branch_ref)
+        .unwrap_or(factory_branch.as_str());
     // cas-e33f (GH #1004): a task that changed hands and has no resolvable
     // branch left is measured by its recorded delivery anchor. With neither,
     // there are no deliverable commits to strand — the new assignee's
     // non-existent branch is not unmerged work.
     if trusted_anchor.is_none()
         && task_changed_hands(task)
-        && !git_ref_exists(repo_path, &factory_branch)
+        && branch_ref.is_none()
+        && task.deliverables.factory_branch_anchor.is_none()
+        && task.execution_note.as_deref() != Some("no-code")
+        && attribution.receipt.is_none()
     {
-        match task
-            .deliverables
-            .factory_branch_anchor
-            .as_deref()
-            .map(str::trim)
-            .filter(|anchor| is_safe_git_refname(anchor) && git_ref_exists(repo_path, anchor))
-        {
-            Some(anchor) => commit_ish = anchor,
-            None => {
-                return MergeStateGateOutcome::ProceedWithNote(format!(
-                    "decision: merge-state guard cleared — this task changed hands and no \
-                     branch holding its commits exists ({factory_branch} is absent and no \
-                     handoff or parked branch resolves), so there are no deliverable \
-                     commits to strand on {parent_branch}."
-                ));
-            }
+        return MergeStateGateOutcome::ProceedWithNote(format!(
+            "decision: merge-state guard cleared — this task changed hands and no \
+             branch holding its commits exists ({factory_branch} is absent and no \
+             handoff or parked branch resolves), so there are no deliverable \
+             commits to strand on {parent_branch}."
+        ));
+    }
+
+    if !git_ref_exists(repo_path, commit_ish) {
+        if let (Some(receipt), Some(window)) = (validated_content_receipt, attribution.window) {
+            // An integrated receipt remains valid after branch cleanup.
+            return match validate_task_commit_receipt(repo_path, receipt, parent_branch, window) {
+                Ok(note) => MergeStateGateOutcome::ProceedWithNote(format!(
+                    "{note} The factory branch `{factory_branch}` is missing locally and on origin; its delivery is proven by the receipt."
+                )),
+                Err(reason) => MergeStateGateOutcome::Unresolved(format!(
+                    "FACTORY BRANCH MISSING: `{factory_branch}` cannot be measured and its commit_receipt no longer proves delivery: {reason}"
+                )),
+            };
         }
+        if task.execution_note.as_deref() == Some("no-code")
+            && task.deliverables.work_target.is_none()
+            && task.deliverables.factory_branch_anchor.is_none()
+            && attribution.receipt.is_none()
+        {
+            return match no_code_close_proof(
+                &task.id,
+                Some("no-code"),
+                task.external_ref.as_deref(),
+                false,
+            ) {
+                Ok(Some(proof)) => MergeStateGateOutcome::ProceedWithNote(format!(
+                    "decision: factory branch `{factory_branch}` is missing locally and on origin. This no-code task has no active code target or delivery anchor; external_ref `{proof}` is its delivery proof. No branch commit count was measured."
+                )),
+                Err(message) => MergeStateGateOutcome::Unresolved(message),
+                Ok(None) => unreachable!("explicit no-code intent requires a proof"),
+            };
+        }
+        // Preserve branch-less local-only legacy stores. Their later
+        // zero-commit/proof gates still decide whether delivery is required.
+        if !origin_remote_configured(repo_path)
+            && task.deliverables.factory_branch_anchor.is_none()
+            && attribution.receipt.is_none()
+            && task.execution_note.as_deref() != Some("no-code")
+        {
+            return MergeStateGateOutcome::Proceed;
+        }
+        return MergeStateGateOutcome::Unresolved(format!(
+            "⚠️ FACTORY BRANCH MISSING\n\nTask {} cannot be measured: `{factory_branch}` is missing locally and on origin, and no usable delivery anchor or validated commit_receipt resolves. No branch commit count was obtained.\n\nAsk the supervisor to restore the recorded delivery evidence, or retry with commit_receipt=<integrated-delivery-sha>. If this task delivers only external work, a live registered supervisor can clear the stale code scope with `{supervisor}task action=update id={} proof_scope_fix=true target_repo=\"\" reason=\"reviewed external-only delivery\"` after recording execution_note=no-code, then close with external_ref=<portable-proof-reference>.",
+            task.id,
+            task.id,
+            supervisor = crate::mcp::tools::core::guidance::supervisor_prefix(),
+        ));
     }
     let local_merge = task.delivery_mode == cas_types::DeliveryMode::LocalMerge;
     let origin_parent_branch = format!("origin/{parent_branch}");
@@ -12409,7 +12476,9 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
                 attribution.window,
                 content_identity,
                 validated_content_receipt,
-                attribution.window.and_then(|window| window.supervisor_override_reason.as_deref()),
+                attribution
+                    .window
+                    .and_then(|window| window.supervisor_override_reason.as_deref()),
             ) {
                 return rejection;
             }
@@ -12473,7 +12542,9 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
                 attribution.window,
                 content_identity,
                 validated_content_receipt,
-                attribution.window.and_then(|window| window.supervisor_override_reason.as_deref()),
+                attribution
+                    .window
+                    .and_then(|window| window.supervisor_override_reason.as_deref()),
             ) {
                 return rejection;
             }
@@ -12511,7 +12582,9 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
                 attribution.window,
                 content_identity,
                 validated_content_receipt,
-                attribution.window.and_then(|window| window.supervisor_override_reason.as_deref()),
+                attribution
+                    .window
+                    .and_then(|window| window.supervisor_override_reason.as_deref()),
             ) {
                 return rejection;
             }
@@ -12689,6 +12762,12 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
         ));
     }
     let stranded = attributable.unwrap_or(stranded);
+    if branch_ref.is_none() {
+        return MergeStateGateOutcome::Unresolved(format!(
+            "⚠️ FACTORY BRANCH MISSING\n\nTask {} has a resolvable recorded delivery `{commit_ish}` with {stranded} measured commit(s) not on {parent_branch}, but `{factory_branch}` is missing locally and on origin. Ask the supervisor to restore the branch from the recorded delivery or provide a validated integrated commit_receipt. The missing branch itself was not counted or parked for merge.",
+            task.id,
+        ));
+    }
 
     // cas-c631: `epic/<slug>` branches are created locally by the supervisor
     // (see cas-supervisor EPIC workflow) and the epic ships to `main` as a
@@ -22196,8 +22275,9 @@ mod merge_state_gate_tests {
     //! [`check_unmerged_epic_branches`] guard for epic-type tasks, and
     //! BEFORE the close review policy / `supervisor_override` plumbing.
     //!
-    //! Why these tests are pure-helper instead of end-to-end
-    //! `cas_task_close` calls:
+    //! Most tests isolate the merge-state helper. The missing-lane scope
+    //! repair regression also exercises the real update and close handlers.
+    //! Why the other tests use helpers:
     //!
     //! - The integration call site is mechanical (one
     //!   `pattern-match { Proceed => {} | Reject(msg) => return tool_error(msg) }`
@@ -23420,6 +23500,236 @@ mod merge_state_gate_tests {
         }
     }
 
+    #[tokio::test]
+    async fn missing_lane_scope_repair_closes_through_handler_cas_3067() {
+        use crate::mcp::CasService;
+        use crate::store::{
+            open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store,
+        };
+        use cas_types::{Agent, AgentRole, WorkTarget};
+
+        let mut env = TestEnvGuard::temp_home();
+        let (dir, _bare) = handoff_repo();
+        let p = dir.path();
+        let anchor = head_sha(p);
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["branch", "-D", "factory/worker"]);
+        let cas_dir = p.join(".cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        env.set("CAS_ROOT", &cas_dir);
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        std::fs::write(
+            cas_dir.join("config.toml"),
+            "[verification]\nenabled = false\n",
+        )
+        .unwrap();
+        open_store(&cas_dir).unwrap().init().unwrap();
+        open_rule_store(&cas_dir).unwrap().init().unwrap();
+        open_skill_store(&cas_dir).unwrap().init().unwrap();
+        let store = open_task_store(&cas_dir).unwrap();
+        store.init().unwrap();
+        let agents = open_agent_store(&cas_dir).unwrap();
+        agents.init().unwrap();
+        let actor = "cas-3067-supervisor";
+        agents
+            .register(&Agent::new_with_role(
+                actor.into(),
+                "supervisor".into(),
+                AgentRole::Supervisor,
+            ))
+            .unwrap();
+        let core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        core.set_agent_id_for_testing(actor.into());
+        let service = CasService::new(core, None);
+        let mut task = worker_task("worker");
+        task.task_type = TaskType::Chore;
+        task.risk = vec![TaskRisk::None];
+        store.add(&task).unwrap();
+
+        // Missing code evidence must leave the task active, without parking
+        // a nonexistent branch or attempting merge-tree preflight.
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "close", "id": task.id, "reason": "Delivery claimed"
+        }))
+        .unwrap();
+        let response = service.task(Parameters(request)).await.unwrap();
+        let text = response
+            .content
+            .into_iter()
+            .filter_map(|content| match content.raw {
+                rmcp::model::RawContent::Text(text) => Some(text.text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("FACTORY BRANCH MISSING"), "{text}");
+        assert!(
+            !text.contains("MERGE REQUIRED")
+                && !text.contains("merge-tree")
+                && !text.contains("git push"),
+            "{text}"
+        );
+        assert_eq!(store.get(&task.id).unwrap().status, TaskStatus::InProgress);
+        assert!(
+            store
+                .get(&task.id)
+                .unwrap()
+                .deliverables
+                .parked_branch
+                .is_none()
+        );
+
+        // Reproduce the supervisor's real correction of stale code scope.
+        task.status = TaskStatus::AwaitingMerge;
+        task.execution_note = Some("no-code".into());
+        task.external_ref = Some("https://example.test/cloud/pull/123".into());
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: p.to_str().unwrap().into(),
+            target_branch: "main".into(),
+        });
+        task.deliverables.factory_branch_anchor = Some(anchor);
+        task.deliverables.parked_branch = Some("factory/worker".into());
+        store.update(&task).unwrap();
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "update", "id": task.id, "proof_scope_fix": true,
+            "target_repo": "", "reason": "Reviewed external-only delivery"
+        }))
+        .unwrap();
+        let corrected = service.task(Parameters(request)).await.unwrap();
+        assert_ne!(corrected.is_error, Some(true), "{corrected:?}");
+        let repaired = store.get(&task.id).unwrap();
+        assert_eq!(repaired.status, TaskStatus::Open);
+        assert!(repaired.deliverables.work_target.is_none());
+        assert!(repaired.deliverables.factory_branch_anchor.is_none());
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "close", "id": task.id, "reason": "External delivery proven"
+        }))
+        .unwrap();
+        let response = service.task(Parameters(request)).await.unwrap();
+        assert_ne!(response.is_error, Some(true), "{response:?}");
+        let closed = store.get(&task.id).unwrap();
+        assert_eq!(closed.status, TaskStatus::Closed, "{response:?}");
+        assert!(
+            closed.notes.contains("external_ref")
+                && closed.notes.contains("missing locally and on origin"),
+            "{}",
+            closed.notes
+        );
+    }
+
+    #[test]
+    fn missing_factory_branch_reports_unresolved_evidence_cas_3067() {
+        let (dir, _bare) = handoff_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["branch", "-D", "factory/worker"]);
+        let task = worker_task("worker");
+        match run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p) {
+            MergeStateGateOutcome::Unresolved(message) => {
+                assert!(
+                    message.contains("factory/worker")
+                        && message.contains("missing locally and on origin"),
+                    "{message}"
+                );
+                assert!(
+                    !message.contains("has 1 commit")
+                        && !message.contains("git push")
+                        && !message.contains("MERGE REQUIRED"),
+                    "{message}"
+                );
+                assert!(
+                    message.contains("supervisor") && message.contains("commit_receipt"),
+                    "{message}"
+                );
+            }
+            other => panic!("missing evidence must not become a merge count: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_no_code_branch_still_requires_portable_proof_cas_3067() {
+        let (dir, _bare) = handoff_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["branch", "-D", "factory/worker"]);
+        for reference in [None, Some("token=secret-shaped")] {
+            let mut task = worker_task("worker");
+            task.execution_note = Some("no-code".into());
+            task.external_ref = reference.map(str::to_string);
+            match run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p) {
+                MergeStateGateOutcome::Unresolved(message) => {
+                    assert!(message.contains("NO-CODE PROOF REQUIRED"), "{message}")
+                }
+                other => panic!("missing lane does not waive portable proof: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn missing_no_code_branch_does_not_waive_retained_anchor_cas_3067() {
+        let (dir, _bare) = handoff_repo();
+        let p = dir.path();
+        let anchor = head_sha(p);
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["branch", "-D", "factory/worker"]);
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.execution_note = Some("no-code".into());
+        task.external_ref = Some("https://example.test/proof".into());
+        task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        match run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p) {
+            MergeStateGateOutcome::Unresolved(message) => {
+                assert!(
+                    message.contains(&anchor) && message.contains("1 measured commit"),
+                    "{message}"
+                );
+                assert!(
+                    message.contains("missing locally and on origin")
+                        && !message.contains("git push"),
+                    "{message}"
+                );
+            }
+            other => panic!("recorded code delivery stays binding: {other:?}"),
+        }
+        task.deliverables.factory_branch_anchor =
+            Some("1234567890123456789012345678901234567890".into());
+        assert!(
+            matches!(
+                run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p),
+                MergeStateGateOutcome::Unresolved(_)
+            ),
+            "an unavailable retained anchor must not authorize no-code close"
+        );
+    }
+
+    #[test]
+    fn pruned_local_lane_uses_origin_evidence_cas_3067() {
+        let (dir, _bare) = handoff_repo();
+        let p = dir.path();
+        git(p, &["push", "-q", "origin", "factory/worker"]);
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "-m",
+                "integrate delivery",
+                "factory/worker",
+            ],
+        );
+        git(p, &["push", "-q", "origin", "main"]);
+        git(p, &["branch", "-D", "factory/worker"]);
+        let task = worker_task("worker");
+        assert!(
+            matches!(
+                run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p),
+                MergeStateGateOutcome::Proceed
+            ),
+            "remote-only delivered lane must remain measurable"
+        );
+    }
     // --- cas-e33f (GH #1004): close after a worker → supervisor handoff -----
 
     /// A `main` repo with a bare `origin` (so the trunk target is

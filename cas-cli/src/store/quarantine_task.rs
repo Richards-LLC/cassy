@@ -310,6 +310,40 @@ mod tests {
     }
 
     #[test]
+    fn cas_4bd8_suppression_report_survives_notifying_and_syncing_wrappers() {
+        let (_temp, queue, store) = store();
+        store
+            .add(&Task::new("cas-keep".into(), "Visible".into()))
+            .unwrap();
+        store
+            .add(&Task::new("cas-hide".into(), "Suppressed".into()))
+            .unwrap();
+        queue
+            .quarantine_row(QUARANTINE_TASK, "cas-hide", "fixture")
+            .unwrap();
+        let notifying = crate::store::NotifyingTaskStore::new(Arc::new(store), Default::default());
+        let syncing = crate::store::SyncingTaskStore::new(Arc::new(notifying), Arc::clone(&queue));
+        let (visible, suppressed) = syncing
+            .list_with_suppressed(Some(TaskStatus::Open))
+            .unwrap();
+        assert_eq!(
+            visible
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            ["cas-keep"]
+        );
+        assert_eq!(
+            suppressed
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            ["cas-hide"]
+        );
+        assert_eq!(syncing.list(Some(TaskStatus::Open)).unwrap().len(), 1);
+    }
+
+    #[test]
     fn re_quarantining_is_idempotent_and_release_reports_honestly() {
         let (_temp, queue, _store) = store();
         assert!(

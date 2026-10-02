@@ -906,6 +906,15 @@ mod tests {
             expected.difference(&hidden).cloned().collect()
         );
         assert!(text.contains("30 quarantined tasks hidden"), "{text}");
+        let mut epic_request = list_request();
+        epic_request.epic = Some("cas-row000".into());
+        let epic_text = list_text(core.cas_task_list(Parameters(epic_request)).await.unwrap());
+        assert_eq!(listed_ids(&epic_text), listed_ids(&text));
+        assert!(epic_text.contains("epic=cas-row000: 1"), "{epic_text}");
+        assert!(
+            epic_text.contains("29 quarantined tasks hidden"),
+            "{epic_text}"
+        );
         assert_eq!(store.get("cas-row007").unwrap().status, TaskStatus::Open);
         assert!(
             queue
@@ -932,6 +941,90 @@ mod tests {
         );
         assert_eq!(listed_ids(&text), expected);
         assert!(!text.contains("quarantined tasks hidden"));
+    }
+
+    #[tokio::test]
+    async fn cas_4bd8_filters_count_only_matching_quarantine_and_empty_results() {
+        use cas_types::TaskType;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let store = core.open_task_store().unwrap();
+        let queue = crate::cloud::SyncQueue::open(&root).unwrap();
+        queue.init().unwrap();
+        for id in [
+            "keep",
+            "hidden",
+            "hidden-closed",
+            "foreign",
+            "closed",
+            "label",
+            "assignee",
+            "type",
+        ] {
+            let mut task = Task::new(format!("cas-{id}"), "Filter fixture".into());
+            task.task_type = if id == "type" {
+                TaskType::Chore
+            } else {
+                TaskType::Bug
+            };
+            task.status = if id.ends_with("closed") {
+                TaskStatus::Closed
+            } else {
+                TaskStatus::Open
+            };
+            task.labels = vec![
+                if id == "label" || id == "closed" {
+                    "other"
+                } else {
+                    "keep"
+                }
+                .into(),
+            ];
+            task.assignee = Some(if id == "assignee" { "other" } else { "owner" }.into());
+            if id == "foreign" {
+                task.origin_project = Some("another-project".into());
+            }
+            store.add(&task).unwrap();
+            if id.starts_with("hidden") {
+                queue
+                    .quarantine_row(crate::cloud::QUARANTINE_TASK, &task.id, "fixture")
+                    .unwrap();
+            }
+        }
+        let mut req = list_request();
+        req.label = Some("keep".into());
+        req.assignee = Some("owner".into());
+        req.task_type = Some("bug".into());
+        let text = list_text(core.cas_task_list(Parameters(req)).await.unwrap());
+        assert_eq!(
+            listed_ids(&text),
+            ["cas-keep".to_string()].into_iter().collect()
+        );
+        assert!(
+            text.contains("status=open: 2; label=keep: 1; assignee=owner: 1; type=bug: 1"),
+            "{text}"
+        );
+        assert!(text.contains("1 quarantined tasks hidden"), "{text}");
+        assert!(text.contains("1 foreign-origin tasks hidden"), "{text}");
+
+        let mut req = list_request();
+        req.include_foreign = true;
+        req.scope = "all".into();
+        let text = list_text(core.cas_task_list(Parameters(req)).await.unwrap());
+        assert!(listed_ids(&text).contains("cas-foreign"));
+        assert!(!text.contains("foreign-origin tasks hidden"));
+        assert!(text.contains("1 quarantined tasks hidden"));
+        assert!(text.contains("Scope: all (currently equivalent"));
+
+        let mut req = list_request();
+        req.status = Some("closed".into());
+        req.label = Some("keep".into());
+        let text = list_text(core.cas_task_list(Parameters(req)).await.unwrap());
+        assert!(listed_ids(&text).is_empty());
+        assert!(text.contains("No tasks found matching filters."));
+        assert!(text.contains("1 quarantined tasks hidden"), "{text}");
     }
 
     #[test]

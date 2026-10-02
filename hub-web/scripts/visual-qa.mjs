@@ -30,6 +30,7 @@ export const FIXTURE_NAMES = [
   "pairing-cleanup",
   "conversation-long-status",
   "conversation-loading-earlier",
+  "conversation-opening",
   "conversation-mic-idle",
   "conversation-mic-listening",
   "conversation-mic-unavailable",

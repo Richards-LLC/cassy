@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   ATTACH_QUIET_MS,
   CONVERSATION_OPENING,
+  OPENING_MOTION_DELAY_MS,
+  showOpeningInto,
   attachInProgress,
   connectionTimeline,
   renderConnectionSurfaceInto,
@@ -224,6 +226,52 @@ describe("the attach surface opens calmly (journey F3)", () => {
     const fatal = card();
     renderConnectionSurfaceInto(fatal, "patient-pelican-9", snapshot({ phase: "failed", fatal: true }), {}, startedAt + 3_200, { openingTitle: CONVERSATION_OPENING, quietRetry: true });
     expect(fatal.querySelector(".terminal-connecting-title")?.textContent).toBe("Connection failed — not retrying.");
+  });
+});
+
+describe("a conversation opens behind one quiet line (cas-813a)", () => {
+  const slot = () => { const target = document.createElement("div"); target.className = "empty"; document.body.replaceChildren(target); return target; };
+  const quiet = { openingTitle: CONVERSATION_OPENING, quietOpening: true } as const;
+
+  it("draws the opening line, not the verdict card, and keeps the same line across repaints", () => {
+    const target = slot();
+    const first = showOpeningInto(target, CONVERSATION_OPENING, OPENING_MOTION_DELAY_MS);
+    expect(target.className).toBe("empty conversation-opening");
+    expect(first.getAttribute("role")).toBe("status");
+    expect(first.textContent).toBe(CONVERSATION_OPENING);
+    expect([...first.querySelectorAll<HTMLElement>(".dots i")].map((dot) => dot.style.animationDelay)).toEqual(["1000ms", "1200ms", "1400ms"]);
+    // The attach surface and every 1 Hz repaint reuse it, so its motion never restarts.
+    renderConnectionSurfaceInto(target, "patient-pelican-9", snapshot(), {}, startedAt + 200, quiet);
+    renderConnectionSurfaceInto(target, "patient-pelican-9", snapshot(), {}, startedAt + 1_200, quiet);
+    expect(target.querySelector(":scope > .conversation-loading")).toBe(first);
+    expect(target.querySelector(".terminal-connecting-title")).toBeNull();
+    expect(target.classList.contains("terminal-state")).toBe(false);
+  });
+
+  it("waits until its motion starts before offering Details", () => {
+    const target = slot();
+    renderConnectionSurfaceInto(target, "patient-pelican-9", snapshot(), {}, startedAt + OPENING_MOTION_DELAY_MS - 1, quiet);
+    expect(target.textContent).toBe(CONVERSATION_OPENING);
+    renderConnectionSurfaceInto(target, "patient-pelican-9", snapshot(), {}, startedAt + OPENING_MOTION_DELAY_MS, quiet);
+    expect(target.querySelector(":scope > details.connection-details summary")?.textContent).toBe("Details");
+  });
+
+  it("stays quiet through a never-live conversation's first retry, then shows the verdict card on a real failure", () => {
+    const target = slot();
+    const retry = snapshot({ phase: "backoff", stage: "attaching", attempt: 1, retryInMs: 1_000 });
+    renderConnectionSurfaceInto(target, "patient-pelican-9", retry, {}, startedAt + 3_200, { ...quiet, quietRetry: true });
+    expect(target.querySelector(":scope > .conversation-loading")?.textContent).toBe(CONVERSATION_OPENING);
+    renderConnectionSurfaceInto(target, "patient-pelican-9", snapshot({ phase: "failed", attempt: 2, reason: "hub did not answer" }), {}, startedAt + 9_000, quiet);
+    expect(target.classList.contains("terminal-state")).toBe(true);
+    expect(target.querySelector(".conversation-loading")).toBeNull();
+    expect(target.querySelector(".terminal-connecting-title")?.textContent).toBe("Connection failed — retry available.");
+  });
+
+  it("starts the line's motion from when the open began, not when the line was drawn", () => {
+    const target = slot();
+    const line = showOpeningInto(target, CONVERSATION_OPENING, OPENING_MOTION_DELAY_MS - 700);
+    expect(line.querySelector<HTMLElement>(".dots i")?.style.animationDelay).toBe("300ms");
+    expect(showOpeningInto(slot(), CONVERSATION_OPENING, -500).querySelector<HTMLElement>(".dots i")?.style.animationDelay).toBe("0ms");
   });
 });
 

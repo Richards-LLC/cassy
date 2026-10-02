@@ -235,6 +235,8 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     // A phone composer mid-draft: the field holds text, the send pill is in the accent.
     reply(80, null, 'Rebased and pushed; nothing waiting.', 'answer', at(9, 30));
     draft = 'Cut 3.26.0 once the gate is green, then post the release notes.';
+  } else if (state === 'conversation-opening') {
+    // cas-813a: the one opening line, while the first history page is on its way.
   } else if (state !== 'conversation') {
     history.submit('fixture', supervisor, 'Please keep the project badge prominent.', at(9, 41));
     if (state === 'conversation-error') history.reject('fixture', 'The session no longer grants this device control.');
@@ -245,7 +247,7 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
   }
   // Fixture respond: record the chip as an operator send answering the ask, exactly as main.ts does after the hub accepts it.
   const sessionFixture = state === 'conversation-sessions';
-  const view = new ConversationView(document, history, { supervisor, machine: machine.label, project: machine.project, header: false, working: () => working, echo: () => echo, ...(sessionFixture ? { activity: () => ({ at: Date.now() - 120_000, label: 'supervisor → bright-robin-85' }), openTerminal: () => {} } : {}), hasEarlier: () => loadingEarlier, loadingEarlier: () => loadingEarlier, editMessage: () => {}, retryMessage: (send) => { history.discardRefused(send.id); history.submit(`retry-${send.id}`, supervisor, send.text, Date.now(), send.replyTo); view.update(); }, respond: (ask, text) => { history.submit(`quick-${ask.notification_id}`, supervisor, text, Date.now(), ask.notification_id); view.update(); syncContextRail(app, { history, progress: false, attention: 0 }); } });
+  const view = new ConversationView(document, history, { supervisor, machine: machine.label, project: machine.project, header: false, working: () => working, echo: () => echo, ...(sessionFixture ? { activity: () => ({ at: Date.now() - 120_000, label: 'supervisor → bright-robin-85' }), openTerminal: () => {} } : {}), hasEarlier: () => loadingEarlier, loadingEarlier: () => loadingEarlier, loadingHistory: () => state === 'conversation-opening', openingSince: () => Date.now() - 5_000, editMessage: () => {}, retryMessage: (send) => { history.discardRefused(send.id); history.submit(`retry-${send.id}`, supervisor, send.text, Date.now(), send.replyTo); view.update(); }, respond: (ask, text) => { history.submit(`quick-${ask.notification_id}`, supervisor, text, Date.now(), ask.notification_id); view.update(); syncContextRail(app, { history, progress: false, attention: 0 }); } });
   app.querySelector('#conversation-pane-slot')!.append(view.element); view.update();
   // The earlier session the operator opened to read (cas-55a4).
   if (sessionFixture) { const open = view.element.querySelector<HTMLDetailsElement>('details.earlier-session'); if (open) open.open = true; }

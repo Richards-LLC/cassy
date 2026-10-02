@@ -1317,7 +1317,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).not.toContain("Connection interrupted — ${view.retryLabel}");
     // Header, row and footer read one conversation connection, and the
     // transport alarm resolves itself once the socket is live again.
-    expect(source).toContain('fleetConnectionLabel(conversationConnection(machine.id, session.name), machine.id)');
+    expect(source).toContain('conversationStatusLabel(machine.id, session.name)');
     // The header and the empty thread read one helper (cas-010f).
     expect(source).toContain('fleetConnectionLabel(conversationConnection(machineId, session), machineId)');
     expect(source).toContain('const label = conversationHeaderLabel(selectedMachineId, selectedSession);');

@@ -3631,13 +3631,7 @@ button.chip:disabled { cursor: default; }
 .thread .empty .proj2.machine-squeezed > :is(.proj2-machine, .proj2-sep) { display: none; }
 .thread .empty .proj2.machine-squeezed > .codename { max-width: 100%; }
 .thread .empty .said { margin: 0; max-width: 34ch; color: var(--ink-mid); font-size: 15px; overflow-wrap: anywhere; }
-/* In the loading line the codename is one unbroken token, capped at 20
-   characters and ellipsised beyond (the 2px keeps a rounded-down 20ch from
-   dropping the 19th character); overflow: clip keeps its text baseline on the
-   sentence's. */
-.thread .empty .said .codename { display: inline-block; max-width: min(100%, calc(20ch + 2px)); overflow: clip; text-overflow: ellipsis; white-space: nowrap; vertical-align: baseline; font: var(--weight-medium) 0.93em/1.4 var(--font-mono); color: var(--ink); }
 .thread .empty .quiet { max-width: min(100%, 56ch); background: var(--sup-bg); color: var(--sup-fg); border-radius: 22px; padding: 12px 22px; box-shadow: var(--lift); overflow-wrap: anywhere; }
-.thread .empty .conversation-loading { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px; }
 
 /* Composer: the field is a pill on --panel with --lift; the send button takes
    the machine accent from the shell root and names the supervisor; the attach
@@ -4124,3 +4118,22 @@ button.chip:disabled { cursor: default; }
   /* The mark keeps its text on any system palette: an outline, no fill. */
   .conversation-session-mark, .conversation-row[aria-current="true"] .conversation-session-mark { background: transparent; border: 1px solid currentColor; }
 }
+
+/* cas-813a: one way to show a conversation opening. The attach (in the pane
+   slot) and the first history page (in the thread) draw the same body-size
+   line, centred where the thread will be. Its dots stay hidden for the first
+   second (counted from the open; openingLine sets each dot's delay), then
+   pulse quietly. The
+   verdict card (.terminal-state) is kept for a failure. */
+.conversation-pane-slot .pane-grid > .conversation-opening { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; height: 100%; min-height: 0; padding: 60px 40px; box-sizing: border-box; text-align: center; color: var(--ink-mid); }
+.conversation-loading { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px; margin: 0; max-width: 34ch; color: var(--ink-mid); font: var(--weight-regular) 15px/1.45 var(--font-ui); }
+.conversation-loading > .dots { display: flex; gap: 4px; }
+.conversation-loading > .dots > i { width: 6px; height: 6px; border-radius: 50%; background: var(--accent, var(--ink-mid)); opacity: 0; animation: opening-dots 1.2s ease-in-out 1s infinite; }
+.conversation-loading > .dots > i:nth-child(2) { animation-delay: 1.2s; }
+.conversation-loading > .dots > i:nth-child(3) { animation-delay: 1.4s; }
+@keyframes opening-dots { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .conversation-loading > .dots > i { animation: none; opacity: 0.6; } }
+@media (forced-colors: active) { .conversation-loading > .dots > i { background: CanvasText; } }
+/* Details hangs below the line, so the line never moves when it appears or opens. */
+.conversation-pane-slot .pane-grid > .conversation-opening { position: relative; }
+.conversation-opening > .connection-details { position: absolute; top: calc(50% + 22px); left: 50%; translate: -50% 0; width: min(calc(100% - 80px), 34ch); max-height: calc(50% - 30px); overflow: auto; color: var(--ink-mid); font-size: 12px; }

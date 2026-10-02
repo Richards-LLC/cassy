@@ -88,14 +88,20 @@ describe("ConversationView (Pebble thread)", () => {
   it("shows a loading line, not the empty state, until the first history page lands (cas-04ee)", () => {
     const history = new ConversationHistory();
     let loading = true;
-    const view = new ConversationView(document, history, { supervisor: "sup", loadingHistory: () => loading });
+    const opened = Date.now() - 600;
+    const view = new ConversationView(document, history, { supervisor: "sup", loadingHistory: () => loading, openingSince: () => opened });
     document.body.replaceChildren(view.element);
     expect(view.element.dataset.mountOverlay).toBe("");
     view.update();
     const empty = view.element.querySelector<HTMLElement>(".empty")!;
     expect(empty.hidden).toBe(false);
     expect(empty.dataset.state).toBe("loading");
-    expect(empty.querySelector('[role="status"]')?.textContent).toBe("Loading your conversation with sup…");
+    // cas-813a: the attach's own words, and its motion clock carried on.
+    expect(empty.querySelector('[role="status"]')?.textContent).toBe("Opening the conversation…");
+    const delays = [...empty.querySelectorAll<HTMLElement>(".conversation-loading .dots i")].map((dot) => parseInt(dot.style.animationDelay, 10));
+    expect(delays).toHaveLength(3);
+    expect(delays[0]).toBeGreaterThan(300); expect(delays[0]).toBeLessThanOrEqual(400);
+    expect(delays[1] - delays[0]).toBe(200); expect(delays[2] - delays[0]).toBe(400);
     expect(empty.textContent).not.toContain("Nothing waiting");
     // The page lands empty: now the empty state is the truth.
     loading = false; view.update();

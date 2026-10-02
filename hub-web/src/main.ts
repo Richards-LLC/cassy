@@ -21,7 +21,7 @@ import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionU
 import { cycleAttentionGroup, renderAttentionPanel, renderAttentionSummary } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
 import { attachElapsedSeconds, elapsedSeconds, headerConnectionChip, machineConnectionLabel, UNSTEADY, UNSTEADY_SENTENCE, type AttachSnapshot } from "./connection-state";
-import { CONVERSATION_OPENING, disconnectedView, lostConnectionBanner, outageControlsReason, outageRefusal, pairingLostBanner, pairingRefusal, unsteadyBanner, renderConnectionSurfaceInto, sessionOutageControlsReason, sessionReconnectingBanner, shouldRetainDisconnectedFrame, transportFailureNeedsAttention } from "./connection-state-view";
+import { CONVERSATION_OPENING, OPENING_MOTION_DELAY_MS, attachInProgress, showOpeningInto, disconnectedView, lostConnectionBanner, outageControlsReason, outageRefusal, pairingLostBanner, pairingRefusal, unsteadyBanner, renderConnectionSurfaceInto, sessionOutageControlsReason, sessionReconnectingBanner, shouldRetainDisconnectedFrame, transportFailureNeedsAttention } from "./connection-state-view";
 import { ensureMachineConnection, replaceMachineConnection } from "./connection-lifecycle";
 import { createDeviceKey } from "./dpop";
 import { readPairingFragment, watchPairingFragment } from "./fragment";
@@ -106,6 +106,8 @@ const sessionsEverLive = new Set<string>();
 const INTERRUPTED_LABELS = new Set(["Reconnecting", "Unreachable", "Needs pairing", UNSTEADY, CANT_REACH_RETRYING]);
 const machineInfo = new Map<string, HubMachineInfo | undefined>();
 const statuses = new Map<string, Record<string, unknown>>();
+/** Sessions whose first status is on its way: the context rail holds its place for them (cas-813a). */
+const statusPending = new Set<string>();
 const leases = new Map<string, LeaseState>();
 const surfaces = new Map<string, TerminalSurface>();
 const transcripts = new Map<string, TranscriptView>();
@@ -431,6 +433,7 @@ function mountConversation(key: string, mount: HTMLElement): void {
         const page = conversationHistoryPage(threadKey);
         return !page.loaded && !page.unavailable;
       },
+      openingSince: () => conversationOpenedAt.get(threadKey),
       historyEnd: () => {
         const page = conversationHistoryPage(threadKey);
         return page.loaded && !page.hasEarlier;
@@ -1508,6 +1511,12 @@ async function openSession(machineId: string, session: string): Promise<void> {
 /** Paints and attaches an already-committed selection; back reuses it so
  * returning somewhere never records a new step forward. */
 async function attachSelectedSession(machineId: string, session: string): Promise<void> {
+  // cas-813a: the opening line's motion clock runs from here, across the
+  // attach and the first history page.
+  conversationOpenedAt.set(sessionKey(machineId, session), Date.now());
+  // The rail keeps its place while the status is on its way, so the composer
+  // doesn't narrow under the operator a moment later (cas-813a).
+  if (!statuses.has(sessionKey(machineId, session))) statusPending.add(sessionKey(machineId, session));
   render();
   renderTerminalConnecting(machineId, session);
   await Promise.all([loadStatus(machineId, session), loadLease(machineId, session)]);
@@ -1519,11 +1528,21 @@ function renderTerminalConnecting(machineId: string, session: string): void {
   const grid = document.querySelector<HTMLElement>("#pane-grid");
   if (grid?.dataset.sessionKey !== sessionKey(machineId, session)) return;
   const placeholder = grid.querySelector<HTMLElement>(":scope > .empty");
-  if (placeholder) {
-    placeholder.classList.remove("terminal-state");
-    // A conversation opens calmly (journey F3): no codename, no relay words.
-    placeholder.textContent = hubPresentation === "conversation" ? CONVERSATION_OPENING : `Connecting to ${session}…`;
-  }
+  if (!placeholder) return;
+  // A conversation opens calmly (journey F3): no codename, no relay words,
+  // and the one opening line the thread keeps until its first page (cas-813a).
+  if (hubPresentation === "conversation") { showOpeningInto(placeholder, CONVERSATION_OPENING, openingDelay(sessionKey(machineId, session))); return; }
+  placeholder.classList.remove("terminal-state");
+  placeholder.textContent = `Connecting to ${session}…`;
+}
+
+/** When each conversation began to open (cas-813a). */
+const conversationOpenedAt = new Map<string, number>();
+
+/** Milliseconds until a conversation's opening line starts to move. */
+function openingDelay(key: string, now = Date.now()): number {
+  const since = conversationOpenedAt.get(key);
+  return since === undefined ? OPENING_MOTION_DELAY_MS : OPENING_MOTION_DELAY_MS - (now - since);
 }
 
 function clearDisconnectedState(grid: HTMLElement): void {
@@ -1636,7 +1655,7 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
     diagnose: () => openConnectionLog(machineId),
     repair: () => openRepairDialog(machineId),
   }, now, {
-    ...(hubPresentation === "conversation" ? { openingTitle: CONVERSATION_OPENING } : {}),
+    ...(hubPresentation === "conversation" ? { openingTitle: CONVERSATION_OPENING, quietOpening: true } : {}),
     quietRetry: "session" in snapshot && firstAttachRetry(snapshot as AttachSnapshot, sessionsEverLive.has(sessionKey(machineId, session))),
   });
 }
@@ -1677,6 +1696,7 @@ function renderTerminalFailure(machineId: string, session: string, detail: strin
     renderTerminalConnecting(machineId, session);
     void connections.get(machineId)?.attach(session);
   };
+  placeholder.classList.remove("conversation-opening");
   placeholder.classList.add("terminal-state");
   placeholder.replaceChildren(message, retry);
 }
@@ -1684,7 +1704,9 @@ function renderTerminalFailure(machineId: string, session: string, detail: strin
 async function loadStatus(machineId: string, session: string): Promise<void> {
   const connection = connections.get(machineId);
   const machine = machines.get(machineId);
-  if (!connection || !machine) return;
+  const key = sessionKey(machineId, session);
+  if (!connection || !machine) { if (statusPending.delete(key)) render(); return; }
+  if (!statuses.has(key)) statusPending.add(key);
   try {
     const status = await connection.status(session);
     statuses.set(sessionKey(machineId, session), status);
@@ -1703,8 +1725,13 @@ async function loadStatus(machineId: string, session: string): Promise<void> {
         });
       }
     }
+    statusPending.delete(key);
     render();
-  } catch { /* connection supervisor owns transport/auth reporting */ }
+  } catch {
+    // The connection supervisor owns transport/auth reporting; the rail stops
+    // holding a place for a status that is not coming.
+    if (statusPending.delete(key)) render();
+  }
 }
 
 async function loadLease(machineId: string, session: string): Promise<void> {
@@ -2328,7 +2355,7 @@ function landFocus(targets: readonly FocusTarget[], options: { keep?: boolean; n
  * back. Focus anywhere else is left alone (cas-9a96).
  */
 function handFocusFromConnectionCard(grid: HTMLElement): void {
-  const card = grid.querySelector<HTMLElement>(":scope > .empty.terminal-state");
+  const card = grid.querySelector<HTMLElement>(":scope > .empty:is(.terminal-state, .conversation-opening)");
   const active = document.activeElement;
   if (!card || !(active instanceof HTMLElement) || !card.contains(active)) return;
   const targets = hubPresentation === "terminal"
@@ -3549,7 +3576,7 @@ function renderConversationList(): void {
     const time = active === undefined ? undefined : activityTime(active);
     const started = session.started_at === undefined ? NaN : Date.parse(session.started_at);
     const activityLabel = active === undefined ? undefined : emptyActivityText({ at: active, ...(active === activity?.at && activity?.label ? { label: activity.label } : {}) }, Date.now());
-    return { key, machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: machine.scopes.includes("factory-manage"), freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), unreachable: Boolean(session.unreachable), connection: session.unreachable ? "Unreachable · message pending" : session.dormant ? "Dormant" : session.liveness === "live" ? fleetConnectionLabel(conversationConnection(machine.id, session.name), machine.id) : "Session unavailable", interrupted: session.liveness === "live" && INTERRUPTED_LABELS.has(fleetConnectionLabel(conversationConnection(machine.id, session.name), machine.id)), attention: waiting, unread: Math.max(0, replies - (readReplies.get(key) ?? 0)), selected };
+    return { key, machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: machine.scopes.includes("factory-manage"), freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), unreachable: Boolean(session.unreachable), connection: session.unreachable ? "Unreachable · message pending" : session.dormant ? "Dormant" : session.liveness === "live" ? conversationStatusLabel(machine.id, session.name) : "Session unavailable", interrupted: session.liveness === "live" && INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name)), attention: waiting, unread: Math.max(0, replies - (readReplies.get(key) ?? 0)), selected };
   }));
   conversationRows = rows;
   // cas-55a4: a project's live sessions on one machine sit together, most
@@ -3585,7 +3612,24 @@ function renderConversationList(): void {
 
 /** The conversation header's connection words; the empty thread reads the same (cas-010f). */
 function conversationHeaderLabel(machineId: string, session: string | undefined): string {
-  return visibleSessions(machineId).find((item) => item.name === session)?.unreachable ? "Unreachable · message pending" : fleetConnectionLabel(conversationConnection(machineId, session), machineId);
+  return visibleSessions(machineId).find((item) => item.name === session)?.unreachable ? "Unreachable · message pending" : conversationStatusLabel(machineId, session);
+}
+
+/**
+ * A conversation's connection words for its header and list row (cas-813a).
+ * While the machine is connected and the conversation is still opening for
+ * the first time (its attach in progress, or the quiet first retry), they
+ * keep the machine's word ("Live") instead of flipping to "Connecting" and
+ * back; the thread says "Opening the conversation…".
+ */
+function conversationStatusLabel(machineId: string, session: string | undefined): string {
+  const machine = connectionStates.get(machineId);
+  if (session && machine?.phase === "live") {
+    const key = sessionKey(machineId, session);
+    const attach = attachStates.get(key);
+    if (attach && !sessionsEverLive.has(key) && (attachInProgress(attach) || firstAttachRetry(attach, false))) return fleetConnectionLabel(machine, machineId);
+  }
+  return fleetConnectionLabel(conversationConnection(machineId, session), machineId);
 }
 
 /**
@@ -4013,7 +4057,13 @@ function renderStatus(status?: Record<string, unknown>): void {
   // clearing for them, so this owns its own emptying.
   container.replaceChildren();
   contextProgress = false;
-  if (!status) { container.textContent = selectedSession ? "Waiting for project status…" : "Open a session for project status."; return; }
+  if (!status) {
+    container.textContent = selectedSession ? "Waiting for project status…" : "Open a session for project status.";
+    // cas-813a: while this session's status is on its way, the rail is open
+    // already, so its arrival doesn't narrow the composer.
+    contextProgress = Boolean(selectedMachineId && selectedSession && statusPending.has(sessionKey(selectedMachineId, selectedSession)));
+    return;
+  }
   const summary = selectedMachineId && selectedSession ? sessionSummaries.get(sessionKey(selectedMachineId, selectedSession)) : undefined;
   if (summary) {
     const row = document.createElement("article");

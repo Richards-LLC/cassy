@@ -1683,7 +1683,7 @@ mod tests {
             },
             status: SweepStatus::Failed,
             log_path: temp.path().join("sweep.log"),
-            summary: "Conflict a and b: shared".to_owned(),
+            summary: "Conflict a and b: shared; Jev: unknown (0.78); touched-change mention=0.16 (advisory)".to_owned(),
             failures: Vec::new(),
             integration_epics: vec!["a".to_owned(), "b".to_owned()],
             base_failure: None,
@@ -1712,10 +1712,12 @@ mod tests {
                 .find(|row| row.factory_session.as_deref() == Some(session.as_str()))
                 .unwrap();
             assert_eq!(row.target, "supervisor");
+            assert!(row.prompt.contains("Jev: unknown (0.78)"));
             assert!(crate::prompt_revalidation::is_supervisor_wake_envelope(
                 &row.prompt
             ));
         }
+        assert_eq!(result.status, SweepStatus::Failed);
     }
     #[test]
     fn open_epics_are_sorted_by_creation_and_closed_epics_are_removed() {

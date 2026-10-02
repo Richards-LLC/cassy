@@ -1,0 +1,74 @@
+[
+  {
+    "id": "macos-ci-97-7",
+    "source": "gate:ci-script-tests",
+    "platform": "macos",
+    "log": "ok   shared self-hosted Rust setup script is executable\ntouch: out of range or illegal time specification: YYYY-MM-DDThh:mm:SS[.frac][tz]\nFAIL runner cache pruning behavior test must be executable and pass\nrealpath: illegal option -- m\nusage: realpath [-q] [path ...]\nFAIL runner cache mount guard behavior test must be executable and pass\nrealpath: illegal option -- e\nusage: realpath [-q] [path ...]\nerror: cache root must exist\nFAIL runner job-lifetime cache lock behavior test must be executable and pass\nok   runner isolation accepts slot 1 tuple\nok   runner isolation accepts slot 2 tuple\nok   runner isolation rejects a mixed slot tuple\nok   impact selector Git/execution/recall fixtures pass\nok   snapshot router is executable\nok   a missing sccache binary degrades to a visible note\nok   sccache summary exits 0 (disabled)\nok   the probe-disabled backend is reported as uncached\n\ntest result: 97 passed; 7 failed",
+    "expected": [
+      "host_or_toolchain_env"
+    ],
+    "provenance": {
+      "kind": "raw-log",
+      "source": "cas-bd00/baseline-1b985223d.log",
+      "lines": "711-725,860-865",
+      "diagnosis": "cas-bd00 supervisor assignment and verified portability fix"
+    }
+  },
+  {
+    "id": "missing-pyyaml",
+    "source": "gate:ci-script-tests",
+    "platform": "macos",
+    "log": "CI policy parser requires pyyaml==6.0.3; install with python3 -m pip install -r scripts/ci_tiers/requirements.txt",
+    "expected": [
+      "host_or_toolchain_env"
+    ],
+    "provenance": {
+      "kind": "supervisor-reported-exact-excerpt",
+      "source": "supervisor notifications12429/12434; scripts/ci_tiers/policy.py:19",
+      "limitation": "Original keyed sweep log was overwritten after PyYAML installation."
+    }
+  },
+  {
+    "id": "missing-flock",
+    "source": "worker-check",
+    "platform": "macos",
+    "log": "./scripts/test-self-hosted-rust-setup.sh\nflock is required to protect the shared rustup home\nmake: *** [test-ci-tiers] Error 1",
+    "expected": [
+      "host_or_toolchain_env"
+    ],
+    "provenance": {
+      "kind": "derived-from-real-failure",
+      "source": "cas-bd00/supervisor-make.log final three lines; scripts/setup-cassy-actions-rust.sh:22 at1b985223; supervisor12345",
+      "limitation": "Inner fixture stderr was captured then deleted; exact helper diagnostic reconstructed from source."
+    }
+  },
+  {
+    "id": "hub-j9-load",
+    "source": "gate:hub-web-visual-qa",
+    "platform": "linux",
+    "log": "HUB-J9 on a phone: from the list to a reply and back\nTest timeout of 60000ms exceeded.\n1 failed; 28 passed (17.5m)\nOperator observed host load 258 during the run. Isolated rerun: HUB-J9 passed three times (38.9s,34.1s,33.6s); 3 passed (1.9m).",
+    "expected": [
+      "load_flake_or_timeout"
+    ],
+    "provenance": {
+      "kind": "raw-log-excerpts-plus-operator-context",
+      "source": "soundwave:cas-c4d3/journeys-c30efe0ce.log:53,62-78; j9-rerun-6baadd4.log:31-36; supervisor12429",
+      "limitation": "Load258 is supervisor-reported context; log excerpts read over SSH without modifying originals."
+    }
+  },
+  {
+    "id": "unnamed-sweep-targets",
+    "source": "sweep",
+    "platform": "macos",
+    "log": "integration failure has no named test targets",
+    "expected": [
+      "unknown",
+      "host_or_toolchain_env"
+    ],
+    "provenance": {
+      "kind": "supervisor-reported-exact-excerpt",
+      "source": "director notifications12285(notification700),12295; rolling_integration.rs:957 at1dd7ca8e",
+      "limitation": "Summary alone hides the underlying Mac gate failure; supervisor accepts unknown or host."
+    }
+  }
+]

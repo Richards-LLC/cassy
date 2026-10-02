@@ -196,4 +196,29 @@ mod tests {
                 .contains("line 2")
         );
     }
+    #[test]
+    fn jev_failure_cli_parses_log_and_exact_change_refs() {
+        let cli = crate::cli::Cli::try_parse_from([
+            "cas",
+            "jev",
+            "classify-failure",
+            "--log",
+            "failed.log",
+            "--source",
+            "gate:ci-script-tests",
+            "--base",
+            "base-tip",
+            "--head",
+            "merged-tip",
+        ])
+        .unwrap();
+        let Some(crate::cli::Commands::Jev(JevCommands::ClassifyFailure(args))) = cli.command
+        else {
+            panic!("wrong command")
+        };
+        assert_eq!(args.log, PathBuf::from("failed.log"));
+        assert_eq!(args.source, "gate:ci-script-tests");
+        assert_eq!(args.base, "base-tip");
+        assert_eq!(args.head, "merged-tip");
+    }
 }

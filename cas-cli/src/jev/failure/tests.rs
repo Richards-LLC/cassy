@@ -43,6 +43,10 @@ fn failure_block_preserves_names_first_panic_tail_and_utf8_bound() {
         "FAIL [0.02s] cas tests::real_regression\nthread 'tests::real_regression' panicked at src/check.rs:7:\nassertion left == right failed\n{}\nFINAL STEP DIAGNOSTIC",
         "🦉".repeat(20_000)
     );
+    let text = format!(
+        "setup emitted an unrelated error\n{}\n{text}",
+        "noise\n".repeat(20)
+    );
     let state = evidence("sweep", "linux", &text, vec!["src/check.rs".into()]);
     assert!(state.failing_block.len() <= MAX_BLOCK);
     assert!(state.failing_block.contains("tests::real_regression"));
@@ -215,4 +219,40 @@ async fn failure_advisory_deadline_bounds_retry_and_never_waives_failure() {
     .unwrap();
     assert!(result.is_none());
     assert!(start.elapsed() < Duration::from_secs(5));
+}
+
+#[tokio::test]
+async fn failure_frozen_fixtures_use_evidence_only_and_accept_mock_labels() {
+    let fixtures: Vec<Value> =
+        serde_json::from_str(include_str!("../fixtures/failures.json")).unwrap();
+    assert_eq!(fixtures.len(), 5);
+    let server = MockServer::start().await;
+    for case in fixtures {
+        server.reset().await;
+        let dir = TempDir::new().unwrap();
+        let expected = case["expected"][0].as_str().unwrap();
+        let state = evidence(
+            case["source"].as_str().unwrap(),
+            case["platform"].as_str().unwrap(),
+            case["log"].as_str().unwrap(),
+            vec![],
+        );
+        let serialized = json!(state);
+        assert!(serialized.get("expected").is_none());
+        assert!(serialized.get("provenance").is_none());
+        Mock::given(method("POST"))
+            .and(body_json(
+                json!({"state":serialized,"questions":questions(),"model":"jev-1.13.0"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response(expected)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = client(&server, &dir);
+        let label = tokio::task::spawn_blocking(move || classify(&client, &state))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(label.contains(expected));
+    }
 }

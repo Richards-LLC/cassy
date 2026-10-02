@@ -11,6 +11,7 @@
 //        202/200 {session, attached} · error {error, detail} · 403 scope_denied
 import { escapeHtml, projectTitle } from "./cloud-brand";
 import { LAUNCH_SCOPE, canEnableSessionLaunch, launchGrantCommand } from "./pairing-scopes";
+import { CANT_REACH_RETRYING, NEEDS_PAIRING, UNSTEADY } from "./connection-state";
 import type { Scope } from "./types";
 
 /** The supervisors POST /v1/sessions accepts (hub/server.rs launch_session_blocking). */
@@ -120,6 +121,13 @@ export interface LaunchMachine {
   scopes: readonly Scope[];
   /** The machine's own default supervisor CLI, when its hub says. */
   defaultCli?: string;
+  /**
+   * The machine's connection, in the header's words ("Live", "Unsteady",
+   * "Reconnecting", "Needs pairing", …) (cas-0e14). Unset reads as live.
+   */
+  connection?: string;
+  /** A code re-pair replaced a pairing that could start sessions (cas-0e14). */
+  launchDropped?: boolean;
 }
 
 /** Everything the sheet needs from the app; no hub call happens elsewhere. */
@@ -149,6 +157,41 @@ export class SessionLaunchGrantError extends Error {
 
 export function canLaunch(machine: Pick<LaunchMachine, "scopes"> | undefined): boolean {
   return machine?.scopes.includes(LAUNCH_SCOPE) === true;
+}
+
+/**
+ * Whether the machine can answer now (cas-0e14 F30). Unsteady still counts:
+ * its sockets are up and a missed heartbeat or two often recovers by itself.
+ */
+export function launchReachable(machine: Pick<LaunchMachine, "connection"> | undefined): boolean {
+  const connection = machine?.connection;
+  return connection === undefined || connection === "Live" || connection === UNSTEADY;
+}
+
+/** The picker's words for a machine: its name, then why it can't start sessions now. */
+export function launchMachineOption(machine: LaunchMachine): string {
+  if (!canLaunch(machine)) return `${machine.label} · can't start sessions yet`;
+  if (launchReachable(machine)) return machine.label;
+  const state = machine.connection === CANT_REACH_RETRYING ? "can't reach" : machine.connection!.replace(/…$/, "").toLowerCase();
+  return `${machine.label} · ${state}`;
+}
+
+/**
+ * What the sheet says instead of a project list while the machine can't
+ * answer, in the banner's words (cas-0e14 F30).
+ */
+export function launchOfflineNotice(machine: Pick<LaunchMachine, "label" | "connection">): string {
+  const { label, connection } = machine;
+  if (connection === NEEDS_PAIRING) return `${label} needs pairing again before it can start sessions.`;
+  if (connection === CANT_REACH_RETRYING) return `Can't reach ${label} — retrying. Its projects load once it's back.`;
+  if (connection === "Connecting" || connection === "Connecting…" || connection === "Idle") return `Connecting to ${label}… Its projects load once it's connected.`;
+  if (connection === "Unreachable") return `Lost connection to ${label}. Its projects load once it's back.`;
+  return `Lost connection to ${label}. Reconnecting… Its projects load once it's back.`;
+}
+
+/** Ready to show projects: allowed to launch and reachable now. */
+function launchUsable(machine: LaunchMachine | undefined): boolean {
+  return canLaunch(machine) && launchReachable(machine);
 }
 
 export function supervisorCliLabel(cli: string): string {
@@ -313,6 +356,10 @@ export class LaunchSheet {
   private ticker: number | undefined;
   private landing = false;
   private grantNeedsInvitation = false;
+  /** Whether the chosen machine could answer when it was chosen (cas-0e14). */
+  private reachable = true;
+  /** The machines as last drawn, so a repeat refresh is free. */
+  private signature = "";
 
   constructor(private readonly host: LaunchHost, private readonly doc: Document = document) {}
 
@@ -320,14 +367,16 @@ export class LaunchSheet {
 
   /**
    * Open on `machineId` when given; otherwise on the current machine if it
-   * can launch, else the first machine that can, else the current one (whose
-   * grant path then shows).
+   * can launch and is reachable, else the first such machine, else the
+   * current machine if it can launch (saying it is offline), else the first
+   * that can, else the current one (whose grant path then shows) (cas-0e14).
    */
   open(machineId?: string): void {
     const dialog = this.ensureDialog();
     const machines = this.host.machines();
     const current = this.host.currentMachineId();
     const chosen = (machineId ? machines.find((m) => m.id === machineId) : undefined)
+      ?? machines.find((m) => m.id === current && launchUsable(m)) ?? machines.find(launchUsable)
       ?? machines.find((m) => m.id === current && canLaunch(m)) ?? machines.find(canLaunch) ?? machines.find((m) => m.id === current) ?? machines[0];
     this.view = "form";
     // Every open starts from the machine's defaults: a supervisor, worker
@@ -439,7 +488,36 @@ export class LaunchSheet {
     this.renderMachines();
     if (this.view === "form" || this.view === "grant") this.view = canLaunch(machine) ? "form" : "grant";
     this.renderAll();
-    if (machine && canLaunch(machine)) { void this.loadCatalog(machine.id); void this.loadProfiles(machine.id); }
+    this.reachable = launchReachable(machine);
+    this.signature = this.machinesSignature();
+    if (machine && launchUsable(machine)) { void this.loadCatalog(machine.id); void this.loadProfiles(machine.id); }
+  }
+
+  /**
+   * The app's machines changed (a connection went up or down, a scope was
+   * granted, a machine was paired or removed). An open sheet follows: the
+   * picker names each machine's state, and the chosen machine's projects
+   * give way to its outage or load once it is back (cas-0e14 F30).
+   */
+  refresh(): void {
+    if (!this.dialog?.open) return;
+    const signature = this.machinesSignature();
+    if (signature === this.signature) return;
+    this.signature = signature;
+    const machine = this.machine();
+    if (!machine) { this.selectMachine(this.host.machines()[0]?.id); return; }
+    this.renderMachines();
+    if (this.view !== "form" && this.view !== "grant") return;
+    const reachable = launchReachable(machine);
+    const wanted = canLaunch(machine) ? "form" : "grant";
+    if (reachable === this.reachable && wanted === this.view) { this.renderGrant(); return; }
+    // Reachability or the grant changed: start this machine over, keeping the
+    // operator's supervisor choice as an explicit choice.
+    this.selectMachine(machine.id);
+  }
+
+  private machinesSignature(): string {
+    return JSON.stringify(this.host.machines().map((m) => [m.id, m.label, [...m.scopes].sort(), launchReachable(m) ? "up" : m.connection, m.launchDropped === true]));
   }
 
   private defaultAccountFor(cli: SupervisorCli): string | undefined {
@@ -564,7 +642,7 @@ export class LaunchSheet {
   private renderMachines(): void {
     const machines = this.host.machines();
     const select = this.$("select[name=launch-machine]") as HTMLSelectElement;
-    select.innerHTML = machines.map((m) => `<option value="${escapeHtml(m.id)}"${m.id === this.machineId ? " selected" : ""}>${escapeHtml(m.label)}${canLaunch(m) ? "" : " · can't start sessions yet"}</option>`).join("");
+    select.innerHTML = machines.map((m) => `<option value="${escapeHtml(m.id)}"${m.id === this.machineId ? " selected" : ""}>${escapeHtml(launchMachineOption(m))}</option>`).join("");
     // One machine needs no picker; its name leads the summary instead.
     this.$("[data-launch-machine-field]").hidden = machines.length < 2;
   }
@@ -624,7 +702,9 @@ export class LaunchSheet {
     this.$(".launch-grant-command").hidden = eligible;
     this.$(".launch-grant-note").hidden = eligible;
     this.$(".launch-grant .launch-lead").innerHTML = eligible
-      ? `Allow starting sessions on <strong>${escapeHtml(label)}</strong> from this browser.`
+      ? machine?.launchDropped
+        ? `Re-pairing <strong>${escapeHtml(label)}</strong> didn't keep starting sessions. Allow it again from this browser.`
+        : `Allow starting sessions on <strong>${escapeHtml(label)}</strong> from this browser.`
       : `This browser can't start sessions on <strong>${escapeHtml(label)}</strong> yet. Pair with a control invitation to allow it.`;
   }
 
@@ -658,6 +738,13 @@ export class LaunchSheet {
     if (!list) return;
     const search = this.$("input[name=launch-query]") as HTMLInputElement;
     if (search.value !== this.query) search.value = this.query;
+    const machine = this.machine();
+    if (machine && canLaunch(machine) && !launchReachable(machine)) {
+      // cas-0e14 F30: the banner's words, not a load that can only fail.
+      list.innerHTML = `<p class="launch-empty launch-offline" role="status">${escapeHtml(launchOfflineNotice(machine))}</p>`;
+      search.disabled = true;
+      return;
+    }
     if (this.catalog.status === "loading" || this.catalog.status === "idle") {
       list.innerHTML = `<p class="launch-empty" role="status">Loading projects…</p>`;
       search.disabled = true;
@@ -710,7 +797,7 @@ export class LaunchSheet {
     const start = this.$('[data-launch-action="start"]');
     const summary = this.$(".launch-summary");
     const machine = this.machine();
-    const ready = Boolean(this.selection && machine && canLaunch(machine));
+    const ready = Boolean(this.selection && machine && launchUsable(machine));
     start.setAttribute("aria-disabled", String(!ready));
     const workers = parseWorkers((this.$("input[name=launch-workers]") as HTMLInputElement).value);
     summary.textContent = this.selection && machine

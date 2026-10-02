@@ -128,3 +128,31 @@ export function launchGrantCommand(controllerOrigin: string, current: readonly S
   const scopes = [...current.filter((scope) => scope !== LAUNCH_SCOPE), LAUNCH_SCOPE];
   return pairCommand(controllerOrigin, scopes);
 }
+
+/**
+ * cas-0e14 (journey F29): a code pairing requests only the default scopes, so
+ * re-pairing by code replaces a credential that could start sessions with one
+ * that can't. True when that is what happened.
+ */
+export function launchDropped(previous: readonly Scope[] | undefined, next: readonly Scope[]): boolean {
+  return previous?.includes(LAUNCH_SCOPE) === true && !next.includes(LAUNCH_SCOPE);
+}
+
+/**
+ * What the Re-pair dialog says before a code is created. When the saved
+ * pairing can start sessions, it says the code won't keep that, and names the
+ * command whose link would (cas-0e14 F29).
+ */
+export function repairStatus(label: string, scopes: readonly Scope[], controllerOrigin: string): string {
+  const plain = `Re-pairing ${label}: create a new code and approve it on that machine. Its saved access here is replaced when the new credential is installed.`;
+  if (!scopes.includes(LAUNCH_SCOPE)) return plain;
+  return `Re-pairing ${label}: a new code replaces its saved access here, and starting sessions will need to be allowed again afterwards. To keep it, run ${launchGrantCommand(controllerOrigin, scopes)} on ${label} and open the link it prints instead.`;
+}
+
+/** The Attention item after a code re-pair dropped session launch (cas-0e14 F29). */
+export function launchDroppedNotice(label: string): { headline: string; detail: string } {
+  return {
+    headline: "Starting sessions needs allowing again",
+    detail: `Re-pairing ${label} with a code didn't include starting sessions. Open Allow new sessions to allow it again.`,
+  };
+}

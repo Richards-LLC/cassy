@@ -32,7 +32,7 @@ import { EXPIRED_PAIRING_INVITATION_MESSAGE, INVALID_PAIRING_LINK_MESSAGE, cance
 import { exchangePendingPairing, PairingCleanupError, PairingExchangeError, PairingStorageError } from "./pairing-exchange";
 import { PairingOperationCoordinator, commitPairingResult } from "./pairing-operation";
 import { LATE_ROLLBACK_FAILURE_MESSAGE, PairingCancellationTracker, cleanupRetryOutcome } from "./pairing-cancellation";
-import { preselectedScopes } from "./pairing-scopes";
+import { launchDropped, launchDroppedNotice, preselectedScopes, repairStatus } from "./pairing-scopes";
 import { LaunchSheet, canLaunch } from "./launch-session";
 import { pendingPairingStoreFor, type PendingPairing, type PendingRelayRequest } from "./pending-pairing";
 import { DEFAULT_PAIRING_SCOPES, PairingRelayError, acknowledgePairing, createPairingRequest, pairingRelayOrigin, pollPairingRequest } from "./pairing-relay";
@@ -672,9 +672,11 @@ async function boot(): Promise<void> {
 
 /** Re-pairing is about a named machine; say so instead of a blank create prompt. */
 function openRepairDialog(machineId: string): void {
-  const label = machines.get(machineId)?.label ?? "this machine";
+  const machine = machines.get(machineId);
+  const label = machine?.label ?? "this machine";
   if (!pendingPairing && !pairingCleanupFailed) {
-    pairingStatus = `Re-pairing ${label}: create a new code and approve it on that machine. Its saved access here is replaced when the new credential is installed.`;
+    // cas-0e14 F29: a code re-pair can't keep starting sessions; say so first.
+    pairingStatus = repairStatus(label, machine?.scopes ?? [], location.origin);
     render(false);
   }
   openPairDialog();
@@ -720,6 +722,8 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
     onState: (state) => {
       const wasLive = connectionStates.get(machine.id)?.phase === "live";
       connectionStates.set(machine.id, state);
+      // cas-0e14 F30: an open New session follows the machine's connection.
+      launchSheet.refresh();
       // Anchor staleness to the last live moment: retry transitions rewrite
       // snapshot.since, which would report a ten-minute outage as "just now".
       if (state.phase === "live") lastLiveAt.set(machine.id, Date.now());
@@ -1054,14 +1058,23 @@ function launchConnection(machineId: string): HubConnectionSupervisor {
 }
 
 const launchSheet = new LaunchSheet({
-  machines: () => [...machines.values()].map((machine) => ({ id: machine.id, label: machine.label, scopes: machine.scopes, defaultCli: machineInfo.get(machine.id)?.default_supervisor_cli })),
+  machines: () => [...machines.values()].map((machine) => ({
+    id: machine.id, label: machine.label, scopes: machine.scopes, defaultCli: machineInfo.get(machine.id)?.default_supervisor_cli,
+    // cas-0e14 F30: the header's words for the machine's connection.
+    connection: fleetConnectionLabel(connectionStates.get(machine.id), machine.id),
+    launchDropped: launchDroppedMachines.has(machine.id),
+  })),
   currentMachineId: () => selectedMachineId,
   origin: location.origin,
   projects: (machineId, signal) => launchConnection(machineId).projects(signal),
   profiles: (machineId, signal) => launchConnection(machineId).launchProfiles(signal),
   browse: (machineId, root, path, signal) => launchConnection(machineId).browseProjects(root, path, signal),
   launch: (machineId, request) => launchConnection(machineId).launchSession(request),
-  grant: (machineId) => launchConnection(machineId).enableSessionLaunch(),
+  grant: async (machineId) => {
+    await launchConnection(machineId).enableSessionLaunch();
+    // cas-0e14 F29: allowed again, so the re-pair notice is done.
+    settleLaunchDropped(machineId);
+  },
   sessionListed: async (machineId, session) => (await launchConnection(machineId).refreshSessions()).some((item) => item.name === session),
   open: (machineId, session) => {
     // Land on the new session's supervisor, as a palette jump does.
@@ -1146,6 +1159,21 @@ function machineFooterConnection(machineId: string): ConnectionState | undefined
   const prefix = `${machineId}:`;
   const attached = [...attachStates].filter(([key]) => key.startsWith(prefix)).map(([key, attach]) => ({ attach, wasLive: sessionsEverLive.has(key) }));
   return machineConnection(connectionStates.get(machineId), attached);
+}
+
+/** Machines whose code re-pair dropped session launch in this page (cas-0e14 F29). */
+const launchDroppedMachines = new Set<string>();
+
+function announceLaunchDropped(machine: StoredMachine): void {
+  launchDroppedMachines.add(machine.id);
+  const notice = launchDroppedNotice(machine.label);
+  void addAttention(machine, undefined, "launch_dropped", { ...notice, severity: "warning", action: "none", fingerprint: `${machine.id}:launch_dropped` });
+}
+
+function settleLaunchDropped(machineId: string): void {
+  if (!launchDroppedMachines.delete(machineId) && !attention.some((item) => item.fingerprint === `${machineId}:launch_dropped`)) return;
+  resolveAttention(`${machineId}:launch_dropped`);
+  launchSheet.refresh();
 }
 
 async function acknowledgeAttentionGroup(items: AttentionItem[]): Promise<void> {
@@ -1287,7 +1315,13 @@ async function pairMachine(form: HTMLFormElement): Promise<StoredMachine | false
   pendingPairing = null;
   stopPairingTimers();
   pairingDraft = createPairingDraft(location.origin);
+  const previousScopes = machines.get(machine.id)?.scopes;
   machines.set(machine.id, machine);
+  // cas-0e14 F29: a code re-pair can't carry session launch. Say plainly that
+  // starting sessions needs allowing again, rather than letting New session
+  // quietly turn back into "Allow new sessions".
+  if (launchDropped(previousScopes, machine.scopes)) announceLaunchDropped(machine);
+  else if (machine.scopes.includes("session-launch")) settleLaunchDropped(machine.id);
   // cas-7752: only a fresh pairing lets a revoked machine's drafts be stored
   // again. A "live" report is not enough: the machine stream can come back
   // while every authenticated request is still refused.

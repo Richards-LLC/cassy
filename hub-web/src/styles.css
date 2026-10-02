@@ -3750,7 +3750,12 @@ button.chip:disabled { cursor: default; }
   .conversation-sidebar #paired-machines-toggle { position: relative; flex-wrap: nowrap; min-width: 0; min-height: 32px; padding: 0 var(--space-2); background: var(--color-transparent); }
   .conversation-sidebar #paired-machines-toggle:hover:not(:disabled) { background: var(--bg-hover); }
   .conversation-sidebar #paired-machines-toggle::before { content: ""; position: absolute; inset: -4px 0; }
-  .conversation-sidebar #paired-machines-toggle > span:nth-child(2) { overflow-wrap: normal; white-space: nowrap; }
+  .conversation-sidebar #paired-machines-toggle > span:nth-child(2) { flex: none; overflow-wrap: normal; white-space: nowrap; }
+  /* cas-0739 QA F01: on the one-line phone footer the state yields to the
+     label, ellipsised; the full words are its title, the button's spoken
+     name, and the open dialog's first row. */
+  .conversation-sidebar #paired-machines-toggle .machine-badge-state { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
+  .conversation-sidebar .hub-footer-badges > #paired-machines-toggle { flex: 1 1 auto; }
   .conversation-sidebar .hub-footer-meta { display: none; }
   .conversation-shell:not(.thread-open) .compose-fab { display: flex; }
   /* The compose bar already takes the free space above the footer. */
@@ -3842,8 +3847,11 @@ button.chip:disabled { cursor: default; }
 /* Machine evidence stays beneath the conversations, outside the phone composer. */
 .hub-footer-badges { display: grid; gap: var(--space-2); margin-bottom: var(--space-3); }
 #paired-machines-toggle { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); text-align: left; padding: var(--space-2); color: var(--text-hi); background: var(--bg-raised); }
-#paired-machines-toggle > span:nth-child(2) { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-.machine-badge-state { color: var(--text-mid); font-size: var(--fs-xs); }
+/* cas-0739 QA F02: the label keeps its own width (basis auto, never 0), so a
+   long outage state wraps onto its own line instead of squeezing the label
+   to a letter per line. */
+#paired-machines-toggle > span:nth-child(2) { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.machine-badge-state { flex: 0 1 auto; min-width: 0; color: var(--text-mid); font-size: var(--fs-xs); overflow-wrap: anywhere; }
 .pairing-dot { width: var(--space-2); height: var(--space-2); border-radius: var(--radius-pill); background: var(--color-series-neutral); flex: none; }
 .pairing-dot.connected { background: var(--state-ok); }
 /* cas-b789: some machines connected, some down — not all-clear. */

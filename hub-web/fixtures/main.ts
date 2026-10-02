@@ -18,7 +18,7 @@ import { LaunchSheet, type LaunchHost, type LaunchResult } from "../src/launch-s
 import type { GhosttyCell, GhosttyColor, GhosttyRow } from "../src/terminal/ghostty/core";
 
 export const FIXTURE_NAMES = [
-  "paired-machines", "paired-machines-down", "conversations-list", "conversation", "conversation-replied", "conversation-error",
+  "paired-machines", "paired-machines-down", "conversations-machine-down-long", "conversations-list", "conversation", "conversation-replied", "conversation-error",
   "conversation-thread", "conversation-evidence",
   "conversation-ask", "conversation-ask-answered", "conversation-blocker", "conversation-pairs",
   "conversation-attachment", "conversation-empty", "conversation-composer", "conversation-keyboard",

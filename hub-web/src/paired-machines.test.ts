@@ -78,6 +78,18 @@ describe('the machine that is not connected comes first and the footer names it 
     expect(one('Connecting…')).toBe('Shed NAS connecting');
   });
 
+  it('keeps a long name whole in the title and safe as text (cas-0739 QA round 1)', () => {
+    const footer = document.createElement('div');
+    const rack = { ...shed, label: 'Build Server Rack Seven Downstairs <b>x</b> · Windows' };
+    footer.innerHTML = machineFooterMarkup([live('atlas', 'Atlas · Linux'), rack], 1, 'test-build');
+    const state = footer.querySelector<HTMLElement>('.machine-badge-state')!;
+    expect(state.textContent).toBe("Build Server Rack Seven Downstairs <b>x</b> can't be reached");
+    expect(state.title).toBe(state.textContent);
+    expect(state.querySelector('b')).toBeNull();
+    // The label and the state are separate spans, so CSS can let the state yield.
+    expect([...footer.querySelector('#paired-machines-toggle')!.children].map((child) => child.className)).toEqual(['pairing-dot partial', '', 'machine-badge-state']);
+  });
+
   it('counts several machines that are not connected', () => {
     expect(footerState([...fleet, { ...shed, id: 'attic', label: 'Attic · Linux', connection: 'Reconnecting' }])).toBe('2 not connected');
   });

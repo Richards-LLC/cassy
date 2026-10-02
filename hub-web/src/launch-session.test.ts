@@ -520,6 +520,8 @@ describe("New session and a machine's connection (cas-0e14 F30)", () => {
     expect(dialog().querySelector('[data-launch-list="known"]')!.textContent).toBe("Lost connection to Atlas. Reconnecting… Its projects load once it's back.");
     expect(loads).toEqual([]);
     expect(dialog().querySelector('[data-launch-action="start"]')!.getAttribute("aria-disabled")).toBe("true");
+    // No "Loading accounts…" that can never finish.
+    expect(dialog().querySelector<HTMLElement>(".launch-account")!.hidden).toBe(true);
     machines[0] = { ...machines[0]!, connection: "Live" };
     s.refresh();
     await flush();

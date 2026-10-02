@@ -41,6 +41,7 @@ export const FIXTURE_NAMES = [
   "launch-error",
   "launch-starting",
   "launch-grant",
+  "launch-offline",
   "launch-account",
   "launch-account-unavailable",
 ];

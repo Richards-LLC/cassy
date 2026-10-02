@@ -560,6 +560,10 @@ export class LaunchSheet {
     const fieldset = this.dialog?.querySelector<HTMLElement>(".launch-account");
     if (!fieldset) return;
     const body = fieldset.querySelector<HTMLElement>("[data-launch-accounts]")!;
+    // cas-0e14: a machine that can't answer has no accounts to load yet; the
+    // project list already says why.
+    const machine = this.machine();
+    if (machine && !launchReachable(machine)) { fieldset.hidden = true; body.innerHTML = ""; return; }
     const step = this.step();
     fieldset.hidden = step.kind === "hidden";
     if (step.kind === "hidden") { body.innerHTML = ""; return; }

@@ -49,6 +49,7 @@ export const FIXTURE_NAMES = [
   "launch-error",
   "launch-starting",
   "launch-grant",
+  "launch-offline",
   "launch-account",
   "launch-account-unavailable",
 ] as const;
@@ -370,7 +371,7 @@ function appendOpenPairingDialog(view: PairingFixture): void {
   }
 }
 
-type LaunchFixture = "launch-form" | "launch-browse" | "launch-error" | "launch-starting" | "launch-grant" | "launch-account" | "launch-account-unavailable";
+type LaunchFixture = "launch-form" | "launch-browse" | "launch-error" | "launch-starting" | "launch-grant" | "launch-offline" | "launch-account" | "launch-account-unavailable";
 
 /**
  * The production New session sheet (LaunchSheet, cas-0f51) driven through its
@@ -382,7 +383,8 @@ async function openLaunchSheet(view: LaunchFixture): Promise<void> {
   const root = { id: "root-code", name: "code", path: "/home/dev/code" };
   const host: LaunchHost = {
     machines: () => [
-      { id: "atlas", label: "Atlas · Linux", scopes: [...control, "session-launch"] },
+      // cas-0e14: the offline view's machine is reconnecting.
+      { id: "atlas", label: "Atlas · Linux", scopes: [...control, "session-launch"], ...(view === "launch-offline" ? { connection: "Reconnecting" } : {}) },
       { id: "studio", label: "Studio Mac · macOS", scopes: control },
     ],
     currentMachineId: () => (view === "launch-grant" ? "studio" : "atlas"),

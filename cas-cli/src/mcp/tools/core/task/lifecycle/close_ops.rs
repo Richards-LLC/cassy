@@ -6708,8 +6708,23 @@ impl CasCore {
                 &context.target_branch,
             )
         });
+        // cas-f01b (GH #1068): the same holds for a delivery that never
+        // parked, merged by a batch squash and named by the supervisor's
+        // commit_receipt. The worker may already be on its next task's
+        // branch; the receipt on the declared target is the delivery, so the
+        // worker checkout is not consulted. A worker's own close, or one
+        // without the override, still validates its branch.
+        let supervisor_closing_merged_receipt = declared_repo_context.as_ref().is_some_and(|context| {
+            supervisor_merged_anchor_close(
+                supervisor_override,
+                req.commit_receipt.as_deref().map(str::trim),
+                &context.repo_root,
+                &context.target_branch,
+            )
+        });
         let worker_worktree_path = if close_disposition == TaskCloseDisposition::Decision
             || supervisor_closing_merged_anchor
+            || supervisor_closing_merged_receipt
         {
             None
         } else {

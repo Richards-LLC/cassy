@@ -4,7 +4,9 @@ Use this branch for a burn-down or a `cas-github-issues` sweep. Keep Jev outputs
 as suggestions for review, including at high confidence; this recipe grants
 no automatic cancellation, closure, duplicate merge or priority change.
 
-The [172-task agreement evaluation](https://github.com/Richards-LLC/cassy/blob/cf89eb9ad7e0cb47012a929e68ac5e2683e07650/docs/research/2026-10-02-jev-triage-eval.md)
+The 172-task agreement evaluation (source-project report
+`docs/research/2026-10-02-jev-triage-eval.md`, revision
+`cf89eb9ad7e0cb47012a929e68ac5e2683e07650`)
 measured about 70% verdict agreement (tuned 121/172 = 70.35%; held-out
 97/138 = 70.29%). Its tuned `confidence >= 0.9` bucket agreed on 28/32 = 87.50%
 overall and 22/26 = 84.62% held-out: roughly 84–88%, with few examples and

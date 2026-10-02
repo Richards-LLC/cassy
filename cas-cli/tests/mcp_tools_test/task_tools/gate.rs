@@ -1067,6 +1067,11 @@ async fn start_moves_a_branch_parked_for_another_target_and_keeps_its_tip_gh_100
         .unwrap_or_else(|error| panic!("start must move the parked branch: {}", error.message));
     assert!(started.contains("PARKED BRANCH MOVED"), "{started}");
     assert!(started.contains("cas-pk06"), "{started}");
+    // cas-ba4a: the parked anchor SHA is named as the delivery.
+    assert!(
+        started.contains(&format!("at anchor {parked_tip}")) && started.contains("Don't force-push"),
+        "{started}"
+    );
     assert_eq!(git(&["rev-parse", "HEAD"]), git(&["rev-parse", "epic/burn-down"]));
     assert_eq!(git(&["rev-parse", "parked/cas-pk06"]), parked_tip);
     assert_eq!(

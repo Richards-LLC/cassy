@@ -5594,6 +5594,75 @@ impl CasCore {
     /// the same unmerged delivery after the first AwaitingMerge park (GH #744 /
     /// #743). The first anchor remains in `notes` for auditability. A later
     /// task on the mutable factory branch must not change this task's anchor.
+    /// cas-ba4a: the live factory tip when it may become `task`'s parked
+    /// delivery anchor on a close retry (GH #744: the worker pushed a fix
+    /// after parking). The tip must strictly descend from the recorded anchor
+    /// and every commit between them must be this task's: none names another
+    /// task, and none postdates a sibling task's lease on the same worker.
+    /// Anything else is a later task's work on the same lane and the parked
+    /// anchor stands.
+    pub(crate) fn eligible_awaiting_merge_advance(
+        &self,
+        task_store: &dyn cas_store::TaskStore,
+        task: &Task,
+        repo_path: &std::path::Path,
+        candidate: Option<&str>,
+    ) -> Option<String> {
+        let candidate = candidate?;
+        if task.status != TaskStatus::AwaitingMerge {
+            return None;
+        }
+        let recorded = task.deliverables.factory_branch_anchor.as_deref()?;
+        let candidate = resolve_branch_sha(repo_path, &format!("{candidate}^{{commit}}"))?;
+        let foreign_since = self.sibling_lease_boundary(task_store, task);
+        parked_anchor_advance_is_attributable(
+            repo_path,
+            recorded,
+            &candidate,
+            &task.id,
+            foreign_since,
+        )
+        .then_some(candidate)
+    }
+
+    /// cas-ba4a: the first lease another unclosed task of the same worker
+    /// took after this task's own latest lease. Commits from then on belong
+    /// to that task, whatever its status (Open, Blocked, InProgress, ...).
+    fn sibling_lease_boundary(
+        &self,
+        task_store: &dyn cas_store::TaskStore,
+        task: &Task,
+    ) -> Option<i64> {
+        let assignee = task.assignee.as_deref()?;
+        let agent_store = self.open_agent_store().ok()?;
+        let claims = |task_id: &str| -> Vec<chrono::DateTime<chrono::Utc>> {
+            agent_store
+                .get_lease_history(task_id, None)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|entry| entry.event_type == "claimed")
+                .map(|entry| entry.timestamp)
+                .collect()
+        };
+        let own_latest = claims(&task.id).into_iter().max();
+        task_store
+            .list(None)
+            .ok()?
+            .into_iter()
+            .filter(|other| {
+                other.id != task.id
+                    && other.status != TaskStatus::Closed
+                    && other
+                        .assignee
+                        .as_deref()
+                        .is_some_and(|name| name.eq_ignore_ascii_case(assignee))
+            })
+            .flat_map(|other| claims(&other.id))
+            .filter(|claimed| own_latest.is_none_or(|own| *claimed > own))
+            .min()
+            .map(|claimed| claimed.timestamp())
+    }
+
     fn advance_awaiting_merge_anchor(
         &self,
         task_store: &dyn cas_store::TaskStore,
@@ -5633,6 +5702,17 @@ impl CasCore {
         }) {
             return;
         }
+        // cas-ba4a: a tip that does not descend from the parked anchor, or
+        // that carries another task's commits, never replaces it.
+        let Some(factory_branch_anchor) = self.eligible_awaiting_merge_advance(
+            task_store,
+            task,
+            repo_path,
+            Some(factory_branch_anchor),
+        ) else {
+            return;
+        };
+        let factory_branch_anchor = factory_branch_anchor.as_str();
         let mut advanced = task.clone();
         let now = chrono::Utc::now();
         let Some(audit) = Self::apply_awaiting_merge_anchor_advance(
@@ -6808,6 +6888,55 @@ impl CasCore {
             return Ok(Self::tool_error(message));
         }
 
+        // cas-ba4a: a task parked for merge answers for its recorded anchor,
+        // not for the mutable factory ref or the worktree HEAD, which may
+        // already carry the worker's next task or a force-push. The live tip
+        // counts only as an attributable continuation of this delivery
+        // (GH #744). An anchor that cannot be resolved refuses the close.
+        let parked_head = if close_disposition.requires_delivery_gates()
+            && !supervisor_closing_merged_anchor
+            && req.commit_receipt.is_none()
+        {
+            let parked_repo = worker_worktree_path
+                .as_deref()
+                .unwrap_or(close_project_root.as_path());
+            match parked_delivery_head(parked_repo, &task) {
+                Ok(Some(anchor)) => {
+                    let live_tip = task.assignee.as_deref().and_then(|assignee| {
+                        resolve_branch_sha(
+                            &close_project_root,
+                            &close_measured_factory_branch(&close_project_root, &task, assignee),
+                        )
+                    });
+                    Some(
+                        self.eligible_awaiting_merge_advance(
+                            task_store.as_ref(),
+                            &task,
+                            &close_project_root,
+                            live_tip.as_deref(),
+                        )
+                        .unwrap_or(anchor),
+                    )
+                }
+                Ok(None) => None,
+                Err(message) if supervisor_override => {
+                    append_close_decision_note(
+                        task_store.as_ref(),
+                        &mut task,
+                        &format!(
+                            "✅ DECISION unresolved parked anchor accepted by supervisor override: {}. {message}",
+                            req.reason.as_deref().unwrap_or("").trim()
+                        ),
+                    );
+                    None
+                }
+                Err(message) => return Ok(Self::tool_error(message)),
+            }
+        } else {
+            None
+        };
+        let delivery_receipt = req.commit_receipt.as_deref().or(parked_head.as_deref());
+
         // cas-0cd5: the implementer's QA evidence must be valid for the
         // delivered head before the delivery may park for merge (and before
         // its post-merge re-close can finish). Runs ahead of the merge gate
@@ -6836,7 +6965,7 @@ impl CasCore {
                     &evidence_repo,
                     &resolved_parent_branch,
                     window,
-                    req.commit_receipt.as_deref(),
+                    delivery_receipt,
                 )
             });
             match super::qa_evidence_gate::qa_evidence_close_gate_for_paths(
@@ -6844,7 +6973,7 @@ impl CasCore {
                 &task,
                 &evidence_repo,
                 &resolved_parent_branch,
-                req.commit_receipt.as_deref(),
+                delivery_receipt,
                 attributed_paths.as_deref(),
             ) {
                 Ok(notes) => {
@@ -6997,11 +7126,19 @@ impl CasCore {
                     // QA pass before it may merge. Open (or re-find) the
                     // round for this exact tip and tell the worker where it
                     // stands. Idempotent per tip, so close retries are cheap.
+                    // cas-ba4a: bind the round to the delivery anchor the park
+                    // or a guarded advance recorded, not to a live tip that
+                    // may be another task's work.
+                    let qa_anchor = task_store
+                        .get(&task.id)
+                        .ok()
+                        .and_then(|stored| stored.deliverables.factory_branch_anchor)
+                        .or(anchor);
                     let msg = match self.dispatch_independent_qa(
                         &task,
                         &close_project_root,
                         &resolved_parent_branch,
-                        anchor.as_deref(),
+                        qa_anchor.as_deref(),
                     ) {
                         Some(qa_status) => format!("{msg}{qa_status}"),
                         None => msg,
@@ -8328,7 +8465,7 @@ impl CasCore {
         // A supervisor-adopted historical receipt may predate the task floor.
         // The ordinary work-window probe intentionally omits it; the
         // receipt-scoped paths must still trigger review and QA on close.
-        let receipt_has_reviewable = req.commit_receipt.as_deref().is_some_and(|receipt| {
+        let receipt_has_reviewable = delivery_receipt.is_some_and(|receipt| {
             commit_receipt_window.as_ref().is_some_and(|window| {
                 task_attribution::paths(
                     worker_worktree_path
@@ -8341,9 +8478,13 @@ impl CasCore {
                 .is_some_and(|paths| paths.iter().any(|path| is_reviewable_path(path)))
             })
         });
+        // cas-ba4a: a parked delivery is judged on its anchor alone; the
+        // branch-wide probes below would count the worker's next task.
         let effective_has_reviewable = receipt_has_reviewable
             || task.execution_note.as_deref() == Some("value-only")
-            || if let Some(worker_wt) = worker_worktree_path.as_ref() {
+            || if parked_head.is_some() {
+                false
+            } else if let Some(worker_wt) = worker_worktree_path.as_ref() {
                 commit_receipt_window
                     .as_ref()
                     .and_then(|window| {
@@ -8383,11 +8524,15 @@ impl CasCore {
             // worker checkout, so attribution would otherwise walk the
             // supervisor's own HEAD. The merged anchor is the delivery, exactly
             // as if the supervisor had passed it as commit_receipt.
-            let attribution_receipt = req.commit_receipt.as_deref().or_else(|| {
-                supervisor_closing_merged_anchor
-                    .then_some(task.deliverables.factory_branch_anchor.as_deref())
-                    .flatten()
-            });
+            let attribution_receipt = req
+                .commit_receipt
+                .as_deref()
+                .or_else(|| {
+                    supervisor_closing_merged_anchor
+                        .then_some(task.deliverables.factory_branch_anchor.as_deref())
+                        .flatten()
+                })
+                .or(parked_head.as_deref());
             let delivered_paths = commit_receipt_window
                 .as_ref()
                 .and_then(|window| {
@@ -8454,12 +8599,14 @@ impl CasCore {
                 if supervisor_closing_merged_anchor {
                     task.deliverables.factory_branch_anchor.as_deref()
                 } else {
-                    None
+                    // cas-ba4a: the parked delivery, never the worktree HEAD.
+                    parked_head.as_deref()
                 },
             );
             let tip_is_task_delivery = req.commit_receipt.is_some()
                 || (supervisor_closing_merged_anchor
                     && task.deliverables.factory_branch_anchor.is_some())
+                || parked_head.is_some()
                 || worker_worktree_path.is_some();
             if let Some(range) = snapshot_gate_range(
                 proof_repo,
@@ -13257,9 +13404,6 @@ pub(crate) fn fetch_parent_branch_best_effort(
     repo_path: &std::path::Path,
     parent_branch: &str,
 ) -> bool {
-    use std::process::{Command, Stdio};
-    use std::time::Instant;
-
     if !is_safe_git_refname(parent_branch) {
         return false;
     }
@@ -13269,8 +13413,30 @@ pub(crate) fn fetch_parent_branch_best_effort(
     // caller needs the authoritative remote state rather than a fetch rejected
     // as non-fast-forward.
     let refspec = format!("+refs/heads/{parent_branch}:refs/remotes/origin/{parent_branch}");
+    // Finished (success or failure) or timed out — the caller doesn't care.
+    !matches!(
+        run_bounded_git_fetch(repo_path, &["fetch", "--quiet", "origin", &refspec]),
+        BoundedFetch::NotStarted(_)
+    )
+}
+
+/// How one bounded `git fetch` ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BoundedFetch {
+    Succeeded,
+    Failed,
+    TimedOut,
+    NotStarted(String),
+}
+
+/// Run one `git fetch` with no prompt, no output and a hard deadline of
+/// [`FETCH_TIMEOUT`]; the shared runner for every close-time fetch.
+fn run_bounded_git_fetch(repo_path: &std::path::Path, args: &[&str]) -> BoundedFetch {
+    use std::process::{Command, Stdio};
+    use std::time::Instant;
+
     let mut child = match Command::new("git")
-        .args(["fetch", "--quiet", "origin", &refspec])
+        .args(args)
         .current_dir(repo_path)
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null())
@@ -13279,24 +13445,99 @@ pub(crate) fn fetch_parent_branch_best_effort(
         .spawn()
     {
         Ok(child) => child,
-        Err(_) => return false,
+        Err(error) => return BoundedFetch::NotStarted(error.to_string()),
     };
 
     let deadline = Instant::now() + FETCH_TIMEOUT;
     loop {
         match child.try_wait() {
-            Ok(Some(_status)) => return true, // finished (success or failure — don't care)
+            Ok(Some(status)) if status.success() => return BoundedFetch::Succeeded,
+            Ok(Some(_)) | Err(_) => return BoundedFetch::Failed,
             Ok(None) => {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return true;
+                    return BoundedFetch::TimedOut;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            Err(_) => return true,
         }
     }
+}
+
+/// cas-ba4a: resolve `sha` to a commit, fetching it from `origin` by SHA
+/// through the bounded runner when this checkout lacks it (a force-pushed or
+/// deleted lane, or a squash-merged PR whose head lives only on the remote).
+/// The error says why it could not be resolved.
+pub(crate) fn resolve_or_fetch_commit(
+    repo_path: &std::path::Path,
+    sha: &str,
+) -> Result<String, String> {
+    let resolve = || resolve_branch_sha(repo_path, &format!("{sha}^{{commit}}"));
+    if let Some(head) = resolve() {
+        return Ok(head);
+    }
+    if !is_safe_git_refname(sha) || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("it is not a commit SHA, so it was not fetched".to_string());
+    }
+    if !origin_remote_configured(repo_path) {
+        return Err("this checkout has no origin remote to fetch it from".to_string());
+    }
+    Err(
+        match run_bounded_git_fetch(repo_path, &["fetch", "--quiet", "--no-tags", "origin", sha]) {
+            BoundedFetch::Succeeded => match resolve() {
+                Some(head) => return Ok(head),
+                None => "`git fetch origin <sha>` succeeded but the commit still does not resolve"
+                    .to_string(),
+            },
+            BoundedFetch::Failed => "`git fetch origin <sha>` failed".to_string(),
+            BoundedFetch::TimedOut => format!(
+                "`git fetch origin <sha>` did not finish within {}s",
+                FETCH_TIMEOUT.as_secs()
+            ),
+            BoundedFetch::NotStarted(error) => format!("git could not be started: {error}"),
+        },
+    )
+}
+
+/// cas-ba4a: the delivery a parked task answers for.
+///
+/// A task parked for merge recorded its delivery anchor. That SHA, not the
+/// mutable `factory/<worker>` ref or the worktree HEAD, is the delivery: the
+/// worker may already have started its next task on the same branch, or
+/// force-pushed it for an open PR. `Ok(None)` means the task is not parked
+/// with an anchor. A parked anchor missing locally is fetched from `origin`
+/// by SHA through the bounded runner; if it still does not resolve, the
+/// error names why and the caller must refuse rather than fall back to the
+/// live lane.
+pub(crate) fn parked_delivery_head(
+    repo_path: &std::path::Path,
+    task: &Task,
+) -> Result<Option<String>, String> {
+    if task.status != TaskStatus::AwaitingMerge {
+        return Ok(None);
+    }
+    let Some(anchor) = task
+        .deliverables
+        .factory_branch_anchor
+        .as_deref()
+        .map(str::trim)
+        .filter(|anchor| !anchor.is_empty())
+    else {
+        return Ok(None);
+    };
+    let fetch = match resolve_or_fetch_commit(repo_path, anchor) {
+        Ok(head) => return Ok(Some(head)),
+        Err(reason) => reason,
+    };
+    Err(format!(
+        "PARKED DELIVERY UNRESOLVED: {} is parked for merge at anchor {anchor}, but that commit \
+         does not resolve in {} ({fetch}). Cassy will not substitute the live factory branch \
+         or HEAD for the parked delivery. Fetch the commit (`git fetch origin {anchor}`) and \
+         retry, or ask the supervisor to correct the anchor.",
+        task.id,
+        repo_path.display(),
+    ))
 }
 
 /// Return whether this checkout has an `origin` remote whose target refs are
@@ -16461,7 +16702,13 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
         let recorded_anchor = has_delivery
             .then_some(t.deliverables.factory_branch_anchor.as_deref())
             .flatten();
-        let resolved_anchor = recorded_anchor.filter(|anchor| git_snapshot.commit_exists(anchor));
+        // cas-ba4a: a recorded anchor this checkout lacks (the worker lane
+        // was force-pushed or deleted) is fetched by SHA before the gate
+        // falls back to measuring live lanes that no longer hold it.
+        let resolved_anchor = recorded_anchor.filter(|anchor| {
+            git_snapshot.commit_exists(anchor)
+                || (!options.summary && resolve_or_fetch_commit(repo_path, anchor).is_ok())
+        });
 
         let mut fallback_branches = Vec::new();
         if let Some(branch) = parked_branch.as_ref() {
@@ -16621,6 +16868,10 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                     }
                 }
                 DeliveryContentPresence::Superseded { paths, commits } => {
+                    // cas-ba4a: a merged, intentionally evolved delivery is
+                    // integrated exactly like a present one; later commits on
+                    // the reusable live lane are another task's work.
+                    unmerged_count = 0;
                     content_evolution_note = Some(format!(
                         "decision: recorded factory_branch_anchor `{anchor}` for child task `{}` \
                              is merged and its delivered path(s) {} were intentionally evolved by \
@@ -19510,6 +19761,61 @@ pub(crate) fn git_commit_is_ancestor(
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+/// cas-ba4a: whether every commit in `recorded..candidate` is `task_id`'s, so
+/// `candidate` may replace the parked anchor. `candidate` must strictly
+/// descend from `recorded`; no commit may name another task; and with
+/// `foreign_since` (epoch seconds a sibling task's lease began) none may be
+/// committed from then on. Unknown Git state answers no.
+pub(crate) fn parked_anchor_advance_is_attributable(
+    repo_path: &std::path::Path,
+    recorded: &str,
+    candidate: &str,
+    task_id: &str,
+    foreign_since: Option<i64>,
+) -> bool {
+    if commit_ids_match(recorded, candidate)
+        || !is_safe_git_refname(recorded)
+        || !is_safe_git_refname(candidate)
+        || !git_commit_is_ancestor(repo_path, recorded, candidate)
+    {
+        return false;
+    }
+    let Ok(output) = std::process::Command::new("git")
+        .args([
+            "log",
+            "--format=%ct%x1f%B%x1e",
+            &format!("{recorded}..{candidate}"),
+        ])
+        .current_dir(repo_path)
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let log = String::from_utf8_lossy(&output.stdout);
+    // A record that does not parse is unknown history: refuse.
+    let Some(commits) = log
+        .split('\u{1e}')
+        .filter(|record| !record.trim().is_empty())
+        .map(|record| {
+            let (epoch, message) = record.trim_start().split_once('\u{1f}')?;
+            Some((epoch.trim().parse::<i64>().ok()?, message))
+        })
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    !commits.is_empty()
+        && commits.iter().all(|(epoch, message)| {
+            !message_claims_other_task(message, Some(task_id))
+                && foreign_since.is_none_or(|since| {
+                    *epoch < since.saturating_sub(COMMIT_RECEIPT_CLOCK_SKEW_SECS)
+                })
+        })
 }
 
 /// Content-level delivery proof for one immutable commit against one exact
@@ -25268,6 +25574,145 @@ mod merge_state_gate_tests {
         assert_eq!(task.deliverables.factory_branch_anchor, Some(second));
     }
 
+    fn commit_local(p: &std::path::Path, path: &str, message: &str) -> String {
+        std::fs::write(p.join(path), format!("// {message}\n")).unwrap();
+        git(p, &["add", path]);
+        git(p, &["commit", "-q", "-m", message]);
+        rev_parse_local(p, "HEAD")
+    }
+
+    /// cas-ba4a: only this task's own continuation may replace its parked
+    /// anchor — never a commit naming another task, one made after a sibling
+    /// task's lease began, or a force-pushed lane that drops the anchor.
+    #[test]
+    fn parked_anchor_advance_requires_this_tasks_own_continuation_cas_ba4a() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let base = rev_parse_local(p, "main");
+        let parked = commit_local(p, "a.rs", "task A delivery");
+        let continuation = commit_local(p, "a2.rs", "fix(cas-a0a0): review follow-up");
+        assert!(parked_anchor_advance_is_attributable(
+            p,
+            &parked,
+            &continuation,
+            "cas-a0a0",
+            None
+        ));
+        assert!(
+            !parked_anchor_advance_is_attributable(p, &parked, &parked, "cas-a0a0", None),
+            "the same tip is not an advance"
+        );
+        assert!(
+            !parked_anchor_advance_is_attributable(
+                p,
+                &parked,
+                &continuation,
+                "cas-a0a0",
+                Some(chrono::Utc::now().timestamp())
+            ),
+            "a commit made after a sibling task's lease began is that task's"
+        );
+
+        let foreign = commit_local(p, "b.rs", "feat(cas-b0b0): next task");
+        assert!(!parked_anchor_advance_is_attributable(
+            p, &parked, &foreign, "cas-a0a0", None
+        ));
+
+        git(p, &["reset", "-q", "--hard", &base]);
+        let forced = commit_local(p, "c.rs", "untagged work");
+        assert!(
+            !parked_anchor_advance_is_attributable(p, &parked, &forced, "cas-a0a0", None),
+            "a force-pushed lane no longer carries the parked delivery"
+        );
+    }
+
+    /// cas-ba4a: the next task need not be in progress for its commits to be
+    /// its own. With B Open or Blocked (the in-progress-sibling guard does not
+    /// fire) or the lane force-pushed, A's anchor stays put; A's own tagged
+    /// continuation still advances it.
+    #[test]
+    fn advance_keeps_anchor_when_next_task_is_open_blocked_or_force_pushed_cas_ba4a() {
+        use cas_store::TaskStore;
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let base = rev_parse_local(p, "main");
+        let parked_at = commit_local(p, "a.rs", "task A delivery");
+        let mut parked = worker_task("worker");
+        parked.id = "cas-a0a0".to_string();
+        parked.status = TaskStatus::AwaitingMerge;
+        parked.deliverables.factory_branch_anchor = Some(parked_at.clone());
+        let next_tip = commit_local(p, "b.rs", "feat(cas-b0b0): next task");
+        let temp = tempfile::tempdir().unwrap();
+        let core = CasCore::with_daemon(temp.path().join(".cas"), None, None);
+
+        for status in [TaskStatus::Open, TaskStatus::Blocked] {
+            let mut next = worker_task("worker");
+            next.id = "cas-b0b0".to_string();
+            next.status = status;
+            let store = crate::store::mock::MockTaskStore::with_tasks(vec![parked.clone(), next]);
+            core.advance_awaiting_merge_anchor(&store, &parked, p, "main", Some(&next_tip));
+            assert_eq!(
+                store
+                    .get(&parked.id)
+                    .unwrap()
+                    .deliverables
+                    .factory_branch_anchor,
+                Some(parked_at.clone()),
+                "task B at {status:?} owns {next_tip}"
+            );
+        }
+
+        git(p, &["reset", "-q", "--hard", &base]);
+        let forced = commit_local(p, "c.rs", "untagged work");
+        let store = crate::store::mock::MockTaskStore::with_tasks(vec![parked.clone()]);
+        core.advance_awaiting_merge_anchor(&store, &parked, p, "main", Some(&forced));
+        assert_eq!(
+            store
+                .get(&parked.id)
+                .unwrap()
+                .deliverables
+                .factory_branch_anchor,
+            Some(parked_at.clone()),
+            "a force-pushed lane never becomes the parked delivery"
+        );
+
+        git(p, &["reset", "-q", "--hard", &parked_at]);
+        let own = commit_local(p, "a2.rs", "fix(cas-a0a0): review follow-up");
+        core.advance_awaiting_merge_anchor(&store, &parked, p, "main", Some(&own));
+        assert_eq!(
+            store
+                .get(&parked.id)
+                .unwrap()
+                .deliverables
+                .factory_branch_anchor,
+            Some(own),
+            "control: A's own continuation still advances its anchor"
+        );
+    }
+
+    /// cas-ba4a: a parked task resolves to its anchor; an anchor that cannot
+    /// be resolved (and cannot be fetched) refuses with a named reason
+    /// instead of substituting the live lane.
+    #[test]
+    fn parked_delivery_head_is_the_anchor_or_a_named_refusal_cas_ba4a() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let parked_at = commit_local(p, "a.rs", "task A delivery");
+        commit_local(p, "b.rs", "next task");
+        let mut task = worker_task("worker");
+        task.deliverables.factory_branch_anchor = Some(parked_at.clone());
+        assert_eq!(parked_delivery_head(p, &task), Ok(None), "not parked");
+
+        task.status = TaskStatus::AwaitingMerge;
+        assert_eq!(parked_delivery_head(p, &task), Ok(Some(parked_at)));
+
+        task.deliverables.factory_branch_anchor = Some("d".repeat(40));
+        let refusal = parked_delivery_head(p, &task).unwrap_err();
+        assert!(refusal.contains("PARKED DELIVERY UNRESOLVED"), "{refusal}");
+        assert!(refusal.contains("no origin remote"), "{refusal}");
+        assert!(refusal.contains(&"d".repeat(40)), "{refusal}");
+    }
+
     /// GH #819: the worker syncs the current target into its factory branch
     /// before `worktree_merge`, leaving a merge tip with no first-parent tree
     /// effect. The task's earlier first-parent content commits are the
@@ -30468,6 +30913,121 @@ mod epic_status_gate_tests {
             "epic 1 must close based on task A's merged anchor, regardless of \
              task B's later commit on the reused worker branch; got {out:?}"
         );
+    }
+
+    /// cas-ba4a: A's anchor merged into the epic and a later epic commit
+    /// evolved the same file (Superseded); the worker lane was then
+    /// force-pushed to unrelated next-task work. The lane is not A's
+    /// delivery, so the child is not stranded and the epic may close.
+    #[test]
+    fn epic_close_measures_a_merged_superseded_anchor_not_a_force_pushed_lane_cas_ba4a() {
+        let dir = init_epic_repo(&[("worker", 1)]);
+        let p = dir.path();
+        let seed = epic_git_stdout(p, &["rev-parse", "main"]);
+        let task_a_anchor = epic_git_stdout(p, &["rev-parse", "factory/worker"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/worker"]);
+        std::fs::write(p.join("worker-0.rs"), "// worker 0, evolved on the epic\n").unwrap();
+        git(p, &["add", "worker-0.rs"]);
+        git(p, &["commit", "-q", "-m", "refactor: evolve worker-0"]);
+
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git(p, &["reset", "-q", "--hard", &seed]);
+        std::fs::write(p.join("next-task.rs"), "// next task\n").unwrap();
+        git(p, &["add", "next-task.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: next task"]);
+        git(p, &["checkout", "-q", "main"]);
+        assert!(!git_commit_is_ancestor(p, &task_a_anchor, "factory/worker"));
+
+        let mut task_a = child("cas-task-a", TaskStatus::Closed, Some("worker"));
+        task_a.deliverables.factory_branch_anchor = Some(task_a_anchor);
+        let rows = collect_epic_branch_statuses(&[task_a.clone()], "main", p);
+        assert_eq!(rows[0].unmerged_count, 0, "{:?}", rows[0]);
+        assert!(rows[0].content_evolution_note.is_some(), "{:?}", rows[0]);
+
+        let task = epic("cas-epic-1");
+        let out = run_epic_close_merge_gate(&task, &base_req(&task.id), "main", p, &[task_a]);
+        assert!(
+            matches!(
+                out,
+                EpicCloseGateOutcome::Proceed | EpicCloseGateOutcome::ProceedWithNote(_)
+            ),
+            "got {out:?}"
+        );
+    }
+
+    /// cas-ba4a: the child's anchor exists only on origin (its lane was
+    /// force-pushed locally and the delivery squash-merged into the epic). The
+    /// gate fetches the anchor by SHA and proves its content instead of
+    /// reading the force-pushed lane as "content absent".
+    #[test]
+    fn epic_close_fetches_a_missing_child_anchor_by_sha_cas_ba4a() {
+        let remote = tempfile::tempdir().unwrap();
+        git(remote.path(), &["init", "-q", "--bare", "-b", "main"]);
+        git(
+            remote.path(),
+            &["config", "uploadpack.allowAnySHA1InWant", "true"],
+        );
+        let author = tempfile::tempdir().unwrap();
+        let a = author.path();
+        git(a, &["init", "-q", "-b", "main"]);
+        std::fs::write(a.join("seed.txt"), "seed\n").unwrap();
+        git(a, &["add", "seed.txt"]);
+        git(a, &["commit", "-q", "-m", "seed"]);
+        git(
+            a,
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
+        git(a, &["push", "-q", "origin", "main"]);
+        git(a, &["checkout", "-q", "-b", "factory/worker"]);
+        std::fs::write(a.join("delivery.rs"), "// task A delivery\n").unwrap();
+        git(a, &["add", "delivery.rs"]);
+        git(a, &["commit", "-q", "-m", "feat: task A delivery"]);
+        let task_a_anchor = epic_git_stdout(a, &["rev-parse", "HEAD"]);
+        // The PR ref keeps the delivery on origin after the lane moves on.
+        git(a, &["push", "-q", "origin", "HEAD:refs/pull/1/head"]);
+
+        // `--no-local` transfers only objects reachable from the cloned
+        // heads; a local-path clone would hardlink the whole object store,
+        // anchor included.
+        let clone = tempfile::tempdir().unwrap();
+        let p = clone.path();
+        git(
+            p,
+            &[
+                "clone",
+                "-q",
+                "--no-local",
+                remote.path().to_str().unwrap(),
+                p.to_str().unwrap(),
+            ],
+        );
+        assert!(
+            resolve_branch_sha(p, &format!("{task_a_anchor}^{{commit}}")).is_none(),
+            "precondition: the anchor is not in this checkout"
+        );
+        // Squash-merge A's content into the epic, then force the lane to
+        // unrelated next-task work.
+        std::fs::write(p.join("delivery.rs"), "// task A delivery\n").unwrap();
+        git(p, &["add", "delivery.rs"]);
+        git(p, &["commit", "-q", "-m", "squash: task A delivery (#1)"]);
+        git(
+            p,
+            &["checkout", "-q", "-b", "factory/worker", "origin/main"],
+        );
+        std::fs::write(p.join("next-task.rs"), "// next task\n").unwrap();
+        git(p, &["add", "next-task.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: next task"]);
+        git(p, &["checkout", "-q", "main"]);
+
+        let mut task_a = child("cas-task-a", TaskStatus::Closed, Some("worker"));
+        task_a.deliverables.factory_branch_anchor = Some(task_a_anchor.clone());
+        let rows = collect_epic_branch_statuses(&[task_a], "main", p);
+        assert!(
+            resolve_branch_sha(p, &format!("{task_a_anchor}^{{commit}}")).is_some(),
+            "the gate fetched the anchor by SHA"
+        );
+        assert_eq!(rows[0].unmerged_count, 0, "{:?}", rows[0]);
+        assert!(!rows[0].blocks_epic_close(), "{:?}", rows[0]);
     }
 
     #[test]

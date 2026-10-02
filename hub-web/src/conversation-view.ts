@@ -1157,7 +1157,8 @@ export class ConversationView {
       const label = document.createElement("b"); label.textContent = "Not confirmed";
       const separator = document.createElement("span"); separator.className = "sr-only"; separator.textContent = " · ";
       const reason = document.createElement("span"); reason.className = "conversation-refused-reason";
-      reason.textContent = `Cassy couldn't confirm delivery to ${this.options.supervisor}.`;
+      // cas-71f4 (journey F20): the project's supervisor, never the codename.
+      reason.textContent = `Cassy couldn't confirm delivery to ${this.options.project ? `the ${this.options.project} supervisor` : "the supervisor"}.`;
       const next = document.createElement("span"); next.className = "conversation-refused-next"; next.textContent = " Retry sends it again.";
       reason.append(next);
       state.append(glyph.content.firstElementChild!, label, separator, reason);

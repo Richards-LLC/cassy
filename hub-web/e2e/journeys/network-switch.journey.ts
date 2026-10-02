@@ -648,7 +648,10 @@ test("HUB-J12 network switch: re-pairing by code says plainly that starting sess
       return chars.flatMap((item, index) => index > 0 && item.top !== chars[index - 1]!.top && item.char !== " " && chars[index - 1]!.char !== " " ? [`${chars[index - 1]!.char}|${item.char}@${index}`] : []);
     });
     const sweep = async (phase: string, label?: string) => {
-      for (let width = 360; width <= 1440; width += 10) {
+      // The widths QA found breaking (450–470 before Copy, 530–640 after), and
+      // a phone-to-desktop spread around them; a 10 px sweep of 1080 px took
+      // over a minute and crashed the renderer on a loaded host.
+      for (const width of [360, 390, 420, 440, 450, 460, 470, 480, 500, 530, 560, 600, 640, 700, 768, 900, 1024, 1280, 1440]) {
         await page.setViewportSize({ width, height: 844 });
         if (label) await dialog.locator(".pair-command-copy").evaluate((button, text) => { button.textContent = text; }, label);
         expect(await splitWords(), `no word split at ${width} px (${phase})`).toEqual([]);

@@ -15,6 +15,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+pub mod failure;
+
 const DIRECT_ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
 const CALL_TIMEOUT: Duration = Duration::from_secs(15);
 // Leave margin beneath the MCP server's 55-second response timeout.

@@ -15,6 +15,8 @@ pub enum JevCommands {
     Ask(JevAskArgs),
     /// Evaluate 1–50 JSONL records and print an ordered JSON response array.
     Batch(JevBatchArgs),
+    /// Print an advisory failure label; unavailable evaluations print nothing.
+    ClassifyFailure(JevFailureArgs),
 }
 #[derive(Debug, Clone, Args)]
 pub struct JevAskArgs {
@@ -42,7 +44,32 @@ pub struct JevBatchArgs {
     #[arg(long)]
     pub advisory: bool,
 }
+#[derive(Debug, Clone, Args)]
+pub struct JevFailureArgs {
+    #[arg(long)]
+    pub log: PathBuf,
+    #[arg(long)]
+    pub source: String,
+    #[arg(long, default_value = "HEAD^")]
+    pub base: String,
+    #[arg(long, default_value = "HEAD")]
+    pub head: String,
+}
 pub fn execute(command: &JevCommands, cas_root: &Path) -> anyhow::Result<()> {
+    if let JevCommands::ClassifyFailure(args) = command {
+        if let Some(label) = crate::jev::failure::label(
+            cas_root,
+            &std::env::current_dir()?,
+            &args.log,
+            "",
+            &args.source,
+            &args.base,
+            &args.head,
+        ) {
+            println!("{label}");
+        }
+        return Ok(());
+    }
     let client = JevClient::from_project(cas_root)?;
     let (value, out) = match command {
         JevCommands::Ask(args) => {
@@ -78,6 +105,7 @@ pub fn execute(command: &JevCommands, cas_root: &Path) -> anyhow::Result<()> {
                 args.out.as_ref(),
             )
         }
+        JevCommands::ClassifyFailure(_) => unreachable!("handled above"),
     };
     let json = format!("{}\n", serde_json::to_string_pretty(&value)?);
     if let Some(path) = out {

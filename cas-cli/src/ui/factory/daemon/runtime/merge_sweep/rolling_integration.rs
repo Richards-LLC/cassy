@@ -349,16 +349,30 @@ pub(super) fn execute(
         strict_target,
     ) {
         Ok(result) => result,
-        Err(error) => SweepResult {
-            integration_epics: vec![request.epic_id.clone()],
-            request,
-            status: SweepStatus::SetupFailed,
-            log_path: cas_dir.join(LOG_DIR).join("integration.json"),
-            summary: format!("Rolling integration setup failed: {error}"),
-            failures: Vec::new(),
-            base_failure: None,
-            after_deferrals: 0,
-        },
+        Err(error) => {
+            let label = crate::jev::failure::label(
+                cas_dir,
+                project_root,
+                &cas_dir.join(LOG_DIR).join("integration.json"),
+                &error,
+                "sweep",
+                "HEAD^",
+                &request.commit,
+            );
+            SweepResult {
+                integration_epics: vec![request.epic_id.clone()],
+                request,
+                status: SweepStatus::SetupFailed,
+                log_path: cas_dir.join(LOG_DIR).join("integration.json"),
+                summary: format!(
+                    "Rolling integration setup failed: {error}{}",
+                    label.map(|l| format!("; {l}")).unwrap_or_default()
+                ),
+                failures: Vec::new(),
+                base_failure: None,
+                after_deferrals: 0,
+            }
+        }
     }
 }
 
@@ -653,6 +667,24 @@ fn integrate(
         affected.push(request.epic_id.clone());
     }
     result.integration_epics = affected.clone();
+    // Off the async daemon thread, after mechanical attribution; the label
+    // cannot affect outcomes, fix proposals, cache authorization or merges.
+    if matches!(
+        result.status,
+        SweepStatus::Failed | SweepStatus::TimedOut | SweepStatus::SetupFailed
+    ) {
+        if let Some(label) = crate::jev::failure::label(
+            &shared_cas,
+            &worktree,
+            &result.log_path,
+            &sweep_detail(&result),
+            "sweep",
+            &base,
+            &tip,
+        ) {
+            result.summary.push_str(&format!("; {label}"));
+        }
+    }
     receipt.status = status_text(result.status).to_owned();
     receipt.detail = format!(
         "{}; {}",

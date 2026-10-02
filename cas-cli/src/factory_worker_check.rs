@@ -2,8 +2,46 @@
 //! and holds OS slot/lane locks until Cargo exits; descendants never inherit them.
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+
+// A regular-file capture cannot be held open by a compiler daemon descendant.
+// Tail it while Cargo runs so compile progress still reaches the caller.
+fn progress_log(root: &Path, lane: &str, head: &str) -> Option<(PathBuf, File)> {
+    let directory = root.join("worker-checks/logs");
+    std::fs::create_dir_all(&directory).ok()?;
+    let path = directory.join(format!("{lane}-{head}.log"));
+    let mut options = OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    Some((path.clone(), options.open(path).ok()?))
+}
+
+fn relay_progress(path: PathBuf, done: Arc<AtomicBool>) {
+    let Ok(mut file) = File::open(path) else {
+        return;
+    };
+    let mut buffer = [0; 8192];
+    loop {
+        match file.read(&mut buffer) {
+            Ok(0) if done.load(Ordering::Acquire) => break,
+            Ok(0) => std::thread::sleep(std::time::Duration::from_millis(30)),
+            Ok(count) => {
+                let _ = std::io::stdout().write_all(&buffer[..count]);
+            }
+            Err(_) => break,
+        }
+    }
+}
 
 use anyhow::{Context, Result, bail};
 use fs2::FileExt;
@@ -448,6 +486,12 @@ fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Res
     {
         cargo_args.insert(4, "--lib".into());
     }
+    let output_log = progress_log(&cas_root, &lane_key, &head);
+    if let Some((_, file)) = &output_log {
+        if let (Ok(stdout), Ok(stderr)) = (file.try_clone(), file.try_clone()) {
+            command.stdout(stdout).stderr(stderr);
+        }
+    }
     let mut child = command
         .args(&cargo_args)
         .current_dir(&repo)
@@ -456,13 +500,40 @@ fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Res
         .context("start capped worker Cargo command")?;
     FileExt::unlock(&admission)?;
     drop(admission);
-    let status = child.wait()?;
+    let done = Arc::new(AtomicBool::new(false));
+    let relay = output_log.as_ref().map(|(path, _)| {
+        let path = path.clone();
+        let done = Arc::clone(&done);
+        std::thread::spawn(move || relay_progress(path, done))
+    });
+    let status = child.wait();
+    done.store(true, Ordering::Release);
+    if let Some(relay) = relay {
+        let _ = relay.join();
+    }
+    let status = status?;
     drop(slot);
     if !status.success() {
-        bail!(
+        let summary = format!(
             "{}: FAIL {head} ({status})",
             if test.is_some() { "test" } else { "check" }
         );
+        let label = output_log
+            .as_ref()
+            .and_then(|(path, _)| {
+                crate::jev::failure::label(
+                    &cas_root,
+                    &repo,
+                    path,
+                    &summary,
+                    "worker-check",
+                    "HEAD^",
+                    &head,
+                )
+            })
+            .map(|label| format!("\n{label}"))
+            .unwrap_or_default();
+        bail!("{summary}{label}");
     }
     if clean_head(&repo)? != head {
         bail!("Worker tree changed during check; no PASS receipt recorded");

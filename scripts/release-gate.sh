@@ -430,6 +430,14 @@ run_check() {
             sed 's/^/  | /' "$log" | tail -20
         fi
         printf '  | exit status: %s\n' "$status"
+        # Advisory only: an old binary, missing credentials or an unavailable
+        # Jev service cannot change this row's recorded failure or gate exit.
+        if command -v cas >/dev/null 2>&1; then
+            local jev_label=''
+            jev_label="$(cas jev classify-failure --log "$log" --source "gate:$name" \
+                --base "${fast_base:-HEAD^}" --head "$cache_head" 2>/dev/null)" || true
+            [[ "$jev_label" != 'Jev: '* ]] || printf '  | %s\n' "$jev_label"
+        fi
     fi
     ended="$(date -u +%FT%TZ)"
     read -r wall user system <"$tmp_dir/$name.time"

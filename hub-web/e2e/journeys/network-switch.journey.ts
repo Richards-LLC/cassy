@@ -455,3 +455,25 @@ test("HUB-J12 network switch: single revoked machine stops promising reconnectio
   await expect(working).toHaveCount(0);
   expect(await page.getByRole("log").ariaSnapshot()).not.toContain("status: working");
 });
+
+// cas-7752: drafts are kept on disk per conversation, so a revoked pairing
+// must take them with it — and the renders after it must not write them back.
+test("HUB-J12 network switch: a revoked pairing leaves no stored draft behind (cas-7752)", async ({ page }) => {
+  const { hub, clock, header } = await connected(page);
+  const stored = () => page.evaluate(() => localStorage.getItem("cas-commander-conversation:drafts:v1") ?? "");
+  await page.getByRole("textbox", { name: "Your message" }).fill("A private draft for Atlas");
+  await expect.poll(stored, { message: "the draft is stored while the pairing is good" }).toContain("A private draft for Atlas");
+  hub.refuseProofs("atlas", 1_000, "revoked", false);
+  await hub.down("atlas", { sockets: "close" });
+  await hub.up("atlas");
+  await clock.advance(1_000);
+  await expect(header).toHaveText(" · Needs pairing");
+  // Several heartbeat renders later, it has not been written back.
+  await clock.advance(15_000);
+  expect(await stored()).not.toContain("A private draft for Atlas");
+  // Nor is anything typed after the revoke, though it stays on screen.
+  await page.getByRole("textbox", { name: "Your message" }).pressSequentially(" and more");
+  await expect(page.getByRole("textbox", { name: "Your message" })).toHaveValue("A private draft for Atlas and more");
+  await clock.advance(15_000);
+  expect(await stored()).not.toContain("atlas:");
+});

@@ -5,6 +5,7 @@ import "./styles.css";
 import { activityTime, ConversationList, filterConversationRows, groupConversationRows, type ConversationRow } from "./conversation-list";
 import { controlCommandCopy, sessionJumpCommandMarkup } from "./palette-commands";
 import { ConversationHistory, supervisorWorking } from "./conversation-history";
+import { draftStore, purgeConversations, type Draft } from "./conversation-store";
 import { loadDismissedAsks, saveDismissedAsks, type DismissedAsksStorage } from "./dismissed-asks";
 import { ConversationView, emptyActivityText } from "./conversation-view";
 import { applySheetSemantics, findByFocusKey, focusKey, layerAboveSheet, sheetFocusables, sheetKeydown } from "./attention-sheet";
@@ -734,6 +735,8 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       // One outage is one problem. A stable fingerprint per machine and kind
       // collapses every retry into a single card with a repeat count instead of
       // burying the feed under a card for each attempt.
+      // cas-7752: a revoked pairing takes the operator's stored words with it.
+      if (state.authFailure === "revoked") purgeMachineConversations(machine.id, { forgetInMemory: false });
       if (state.authFailure) {
         // The hub answered, so it is not "Reconnecting to hub" any more; the
         // pairing card below says what is wrong (cas-d15c QA F01).
@@ -1285,6 +1288,10 @@ async function pairMachine(form: HTMLFormElement): Promise<StoredMachine | false
   stopPairingTimers();
   pairingDraft = createPairingDraft(location.origin);
   machines.set(machine.id, machine);
+  // cas-7752: only a fresh pairing lets a revoked machine's drafts be stored
+  // again. A "live" report is not enough: the machine stream can come back
+  // while every authenticated request is still refused.
+  conversationPersistenceBlocked.delete(machine.id);
   commitSelection({ machineId: machine.id });
   // A phone shows the list or one conversation, never both: with only the
   // machine selected it stays on the list, so its first live session opens
@@ -2266,11 +2273,52 @@ function pairDialogMarkup(): string {
 // the composer draft survives re-render exactly like the pairing draft does.
 let messageDraft = "";
 let messageDraftSelection = 0;
-const conversationDrafts = new Map<string, { text: string; caret: number }>();
+// cas-7752: drafts also survive a reload or a same-tab navigation (a pair
+// link opened in this tab), per conversation, in the bounded conversation store.
+const conversationStorage = (() => { try { return window.localStorage; } catch { return undefined; } })();
+const drafts = draftStore(conversationStorage);
+const conversationDrafts: Map<string, Draft> = drafts.load();
+/**
+ * Machines whose pairing was revoked or removed in this page: their
+ * conversations' words are not written to disk again until the machine is
+ * paired again here. Without this, the next render would store the draft
+ * still on screen right after it was purged.
+ */
+const conversationPersistenceBlocked = new Set<string>();
+
+/** Record (or, with no draft, forget) a conversation's draft, in memory and in storage. */
+function rememberDraft(key: string, draft: Draft | undefined): void {
+  if (draft) conversationDrafts.set(key, draft); else conversationDrafts.delete(key);
+  const machineId = key.slice(0, key.indexOf(":"));
+  if (conversationPersistenceBlocked.has(machineId)) drafts.save(key, undefined);
+  else drafts.save(key, draft);
+}
+
+/**
+ * The machine's pairing is gone (revoked, or removed from this browser): purge
+ * every stored conversation for it, drafts and (cas-e7b1) unconfirmed messages
+ * alike, and stop writing new ones until it is paired again.
+ */
+function purgeMachineConversations(machineId: string, options: { forgetInMemory: boolean }): void {
+  conversationPersistenceBlocked.add(machineId);
+  purgeConversations(conversationStorage, machineId);
+  if (options.forgetInMemory) {
+    for (const key of [...conversationDrafts.keys()]) if (key.startsWith(`${machineId}:`)) conversationDrafts.delete(key);
+  }
+}
+
+/** The composer's text, stored as its thread's draft. */
+function rememberComposerDraft(): void {
+  const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
+  if (composer?.dataset.threadKey) rememberDraft(composer.dataset.threadKey, { text: composer.value, caret: composer.selectionStart ?? composer.value.length });
+}
+// Typing is stored as it happens, and once more as the page goes away, so a
+// reload between renders loses nothing.
+document.addEventListener("input", (event) => { if ((event.target as Element | null)?.id === "message-text") rememberComposerDraft(); });
+window.addEventListener("pagehide", rememberComposerDraft);
 
 function captureMessageDraft(): void {
-  const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
-  if (composer?.dataset.threadKey) conversationDrafts.set(composer.dataset.threadKey, { text: composer.value, caret: composer.selectionStart ?? composer.value.length });
+  rememberComposerDraft();
   const key = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : "";
   const draft = conversationDrafts.get(key);
   messageDraft = draft?.text ?? "";
@@ -2930,7 +2978,7 @@ function deliverSupervisorMessage(machine: StoredMachine, session: string, super
     if (selectedMachineId === machine.id && selectedSession === session) {
       const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
       if (composer && composer.value.trim() === text) composer.value = "";
-      conversationDrafts.delete(sessionKey(machine.id, session));
+      rememberDraft(sessionKey(machine.id, session), undefined);
       messageDraft = composer?.value ?? "";
       messageDraftSelection = messageDraft.length;
       // A transport status: it clears when the session is back (and the held
@@ -2944,12 +2992,12 @@ function deliverSupervisorMessage(machine: StoredMachine, session: string, super
   scheduleReceiptCheck(sessionKey(machine.id, session));
   updateConversationViews(); renderConversationList();
   const storedDraft = conversationDrafts.get(sessionKey(machine.id, session));
-  if (storedDraft?.text.trim() === text) conversationDrafts.delete(sessionKey(machine.id, session));
+  if (storedDraft?.text.trim() === text) rememberDraft(sessionKey(machine.id, session), undefined);
   if (selectedMachineId !== machine.id || selectedSession !== session) return;
   clearComposerStatus();
   const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
   if (composer && composer.value.trim() === text) composer.value = "";
-  conversationDrafts.delete(sessionKey(machine.id, session));
+  rememberDraft(sessionKey(machine.id, session), undefined);
   messageDraft = composer?.value ?? "";
   messageDraftSelection = messageDraft.length;
   messageDelivery = { session: sessionKey(machine.id, session), target: supervisor, clientRef };
@@ -4728,6 +4776,8 @@ async function forgetPairedMachine(id: string): Promise<void> {
   catch { if (error) { error.hidden = false; error.textContent = 'Could not remove this pairing. Try again.'; } else toast('Could not remove this pairing. Try again.'); return; }
   connections.get(id)?.stop(); firstConnections.forget(id);
   connections.delete(id); machines.delete(id); sessions.delete(id);
+  // cas-7752: removing the pairing removes the operator's stored words for it.
+  purgeMachineConversations(id, { forgetInMemory: true });
   window.clearTimeout(catalogExpiryTimers.get(id)); catalogExpiryTimers.delete(id); catalogExpiresAt.delete(id);
   selection = forgetMachine(selection, id);
   if (restoreTarget?.machineId === id) restoreTarget = undefined;

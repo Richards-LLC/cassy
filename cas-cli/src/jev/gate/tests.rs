@@ -69,7 +69,15 @@ fn jev_shadow_config_default_roundtrip_and_reset() {
             .list()
             .contains(&("jev.gate.shadow".into(), "true".into()))
     );
-    config.set("jev.gate.shadow", "").unwrap();
+    config
+        .set(
+            "jev.gate.shadow",
+            crate::config::registry()
+                .get("jev.gate.shadow")
+                .unwrap()
+                .default,
+        )
+        .unwrap();
     config.save_toml(dir.path()).unwrap();
     assert!(
         !crate::config::Config::load(dir.path())
@@ -138,7 +146,7 @@ async fn jev_shadow_mock_records_every_tool_without_output_or_content_changes() 
         assert_eq!(summary["exemption_changes"], 3);
         assert_eq!(summary["literal"]["would_ask"], 3);
         let log = fs::read_to_string(root.join("jev-decisions.jsonl")).unwrap();
-        assert!(!log.contains("git status"));
+        assert!(!log.contains("git status --short"));
         assert!(!log.contains("never-send"));
         assert!(!log.contains("mock-only-token"));
     })

@@ -674,3 +674,38 @@ export function supervisorWorking(
   const reachable = machine?.phase === "live" && !machine.authFailure;
   return reachable && history.awaitingReply();
 }
+
+/** The thread's paging state: how far back it has loaded, and whether more is offered. */
+export interface HistoryCursor { hasEarlier: boolean; nextBefore?: number; loading: boolean; loaded: boolean }
+
+/**
+ * Fold one history page into the thread's cursor (cas-2093). Every attach
+ * asks again for the newest page, and a reconnect lands that page on a thread
+ * that may already reach further back, even to its start. The newest page's
+ * "has earlier" is about itself, not the thread: it never brings back "Load
+ * earlier" once the start was reached, nor moves the cursor forward again.
+ * An older page (the one Load earlier asked for) moves the cursor back.
+ */
+export function applyHistoryCursor(cursor: HistoryCursor, page: { has_earlier: boolean; next_before?: number }): void {
+  const first = !cursor.loaded;
+  cursor.loaded = true;
+  if (first) {
+    cursor.loading = false;
+    cursor.hasEarlier = page.has_earlier;
+    cursor.nextBefore = page.next_before;
+    return;
+  }
+  if (!page.has_earlier) {
+    // This page reaches the start: the thread does too.
+    cursor.loading = false;
+    cursor.hasEarlier = false;
+    cursor.nextBefore = undefined;
+    return;
+  }
+  // The start was reached already: a newer page changes nothing here.
+  if (!cursor.hasEarlier) return;
+  const older = page.next_before !== undefined && (cursor.nextBefore === undefined || page.next_before < cursor.nextBefore);
+  if (!older) return;
+  cursor.loading = false;
+  cursor.nextBefore = page.next_before;
+}

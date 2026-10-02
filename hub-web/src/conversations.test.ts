@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { ConversationHistory, RECEIPT_REPLY_GRACE_MS, RECEIPT_TIMEOUT_MS, supervisorWorking } from "./conversation-history";
+import { applyHistoryCursor, ConversationHistory, RECEIPT_REPLY_GRACE_MS, RECEIPT_TIMEOUT_MS, supervisorWorking, type HistoryCursor } from "./conversation-history";
 import { ConversationList, conversationRowMarkup, filterConversationRows, truncateConversationPreview, type ConversationRow } from "./conversation-list";
 import { ConversationView } from "./conversation-view";
 import { applePlatform, appearanceButtonMarkup, ATTACH_DISABLED_REASON, ATTACH_SUPPORTED, arrangeConversationShell, conversationNoMatchText, conversationSearchPlaceholder, conversationShellMarkup, dressComposer, fitMachineLine, hostMarkup, KEYBOARD_HINT_MEDIA_QUERY, paletteShortcutLabel } from "./conversation-shell";
@@ -623,5 +623,35 @@ describe("supervisor working indicator (cas-5a8f)", () => {
     const history = new ConversationHistory();
     expect(supervisorWorking(history, { phase: "backoff" }, true)).toBe(true);
     expect(supervisorWorking(history, live, false), "nothing pending, no output").toBe(false);
+  });
+});
+
+describe("history cursor across a reattach (cas-2093)", () => {
+  const fresh = (): HistoryCursor => ({ hasEarlier: false, loading: false, loaded: false });
+  it("a newest page after the start was reached never brings Load earlier back", () => {
+    const cursor = fresh();
+    applyHistoryCursor(cursor, { has_earlier: true, next_before: 20 });
+    expect(cursor).toMatchObject({ loaded: true, hasEarlier: true, nextBefore: 20 });
+    cursor.loading = true;
+    applyHistoryCursor(cursor, { has_earlier: true, next_before: 10 });
+    expect(cursor).toMatchObject({ hasEarlier: true, nextBefore: 10, loading: false });
+    cursor.loading = true;
+    applyHistoryCursor(cursor, { has_earlier: false });
+    expect(cursor).toMatchObject({ hasEarlier: false, nextBefore: undefined, loading: false });
+    // The reconnect asks for the newest page again: it says has_earlier, about itself.
+    applyHistoryCursor(cursor, { has_earlier: true, next_before: 20 });
+    expect(cursor).toMatchObject({ hasEarlier: false, nextBefore: undefined });
+  });
+  it("a newest page never moves the cursor forward, and leaves a Load earlier in flight waiting for its own page", () => {
+    const cursor = fresh();
+    applyHistoryCursor(cursor, { has_earlier: true, next_before: 20 });
+    cursor.loading = true;
+    applyHistoryCursor(cursor, { has_earlier: true, next_before: 10 });
+    cursor.loading = true;
+    // The reattach's newest page lands while the next Load earlier is out.
+    applyHistoryCursor(cursor, { has_earlier: true, next_before: 20 });
+    expect(cursor).toMatchObject({ hasEarlier: true, nextBefore: 10, loading: true });
+    applyHistoryCursor(cursor, { has_earlier: true, next_before: 5 });
+    expect(cursor).toMatchObject({ nextBefore: 5, loading: false });
   });
 });

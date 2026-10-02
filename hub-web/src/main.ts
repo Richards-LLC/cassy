@@ -4,7 +4,7 @@ import { retainPendingSessions, visibleCatalog } from "./worker-visibility";
 import "./styles.css";
 import { activityTime, ConversationList, filterConversationRows, groupConversationRows, type ConversationRow } from "./conversation-list";
 import { controlCommandCopy, sessionJumpCommandMarkup } from "./palette-commands";
-import { ConversationHistory, supervisorWorking } from "./conversation-history";
+import { applyHistoryCursor, ConversationHistory, supervisorWorking } from "./conversation-history";
 import { draftStore, pendingSendStore, purgeConversations, type Draft, type PendingSend } from "./conversation-store";
 import { loadDismissedAsks, saveDismissedAsks, type DismissedAsksStorage } from "./dismissed-asks";
 import { ConversationView, emptyActivityText } from "./conversation-view";
@@ -921,10 +921,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
     onConversationHistory: (session, page: ConversationHistoryPage) => {
       const key = sessionKey(machine.id, session);
       const cursor = conversationHistoryPage(key);
-      cursor.loading = false;
-      cursor.loaded = true;
-      cursor.hasEarlier = page.has_earlier;
-      cursor.nextBefore = page.next_before;
+      applyHistoryCursor(cursor, page);
       const history = conversationHistory(key, session);
       // cas-55a4: the thread is this session's own turns. Other sessions'
       // turns (the page's earlier_* section, or a project-wide page from an

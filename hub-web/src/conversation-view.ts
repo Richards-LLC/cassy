@@ -361,6 +361,15 @@ export class ConversationView {
   private expanded = new Set<string>();
   private following = true;
   /**
+   * Where the reader was, by turn, while not following the tail (cas-2093).
+   * A reconnect rebuilds the pane card around this view, and the browser
+   * resets the moved thread's scroll to the top; this puts the reader back.
+   */
+  private place?: { key: string; offset: number };
+  private placePending = false;
+  /** The scroll position this view last saw or set; another value means the browser reset it. */
+  private scrolledTo = 0;
+  /**
    * cas-71af (1584 QA F01): Load earlier held focus when pressed. It is
    * disabled while the page loads and hidden once the last page lands, and
    * either used to drop focus to the page body.
@@ -431,12 +440,16 @@ export class ConversationView {
       this.lastHeight = height;
       this.following = shouldFollowTail(this.element);
       this.jump.hidden = this.following;
+      this.scrolledTo = this.element.scrollTop;
+      this.notePlace();
     }, { passive: true });
     if (typeof ResizeObserver !== "undefined") {
       this.resize = new ResizeObserver(() => {
         for (const node of this.msgs.querySelectorAll<HTMLElement>(".coalesce-turn")) syncClampPill(node);
         this.lastHeight = this.element.clientHeight;
         this.fitEmptyMeta();
+        this.noticeReset();
+        this.restorePlace();
         if (this.following) this.pin();
       });
       this.resize.observe(this.element);
@@ -446,9 +459,12 @@ export class ConversationView {
   /** Re-derive the thread from the history; nodes are keyed so grouping survives. */
   update(): void {
     if (this.disposed) return;
+    this.noticeReset();
+    this.restorePlace();
     // Turns added above the reader (Load earlier) must not move what they are
     // reading (journey F7): remember the first turn on screen and where it sat.
     const anchor = this.following ? undefined : this.readingAnchor();
+    const offeredEarlier = !this.loadEarlier.hidden;
     const hasEarlier = this.options.hasEarlier?.() === true;
     const loadingEarlier = this.options.loadingEarlier?.() === true;
     this.loadEarlier.hidden = !hasEarlier;
@@ -482,7 +498,13 @@ export class ConversationView {
       // anchoring has nothing to hold on to; hold the turn ourselves.
       const drift = held.getBoundingClientRect().top - anchor.top;
       if (Math.abs(drift) >= 1) this.element.scrollTop += drift;
+      // cas-2093 (F12): the last page landed. The end of history is stated on
+      // screen, not left above the fold.
+      if (offeredEarlier && !hasEarlier) this.revealHistoryEnd();
     }
+    this.restorePlace();
+    this.scrolledTo = this.element.scrollTop;
+    this.notePlace();
     if (this.following && document.getSelection()?.isCollapsed !== false) this.pin();
     if (this.loadEarlierFocus && !loadingEarlier) this.restoreLoadEarlierFocus(document);
   }
@@ -528,6 +550,53 @@ export class ConversationView {
       if (at !== undefined) return { node: child as HTMLElement, top: at };
     }
     return undefined;
+  }
+
+  /**
+   * The last page the reader asked for is above them; they asked for it to
+   * read it. Scroll up just enough that its first line, the end of history,
+   * is at the top: the page reads down to where they were.
+   */
+  private revealHistoryEnd(): void {
+    const end = this.msgs.querySelector<HTMLElement>(":scope > .history-end");
+    if (!end) return;
+    const view = this.element.getBoundingClientRect();
+    const above = view.top - end.getBoundingClientRect().top;
+    if (above <= 0) return;
+    this.element.scrollTop -= above;
+  }
+
+  /** Remember the reader's turn and its offset from the top of the thread (cas-2093). */
+  private notePlace(): void {
+    if (this.following) { this.place = undefined; return; }
+    if (!this.element.isConnected || this.element.clientHeight === 0 || this.placePending) return;
+    const anchor = this.readingAnchor();
+    if (anchor?.key === undefined) return;
+    this.place = { key: anchor.key, offset: anchor.top - this.element.getBoundingClientRect().top };
+  }
+
+  /**
+   * A thread taken out of the page and put back (a reconnect rebuilds the
+   * pane card around it) comes back scrolled to its top, with no scroll event
+   * to say so. A position this view did not see or set is that reset: put the
+   * reader back (cas-2093).
+   */
+  private noticeReset(): void {
+    if (!this.element.isConnected || this.element.clientHeight === 0) return;
+    if (Math.abs(this.element.scrollTop - this.scrolledTo) > 1) this.placePending = true;
+  }
+
+  private restorePlace(): void {
+    if (!this.placePending || !this.element.isConnected || this.element.clientHeight === 0) return;
+    if (this.following) { this.placePending = false; this.pin(); return; }
+    const place = this.place;
+    if (!place) { this.placePending = false; return; }
+    const node = [...this.msgs.querySelectorAll<HTMLElement>("[data-key]")].find((item) => item.dataset.key === place.key);
+    // Not drawn yet: try again on the next update.
+    if (!node) return;
+    this.placePending = false;
+    const offset = node.getBoundingClientRect().top - this.element.getBoundingClientRect().top;
+    this.element.scrollTop += offset - place.offset;
   }
 
   private anchorNode(anchor: { key?: string; node: HTMLElement }): HTMLElement | undefined {
@@ -1158,6 +1227,7 @@ export class ConversationView {
 
   private pin(): void {
     this.element.scrollTop = this.element.scrollHeight;
+    this.scrolledTo = this.element.scrollTop;
     this.jump.hidden = true;
     if (this.pinPending) return;
     this.pinPending = true;

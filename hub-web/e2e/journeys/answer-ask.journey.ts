@@ -1,4 +1,4 @@
-import { test, expect } from "./journey";
+import { test, expect, journeyPart } from "./journey";
 import { journeyNow, journeyStamp } from "./clock";
 import type { Page } from "@playwright/test";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
@@ -298,5 +298,55 @@ test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
     await expect(page.getByRole("log").locator(".day")).toHaveText(["Today"]);
     const times = await page.getByRole("log").locator(".turn > time").evaluateAll((nodes) => nodes.map((node) => node.firstChild?.textContent ?? ""));
     expect(times, "times read in order down the thread").toEqual([...times].sort());
+  });
+});
+
+test("HUB-J7 a machine clock ahead: the first visit and a reload agree, and the row ages (cas-9e33, cas-24fe)", journeyPart, async ({ page, journey }) => {
+  // The machine's clock runs five minutes ahead, and nothing in the thread has
+  // shown it yet: no history, one answer arriving live.
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], clockAheadMs: { [PELICAN]: 300_000 } });
+  const list = page.getByRole("navigation", { name: "Choose a supervisor" });
+  const log = page.getByRole("log");
+  const row = list.getByRole("button", { name: /cas-src/ });
+  let before: string[] = [];
+
+  await journey.stage("The supervisor answers live", async () => {
+    await journey.open();
+    await row.click();
+    await page.getByRole("textbox", { name: "Your message" }).fill("Is the gate green?");
+    const sent = hub.nextSend();
+    await page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }).click();
+    await sent;
+    hub.answerLatest(PELICAN, "Yes, the gate is green.");
+    await expect(log.getByText("Yes, the gate is green.")).toBeVisible();
+    // The visit cannot know the machine's lead yet: the answer shows its arrival, unmarked.
+    await expect(log.locator("time .clock-ahead")).toHaveCount(0);
+    await expect(list.locator(".conversation-when")).toHaveText("now");
+    before = await threadOrder(page);
+  });
+
+  await journey.stage("Reload three minutes later", async () => {
+    await page.clock.fastForward(180_000);
+    await page.reload();
+    await row.click();
+    await expect(log.getByText("Yes, the gate is green.")).toBeVisible();
+    // cas-9e33: the reload rebuilds the answer from the machine's stamp and
+    // shows it exactly as the visit did: the same time, and no mark the visit
+    // never showed.
+    await expect(log.locator("time .clock-ahead")).toHaveCount(0);
+    expect(await threadOrder(page), "the reload shows the thread the visit showed").toEqual(before);
+    // cas-24fe: the row dates the answer from its arrival, not from the
+    // machine's stamp in this browser's future.
+    await expect(list.locator(".conversation-when")).toHaveText("3m");
+  });
+
+  await journey.stage("Come back five minutes later", async () => {
+    await page.clock.fastForward(300_000);
+    await expect(list.locator(".conversation-when")).toHaveText("8m");
+    // The reload measured the lead, so the next live answer says the clock is ahead.
+    hub.answerLatest(PELICAN, "Tagging 3.26.0 now.");
+    await expect(log.getByText("Tagging 3.26.0 now.")).toBeVisible();
+    await expect(log.locator("time .clock-ahead")).toHaveText([" · machine clock ahead"]);
+    await expect(list.locator(".conversation-when")).toHaveText("now");
   });
 });

@@ -255,8 +255,11 @@ export function pendingSendStore(storage: StorageLike | undefined): {
  * clock's measured lead over this browser (`skew`, ms; positive when ahead).
  * A reload rebuilds the thread from the machine's stamps; these keep each turn
  * at the time the visit showed it instead of the moment of the reload.
+ * `live` names the supervisor turns this browser saw arrive live, and whether
+ * the visit marked each "machine clock ahead" (cas-9e33): a reload shows the
+ * same mark, even when the visit could not yet know the machine's lead.
  */
-export type Arrivals = { skew?: number; at: Record<string, number> };
+export type Arrivals = { skew?: number; at: Record<string, number>; live?: Record<string, boolean> };
 
 /** At most this many turns' times are kept per conversation, the newest. */
 export const MAX_ARRIVALS = 400;
@@ -276,7 +279,12 @@ export function validArrivals(raw: unknown): Arrivals | undefined {
   }
   const lead = finite(skew);
   if (!Object.keys(times).length && lead === undefined) return undefined;
-  return { ...(lead === undefined ? {} : { skew: lead }), at: times };
+  const marks: Record<string, boolean> = {};
+  const live = (raw as Record<string, unknown>).live;
+  if (live && typeof live === "object" && !Array.isArray(live)) {
+    for (const [key, value] of Object.entries(live as Record<string, unknown>)) if (key in times && key.startsWith("r:") && typeof value === "boolean") marks[key] = value;
+  }
+  return { ...(lead === undefined ? {} : { skew: lead }), at: times, ...(Object.keys(marks).length ? { live: marks } : {}) };
 }
 
 /** The turn-times store (cas-8d52): an empty record is a deletion. */

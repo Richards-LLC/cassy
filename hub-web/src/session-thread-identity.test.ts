@@ -6,7 +6,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { ConversationHistory, sessionCodename } from "./conversation-history";
 import { ConversationView, earlierSessionLabel, emptyActivityText, emptyCardActivityText, emptyThreadCopy } from "./conversation-view";
-import { activityTime, ConversationList, conversationRowMarkup, groupConversationRows, plainActivity, type ConversationRow } from "./conversation-list";
+import { activityTime, ConversationList, conversationRowMarkup, groupConversationRows, machineActivityAt, plainActivity, type ConversationRow } from "./conversation-list";
 import type { ConversationHistoryMessage, ConversationHistoryReply } from "./types";
 
 const at = (day: number, hh: number, mm: number) => new Date(2026, 8, day, hh, mm).toISOString();
@@ -307,6 +307,25 @@ describe("grouped project sessions (cas-55a4)", () => {
     expect((document.activeElement as HTMLElement).dataset.threadKey).toBe("atlas:calm-puma-34");
     expect(container.querySelector(".conversation-group-head")).toBeNull();
     expect(document.activeElement).not.toBe(document.body);
+  });
+
+  it("dates a machine-stamped activity in this browser's time when the machine clock runs ahead (cas-24fe)", () => {
+    const now = new Date(2026, 9, 1, 12, 0).getTime();
+    const AHEAD = 5 * 60_000;
+    // With the lead measured, the stamp less the lead: three minutes ago reads 3m, not "now".
+    expect(machineActivityAt(now - 3 * 60_000 + AHEAD, AHEAD, undefined, now)).toEqual({ at: now - 3 * 60_000 });
+    expect(activityTime(machineActivityAt(now - 3 * 60_000 + AHEAD, AHEAD, undefined, now).at, now).short).toBe("3m");
+    // A lead never puts the activity after now.
+    expect(machineActivityAt(now + AHEAD + 60_000, AHEAD, undefined, now)).toEqual({ at: now });
+    // A stamp in the past with no lead known is its own time.
+    expect(machineActivityAt(now - 60_000, undefined, undefined, now)).toEqual({ at: now - 60_000 });
+    // With no lead known, a future stamp dates from when this page first saw it, so the row ages.
+    const first = machineActivityAt(now + 2 * 60_000, undefined, undefined, now);
+    expect(first).toEqual({ at: now, seen: { stamp: now + 2 * 60_000, seen: now } });
+    const fiveLater = machineActivityAt(now + 2 * 60_000, undefined, first.seen, now + 5 * 60_000);
+    expect(activityTime(fiveLater.at, now + 5 * 60_000).short).toBe("5m");
+    // A newer stamp is new activity.
+    expect(machineActivityAt(now + 9 * 60_000, undefined, first.seen, now + 5 * 60_000)).toEqual({ at: now + 5 * 60_000, seen: { stamp: now + 9 * 60_000, seen: now + 5 * 60_000 } });
   });
 
   it("times a row from its own activity only: now under a minute, then words for assistive tech (cas-6acf)", () => {

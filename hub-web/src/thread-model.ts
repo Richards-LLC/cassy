@@ -110,7 +110,12 @@ export function shownTimes(events: readonly ConversationEvent[], now: number): A
     // browser's clock, never the machine's, so it is never pulled back or
     // marked. It still bounds the turns above it.
     if (event.kind === "send") { shown[index] = { at: own, clockAhead: false }; continue; }
-    shown[index] = { at: floor, clockAhead: event.clockAhead === true || Math.floor(stamp / 60_000) !== Math.floor(floor / 60_000) };
+    // cas-9e33: a turn this browser saw arrive live is shown at that arrival,
+    // a time it observed; only a later turn pulling it back marks it, beside
+    // the mark the visit gave it. Any other turn is marked when its machine
+    // stamp reads a different minute from the time shown.
+    const measured = event.seenLive ? own : stamp;
+    shown[index] = { at: floor, clockAhead: event.clockAhead === true || Math.floor(measured / 60_000) !== Math.floor(floor / 60_000) };
   }
   return shown;
 }

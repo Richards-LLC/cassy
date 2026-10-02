@@ -212,6 +212,22 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     reply(61, 60, 'The lint warning is the only failure.', 'answer', at(9, 33));
     // An answer to a question from yesterday's ended session stays here and names it.
     history.reply({ notification_id: 62, reply_to: 3196200, reply_to_session: 'gabber-studio-noble-cheetah-84', message: 'The mixdown preview you asked about yesterday is in renders/.', summary: '', device_id: 'fixture', kind: 'answer' }, at(9, 35));
+  } else if (state === 'conversation-clock-ahead') {
+    // cas-9e33 / cas-24fe: a reload of a thread whose machine clock runs five
+    // minutes ahead. The first answer arrived live before anything showed the
+    // lead, so it stays unmarked, as that visit showed it. The answer after
+    // the reload arrived once the lead was known and says so. Times are
+    // relative to now: a machine stamp is only "ahead" of this browser's clock.
+    const AHEAD = 5 * 60_000;
+    const now = Date.now();
+    const first = { notification_id: 71, reply_to: null, message: 'The release gate is green; tagging 3.26.0 now.', summary: '', device_id: 'fixture', operator_label: 'Daniel', kind: 'answer' as const, attachments: [] };
+    const visit = new ConversationHistory();
+    visit.receive(first, now - 30 * 60_000);
+    history.seedArrivals(visit.arrivalsRecord());
+    history.hydrateReply({ ...first, at: new Date(now - 30 * 60_000 + AHEAD).toISOString() }, now - 28 * 60_000);
+    history.submit('push', supervisor, 'Push the tag when the notes are ready.', now - 20 * 60_000);
+    history.acknowledge({ client_ref: 'push', notification_id: 70, target: supervisor, stamped: true });
+    history.receive({ notification_id: 72, reply_to: null, message: 'Tagged and pushed. The release notes are drafting.', summary: '', device_id: 'fixture', operator_label: 'Daniel', kind: 'receipt', attachments: [] }, now - 4 * 60_000);
   } else if (state === 'conversation-evidence') {
     history.submit('flake', supervisor, 'Did pass two clear the flake?', at(9, 28));
     history.acknowledge({ client_ref: 'flake', notification_id: 61, target: supervisor, stamped: true });

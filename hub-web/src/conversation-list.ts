@@ -117,6 +117,27 @@ export function activityTime(at: number, now: number = Date.now()): { short: str
   return { short: `${days}d`, spoken: unit(days, "day") };
 }
 
+/**
+ * A machine-stamped activity time in this browser's time (cas-24fe). The hub
+ * stamps a session's activity with the machine's clock. Once the thread has
+ * measured that clock's lead, the stamp less the lead (never after now);
+ * before that, a stamp in this browser's future dates from the moment this
+ * page first saw it, kept in `seen` across renders. A clock that runs ahead
+ * therefore never keeps a row at "now".
+ */
+export function machineActivityAt(
+  stamp: number,
+  lead: number | undefined,
+  seen: { stamp: number; seen: number } | undefined,
+  now: number,
+): { at: number; seen?: { stamp: number; seen: number } } {
+  if (lead !== undefined) return { at: Math.min(stamp - lead, now) };
+  // Once dated by when it was seen, it stays so: the row ages steadily even after now passes the stamp.
+  if (seen?.stamp === stamp) return { at: seen.seen, seen };
+  if (stamp <= now) return { at: stamp };
+  return { at: now, seen: { stamp, seen: now } };
+}
+
 export const CONVERSATION_PREVIEW_MAX_CHARS = 160;
 
 /** Keep a long reply useful to screen readers and the two-line rail preview. */

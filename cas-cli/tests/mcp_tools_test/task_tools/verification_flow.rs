@@ -689,6 +689,161 @@ async fn test_recorded_delivery_receipt_survives_worker_ref_advance_to_superviso
     );
 }
 
+fn head_of(path: &std::path::Path) -> String {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(path)
+        .output()
+        .expect("rev-parse HEAD");
+    assert!(output.status.success());
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn approve(task_id: &str, dispatch_id: String) -> VerificationAddRequest {
+    VerificationAddRequest {
+        task_id: task_id.to_string(),
+        status: "approved".to_string(),
+        summary: "reviewed the delivered receipt".to_string(),
+        confidence: Some(0.99),
+        issues: None,
+        files_reviewed: Some("receipt-delivery.txt".to_string()),
+        duration_ms: Some(5),
+        verification_type: None,
+        verifier_capability: None,
+        dispatch_id: Some(dispatch_id),
+    }
+}
+
+/// Commit the receipt-bearing delivery inside the task's work window and,
+/// on top of it, the worker's next task's local commit. Returns
+/// (receipt, next-task commit).
+fn deliver_then_start_next_task(
+    worker_dir: &std::path::Path,
+    merge_into: Option<(&std::path::Path, &str)>,
+) -> (String, String) {
+    std::fs::write(worker_dir.join("receipt-delivery.txt"), "delivered\n").unwrap();
+    proof_boundary_git(worker_dir, &["add", "receipt-delivery.txt"]);
+    proof_boundary_git(worker_dir, &["commit", "-q", "-m", "delivered work"]);
+    let receipt = head_of(worker_dir);
+    if let Some((main_checkout, branch)) = merge_into {
+        proof_boundary_git(
+            main_checkout,
+            &["merge", "-q", "--no-ff", branch, "-m", "merge PR"],
+        );
+    }
+    std::fs::write(worker_dir.join("next-task.txt"), "next task\n").unwrap();
+    proof_boundary_git(worker_dir, &["add", "next-task.txt"]);
+    proof_boundary_git(worker_dir, &["commit", "-q", "-m", "next task"]);
+    (receipt, head_of(worker_dir))
+}
+
+/// cas-5200: cas-3e66 and cas-ba4a were merged through a PR without ever
+/// being parked, then closed with `commit_receipt` while the worker's HEAD
+/// was already its next task's local commit. The dispatch bound that commit
+/// as a delivered anchor; rebasing the next task made it unreachable and the
+/// supervisor's verdict was refused. A merged receipt is the delivery.
+#[tokio::test]
+async fn test_merged_receipt_dispatch_ignores_the_next_tasks_local_commit_cas_5200() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (temp, service, cas_dir, task_id, worker_dir) =
+        delivered_worktree_fixture(&mut test_env, "factory/c5200-worker").await;
+    let (receipt, next_task) = deliver_then_start_next_task(
+        worker_dir.path(),
+        Some((temp.path(), "factory/c5200-worker")),
+    );
+
+    let close = || {
+        let mut request = close_request(&task_id, "delivered through a merged PR");
+        request.commit_receipt = Some(receipt.clone());
+        request
+    };
+    let first = extract_text(
+        service
+            .cas_task_close(Parameters(close()))
+            .await
+            .expect("first close"),
+    );
+    assert!(first.contains("VERIFICATION REQUIRED"), "{first}");
+    assert!(!first.contains(&next_task), "{first}");
+    let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &task_id)
+        .unwrap()
+        .expect("dispatch");
+    let repository = dispatch.repository.as_ref().expect("repository proof");
+    assert_eq!(
+        repository.anchor_commits,
+        vec![receipt.clone()],
+        "{repository:?}"
+    );
+    assert_ne!(repository.head_commit, next_task, "{repository:?}");
+
+    // The worker rebases/rewrites its next task: that commit vanishes.
+    proof_boundary_git(
+        worker_dir.path(),
+        &["commit", "-q", "--amend", "-m", "next task, rewritten"],
+    );
+    assert_ne!(head_of(worker_dir.path()), next_task);
+
+    let supervisor = registered_supervisor(&cas_dir, "c5200-supervisor").await;
+    supervisor
+        .cas_verification_add(Parameters(approve(&task_id, dispatch.id)))
+        .await
+        .expect("the verdict on the merged receipt survives the next task's rewrite");
+    let closed = extract_text(
+        service
+            .cas_task_close(Parameters(close()))
+            .await
+            .expect("close after the verdict"),
+    );
+    assert!(closed.contains("Closed task:"), "{closed}");
+}
+
+/// cas-5200 negative: a receipt that is NOT on the target keeps today's
+/// worktree binding (no target-branch proof), and rewriting the bound
+/// worktree head still voids the verdict rather than passing silently.
+#[tokio::test]
+async fn test_unmerged_receipt_keeps_worktree_binding_cas_5200() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, service, cas_dir, task_id, worker_dir) =
+        delivered_worktree_fixture(&mut test_env, "factory/c5200-unmerged").await;
+    let (receipt, next_task) = deliver_then_start_next_task(worker_dir.path(), None);
+
+    let mut close = close_request(&task_id, "delivery not merged yet");
+    close.commit_receipt = Some(receipt.clone());
+    let first = extract_text(
+        service
+            .cas_task_close(Parameters(close))
+            .await
+            .expect("first close"),
+    );
+    assert!(first.contains("VERIFICATION REQUIRED"), "{first}");
+    let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &task_id)
+        .unwrap()
+        .expect("dispatch");
+    let repository = dispatch.repository.as_ref().expect("repository proof");
+    assert_eq!(repository.target_branch, None, "{repository:?}");
+    assert_eq!(repository.head_commit, next_task, "{repository:?}");
+    assert!(
+        repository.anchor_commits.contains(&receipt)
+            && repository.anchor_commits.contains(&next_task),
+        "{repository:?}"
+    );
+
+    proof_boundary_git(
+        worker_dir.path(),
+        &["commit", "-q", "--amend", "-m", "next task, rewritten"],
+    );
+    let supervisor = registered_supervisor(&cas_dir, "c5200-unmerged-supervisor").await;
+    let refused = supervisor
+        .cas_verification_add(Parameters(approve(&task_id, dispatch.id)))
+        .await
+        .expect_err("an unmerged delivery's bound worktree head moving still voids the verdict");
+    assert!(
+        refused.message.contains("repository proof"),
+        "{}",
+        refused.message
+    );
+}
+
 #[tokio::test]
 async fn test_close_remints_a_fresh_dispatch_when_the_bound_proof_is_dead() {
     let mut test_env = TestEnvGuard::temp_home();

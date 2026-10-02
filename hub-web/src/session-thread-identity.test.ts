@@ -96,7 +96,7 @@ describe("session-bound thread history (cas-55a4)", () => {
     expect(empty.textContent).not.toContain("Commander");
     expect(empty.textContent).not.toContain("→");
     expect(empty.querySelector(".empty-activity")?.textContent).toBe("Last active 3m ago");
-    expect(empty.querySelector(".empty-foot")?.textContent).toBe("Last active 3m ago · Terminal view");
+    expect(empty.querySelector(".empty-foot")?.textContent).toBe("Last active 3m ago·Terminal view");
     const terminal = empty.querySelector<HTMLButtonElement>(".empty-foot > button.empty-terminal")!;
     expect(terminal.textContent).toBe("Terminal view");
     terminal.click();

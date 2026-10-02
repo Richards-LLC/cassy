@@ -4080,6 +4080,7 @@ button.chip:disabled { cursor: default; }
    Terminal view is a link-weight control named as the header names it. */
 .thread .empty .empty-foot { margin: 0; color: var(--ink-mid); font: var(--weight-regular) 12px/1.4 var(--font-ui); overflow-wrap: anywhere; }
 .thread .empty .empty-activity { font-family: var(--font-mono); }
+.thread .empty .empty-foot-sep { margin: 0 0.5em; }
 .thread .empty .empty-terminal { display: inline-flex; align-items: center; min-height: 24px; padding: 0 2px; border: 0; background: none; color: var(--ink-mid); font: inherit; text-decoration: underline; text-decoration-color: var(--line-subtle); text-underline-offset: 3px; cursor: pointer; }
 .thread .empty .empty-terminal:hover { color: var(--ink); text-decoration-color: currentColor; }
 .thread .empty .empty-terminal:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; border-radius: 4px; }

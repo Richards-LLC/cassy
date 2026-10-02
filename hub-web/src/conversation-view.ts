@@ -781,7 +781,7 @@ export class ConversationView {
       const foot = document.createElement("p"); foot.className = "empty-foot";
       if (activityText) { const live = document.createElement("span"); live.className = "empty-activity"; live.textContent = activityText; foot.append(live); }
       if (terminal) {
-        if (activityText) { const dot = document.createElement("span"); dot.className = "empty-foot-sep"; dot.setAttribute("aria-hidden", "true"); dot.textContent = " · "; foot.append(dot); }
+        if (activityText) { const dot = document.createElement("span"); dot.className = "empty-foot-sep"; dot.setAttribute("aria-hidden", "true"); dot.textContent = "·"; foot.append(dot); }
         const open = document.createElement("button"); open.type = "button"; open.className = "empty-terminal";
         open.textContent = "Terminal view";
         open.onclick = () => this.options.openTerminal?.();

@@ -60,7 +60,7 @@ server error bodies are not printed/logged. Redirects are refused. Cloud URLs
 require HTTPS (HTTP loopback is allowed for tests).
 
 Each evaluation has a 15-second deadline including retries; a batch shares a
-60-second deadline. Remaining records receive unavailable/log rows after the
+45-second deadline (below the MCP server's 55-second limit). Remaining records receive unavailable/log rows after the
 batch deadline. HTTP 429/529 get at most three attempts, with exponential
 backoff or Retry-After (seconds or HTTP date). A Retry-After exceeding the
 remaining deadline returns unavailable without retrying early. Other HTTP or

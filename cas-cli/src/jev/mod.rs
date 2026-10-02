@@ -17,7 +17,8 @@ use sha2::{Digest, Sha256};
 
 const DIRECT_ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
 const CALL_TIMEOUT: Duration = Duration::from_secs(15);
-const BATCH_TIMEOUT: Duration = Duration::from_secs(60);
+// Leave margin beneath the MCP server's 55-second response timeout.
+const BATCH_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_ATTEMPTS: usize = 3;
 const MAX_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
 
@@ -171,6 +172,23 @@ impl JevClient {
         caller: &str,
         advisory: bool,
     ) -> Result<Vec<Outcome>, JevError> {
+        self.batch_until(
+            states,
+            questions,
+            caller,
+            advisory,
+            Instant::now() + BATCH_TIMEOUT,
+        )
+    }
+
+    fn batch_until(
+        &self,
+        states: &[Value],
+        questions: &Value,
+        caller: &str,
+        advisory: bool,
+        deadline: Instant,
+    ) -> Result<Vec<Outcome>, JevError> {
         if !(1..=50).contains(&states.len()) {
             return Err(JevError::InvalidInput(
                 "Jev batch requires 1–50 records".into(),
@@ -179,7 +197,6 @@ impl JevClient {
         for state in states {
             validate_input(state, questions)?;
         }
-        let deadline = Instant::now() + BATCH_TIMEOUT;
         // Evaluate/log all records even if strict transport failed on a prior
         // record, then return the first error rather than dropping log rows.
         let results: Vec<_> = states

@@ -2,6 +2,9 @@ use crate::config::meta::registry::ConfigRegistry;
 use crate::config::meta::{ConfigMeta, ConfigType, Constraint};
 
 pub(super) fn register_jev(registry: &mut ConfigRegistry) {
+    registry
+        .section_descriptions
+        .insert("jev", "Calibrated Jev decision evaluations");
     for (key, name, description, value_type, default, constraint) in [
         (
             "jev.model",

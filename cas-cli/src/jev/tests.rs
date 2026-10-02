@@ -379,3 +379,40 @@ fn jev_validation_probabilities_log_failure_and_concurrent_append() {
         Err(JevError::DecisionLog(_))
     ));
 }
+
+#[tokio::test]
+async fn jev_batch_deadline_logs_all_unavailable_without_more_requests() {
+    let server = MockServer::start().await;
+    let dir = TempDir::new().unwrap();
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(response())
+                .set_delay(Duration::from_millis(150)),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = fixture(&server, &dir, true);
+    let start = Instant::now();
+    let outcomes = tokio::task::spawn_blocking(move || {
+        client.batch_until(
+            &[json!("first"), json!("second"), json!("third")],
+            &questions(),
+            "batch",
+            true,
+            Instant::now() + Duration::from_millis(30),
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(outcomes.len(), 3);
+    assert!(
+        outcomes
+            .iter()
+            .all(|o| matches!(o, Outcome::Unavailable { .. }))
+    );
+    assert!(start.elapsed() < Duration::from_secs(1));
+    assert_eq!(rows(&dir).len(), 3);
+}

@@ -1155,7 +1155,7 @@ fn published_action_enums_equal_their_dispatch_tables() {
         checked += 1;
     }
     assert_eq!(
-        checked, 14,
+        checked, 15,
         "every multi-action tool publishes an action enum"
     );
 }

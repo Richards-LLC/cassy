@@ -4134,7 +4134,6 @@ mod tests {
 
     #[cfg(unix)]
     fn delivery_ci_fixture(code: bool, conclusion: Option<&str>) -> (TempDir, String, String) {
-        use std::os::unix::fs::PermissionsExt;
         let temp = TempDir::new().unwrap();
         let git = |args: &[&str]| {
             let output = std::process::Command::new("git")
@@ -4177,10 +4176,9 @@ mod tests {
         .to_string();
         let docs_response = r#"{"check_runs":[{"name":"Docs Lint","status":"completed","conclusion":"success"},{"name":"Scoped Validation (factory/PR)","status":"completed","conclusion":"skipped"}]}"#;
         let fake_gh = temp.path().join("gh-fixture");
-        std::fs::write(&fake_gh, format!(
+        crate::test_paths::warm_stub(&fake_gh, &format!(
             "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{{\"nameWithOwner\":\"acme/cas\"}}'; exit 0; fi\nprintf '%s\\n' \"$4\" >> gh-requests.log\ncase \"$4\" in\n*/{code_sha}/check-runs) cat <<'JSON'\n{code_response}\nJSON\n;;\n*/{tip}/check-runs) cat <<'JSON'\n{docs_response}\nJSON\n;;\n*) exit 97 ;;\nesac\n"
-        )).unwrap();
-        std::fs::set_permissions(&fake_gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ));
         (temp, code_sha, tip)
     }
 
@@ -4259,11 +4257,7 @@ mod tests {
         ] {
             let (repo, code_sha, _) = delivery_ci_fixture(true, Some("success"));
             let fake_gh = repo.path().join("gh-fixture");
-            std::fs::write(
-                &fake_gh,
-                format!("#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{{\"nameWithOwner\":\"acme/cas\"}}'; exit 0; fi\ncat <<'JSON'\n{response}\nJSON\n"),
-            )
-            .unwrap();
+            crate::test_paths::warm_stub(&fake_gh, &format!("#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{{\"nameWithOwner\":\"acme/cas\"}}'; exit 0; fi\ncat <<'JSON'\n{response}\nJSON\n"));
             env.set(crate::github_issue_attach::GH_BIN_ENV, &fake_gh);
             let state = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path()).state;
             if response.contains("Docs Lint") {
@@ -4288,9 +4282,9 @@ mod tests {
         let mut env = crate::test_support::TestEnvGuard::new();
         let (repo, code_sha, tip) = delivery_ci_fixture(true, Some("success"));
         let fake_gh = repo.path().join("gh-fixture");
-        std::fs::write(&fake_gh, format!(
+        crate::test_paths::warm_stub(&fake_gh, &format!(
             "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{{\"nameWithOwner\":\"acme/cas\"}}'; exit 0; fi\nprintf '%s\\n' \"$4\" >> gh-requests.log\ncase \"$4\" in\n*/{tip}/check-runs) printf '%s\\n' '{{\"check_runs\":[{{\"name\":\"Scoped Validation\",\"status\":\"completed\",\"conclusion\":\"success\"}}]}}' ;;\n*/{code_sha}/check-runs) printf '%s\\n' '{{\"check_runs\":[]}}' ;;\n*) exit 97 ;;\nesac\n"
-        )).unwrap();
+        ));
         env.set(crate::github_issue_attach::GH_BIN_ENV, &fake_gh);
         let state = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path()).state;
         assert_eq!(admit_branch_ci(&state, false, None), Ok(false));
@@ -4308,7 +4302,7 @@ mod tests {
         let mut env = crate::test_support::TestEnvGuard::new();
         let (repo, code_sha, _) = delivery_ci_fixture(true, Some("success"));
         let fake_gh = repo.path().join("gh-fixture");
-        std::fs::write(&fake_gh, "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{\"nameWithOwner\":\"acme/cas\"}'; exit 0; fi\nprintf '%s\\n' '{\"check_runs\":[{\"name\":\"Docs Lint\",\"status\":\"completed\",\"conclusion\":\"success\"},{\"name\":\"Scoped Validation\",\"status\":\"completed\",\"conclusion\":\"skipped\"}]}'\n").unwrap();
+        crate::test_paths::warm_stub(&fake_gh, "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{\"nameWithOwner\":\"acme/cas\"}'; exit 0; fi\nprintf '%s\\n' '{\"check_runs\":[{\"name\":\"Docs Lint\",\"status\":\"completed\",\"conclusion\":\"success\"},{\"name\":\"Scoped Validation\",\"status\":\"completed\",\"conclusion\":\"skipped\"}]}'\n");
         env.set(crate::github_issue_attach::GH_BIN_ENV, &fake_gh);
         let state = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path()).state;
         let refusal = admit_branch_ci(&state, false, None).unwrap_err();
@@ -4322,11 +4316,7 @@ mod tests {
         let mut env = crate::test_support::TestEnvGuard::new();
         let (repo, code_sha, _) = delivery_ci_fixture(true, Some("success"));
         let fake_gh = repo.path().join("gh-fixture");
-        std::fs::write(
-            &fake_gh,
-            "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{\"nameWithOwner\":\"acme/cas\"}'; exit 0; fi\nprintf '%s\\n' 'HTTP 422: No commit found for SHA' >&2\nexit 1\n",
-        )
-        .unwrap();
+        crate::test_paths::warm_stub(&fake_gh, "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{\"nameWithOwner\":\"acme/cas\"}'; exit 0; fi\nprintf '%s\\n' 'HTTP 422: No commit found for SHA' >&2\nexit 1\n");
         env.set(crate::github_issue_attach::GH_BIN_ENV, &fake_gh);
         let state = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path()).state;
         assert_eq!(admit_branch_ci(&state, false, None), Ok(false));
@@ -4369,9 +4359,9 @@ mod tests {
             );
         }
         let gh = repo.path().join("gh-fixture");
-        std::fs::write(&gh, format!(
+        crate::test_paths::warm_stub(&gh, &format!(
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> canonical-requests.log\ncase \"$1 $2 $3\" in\n'repo view pippenz/cas') printf '%s\\n' '{{\"nameWithOwner\":\"Richards-LLC/cassy\"}}'; exit 0 ;;\nesac\ncase \"$4\" in\nrepos/Richards-LLC/cassy/commits/{tip}/check-runs) printf '%s\\n' '{{\"check_runs\":[{{\"name\":\"Scoped Validation\",\"status\":\"completed\",\"conclusion\":\"failure\"}}]}}' ;;\n*) printf '%s\\n' 'HTTP 422: No commit found for SHA' >&2; exit 1 ;;\nesac\n"
-        )).unwrap();
+        ));
         env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
         let lookup = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path());
         let receipt = super::describe_branch_ci_lookup("factory/ci-fixture", &lookup);
@@ -4406,9 +4396,9 @@ mod tests {
         let mut env = crate::test_support::TestEnvGuard::new();
         let (repo, code_sha, tip) = delivery_ci_fixture(true, Some("failure"));
         let gh = repo.path().join("gh-fixture");
-        std::fs::write(&gh, format!(
+        crate::test_paths::warm_stub(&gh, &format!(
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> canonical-requests.log\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{{\"nameWithOwner\":\"canonical/repo\"}}'; exit 0; fi\ncase \"$4\" in\nrepos/canonical/repo/commits/{tip}/check-runs) printf '%s\\n' '{{\"check_runs\":[{{\"name\":\"Docs Lint\",\"status\":\"completed\",\"conclusion\":\"success\"}}]}}' ;;\nrepos/canonical/repo/commits/{code_sha}/check-runs) printf '%s\\n' '{{\"check_runs\":[{{\"name\":\"Scoped Validation\",\"status\":\"completed\",\"conclusion\":\"failure\"}}]}}' ;;\n*) exit 97 ;;\nesac\n"
-        )).unwrap();
+        ));
         env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
         let lookup = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path());
         assert!(
@@ -4448,11 +4438,7 @@ mod tests {
         let mut env = crate::test_support::TestEnvGuard::new();
         let (repo, code_sha, _) = delivery_ci_fixture(true, Some("success"));
         let gh = repo.path().join("gh-fixture");
-        std::fs::write(
-            &gh,
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> canonical-requests.log\nexit 1\n",
-        )
-        .unwrap();
+        crate::test_paths::warm_stub(&gh, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> canonical-requests.log\nexit 1\n");
         env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
         let lookup = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path());
         assert_eq!(admit_branch_ci(&lookup.state, false, None), Ok(false));
@@ -4470,7 +4456,7 @@ mod tests {
         assert!(!requests.contains("api"), "{requests}");
         let (docs, _, tip) = delivery_ci_fixture(false, None);
         let gh = docs.path().join("gh-fixture");
-        std::fs::write(&gh, "#!/bin/sh\nexit 1\n").unwrap();
+        crate::test_paths::warm_stub(&gh, "#!/bin/sh\nexit 1\n");
         env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
         let lookup = super::lookup_branch_ci("factory/ci-fixture", "main", docs.path());
         assert_eq!(admit_branch_ci(&lookup.state, false, None), Ok(false));

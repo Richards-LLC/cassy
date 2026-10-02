@@ -593,15 +593,7 @@ async fn red_ci_worktree_merge_accepts_supervisor_override_end_to_end_cas_4150()
     let home = TempDir::new().expect("temp HOME");
     let fake_bin = TempDir::new().expect("fake gh dir");
     let gh = fake_bin.path().join("gh");
-    std::fs::write(
-        &gh,
-        "#!/bin/sh\nif [ \"$1 $2 $3\" = 'repo view org/red-ci-override' ]; then printf '%s\\n' '{\"nameWithOwner\":\"Richards-LLC/cassy\"}'; exit 0; fi\ncase \"$4\" in repos/Richards-LLC/cassy/commits/*/check-runs) ;; *) echo 'HTTP 422: No commit found for SHA' >&2; exit 1 ;; esac\ncat <<'JSON'\n{\"check_runs\":[{\"name\":\"Fast Validation\",\"status\":\"completed\",\"conclusion\":\"failure\",\"html_url\":\"https://github.com/org/repo/actions/runs/4150\"}]}\nJSON\n",
-    )
-    .expect("write fake gh");
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).expect("chmod gh");
-    }
+    cas::test_paths::warm_stub(&gh, "#!/bin/sh\nif [ \"$1 $2 $3\" = 'repo view org/red-ci-override' ]; then printf '%s\\n' '{\"nameWithOwner\":\"Richards-LLC/cassy\"}'; exit 0; fi\ncase \"$4\" in repos/Richards-LLC/cassy/commits/*/check-runs) ;; *) echo 'HTTP 422: No commit found for SHA' >&2; exit 1 ;; esac\ncat <<'JSON'\n{\"check_runs\":[{\"name\":\"Fast Validation\",\"status\":\"completed\",\"conclusion\":\"failure\",\"html_url\":\"https://github.com/org/repo/actions/runs/4150\"}]}\nJSON\n");
     let mut env = TestEnvGuard::new();
     env.set("HOME", home.path());
     // cas-9790: select the fake through Cassy's `CAS_GH_BIN` seam; process
@@ -696,15 +688,7 @@ async fn docs_only_code_ci_supervisor_override_is_logged_cas_a9bd() {
     let home = TempDir::new().expect("temp HOME");
     let fake_bin = TempDir::new().expect("fake gh dir");
     let gh = fake_bin.path().join("gh");
-    std::fs::write(
-        &gh,
-        "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '{\"nameWithOwner\":\"%s\"}\\n' \"$3\"; exit 0; fi\ncat <<'JSON'\n{\"check_runs\":[{\"name\":\"Docs Lint\",\"status\":\"completed\",\"conclusion\":\"success\",\"html_url\":\"https://github.com/org/repo/actions/runs/4150\"}]}\nJSON\n",
-    )
-    .expect("write fake gh");
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).expect("chmod gh");
-    }
+    cas::test_paths::warm_stub(&gh, "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '{\"nameWithOwner\":\"%s\"}\\n' \"$3\"; exit 0; fi\ncat <<'JSON'\n{\"check_runs\":[{\"name\":\"Docs Lint\",\"status\":\"completed\",\"conclusion\":\"success\",\"html_url\":\"https://github.com/org/repo/actions/runs/4150\"}]}\nJSON\n");
     let mut env = TestEnvGuard::new();
     env.set("HOME", home.path());
     // cas-9790: select the fake through Cassy's `CAS_GH_BIN` seam; process

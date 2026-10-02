@@ -1292,3 +1292,50 @@ fn refresh_banner_is_a_verdict_line_with_the_count_grammar_as_detail() {
     assert!(banner.starts_with("[ERROR] 1 project failed · "), "{banner}");
     assert!(banner.contains("2 unregistered store(s) not refreshed"), "{banner}");
 }
+
+#[test]
+fn store_lock_failure_names_holders_and_the_remedy_cas_91a3() {
+    let cas_root = Path::new("/projects/soundwave-config/.cas");
+    let phase = ProjectPhase::Failed("migration: database error: database is locked".to_string());
+    assert!(is_store_lock_error(phase.detail()));
+    let holders = vec![
+        crate::hub::HubLockHolder {
+            pid: 4242,
+            age: None,
+            phase: None,
+            command: Some("cas serve".to_string()),
+        },
+        crate::hub::HubLockHolder {
+            pid: 4343,
+            age: None,
+            phase: None,
+            command: None,
+        },
+    ];
+    assert_eq!(
+        store_lock_remedy(cas_root, &holders),
+        "store held open by pid 4242 (cas serve), pid 4343; stop the Cassy sessions in /projects/soundwave-config and rerun `cas update`"
+    );
+    assert!(store_lock_remedy(cas_root, &[]).starts_with("another process holds its write lock"));
+    // Any other failure keeps its own words.
+    let other = name_store_lock_holders(
+        ProjectPhase::Failed("migration: disk full".to_string()),
+        cas_root,
+    );
+    assert_eq!(other.detail(), "migration: disk full");
+}
+
+#[test]
+fn store_schema_gate_names_a_failed_migration_cas_91a3() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let failed = ProjectPhase::Failed("migration: database is locked".to_string());
+    assert_eq!(
+        store_schema_gate(temp.path(), &failed).as_deref(),
+        Some("schema not current: the migration phase failed (see migr)")
+    );
+    // No store at all: nothing to read stale, nothing to gate.
+    assert_eq!(
+        store_schema_gate(temp.path(), &ProjectPhase::Ok("migration".into())),
+        None
+    );
+}

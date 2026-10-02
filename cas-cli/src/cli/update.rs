@@ -1007,34 +1007,56 @@ fn refresh_all_projects(
         // Run each phase independently. A malformed database must be visible
         // in the receipt, but must not leave another project stale.
         let (migration, output) = capture_phase(!cli.json, || {
-            run_project_phase("migration", args.dry_run, || {
+            let phase = run_project_phase("migration", args.dry_run, || {
                 run_schema_migrations(args, cli, Some(&cas_root))
-            })
+            });
+            name_store_lock_holders(phase, &cas_root)
         });
         details.push_str(&output);
         let mut phase_details = vec![(migration.is_ok(), output)];
-        let (search_index, output) = capture_phase(!cli.json, || {
-            repair_project_search_index(&cas_root, args.dry_run, cli)
-        });
-        details.push_str(&output);
-        phase_details.push((search_index.is_ok(), output));
-        let (skills, output) = capture_phase(!cli.json, || {
-            run_project_phase("skills", args.dry_run, || {
-                sync_claude_files(cli, Some(&cas_root))
-            })
-        });
-        details.push_str(&output);
-        phase_details.push((skills.is_ok(), output));
-        let (membership, output) = capture_phase(!cli.json, || {
-            refresh_project_membership(&cas_root, args.dry_run)
-        });
-        details.push_str(&output);
-        phase_details.push((membership.is_ok(), output));
-        let ((cloud, _summaries), output) = capture_phase(!cli.json, || {
-            sync_project_cloud(&cas_root, args.dry_run, cli)
-        });
-        details.push_str(&output);
-        phase_details.push((cloud.is_ok(), output));
+
+        // cas-91a3 / cas-3af4: every later phase reads this project's store
+        // with the current schema (rules.origin_project, operator_authority,
+        // ...). A store the migration phase could not bring current fails
+        // those reads with "no such column", which buried the one actionable
+        // cause. Skip them, each naming the same reason.
+        let schema_gate = (!args.dry_run)
+            .then(|| store_schema_gate(&cas_root, &migration))
+            .flatten();
+        let (search_index, skills, membership, cloud) = if let Some(reason) = &schema_gate {
+            let skipped = || ProjectPhase::Skipped(reason.clone());
+            // One message, not four: a failed migration already says why
+            // (and who holds the store); otherwise the first skipped phase
+            // carries the reason and the rest stay quiet in the details.
+            for index in 0..4 {
+                phase_details.push((migration.failed() || index > 0, String::new()));
+            }
+            (skipped(), skipped(), skipped(), skipped())
+        } else {
+            let (search_index, output) = capture_phase(!cli.json, || {
+                repair_project_search_index(&cas_root, args.dry_run, cli)
+            });
+            details.push_str(&output);
+            phase_details.push((search_index.is_ok(), output));
+            let (skills, output) = capture_phase(!cli.json, || {
+                run_project_phase("skills", args.dry_run, || {
+                    sync_claude_files(cli, Some(&cas_root))
+                })
+            });
+            details.push_str(&output);
+            phase_details.push((skills.is_ok(), output));
+            let (membership, output) = capture_phase(!cli.json, || {
+                refresh_project_membership(&cas_root, args.dry_run)
+            });
+            details.push_str(&output);
+            phase_details.push((membership.is_ok(), output));
+            let ((cloud, _summaries), output) = capture_phase(!cli.json, || {
+                sync_project_cloud(&cas_root, args.dry_run, cli)
+            });
+            details.push_str(&output);
+            phase_details.push((cloud.is_ok(), output));
+            (search_index, skills, membership, cloud)
+        };
 
         // Registration is what makes discovery converge: a project the scan had
         // to find this time is in the registry for every later run, and for
@@ -1225,6 +1247,81 @@ fn repair_project_search_index(cas_root: &Path, dry_run: bool, cli: &Cli) -> Pro
     }
 
     phase
+}
+
+/// Why a project's later refresh phases must not read its store, or `None`
+/// when the store's schema is current (cas-91a3, cas-3af4).
+fn store_schema_gate(cas_root: &Path, migration: &ProjectPhase) -> Option<String> {
+    if migration.failed() {
+        return Some("schema not current: the migration phase failed (see migr)".to_string());
+    }
+    if !cas_root.join("cas.db").exists() {
+        return None;
+    }
+    match check_migrations(cas_root) {
+        Ok(status) if status.pending.is_empty() => None,
+        Ok(status) => Some(format!(
+            "schema not current: v{} of v{}, {} migration(s) pending; rerun `cas update` in {}",
+            status.current_version,
+            status.latest_version,
+            status.pending.len(),
+            cas_root.parent().unwrap_or(cas_root).display()
+        )),
+        Err(error) => Some(format!("schema not readable: {error}")),
+    }
+}
+
+/// A migration refused by SQLite's write lock names the processes holding the
+/// store open and what to do, as the hub machine-lock message does (cas-91a3).
+fn name_store_lock_holders(phase: ProjectPhase, cas_root: &Path) -> ProjectPhase {
+    let ProjectPhase::Failed(detail) = phase else {
+        return phase;
+    };
+    if !is_store_lock_error(&detail) {
+        return ProjectPhase::Failed(detail);
+    }
+    ProjectPhase::Failed(format!(
+        "{detail}; {}",
+        store_lock_remedy(cas_root, &store_lock_holders(cas_root))
+    ))
+}
+
+fn is_store_lock_error(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    detail.contains("database is locked") || detail.contains("database table is locked")
+}
+
+fn store_lock_holders(cas_root: &Path) -> Vec<crate::hub::HubLockHolder> {
+    let mut holders = Vec::new();
+    for name in ["cas.db", "cas.db-wal", "cas.db-shm"] {
+        let path = cas_root.join(name);
+        let path = path.canonicalize().unwrap_or(path);
+        holders.extend(crate::hub::processes_holding_file(&path));
+    }
+    holders.sort_by_key(|holder| holder.pid);
+    holders.dedup_by_key(|holder| holder.pid);
+    holders
+}
+
+fn store_lock_remedy(cas_root: &Path, holders: &[crate::hub::HubLockHolder]) -> String {
+    let project = cas_root.parent().unwrap_or(cas_root).display();
+    let named = holders
+        .iter()
+        .map(|holder| match holder.command.as_deref() {
+            Some(command) => format!("pid {} ({command})", holder.pid),
+            None => format!("pid {}", holder.pid),
+        })
+        .collect::<Vec<_>>();
+    if named.is_empty() {
+        format!(
+            "another process holds its write lock; stop the Cassy sessions in {project} and rerun `cas update`"
+        )
+    } else {
+        format!(
+            "store held open by {}; stop the Cassy sessions in {project} and rerun `cas update`",
+            named.join(", ")
+        )
+    }
 }
 
 fn run_project_phase(
@@ -2463,6 +2560,26 @@ fn run_schema_migrations(
                 |row| row.get(0),
             )
             .unwrap_or(0);
+        // cas-3af4: a legacy store (rules/entries from before the task store
+        // and the migration ledger) is still ours. Install the missing base
+        // tables so the migration chain can bring it current, instead of
+        // calling it uninitialized, reporting the phase ok, and leaving the
+        // skills phase to fail on a column a migration adds.
+        let legacy: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('entries', 'rules')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let table_count = if table_count < 3 && legacy > 0 && !args.dry_run {
+            crate::migration::ensure_base_schemas(&conn)
+                .context("install the base tables of a legacy store")?;
+            3
+        } else {
+            table_count
+        };
+        drop(conn);
         if table_count < 3 {
             if cli.json {
                 println!(

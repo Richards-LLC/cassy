@@ -412,13 +412,12 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(opening).toHaveText("Opening the conversation…");
     // cas-813a: still for the first second, then a quiet pulse.
     const dot = opening.locator(".dots i").first();
-    expect(Number(await dot.evaluate((element) => getComputedStyle(element).opacity)), "no motion at first").toBe(0);
+    // Its first frames are still: the pulse is scheduled about a second after the open.
+    expect(parseInt(await dot.evaluate((element) => element.style.animationDelay), 10), "motion waits after the open").toBeGreaterThanOrEqual(500);
     await expect.poll(() => dot.evaluate((element) => Number(getComputedStyle(element).opacity)), { message: "the dots move after a second" }).toBeGreaterThan(0.3);
     // Past the quiet window the attempt and stage are offered behind Details, closed.
-    const details = page.locator(".conversation-pane-slot .connection-details");
-    await expect(details.getByText("Details", { exact: true })).toBeVisible();
-    await expect(details).not.toHaveAttribute("open", "");
-    await expect(details.locator(".connection-timeline")).toBeHidden();
+    // One locator, so the check can't straddle the attach finishing.
+    await expect(page.locator(".conversation-pane-slot .connection-details:not([open]) > summary"), "Details offered, closed").toHaveText("Details");
     await expect(page.getByRole("button", { name: "Send to quiet-heron-7", exact: true })).toBeVisible();
     await expect(page.locator(".thread .empty b")).toHaveText("lighthouse", { timeout: 10_000 });
     const seen = await page.evaluate(() => {

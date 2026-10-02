@@ -105,7 +105,15 @@ git -C "$fx" add -A && git -C "$fx" commit -q -m pair-change
 
 broken="$tmp/broken"
 cp -r "$fx" "$broken"
-sed -i '/\*\*Goal:\*\* paired/d; s/"Write and send"/"Type and send"/' "$broken/docs/qa/journeys.md" "$broken/hub-web/e2e/reply.journey.ts"
+python3 - "$broken/docs/qa/journeys.md" "$broken/hub-web/e2e/reply.journey.ts" <<'PY_MUTATION'
+from pathlib import Path
+import sys
+for name in sys.argv[1:]:
+    path = Path(name)
+    text = "".join(line for line in path.read_text().splitlines(keepends=True)
+                   if "**Goal:** paired" not in line)
+    path.write_text(text.replace('"Write and send"', '"Type and send"'))
+PY_MUTATION
 if out="$(cd "$broken" && python3 "$helper" --check 2>&1)"; then
     bad "--check accepted a broken catalog"
 else
@@ -133,6 +141,11 @@ report() { # <file> <tree> <blocking> <rows...>
 }
 report stale.md "$(git -C "$fx" rev-parse "$base_sha:hub-web/dist")" 0 '| HUB-J1 | PASS | 0 |' '| HUB-J2 | PASS | 0 |'
 if out="$(gate_run)"; then bad "gate accepted a report for another dist tree"; else ok "gate: a report for another dist tree does not count"; fi
+# A longer word containing the current tree as a prefix is different proof.
+report prefix.md "${tree}00" 0 '| HUB-J1 | PASS | 0 |' '| HUB-J2 | PASS | 0 |'
+if out="$(gate_run)"; then bad "gate accepted a prefix-only tree match"; else
+    [[ "$out" == *"no committed report"* ]] && ok "gate: a longer tree token cannot cover its prefix" || bad "gate prefix output: $out"
+fi
 report blocking.md "$tree" 1 '| HUB-J1 | PASS | 0 |' '| HUB-J2 | PASS | 0 |'
 if out="$(gate_run)"; then bad "gate accepted blocking findings"; else
     [[ "$out" == *"blocking_findings is not 0"* ]] && ok "gate: blocking findings block" || bad "gate blocking output: $out"

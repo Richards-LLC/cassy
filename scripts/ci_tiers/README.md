@@ -27,6 +27,27 @@ the pinned dependency there and puts that venv first on `PATH` before
 triggers,
 runner selection, gates, jobs and required contexts are unchanged.
 
+## Platform behavior
+
+The runner cache pruning, mount-guard and job-lifetime lock fixtures exercise
+Linux cgroups, `/proc`, `flock` and `findmnt`/mountpoint semantics. On Darwin the
+executable suite reports these three cases as explicit skips, separately from
+passed cases; it still checks the scripts and fixtures are executable. Linux
+runs all three unchanged. Parsed cache policy contracts run on both platforms.
+The separate `test-self-hosted-rust-setup.sh` Make cohort fixture also reports
+an explicit Darwin skip because its Linux shared-toolchain concurrency contract
+requires `flock`; the production setup script and Linux fixture are unchanged.
+
+Both cancellation watchdogs run their full fixtures on macOS and Linux. They
+retain GNU `date -u -d` parsing when it succeeds and fall back to Python 3's
+UTC-aware ISO-8601 parser for GitHub timestamps when it fails. The fixtures also
+force the fallback on Linux, cover UTC offsets/fractions and invalid timestamps,
+and verify that successful GNU parsing retains its exact result.
+
+Workflow-body subprocess fixtures retain the parent-selected Bash executable
+when isolating fake-tool `PATH`, so Homebrew Bash on macOS is not silently
+replaced by the system Bash 3.2. The actual Ubuntu run scalars stay unchanged.
+
 ## Preservation ledger
 
 The previous script reported 832 checks: 778 `require_*` instances plus 54

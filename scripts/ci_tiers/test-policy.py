@@ -221,7 +221,11 @@ fi
     def run_body(self, body, values):
         environment = os.environ.copy();environment.update(values)
         environment['HOME'] = str(self.root)
-        return subprocess.run(['bash', '-euo', 'pipefail', '-c', body], env=environment, cwd=self.root, capture_output=True, text=True)
+        # Resolve the host-selected Bash before fixture PATH isolation. On
+        # Darwin /usr/bin:/bin otherwise replaces Homebrew Bash with Bash 3.2,
+        # which cannot execute these Ubuntu workflow bodies (e.g. mapfile).
+        bash = shutil.which('bash')
+        return subprocess.run([bash, '-euo', 'pipefail', '-c', body], env=environment, cwd=self.root, capture_output=True, text=True)
 
     def test_real_required_rollup_rejects_every_failed_or_cancelled_dependency(self):
         job = self.ci()['jobs']['fast-validation']

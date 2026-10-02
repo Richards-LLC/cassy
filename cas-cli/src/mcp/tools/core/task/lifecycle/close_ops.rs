@@ -1483,7 +1483,7 @@ fn legacy_required_scoped_proof_targets(
 /// authority.
 #[derive(Debug, Default)]
 struct ScopedProofTargetCache {
-    entries: std::collections::HashMap<ScopedProofTargetCacheKey, Vec<String>>,
+    entries: std::collections::HashMap<ScopedProofTargetCacheKey, Result<Vec<String>, String>>,
 }
 
 #[derive(Debug, Hash, PartialEq, Eq)]
@@ -1511,12 +1511,21 @@ fn proof_repo_is_git_worktree(repo: &std::path::Path) -> bool {
         .is_ok_and(|output| output.status.success() && output.stdout == b"true\n")
 }
 
+/// cas-74cb: one surface-checker run may take no longer than this. The
+/// checker walks every changed path; for cas-f0c7's 1228-path epic range it
+/// ran 38 s, and the close spawned it twice with no bound, so the MCP call
+/// exceeded its 55 s deadline with an unknown mutation outcome.
+const SCOPED_SURFACE_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// `Err` only when the checker ran past its bound: the close refuses rather
+/// than guess the required targets. Any other checker failure keeps the
+/// established in-process fallback.
 fn required_scoped_proof_targets(
     proof_repo: &std::path::Path,
     target_repo: &std::path::Path,
     changed_paths: &[String],
     cache: &mut ScopedProofTargetCache,
-) -> Vec<String> {
+) -> Result<Vec<String>, String> {
     let normalized_paths = scoped_proof_changed_path_set(changed_paths);
     let key = ScopedProofTargetCacheKey {
         proof_repo: proof_repo.to_path_buf(),
@@ -1531,16 +1540,33 @@ fn required_scoped_proof_targets(
         proof_repo,
         target_repo,
         &normalized_paths,
+        SCOPED_SURFACE_CHECK_TIMEOUT,
     );
     cache.entries.insert(key, targets.clone());
     targets
+}
+
+/// Run the surface checker under a deadline. Its process group is reaped on
+/// timeout, so a stuck checker cannot outlive the close (cas-74cb).
+fn run_scoped_surface_checker(
+    command: &mut std::process::Command,
+    stdin: std::process::Stdio,
+    timeout: std::time::Duration,
+) -> Result<std::process::Output, crate::bounded_process::BoundedCommandError> {
+    crate::bounded_process::run_command_with_stdin(
+        command,
+        crate::bounded_process::Deadline::after(timeout),
+        timeout,
+        stdin,
+    )
 }
 
 fn resolve_scoped_proof_targets_without_cache(
     proof_repo: &std::path::Path,
     target_repo: &std::path::Path,
     changed_paths: &[String],
-) -> Vec<String> {
+    timeout: std::time::Duration,
+) -> Result<Vec<String>, String> {
     // The worker checkout owns the delivery diff, while the task's target
     // repository is the durable location for project tooling. Keep the
     // checker path tied to the declared target so an installed Cassy binary
@@ -1551,49 +1577,57 @@ fn resolve_scoped_proof_targets_without_cache(
     // resolution. In-process fallback is the safe path for lightweight
     // stores, installed binaries without a checkout, and any checker failure.
     if proof_repo_is_git_worktree(proof_repo) && checker.is_file() {
-        let mut command = std::process::Command::new("bash");
-        command
-            .arg(&checker)
-            .args([
-                "--resolve-targets",
-                "--base",
-                "HEAD",
-                "--paths-from-stdin",
-                "--",
-            ])
-            .current_dir(proof_repo)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        if let Ok(mut child) = command.spawn() {
-            let paths = if changed_paths.is_empty() {
-                String::new()
-            } else {
-                format!("{}\n", changed_paths.join("\n"))
-            };
-            let stdin_ok = child
-                .stdin
-                .take()
-                .map(|mut stdin| {
-                    use std::io::Write;
-                    stdin.write_all(paths.as_bytes()).is_ok()
-                })
-                .unwrap_or(false);
-            let output = child.wait_with_output();
-            if stdin_ok
-                && let Ok(output) = output
-                && output.status.success()
-                && let Some(targets) =
-                    parse_scoped_proof_target_args(&String::from_utf8_lossy(&output.stdout))
-            {
-                if let Some(canonical) = canonical_scoped_proof_targets(proof_repo, targets) {
-                    return canonical;
+        // A file, not a pipe, carries the path list: writing a large request
+        // cannot block, and the bounded runner owns the whole lifetime.
+        let input = tempfile::tempfile().ok().and_then(|mut input| {
+            use std::io::{Seek, Write};
+            if !changed_paths.is_empty() {
+                writeln!(input, "{}", changed_paths.join("\n")).ok()?;
+            }
+            input.rewind().ok()?;
+            Some(input)
+        });
+        if let Some(input) = input {
+            let mut command = std::process::Command::new("bash");
+            command
+                .arg(&checker)
+                .args([
+                    "--resolve-targets",
+                    "--base",
+                    "HEAD",
+                    "--paths-from-stdin",
+                    "--",
+                ])
+                .current_dir(proof_repo);
+            match run_scoped_surface_checker(&mut command, std::process::Stdio::from(input), timeout) {
+                Ok(output) if output.status.success() => {
+                    if let Some(canonical) =
+                        parse_scoped_proof_target_args(&String::from_utf8_lossy(&output.stdout))
+                            .and_then(|targets| canonical_scoped_proof_targets(proof_repo, targets))
+                    {
+                        return Ok(canonical);
+                    }
+                }
+                Ok(_) | Err(crate::bounded_process::BoundedCommandError::Io) => {}
+                Err(crate::bounded_process::BoundedCommandError::TimedOut) => {
+                    tracing::warn!(
+                        checker = %checker.display(),
+                        changed_paths = changed_paths.len(),
+                        timeout_secs = timeout.as_secs_f64(),
+                        "cas-74cb: scoped-proof surface checker exceeded its bound"
+                    );
+                    return Err(format!(
+                        "SCOPED PROOF SURFACE UNRESOLVED: `{}` did not finish within {:.0}s for {} changed path(s), so the close refused rather than guess which proof targets this diff requires. Retry once the host is less loaded, or close a narrower delivery.",
+                        checker.display(),
+                        timeout.as_secs_f64(),
+                        changed_paths.len(),
+                    ));
                 }
             }
         }
     }
 
-    legacy_required_scoped_proof_targets(proof_repo, changed_paths)
+    Ok(legacy_required_scoped_proof_targets(proof_repo, changed_paths))
 }
 
 /// The `--test` targets on the checker's `SCOPED_PROOF_TARGET_ARGS:` line.
@@ -1626,6 +1660,16 @@ fn proof_validation_targets(
     target_repo: &std::path::Path,
     base: Option<&str>,
 ) -> Option<Vec<String>> {
+    proof_validation_targets_within(proof_repo, target_repo, base, SCOPED_SURFACE_CHECK_TIMEOUT)
+}
+
+/// The suggestion is advisory: past its bound it adds nothing (cas-74cb).
+fn proof_validation_targets_within(
+    proof_repo: &std::path::Path,
+    target_repo: &std::path::Path,
+    base: Option<&str>,
+    timeout: std::time::Duration,
+) -> Option<Vec<String>> {
     let checker = target_repo.join("scripts/check-scoped-test-surface.sh");
     if !proof_repo_is_git_worktree(proof_repo) || !checker.is_file() {
         return None;
@@ -1635,12 +1679,8 @@ fn proof_validation_targets(
     if let Some(base) = base {
         command.args(["--base", base]);
     }
-    let output = command
-        .arg("--")
-        .current_dir(proof_repo)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()?;
+    command.arg("--").current_dir(proof_repo);
+    let output = run_scoped_surface_checker(&mut command, std::process::Stdio::null(), timeout).ok()?;
     if !output.status.success() {
         return None;
     }
@@ -2255,12 +2295,20 @@ enum BuildProofs {
 }
 
 /// cas-4cbb / cas-2664: which closes carry their own Rust build proofs.
+///
+/// cas-74cb: an epic's build proof is the supervisor's assembly of the epic
+/// tip (CONTRIBUTING: one full build and suite per epic, recorded as
+/// `ASSEMBLY_PROOF` on the epic). Its children already deferred to that same
+/// assembly. Re-deriving scoped targets for the epic's whole attributed range
+/// duplicated it and, on a large epic, ran the surface checker past the MCP
+/// deadline (1228 paths took 38 s on cas-f0c7).
 fn close_build_proofs(
     is_factory_worker: bool,
     epic_assembly_proof_covers_delivery: bool,
     merged_epic_child: bool,
+    is_epic: bool,
 ) -> BuildProofs {
-    if is_factory_worker || epic_assembly_proof_covers_delivery || merged_epic_child {
+    if is_factory_worker || epic_assembly_proof_covers_delivery || merged_epic_child || is_epic {
         BuildProofs::DeferredToAssembly
     } else {
         BuildProofs::Required
@@ -2389,7 +2437,8 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
         target_repo,
         changed_paths,
         scoped_proof_cache,
-    );
+    )
+    .map_err(|unresolved| format!("TASK CLOSE REJECTED: task {}: {unresolved}", task.id))?;
     if !required_targets.is_empty() {
         if let Some(expected_base) = expected_base {
             let actual_base = scoped_proof_note_base(&task.notes);
@@ -2467,10 +2516,12 @@ mod risk_proof_tests {
     /// defers build proofs to the epic's assembly, like a worker close.
     #[test]
     fn merged_epic_child_close_defers_build_proofs_cas_2664() {
-        assert_eq!(close_build_proofs(false, false, true), BuildProofs::DeferredToAssembly);
-        assert_eq!(close_build_proofs(true, false, false), BuildProofs::DeferredToAssembly);
-        assert_eq!(close_build_proofs(false, true, false), BuildProofs::DeferredToAssembly);
-        assert_eq!(close_build_proofs(false, false, false), BuildProofs::Required);
+        assert_eq!(close_build_proofs(false, false, true, false), BuildProofs::DeferredToAssembly);
+        assert_eq!(close_build_proofs(true, false, false, false), BuildProofs::DeferredToAssembly);
+        assert_eq!(close_build_proofs(false, true, false, false), BuildProofs::DeferredToAssembly);
+        assert_eq!(close_build_proofs(false, false, false, false), BuildProofs::Required);
+        // cas-74cb: an epic's own close defers to its assembly.
+        assert_eq!(close_build_proofs(false, false, false, true), BuildProofs::DeferredToAssembly);
 
         let task = Task {
             id: "cas-2664".into(),
@@ -3220,7 +3271,8 @@ mod risk_proof_tests {
             target_repo.path(),
             &changed,
             &mut cache,
-        );
+        )
+        .unwrap();
         let reordered = changed.iter().rev().cloned().collect::<Vec<_>>();
         assert_eq!(
             required_scoped_proof_targets(
@@ -3228,7 +3280,8 @@ mod risk_proof_tests {
                 target_repo.path(),
                 &reordered,
                 &mut cache,
-            ),
+            )
+            .unwrap(),
             targets,
             "the same changed-path set must reuse the close-local cache"
         );
@@ -3372,7 +3425,7 @@ mod risk_proof_tests {
 
         let attributed = vec!["cas-cli/tests/mcp_tools_test.rs".to_string()];
         let mut cache = ScopedProofTargetCache::default();
-        let gate_targets = required_scoped_proof_targets(p, p, &attributed, &mut cache);
+        let gate_targets = required_scoped_proof_targets(p, p, &attributed, &mut cache).unwrap();
         assert!(
             gate_targets.contains(&"mcp_tools_test".to_string()),
             "{gate_targets:?}"
@@ -3494,6 +3547,7 @@ mod risk_proof_tests {
             &["cas-cli/src/hub.rs".to_string()],
             &mut cache,
         )
+        .unwrap()
         .is_empty());
     }
 
@@ -3518,7 +3572,8 @@ mod risk_proof_tests {
                 dir.path(),
                 &["cas-cli/src/hub.rs".to_string()],
                 &mut cache,
-            ),
+            )
+            .unwrap(),
             ["hub_contract_test".to_string()]
         );
     }
@@ -3725,6 +3780,49 @@ mod risk_proof_tests {
         (dir, target)
     }
 
+    /// cas-74cb: a surface checker that outlives its bound refuses the close
+    /// with a named reason instead of holding the MCP call past its deadline,
+    /// and the advisory suggestion run gives up on the same bound. Either way
+    /// the checker's process group is reaped, not left running.
+    #[cfg(unix)]
+    #[test]
+    fn scoped_surface_checker_is_bounded_and_fails_closed_cas_74cb() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        std::fs::create_dir_all(repo.join("scripts")).unwrap();
+        std::fs::write(repo.join("seed.txt"), "seed\n").unwrap();
+        initialize_scoped_proof_git_fixture(repo);
+        std::fs::write(
+            repo.join("scripts/check-scoped-test-surface.sh"),
+            "#!/bin/bash\nsleep 30\nprintf '%s\\n' 'SCOPED_PROOF_TARGET_ARGS: --test late_target'\n",
+        )
+        .unwrap();
+        let bound = std::time::Duration::from_millis(300);
+        let changed = vec!["cas-cli/src/hub.rs".to_string()];
+
+        let started = std::time::Instant::now();
+        let unresolved = resolve_scoped_proof_targets_without_cache(repo, repo, &changed, bound)
+            .expect_err("a checker past its bound must not resolve targets");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "the checker escaped its bound: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            unresolved.contains("SCOPED PROOF SURFACE UNRESOLVED")
+                && unresolved.contains("1 changed path(s)"),
+            "{unresolved}"
+        );
+
+        let started = std::time::Instant::now();
+        assert_eq!(proof_validation_targets_within(repo, repo, None, bound), None);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "the suggestion run escaped its bound: {:?}",
+            started.elapsed()
+        );
+    }
+
     #[test]
     fn consolidated_inventory_repairs_legacy_checker_and_fallback_targets_cas_d1ee() {
         let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
@@ -3735,7 +3833,8 @@ mod risk_proof_tests {
             "cas-cli/tests/distributed_factory_test.rs".into(),
         ];
         let mut cache = ScopedProofTargetCache::default();
-        let required = required_scoped_proof_targets(repo, target.path(), &changed, &mut cache);
+        let required =
+            required_scoped_proof_targets(repo, target.path(), &changed, &mut cache).unwrap();
         assert_eq!(required, ["integration_cloud", "integration_factory"]);
         assert_eq!(
             std::fs::read_to_string(repo.join("checker-paths.txt")).unwrap(),
@@ -8696,13 +8795,23 @@ impl CasCore {
                 && delivered_tip.as_deref().is_some_and(|tip| {
                     commit_is_merged_into_parent(proof_repo, tip, &resolved_parent_branch)
                 });
+            let closing_epic = task.task_type == TaskType::Epic;
             let build_proofs = close_build_proofs(
                 is_factory_worker,
                 assembly_proof.is_some(),
                 merged_epic_child,
+                closing_epic,
             );
             if build_proofs == BuildProofs::DeferredToAssembly {
                 let reference = match (&assembly_proof, parent_epic.as_ref()) {
+                    // cas-74cb: the epic answers with its own assembly.
+                    _ if closing_epic => match assembly_proof_line(&task.notes) {
+                        Some(line) => format!("the epic's own latest {line}"),
+                        None => format!(
+                            "no passing ASSEMBLY_PROOF is recorded on {} itself; its build proof is the supervisor's assembly of the epic tip",
+                            task.id
+                        ),
+                    },
                     (Some((epic_id, line)), _) => format!("covered by {epic_id}'s {line}"),
                     (None, Some(epic)) => format!(
                         "pending the supervisor's ASSEMBLY_PROOF on {} (one build and test of the epic tip)",
@@ -8762,12 +8871,16 @@ impl CasCore {
                     build_proofs,
                     &mut scoped_proof_cache,
                 ) {
-                    let required_targets = required_scoped_proof_targets(
+                    // The cache already holds this result; an unresolved
+                    // surface is the refusal the gate just returned.
+                    let Ok(required_targets) = required_scoped_proof_targets(
                         proof_repo,
                         target_repo,
                         &changed_paths,
                         &mut scoped_proof_cache,
-                    );
+                    ) else {
+                        return Ok(Self::tool_error(scoped_error));
+                    };
                     if required_targets.is_empty() {
                         return Ok(Self::tool_error(scoped_error));
                     }

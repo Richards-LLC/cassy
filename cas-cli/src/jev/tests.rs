@@ -444,6 +444,7 @@ async fn jev_files_mock_http_globs_secrets_ignores_binary_and_hash_only() {
             &root,
             &FilesOptions {
                 paths: vec![
+                    dir.path().join("src/one.rs").to_string_lossy().into(),
                     "ignored.txt".into(),
                     ".env.local".into(),
                     "server.pem".into(),

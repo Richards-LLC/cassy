@@ -59,8 +59,15 @@ fn skipped(path: impl Into<String>, reason: &str) -> FileRow {
 }
 
 // Normalize without touching the filesystem; glob metacharacters remain literal.
-fn relative(root: &Path, supplied: &str) -> Option<PathBuf> {
+fn relative(root: &Path, supplied_root: &Path, supplied: &str) -> Option<PathBuf> {
     let input = Path::new(supplied);
+    // Preserve lexical secret components while accepting the supplied root
+    // through an OS alias (for example macOS /var -> /private/var).
+    let input = if input.is_absolute() {
+        input.strip_prefix(supplied_root).unwrap_or(input)
+    } else {
+        input
+    };
     let mut path = if input.is_absolute() {
         PathBuf::new()
     } else {
@@ -136,7 +143,7 @@ impl JevClient {
         let mut exact = BTreeSet::new();
         let mut directories = Vec::new();
         for supplied in &options.paths {
-            let Some(rel) = relative(&root, supplied) else {
+            let Some(rel) = relative(&root, project_root, supplied) else {
                 output.files.push(skipped(supplied, "outside project root"));
                 continue;
             };
@@ -168,7 +175,7 @@ impl JevClient {
         }
         let mut patterns = Vec::new();
         for supplied in &options.globs {
-            let Some(rel) = relative(&root, supplied) else {
+            let Some(rel) = relative(&root, project_root, supplied) else {
                 output.files.push(skipped(supplied, "outside project root"));
                 continue;
             };

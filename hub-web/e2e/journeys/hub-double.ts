@@ -134,6 +134,14 @@ export class HubDouble {
   private readonly sessionSocketsByMachine = new Map<string, Set<WebSocketRoute>>();
   /** Health pings the double answered, per machine. */
   readonly pongs = new Map<string, number>();
+  /**
+   * GET /v1/sessions answered, per machine (cas-9772). Every catalog the page
+   * renders arrives through one of these, so a journey bounds "the page shows
+   * the new catalog" by catalog fetches, not by wall-clock time.
+   */
+  readonly catalogFetches = new Map<string, number>();
+  /** GET /v1/machine answered, per machine: heartbeats and dial probes (cas-9772). */
+  readonly machineProbes = new Map<string, number>();
   /** Sockets that were open when their machine went down: half-open for good. */
   private readonly stalledSockets = new WeakSet<WebSocketRoute>();
   /** Machine sockets opened, per machine (multiplex). */
@@ -168,6 +176,40 @@ export class HubDouble {
     else setTimeout(callback, ms);
   }
 
+  /** Catalog fetches answered for one machine, or for every machine. */
+  catalogFetchCount(machineId?: string): number {
+    if (machineId !== undefined) return this.catalogFetches.get(machineId) ?? 0;
+    return [...this.catalogFetches.values()].reduce((sum, count) => sum + count, 0);
+  }
+
+  /**
+   * The machine's session list changed (cas-9772): announce it on its event
+   * stream, as the hub does, and resolve once the page has fetched the
+   * catalog again. Commander refetches the catalog on every machine event
+   * (connection.ts consumeEvents) with no deadline; waiting for the 5 s
+   * heartbeat instead, whose fetch aborts after 3 s, is what timed out on a
+   * loaded CI host. A heartbeat fetch that lands first resolves this too.
+   *
+   * `session_added` and `pane_removed` are what the hub sends when sessions
+   * come and go; a `session_removed` would also file an Attention item,
+   * which these scaffolding changes must not leave behind.
+   */
+  async announceCatalog(machineId: string, change: { added?: string[]; removed?: string[] } = {}): Promise<void> {
+    const before = this.catalogFetchCount(machineId);
+    const events = [
+      ...(change.added ?? []).map((session) => ({ kind: "session_added", session })),
+      ...(change.removed ?? []).map((session) => ({ kind: "pane_removed", session })),
+    ];
+    if (!events.length) events.push({ kind: "session_added", session: "" });
+    for (const event of events) {
+      await this.page.evaluate(
+        ([host, data]) => (window as unknown as { __journeyMachineEvent: (host: string, data: string) => number }).__journeyMachineEvent(host, data),
+        [`${machineId}.test`, JSON.stringify(event)] as const,
+      );
+    }
+    await this.waitFor(() => this.catalogFetchCount(machineId) > before);
+  }
+
   /** Resolve on the next matching wire observation, with no polling sleeps. */
   waitFor(observed: () => boolean): Promise<void> {
     if (observed()) return Promise.resolve();
@@ -198,7 +240,19 @@ export class HubDouble {
       // errors the open ones; a stalled one just goes quiet.
       const down = new Set<string>();
       const streams = new Map<string, Set<ReadableStreamDefaultController<Uint8Array>>>();
-      const w = window as unknown as { __journeyOutage: (host: string, isDown: boolean, reset: boolean) => void };
+      const w = window as unknown as {
+        __journeyOutage: (host: string, isDown: boolean, reset: boolean) => void;
+        __journeyMachineEvent: (host: string, data: string) => number;
+      };
+      // cas-9772: a machine event on the open streams, as the hub announces
+      // a session list change. Returns how many streams carried it.
+      w.__journeyMachineEvent = (host, data) => {
+        let delivered = 0;
+        for (const controller of streams.get(host) ?? []) {
+          try { controller.enqueue(new TextEncoder().encode(`data: ${data}\n\n`)); delivered += 1; } catch { /* closed */ }
+        }
+        return delivered;
+      };
       w.__journeyOutage = (host, isDown, reset) => {
         if (isDown) down.add(host); else down.delete(host);
         if (isDown && reset) {
@@ -481,6 +535,8 @@ export class HubDouble {
       });
     }
     if (path === "/v1/machine") {
+      this.machineProbes.set(machineId, (this.machineProbes.get(machineId) ?? 0) + 1);
+      this.observed();
       const capabilities = ["session_index", "daemon_attach", "machine_events", ...(this.options.multiplex ? ["machine_multiplex_v2"] : [])];
       const defaultCli = this.options.launch?.[machineId]?.defaultCli;
       return route.fulfill({ json: { schema_version: 1, version: "journey-double", capabilities, ...(defaultCli ? { default_supervisor_cli: defaultCli } : {}) } });
@@ -509,7 +565,13 @@ export class HubDouble {
     }
     if (path === "/v1/sessions") {
       this.tickBooting(machineId);
-      return route.fulfill({ json: { freshness_threshold_secs: 30, sessions: this.sessionsFor(machineId) } });
+      const sessions = this.sessionsFor(machineId);
+      await route.fulfill({ json: { freshness_threshold_secs: 30, sessions } });
+      // Counted once the page has the answer, so a waiter that resumes on it
+      // never races the response it is waiting for.
+      this.catalogFetches.set(machineId, (this.catalogFetches.get(machineId) ?? 0) + 1);
+      this.observed();
+      return;
     }
     if (path === "/v1/launch/profiles") return route.fulfill({ json: this.options.launch?.[machineId]?.profiles ?? {} });
     if (path === "/v1/projects") {

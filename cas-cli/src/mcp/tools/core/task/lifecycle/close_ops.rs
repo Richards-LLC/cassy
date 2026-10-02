@@ -12405,11 +12405,12 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
                 Ok(None) => unreachable!("explicit no-code intent requires a proof"),
             };
         }
-        // Preserve branch-less local-only legacy stores. Their later
-        // zero-commit/proof gates still decide whether delivery is required.
+        // Preserve branch-less local-only legacy stores, including an
+        // unvalidated receipt on a per-task worktree branch (cas-8f1b).
+        // The receipt is not integration proof: later proof/verification
+        // gates still bind the delivery to that worktree's current head.
         if !origin_remote_configured(repo_path)
             && task.deliverables.factory_branch_anchor.is_none()
-            && attribution.receipt.is_none()
             && task.execution_note.as_deref() != Some("no-code")
         {
             return MergeStateGateOutcome::Proceed;

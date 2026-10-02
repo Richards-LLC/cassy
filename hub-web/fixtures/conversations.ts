@@ -3,7 +3,7 @@ import { ConversationList, groupConversationRows, type ConversationRow } from '.
 import { ConversationHistory } from '../src/conversation-history';
 import { ConversationView } from '../src/conversation-view';
 import { applyKeyboardViewport, conversationListState, conversationShellMarkup, conversationSkeletonMarkup, dressComposer, keyboardViewportHeight } from '../src/conversation-shell';
-import { applyMicState, composerMarkup, type MicState } from '../src/composer-markup';
+import { applyDraftNote, applyMicState, composerMarkup, type MicState } from '../src/composer-markup';
 import { syncContextRail } from '../src/context-rail';
 import { installAttentionObjects, renderAskObject, renderBlockerObject } from '../src/attention-objects';
 import { installAttachmentSheet } from '../src/attachment-sheet';
@@ -242,6 +242,10 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     // A phone composer mid-draft: the field holds text, the send pill is in the accent.
     reply(80, null, 'Rebased and pushed; nothing waiting.', 'answer', at(9, 30));
     draft = 'Cut 3.26.0 once the gate is green, then post the release notes.';
+  } else if (state === 'conversation-draft-too-long') {
+    // cas-adfc: a draft over the store's 64k bound; the composer says it will not survive a reload.
+    reply(80, null, 'Rebased and pushed; nothing waiting.', 'answer', at(9, 30));
+    draft = 'Release notes for 3.26.0, pasted whole. '.repeat(1_800);
   } else if (state === 'conversation-opening') {
     // cas-813a: the one opening line, while the first history page is on its way.
   } else if (state !== 'conversation') {
@@ -267,6 +271,7 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
   dressComposer(slot.querySelector<HTMLElement>('.message')!, supervisor, machine.project);
   applyMicState(slot.querySelector<HTMLButtonElement>('#message-mic')!, fixtureMicState(state));
   slot.querySelector<HTMLTextAreaElement>('#message-text')!.value = draft;
+  applyDraftNote(slot, state === 'conversation-draft-too-long');
   if (state === 'conversation-keyboard') {
     // A phone keyboard on a browser that ignores interactive-widget: the visual
     // viewport is 300px shorter than the layout one; the shell follows it and

@@ -1921,12 +1921,13 @@ mod tests {
         .unwrap();
         let mut config = FactoryConfig::default();
         config.merge_sweep_cwd = Some("web".to_owned());
+        let canonical_web = web.canonicalize().unwrap();
         let runner = resolve_sweep_runner(temp.path(), &SweepSettings::from(&config)).unwrap();
-        assert_eq!(runner.cwd, web);
+        assert_eq!(runner.cwd, canonical_web);
         config.merge_sweep_command = Some("echo configured".to_owned());
         let runner = resolve_sweep_runner(temp.path(), &SweepSettings::from(&config)).unwrap();
         assert_eq!(runner.kind, TestRunnerKind::Configured);
-        assert_eq!(runner.cwd, web);
+        assert_eq!(runner.cwd, canonical_web);
         config.merge_sweep_cwd = Some("../outside".to_owned());
         assert!(resolve_sweep_runner(temp.path(), &SweepSettings::from(&config)).is_err());
     }

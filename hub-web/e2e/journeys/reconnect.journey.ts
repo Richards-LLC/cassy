@@ -62,6 +62,11 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     await expect(composer).toHaveValue("");
     await expect(page.getByRole("log").locator(".conversation-held")).toHaveText("Waiting for the connection — sends when it's back");
     expect(hub.sends.filter((m) => m.text === "Are you there?")).toHaveLength(0);
+    // cas-5a8f: a send held in this browser is not supervisor execution: the
+    // thread does not say "working" beside "Waiting for the connection", on
+    // screen or to a screen reader.
+    await expect(page.getByRole("log").locator(".working")).toHaveCount(0);
+    expect(await page.getByRole("log").ariaSnapshot()).not.toContain("status: working");
     // The rail defers to the banner: no second, technical alarm about the same
     // drop, and whatever it does show counts the same in every place (cas-90d4).
     const rail = page.locator("#attention-panel");
@@ -92,6 +97,9 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     await expect.poll(() => hub.sends.filter((m) => m.text === "Are you there?").length, { timeout: 10_000 }).toBe(1);
     await expect(page.locator("#message-status")).toBeHidden();
     await expect(page.getByRole("log").locator(".conversation-held")).toHaveCount(0);
+    // cas-5a8f: once the held send is out on a live machine, the supervisor
+    // has it and the thread says it is working again.
+    await expect(page.getByRole("log").locator(".working")).toHaveCount(1);
     hub.deliverLatest(PELICAN);
     await expect(page.getByRole("log").getByText("Delivered")).toBeVisible();
     await page.waitForTimeout(1_000);

@@ -439,10 +439,19 @@ test("HUB-J12 network switch: a revoked pairing settles waiting sends and is nam
 // ATLAS alone reaches Needs pairing; the footer must use the same machine words.
 test("HUB-J12 network switch: single revoked machine stops promising reconnection (cas-f698)", async ({ page }) => {
   const { hub, clock, header } = await connected(page);
+  // cas-5a8f: a send the supervisor has, awaiting its reply, reads "working"
+  // while the machine is live...
+  await accepted(page, hub, "Before the pairing is revoked");
+  const working = page.getByRole("log").locator(".working");
+  await expect(working).toHaveCount(1);
   hub.refuseProofs("atlas", 1_000, "revoked", false);
   await hub.down("atlas", { sockets: "close" });
   await hub.up("atlas");
   await clock.advance(1_000);
   await expect(header).toHaveText(" · Needs pairing");
   await expect(page.locator("#hub-footer-badges .machine-badge-state")).toHaveText("Needs pairing");
+  // ...and not beside "Needs pairing": the page can no longer know, on screen
+  // or to a screen reader.
+  await expect(working).toHaveCount(0);
+  expect(await page.getByRole("log").ariaSnapshot()).not.toContain("status: working");
 });

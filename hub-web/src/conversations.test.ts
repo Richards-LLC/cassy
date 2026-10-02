@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { ConversationHistory, RECEIPT_REPLY_GRACE_MS, RECEIPT_TIMEOUT_MS } from "./conversation-history";
+import { ConversationHistory, RECEIPT_REPLY_GRACE_MS, RECEIPT_TIMEOUT_MS, supervisorWorking } from "./conversation-history";
 import { ConversationList, conversationRowMarkup, filterConversationRows, truncateConversationPreview, type ConversationRow } from "./conversation-list";
 import { ConversationView } from "./conversation-view";
 import { applePlatform, appearanceButtonMarkup, ATTACH_DISABLED_REASON, ATTACH_SUPPORTED, arrangeConversationShell, conversationNoMatchText, conversationSearchPlaceholder, conversationShellMarkup, dressComposer, fitMachineLine, hostMarkup, KEYBOARD_HINT_MEDIA_QUERY, paletteShortcutLabel } from "./conversation-shell";
@@ -594,5 +594,34 @@ describe("fitMachineLine (cas-71af, e918 QA F01)", () => {
     const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
     expect(css).toContain(".conversation-identity .host-where.machine-squeezed > :is(.host-machine, .host-sep) { display: none; }");
     expect(css).toContain(".thread .empty .proj2.machine-squeezed > :is(.proj2-machine, .proj2-sep) { display: none; }");
+  });
+});
+
+describe("supervisor working indicator (cas-5a8f)", () => {
+  const live = { phase: "live" };
+  it("a send held in this browser while the machine is unreachable is not supervisor execution", () => {
+    const history = new ConversationHistory();
+    history.hold("held", "supervisor", "Are you there?");
+    expect(history.hasPending(), "the held send still keeps its session listed").toBe(true);
+    expect(history.awaitingReply()).toBe(false);
+    expect(supervisorWorking(history, { phase: "backoff" }, false)).toBe(false);
+    expect(supervisorWorking(history, live, false), "held, so the supervisor has not seen it").toBe(false);
+    // Reconnected: the held send goes out, and now it awaits the supervisor.
+    expect(history.release("held")).toBe(true);
+    expect(supervisorWorking(history, live, false)).toBe(true);
+  });
+  it("a send that went out says working only while the machine is live and paired", () => {
+    const history = new ConversationHistory();
+    history.submit("sent", "supervisor", "Run the tests");
+    expect(supervisorWorking(history, live, false)).toBe(true);
+    for (const machine of [{ phase: "backoff" }, { phase: "dialing" }, { phase: "failed" }, undefined]) {
+      expect(supervisorWorking(history, machine, false), JSON.stringify(machine)).toBe(false);
+    }
+    expect(supervisorWorking(history, { phase: "live", authFailure: "revoked" }, false), "revoked pairing").toBe(false);
+  });
+  it("real pane output is independent evidence and keeps working", () => {
+    const history = new ConversationHistory();
+    expect(supervisorWorking(history, { phase: "backoff" }, true)).toBe(true);
+    expect(supervisorWorking(history, live, false), "nothing pending, no output").toBe(false);
   });
 });

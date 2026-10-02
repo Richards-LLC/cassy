@@ -37,6 +37,9 @@ use tempfile::TempDir;
 mod test_env_guard;
 use test_env_guard::TestEnvGuard;
 
+#[path = "fixtures/ci_check_run.rs"]
+mod ci_check_run;
+
 // =============================================================================
 // Fixtures (deliberately self-contained: cas-0a21 must not couple to the
 // shared worktree_surface_test helpers while cas-59c0 is editing that file)
@@ -194,7 +197,7 @@ struct DeliveryFixture {
     receipt: WorkerCompletionReceiptInput,
 }
 
-async fn arm_delivery(slug: &str, repo_host: &str) -> DeliveryFixture {
+async fn arm_delivery(slug: &str, repo_host: &str, env: &mut TestEnvGuard) -> DeliveryFixture {
     let repo = GitRepo::new();
     run_git(
         &[
@@ -206,6 +209,11 @@ async fn arm_delivery(slug: &str, repo_host: &str) -> DeliveryFixture {
         &repo.root,
     );
     let cas_root = init_cas_dir(&repo.root).expect("init CAS");
+    // Keep deliberate CI doubles (notably the red-override regression).
+    // Other target-CAS fixtures need explicit successful code validation.
+    if std::env::var_os(cas::github_issue_attach::GH_BIN_ENV).is_none() {
+        env.set(cas::github_issue_attach::GH_BIN_ENV, ci_check_run::green_ci(&cas_root));
+    }
     let artifact_root = cas_root.join("durable-artifacts");
     std::fs::write(
         cas_root.join("config.toml"),
@@ -424,7 +432,7 @@ fn assert_no_delivery_projection(fixture: &DeliveryFixture, state: WorkerDeliver
 async fn cas8d38_worktree_merge_records_observed_work_target_delivery() {
     // cas-bebc scopes worktree_merge to the caller's CAS_FACTORY_SESSION; the
     // test must not inherit the session of the shell that runs it (cas-31a3).
-    let _env = TestEnvGuard::temp_home();
+    let mut env = TestEnvGuard::temp_home();
     let repo = GitRepo::new();
     run_git(&["branch", "integration"], &repo.root);
     run_git(
@@ -432,6 +440,7 @@ async fn cas8d38_worktree_merge_records_observed_work_target_delivery() {
         &repo.root,
     );
     let cas_root = init_cas_dir(&repo.root).expect("init CAS");
+    env.set(cas::github_issue_attach::GH_BIN_ENV, ci_check_run::green_ci(&cas_root));
     std::fs::write(cas_root.join("config.toml"), "[worktrees]\nenabled = false\n")
         .expect("write config");
     let supervisor_id = "cas8d38-supervisor-session";
@@ -506,7 +515,7 @@ async fn delivery_merge_accepts_task_id_and_reaches_target_resolution() {
     let home = TempDir::new().expect("temp HOME");
     let mut env = TestEnvGuard::new();
     env.set("HOME", home.path());
-    let fixture = arm_delivery("taskidaccepted", "task-id-accepted").await;
+    let fixture = arm_delivery("taskidaccepted", "task-id-accepted", &mut env).await;
 
     assert_eq!(
         cas_store::get_latest_worker_delivery(&fixture.cas_root, &fixture.task_id)
@@ -550,7 +559,7 @@ async fn delivery_merge_rejects_unrelated_union_parameter_before_target_resoluti
     let home = TempDir::new().expect("temp HOME");
     let mut env = TestEnvGuard::new();
     env.set("HOME", home.path());
-    let fixture = arm_delivery("taskidrejectsother", "task-id-rejects-other").await;
+    let fixture = arm_delivery("taskidrejectsother", "task-id-rejects-other", &mut env).await;
     let supervisor_service = delivery_service(&fixture.cas_root, &fixture.supervisor_id);
     let mut merge = coord_req("worktree_merge");
     merge.id = Some(fixture.receipt.source_branch.clone());
@@ -598,7 +607,7 @@ async fn red_ci_worktree_merge_accepts_supervisor_override_end_to_end_cas_4150()
     // cas-9790: select the fake through Cassy's `CAS_GH_BIN` seam; process
     // PATH stays untouched (factory_mcp_ops_test PATH-isolation lint).
     env.set(cas::github_issue_attach::GH_BIN_ENV, &gh);
-    let fixture = arm_delivery("redcioverride", "red-ci-override").await;
+    let fixture = arm_delivery("redcioverride", "red-ci-override", &mut env).await;
     let supervisor_service = delivery_service(&fixture.cas_root, &fixture.supervisor_id);
     let merge_with = |supervisor_override: Option<bool>, reason: Option<&str>| {
         let mut merge = coord_req("worktree_merge");
@@ -682,7 +691,7 @@ async fn delivery_merge_refuses_target_drift_before_merge_as_recoverable_tip_cha
     let home = TempDir::new().expect("temp HOME");
     let mut env = TestEnvGuard::new();
     env.set("HOME", home.path());
-    let fixture = arm_delivery("driftbefore", "drift-before").await;
+    let fixture = arm_delivery("driftbefore", "drift-before", &mut env).await;
 
     // A concurrent actor commits on the reviewed target after approval.
     std::fs::write(fixture.repo.root.join("concurrent.txt"), "concurrent\n").unwrap();
@@ -724,7 +733,7 @@ async fn delivery_merge_refuses_target_drift_injected_between_preflight_and_merg
     let home = TempDir::new().expect("temp HOME");
     let mut env = TestEnvGuard::new();
     env.set("HOME", home.path());
-    let fixture = arm_delivery("driftduring", "drift-during").await;
+    let fixture = arm_delivery("driftduring", "drift-during", &mut env).await;
 
     let reviewed = fixture.receipt.target_sha.clone();
     assert_eq!(
@@ -796,8 +805,8 @@ async fn concurrent_deliveries_in_independent_repositories_remain_independent() 
     let mut env = TestEnvGuard::new();
     env.set("HOME", home.path());
 
-    let first = arm_delivery("indepone", "independent-one").await;
-    let second = arm_delivery("indeptwo", "independent-two").await;
+    let first = arm_delivery("indepone", "independent-one", &mut env).await;
+    let second = arm_delivery("indeptwo", "independent-two", &mut env).await;
 
     // Drift only the FIRST repository's target.
     std::fs::write(first.repo.root.join("concurrent.txt"), "concurrent\n").unwrap();

@@ -32,6 +32,9 @@ use tempfile::TempDir;
 mod test_env_guard;
 use test_env_guard::TestEnvGuard;
 
+#[path = "fixtures/ci_check_run.rs"]
+mod ci_check_run;
+
 /// cas-6a30: every test in this integration binary shares one process. Direct
 /// HOME/XDG_CONFIG_HOME mutation bypasses the canonical guard and can move the
 /// host registry between schema installation and strict store open.
@@ -99,7 +102,7 @@ fn test_env() -> TestEnvGuard {
         .canonicalize()
         .expect("canonical isolated worktree test HOME");
     let xdg = home.join("xdg");
-    TestEnvGuard::with_optional_vars(&[
+    let mut env = TestEnvGuard::with_optional_vars(&[
         ("HOME", home.to_str()),
         ("XDG_CONFIG_HOME", xdg.to_str()),
         // Close-time verification policy derives the factory harness from the
@@ -121,7 +124,11 @@ fn test_env() -> TestEnvGuard {
         ("CAS_SESSION_ID", None),
         ("CAS_FACTORY_SESSION", None),
         ("CAS_FACTORY_MODE", None),
-    ])
+    ]);
+    // cas-a9bd: code merges need successful code CI even when this fixture
+    // is testing worktree routing, cleanup or task authority instead of CI.
+    env.set(cas::github_issue_attach::GH_BIN_ENV, ci_check_run::green_ci(&home));
+    env
 }
 
 fn init_cas_dir(path: &Path, _env: &mut TestEnvGuard) -> anyhow::Result<PathBuf> {
@@ -960,8 +967,8 @@ async fn test_worktree_merge_succeeds_for_factory_worktree_when_system_a_disable
         "worktree_merge should report a successful merge.\nGot:\n{text}"
     );
     assert!(
-        text.contains("Merge policy: merge proceeded because CI is advisory."),
-        "successful worktree_merge must state the advisory CI policy.\nGot:\n{text}"
+        text.contains("Merge policy: merge proceeded on successful validation."),
+        "successful code worktree_merge must state its validation policy.\nGot:\n{text}"
     );
     assert!(
         text.contains("gh endpoint queried:") && text.contains("CI SHA:"),

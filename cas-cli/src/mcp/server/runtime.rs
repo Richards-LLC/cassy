@@ -769,9 +769,7 @@ pub(crate) fn resolve_mcp_serve_root() -> anyhow::Result<std::path::PathBuf> {
                 "resolve_mcp_serve_root: using CLAUDE_PROJECT_DIR"
             );
             return find_cas_root_from(&project_dir).map_err(|_| {
-                anyhow::anyhow!(
-                    "no Cassy store here (CLAUDE_PROJECT_DIR={dir}); run `cas init`"
-                )
+                anyhow::anyhow!("no Cassy store here (CLAUDE_PROJECT_DIR={dir}); run `cas init`")
             });
         }
         tracing::debug!(
@@ -1367,6 +1365,25 @@ pub async fn write_proxy_health_cache(cas_root: &std::path::Path, engine: &cmcp_
 #[cfg(test)]
 mod tests {
     #[tokio::test]
+    async fn cas_8095_team_only_startup_without_team_refuses_before_network() {
+        let server = wiremock::MockServer::start().await;
+        let temp = TempDir::new().unwrap();
+        let root = init_cas_dir(temp.path()).unwrap();
+        let mut config = crate::config::Config::load(&root).unwrap();
+        config.set("cloud.team_only", "true").unwrap();
+        config.save(&root).unwrap();
+        let mut cloud = CloudConfig::default();
+        cloud.endpoint = server.uri();
+        cloud.token = Some("synthetic-test-token".into());
+        cloud.save_to_cas_dir(&root).unwrap();
+        let error = tokio::task::spawn_blocking(move || super::startup_cloud_pull(&root))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("no active team"));
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+    #[tokio::test]
     async fn cas_8095_team_only_startup_makes_only_team_pull_calls() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1514,14 +1531,20 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        assert!(ordinary.contains("MCP upstream 'github' is absent: it is configured but not connected"));
+        assert!(
+            ordinary
+                .contains("MCP upstream 'github' is absent: it is configured but not connected")
+        );
         assert!(!ordinary.contains("proxy policy denied"));
         let delegated = engine
             .call_external_production_verification_tool(&caller, "viktor", "ask_viktor", None)
             .await
             .unwrap_err()
             .to_string();
-        assert!(delegated.contains("MCP upstream 'viktor' is absent: it is configured but not connected"));
+        assert!(
+            delegated
+                .contains("MCP upstream 'viktor' is absent: it is configured but not connected")
+        );
         assert!(!delegated.contains("proxy policy denied"));
 
         let audit = engine.policy_audit();

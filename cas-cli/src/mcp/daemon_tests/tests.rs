@@ -61,6 +61,15 @@ async fn cas_8095_team_only_daemon_makes_only_team_calls() {
             Some(r#"{"scope":"project"}"#),
         )
         .unwrap();
+    let store = SqliteStore::open(&root).unwrap();
+    let mut session = Session::new(
+        "cas-8095-session".into(),
+        temp.path().display().to_string(),
+        None,
+    );
+    session.started_at = chrono::Utc::now() - chrono::Duration::hours(1);
+    store.start_session(&session).unwrap();
+    assert_eq!(super::get_sessions_for_sync(&root, &queue).len(), 1);
     let daemon = EmbeddedDaemon::new(EmbeddedDaemonConfig {
         cas_root: root,
         index_code: false,

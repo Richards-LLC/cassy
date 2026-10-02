@@ -7140,6 +7140,13 @@ mod team_cmd_tests {
             "local writes must not enqueue personal project rows"
         );
         assert_eq!(queue.pending_for_team(team, 100, 5).unwrap().len(), 2);
+        let mut global = crate::types::Task::new("cas-held-global".into(), "held global".into());
+        global.scope = crate::types::Scope::Global;
+        crate::store::open_task_store(&root)
+            .unwrap()
+            .add(&global)
+            .unwrap();
+        assert_eq!(queue.pending(100, 5).unwrap().len(), 1);
         let root_bg = root.clone();
         tokio::task::spawn_blocking(move || {
             let cli = crate::cli::try_parse_from_with_wordmark(["cas", "--json", "cloud", "push"])
@@ -7151,7 +7158,9 @@ mod team_cmd_tests {
         })
         .await
         .unwrap();
-        assert!(queue.pending(100, 5).unwrap().is_empty());
+        let held = queue.pending(100, 5).unwrap();
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].entity_id, "cas-held-global");
         assert!(queue.pending_for_team(team, 100, 5).unwrap().is_empty());
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 3);
@@ -7178,6 +7187,54 @@ mod team_cmd_tests {
             CloudQueueArgs::try_parse_from(["queue", "--purge-team-owned", "--prune", "1"])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn cas_8095_queue_purge_handler_keeps_local_task_and_team_row() {
+        use clap::Parser;
+        let temp = TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        crate::cloud::set_canonical_id_in_config_toml(&root, "purge-team-only").unwrap();
+        let local = crate::store::open_task_store_local(&root).unwrap();
+        let mut task = crate::types::Task::new("cas-purge-kept".into(), "keep local".into());
+        task.origin_project = Some("purge-team-only".into());
+        local.add(&task).unwrap();
+        let queue = SyncQueue::open(&root).unwrap();
+        queue.init().unwrap();
+        queue
+            .enqueue(
+                crate::cloud::EntityType::Task,
+                "cas-purge-kept",
+                crate::cloud::SyncOperation::Upsert,
+                Some("{}"),
+            )
+            .unwrap();
+        queue
+            .enqueue_for_team(
+                crate::cloud::EntityType::Task,
+                "cas-purge-kept",
+                crate::cloud::SyncOperation::Upsert,
+                Some("{}"),
+                "team-1",
+            )
+            .unwrap();
+        let row = queue.pending(10, 5).unwrap().remove(0);
+        queue
+            .record_row_outcome(row.id, "rejected", Some("team_owned_project"))
+            .unwrap();
+        let cli = crate::cli::try_parse_from_with_wordmark([
+            "cas",
+            "--json",
+            "cloud",
+            "queue",
+            "--purge-team-owned",
+        ])
+        .unwrap();
+        let args = CloudQueueArgs::try_parse_from(["queue", "--purge-team-owned"]).unwrap();
+        execute_queue(&args, &cli, &root).unwrap();
+        assert!(queue.pending(10, 5).unwrap().is_empty());
+        assert_eq!(queue.pending_for_team("team-1", 10, 5).unwrap().len(), 1);
+        assert_eq!(local.get("cas-purge-kept").unwrap().title, "keep local");
     }
 
     #[test]

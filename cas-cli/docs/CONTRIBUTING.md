@@ -28,7 +28,10 @@ always runs when logged in.
 ### Team-only project sync
 
 Set `[cloud] team_only = true` in a project's `.cas/config.toml` after linking
-that project to a team with `cas cloud team set`. The default is `false`:
+that project to a team with `cas cloud team set`.
+The registered `cas config set cloud.team_only true` command sets the same key;
+`cas config get cloud.team_only` and reset/list use that configuration too.
+The default is `false`:
 team-eligible project tasks, dependencies, memories, rules, and skills keep
 their existing personal plus team queue behavior. With the opt-in enabled,
 those project rows use only the team queue. Global rows and private memories
@@ -39,6 +42,13 @@ an active team, sync refuses and `cas doctor` reports an error.
 The personal push API requires a project identity, so global and private rows
 from a team-only root remain queued rather than re-registering its retired
 personal project. `cas cloud status` and `cas doctor` show the held count.
+
+Standalone push/pull, the daemon cycle, and MCP startup use the same team-only
+scope policy. To remove stale personal outbox rows rejected by the server with
+`team_owned_project`, run `cas cloud queue --purge-team-owned`. It removes only
+personal rows with that exact structured rejection, keeps local entities and
+team queue rows, and makes no cloud calls. `--json` reports the purged count,
+scope and reason. This cleanup does not backfill or delete remote cloud data.
 
 ## Canonical install path
 

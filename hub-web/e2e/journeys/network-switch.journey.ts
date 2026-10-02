@@ -705,10 +705,11 @@ test("HUB-J12 network switch: an oversized stored waiting message is not sent af
   const { hub, clock, header, held } = await connected(page);
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
-  await page.evaluate(([key, target]) => {
-    const now = Date.now();
+  // Stamped from the journey's protocol clock, never the page's ambient Date.
+  const now = clock.now();
+  await page.evaluate(([key, target, now]) => {
     localStorage.setItem("cas-commander-conversation:sends:v1", JSON.stringify({ [key]: { value: [{ id: "planted", target, text: "x".repeat(2_000_000), state: "held", at: now, heldAt: now }], updatedAt: now } }));
-  }, [`atlas:${PELICAN}`, PELICAN] as const);
+  }, [`atlas:${PELICAN}`, PELICAN, now] as const);
   await page.reload();
   await chooseConversation(page);
   await expect(header).toHaveText(" · Live");

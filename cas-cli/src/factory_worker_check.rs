@@ -524,7 +524,7 @@ fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Res
                 crate::jev::failure::label(
                     &cas_root,
                     &repo,
-                    path,
+                    Some(path),
                     &summary,
                     "worker-check",
                     "HEAD^",

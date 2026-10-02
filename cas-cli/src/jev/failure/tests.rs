@@ -256,3 +256,73 @@ async fn failure_frozen_fixtures_use_evidence_only_and_accept_mock_labels() {
         assert!(label.contains(expected));
     }
 }
+
+#[test]
+fn failure_gate_row_annotations_leave_failure_and_exit_receipts_unchanged() {
+    let gate = include_str!("../../../../scripts/release-gate.sh");
+    let function = gate
+        .split_once("run_check() {")
+        .unwrap()
+        .1
+        .split_once("\nis_gate_check_id()")
+        .unwrap()
+        .0;
+    let dir = TempDir::new().unwrap();
+    for label in [
+        "Jev: host_or_toolchain_env (0.93)",
+        "Jev: real_regression (0.99)",
+        "",
+    ] {
+        let fixture = format!(
+            r#"
+set -euo pipefail
+row_selected() {{ return 0; }}
+row_cache_key() {{ return 1; }}
+cache_environment() {{ echo fixture-env; }}
+cache_input_hash() {{ echo fixture-input; }}
+print_result() {{ printf '%s %s\n' "$1" "$2"; }}
+broken_row() {{ echo 'first assertion failed'; return 7; }}
+cas() {{
+    [[ "$1 $2" == 'jev classify-failure' ]]
+    [[ "$*" == *'--source gate:fixture'* ]]
+    [[ "$*" == *'--base HEAD^ --head fixture-head'* ]]
+    if [[ -n "$FIXTURE_LABEL" ]]; then printf '%s\n' "$FIXTURE_LABEL"; else return 1; fi
+}}
+only_rows=fixture
+row_log_dir="$FIXTURE_DIR"
+tmp_dir="$FIXTURE_DIR"
+cache_head=fixture-head
+repo_root="$FIXTURE_DIR"
+cache_dir=''
+reuse_rows=false
+failures=()
+run_check() {{{function}
+run_check fixture 'fixture command' broken_row
+[[ "${{failures[*]}}" == fixture ]]
+grep -q 'first assertion failed' "$row_log_dir/fixture.log"
+awk -F '\t' '$7 != 7 {{ exit 1 }}' "$row_log_dir/timing.tsv"
+echo 'FAILURE PRESERVED: exit7'
+"#
+        );
+        let result = Command::new("bash")
+            .args(["-c", &fixture])
+            .env("FIXTURE_LABEL", label)
+            .env("FIXTURE_DIR", dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let output = String::from_utf8_lossy(&result.stdout);
+        assert!(output.contains("FAIL fixture"));
+        assert!(output.contains("exit status: 7"));
+        assert!(output.contains("FAILURE PRESERVED: exit7"));
+        if label.is_empty() {
+            assert!(!output.contains("Jev:"));
+        } else {
+            assert!(output.contains(label));
+        }
+    }
+}

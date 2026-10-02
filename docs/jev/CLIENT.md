@@ -79,3 +79,56 @@ callers or an error for strict callers.
 
 Release impact: new `cas jev ask|batch`, `jev` MCP tool and shared advisory
 library; integration into existing policy callers belongs to follow-up tasks.
+
+## Advisory failure classifier
+
+Sweeps, capped worker checks and release-gate failed rows ask the shared client
+for `real_regression`, `load_flake_or_timeout`, `host_or_toolchain_env`,
+`known_issue` or `unknown`, plus the probability that the failure explicitly
+mentions a code-derived touched path. Notices show, for example,
+`Jev: host_or_toolchain_env (0.93); touched-change mention=0.17 (advisory)`.
+Sweep task notes and their durable supervisor attention payload share the same
+annotation. A label never changes status, attribution, cache authorization,
+PASS receipts, merging, or release-gate exit codes.
+
+The internal shell entrypoint is plain text:
+
+```bash
+cas jev classify-failure --log failed-step.log --source gate:ci-script-tests \
+  --base previous-tip --head merged-tip
+```
+
+It prints nothing when configuration, transport, response or decision logging
+is unavailable. Older binaries also leave the gate's original failure intact.
+The classifier uses the configured shared client and its decision log, with a
+2-second evaluation/retry budget and a 1-second read-only Git path probe.
+Sweep evaluation runs off the daemon's async thread and once after mechanical
+attribution, rather than on every diagnostic replay. Worker progress remains
+streamed while a private regular-file capture supplies the failure block.
+
+A log preview reads at most 128 KiB from the head and 6 KiB from the tail. It
+preserves failing names, the first panic/assertion in those windows, and the
+step tail in at most 6 KiB of UTF-8 text. Touched paths are capped at 2 KiB.
+ANSI codes and common credential assignments are removed before evaluation;
+raw captures remain private. Setup failures use their current error only,
+not an earlier integration receipt. Local macOS realpath/flock hints are
+context, never authorization to skip a gate.
+
+The frozen cohort is `cas-cli/src/jev/fixtures/failures.json`, with exact
+provenance and limits. On 2026-10-02 the pinned `jev-1.13.0` client agreed on
+5/5: Mac 97/7 host (.83), PyYAML host (.97), flock host (.91), HUB-J9 load
+(1.00), unnamed sweep targets unknown (.78). The final case accepts unknown or
+host because the summary lacks the actual failing step. Expected diagnoses are
+excluded from inference state. This small operator/developer-labelled cohort
+measures these cases, not general calibration or correctness.
+
+Reproduce with a built client and an isolated output directory:
+
+```bash
+python3 docs/jev/scripts/evaluate_failures.py --cas-binary /path/to/cas \
+  --artifacts /path/to/evidence --key-file /path/to/dev-key
+```
+
+Omit `--key-file` to use the normal cloud login or an existing environment key.
+Answers, agreement, hash-only decision rows and inference states are recorded
+under that directory; credentials are never printed or persisted there.

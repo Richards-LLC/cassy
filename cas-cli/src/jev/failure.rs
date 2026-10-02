@@ -64,15 +64,20 @@ pub fn evidence(
         .copied()
         .collect::<Vec<_>>()
         .join("\n");
-    let diagnostic = lines
-        .iter()
-        .position(|line| {
-            let lower = line.to_ascii_lowercase();
-            lower.contains("panicked")
-                || lower.contains("assertion")
-                || lower.contains("error")
-                || lower.contains("timeout")
-                || lower.contains("requires")
+    let first_panic = lines.iter().position(|line| {
+        let lower = line.to_ascii_lowercase();
+        lower.contains("panicked") || lower.contains("assertion")
+    });
+    let diagnostic = first_panic
+        .or_else(|| {
+            lines.iter().position(|line| {
+                let lower = line.to_ascii_lowercase();
+                lower.contains("panicked")
+                    || lower.contains("assertion")
+                    || lower.contains("error")
+                    || lower.contains("timeout")
+                    || lower.contains("requires")
+            })
         })
         .map(|i| lines[i..(i + 8).min(lines.len())].join("\n"))
         .unwrap_or_default();
@@ -217,7 +222,7 @@ pub fn annotation(outcome: &Outcome) -> Option<String> {
 pub fn label(
     cas_root: &Path,
     repo: &Path,
-    log: &Path,
+    log: Option<&Path>,
     summary: &str,
     source: &str,
     base: &str,
@@ -227,7 +232,11 @@ pub fn label(
     if !client.config.enabled || client.transport.is_err() {
         return None;
     }
-    let state = log_evidence(source, log, summary, touched_paths(repo, base, head));
+    let touched = touched_paths(repo, base, head);
+    let state = match log {
+        Some(log) => log_evidence(source, log, summary, touched),
+        None => evidence(source, std::env::consts::OS, summary, touched),
+    };
     classify(&client, &state)
 }
 

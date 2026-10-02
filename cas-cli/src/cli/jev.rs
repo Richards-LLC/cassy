@@ -1,4 +1,4 @@
-//! JSON-only CLI parity for the Jev MCP and library client.
+//! JSON evaluation CLI plus the advisory operational-failure label helper.
 use crate::jev::JevClient;
 use anyhow::Context;
 use clap::{Args, Subcommand};
@@ -60,7 +60,7 @@ pub fn execute(command: &JevCommands, cas_root: &Path) -> anyhow::Result<()> {
         if let Some(label) = crate::jev::failure::label(
             cas_root,
             &std::env::current_dir()?,
-            &args.log,
+            Some(&args.log),
             "",
             &args.source,
             &args.base,

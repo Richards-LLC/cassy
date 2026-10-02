@@ -353,7 +353,7 @@ pub(super) fn execute(
             let label = crate::jev::failure::label(
                 cas_dir,
                 project_root,
-                &cas_dir.join(LOG_DIR).join("integration.json"),
+                None,
                 &error,
                 "sweep",
                 "HEAD^",
@@ -676,7 +676,7 @@ fn integrate(
         if let Some(label) = crate::jev::failure::label(
             &shared_cas,
             &worktree,
-            &result.log_path,
+            Some(&result.log_path),
             &sweep_detail(&result),
             "sweep",
             &base,

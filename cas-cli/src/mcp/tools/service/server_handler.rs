@@ -366,7 +366,7 @@ mod tests {
             std::future::pending::<()>().await;
         };
         assert!(tokio::time::timeout(std::time::Duration::from_millis(50), call).await.is_err());
-        let rows = service.inner.open_prompt_queue_store().unwrap().peek_all(10).unwrap();
+        let rows = crate::store::open_prompt_queue_store(&service.inner.cas_root).unwrap().peek_all(10).unwrap();
         let row = rows.iter().find(|row| row.target == "timeout-recipient").unwrap();
         let outcome = service.mutation_timeout_outcome("coordination", arguments.as_object());
         assert!(outcome.contains("COMMITTED"), "durable notification {} reported {outcome}", row.id);

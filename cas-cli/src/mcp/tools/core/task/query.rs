@@ -776,7 +776,70 @@ impl CasCore {
 
 #[cfg(test)]
 mod tests {
-    use super::task_show_notes;
+    use super::*;
+
+    fn list_request() -> TaskListRequest {
+        TaskListRequest {
+            limit: Some(500), scope: "project".into(), status: Some("open".into()),
+            task_type: None, label: None, assignee: None, epic: None,
+            sort: None, sort_order: None, include_foreign: false,
+        }
+    }
+
+    fn list_text(result: CallToolResult) -> String {
+        let rmcp::model::RawContent::Text(text) = &result.content[0].raw else {
+            panic!("task list must return text")
+        };
+        text.text.clone()
+    }
+
+    fn listed_ids(text: &str) -> std::collections::BTreeSet<String> {
+        text.lines().filter_map(|line| line.strip_prefix("- ["))
+            .map(|line| line.split(']').next().unwrap().to_string()).collect()
+    }
+
+    #[tokio::test]
+    async fn cas_4bd8_open_list_accounts_for_quarantined_mixed_rows_and_release() {
+        use crate::store::TaskStore;
+        use cas_types::TaskType;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let store = core.open_task_store().unwrap();
+        let queue = crate::cloud::SyncQueue::open(&root).unwrap();
+        queue.init().unwrap();
+        for index in 0..225 {
+            let mut task = cas_types::Task::new(format!("cas-row{index:03}"), "Mixed fixture".into());
+            task.task_type = [TaskType::Epic, TaskType::Chore, TaskType::Task,
+                TaskType::Bug, TaskType::Feature][index % 5];
+            store.create_atomic(&task, &[], (index > 0).then_some("cas-row000"), None).unwrap();
+            if index < 30 {
+                queue.quarantine_row(crate::cloud::QUARANTINE_TASK, &task.id, "fixture suppression").unwrap();
+            }
+        }
+        let conn = rusqlite::Connection::open(&root.join("cas.db")).unwrap();
+        let expected = conn.prepare("SELECT id FROM tasks WHERE status='open'").unwrap()
+            .query_map([], |row| row.get::<_, String>(0)).unwrap()
+            .collect::<Result<std::collections::BTreeSet<_>, _>>().unwrap();
+        assert_eq!(expected.len(), 225);
+        let hidden = queue.quarantined_ids(crate::cloud::QUARANTINE_TASK).unwrap();
+        let text = list_text(core.cas_task_list(Parameters(list_request())).await.unwrap());
+        assert_eq!(listed_ids(&text), expected.difference(&hidden).cloned().collect());
+        assert!(text.contains("30 quarantined tasks hidden"), "{text}");
+        assert_eq!(store.get("cas-row007").unwrap().status, TaskStatus::Open);
+        assert!(queue.release_quarantined_row(crate::cloud::QUARANTINE_TASK, "cas-row007").unwrap());
+        let text = list_text(core.cas_task_list(Parameters(list_request())).await.unwrap());
+        assert_eq!(listed_ids(&text).len(), 196);
+        assert!(listed_ids(&text).contains("cas-row007"));
+        assert!(text.contains("29 quarantined tasks hidden"), "{text}");
+        for id in hidden {
+            queue.release_quarantined_row(crate::cloud::QUARANTINE_TASK, &id).unwrap();
+        }
+        let text = list_text(core.cas_task_list(Parameters(list_request())).await.unwrap());
+        assert_eq!(listed_ids(&text), expected);
+        assert!(!text.contains("quarantined tasks hidden"));
+    }
 
     #[test]
     fn task_show_notes_pages_old_entries_but_keeps_newest_five() {

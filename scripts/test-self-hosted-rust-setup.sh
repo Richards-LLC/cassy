@@ -3,6 +3,11 @@
 # be able to start together without mutating the same rustup home concurrently.
 set -euo pipefail
 
+if [[ "$(uname -s)" == Darwin ]]; then
+    printf 'SKIP shared-home rustup fixture on Darwin: Linux flock is required to serialize the shared runner toolchain\n'
+    exit 0
+fi
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/cassy-rustup-setup.XXXXXX")"
 trap 'rm -rf "$fixture_root"' EXIT

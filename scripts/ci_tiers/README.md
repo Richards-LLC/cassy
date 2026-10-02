@@ -34,6 +34,9 @@ Linux cgroups, `/proc`, `flock` and `findmnt`/mountpoint semantics. On Darwin th
 executable suite reports these three cases as explicit skips, separately from
 passed cases; it still checks the scripts and fixtures are executable. Linux
 runs all three unchanged. Parsed cache policy contracts run on both platforms.
+The separate `test-self-hosted-rust-setup.sh` Make cohort fixture also reports
+an explicit Darwin skip because its Linux shared-toolchain concurrency contract
+requires `flock`; the production setup script and Linux fixture are unchanged.
 
 Both cancellation watchdogs run their full fixtures on macOS and Linux. They
 retain GNU `date -u -d` parsing when it succeeds and fall back to Python 3's

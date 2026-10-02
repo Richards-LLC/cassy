@@ -16,6 +16,7 @@ export const FIXTURE_NAMES = [
   "conversation-attachment", "conversation-empty", "conversation-composer", "conversation-keyboard",
   "conversation-sessions", "conversation-earlier", "conversation-dated", "conversation-clock-ahead", "conversations-sessions",
   "conversations-session-ended",
+  "conversation-needs-pairing",
   "fleet-populated",
   "fleet-empty",
   "session-canvas",

@@ -551,6 +551,16 @@ test("HUB-J12 network switch: a revoked pairing leaves no stored draft behind (c
     await expect(page.getByRole("textbox", { name: "Your message" })).toHaveValue("A private draft for Atlas and more");
     await clock.advance(15_000);
     expect(await stored()).not.toContain("atlas:");
+    // cas-b452 (journey F37): the list and the open conversation agree. Long
+    // past the catalog's freshness, the open conversation's row is still
+    // listed, open and marked Needs pairing; the list never empties beside it.
+    const list = page.getByRole("navigation", { name: "Choose a supervisor" });
+    const row = list.getByRole("button", { name: /cas-src/ });
+    await expect(row).toBeVisible();
+    await expect(row).toHaveAttribute("aria-current", "true");
+    await expect(row).toContainText("Needs pairing");
+    await expect(page.locator("#conversation-empty")).toBeHidden();
+    await expect(page.locator(".hub-footer-meta")).toContainText("1 conversation");
   });
 });
 
@@ -705,9 +715,11 @@ test("HUB-J12 network switch: re-pairing by code says plainly that starting sess
     await dialog.getByRole("button", { name: "Pair", exact: true }).click();
     await expect(dialog).toBeHidden();
     await expect(page.locator("#hub-footer-badges .machine-badge-state")).toHaveText("Connected", { timeout: 30_000 });
-    // Pairing lands on the machine; open its conversation again.
-    await chooseConversation(page);
+    // cas-b452 (journey F39): Re-pair was started from the cas-src
+    // conversation, so it lands back in it, live, with no click to find it again.
     await expect(header).toHaveText(" · Live", { timeout: 30_000 });
+    await expect(page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ })).toHaveAttribute("aria-current", "true");
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
   });
 
   await journey.stage("Told plainly that starting sessions needs allowing again, even after a reload (cas-093d)", async () => {

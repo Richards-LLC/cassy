@@ -46,7 +46,7 @@ import { toastPlacementInThread, toastTopAboveAction, toastTopClearOfBanner } fr
 import { absoluteTimestamp, relativeTimestamp } from "./time";
 import { loadPaneLayout, movePane, normalizePaneLayout, orderedPaneIds, promotePane, savePaneLayout, type PaneLayout, type PaneLayoutStorage } from "./pane-layout";
 import { detectSpeechInput, focusAfterDictation, SpeechDictationController, type SpeechInputCapability, type SpeechInputState } from "./speech-input";
-import { backLabel, clearStoredSelection, forgetMachine, goBackSelection, loadStoredSelection, pairedSessionToOpen, previousSelection, restorableSession, saveStoredSelection, selectSelection, sessionPickerEntries, sessionPickerHeadline, sessionPickerRowMeta, type SelectionState, type SessionPickerEntry, type SelectionStorage, type SessionSelection } from "./session-selection";
+import { backLabel, clearStoredSelection, forgetMachine, goBackSelection, loadStoredSelection, pairedSessionToOpen, previousSelection, restorableSession, saveStoredSelection, selectionAfterPairing, selectSelection, sessionPickerEntries, sessionPickerHeadline, sessionPickerRowMeta, type SelectionState, type SessionPickerEntry, type SelectionStorage, type SessionSelection } from "./session-selection";
 import { composerFocusWinner, planSupervisorSend, sendsOnEnter, supervisorMessage, supervisorTarget } from "./supervisor-message";
 import { hiddenWorkersLabel, saveWorkersRevealed, splitVisiblePanes, workersCommandLabel, workersRevealed, workersRoute } from "./worker-visibility";
 import { dormantCommandLabel, dormantRevealed, dormantRoute, saveDormantRevealed } from "./dormant-visibility";
@@ -786,6 +786,13 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       // cas-7752: a revoked pairing takes the operator's stored words with it.
       if (state.authFailure === "revoked") purgeMachineConversations(machine.id, { forgetInMemory: false });
       if (state.authFailure) {
+        // cas-b452 (journey F37): a refused pairing can't send a fresh catalog,
+        // so its last one must not expire into an empty list while its
+        // conversation stays open beside it. The rows stay, reading "Needs
+        // pairing", until the next catalog after Re-pair replaces them.
+        window.clearTimeout(catalogExpiryTimers.get(machine.id));
+        catalogExpiryTimers.delete(machine.id);
+        catalogExpiresAt.delete(machine.id);
         // The hub answered, so it is not "Reconnecting to hub" any more; the
         // pairing card below says what is wrong (cas-d15c QA F01).
         resolveAttention(`${machine.id}:hub_disconnected`);
@@ -1387,11 +1394,16 @@ async function pairMachine(form: HTMLFormElement): Promise<StoredMachine | false
   // again. A "live" report is not enough: the machine stream can come back
   // while every authenticated request is still refused.
   conversationPersistenceBlocked.delete(machine.id);
-  commitSelection({ machineId: machine.id });
+  // cas-b452 (journey F39): a re-pair started from an open conversation
+  // returns to that conversation, not to the landing page. A first pairing
+  // still lands on the new machine.
+  const landing = selectionAfterPairing(machine.id, previousScopes !== undefined, selectedMachineId === undefined ? undefined : { machineId: selectedMachineId, session: selectedSession });
+  const returnTo = landing.session === undefined ? undefined : { machineId: landing.machineId, session: landing.session };
+  commitSelection(landing);
   // A phone shows the list or one conversation, never both: with only the
   // machine selected it stays on the list, so its first live session opens
   // when the connection installed below first lists sessions (journey F8).
-  if (phoneLayout()) openAfterPairing = machine.id;
+  if (phoneLayout() && !returnTo) openAfterPairing = machine.id;
   // The installation seam: "Access saved" and the armed first-connection
   // announcement both precede the connection, so a hub that reports healthy
   // live synchronously still yields saved → connected, named from the machine
@@ -1402,6 +1414,8 @@ async function pairMachine(form: HTMLFormElement): Promise<StoredMachine | false
     startConnection: (installed) => { replaceMachineConnection(installed, connections, connectionStates, createConnection); },
   });
   render(false);
+  // The conversation re-attaches over the new pairing's connection.
+  if (returnTo?.machineId === machine.id) void attachSelectedSession(machine.id, returnTo.session);
   return machine;
 }
 

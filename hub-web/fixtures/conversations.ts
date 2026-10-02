@@ -108,7 +108,11 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
         ? { id: 'atlas-linux', label: 'Atlas', host: 'Atlas · Linux', projectDir: '/projects/gabber-studio', project: 'gabber-studio' }
       : { id: 'atlas-linux', label: 'Atlas', host: 'Atlas · Linux', projectDir: '/projects/cas-src', project: 'cas-src' };
   app.innerHTML = conversationShellMarkup({ selected, supervisor, projectDir: machine.projectDir, host: machine.host, machineId: machine.id, loaded: !loading, paired: !loading && !unpaired });
-  const listRows = loading || unpaired ? [] : sessions ? fixtureSessionRows() : state === 'conversations-sessions' || state === 'conversations-session-ended' ? fixtureManySessionRows() : fixtureConversationRows(selected);
+  // cas-b452: Atlas's pairing was revoked with its conversation open; its rows stay listed, reading Needs pairing.
+  const needsPairing = state === 'conversation-needs-pairing';
+  const listRows = loading || unpaired ? [] : sessions ? fixtureSessionRows() : state === 'conversations-sessions' || state === 'conversations-session-ended' ? fixtureManySessionRows()
+    : needsPairing ? fixtureConversationRows(selected).map((row) => row.machineId === 'atlas-linux' ? { ...row, connection: 'Needs pairing', interrupted: true } : row)
+    : fixtureConversationRows(selected);
   const conversationList = new ConversationList();
   const listNode = app.querySelector<HTMLElement>('#conversation-list')!;
   // Ending a session drops its row, as main.ts does once the hub confirms.
@@ -133,7 +137,9 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
       // cas-0739 QA round 1: a long machine name down; the footer state must
       // not collide with the label (phone) or squeeze it (desktop).
       ? orderPairedMachines(FIXTURE_MACHINES.map((machine) => machine.id === 'bench-1' ? { ...machine, label: 'Build Server Rack Seven Downstairs · Windows', connection: "Can't reach · retrying", connected: false, lastSeen: 'Not yet seen in this visit' } : machine))
-      : FIXTURE_MACHINES;
+      : needsPairing
+        ? orderPairedMachines(FIXTURE_MACHINES.map((machine) => machine.id === 'atlas-linux' ? { ...machine, connection: 'Needs pairing', connected: false } : machine))
+        : FIXTURE_MACHINES;
   // The list's empty line, exactly as main.ts renderConversationList sets it.
   const empty = app.querySelector<HTMLElement>('#conversation-empty')!;
   empty.hidden = listRows.length > 0;

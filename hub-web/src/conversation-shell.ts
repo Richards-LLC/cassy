@@ -93,9 +93,9 @@ export const composeFabMarkup = '<button id="compose-fab" class="compose-fab" ty
  * keeps its accessible name ("‹ Conversations", "Terminal view") the same at
  * every width. The project ellipsises (its title carries it whole) and the
  * host line ellipsises its machine · codename part while the connection state
- * after it stays visible. The codename has priority over the machine name
- * (journey F14, QA round 1 F01): the machine name ellipsises first, and
- * below 500px its OS word is dropped before that.
+ * after it stays visible. The machine name has priority over the generated
+ * codename (cas-766c): its OS word goes first, then the codename ellipsises
+ * and, with no room left, steps aside (fitMachineLine).
  */
 /** A machine label's trailing operating-system word, as in "Studio Mac · macOS". */
 const HOST_OS = /^(.*\S)(\s·\s(?:macOS|Linux|Windows|FreeBSD|OpenBSD|NetBSD|ChromeOS|iPadOS|iOS|Android|Ubuntu|Debian|Fedora|WSL))$/i;
@@ -333,21 +333,39 @@ export function conversationShellMarkup(model: ConversationShellModel): string {
 }
 
 /** Rehouse existing owned regions; retain terminal surfaces and composer APIs. */
+/** The room a machine name keeps on a "machine · codename" line, in ch (cas-766c). */
+export const MACHINE_KEEP_CH = 16;
+/** The least a codename shows before it steps aside for the machine, in ch (cas-766c). */
+export const CODENAME_KEEP_CH = 8;
+
 /**
- * cas-71af (e918 QA F01): a "machine · codename" line whose machine name cannot
- * keep a letter and its ellipsis (2ch) beside the whole codename drops the
- * machine and its separator instead of shrinking it to a glyph sliver; the
- * line's title still names it. `available` is the width the line may take.
- * Decided from widths that do not depend on the current state (the codename's
- * full width, the space on offer), so it never flips back and forth.
+ * Fit a "machine · codename" line to `available` px (cas-766c). The machine
+ * name is the one thing that says where a conversation runs, so it holds its
+ * place; the generated codename yields:
+ * 1. everything whole, if it fits;
+ * 2. else the machine's OS word goes ("Studio Mac · macOS" → "Studio Mac"),
+ *    so it is never cut mid-word;
+ * 3. the codename ellipsises (CSS), down to CODENAME_KEEP_CH, while the
+ *    machine keeps up to MACHINE_KEEP_CH;
+ * 4. with no room even for that, the codename and its separator step aside
+ *    and the machine ellipsises alone.
+ * The line's title always carries the whole "machine · codename". Decided
+ * from widths that don't depend on the current state, so it never flips.
  */
 export function fitMachineLine(line: HTMLElement | null | undefined, available: number): void {
   if (!line) return;
+  line.classList.remove("os-dropped", "codename-squeezed", "machine-long", "machine-squeezed");
   const codename = line.querySelector<HTMLElement>(":scope > .codename");
   const machine = line.querySelector<HTMLElement>(":scope > .host-machine, :scope > .proj2-machine");
-  if (!codename || !machine || !(available > 0)) { line.classList.remove("machine-squeezed"); return; }
+  if (!codename || !machine || !(available > 0)) return;
   const ch = parseFloat(getComputedStyle(codename).fontSize) * 0.6;
-  line.classList.toggle("machine-squeezed", codename.scrollWidth + 5 * ch > available + 1);
+  const separator = line.querySelector<HTMLElement>(":scope > .host-sep, :scope > .proj2-sep");
+  const gap = separator?.getBoundingClientRect().width || 3 * ch;
+  if (machine.scrollWidth + gap + codename.scrollWidth <= available + 1) return;
+  if (machine.querySelector(".host-os")) line.classList.add("os-dropped");
+  if (machine.scrollWidth > MACHINE_KEEP_CH * ch) line.classList.add("machine-long");
+  const kept = Math.min(machine.scrollWidth, MACHINE_KEEP_CH * ch);
+  if (kept + gap + Math.min(codename.scrollWidth, CODENAME_KEEP_CH * ch) > available + 1) line.classList.add("codename-squeezed");
 }
 
 /** The conversation header's host line, fitted to the room beside its connection state. */

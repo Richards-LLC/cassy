@@ -43,7 +43,7 @@ import { firstAttachRetry, machineConnection, sessionConnection } from "./sessio
 import { toastPlacementInThread, toastTopAboveAction, toastTopClearOfBanner } from "./toast-placement";
 import { absoluteTimestamp, relativeTimestamp } from "./time";
 import { loadPaneLayout, movePane, normalizePaneLayout, orderedPaneIds, promotePane, savePaneLayout, type PaneLayout, type PaneLayoutStorage } from "./pane-layout";
-import { detectSpeechInput, SpeechDictationController, type SpeechInputCapability, type SpeechInputState } from "./speech-input";
+import { detectSpeechInput, focusAfterDictation, SpeechDictationController, type SpeechInputCapability, type SpeechInputState } from "./speech-input";
 import { backLabel, clearStoredSelection, forgetMachine, goBackSelection, loadStoredSelection, pairedSessionToOpen, previousSelection, restorableSession, saveStoredSelection, selectSelection, sessionPickerEntries, sessionPickerHeadline, sessionPickerRowMeta, type SelectionState, type SessionPickerEntry, type SelectionStorage, type SessionSelection } from "./session-selection";
 import { composerFocusWinner, planSupervisorSend, sendsOnEnter, supervisorMessage, supervisorTarget } from "./supervisor-message";
 import { hiddenWorkersLabel, saveWorkersRevealed, splitVisiblePanes, workersCommandLabel, workersRevealed, workersRoute } from "./worker-visibility";
@@ -282,6 +282,8 @@ let speechDetectionStarted = false;
 let speechController: SpeechDictationController | undefined;
 let speechInputState: SpeechInputState = "idle";
 let speechInputDetail = "";
+/** Dictation wrote into the composer during the current listening run (cas-71f4). */
+let speechWroteThisRun = false;
 let messageDelivery: { session: string; target: string; clientRef: string } | undefined;
 /** The refused send whose text Edit put back in the composer (F6): the next
  * composer send in that thread is its edited version and retires it. */
@@ -2501,13 +2503,28 @@ function createSpeechController(capability: SpeechInputCapability): SpeechDictat
       if (!composer) return;
       composer.value = value;
       composer.setSelectionRange(messageDraftSelection, messageDraftSelection);
+      speechWroteThisRun = true;
       const delivery = document.querySelector<HTMLElement>("#message-delivery");
       if (delivery) delivery.hidden = true;
     },
     state: (next, detail = "") => {
+      const wasListening = speechInputState === "listening";
+      if (next === "listening" && !wasListening) speechWroteThisRun = false;
       speechInputState = next;
       speechInputDetail = detail;
       syncSpeechComposer();
+      // cas-71f4 (journey F21): listening stopped with new words: on a fine
+      // pointer the reply box takes focus, caret after them, to review and
+      // send without another click. A touch device keeps its focus, so the
+      // on-screen keyboard does not jump up unasked.
+      if (wasListening && next !== "listening" && speechWroteThisRun) {
+        speechWroteThisRun = false;
+        const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
+        if (composer && focusAfterDictation(window)) {
+          composer.focus({ preventScroll: true });
+          composer.setSelectionRange(messageDraftSelection, messageDraftSelection);
+        }
+      }
     },
     permissionDenied: () => {
       speechCapability = { mode: "typing", language: capability.language };
@@ -2999,6 +3016,12 @@ async function flushHeldSends(machine: StoredMachine, session: string): Promise<
   }
 }
 
+/** "the cas-src supervisor", never the generated codename (cas-71f4, journey F20). */
+function supervisorPhrase(machineId: string, session: string): string {
+  const project = projectTitle(visibleSessions(machineId).find((item) => item.name === session)?.project_dir);
+  return project ? `the ${project} supervisor` : "the supervisor";
+}
+
 function deliverSupervisorMessage(machine: StoredMachine, session: string, supervisor: string, text: string, replyTo?: number, retryOf?: string, editOf?: string): void {
   const clientRef = crypto.randomUUID();
   // Earlier sends still held go first: a new message must not overtake them.
@@ -3049,12 +3072,12 @@ function deliverSupervisorMessage(machine: StoredMachine, session: string, super
   messageDraft = composer?.value ?? "";
   messageDraftSelection = messageDraft.length;
   messageDelivery = { session: sessionKey(machine.id, session), target: supervisor, clientRef };
+  // cas-71f4 (journey F20): the bubble's own "Sending…" is the one sending
+  // signal; the composer no longer repeats it with the supervisor's codename.
   const delivery = document.querySelector<HTMLElement>("#message-delivery");
-  if (delivery) {
-    delivery.hidden = false;
-    delivery.textContent = `Sending to ${supervisor}…`;
-  }
-  if (hubPresentation === "terminal") toast(`Sending to ${supervisor}`);
+  if (delivery) { delivery.hidden = true; delivery.textContent = ""; }
+  // Terminal view has no bubble on screen, so it says so once, by project.
+  if (hubPresentation === "terminal") toast(`Sending to ${supervisorPhrase(machine.id, session)}`);
   // A phone operator usually has a second sentence; keep the caret where they
   // left it rather than dropping focus to the page body.
   composer?.focus();
@@ -3306,7 +3329,7 @@ function render(captureDraft = true): void {
     ...(controlReason ? { controlReason } : {}),
     ...(sendReason ? { sendReason } : {}),
     ...(composerStatus ? { messageStatus: { text: composerStatus.text, error: composerStatus.tone === "error" } } : {}),
-    ...(delivery ? { delivery: `Sending to ${delivery.target}…` } : {}),
+    // cas-71f4: no composer "Sending to <codename>…" line; the bubble says it.
     pairing: {
       ...(pairingStatus ? { status: pairingStatus } : {}),
       exchangeInFlight: pairingExchangeInFlight,

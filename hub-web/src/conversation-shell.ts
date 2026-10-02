@@ -144,8 +144,9 @@ const SEND_GLYPH = '<svg class="send-glyph" viewBox="0 0 20 20" fill="currentCol
  *
  * The field and the button lead with the project, never the generated
  * codename (journey F13): "Message the cas-src supervisor" and "Send". The
- * codename is an identifier, not a name to read in prose; the header shows it,
- * and the button's accessible name, "Send to <codename>", keeps it whole.
+ * codename is an identifier, not a name to read in prose; the header shows it.
+ * The button's accessible name names the project's supervisor too, "Send to
+ * the cas-src supervisor" (cas-71f4, journey F20).
  */
 export function dressComposer(composer: HTMLElement, supervisor?: string, project?: string): void {
   composer.classList.add("conversation-composer");
@@ -173,7 +174,7 @@ export function dressComposer(composer: HTMLElement, supervisor?: string, projec
   const button = composer.querySelector<HTMLElement>("#message-send");
   if (button) {
     button.classList.add("send");
-    button.setAttribute("aria-label", `Send to ${supervisor || "supervisor"}`);
+    button.setAttribute("aria-label", project ? `Send to the ${project} supervisor` : "Send to the supervisor");
     button.replaceChildren();
     button.insertAdjacentHTML("afterbegin", SEND_GLYPH);
     const text = composer.ownerDocument.createElement("span"); text.className = "send-label"; text.textContent = "Send";
@@ -183,12 +184,14 @@ export function dressComposer(composer: HTMLElement, supervisor?: string, projec
 
 /**
  * The composer's placeholder wordings, longest first: the project's
- * supervisor, then the project alone, then the role. Never the codename, and
+ * supervisor, then the role. Never the codename, and
  * never a name cut inside the text (cas-1e0f QA F02).
  */
 export function composerPlaceholders(project?: string): string[] {
   const name = project?.trim();
-  return name ? [`Message the ${name} supervisor`, `Message ${name}`, COMPOSER_ROLE_PLACEHOLDER] : [COMPOSER_ROLE_PLACEHOLDER];
+  // cas-71f4 (journey F20): no "Message <project>" step, which read as
+  // messaging the project itself; the role is the short wording.
+  return name ? [`Message the ${name} supervisor`, COMPOSER_ROLE_PLACEHOLDER] : [COMPOSER_ROLE_PLACEHOLDER];
 }
 
 export const COMPOSER_ROLE_PLACEHOLDER = "Message the supervisor";

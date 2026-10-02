@@ -203,3 +203,13 @@ export class SpeechDictationController {
     this.callbacks.state("idle");
   }
 }
+
+/**
+ * After dictation adds words, does the reply box take focus? Only on a
+ * device whose primary pointer is fine (a mouse or trackpad): there the
+ * operator reviews with the keyboard next. On touch, focusing would raise the
+ * on-screen keyboard unasked, so focus stays where it was (cas-71f4).
+ */
+export function focusAfterDictation(win: Pick<Window, "matchMedia">): boolean {
+  try { return win.matchMedia("(pointer: fine)").matches; } catch { return false; }
+}

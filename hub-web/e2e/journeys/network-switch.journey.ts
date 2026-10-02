@@ -719,20 +719,22 @@ test("HUB-J12 network switch: three unconfirmed messages read as one notice (cas
 // corrupted or foreign-written "waiting" message far over the store's size
 // bound is dropped on read: it is never shown as waiting and never sent on
 // the operator's behalf when the session is live.
-test("HUB-J12 network switch: an oversized stored waiting message is not sent after a reload (cas-8f19)", async ({ page }) => {
-  const { hub, clock, header, held } = await connected(page);
-  const errors: string[] = [];
-  page.on("pageerror", (error) => errors.push(error.message));
-  // Stamped from the journey's protocol clock, never the page's ambient Date.
-  const now = clock.now();
-  await page.evaluate(([key, target, now]) => {
-    localStorage.setItem("cas-commander-conversation:sends:v1", JSON.stringify({ [key]: { value: [{ id: "planted", target, text: "x".repeat(2_000_000), state: "held", at: now, heldAt: now }], updatedAt: now } }));
-  }, [`atlas:${PELICAN}`, PELICAN, now] as const);
-  await page.reload();
-  await chooseConversation(page);
-  await expect(header).toHaveText(" · Live");
-  await expect(held).toHaveCount(0);
-  await clock.advance(15_000); // a reattach and a receipt window later
-  expect(hub.sends, "nothing was sent on the operator's behalf").toHaveLength(0);
-  expect(errors).toEqual([]);
+test("HUB-J12 network switch: an oversized stored waiting message is not sent after a reload (cas-8f19)", journeyPart, async ({ page, journey }) => {
+  await journey.stage("An oversized stored waiting message is dropped on reload and never sent", async () => {
+    const { hub, clock, header, held } = await connected(page);
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    // Stamped from the journey's protocol clock, never the page's ambient Date.
+    const now = clock.now();
+    await page.evaluate(([key, target, now]) => {
+      localStorage.setItem("cas-commander-conversation:sends:v1", JSON.stringify({ [key]: { value: [{ id: "planted", target, text: "x".repeat(2_000_000), state: "held", at: now, heldAt: now }], updatedAt: now } }));
+    }, [`atlas:${PELICAN}`, PELICAN, now] as const);
+    await page.reload();
+    await chooseConversation(page);
+    await expect(header).toHaveText(" · Live");
+    await expect(held).toHaveCount(0);
+    await clock.advance(15_000); // a reattach and a receipt window later
+    expect(hub.sends, "nothing was sent on the operator's behalf").toHaveLength(0);
+    expect(errors).toEqual([]);
+  });
 });

@@ -16,6 +16,12 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
   const footer = page.locator("#hub-footer-badges");
   const banner = page.locator(".terminal-disconnected-banner");
   /** The thread as painted, top to bottom: day and session lines by text, message groups by their spoken label. */
+  /** The journey's own turns as painted, top to bottom (cas-eb4b). */
+  const SAID = ["Are you there?", "Are we back?", "Back. Nothing was lost."];
+  const turnOrder = () => page.getByRole("log").evaluate((log, said) => {
+    const text = log.textContent ?? "";
+    return said.map((line) => ({ line, at: text.indexOf(line) })).filter(({ at }) => at >= 0).sort((a, b) => a.at - b.at).map(({ line }) => line);
+  }, SAID);
   const threadOrder = () => page.locator(".msgs > *").evaluateAll((nodes) => nodes.filter((node) => node.matches(".day, .session-divider, [role=group]")).map((node) => node.getAttribute("role") === "group" ? node.getAttribute("aria-label") ?? "" : node.textContent ?? ""));
   let beforeOutage: string[] = [];
 
@@ -117,8 +123,14 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     await expect(page.getByRole("log").getByText("Back. Nothing was lost.")).toBeVisible();
     await expect(page.getByText("Terminal transport problem")).toHaveCount(0);
     beforeOutage = await threadOrder();
-    // The session line comes first in its session, above the message sent in it.
-    expect(beforeOutage.findIndex((line) => line.startsWith(`session ${PELICAN} started`))).toBeLessThan(beforeOutage.findIndex((line) => line.startsWith("You, ")));
+    // cas-eb4b: a session's own thread has no "session … started" line
+    // (cas-55a4), so the order is anchored on lines that exist: the day line
+    // heads the thread, and the turns stay in the order they were said.
+    expect(beforeOutage.filter((line) => line.startsWith("session ")), "no session line in the session's own thread").toEqual([]);
+    const today = beforeOutage.indexOf("Today");
+    expect(today, "the day line is painted").toBeGreaterThanOrEqual(0);
+    expect(today, "the day line comes before the first message").toBeLessThan(beforeOutage.findIndex((line) => line.startsWith("You, ")));
+    expect(await turnOrder(), "turns in the order they were said").toEqual(SAID);
   });
 
   await journey.stage("On a phone, the banner stays readable through an outage", async () => {
@@ -158,9 +170,11 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     await expect(banner).toBeHidden({ timeout: 15_000 });
     await page.emulateMedia({ colorScheme: null });
     // cas-1f13: the reconnect re-hydrates the thread from history, and every
-    // turn keeps its place: "Are we back?" stays below the session line.
+    // turn keeps its place: the day line still heads the thread and the held
+    // message stays above the ones sent after it (cas-eb4b).
     await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 30_000 }).toBe(true);
     await expect.poll(threadOrder, { message: "thread order after the reconnect" }).toEqual(beforeOutage);
+    await expect.poll(turnOrder, { message: "turns in the order they were said, after the reconnect" }).toEqual(SAID);
   });
 
   await journey.stage("In Terminal view, nothing claims all clear or live during an outage", async () => {

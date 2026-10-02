@@ -873,6 +873,7 @@ async function inspectVisualQa(options) {
   const screenshots = [];
   const journeyRuns = [];
   const seen = new Set();
+  let warnedUnownedTrace = false;
   try {
     for (const [urlIndex, url] of urls.entries()) {
       const source = inputUrls[urlIndex];
@@ -957,13 +958,17 @@ async function inspectVisualQa(options) {
             };
             const context = await browser.newContext({ storageState: options.storageState, extraHTTPHeaders: options.extraHTTPHeaders, colorScheme: scheme, viewport: { width: viewport.width, height: viewport.height } });
             const holds = [];
-            // Only publish traces owned by this harness, where we can scrub them.
+            // The Playwright runner may already own this context trace.
+            let tracing = false;
             try {
               await context.tracing.start({ screenshots: true, snapshots: true, title: `${journey.name} · ${state.name} · ${scheme} · ${viewport.name}` });
+              tracing = true;
             } catch {
-              await context.tracing.stop().catch(() => {});
-              await closeQaContext(context);
-              throw new Error('Visual QA requires a private trace; disable automatic tracing.');
+              run.trace = undefined;
+              if (!warnedUnownedTrace) {
+                console.warn(redactQaText('Warning: runner-owned trace is outside visual-qa and is not scrubbed.'));
+                warnedUnownedTrace = true;
+              }
             }
             const page = await context.newPage();
             try {
@@ -1006,7 +1011,7 @@ async function inspectVisualQa(options) {
               recordFinding({ type: 'journey-step-failed', selector: 'journey', elementPath: 'journey', reason: `${state.name}: ${redactQaText(error, options.secrets).split('\n')[0]}` });
             } finally {
               for (const release of holds) release();
-              await saveQaTrace(context, join(artifactDir, run.trace), { secrets: options.secrets }).catch(() => {
+              if (tracing) await saveQaTrace(context, join(artifactDir, run.trace), { secrets: options.secrets }).catch(() => {
                 run.trace = undefined;
                 recordFinding({ type: 'journey-trace-failed', selector: 'journey', elementPath: 'journey', reason: 'Could not publish a scrubbed trace.' });
               });

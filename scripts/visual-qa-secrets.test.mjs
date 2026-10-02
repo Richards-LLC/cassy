@@ -124,3 +124,39 @@ test('installed builtin uses the same safe capture implementation', async () => 
   const builtin = await readFile(new URL('../cas-cli/src/builtins/skills/cas-ui-craft/scripts/visual-qa.mjs', import.meta.url), 'utf8');
   assert.equal(root, builtin);
 });
+
+test('runner-owned tracing continues journeys with one safe warning and no harness trace', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'qa-runner-trace-'));
+  try {
+    const script = `
+      import * as qa from ${JSON.stringify(moduleUrl)};
+      const { playwright } = await qa.resolvePlaywright();
+      const launch = playwright.chromium.launch.bind(playwright.chromium);
+      playwright.chromium.launch = async options => {
+        const browser = await launch(options);
+        const newContext = browser.newContext.bind(browser);
+        browser.newContext = async options => {
+          const context = await newContext(options);
+          await context.tracing.start({ snapshots: true });
+          return context;
+        };
+        return browser;
+      };
+      const result = await qa.runVisualQa({
+        urls: [${JSON.stringify(new URL('./visual-qa-fixtures/clean.html', import.meta.url).pathname)}],
+        journey: { states: [{ name: 'first', steps: [{ wait: 1 }] }, { name: 'second', steps: [{ wait: 1 }] }] },
+        schemes: ['light'], viewports: ['390x800'], artifactDir: ${JSON.stringify(dir)},
+      });
+      if (result.journeyRuns.some(run => run.trace || run.steps.some(step => step.status !== 'ok'))) throw new Error('Journey did not complete without a harness trace');
+      console.log('runner fixture completed');
+    `;
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', timeout: 45000 });
+    assert.equal(child.status, 0, 'runner-owned tracing interrupted the journey');
+    assert.match(child.stdout, /runner fixture completed/);
+    assert.equal((child.stderr.match(/runner-owned trace/g) ?? []).length, 1);
+    assert.match(child.stderr, /not scrubbed/);
+    assert.equal(forbidden.test(child.stdout + child.stderr), false);
+    const { readdir } = await import('node:fs/promises');
+    assert.equal((await readdir(dir)).some(name => name.endsWith('.zip')), false);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

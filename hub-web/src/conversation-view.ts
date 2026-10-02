@@ -378,6 +378,8 @@ export class ConversationView {
   private pinPending = false;
   /** The thread's height at the last scroll or resize it saw (cas-16eed). */
   private lastHeight?: number;
+  /** The thread's content height at the last scroll it saw (cas-acb4b). */
+  private lastContentHeight?: number;
   private disposed = false;
   private resize?: ResizeObserver;
 
@@ -438,6 +440,12 @@ export class ConversationView {
         if (this.following) { this.pin(); return; }
       }
       this.lastHeight = height;
+      // A scroll that comes with a change of content height while following
+      // is layout (content grew, the browser re-anchored), not the reader.
+      const contentHeight = this.element.scrollHeight;
+      const grew = this.lastContentHeight !== undefined && contentHeight !== this.lastContentHeight;
+      this.lastContentHeight = contentHeight;
+      if (grew && this.following) { this.pin(); return; }
       this.following = shouldFollowTail(this.element);
       this.jump.hidden = this.following;
       this.scrolledTo = this.element.scrollTop;
@@ -453,6 +461,12 @@ export class ConversationView {
         if (this.following) this.pin();
       });
       this.resize.observe(this.element);
+      // cas-acb4b: the thread's content grows after it was pinned (file cards
+      // and late text layout finish after the first paint) while the scroll
+      // box keeps its size. Watching only the box left a thread that was
+      // following its tail a few exchanges above it, and the browser's next
+      // scroll-anchoring nudge then read as the reader scrolling away.
+      this.resize.observe(this.msgs);
     }
   }
 
@@ -504,6 +518,7 @@ export class ConversationView {
     }
     this.restorePlace();
     this.scrolledTo = this.element.scrollTop;
+    this.lastContentHeight = this.element.scrollHeight;
     this.notePlace();
     if (this.following && document.getSelection()?.isCollapsed !== false) this.pin();
     if (this.loadEarlierFocus && !loadingEarlier) this.restoreLoadEarlierFocus(document);
@@ -1228,6 +1243,7 @@ export class ConversationView {
   private pin(): void {
     this.element.scrollTop = this.element.scrollHeight;
     this.scrolledTo = this.element.scrollTop;
+    this.lastContentHeight = this.element.scrollHeight;
     this.jump.hidden = true;
     if (this.pinPending) return;
     this.pinPending = true;

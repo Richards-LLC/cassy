@@ -26,6 +26,28 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
     await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
     await expect(log.getByText("Yes. The gate is green on the release branch.")).toBeVisible();
     await expect(log.getByText("Is the release ready to cut?")).toBeVisible();
+    // cas-acb4b: the latest exchange is on screen at once, without Jump to latest.
+    const newest = log.getByText("Closing it after the notes go out.");
+    const jump = page.getByRole("button", { name: "Jump to latest" });
+    /** The thread sits at its tail: nothing below the newest turn is out of view. */
+    const atTail = () => page.evaluate(() => {
+      const thread = document.querySelector<HTMLElement>(".conversation-reading.thread")!;
+      return thread.scrollHeight - thread.clientHeight - thread.scrollTop <= 4;
+    });
+    await expect.poll(atTail, { message: "the thread opens at its latest turn" }).toBe(true);
+    await expect(newest).toBeInViewport();
+    await expect(jump).toBeHidden();
+    // File cards that finish their layout late (an image, a font) grow the
+    // thread after it was pinned to the tail. The thread keeps following it:
+    // the newest turn stays on screen and the reader is not marked as having
+    // scrolled away.
+    const late = await page.addStyleTag({ content: '.msgs a[data-artifact-id] { min-height: 180px; } .msgs [data-key] { min-height: 140px; }' });
+    await page.evaluate(() => new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(ok))));
+    expect(await atTail(), "late layout growth keeps the thread at its latest turn").toBe(true);
+    await expect(newest).toBeInViewport();
+    await expect(jump).toBeHidden();
+    // The rest of the journey reads the thread at its normal size.
+    await late.evaluate((node) => (node as Element).remove());
   });
 
   /** Top of the first thread item on screen: the line the reader is on. */

@@ -458,7 +458,7 @@ test("HUB-J12 network switch: a machine drop is told by the banner alone, and co
     // Control held before the drop is taken back, nothing having been sent.
     await expect.poll(() => leaseTakes.length).toBe(1);
     await expect(rail.getByText(transport)).toHaveCount(0);
-    await page.getByRole("button", { name: "Terminal view" }).click();
+    await page.locator("#conversation-terminal").click();
     const mode = page.locator(".mode-badge");
     await expect(mode).toHaveText("CONTROL");
     await expect(mode).toBeVisible();
@@ -467,7 +467,7 @@ test("HUB-J12 network switch: a machine drop is told by the banner alone, and co
 
 test("HUB-J12 network switch: in Terminal view a refused pairing leaves no 'connection dropped' toast behind (cas-7b31)", async ({ page }) => {
   const { hub, clock } = await connected(page, true);
-  await page.getByRole("button", { name: "Terminal view" }).click();
+  await page.locator("#conversation-terminal").click();
   await expect(page.locator(".mode-badge")).toHaveText("CONTROL");
   hub.refuseProofs("atlas", 1_000, "revoked", false);
   await hub.down("atlas", { sockets: "close" });

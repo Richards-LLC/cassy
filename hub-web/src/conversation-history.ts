@@ -129,6 +129,45 @@ export class ConversationHistory {
   private readonly dismissedAsks = new Set<number>();
   /** A durable stamp from this thread's machine has been seen in this browser's future. */
   private machineAhead = false;
+  /**
+   * When this browser first saw each turn (cas-8d52), by `r:<id>` / `s:<id>`,
+   * and the machine clock's measured lead. Kept across a reload so a rebuilt
+   * thread shows each turn at the time the visit showed it.
+   */
+  private readonly arrivals = new Map<string, number>();
+  /** Turns this page saw arrive live: only they measure the machine's lead. */
+  private readonly liveArrivals = new Set<string>();
+  private skewMs?: number;
+
+  /** Seed the times a previous visit recorded (cas-8d52). */
+  seedArrivals(arrivals: { skew?: number; at: Record<string, number> }): void {
+    for (const [key, at] of Object.entries(arrivals.at)) if (!this.arrivals.has(key)) this.arrivals.set(key, at);
+    if (this.skewMs === undefined && arrivals.skew !== undefined) this.skewMs = arrivals.skew;
+  }
+
+  /** What to keep for the next visit: the newest turns' times and the measured lead. */
+  arrivalsRecord(limit = 400): { skew?: number; at: Record<string, number> } {
+    const at: Record<string, number> = {};
+    for (const [key, value] of [...this.arrivals].sort(([, a], [, b]) => a - b).slice(-limit)) at[key] = value;
+    return { ...(this.skewMs === undefined ? {} : { skew: this.skewMs }), at };
+  }
+
+  /**
+   * The browser time a durable turn is shown at, at most `now`: the time this
+   * browser first saw it, else its stamp less the machine's measured lead, else
+   * `now` (cas-8d52). A stamp for a turn seen before refines the measured lead.
+   */
+  private arrivalFor(key: string, stamped: number | undefined, now: number): number {
+    const seen = this.arrivals.get(key);
+    if (seen !== undefined) {
+      if (stamped !== undefined && this.liveArrivals.has(key)) this.skewMs = stamped - seen;
+      return Math.min(seen, now);
+    }
+    const shown = stamped !== undefined && this.skewMs !== undefined ? Math.min(stamped - this.skewMs, now) : now;
+    // The time this visit shows it is the time the next visit shows it.
+    this.arrivals.set(key, shown);
+    return shown;
+  }
   private insert(event: ConversationEvent): void {
     const at = event.at ?? Number.POSITIVE_INFINITY;
     const index = this.events.findIndex((existing) => (existing.at ?? Number.POSITIVE_INFINITY) > at);
@@ -368,7 +407,7 @@ export class ConversationHistory {
         ...(message.reply_to === undefined ? {} : { replyTo: message.reply_to }),
       },
       at,
-      arrivedAt: now,
+      arrivedAt: this.arrivalFor(`s:${message.notification_id}`, at, now),
       session: message.session,
     });
   }
@@ -481,6 +520,9 @@ export class ConversationHistory {
     send.value.notificationId = receipt.notification_id;
     send.value.stamped = receipt.stamped;
     if (receipt.device_label) send.value.deviceLabel = receipt.device_label;
+    // cas-8d52: the time this message shows, for the thread a reload rebuilds.
+    const shown = send.shownAt ?? send.at;
+    if (shown !== undefined && Number.isFinite(shown) && !this.arrivals.has(`s:${receipt.notification_id}`)) { this.arrivals.set(`s:${receipt.notification_id}`, shown); this.liveArrivals.add(`s:${receipt.notification_id}`); }
     // A late receipt means it did go: a dismissed "failed" send is back in the thread as delivered.
     delete send.value.dismissed;
     send.value.state = this.events.some((event) => event.kind === "reply" && event.value.reply_to === receipt.notification_id) ? "replied" : "acknowledged";
@@ -642,6 +684,7 @@ export class ConversationHistory {
    * answer and read as already acknowledged.
    */
   receive(reply: OperatorReply, at: number = Date.now(), session?: string): void {
+    if (!this.arrivals.has(`r:${reply.notification_id}`)) { this.arrivals.set(`r:${reply.notification_id}`, at); this.liveArrivals.add(`r:${reply.notification_id}`); }
     const key = Math.max(at, this.latestAt());
     this.reply(reply, key, session, key === at ? undefined : at, at, "time", this.machineAhead);
   }
@@ -655,7 +698,7 @@ export class ConversationHistory {
       return;
     }
     this.observeStamp(stamped, now);
-    this.reply(live, stamped, reply.session, undefined, now, "durable");
+    this.reply(live, stamped, reply.session, undefined, this.arrivalFor(`r:${reply.notification_id}`, stamped, now), "durable");
   }
 }
 

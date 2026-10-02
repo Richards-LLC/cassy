@@ -309,7 +309,8 @@ function earlierSessionNode(document: Document, entry: EarlierSession, now: numb
   const list = document.createElement("ol"); list.className = "earlier-turns";
   for (const event of entry.events) {
     const item = document.createElement("li"); item.className = `earlier-turn ${event.kind === "send" ? "you" : "supervisor"}`;
-    const who = document.createElement("b"); who.textContent = event.kind === "send" ? (event.value.deviceLabel ? `You · ${event.value.deviceLabel}` : "You") : "Supervisor";
+    // cas-8d52: an earlier session's supervisor by its own codename.
+    const who = document.createElement("b"); who.textContent = event.kind === "send" ? (event.value.deviceLabel ? `You · ${event.value.deviceLabel}` : "You") : entry.session ? sessionCodename(entry.session) : "Supervisor";
     const time = document.createElement("time");
     if (event.at !== undefined && Number.isFinite(event.at)) {
       time.dateTime = new Date(event.at).toISOString();
@@ -785,9 +786,18 @@ export class ConversationView {
     this.unsent.setAttribute("aria-label", `Show ${noun}`);
   }
 
+  /**
+   * Who said a turn (cas-8d52, journey F13): a turn from another session
+   * than the one the thread is attached to is that session's, by its own
+   * codename, never the current supervisor's.
+   */
+  private speakerOf(session: string | undefined): string {
+    return session && this.history.currentSession !== undefined && session !== this.history.currentSession ? sessionCodename(session) : this.options.supervisor;
+  }
+
   private context(document: Document, turn: ThreadTurn, reply: OperatorReply, pinned = false): TurnRenderContext {
     const context: TurnRenderContext = {
-      document, turn, reply, supervisor: this.options.supervisor,
+      document, turn, reply, supervisor: this.speakerOf(turn.event.session),
       body: () => renderBody(document, reply, context),
       history: this.history,
       respond: this.options.respond,
@@ -966,7 +976,7 @@ export class ConversationView {
     const document = node.ownerDocument;
     const expanded = this.expanded.has(item.key);
     node.className = "turn coalesce-turn";
-    speaker(node, `${this.options.supervisor}, status`, item.time, item.clockAhead);
+    speaker(node, `${this.speakerOf(item.session)}, status`, item.time, item.clockAhead);
     const line = document.createElement("div"); line.className = "coalesce";
     line.id = `coalesce-${item.key.replace(/[^\w-]/g, "-")}`;
     line.dataset.count = String(item.count);
@@ -999,7 +1009,7 @@ export class ConversationView {
     node.className = `turn ${group.side === "you" ? "you" : "sup"}`;
     // F19 (cas-17e3): a screen reader hears who spoke and when, not bare
     // paragraphs and times. The visible time stays for sighted readers.
-    speaker(node, group.side === "you" ? "You" : this.options.supervisor, group.time, group.clockAhead);
+    speaker(node, group.side === "you" ? "You" : this.speakerOf(group.turns[0]?.event.session), group.time, group.clockAhead);
     // Bubbles are keyed too: a later turn re-derives the earlier one's corner
     // classes without replacing its node, so a selection or focus inside it
     // survives the update.

@@ -5,7 +5,7 @@ import "./styles.css";
 import { activityTime, ConversationList, filterConversationRows, groupConversationRows, plainActivity, type ConversationRow } from "./conversation-list";
 import { controlCommandCopy, sessionJumpCommandMarkup } from "./palette-commands";
 import { applyHistoryCursor, ConversationHistory, supervisorWorking } from "./conversation-history";
-import { draftStore, pendingSendStore, purgeConversations, type Draft, type PendingSend } from "./conversation-store";
+import { arrivalStore, draftStore, pendingSendStore, purgeConversations, type Arrivals, type Draft, type PendingSend } from "./conversation-store";
 import { loadDismissedAsks, saveDismissedAsks, type DismissedAsksStorage } from "./dismissed-asks";
 import { ConversationView, emptyActivityText } from "./conversation-view";
 import { applySheetSemantics, findByFocusKey, focusKey, layerAboveSheet, sheetFocusables, sheetKeydown } from "./attention-sheet";
@@ -138,6 +138,9 @@ function conversationHistory(key: string, session?: string): ConversationHistory
     history = new ConversationHistory();
     // Questions dismissed on an earlier visit stay dismissed when history replays them.
     for (const id of loadDismissedAsks(dismissedAskStorage(), key)) history.dismissAsk(id);
+    // cas-8d52: and every turn keeps the time the last visit showed it.
+    const seen = storedArrivals.get(key);
+    if (seen && !conversationPersistenceBlocked.has(key.slice(0, key.indexOf(":")))) history.seedArrivals(seen);
     conversationHistories.set(key, history);
   }
   if (session !== undefined) history.currentSession = session;
@@ -159,7 +162,7 @@ function conversationHistoryPage(key: string): { hasEarlier: boolean; nextBefore
   }
   return page;
 }
-function updateConversationViews(): void { for (const view of conversationViews.values()) view.update(); syncConversationContext(); persistPendingSends(); }
+function updateConversationViews(): void { for (const view of conversationViews.values()) view.update(); syncConversationContext(); persistPendingSends(); persistArrivals(); }
 // What the desktop context rail can show beyond the header (P10): the last
 // status and attention renders record whether they had anything for the open
 // thread; asks, blockers and attachments are read from its history.
@@ -2350,6 +2353,26 @@ const conversationDrafts: Map<string, Draft> = drafts.load();
  */
 const conversationPersistenceBlocked = new Set<string>();
 
+/**
+ * cas-8d52: when this browser first saw each turn, per conversation, so a
+ * reload rebuilds the thread at the times the visit showed (a machine whose
+ * clock runs ahead otherwise re-timed every turn to the reload).
+ */
+const arrivals = arrivalStore(conversationStorage);
+const storedArrivals: Map<string, Arrivals> = arrivals.load();
+const persistedArrivals = new Map<string, string>();
+
+function persistArrivals(): void {
+  for (const [key, history] of conversationHistories) {
+    if (conversationPersistenceBlocked.has(key.slice(0, key.indexOf(":")))) continue;
+    const record = history.arrivalsRecord();
+    const serialized = JSON.stringify(record);
+    if (persistedArrivals.get(key) === serialized) continue;
+    persistedArrivals.set(key, serialized);
+    arrivals.save(key, record);
+  }
+}
+
 /** Record (or, with no draft, forget) a conversation's draft, in memory and in storage. */
 function rememberDraft(key: string, draft: Draft | undefined): void {
   if (draft) conversationDrafts.set(key, draft); else conversationDrafts.delete(key);
@@ -2367,6 +2390,7 @@ function purgeMachineConversations(machineId: string, options: { forgetInMemory:
   conversationPersistenceBlocked.add(machineId);
   purgeConversations(conversationStorage, machineId);
   for (const key of [...storedSends.keys()]) if (key.startsWith(`${machineId}:`)) storedSends.delete(key);
+  for (const key of [...storedArrivals.keys()]) if (key.startsWith(`${machineId}:`)) storedArrivals.delete(key);
   if (options.forgetInMemory) {
     for (const key of [...conversationDrafts.keys()]) if (key.startsWith(`${machineId}:`)) conversationDrafts.delete(key);
   }
@@ -2380,7 +2404,7 @@ function rememberComposerDraft(): void {
 // Typing is stored as it happens, and once more as the page goes away, so a
 // reload between renders loses nothing.
 document.addEventListener("input", (event) => { if ((event.target as Element | null)?.id === "message-text") rememberComposerDraft(); });
-window.addEventListener("pagehide", () => { rememberComposerDraft(); persistPendingSends(); });
+window.addEventListener("pagehide", () => { rememberComposerDraft(); persistPendingSends(); persistArrivals(); });
 
 function captureMessageDraft(): void {
   rememberComposerDraft();

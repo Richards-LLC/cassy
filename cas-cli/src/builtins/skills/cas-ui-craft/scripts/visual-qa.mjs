@@ -2,7 +2,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { readFile, mkdir, writeFile, rm, mkdtemp } from 'node:fs/promises';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
@@ -862,6 +862,7 @@ async function inspectVisualQa(options) {
   const urls = inputUrls.map((url) => /^(?:file|https?):\/\//i.test(url) ? url : pathToFileURL(resolve(url)).href);
   const schemes = options.schemes || DEFAULT_SCHEMES;
   const viewports = (options.viewports || DEFAULT_VIEWPORTS).map(normalizeViewport);
+  if (!schemes.length || !viewports.length) throw new Error('No captures requested: at least one color scheme and viewport are required.');
   const allowlist = await loadAllowlist(options.allowlistPath);
   await mkdir(artifactDir, { recursive: true });
   const { playwright, version: playwrightVersion, source: playwrightSource } = await resolvePlaywright();
@@ -1024,6 +1025,7 @@ async function inspectVisualQa(options) {
   } finally {
     await browser.close();
   }
+  if (!screenshots.length) throw new Error('No captures produced; visual QA cannot pass without screenshots.');
   const result = redactQaValue({
     status: findings.length ? 'FAIL' : 'PASS',
     exitCode: findings.length && options.strict ? 1 : 0,
@@ -1065,9 +1067,10 @@ function parseArgs(argv) {
   return options;
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (process.argv[1] && existsSync(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
   const options = parseArgs(process.argv.slice(2));
   if (options.help || (!options.urls.length && !options.journey)) {
+    if (!options.help) console.error('No captures requested: at least one URL or journey is required.');
     console.log('Usage: npm exec --yes --package=playwright -- node scripts/visual-qa.mjs [--strict] [--artifact-dir DIR] [--allowlist FILE] [--journey FILE] [--scheme light|dark] [--viewport WIDTHxHEIGHT] [URL...]');
     process.exitCode = options.help ? 0 : 2;
   } else {

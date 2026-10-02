@@ -274,6 +274,9 @@ fn check_without_a_shared_root_fails_closed() {
 
 #[test]
 fn worker_read_only_and_non_build_commands_are_not_denied() {
+    // The explicit HookInput role exercises the Rust command guard. Ambient
+    // factory identity would additionally reject this fixture's /test Git cwd.
+    let _env = crate::test_support::TestEnvGuard::new();
     for command in [
         "cargo fmt --all -- --check",
         "rustfmt --edition 2024 --check --config skip_children=true src/lib.rs",
@@ -291,7 +294,7 @@ fn worker_read_only_and_non_build_commands_are_not_denied() {
         let out = handle_pre_tool_use(&input(command, "worker"), None).expect("handler ok");
         assert!(
             deny_reason(&out).is_none(),
-            "read-only/non-Rust command must not be denied: {command:?}"
+            "read-only/non-Rust command must not be denied: {command:?}: {out:?}"
         );
     }
 }

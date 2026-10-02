@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.45.0] - 2026-10-02
+
 ### Added — Jev decision support
 
 - Jev is available through the live Cassy cloud proxy using Cassy-login

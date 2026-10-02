@@ -5,7 +5,7 @@ import "./styles.css";
 import { activityTime, ConversationList, filterConversationRows, groupConversationRows, type ConversationRow } from "./conversation-list";
 import { controlCommandCopy, sessionJumpCommandMarkup } from "./palette-commands";
 import { ConversationHistory, supervisorWorking } from "./conversation-history";
-import { draftStore, purgeConversations, type Draft } from "./conversation-store";
+import { draftStore, pendingSendStore, purgeConversations, type Draft, type PendingSend } from "./conversation-store";
 import { loadDismissedAsks, saveDismissedAsks, type DismissedAsksStorage } from "./dismissed-asks";
 import { ConversationView, emptyActivityText } from "./conversation-view";
 import { applySheetSemantics, findByFocusKey, focusKey, layerAboveSheet, sheetFocusables, sheetKeydown } from "./attention-sheet";
@@ -159,7 +159,7 @@ function conversationHistoryPage(key: string): { hasEarlier: boolean; nextBefore
   }
   return page;
 }
-function updateConversationViews(): void { for (const view of conversationViews.values()) view.update(); syncConversationContext(); }
+function updateConversationViews(): void { for (const view of conversationViews.values()) view.update(); syncConversationContext(); persistPendingSends(); }
 // What the desktop context rail can show beyond the header (P10): the last
 // status and attention renders record whether they had anything for the open
 // thread; asks, blockers and attachments are read from its history.
@@ -716,6 +716,7 @@ watchPairingFragment(window, pendingPairingStore, (fragment) => {
 });
 
 function createConnection(machine: StoredMachine): HubConnectionSupervisor {
+  restoreStoredSends(machine);
   return new HubConnectionSupervisor(machine, {
     onState: (state) => {
       const wasLive = connectionStates.get(machine.id)?.phase === "live";
@@ -2302,6 +2303,7 @@ function rememberDraft(key: string, draft: Draft | undefined): void {
 function purgeMachineConversations(machineId: string, options: { forgetInMemory: boolean }): void {
   conversationPersistenceBlocked.add(machineId);
   purgeConversations(conversationStorage, machineId);
+  for (const key of [...storedSends.keys()]) if (key.startsWith(`${machineId}:`)) storedSends.delete(key);
   if (options.forgetInMemory) {
     for (const key of [...conversationDrafts.keys()]) if (key.startsWith(`${machineId}:`)) conversationDrafts.delete(key);
   }
@@ -2315,7 +2317,7 @@ function rememberComposerDraft(): void {
 // Typing is stored as it happens, and once more as the page goes away, so a
 // reload between renders loses nothing.
 document.addEventListener("input", (event) => { if ((event.target as Element | null)?.id === "message-text") rememberComposerDraft(); });
-window.addEventListener("pagehide", rememberComposerDraft);
+window.addEventListener("pagehide", () => { rememberComposerDraft(); persistPendingSends(); });
 
 function captureMessageDraft(): void {
   rememberComposerDraft();
@@ -2860,6 +2862,52 @@ function queueHeldSend(machine: StoredMachine, key: string, clientRef: string, s
   const queue = heldSends.get(key) ?? [];
   queue.push({ clientRef, supervisor, text, replyTo, expiry });
   heldSends.set(key, queue);
+}
+
+/**
+ * cas-e7b1: the operator's unsettled messages (held, unreceipted, not
+ * confirmed, not sent) are kept per conversation in the conversation store,
+ * so a reload or a discarded tab does not lose them. `storedSends` holds what
+ * the last page left until each machine's connection is set up here.
+ */
+const sendStore = pendingSendStore(conversationStorage);
+const storedSends: Map<string, PendingSend[]> = sendStore.load();
+/** What was last written per conversation, so an unchanged thread is not rewritten. */
+const persistedSends = new Map<string, string>();
+
+function persistPendingSends(): void {
+  for (const [key, history] of conversationHistories) {
+    // Not restored yet: writing now would replace what the last page left.
+    if (storedSends.has(key)) continue;
+    const machineId = key.slice(0, key.indexOf(":"));
+    const sends = conversationPersistenceBlocked.has(machineId) ? [] : history.pendingSends().map((send) => send.state === "held" ? { ...send, heldAt: heldSince.get(send.id) ?? send.at } : send);
+    const serialized = JSON.stringify(sends);
+    if (persistedSends.get(key) === serialized) continue;
+    persistedSends.set(key, serialized);
+    sendStore.save(key, sends);
+  }
+}
+
+/**
+ * Put the machine's messages from before the reload back in their threads.
+ * A held one goes out once, under its own client_ref, when its session is
+ * live, or turns Not sent when its wait (from when it was first held) is over.
+ */
+function restoreStoredSends(machine: StoredMachine): void {
+  const prefix = `${machine.id}:`;
+  const now = Date.now();
+  for (const [key, sends] of [...storedSends]) {
+    if (!key.startsWith(prefix)) continue;
+    storedSends.delete(key);
+    const history = conversationHistory(key);
+    for (const held of history.restorePending(sends, now)) {
+      const since = held.heldAt ?? held.at;
+      heldSince.set(held.id, since);
+      const remaining = HELD_SEND_MS - (now - since);
+      if (remaining <= 0) expireHeldSend(machine, key, held.id);
+      else queueHeldSend(machine, key, held.id, held.target, held.text, held.replyTo, remaining);
+    }
+  }
 }
 
 /**

@@ -1,4 +1,5 @@
 import type { ConversationHistoryMessage, ConversationHistoryReply, MessageQueued, OperatorReply } from "./types";
+import type { PendingSend } from "./conversation-store";
 
 /**
  * How long a live send waits for the hub's delivery receipt (MessageQueued)
@@ -44,7 +45,16 @@ export interface ConversationSend {
    * wire yet, so it goes out once (with its own client_ref) when the
    * session is back, or turns "Not sent" if it is not back in time (cas-0978). */
   held?: boolean;
+  /** Brought back from this browser's storage after a reload (cas-e7b1). */
+  restored?: boolean;
 }
+
+/**
+ * A restored "Not confirmed" message (cas-e7b1) is the same message as a
+ * durable history row with its target and text stamped no earlier than this
+ * before it went out: the machine's clock may run behind this browser's.
+ */
+export const RESTORED_MATCH_WINDOW_MS = 10 * 60_000;
 
 /**
  * Why an unanswered ask (or blocker) no longer waits on the operator
@@ -215,6 +225,58 @@ export class ConversationHistory {
     return true;
   }
 
+  /**
+   * The operator's messages that have not settled (cas-e7b1), to keep across a
+   * reload: held here, on the wire without a receipt, not confirmed, or not
+   * sent. Confirmed, answered, replaced and dismissed messages are not.
+   */
+  pendingSends(): PendingSend[] {
+    return this.events.flatMap((event): PendingSend[] => {
+      if (event.kind !== "send") return [];
+      const send = event.value;
+      if (send.notificationId !== undefined || send.dismissed || send.replaced) return [];
+      const state = send.held ? "held" : send.state === "sending" || send.state === "unconfirmed" || send.state === "error" ? send.state : undefined;
+      const at = event.shownAt ?? event.at;
+      if (!state || at === undefined || !Number.isFinite(at)) return [];
+      return [{
+        id: send.id, target: send.target, text: send.text, state, at,
+        ...(send.sentAt === undefined || send.held ? {} : { sentAt: send.sentAt }),
+        ...(send.replyTo === undefined ? {} : { replyTo: send.replyTo }),
+        ...(send.error === undefined ? {} : { error: send.error }),
+        ...(event.session === undefined ? {} : { session: event.session }),
+      }];
+    });
+  }
+
+  /**
+   * Put messages kept across a reload back in the thread (cas-e7b1), each once.
+   * A held message still waits: it has never left this browser, and the
+   * caller queues it to go out once. One that was on the wire without a
+   * receipt cannot be known to have arrived, so it comes back "Not confirmed"
+   * (never "Sending…" or delivered) and is not sent again by itself. A
+   * message that was not sent stays not sent. Returns the held ones.
+   */
+  restorePending(sends: PendingSend[], now: number = Date.now()): PendingSend[] {
+    const held: PendingSend[] = [];
+    for (const stored of sends) {
+      if (this.events.some((event) => event.kind === "send" && event.value.id === stored.id)) continue;
+      const value: ConversationSend = { id: stored.id, target: stored.target, text: stored.text, state: "sending", restored: true, ...(stored.replyTo === undefined ? {} : { replyTo: stored.replyTo }) };
+      if (stored.state === "held") {
+        value.held = true;
+        held.push(stored);
+      } else if (stored.state === "error") {
+        value.state = "error";
+        value.error = stored.error ?? "This message was not sent.";
+      } else {
+        value.state = "unconfirmed";
+        value.unconfirmedAt = now;
+        if (stored.sentAt !== undefined) value.sentAt = stored.sentAt;
+      }
+      this.insert({ kind: "send", value, at: stored.at, ...(stored.session === undefined ? {} : { session: stored.session }) });
+    }
+    return held;
+  }
+
   /** The latest stamp already in the thread; live events are placed at or after it. */
   private latestAt(): number {
     return this.events.reduce((max, event) => (event.at !== undefined && Number.isFinite(event.at) && event.at > max ? event.at : max), Number.NEGATIVE_INFINITY);
@@ -273,6 +335,25 @@ export class ConversationHistory {
       return;
     }
     const at = ConversationHistory.timestamp(message.at);
+    // cas-e7b1: a message restored as "Not confirmed" that the machine's
+    // history now shows did arrive. It becomes that row instead of a second
+    // copy of the message.
+    const restored = this.events.find((event) => event.kind === "send" && event.value.restored && event.value.state === "unconfirmed" && event.value.notificationId === undefined
+      && event.value.sentAt !== undefined && event.value.target === message.target && event.value.text === message.text
+      && (at === undefined || at >= event.value.sentAt - RESTORED_MATCH_WINDOW_MS));
+    if (restored?.kind === "send") {
+      const value = restored.value;
+      value.notificationId = message.notification_id;
+      value.state = message.state;
+      value.stamped = message.stamped;
+      value.deviceLabel = message.operator_label;
+      value.replyTo = message.reply_to ?? value.replyTo;
+      delete value.sentAt;
+      delete value.unconfirmedAt;
+      delete value.restored;
+      restored.session ??= message.session;
+      return;
+    }
     this.observeStamp(at, now);
     this.insertDurable({
       kind: "send",

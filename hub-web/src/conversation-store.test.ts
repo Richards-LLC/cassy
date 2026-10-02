@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ConversationStore, draftStore, purgeConversations, validDraft } from "./conversation-store";
+import { ConversationStore, draftStore, MAX_PENDING_SENDS, pendingSendStore, purgeConversations, validDraft, type PendingSend } from "./conversation-store";
 
 function memoryStorage(initial: Record<string, string> = {}) {
   const values = new Map(Object.entries(initial));
@@ -126,5 +126,33 @@ describe("purging stored conversations when a pairing goes (cas-7752)", () => {
     purgeConversations(storage, "atlas");
     expect(storage.values.size).toBe(0);
     expect(() => purgeConversations(undefined, "atlas")).not.toThrow();
+  });
+});
+
+describe("unsettled messages store (cas-e7b1)", () => {
+  const send = (id: string, extra: Partial<PendingSend> = {}): PendingSend => ({ id, target: "sup", text: `message ${id}`, state: "held", at: 1, ...extra });
+
+  it("keeps a conversation's unsettled messages in order, and an empty list removes them", () => {
+    const storage = memoryStorage();
+    pendingSendStore(storage).save("atlas:pelican", [send("a", { heldAt: 1, replyTo: 4, session: "pelican" }), send("b", { state: "unconfirmed", sentAt: 2 })]);
+    expect(pendingSendStore(storage).load().get("atlas:pelican")).toEqual([
+      { id: "a", target: "sup", text: "message a", state: "held", at: 1, heldAt: 1, replyTo: 4, session: "pelican" },
+      { id: "b", target: "sup", text: "message b", state: "unconfirmed", at: 1, sentAt: 2 },
+    ]);
+    pendingSendStore(storage).save("atlas:pelican", []);
+    expect(pendingSendStore(storage).load().size).toBe(0);
+  });
+
+  it("drops malformed messages, keeps the newest per conversation, and is purged with its machine", () => {
+    const storage = memoryStorage({
+      "cas-commander-conversation:sends:v1": JSON.stringify({ "atlas:s": { value: [send("ok"), { id: "no-text", target: "sup", text: " ", state: "held", at: 1 }, { ...send("bad-state"), state: "delivered" }, { ...send("no-at"), at: "soon" }], updatedAt: 1 } }),
+    });
+    expect(pendingSendStore(storage).load().get("atlas:s")?.map((kept) => kept.id)).toEqual(["ok"]);
+    const many = Array.from({ length: MAX_PENDING_SENDS + 5 }, (_, index) => send(`m${index}`));
+    pendingSendStore(storage).save("atlas:s", many);
+    expect(pendingSendStore(storage).load().get("atlas:s")?.map((kept) => kept.id)).toEqual(many.slice(-MAX_PENDING_SENDS).map((kept) => kept.id));
+    pendingSendStore(storage).save("studio:s", [send("studio")]);
+    purgeConversations(storage, "atlas");
+    expect([...pendingSendStore(storage).load().keys()]).toEqual(["studio:s"]);
   });
 });

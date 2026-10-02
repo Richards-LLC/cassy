@@ -8,6 +8,16 @@
 | Machine output | `--json`: one array of `{name, status, group, message, remediation, duration_ms, phase}`; nothing else on stdout. |
 | Omitted | Per-check timings, the slow-phase table, and instances beyond the first of a repeated finding — all under `--verbose`; detailed payload sections remain in the SessionStart references. |
 
+## GitHub origin diagnostic (cas-28c8)
+
+The `GitHub origin` integration row warns when GitHub resolves the explicit origin
+slug to a renamed repository, names both slugs, and supplies
+`git remote set-url origin https://github.com/<canonical>.git`. A failed bounded
+lookup says the origin could not be checked; it never claims the origin is current.
+Non-GitHub projects omit this check. The existing JSON check shape and renderer
+remain unchanged. Fresh terminal capture against the assembled binary belongs to
+the supervisor; named tests prove the warning, remedy and JSON row.
+
 ## Rendering decisions
 
 - The verdict word is the count of findings (`2 warnings`, `1 error`, `healthy`); the healthy

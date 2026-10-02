@@ -177,11 +177,16 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     // "Connecting…" forever; the footer counts it and its dot is not all-clear.
     await page.getByRole("button", { name: "‹ Conversations", exact: true }).tap();
     const footer = page.locator("#paired-machines-toggle");
-    await expect(footer).toContainText("5 connected");
+    // cas-0739 (journey F10): the footer names the machine that is down,
+    // not "5 connected", and the dialog opens with it on screen.
+    await expect(footer.locator(".machine-badge-state")).toHaveText("Shed NAS can't be reached");
     await expect(footer.locator(".pairing-dot")).toHaveClass("pairing-dot partial");
+    expect(await footer.evaluate((button) => button.scrollWidth <= button.clientWidth + 1), "the footer names it without overflowing").toBe(true);
     await footer.tap();
     const dialog = page.locator("#paired-machines-dialog");
-    await expect(dialog.getByText("Shed NAS · Linux")).toBeVisible();
+    await expect(dialog.locator('[data-machine-id="shed"] h3')).toBeInViewport({ ratio: 1 });
+    await expect(dialog.locator('[data-machine-id="shed"] .paired-machine-state')).toBeInViewport({ ratio: 1 });
+    await expect(dialog.locator(".paired-machine").first()).toHaveAttribute("data-machine-id", "shed");
     await expect(dialog).toContainText("Can't reach · retrying");
     await expect(dialog).not.toContainText("Connecting");
     // One clock, the thread's 24-hour one, and plain words for a version the

@@ -27,7 +27,7 @@ while IFS=$'\t' read -r run_id workflow_name head_branch run_status; do
     job_state="$(archive_job_state "$run_id")"
     IFS=$'\t' read -r job_status started_at <<<"$job_state"
     [[ "$job_status" == queued || "$job_status" == in_progress ]] || continue
-    if ! started_epoch="$(date -u -d "$started_at" +%s 2>/dev/null)"; then
+    if ! started_epoch="$(watchdog_timestamp_epoch "$started_at" 2>/dev/null)"; then
         printf 'skipping merge_group run=%s with invalid archive time=%s\n' "$run_id" "$started_at" >&2
         continue
     fi

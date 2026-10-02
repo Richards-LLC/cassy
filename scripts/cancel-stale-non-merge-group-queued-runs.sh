@@ -18,7 +18,7 @@ while IFS=$'\t' read -r run_id created_at event head_branch; do
     # cas-065a owns merge_group queue/orphan reclamation. Keeping that event
     # out of this broader stale-queue sweep prevents duelling cancellers.
     [[ "$event" != merge_group ]] || continue
-    if ! created_epoch="$(date -u -d "$created_at" +%s 2>/dev/null)"; then
+    if ! created_epoch="$(watchdog_timestamp_epoch "$created_at" 2>/dev/null)"; then
         printf 'skipping queued run=%s with invalid created_at=%s\n' "$run_id" "$created_at" >&2
         continue
     fi

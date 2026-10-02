@@ -298,9 +298,9 @@ fn lookup_branch_ci(branch: &str, target: &str, cwd: &Path) -> BranchCiLookup {
         Ok(repo) => repo.canonical,
         Err(reason) => {
             return BranchCiLookup {
-                state: BranchCiState::CodeValidationUnconfirmed {
-                    sha: code_sha.unwrap_or(tip),
-                    reason,
+                state: match code_sha {
+                    Some(sha) => BranchCiState::CodeValidationUnconfirmed { sha, reason },
+                    None => BranchCiState::Unknown { sha: tip, reason },
                 },
                 repo: None,
             };
@@ -4468,6 +4468,16 @@ mod tests {
         let requests = std::fs::read_to_string(repo.path().join("canonical-requests.log")).unwrap();
         assert_eq!(requests.lines().count(), 1, "{requests}");
         assert!(!requests.contains("api"), "{requests}");
+        let (docs, _, tip) = delivery_ci_fixture(false, None);
+        let gh = docs.path().join("gh-fixture");
+        std::fs::write(&gh, "#!/bin/sh\nexit 1\n").unwrap();
+        env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
+        let lookup = super::lookup_branch_ci("factory/ci-fixture", "main", docs.path());
+        assert_eq!(admit_branch_ci(&lookup.state, false, None), Ok(false));
+        let receipt = super::describe_branch_ci_lookup("factory/ci-fixture", &lookup);
+        assert!(receipt.contains(&format!("CI SHA: {tip}")), "{receipt}");
+        assert!(receipt.contains("CI state unknown"), "{receipt}");
+        assert!(!receipt.contains("code validation not confirmed"), "{receipt}");
     }
 
     #[test]

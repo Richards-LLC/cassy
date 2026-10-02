@@ -13,9 +13,13 @@ const FORGE: Machine = {
 };
 
 test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => {
-  // Eight stages, two searches and the palette: under a loaded factory host it
-  // ran at the project's 60 s budget (QA N01/N3), so it gets its own headroom.
-  test.setTimeout(120_000);
+  // Fourteen stages, two searches, three page loads and the palette. On a
+  // quiet host the test takes about 72 s (50 s of stages); on the loaded
+  // merge-queue host its passing runs took up to 2.2 min and 6 of 10 at
+  // --workers=2 ran past a 120 s budget in the late palette stages (cas-dff1).
+  // Every wait inside is event-driven (hub double, DOM, page clock), so the
+  // whole-test budget is sized from that loaded runtime with headroom.
+  test.setTimeout(240_000);
   const hub = await journey.hub({ machines: [ATLAS, STUDIO, FORGE], paired: ["atlas", "studio", "forge"] });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
   const search = page.getByRole("searchbox", { name: "Search conversations" });
@@ -295,7 +299,8 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     // Any render while the row has focus must leave the palette alone.
     hub.supervisorSays(OTTER, "Still here.", { kind: "status" });
     await expect(page.locator(".conversation-host")).toBeVisible();
-    await page.waitForTimeout(300);
+    // The render the update causes has happened (cas-dff1: on the turn itself, not 300 ms).
+    await expect(page.locator(".thread")).toContainText("Still here.");
     await expect(filter).toHaveValue(PELICAN);
     await expect(row).toBeFocused();
     await page.keyboard.press("Enter");

@@ -18,7 +18,7 @@ import { LaunchSheet, type LaunchHost, type LaunchResult } from "../src/launch-s
 import type { GhosttyCell, GhosttyColor, GhosttyRow } from "../src/terminal/ghostty/core";
 
 export const FIXTURE_NAMES = [
-  "paired-machines", "conversations-list", "conversation", "conversation-replied", "conversation-error",
+  "paired-machines", "paired-machines-down", "conversations-list", "conversation", "conversation-replied", "conversation-error",
   "conversation-thread", "conversation-evidence",
   "conversation-ask", "conversation-ask-answered", "conversation-blocker", "conversation-pairs",
   "conversation-attachment", "conversation-empty", "conversation-composer", "conversation-keyboard",
@@ -539,5 +539,5 @@ function renderShell(): void {
   }
 }
 
-if (fixtureName.startsWith("conversation") || fixtureName === "paired-machines") renderConversationFixture(app, fixtureName);
+if (fixtureName.startsWith("conversation") || fixtureName === "paired-machines" || fixtureName === "paired-machines-down") renderConversationFixture(app, fixtureName);
 else renderShell();

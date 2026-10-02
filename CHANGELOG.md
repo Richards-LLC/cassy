@@ -15,12 +15,22 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **DRAFT PENDING — cas-7555:** `cas jev ask` / `batch`, the `jev` MCP tool,
   advisory unavailable results and a decision log. Confirm final commands,
   configuration, transport behavior and tests from the delivered client.
-- **DRAFT PENDING — cas-9add:** Jev triage evaluation. Fill both runs' agreement,
-  held-out results, confidence buckets, cost, latency and retrieval limitations
-  from the completed report; do not present the preliminary run as final.
 - **DRAFT PENDING — cas-63fa:** the builtin `cas-jev` skill and triage recipe.
   Confirm shipped harness catalogs, final question set and confidence policy
   after the client and evaluation land.
+
+### Added — Jev evaluation
+
+- A reproducible, two-run Jev triage report compares 172 reviewed tasks.
+  Overall agreement is 119/172 (69.19%) before wording tuning and 121/172
+  (70.35%) afterward; the held-out subset falls from 98/138 (71.01%) to 97/138
+  (70.29%). Tuned high-confidence agreement is 28/32 (87.50%), covering only
+  32 tasks. Estimated API cost totals $0.27674; median request latency is
+  193.3 ms / 180.1 ms and p95 is 287.8 ms / 276.6 ms across the two runs.
+  The report includes confusion matrices, all confidence buckets, the final
+  question set and retrieval failures. Its recommendation is human-reviewed
+  suggestions; this result does not establish an automatic-action threshold
+  or a general benefit from wording tuning.
 
 ### Fixed — proposed 3.45.0 scope
 
@@ -63,12 +73,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   decision audit; a supervisor override still cannot waive a measured blocker
   (PR #1092).
 
-### Conditional — include only after merge
-
-- **DRAFT PENDING — cas-bd00:** macOS release-gate portability. Confirm the final
-  ordered script cohort and target merge before adding a shipped item. The
-  proposed fix covers portable timestamp parsing, explicit Linux-only fixture
-  skips, native Bash installer behavior and exact-tree journey validation.
+- Release-gate scripts work on macOS with portable timestamp parsing, native
+  Bash installer handling and exact-tree journey validation. Linux-only
+  behavior fixtures explicitly skip on Darwin; Linux runner implementations
+  are unchanged. The 27-script Mac cohort and the full Mac Make wrapper pass;
+  this does not claim Linux execution from Mac-only evidence.
 
 ## [3.44.0] - 2026-10-02
 

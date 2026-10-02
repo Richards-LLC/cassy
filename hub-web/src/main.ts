@@ -2788,7 +2788,20 @@ function supervisorSendContext(text: string): Parameters<typeof planSupervisorSe
 const controlTakenAfterRefusal = new Set<string>();
 function noteControlTaken(machineId: string, session: string): void {
   const key = sessionKey(machineId, session);
-  if (leases.get(key)?.held_by_me) controlTakenAfterRefusal.add(key); else controlTakenAfterRefusal.delete(key);
+  if (leases.get(key)?.held_by_me) { controlTakenAfterRefusal.add(key); retireControlReleasedToast(); } else controlTakenAfterRefusal.delete(key);
+}
+
+/**
+ * cas-ca7f (cas-7b31 QA F01): control is held again, so a "Control released
+ * — …" toast from before (shown, or faded but still in the accessibility tree
+ * as a role=status) is no longer true. It says control is back where a toast
+ * is shown, and goes quiet otherwise.
+ */
+function retireControlReleasedToast(): void {
+  const shown = document.querySelector<HTMLElement>("#toast");
+  if (!shown?.textContent?.startsWith("Control released")) return;
+  if (hubPresentation === "terminal") toast("Control is back");
+  else { shown.classList.remove("visible"); shown.textContent = ""; }
 }
 
 async function takeControlForMessage(machine: StoredMachine, session: string): Promise<boolean> {

@@ -3608,6 +3608,11 @@ button.chip:disabled { cursor: default; }
 .conversation-unsent[hidden] { display: none; }
 .conversation-unsent svg.warn { width: 14px; height: 14px; flex: none; color: var(--crit-bg); }
 .conversation-unsent-show { color: var(--color-action); font-weight: var(--weight-semibold); }
+/* cas-ca7f: a chip for messages that were only not confirmed (they may well
+ * have arrived) takes the caution ink the thread uses for them; a chip with
+ * any message known not to be sent keeps the critical red above. */
+.conversation-unsent[data-tone="caution"] { border-color: var(--warn-text); }
+.conversation-unsent[data-tone="caution"] svg.warn { color: var(--warn-text); }
 .conversation-unsent:hover { background: var(--bg-hover); }
 /* A question that stopped waiting unanswered quiets like an answered one and says why. */
 .obj.t-a[data-retired] { box-shadow: var(--lift-sup); }

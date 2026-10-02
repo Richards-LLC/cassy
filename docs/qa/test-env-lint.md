@@ -4,8 +4,19 @@
 root Cargo workspace. It checks tracked files and untracked files that Git
 would admit. It tokenizes source without compiling or executing Rust.
 `release-gate.sh --fast-rows --base <commit>` and the full release gate require
-the `test-env` row. Fast mode still scans the whole workspace: the base controls
-the ratchet, rather than hiding unchanged helper definitions.
+the `test-env` row. Fast mode supplies `--changed-since <commit> --changed-paths`:
+it analyzes every Rust path in crates affected by changed or deleted Rust files,
+including untracked files. Keeping the entire affected crate preserves unchanged
+helper definitions and callers of changed helpers. A scripts-only or web-only
+lane analyzes no Rust paths. Lint implementation, baseline, or Cargo manifest
+changes require the full inventory. Without `--changed-paths`, the lint still
+scans the whole workspace.
+
+Fast mode runs the lint's fixture suite when its implementation or fixtures
+change. The full release gate always scans the whole workspace and runs that
+suite. Scoped admission checks stale baseline entries only in audited paths,
+including deleted sources; baseline growth and disposition checks retain their
+complete Git history comparison.
 
 Tests and test support that mutate the process environment or current directory
 must use the canonical `TestEnvGuard` setters (`set`, `remove`, and

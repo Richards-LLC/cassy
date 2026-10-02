@@ -3870,6 +3870,92 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn delivery_ci_fixture(code: bool, conclusion: Option<&str>) -> (TempDir, String, String) {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TempDir::new().unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(temp.path())
+                .args(["-c", "user.name=CI fixture", "-c", "user.email=ci@example.test"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(temp.path().join("README.md"), "base\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        git(&["switch", "-qc", "factory/ci-fixture"]);
+        if code {
+            std::fs::write(temp.path().join("validate.sh"), "exit 0\n").unwrap();
+            git(&["add", "."]);
+            git(&["commit", "-qm", "code delivery"]);
+        }
+        let code_sha = git(&["rev-parse", "HEAD"]);
+        std::fs::write(temp.path().join("README.md"), "docs tip\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "docs tip"]);
+        let tip = git(&["rev-parse", "HEAD"]);
+        let code_response = serde_json::json!({"check_runs": [{
+            "name": "Scoped Validation (factory/PR)",
+            "status": if conclusion.is_some() { "completed" } else { "in_progress" },
+            "conclusion": conclusion,
+            "html_url": "https://github.com/acme/cas/actions/runs/100"
+        }]}).to_string();
+        let docs_response = r#"{"check_runs":[{"name":"Docs Lint","status":"completed","conclusion":"success"},{"name":"Scoped Validation (factory/PR)","status":"completed","conclusion":"skipped"}]}"#;
+        let fake_gh = temp.path().join("gh-fixture");
+        std::fs::write(&fake_gh, format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$4\" >> gh-requests.log\ncase \"$4\" in\n*/{code_sha}/check-runs) cat <<'JSON'\n{code_response}\nJSON\n;;\n*/{tip}/check-runs) cat <<'JSON'\n{docs_response}\nJSON\n;;\n*) exit 97 ;;\nesac\n"
+        )).unwrap();
+        std::fs::set_permissions(&fake_gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (temp, code_sha, tip)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn docs_tip_cannot_mask_red_or_pending_delivery_code_cas_a9bd() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        for conclusion in [Some("failure"), None] {
+            let (repo, code_sha, tip) = delivery_ci_fixture(true, conclusion);
+            env.set(crate::github_issue_attach::GH_BIN_ENV, repo.path().join("gh-fixture"));
+            let state = super::lookup_branch_ci("factory/ci-fixture", repo.path());
+            assert!(admit_branch_ci(&state, false, None).is_err(), "{state:?}");
+            let receipt = describe_branch_ci_state("factory/ci-fixture", &state);
+            assert!(receipt.contains(&format!("CI SHA: {code_sha}")), "{receipt}");
+            assert!(!receipt.contains(&format!("CI SHA: {tip}")), "{receipt}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pure_docs_delivery_is_admitted_on_docs_lint_cas_a9bd() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let (repo, _, tip) = delivery_ci_fixture(false, None);
+        env.set(crate::github_issue_attach::GH_BIN_ENV, repo.path().join("gh-fixture"));
+        let state = super::lookup_branch_ci("factory/ci-fixture", repo.path());
+        assert_eq!(admit_branch_ci(&state, false, None), Ok(false));
+        let receipt = describe_branch_ci_state("factory/ci-fixture", &state);
+        assert!(receipt.contains("CI state: green"), "{receipt}");
+        assert!(receipt.contains("passed: Docs Lint"), "{receipt}");
+        assert!(receipt.contains(&format!("CI SHA: {tip}")), "{receipt}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn docs_tip_receipt_names_successful_delivery_code_cas_a9bd() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let (repo, code_sha, _) = delivery_ci_fixture(true, Some("success"));
+        env.set(crate::github_issue_attach::GH_BIN_ENV, repo.path().join("gh-fixture"));
+        let state = super::lookup_branch_ci("factory/ci-fixture", repo.path());
+        assert_eq!(admit_branch_ci(&state, false, None), Ok(false));
+        let receipt = describe_branch_ci_state("factory/ci-fixture", &state);
+        assert!(receipt.contains(&format!("CI SHA: {code_sha}")), "{receipt}");
+        assert!(receipt.contains("passed: Scoped Validation"), "{receipt}");
+    }
+
     #[test]
     fn mocked_branch_ci_lookup_distinguishes_no_pr_from_gh_failure() {
         let no_pr = lookup_branch_ci_with("factory/fox", "deadbeef", |_, _| {

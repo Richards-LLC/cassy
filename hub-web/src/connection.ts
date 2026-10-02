@@ -709,9 +709,11 @@ export class HubConnectionSupervisor {
         return;
       }
       await this.request("GET", "/v1/machine", undefined, AbortSignal.timeout(3_000));
+      const wasUnsteady = this.unsteady();
       this.missedHeartbeats = 0;
       this.lastHeartbeatAt = Date.now();
       this.transition("live", "live", { latencyMs: Math.round(performance.now() - started) });
+      if (wasUnsteady) this.releaseHeldMessages();
     } catch (error) {
       this.missedHeartbeats += 1;
       this.transition("live", "live", { reason: error instanceof Error ? error.message : "heartbeat failed" });
@@ -1255,11 +1257,36 @@ export class HubConnectionSupervisor {
     }
   }
 
+  /**
+   * Heartbeats are going unanswered on a machine that still reads live
+   * (cas-a6f0): the snapshot's `degraded`, the page's "Unsteady".
+   */
+  private unsteady(): boolean {
+    return this.lifecycle.phase === "live" && this.missedHeartbeats >= DEGRADED_AFTER_MISSED_HEARTBEATS;
+  }
+
+  /**
+   * Whether a supervisor message offered now would be held rather than put on
+   * the wire: a probe waits on a doubted socket, or the machine is unsteady.
+   */
+  holdsMessages(): boolean {
+    return this.probePingId !== undefined || this.unsteady();
+  }
+
+  /** Re-announce every live attach, so the page sends what it held (cas-0978, cas-a6f0). */
+  private releaseHeldMessages(): void {
+    for (const [session, snapshot] of this.attachLifecycles) {
+      if (snapshot.phase === "live") this.callbacks.onAttachState?.(session, snapshot);
+    }
+  }
+
   send(session: string, message: unknown, clientRef?: string): boolean {
-    // While a probe waits on the machine socket it may be half-open: a
-    // message sent into it could vanish, so it is refused here and the
-    // caller holds it until the socket answers or is replaced (cas-0978).
-    if (this.probePingId !== undefined && isSupervisorMessage(message)) return false;
+    // While a probe waits on the machine socket it may be half-open, and
+    // while heartbeats go unanswered (unsteady) it may be dead: a message
+    // sent into it could vanish, so it is refused here and the caller holds
+    // it until the machine answers or the socket is replaced (cas-0978,
+    // cas-a6f0, journey F9).
+    if (this.holdsMessages() && isSupervisorMessage(message)) return false;
     const outbound = withClientRef(message, clientRef);
     if (this.machineSocketReady && this.machineSocket?.readyState === WebSocket.OPEN) {
       const resize = typeof outbound === "object" && outbound !== null && "ResizePane" in outbound;
@@ -1391,17 +1418,18 @@ export class HubConnectionSupervisor {
       if (envelope.pong === this.probePingId) {
         // The doubted socket answered: messages held meanwhile can go now.
         this.probePingId = undefined;
-        for (const [session, snapshot] of this.attachLifecycles) {
-          if (snapshot.phase === "live") this.callbacks.onAttachState?.(session, snapshot);
-        }
+        if (!this.unsteady()) this.releaseHeldMessages();
       }
       if (this.healthPing?.id !== envelope.pong) return;
       const latencyMs = Math.max(0, Math.round(performance.now() - this.healthPing.startedAt));
       this.healthPing = undefined;
+      const wasUnsteady = this.unsteady();
       this.missedHeartbeats = 0;
       this.lastHeartbeatAt = Date.now();
       this.transition("live", "live", { latencyMs });
       this.callbacks.onLatency?.(latencyMs);
+      // cas-a6f0: the unsteady machine answered again; what it held goes now.
+      if (wasUnsteady && this.probePingId === undefined) this.releaseHeldMessages();
       return;
     }
     if (envelope.channel === "events" && envelope.event) {

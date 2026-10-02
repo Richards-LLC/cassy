@@ -287,6 +287,23 @@ export function lostConnectionBanner(machineLabel: string, fatal: boolean): stri
 }
 
 /**
+ * cas-a6f0 (journey F8/F9): the machine still reads live but its heartbeats go
+ * unanswered. It is not lost yet, so it is not "Lost connection"; the banner,
+ * the composer and the Tasks panel say what the header's "Unsteady" means.
+ */
+export function unsteadyBanner(machineLabel: string): string {
+  return `Connection to ${machineLabel} unsteady — checking…`;
+}
+
+/**
+ * cas-a6f0 (journey F35): a send held for a machine whose pairing the hub then
+ * refused. It never left this browser and will not go by itself.
+ */
+export function pairingRefusal(machineLabel: string): string {
+  return `Not sent: ${machineLabel} needs pairing again.`;
+}
+
+/**
  * cas-d15c: a pairing the hub refused (revoked, unknown key) is not
  * reconnecting, so the banner beside "Needs pairing" must not say it is.
  */

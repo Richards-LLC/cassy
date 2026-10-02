@@ -331,7 +331,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(main).toContain('function showComposerStatus(text: string, tone: "info" | "error", transport = false): void {');
     // A reconnecting refusal clears when the session is live again (cas-b789).
     // In the banner's words (journey F9).
-    expect(main).toContain("showComposerStatus(outageRefusal(machine.label), \"error\", true);");
+    expect(main).toContain(": outageRefusal(machine.label);\n    showComposerStatus(refused, \"error\", true);");
     expect(main).toContain("sessionsEverLive.add(key);\n        clearTransportStatus(key);");
     expect(css).toContain(".message-status {");
     expect(css).toContain(".message-status.error {");
@@ -1098,7 +1098,10 @@ describe("binding Cassy Cloud browser invariants", () => {
       readSource("main.ts"),
       readFile(new URL("connection-state-view.ts", import.meta.url), "utf8"),
     ]);
-    expect(main).toContain('state.authFailure === "needs-pairing" ? "Machine needs pairing"');
+    // cas-a6f0 (journey F8): every refused pairing, revoked included, is headed
+    // as the header names it.
+    expect(main).toContain('headline: "Machine needs pairing",');
+    expect(main).not.toContain('"Authentication blocked"');
     expect(connectionView).toContain('snapshot.authFailure === "revoked" || snapshot.authFailure === "scope-mismatch" || snapshot.authFailure === "needs-pairing"');
     supervisor.stop();
   });

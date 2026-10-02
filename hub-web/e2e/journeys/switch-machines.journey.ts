@@ -424,17 +424,19 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     let refused = 0;
     await page.route(heartbeat, (route) => { refused += 1; return route.abort(); });
     const shows = (text: string) => async () => (await latency.textContent()) === text;
-    // Degraded after two missed heartbeats (DEGRADED_AFTER_MISSED_HEARTBEATS).
-    await within(page, "Degraded after missed heartbeats", () => refused, 3, shows("Degraded"));
+    // Unsteady after two missed heartbeats (DEGRADED_AFTER_MISSED_HEARTBEATS; cas-a6f0 renamed the word).
+    await within(page, "Unsteady after missed heartbeats", () => refused, 3, shows("Unsteady"));
     await expect(chip).toHaveClass(/\bdegraded\b/);
     await expect(railDot).toHaveClass(/\bdegraded\b/);
     // cas-71af (bf07 QA F01): the chip's tooltip reads the same machine state
     // as the chip, not the terminal attach's "live".
-    await expect(chip).toHaveAttribute("title", /^degraded · \d+ missed$/);
-    // bf07 QA F02: a longer outage does not leave the chip Degraded. After
+    await expect(chip).toHaveAttribute("title", /^unsteady · \d+ missed$/);
+    // cas-a6f0 (journey F9): the rail beside it does not say All clear.
+    await expect(page.locator("#attention-panel .attention-empty")).toHaveText(/^Not all clear\. Atlas · Linux: connection unsteady — checking\./);
+    // bf07 QA F02: a longer outage does not leave the chip Unsteady. After
     // four missed heartbeats the machine reconnects, and it comes back.
     // Reconnecting after four (RECONNECT_AFTER_MISSED_HEARTBEATS).
-    await within(page, "no longer Degraded once the machine reconnects", () => refused, 6, async () => !(await shows("Degraded")()));
+    await within(page, "no longer Unsteady once the machine reconnects", () => refused, 6, async () => !(await shows("Unsteady")()));
     await page.unroute(heartbeat);
     await within(page, "a latency sample again after the outage", probes, 4, sample);
     await expect(chip).not.toHaveClass(/\bdegraded\b/);

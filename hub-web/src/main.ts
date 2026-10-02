@@ -20,8 +20,8 @@ import { applyScheme, markAppearanceCommands, setScheme, type SchemePreference }
 import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionUrl, coalesceAttention, createAttentionItem, dismissableInfoItems, groupAttention, machineEventAttention, mergeAttentionItem, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
 import { cycleAttentionGroup, renderAttentionPanel, renderAttentionSummary } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
-import { attachElapsedSeconds, elapsedSeconds, headerConnectionChip, machineConnectionLabel, type AttachSnapshot } from "./connection-state";
-import { CONVERSATION_OPENING, disconnectedView, lostConnectionBanner, outageControlsReason, outageRefusal, pairingLostBanner, renderConnectionSurfaceInto, sessionOutageControlsReason, sessionReconnectingBanner, shouldRetainDisconnectedFrame, transportFailureNeedsAttention } from "./connection-state-view";
+import { attachElapsedSeconds, elapsedSeconds, headerConnectionChip, machineConnectionLabel, UNSTEADY, UNSTEADY_SENTENCE, type AttachSnapshot } from "./connection-state";
+import { CONVERSATION_OPENING, disconnectedView, lostConnectionBanner, outageControlsReason, outageRefusal, pairingLostBanner, pairingRefusal, unsteadyBanner, renderConnectionSurfaceInto, sessionOutageControlsReason, sessionReconnectingBanner, shouldRetainDisconnectedFrame, transportFailureNeedsAttention } from "./connection-state-view";
 import { ensureMachineConnection, replaceMachineConnection } from "./connection-lifecycle";
 import { createDeviceKey } from "./dpop";
 import { readPairingFragment, watchPairingFragment } from "./fragment";
@@ -102,7 +102,8 @@ const attachStates = new Map<string, AttachSnapshot>();
 /** Sessions whose socket has been live this visit: a later drop is a reconnect, not a first connect. */
 const sessionsEverLive = new Set<string>();
 /** Connection labels a conversation row shows in place of its last turn (cas-a447). */
-const INTERRUPTED_LABELS = new Set(["Reconnecting", "Unreachable", "Needs pairing", CANT_REACH_RETRYING]);
+// cas-a6f0: an unsteady machine is named on the row too, as the header names it.
+const INTERRUPTED_LABELS = new Set(["Reconnecting", "Unreachable", "Needs pairing", UNSTEADY, CANT_REACH_RETRYING]);
 const machineInfo = new Map<string, HubMachineInfo | undefined>();
 const statuses = new Map<string, Record<string, unknown>>();
 const leases = new Map<string, LeaseState>();
@@ -289,7 +290,9 @@ const endedSessions = new Set<string>();
 // to sit beside the composer: a toast is gone before a phone operator has
 // finished reading it, and a disabled button says nothing at all.
 /** `transport` marks a refusal caused by the connection itself: it clears when the session is live again (cas-b789). */
-let messageStatus: { session: string | undefined; text: string; tone: "info" | "error"; transport?: boolean } | undefined;
+// `held`: the line about sends waiting on the connection; its words are
+// re-chosen on every render from the state the banner reads (cas-a6f0).
+let messageStatus: { session: string | undefined; text: string; tone: "info" | "error"; transport?: boolean; held?: boolean } | undefined;
 
 // An engine cannot gain an API mid-session, so this is probed once. Saying so
 // in one line beats a "Connecting…" spinner that can never finish
@@ -717,6 +720,9 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       const connectedNotice = firstConnections.observe(machine.id, machine.label, state);
       if (connectedNotice) toast(connectedNotice);
       if (state.phase === "failed" || state.phase === "backoff") invalidateMachineLeases(machine.id);
+      // cas-a6f0 (journey F35): a refused pairing will not come back by
+      // itself, so nothing may keep saying it is sending.
+      if (state.phase === "failed" && state.authFailure) settleSendsForPairingLoss(machine);
       // One outage is one problem. A stable fingerprint per machine and kind
       // collapses every retry into a single card with a repeat count instead of
       // burying the feed under a card for each attempt.
@@ -724,9 +730,12 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
         // The hub answered, so it is not "Reconnecting to hub" any more; the
         // pairing card below says what is wrong (cas-d15c QA F01).
         resolveAttention(`${machine.id}:hub_disconnected`);
+        // cas-a6f0 (journey F8): one name for a pairing the hub refused,
+        // revoked or otherwise, as the header's "Needs pairing" and the
+        // banner's "needs pairing again" say.
         void addAttention(machine, undefined, "auth_loss", {
-          headline: state.authFailure === "needs-pairing" ? "Machine needs pairing" : "Authentication blocked",
-          detail: state.reason ?? "Authentication blocked",
+          headline: "Machine needs pairing",
+          detail: state.reason ?? pairingLostBanner(machine.label),
           severity: "critical",
           action: "repair",
           fingerprint: `${machine.id}:auth_loss`,
@@ -842,8 +851,8 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
           document.querySelector<HTMLElement>("#message-delivery")?.setAttribute("hidden", "");
         }
         if (selectedMachineId === machine.id && selectedSession === session && heldSends.get(key)?.some((held) => held.clientRef === clientRef)) {
-          // Named as the banner above it names the conversation (cas-d15c).
-          showComposerStatus(`${conversationLabel(machine.id, session)} on ${machine.label} is reconnecting. Your message will go out by itself when it's back.`, "info", true);
+          // Worded as the banner words this outage (cas-d15c, cas-a6f0).
+          showHeldSendStatus(machine.id, session);
         }
         updateConversationViews(); renderConversationList();
         return;
@@ -1582,11 +1591,15 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
       words.className = "banner-text";
       banner.replaceChildren(words);
     }
+    // cas-a6f0: still live but its heartbeats go unanswered: not lost yet.
+    const unsteady = !pairingLost && snapshot.phase === "live" && snapshot.degraded;
     words.textContent = pairingLost
       ? pairingLostBanner(where)
-      : sessionOnly
-        ? sessionReconnectingBanner(conversationLabel(machineId, session), where, snapshot.fatal === true)
-        : lostConnectionBanner(where, snapshot.fatal === true);
+      : unsteady
+        ? unsteadyBanner(where)
+        : sessionOnly
+          ? sessionReconnectingBanner(conversationLabel(machineId, session), where, snapshot.fatal === true)
+          : lostConnectionBanner(where, snapshot.fatal === true);
     // cas-d636 QA F01: a phone hides the rail's Re-pair, so the banner that
     // says the pairing is gone carries it.
     const repair = banner.querySelector<HTMLButtonElement>(":scope > .banner-repair");
@@ -1601,7 +1614,7 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
     } else if (!pairingLost && repair) {
       repair.remove();
     }
-    banner.dataset.scope = pairingLost ? "pairing" : sessionOnly ? "session" : "machine";
+    banner.dataset.scope = pairingLost ? "pairing" : unsteady ? "unsteady" : sessionOnly ? "session" : "machine";
     banner.dataset.attempt = String(view.attempt);
     grid.classList.add("terminal-disconnected");
     // A toast already up when the banner arrives moves clear of it (cas-00cc).
@@ -2085,6 +2098,9 @@ function sendControl(machineId: string, session: string, message: unknown): bool
   // While the session is known to be down, the banner and the header already
   // say it is reconnecting; a toast repeating it would only cover the banner
   // (cas-00cc). A send that fails while the state still reads live does warn.
+  // Nor does a message held while the machine is unsteady or being probed:
+  // the held bubble and the composer say so (cas-a6f0).
+  if (connections.get(machineId)?.holdsMessages()) return false;
   const attach = attachStates.get(sessionKey(machineId, session));
   if (!attach || attach.phase === "live" || attach.phase === "idle") toast("Terminal is reconnecting");
   return false;
@@ -2120,8 +2136,13 @@ function invalidateMachineLeases(machineId: string): void {
   }
   // Control disappearing in silence invites typing into a terminal that is no
   // longer listening.
-  // cas-d15c QA N2: a refused pairing is not a dropped connection.
-  if (held) toast(connectionStates.get(machineId)?.authFailure ? "Control released — this browser needs pairing again" : "Control released — the hub connection dropped");
+  // cas-d15c QA N2: a refused pairing is not a dropped connection; cas-a6f0:
+  // nor is a machine that still reads live (its lease heartbeat failed before
+  // its heartbeats said Unsteady): that connection is being checked.
+  const state = connectionStates.get(machineId);
+  if (held) toast(state?.authFailure ? "Control released — this browser needs pairing again"
+    : state?.phase === "live" ? "Control released — checking the connection…"
+    : "Control released — the hub connection dropped");
 }
 
 let toastTimer: number | undefined;
@@ -2184,7 +2205,7 @@ function toast(message: string): void {
 function connectionLabel(state: ConnectionState | AttachSnapshot | undefined): string {
   if (!state) return "idle";
   if (state.phase === "live") {
-    if (state.degraded) return `degraded · ${state.missedHeartbeats} missed`;
+    if (state.degraded) return `unsteady · ${state.missedHeartbeats} missed`;
     return state.latencyMs === undefined ? "live" : `live · ${state.latencyMs}ms`;
   }
   if (state.phase === "backoff") return `retrying ${state.stage} in ${Math.ceil((state.retryInMs ?? 0) / 1000)}s`;
@@ -2690,9 +2711,14 @@ function machineWillReconnect(machineId: string): boolean {
   return snapshot !== undefined && snapshot.phase !== "idle" && !snapshot.authFailure && !snapshot.fatal;
 }
 
-/** Whether the thread's session is attached and its machine live right now. */
+/**
+ * Whether the thread's session is attached and its machine live right now. A
+ * machine that holds messages (unsteady, or a doubted socket being probed) is
+ * not: control is taken when it answers, as for any held send (cas-a6f0).
+ */
 function sessionIsUp(machineId: string, session: string): boolean {
-  return attachStates.get(sessionKey(machineId, session))?.phase === "live" && connections.get(machineId)?.snapshot().phase === "live";
+  const connection = connections.get(machineId);
+  return attachStates.get(sessionKey(machineId, session))?.phase === "live" && connection?.snapshot().phase === "live" && !connection.holdsMessages();
 }
 
 function holdSupervisorMessage(machine: StoredMachine, session: string, clientRef: string, supervisor: string, text: string, replyTo?: number): void {
@@ -2756,6 +2782,62 @@ function queueHeldSend(machine: StoredMachine, key: string, clientRef: string, s
   heldSends.set(key, queue);
 }
 
+/**
+ * The composer's line while a send waits on the connection, in the words the
+ * banner, header and row use for the same outage (cas-a6f0, journey F8): the
+ * machine is unsteady; only this conversation's link dropped (the banner's
+ * own check, sessionOnlyDrop); or the machine is not connected.
+ */
+function heldSendStatus(machineId: string, session: string): string {
+  const label = machines.get(machineId)?.label ?? "the machine";
+  const machine = connectionStates.get(machineId);
+  const after = "Your message will go out by itself when it's back.";
+  // Unsteady, or a doubted socket being probed: it is being checked.
+  if (machine?.phase === "live" && (machine.degraded || connections.get(machineId)?.holdsMessages())) return `${unsteadyBanner(label)} ${after}`;
+  if (sessionOnlyDrop(machineId, session)) return `${conversationLabel(machineId, session)} on ${label} is reconnecting. ${after}`;
+  return `${lostConnectionBanner(label, false)} ${after}`;
+}
+
+function showHeldSendStatus(machineId: string, session: string): void {
+  showComposerStatus(heldSendStatus(machineId, session), "info", true);
+  if (messageStatus) messageStatus.held = true;
+}
+
+/**
+ * The hub refused this browser's pairing (revoked, unknown key): it will not
+ * reconnect by itself, so the machine's sends stop waiting (cas-a6f0, journey
+ * F35). A held send never left this browser: it is Not sent, re-pair to send.
+ * One already on the wire may or may not have arrived and no receipt can come
+ * now: it is Not confirmed, with Retry, rather than Sending… forever.
+ */
+function settleSendsForPairingLoss(machine: StoredMachine): void {
+  const prefix = `${machine.id}:`;
+  let changed = false;
+  for (const [key, queue] of [...heldSends]) {
+    if (!key.startsWith(prefix)) continue;
+    heldSends.delete(key);
+    for (const held of queue) {
+      clearTimeout(held.expiry);
+      heldSince.delete(held.clientRef);
+      changed = conversationHistory(key).reject(held.clientRef, pairingRefusal(machine.label)) || changed;
+    }
+  }
+  for (const [key, history] of conversationHistories) {
+    if (!key.startsWith(prefix)) continue;
+    const unconfirmed = history.unconfirmInFlight(Date.now());
+    if (unconfirmed.length) changed = true;
+    if (messageDelivery?.session === key && unconfirmed.includes(messageDelivery.clientRef)) {
+      messageDelivery = undefined;
+      document.querySelector<HTMLElement>("#message-delivery")?.setAttribute("hidden", "");
+    }
+  }
+  if (messageStatus?.held && messageStatus.session?.startsWith(prefix)) {
+    if (selectedMachineId && selectedSession && messageStatus.session === sessionKey(selectedMachineId, selectedSession)) showComposerStatus(REFUSED_SEE_ABOVE, "error");
+    else messageStatus = undefined;
+  }
+  if (changed) { updateConversationViews(); renderConversationList(); }
+}
+
 /** The session is back: send what was held, in order, each once. */
 async function flushHeldSends(machine: StoredMachine, session: string): Promise<void> {
   const key = sessionKey(machine.id, session);
@@ -2797,8 +2879,12 @@ function deliverSupervisorMessage(machine: StoredMachine, session: string, super
   // Without an outcome the operator cannot tell a sent message from a lost
   // one, and the natural response is to send it a second time.
   if (!sent && !machineWillReconnect(machine.id)) {
-    // In the banner's words, naming the machine it names (journey F9).
-    showComposerStatus(outageRefusal(machine.label), "error", true);
+    // In the banner's words, naming the machine it names (journey F9); a
+    // refused pairing is not an outage (cas-a6f0).
+    const refused = connectionStates.get(machine.id)?.authFailure
+      ? `${pairingRefusal(machine.label)} Your message is kept; re-pair, then send it.`
+      : outageRefusal(machine.label);
+    showComposerStatus(refused, "error", true);
     return;
   }
   const history = conversationHistory(sessionKey(machine.id, session), session);
@@ -2817,7 +2903,7 @@ function deliverSupervisorMessage(machine: StoredMachine, session: string, super
       messageDraftSelection = messageDraft.length;
       // A transport status: it clears when the session is back (and the held
       // message goes out then).
-      showComposerStatus(`Not connected to ${machine.label} right now. Your message will go out by itself when it's back.`, "info", true);
+      showHeldSendStatus(machine.id, session);
       composer?.focus();
     }
     return;
@@ -2981,6 +3067,9 @@ function render(captureDraft = true): void {
   const sendPlan = planSupervisorSend(supervisorSendContext(messageDraft));
   const sendReason = sendPlan.kind === "blocked" && sendPlan.block !== "empty" ? sendPlan.reason : undefined;
   const composerStatus = messageStatus?.session === (selected && selectedSession ? sessionKey(selected.id, selectedSession) : undefined) ? messageStatus : undefined;
+  // A held send's line follows the outage as it changes (unsteady, then
+  // reconnecting), as the banner and header beside it do (cas-a6f0).
+  if (composerStatus?.held && selected && selectedSession) composerStatus.text = heldSendStatus(selected.id, selectedSession);
   // A phone has no hover, so a title attribute is an explanation nobody can
   // reach. Unavailable controls stay focusable and say why when tapped.
   const interruptReason = outageReason ?? (!selected || !selectedSession || !canControl(selected.id, selectedSession, "pane-interrupt")
@@ -3001,8 +3090,13 @@ function render(captureDraft = true): void {
   // what the header's "Needs pairing" and the banner say.
   const pairingLostHere = Boolean(selected) && (machineConnectionSnapshot?.authFailure !== undefined
     || (terminalAttachSnapshot?.authFailure !== undefined));
+  // cas-a6f0 (journey F8): a machine that still reads live with its
+  // heartbeats unanswered is unsteady, not reconnecting, as the header says.
+  const unsteadyHere = machineConnectionSnapshot?.phase === "live" && machineConnectionSnapshot.degraded && !sessionDown;
   const staleStatusText = statusIsStale
-    ? (pairingLostHere ? `Not live — this browser needs pairing again.${staleStatusTail}` : `Not live — reconnecting.${staleStatusTail}`)
+    ? (pairingLostHere ? `Not live — this browser needs pairing again.${staleStatusTail}`
+      : unsteadyHere ? `${UNSTEADY_SENTENCE}${staleStatusTail}`
+      : `Not live — reconnecting.${staleStatusTail}`)
     : undefined;
   const terminalSessionKey = selected && selectedSession ? sessionKey(selected.id, selectedSession) : undefined;
   // While the session is up the chip reads the machine's own connection, as
@@ -3320,7 +3414,7 @@ function renderRegions(context: RegionContext): void {
     const summary = renderAttentionSummary(context.counts);
     const label = summary.querySelector(".attention-summary-label");
     // "Clear" beside a reconnect banner is a claim the page contradicts (cas-edcd).
-    if (label) label.textContent = attentionSummary(context.counts).total > 0 ? "Needs you" : attentionOutage() ? "Reconnecting" : "Clear";
+    if (label) label.textContent = attentionSummary(context.counts).total > 0 ? "Needs you" : attentionOutage()?.word ?? "Clear";
     railCounts.replaceChildren(summary);
   }
   renderAttention();
@@ -3771,7 +3865,7 @@ function renderAttention(): void {
       await navigator.clipboard.writeText(payload);
       toast("Event payload copied");
     },
-  }, { animateIds: newCriticalAttentionIds, reclassifyIds: reclassifiedAttentionIds, outage: attentionOutage() });
+  }, { animateIds: newCriticalAttentionIds, reclassifyIds: reclassifiedAttentionIds, outage: attentionOutage()?.text });
   // After the panel is drawn, so the sheet can hand focus back into it (cas-a5c6).
   syncConversationAttention(hubPresentation === "conversation" && selectedSession ? coalesceAttention(visibleAttention).length : 0);
 }
@@ -3869,17 +3963,22 @@ function closeAttentionSheet(): void {
  * fleet. A machine that has never been live in this visit is still
  * connecting, not an outage.
  */
-function attentionOutage(): string | undefined {
+function attentionOutage(): { readonly text: string; readonly word: string } | undefined {
+  // cas-a6f0 (journey F9): an unsteady machine is not "All clear" either.
   const down = (hubPresentation === "conversation" && selectedMachineId
     ? [[selectedMachineId, conversationConnection(selectedMachineId, selectedSession)] as const]
     : [...machines.keys()].map((id) => [id, machineFooterConnection(id)] as const))
-    .filter(([id, state]) => lastLiveAt.has(id) && state !== undefined && state.phase !== "live" && state.phase !== "idle")
+    .filter(([id, state]) => lastLiveAt.has(id) && state !== undefined && (state.phase === "live" ? state.degraded : state.phase !== "idle"))
     .map(([id, state]) => {
       const label = machines.get(id)?.label ?? "A machine";
       const phase = fleetConnectionLabel(state, id);
-      return phase === "Reconnecting" ? `${label} is reconnecting` : `${label}: ${phase}`;
+      return {
+        phase,
+        text: phase === "Reconnecting" ? `${label} is reconnecting` : phase === UNSTEADY ? `${label}: ${UNSTEADY_SENTENCE.toLowerCase().replace(/…$/, "")}` : `${label}: ${phase}`,
+      };
     });
-  return down.length ? `Not all clear. ${down.join("; ")}.` : undefined;
+  if (!down.length) return undefined;
+  return { text: `Not all clear. ${down.map((item) => item.text).join("; ")}.`, word: down.every((item) => item.phase === UNSTEADY) ? UNSTEADY : "Reconnecting" };
 }
 
 async function performAttentionAction(item: AttentionItem, action: AttentionAction): Promise<void> {

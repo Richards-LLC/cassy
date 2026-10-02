@@ -26,12 +26,21 @@ export interface ConnectionSnapshot {
 /** A machine never live in this visit whose attempts have failed; retries continue. */
 export const CANT_REACH_RETRYING = "Can't reach · retrying";
 export const NEEDS_PAIRING = "Needs pairing";
+/**
+ * cas-a6f0 (journey F8/F9): heartbeats are going unanswered on a machine that
+ * still reads live. Every surface uses this one word for it (header, row,
+ * footer, rail, fleet), and the sentence below where there is room (Tasks
+ * panel, banner, composer, Attention rail). It replaced "Degraded", which
+ * said nothing about what was happening or what came next.
+ */
+export const UNSTEADY = "Unsteady";
+export const UNSTEADY_SENTENCE = "Connection unsteady — checking…";
 export type MachineConnectionLabelState = Pick<ConnectionSnapshot, "phase" | "degraded" | "fatal" | "authFailure">;
 
 /** Shared machine words; the caller supplies this visit's live history. */
 export function machineConnectionLabel(state: MachineConnectionLabelState | undefined, everConnected = true): string {
   if (!state) return "Idle";
-  if (state.phase === "live") return state.degraded ? "Degraded" : "Live";
+  if (state.phase === "live") return state.degraded ? UNSTEADY : "Live";
   // Never live and already failed (cas-b789): name the failed attempts while retries continue.
   const retrying = state.phase === "backoff" || (state.phase === "failed" && state.fatal !== true && !state.authFailure);
   if (retrying && !everConnected) return CANT_REACH_RETRYING;
@@ -70,8 +79,8 @@ export const RECONNECT_AFTER_MISSED_HEARTBEATS = 4;
  * - no latency sample yet, or one missed heartbeat: a neutral dot and
  *   "Checking…", never a green dot beside "Status unavailable" (journey F17,
  *   QA F02);
- * - degraded (heartbeats keep failing): the amber dot and "Degraded", as the
- *   rail, whatever the terminal attach says;
+ * - degraded (heartbeats keep failing): the amber dot and "Unsteady", as the
+ *   rail, whatever the terminal attach says (cas-a6f0);
  * - a sample: `attachState` (normally live) and the latency;
  * - not live: the machine's phase and `notLiveLabel`.
  */
@@ -82,7 +91,7 @@ export function headerConnectionChip(
 ): { readonly state: string; readonly text: string } {
   if (!machine) return { state: "checking", text: "Checking…" };
   if (machine.phase !== "live") return { state: machine.phase, text: notLiveLabel };
-  if (machine.degraded) return { state: "degraded", text: "Degraded" };
+  if (machine.degraded) return { state: "degraded", text: UNSTEADY };
   if (machine.latencyMs === undefined) return { state: "checking", text: "Checking…" };
   return { state: attachState, text: `${machine.latencyMs}ms` };
 }

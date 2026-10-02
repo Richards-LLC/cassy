@@ -85,6 +85,9 @@ test("HUB-J12 network switch: delayed legacy refusal holds both sends in order",
     await clock.advance(1);
     expect(hub.deliveredRefusals).toHaveLength(1);
     await expect(held).toHaveCount(2);
+    // cas-a6f0 (journey F8): the composer names the outage the banner names.
+    await expect(page.locator(".terminal-disconnected-banner .banner-text")).toHaveText("Lost connection to Atlas · Linux. Reconnecting…");
+    await expect(page.locator("#message-status")).toHaveText("Lost connection to Atlas · Linux. Reconnecting… Your message will go out by itself when it's back.");
     hub.upstreamBack(PELICAN);
     const next = hub.nextSend();
     await clock.advance(1_000);
@@ -98,31 +101,89 @@ test("HUB-J12 network switch: delayed legacy refusal holds both sends in order",
 test("HUB-J12 network switch: half-open machine waits for four failed heartbeats then flushes once", async ({ page }) => {
   await test.step("Tailscale goes off, then on again", async () => {
     const { hub, clock, header, held } = await connected(page);
+    const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).locator(".conversation-preview");
+    const footer = page.locator("#hub-footer-badges .machine-badge-state");
+    const panel = page.locator(".status-stale").filter({ visible: true });
     await hub.down("atlas");
     for (let beat = 1; beat <= 4; beat++) {
       const failed = page.waitForEvent("requestfailed", request => request.url() === "https://atlas.test/v1/sessions");
       await clock.advance(5_000);
       await failed;
-      if (beat < 4) await expect(header).toHaveText(beat === 1 ? " · Live" : " · Degraded");
+      if (beat === 1) await expect(header).toHaveText(" · Live");
+      if (beat === 2) {
+        // cas-a6f0 (journey F8/F9): heartbeats unanswered on a machine that
+        // still reads live. Header, row, footer, Tasks panel and rail all say
+        // so in one word, and a message sent now waits instead of going into a
+        // dead socket.
+        await expect(header).toHaveText(" · Unsteady");
+        await expect(row).toHaveText("Unsteady");
+        await expect(footer).toHaveText("Unsteady");
+        await expect(panel).toHaveText(/^Connection unsteady — checking…/);
+        await expect(page.getByText("All clear").filter({ visible: true })).toHaveCount(0);
+        await expect(page.getByText(/degraded|connection dropped/i).filter({ visible: true })).toHaveCount(0);
+        await sendNow(page, "While unsteady");
+        await expect(held).toHaveText("Waiting for the connection — sends when it's back");
+        await expect(page.locator("#message-status")).toHaveText("Connection to Atlas · Linux unsteady — checking… Your message will go out by itself when it's back.");
+        expect(sentTimes(hub, "While unsteady")).toBe(0);
+      }
+      if (beat === 3) await expect(header).toHaveText(" · Unsteady");
     }
     await expect(header).toHaveText(" · Reconnecting");
+    await expect(row).toHaveText("Reconnecting");
+    await expect(footer).toHaveText("Reconnecting");
     await expect(page.locator(".terminal-disconnected-banner")).toHaveText("Lost connection to Atlas · Linux. Reconnecting…");
+    // The composer's line follows the outage from unsteady to lost.
+    await expect(page.locator("#message-status")).toHaveText("Lost connection to Atlas · Linux. Reconnecting… Your message will go out by itself when it's back.");
     await sendNow(page, "While Tailscale is off");
-    await expect(held).toHaveText("Waiting for the connection — sends when it's back");
-    await expect(page.locator("#message-status")).toHaveText("Not connected to Atlas · Linux right now. Your message will go out by itself when it's back.");
+    await expect(held).toHaveCount(2);
+    await expect(held.last()).toHaveText("Waiting for the connection — sends when it's back");
+    await expect(page.locator("#message-status")).toHaveText("Lost connection to Atlas · Linux. Reconnecting… Your message will go out by itself when it's back.");
     // Negative window: a held message must survive a failed reconnect unsent.
     await clock.advance(5_000);
+    expect(sentTimes(hub, "While unsteady")).toBe(0);
     expect(sentTimes(hub, "While Tailscale is off")).toBe(0);
     await hub.up("atlas");
     const next = hub.nextSend();
     await clock.advance(10_000); // the promised retry ceiling, in protocol time
-    expect((await next).text).toBe("While Tailscale is off");
+    expect((await next).text).toBe("While unsteady");
     await expect(header).toHaveText(" · Live");
     await expect(held).toHaveCount(0);
     await expect(page.locator("#message-status")).toBeHidden();
+    expect(hub.sends.map(m => m.text)).toEqual(["While unsteady", "While Tailscale is off"]);
     hub.deliverLatest(PELICAN);
     await expect(page.getByRole("log").getByText("Delivered")).toBeVisible();
+    expect(sentTimes(hub, "While unsteady")).toBe(1);
     expect(sentTimes(hub, "While Tailscale is off")).toBe(1);
+  });
+});
+
+test("HUB-J12 network switch: a message sent while unsteady waits, then goes once when heartbeats answer again (cas-a6f0)", async ({ page }) => {
+  await test.step("The connection wobbles and steadies without a reconnect", async () => {
+    const { hub, clock, header, held } = await connected(page);
+    const opens = hub.machineSocketOpens.get("atlas");
+    // Two heartbeats go unanswered; the machine socket itself survives.
+    const heartbeat = "https://atlas.test/v1/sessions";
+    await page.route(heartbeat, route => route.abort());
+    for (let beat = 1; beat <= 2; beat++) {
+      const failed = page.waitForEvent("requestfailed", request => request.url() === heartbeat);
+      await clock.advance(5_000);
+      await failed;
+    }
+    await expect(header).toHaveText(" · Unsteady");
+    await sendNow(page, "While it wobbles");
+    await expect(held).toHaveCount(1);
+    expect(hub.sends).toHaveLength(0);
+    await page.unroute(heartbeat);
+    const next = hub.nextSend();
+    await clock.advance(5_000); // the next heartbeat, answered
+    expect((await next).text).toBe("While it wobbles");
+    await expect(header).toHaveText(" · Live");
+    await expect(held).toHaveCount(0);
+    await expect(page.locator("#message-status")).toBeHidden();
+    expect(hub.machineSocketOpens.get("atlas"), "steadied, not reconnected").toBe(opens);
+    // Negative window: later heartbeats must not send it again.
+    await clock.advance(10_000);
+    expect(sentTimes(hub, "While it wobbles")).toBe(1);
   });
 });
 
@@ -335,6 +396,41 @@ test("HUB-J12 network switch: revoked pairing offers accessible Re-pair on deskt
     expect((await repair.boundingBox())!.height).toBeGreaterThanOrEqual(44);
     await repair.click();
     await expect(page.locator("#pair-dialog")).toBeVisible();
+  });
+});
+
+test("HUB-J12 network switch: a revoked pairing settles waiting sends and is named one way everywhere (cas-a6f0)", async ({ page }) => {
+  await test.step("The pairing is revoked while messages wait", async () => {
+    const { hub, clock, header, held } = await connected(page);
+    const log = page.getByRole("log");
+    // On the wire, with no receipt yet.
+    await accepted(page, hub, "On the wire before the revoke");
+    await expect(log.getByText("Sending…")).toHaveCount(1);
+    hub.refuseProofs("atlas", 1_000, "revoked", false);
+    await hub.down("atlas", { sockets: "close" });
+    await expect(header).toHaveText(" · Reconnecting");
+    await sendNow(page, "Held before the revoke");
+    await expect(held).toHaveCount(1);
+    await hub.up("atlas");
+    await clock.advance(1_000);
+    await expect(header).toHaveText(" · Needs pairing");
+    // Nothing keeps saying it is sending (journey F35).
+    await expect(log.getByText("Sending…")).toHaveCount(0);
+    await expect(held).toHaveCount(0);
+    const refused = log.locator('.bub[data-state="error"]');
+    await expect(refused).toHaveCount(1);
+    await expect(refused).toContainText("Held before the revoke");
+    await expect(refused.locator(".conversation-refused-reason")).toHaveText("Atlas · Linux needs pairing again. Re-pair Atlas · Linux, then retry.");
+    await expect(refused.getByRole("button", { name: "Retry sending" })).toBeVisible();
+    await expect(log.locator('.bub[data-state="unconfirmed"]')).toContainText("On the wire before the revoke");
+    await expect(page.locator("#message-status")).toHaveText("Not sent — see the message above.");
+    // The rail card is headed as the header and banner word it (journey F8).
+    await expect(page.getByText("Machine needs pairing").filter({ visible: true }).first()).toBeVisible();
+    await expect(page.getByText(/Authentication blocked/).filter({ visible: true })).toHaveCount(0);
+    await expect(page.getByText(/reconnecting/i).filter({ visible: true })).toHaveCount(0);
+    // Negative window: the held send never goes by itself.
+    await clock.advance(10_000);
+    expect(sentTimes(hub, "Held before the revoke")).toBe(0);
   });
 });
 

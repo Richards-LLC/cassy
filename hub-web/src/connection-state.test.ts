@@ -84,8 +84,8 @@ describe("Terminal view header connection chip (journey F17, cas-bf07 QA)", () =
 
   it("names a degraded machine with the amber dot even while the terminal is still attached (QA F01)", () => {
     const degraded = live({ missedHeartbeats: DEGRADED_AFTER_MISSED_HEARTBEATS, degraded: true });
-    expect(headerConnectionChip(degraded, "live", "Degraded")).toEqual({ state: "degraded", text: "Degraded" });
-    expect(headerConnectionChip({ ...degraded, latencyMs: 12 }, "live", "Degraded")).toEqual({ state: "degraded", text: "Degraded" });
+    expect(headerConnectionChip(degraded, "live", "Unsteady")).toEqual({ state: "degraded", text: "Unsteady" });
+    expect(headerConnectionChip({ ...degraded, latencyMs: 12 }, "live", "Unsteady")).toEqual({ state: "degraded", text: "Unsteady" });
   });
 
   it("names a machine that is not live by its own phase and label", () => {

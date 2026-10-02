@@ -1056,3 +1056,198 @@ mod delivery_location_tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod squash_close_tests {
+    use super::*;
+    use crate::store::{
+        open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store,
+    };
+    use crate::test_support::TestEnvGuard;
+    use cas_types::{Agent, AgentRole, QaPassState, QaVerdict, TaskRisk, TaskStatus};
+    use std::process::Command;
+
+    fn git(repo: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "CAS Test")
+            .env("GIT_AUTHOR_EMAIL", "cas@example.test")
+            .env("GIT_COMMITTER_NAME", "CAS Test")
+            .env("GIT_COMMITTER_EMAIL", "cas@example.test")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn squash_fixture(
+        env: &mut TestEnvGuard,
+        state: QaPassState,
+    ) -> (tempfile::TempDir, CasCore, Task, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let cas_dir = repo.join(".cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        env.set("CAS_ROOT", &cas_dir);
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        std::fs::write(
+            cas_dir.join("config.toml"),
+            "[verification]\nenabled=false\n[qa]\nevidence_gate=false\nindependent_pass=true\n",
+        )
+        .unwrap();
+        open_store(&cas_dir).unwrap().init().unwrap();
+        open_rule_store(&cas_dir).unwrap().init().unwrap();
+        open_skill_store(&cas_dir).unwrap().init().unwrap();
+        let tasks = open_task_store(&cas_dir).unwrap();
+        tasks.init().unwrap();
+        let agents = open_agent_store(&cas_dir).unwrap();
+        agents.init().unwrap();
+        agents
+            .register(&Agent::new_with_role(
+                "test-worker-session".into(),
+                "worker".into(),
+                AgentRole::Worker,
+            ))
+            .unwrap();
+        let core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        core.set_agent_id_for_testing("test-worker-session".into());
+        git(repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("README.md"), "seed\n").unwrap();
+        git(repo, &["add", "README.md"]);
+        git(repo, &["commit", "-q", "-m", "seed"]);
+        let mut task = Task::new("cas-ui01".into(), "Composer spacing".into());
+        task.assignee = Some("worker".into());
+        task.risk = vec![TaskRisk::None];
+        task.demo_statement = "Open composer and see even spacing".into();
+        git(repo, &["checkout", "-q", "-b", "factory/worker"]);
+        std::fs::create_dir_all(repo.join("web")).unwrap();
+        std::fs::write(repo.join("web/composer.css"), ".composer{gap:8px}\n").unwrap();
+        git(repo, &["add", "web/composer.css"]);
+        git(repo, &["commit", "-q", "-m", "feat(cas-ui01): spacing"]);
+        std::fs::write(repo.join("web/composer.js"), "export const ready = true;\n").unwrap();
+        git(repo, &["add", "web/composer.js"]);
+        git(repo, &["commit", "-q", "-m", "feat(cas-ui01): ready"]);
+        let tip = git(repo, &["rev-parse", "HEAD"]);
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(tip.clone());
+        task.deliverables.parked_branch = Some("factory/worker".into());
+        tasks.add(&task).unwrap();
+        let now = chrono::Utc::now();
+        match state {
+            QaPassState::Waived => {
+                cas_store::waive_qa_pass(
+                    &cas_dir,
+                    &task.id,
+                    "supervisor",
+                    "worker",
+                    "factory/worker",
+                    &tip,
+                    "Reviewed approved delivery",
+                    now,
+                )
+                .unwrap();
+            }
+            QaPassState::Passed => {
+                cas_store::open_qa_pass(
+                    &cas_dir,
+                    &NewQaPass {
+                        task_id: &task.id,
+                        implementer_agent_id: "worker",
+                        branch: "factory/worker",
+                        bound_head: &tip,
+                        deadline_at: now + chrono::Duration::minutes(30),
+                        max_rounds: 3,
+                    },
+                    now,
+                )
+                .unwrap();
+                cas_store::claim_qa_pass(&cas_dir, &task.id, "reviewer", now).unwrap();
+                cas_store::resolve_qa_pass(
+                    &cas_dir,
+                    &task.id,
+                    "reviewer",
+                    QaVerdict::Approved,
+                    "Independent review passed",
+                    None,
+                    "/fixture/LEDGER.md",
+                    now,
+                )
+                .unwrap();
+            }
+            _ => panic!("fixture needs a satisfying round"),
+        }
+        git(repo, &["checkout", "-q", "main"]);
+        // Target has unrelated changes: equality is over delivered files,
+        // rather than the entire target tree.
+        std::fs::write(repo.join("other.txt"), "another task\n").unwrap();
+        git(repo, &["add", "other.txt"]);
+        git(repo, &["commit", "-q", "-m", "other task"]);
+        git(repo, &["merge", "-q", "--squash", "factory/worker"]);
+        git(repo, &["commit", "-q", "-m", "squash(cas-ui01): composer"]);
+        let squash = git(repo, &["rev-parse", "HEAD"]);
+        assert!(
+            !is_ancestor(repo, &tip, "main"),
+            "fixture must rewrite commit identity"
+        );
+        git(repo, &["checkout", "-q", "factory/worker"]);
+        (dir, core, task, squash)
+    }
+
+    async fn worker_close_after_squash(state: QaPassState) {
+        let mut env = TestEnvGuard::temp_home();
+        let (dir, core, task, squash) = squash_fixture(&mut env, state);
+        let request = TaskCloseRequest {
+            id: task.id.clone(),
+            reason: Some("Squash delivery landed".into()),
+            commit_receipt: Some(squash),
+            supervisor_override: None,
+            stranded_branch_override: None,
+            legacy_bypass_code_review: None,
+            search_manifest: None,
+        };
+        let result = core.cas_task_close(Parameters(request)).await.unwrap();
+        let text = result
+            .content
+            .into_iter()
+            .filter_map(|content| match content.raw {
+                rmcp::model::RawContent::Text(text) => Some(text.text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            open_task_store(&dir.path().join(".cas"))
+                .unwrap()
+                .get(&task.id)
+                .unwrap()
+                .status,
+            TaskStatus::Closed,
+            "{text}"
+        );
+        assert!(!text.contains("INDEPENDENT QA REQUIRED"), "{text}");
+        let passes = cas_store::list_qa_passes(&dir.path().join(".cas"), &task.id).unwrap();
+        assert_eq!(passes.len(), 1, "no new round or waiver is needed");
+        assert_eq!(passes[0].state, state);
+        assert_eq!(
+            passes[0].bound_head,
+            task.deliverables.factory_branch_anchor.unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_squash_close_honors_waived_round_cas_fe7b() {
+        worker_close_after_squash(QaPassState::Waived).await;
+    }
+
+    #[tokio::test]
+    async fn worker_squash_close_honors_passed_round_cas_fe7b() {
+        worker_close_after_squash(QaPassState::Passed).await;
+    }
+}

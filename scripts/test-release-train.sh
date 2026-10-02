@@ -1468,6 +1468,11 @@ new_gh_stub() {
 #!/usr/bin/env bash
 state="$GH_STUB_STATE"
 printf '%s\n' "$*" >> "$state/calls.log"
+# PR-run visibility is independent of the scripted merge-queue poll sequence.
+if [[ "$1 $2" == 'run list' && "$*" == *'--event pull_request'* ]]; then
+    printf '[{"headSha":"%s"}]\n' "$GH_STUB_HEAD"
+    exit 0
+fi
 step="$(cat "$state/step.txt" 2>/dev/null || echo 1)"
 printf '%s\n' "$((step + 1))" > "$state/step.txt"
 case "$1 $2" in
@@ -1909,6 +1914,11 @@ else
     bad "pipeline.log is missing, unstamped, or truncated: $(head -3 "$run_stale_dir/pipeline.log" 2>/dev/null || echo absent)"
 fi
 
+if python3 "$script_dir/test-release-train-pipeline.py"; then
+    ok 'owned-PR resume and exact-pushed-head PR-run regressions'
+else
+    bad 'owned-PR resume or exact-pushed-head PR-run regression'
+fi
 
 # ===========================================================================
 # `publish` — the port of publish-wrapper.sh (cas-c1cd).

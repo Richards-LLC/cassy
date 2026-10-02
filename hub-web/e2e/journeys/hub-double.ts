@@ -126,6 +126,8 @@ export class HubDouble {
   /** Attaches held until the journey releases them (cas-54ed). */
   private readonly attachGates = new Map<string, Promise<void>>();
   private polls = 0;
+  /** Relay polls answered so far: the pairing's own clock (cas-03b7). */
+  get relayPolls(): number { return this.polls; }
   private requestedScopes: string[] = [];
   private nextId = 1000;
   /** Machines currently unreachable (network down, Tailscale off), and how. */
@@ -708,6 +710,7 @@ export class HubDouble {
     }
     if (url.pathname.endsWith("/requests/poll")) {
       this.polls += 1;
+      this.observed();
       if (this.polls < relay.claimAfter) return route.fulfill({ status: 202, json: { wire_version: 1, status: "authorization_pending", interval: 0.2, expires_at: expiresAt } });
       if (this.polls < relay.authorizeAfter) return route.fulfill({ status: 202, json: { wire_version: 1, status: "machine_claimed", interval: 0.2, expires_at: expiresAt } });
       const machine = this.machine(relay.machine);

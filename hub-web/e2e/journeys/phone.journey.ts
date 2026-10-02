@@ -1,5 +1,6 @@
+import type { Locator } from "@playwright/test";
 import { test, expect } from "./journey";
-import type { Machine } from "./hub-double";
+import type { HubDouble, Machine } from "./hub-double";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
 
 /** A paired machine that is switched off: it never answers this visit (cas-b789). */
@@ -15,7 +16,32 @@ const LONG_LABELS: Machine[] = [
 
 test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
+/**
+ * Wait for `target` to show with no wall-clock budget of its own. It fails
+ * only when the hub double has answered `allowance` more of the `events` it
+ * is waiting on and the page still has not shown it, so a stall names the
+ * protocol step that did not land and a slow host is not a failure
+ * (cas-03b7, as HUB-J8's waits in cas-9772).
+ */
+async function shownWithin(hub: HubDouble, what: string, target: Locator, events: () => number, allowance: number): Promise<void> {
+  const start = events();
+  const overrun = hub.waitFor(() => events() - start > allowance).then(() => {
+    throw new Error(`${what}: not shown after ${events() - start} protocol events (allowance ${allowance})`);
+  });
+  overrun.catch(() => undefined); // settled by the race below, or never
+  await Promise.race([expect(target).toBeVisible({ timeout: 0 }), overrun]);
+}
+
 test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, journey }) => {
+  // Ten stages over nine machines, two palette sweeps, a long thread and a
+  // relay pairing. Idle it takes about 34 s, about 16 s of which is the
+  // journey fixture (screencast, trace, receipts), and that also counts
+  // against this budget. On the loaded merge-queue host it passed in 34–39 s
+  // at load 63 but ran past the 60 s default at load 258 (cas-03b7). The
+  // waits inside are DOM assertions or bounded by the hub double's own
+  // events, so this is a hang guard sized from the loaded runtime: more than
+  // 3× the idle run, and 4.6× the worst loaded pass.
+  test.setTimeout(180_000);
   const hub = await journey.hub({ machines: [ATLAS, STUDIO, SHED, FORGE, ...LONG_LABELS], paired: ["atlas", "studio", "shed", ...LONG_LABELS.map((machine) => machine.id)], relay: { machine: "forge", claimAfter: 2, authorizeAfter: 4 } });
   await page.route("https://shed.test/**", (route) => route.abort("connectionrefused"));
   await page.routeWebSocket(/shed\.test/, (ws) => { void ws.close({ code: 1006 }); });
@@ -141,10 +167,12 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     await expect(page.locator("#command-palette")).toBeHidden();
     await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
     await expect(composer).not.toBeFocused();
-    await expect.poll(() => page.evaluate(() => {
+    // The thread takes focus, so no text field holds it and no soft keyboard is up.
+    await expect(page.locator(".conversation-reading.thread")).toBeFocused();
+    expect(await page.evaluate(() => {
       const active = document.activeElement as HTMLElement | null;
       return Boolean(active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable));
-    }), { message: "no text field holds focus, so no soft keyboard is up" }).toBe(false);
+    }), "no text field holds focus, so no soft keyboard is up").toBe(false);
     // The thread it lands on draws the house focus ring, never the browser's
     // default 1px outline (cas-0bf5).
     const ring = await page.locator(".conversation-reading.thread").evaluate((thread) => {
@@ -199,15 +227,19 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     const dialog = page.locator("#pair-dialog");
     await page.getByRole("button", { name: "Pair a machine" }).filter({ visible: true }).first().tap();
     await dialog.getByRole("button", { name: "Create pairing code" }).tap();
-    await expect(dialog.getByRole("heading", { name: "Machine authorized" })).toBeVisible({ timeout: 15_000 });
+    // The relay authorizes on its fourth poll; a few more polls without the
+    // heading is a stall, however long the polls take.
+    await shownWithin(hub, "the relay's authorization", dialog.getByRole("heading", { name: "Machine authorized" }), () => hub.relayPolls, 6);
     await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Daniel");
     await dialog.getByRole("button", { name: "Pair", exact: true }).tap();
     await expect(dialog).toBeHidden();
     const toast = page.locator("#toast");
-    await expect(toast).toHaveText("Forge · Linux connected", { timeout: 15_000 });
+    // Connected, then its conversation opened: both follow Forge's first
+    // session list, so they are bounded by Forge's catalog fetches.
+    await shownWithin(hub, "Forge's connected notice", toast.filter({ hasText: "Forge · Linux connected" }), () => hub.catalogFetchCount("forge"), 3);
     // Pairing from the phone opens the new machine's conversation; no list
     // tap in between (journey F8).
-    await expect(page.locator(".conversation-identity h1")).toHaveText("forge-tools", { timeout: 15_000 });
+    await shownWithin(hub, "Forge's conversation", page.locator(".conversation-identity h1").filter({ hasText: /^forge-tools$/ }), () => hub.catalogFetchCount("forge"), 3);
     // cas-71af (dfb2 QA F02): focus lands on the opened thread, not the page
     // body (and not the reply box, which would raise the phone keyboard).
     await expect(page.locator(".conversation-reading.thread")).toBeFocused();

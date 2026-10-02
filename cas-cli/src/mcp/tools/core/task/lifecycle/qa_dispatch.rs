@@ -47,6 +47,8 @@ fn is_ancestor(repo: &Path, commit: &str, target: &str) -> bool {
     std::process::Command::new("git")
         .args(["merge-base", "--is-ancestor", commit, target])
         .current_dir(repo)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
 }
@@ -178,6 +180,8 @@ fn reviewed_tip_carried_by(repo: &Path, reviewed: &str, integrated: &str, target
         ])
         .args(&paths)
         .current_dir(repo)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .is_ok_and(|status| status.success());
     if matches {

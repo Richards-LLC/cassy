@@ -382,6 +382,10 @@ fn clear_foreign_identity_metadata(
 
 #[derive(Parser)]
 pub struct CloudQueueArgs {
+    /// Purge only personal rows rejected by the server as team_owned_project.
+    /// Local entities and all team queue rows are kept; no cloud calls run.
+    #[arg(long, conflicts_with_all = ["prune", "clear", "retry"])]
+    pub purge_team_owned: bool,
     /// Show detailed list of queued items
     #[arg(long, short)]
     pub verbose: bool,
@@ -2440,6 +2444,24 @@ fn execute_queue(args: &CloudQueueArgs, cli: &Cli, cas_root: &Path) -> anyhow::R
 
     let queue = SyncQueue::open(cas_root)?;
     queue.init()?;
+
+    if args.purge_team_owned {
+        let purged = queue.purge_team_owned_personal_rejections()?;
+        if cli.json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "status": "ok", "purged": purged, "scope": "personal",
+                    "reason": "team_owned_project",
+                })
+            );
+        } else {
+            let mut out = io::stdout();
+            let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
+            fmt.success(&format!("Purged {purged} rejected personal queue row(s)"))?;
+        }
+        return Ok(());
+    }
 
     // Handle clear operation
     if args.clear {
@@ -7060,6 +7082,160 @@ mod team_cmd_tests {
     use tempfile::TempDir;
     use wiremock::matchers::{header, method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn cas_8095_team_only_enqueue_and_standalone_push_pull_make_zero_personal_calls() {
+        use clap::Parser;
+        let server = MockServer::start().await;
+        let team = "550e8400-e29b-41d4-a716-446655440000";
+        Mock::given(method("POST"))
+            .and(path(format!("/api/teams/{team}/sync/push")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "synced": {"entries": 1, "tasks": 1},
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/teams/{team}/sync/pull")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [], "tasks": [], "rules": [], "skills": [],
+                "task_dependencies": [], "pulled_at": "2026-10-02T12:00:00Z",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let temp = TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        crate::cloud::set_canonical_id_in_config_toml(&root, "cli-team-only").unwrap();
+        let mut config = crate::config::Config::load(&root).unwrap();
+        config.set("cloud.team_only", "true").unwrap();
+        config.save(&root).unwrap();
+        let mut cloud = CloudConfig::default();
+        cloud.endpoint = server.uri();
+        cloud.token = Some("synthetic-test-token".into());
+        cloud.set_team(team, "fixture-team");
+        cloud.save_to_cas_dir(&root).unwrap();
+        let queue = SyncQueue::open(&root).unwrap();
+        queue.init().unwrap();
+        queue
+            .set_metadata(&team_registration_metadata_key(team, "cli-team-only"), "1")
+            .unwrap();
+        crate::store::open_store(&root)
+            .unwrap()
+            .add(&crate::types::Entry::new(
+                "p-cli-team-only".into(),
+                "local entry".into(),
+            ))
+            .unwrap();
+        crate::store::open_task_store(&root)
+            .unwrap()
+            .add(&crate::types::Task::new(
+                "cas-cli-team-only".into(),
+                "local task".into(),
+            ))
+            .unwrap();
+        assert!(
+            queue.pending(100, 5).unwrap().is_empty(),
+            "local writes must not enqueue personal project rows"
+        );
+        assert_eq!(queue.pending_for_team(team, 100, 5).unwrap().len(), 2);
+        let mut global = crate::types::Task::new("cas-held-global".into(), "held global".into());
+        global.scope = crate::types::Scope::Global;
+        crate::store::open_task_store(&root)
+            .unwrap()
+            .add(&global)
+            .unwrap();
+        assert_eq!(queue.pending(100, 5).unwrap().len(), 1);
+        let root_bg = root.clone();
+        tokio::task::spawn_blocking(move || {
+            let cli = crate::cli::try_parse_from_with_wordmark(["cas", "--json", "cloud", "push"])
+                .unwrap();
+            let push = CloudPushArgs::try_parse_from(["push"]).unwrap();
+            execute_push_with_output(&push, &cli, &root_bg, false).unwrap();
+            let pull = CloudPullArgs::try_parse_from(["pull"]).unwrap();
+            execute_pull_with_output(&pull, &cli, &root_bg, false).unwrap();
+        })
+        .await
+        .unwrap();
+        let held = queue.pending(100, 5).unwrap();
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].entity_id, "cas-held-global");
+        assert!(queue.pending_for_team(team, 100, 5).unwrap().is_empty());
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests.iter().all(|request| {
+            request
+                .url
+                .path()
+                .starts_with(&format!("/api/teams/{team}/"))
+        }));
+        server.verify().await;
+    }
+
+    #[test]
+    fn cas_8095_queue_purge_flag_is_targeted_and_mutually_exclusive() {
+        use clap::Parser;
+        let args = CloudQueueArgs::try_parse_from(["queue", "--purge-team-owned"]).unwrap();
+        assert!(args.purge_team_owned);
+        for other in ["--clear", "--retry"] {
+            assert!(
+                CloudQueueArgs::try_parse_from(["queue", "--purge-team-owned", other]).is_err()
+            );
+        }
+        assert!(
+            CloudQueueArgs::try_parse_from(["queue", "--purge-team-owned", "--prune", "1"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn cas_8095_queue_purge_handler_keeps_local_task_and_team_row() {
+        use clap::Parser;
+        let temp = TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        crate::cloud::set_canonical_id_in_config_toml(&root, "purge-team-only").unwrap();
+        let local = crate::store::open_task_store_local(&root).unwrap();
+        let mut task = crate::types::Task::new("cas-purge-kept".into(), "keep local".into());
+        task.origin_project = Some("purge-team-only".into());
+        local.add(&task).unwrap();
+        let queue = SyncQueue::open(&root).unwrap();
+        queue.init().unwrap();
+        queue
+            .enqueue(
+                crate::cloud::EntityType::Task,
+                "cas-purge-kept",
+                crate::cloud::SyncOperation::Upsert,
+                Some("{}"),
+            )
+            .unwrap();
+        queue
+            .enqueue_for_team(
+                crate::cloud::EntityType::Task,
+                "cas-purge-kept",
+                crate::cloud::SyncOperation::Upsert,
+                Some("{}"),
+                "team-1",
+            )
+            .unwrap();
+        let row = queue.pending(10, 5).unwrap().remove(0);
+        queue
+            .record_row_outcome(row.id, "rejected", Some("team_owned_project"))
+            .unwrap();
+        let cli = crate::cli::try_parse_from_with_wordmark([
+            "cas",
+            "--json",
+            "cloud",
+            "queue",
+            "--purge-team-owned",
+        ])
+        .unwrap();
+        let args = CloudQueueArgs::try_parse_from(["queue", "--purge-team-owned"]).unwrap();
+        execute_queue(&args, &cli, &root).unwrap();
+        assert!(queue.pending(10, 5).unwrap().is_empty());
+        assert_eq!(queue.pending_for_team("team-1", 10, 5).unwrap().len(), 1);
+        assert_eq!(local.get("cas-purge-kept").unwrap().title, "keep local");
+    }
 
     #[test]
     fn foreign_identity_metadata_cleanup_keeps_current_scope_and_removes_foreign_markers() {

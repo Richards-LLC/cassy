@@ -47,6 +47,7 @@ impl Config {
             ),
             ("skills.optional".to_string(), skills.optional.join(",")),
             // Cloud section
+            ("cloud.team_only".to_string(), cloud.team_only.to_string()),
             ("cloud.auto_sync".to_string(), cloud.auto_sync.to_string()),
             (
                 "cloud.interval_secs".to_string(),

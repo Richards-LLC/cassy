@@ -203,6 +203,12 @@ impl Config {
                     .collect();
             }
             // Cloud section
+            "cloud.team_only" => {
+                let cloud = self.cloud.get_or_insert_with(CloudSyncConfig::default);
+                cloud.team_only = value
+                    .parse()
+                    .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
+            }
             "cloud.auto_sync" => {
                 let cloud = self.cloud.get_or_insert_with(CloudSyncConfig::default);
                 cloud.auto_sync = value

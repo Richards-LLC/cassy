@@ -2217,6 +2217,7 @@ pub(crate) fn pid_matches_fingerprint(pid: u32, expected_starttime: u64) -> bool
 /// Initialize cloud syncer if user is logged in
 fn init_cloud_syncer(cas_root: &std::path::Path) -> Option<Arc<CloudSyncer>> {
     let cloud_config = CloudConfig::load_from_cas_dir(cas_root).ok()?;
+    cloud_config.validate_team_only().ok()?;
 
     if !cloud_config.is_logged_in() {
         return None;

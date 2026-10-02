@@ -39,6 +39,7 @@ impl Config {
             "skills.optional" => Some(skills.optional.join(",")),
             // Cloud section
             "cloud.auto_sync" => Some(cloud.auto_sync.to_string()),
+            "cloud.team_only" => Some(cloud.team_only.to_string()),
             "cloud.interval_secs" => Some(cloud.interval_secs.to_string()),
             "cloud.pull_on_start" => Some(cloud.pull_on_start.to_string()),
             "cloud.max_retries" => Some(cloud.max_retries.to_string()),

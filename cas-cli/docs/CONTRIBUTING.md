@@ -188,6 +188,11 @@ copies matching exact-delivery receipts into worker evidence. Dirty trees,
 failed retries, other worktrees and other SHAs cannot supply this receipt.
 Check receipts are optional compile-only evidence and do not waive test proof.
 
+Shell redirection opens logs before the runner checks that commit. Use a
+Git-ignored `target/worker-check.log` or the task's artifacts directory; create
+the parent directory first. In-repo logs that Git does not ignore are refused
+by the hook. The clean-head gate still rejects source changes.
+
 Rust-touching supervisor lane merges require separate combined-tree evidence.
 Run `python3 scripts/check-lane-compile.py . <target> <source> --prove` as a
 supervisor before merging, backgrounded with a log. It uses the same capped

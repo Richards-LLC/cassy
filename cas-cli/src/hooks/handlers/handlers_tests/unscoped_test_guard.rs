@@ -50,6 +50,26 @@ fn cas_c0ec_rewritten_worker_logs_require_ignored_or_external_paths() {
         assert!(reason.contains("WORKER CHECK LOG"), "{reason}");
         assert!(reason.contains("target/worker-check.log"), "{reason}");
     }
+    #[cfg(unix)]
+    {
+        std::fs::create_dir(dir.path().join("target")).unwrap();
+        std::fs::write(dir.path().join("source.rs"), "// source").unwrap();
+        std::os::unix::fs::symlink("../source.rs", dir.path().join("target/source.log")).unwrap();
+        let mut request = input("cargo check -p cas --lib > target/source.log 2>&1 &", "worker");
+        request.cwd = worktree.into();
+        let reason = deny_reason(&handle_pre_tool_use(&request, Some(&root)).unwrap()).unwrap();
+        assert!(reason.contains("WORKER CHECK LOG"));
+    }
+    let artifacts = tempfile::tempdir().unwrap();
+    let mut config = crate::config::Config::default();
+    let mut factory = config.factory();
+    factory.artifacts_root = Some(artifacts.path().to_string_lossy().into_owned());
+    config.factory = Some(factory);
+    config.save(&root).unwrap();
+    let mut request = input(&format!("cargo check -p cas --tests > {}/worker-check.log 2>&1 &", artifacts.path().display()), "worker");
+    request.cwd = worktree.into();
+    let out = handle_pre_tool_use(&request, Some(&root)).unwrap();
+    assert!(deny_reason(&out).is_none(), "sanctioned artifact log: {out:?}");
 }
 
 /// Only the literal package-scoped check shape is exempt from assembly.

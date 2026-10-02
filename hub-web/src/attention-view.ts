@@ -12,6 +12,7 @@ import {
 } from "./attention";
 import type { AttentionItem } from "./types";
 import { absoluteTimestamp } from "./time";
+import { stampLabel } from "./thread-model";
 
 export interface AttentionPanelCallbacks {
   dismiss(items: AttentionItem[]): Promise<void> | void;
@@ -284,6 +285,12 @@ export function renderAttentionPanel(
       const label = attentionTimeLabel(time.dateTime, now);
       if (time.textContent !== label) time.textContent = label;
     }
+    // The empty rail's last-event time names its day once it is no longer
+    // today, as thread times do, so it moves on in place too (cas-0cd1).
+    for (const time of container.querySelectorAll<HTMLTimeElement>("time.attention-last-event[datetime]")) {
+      const label = lastEventLabel(time.dateTime, now);
+      if (time.textContent !== label) time.textContent = label;
+    }
     return;
   }
   container.dataset.panelSignature = signature;
@@ -398,6 +405,17 @@ function restoreAttentionPanelState(container: HTMLElement, state: AttentionPane
   if (document.activeElement === document.body) document.defaultView?.requestAnimationFrame(land);
 }
 
+/**
+ * The empty rail's last event in the app's clock (cas-0cd1): "Last event
+ * 12:01" today, "Last event Sep 30, 12:01" on another day, the same as a
+ * thread time. The browser's locale format ("9/30/2026, 12:01:32 PM") read as
+ * a different clock from everything beside it.
+ */
+function lastEventLabel(createdAt: string, now: number): string {
+  const at = Date.parse(createdAt);
+  return Number.isFinite(at) ? `Last event ${stampLabel(at, now)}` : `Last event ${createdAt}`;
+}
+
 function renderAttentionPanelContent(
   container: HTMLElement,
   items: readonly AttentionItem[],
@@ -435,7 +453,7 @@ function renderAttentionPanelContent(
     timestamp.className = "attention-last-event";
     if (latest) {
       timestamp.dateTime = latest.createdAt;
-      timestamp.textContent = `Last event ${new Date(latest.createdAt).toLocaleString()}`;
+      timestamp.textContent = lastEventLabel(latest.createdAt, options.now ?? Date.now());
     } else {
       timestamp.textContent = "No events recorded yet";
     }

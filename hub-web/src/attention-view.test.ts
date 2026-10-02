@@ -33,6 +33,32 @@ describe("attention timeline", () => {
     expect(busy.querySelector(".attention-empty")).toBeNull();
   });
 
+  it("tells the last event's time in the app's 24-hour clock, not the browser's locale (cas-0cd1)", () => {
+    const at = new Date(now);
+    at.setHours(9, 7, 32, 0);
+    const earlier = new Date(now);
+    earlier.setHours(8, 0, 0, 0);
+    const acknowledged = (id: string, createdAt: string): AttentionItem => ({ ...event(id), createdAt, acknowledgedAt: createdAt });
+    const items = [acknowledged("old", earlier.toISOString()), acknowledged("latest", at.toISOString())];
+    const root = document.createElement("div");
+    renderAttentionPanel(root, items, callbacks(), { now: at.getTime() + 60_000 });
+    const stamp = root.querySelector<HTMLTimeElement>(".attention-empty time.attention-last-event")!;
+    expect(stamp.dateTime).toBe(at.toISOString());
+    expect(stamp.textContent).toBe("Last event 09:07");
+    expect(stamp.textContent).not.toMatch(/AM|PM|\d+\/\d+\/\d+|:32/);
+
+    // On a later day it names the day, as thread times do, and a redraw with
+    // nothing new still moves the label over midnight.
+    const tomorrow = at.getTime() + 86_400_000;
+    const later = document.createElement("div");
+    renderAttentionPanel(later, items, callbacks(), { now: tomorrow });
+    const day = `${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][at.getMonth()]} ${at.getDate()}`;
+    expect(later.querySelector(".attention-last-event")?.textContent).toBe(`Last event ${day}, 09:07`);
+    renderAttentionPanel(root, items, callbacks(), { now: tomorrow });
+    expect(root.querySelector(".attention-last-event")).toBe(stamp);
+    expect(stamp.textContent).toBe(`Last event ${day}, 09:07`);
+  });
+
   it("gives all twelve events one primary text action and a timestamp", () => {
     const root = document.createElement("div");
     renderAttentionPanel(root, Array.from({ length: 12 }, (_, i) => event(String(i))), callbacks(), { now });

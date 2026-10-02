@@ -2072,6 +2072,14 @@ main > #conversation-return { order: 1; }
 
 .message-status.error { color: var(--state-warn); }
 
+/* cas-adfc: this draft will not survive a reload. */
+.message-draft-note {
+  margin: 0;
+  color: var(--state-warn);
+  font-size: var(--fs-meta);
+  text-wrap: pretty;
+}
+
 .control-disabled-reason {
   margin: 0;
   color: var(--state-warn);
@@ -3754,6 +3762,10 @@ button.chip:disabled { cursor: default; }
 .conversation-composer .control-disabled-reason { display: none; }
 .conversation-composer .composer-status, .conversation-composer .message-status, .conversation-composer .message-delivery { grid-area: status; font-size: var(--fs-meta); margin: 0; }
 .conversation-composer .composer-status[hidden], .conversation-composer .message-status[hidden], .conversation-composer .message-delivery[hidden] { display: none; }
+/* Auto-placed across the composer: the status row when that is empty,
+   otherwise its own row beneath, never on top of a status (cas-adfc). */
+.conversation-composer .message-draft-note { grid-column: 1 / -1; }
+.conversation-composer .message-draft-note[hidden] { display: none; }
 .conversation-context { min-width: 0; overflow-y: auto; padding: var(--space-6) var(--space-4); border-left: var(--line-width) solid var(--line-subtle); }
 .conversation-context[data-open="false"] { padding: 0; overflow: hidden; }
 .conversation-context .context-section[hidden] { display: none; }

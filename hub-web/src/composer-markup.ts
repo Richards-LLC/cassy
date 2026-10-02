@@ -8,7 +8,26 @@ import { escapeHtml } from "./cloud-brand";
 export const MIC_GLYPH = '<svg class="mic-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="8" y="3" width="8" height="12" rx="4"></rect><path d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6"></path></svg>';
 
 export function composerMarkup(supervisor: string | undefined, threadMarkup = ""): string {
-  return `<div class="message"><h2><label for="message-text">Talk to ${escapeHtml(supervisor ?? "supervisor")}</label></h2>${threadMarkup}<textarea aria-describedby="message-status" id="message-text" placeholder="Speak or type a message, then review it before sending"></textarea><p class="control-disabled-reason" role="note" hidden></p><div class="composer-actions"><button id="message-mic" type="button" disabled data-mic-state="checking" aria-label="Checking voice input" aria-description="Checking voice input support…" title="Checking voice input support…" aria-pressed="false">${MIC_GLYPH}</button><button id="message-keyboard" type="button">Keyboard</button><button id="message-send" class="primary">Send message</button></div><p id="message-status" class="message-status" role="status" hidden></p><p id="message-delivery" class="message-delivery" role="status" hidden></p></div>`;
+  return `<div class="message"><h2><label for="message-text">Talk to ${escapeHtml(supervisor ?? "supervisor")}</label></h2>${threadMarkup}<textarea aria-describedby="message-status" id="message-text" placeholder="Speak or type a message, then review it before sending"></textarea><p class="control-disabled-reason" role="note" hidden></p><div class="composer-actions"><button id="message-mic" type="button" disabled data-mic-state="checking" aria-label="Checking voice input" aria-description="Checking voice input support…" title="Checking voice input support…" aria-pressed="false">${MIC_GLYPH}</button><button id="message-keyboard" type="button">Keyboard</button><button id="message-send" class="primary">Send message</button></div><p id="message-status" class="message-status" role="status" hidden></p><p id="message-draft-note" class="message-draft-note" role="status" hidden></p><p id="message-delivery" class="message-delivery" role="status" hidden></p></div>`;
+}
+
+/**
+ * cas-adfc: a draft over the conversation store's bound is kept only in this
+ * page. The composer says so, in one sentence, while that is true.
+ */
+export const DRAFT_TOO_LONG_NOTE = "This draft is too long to keep if the page reloads. Send it, or copy it somewhere safe, before you leave.";
+
+/**
+ * Show or hide the too-long note. The sentence is written only when it was not
+ * already showing, so a screen reader hears it once, not on every keystroke.
+ */
+export function applyDraftNote(root: ParentNode, tooLong: boolean): void {
+  const note = root.querySelector<HTMLElement>("#message-draft-note");
+  if (!note) return;
+  if (!tooLong) { note.hidden = true; note.textContent = ""; return; }
+  if (!note.hidden && note.textContent === DRAFT_TOO_LONG_NOTE) return;
+  note.textContent = DRAFT_TOO_LONG_NOTE;
+  note.hidden = false;
 }
 
 /** What the mic knows: still detecting, typing only, or dictation available. */

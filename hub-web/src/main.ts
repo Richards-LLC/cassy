@@ -60,7 +60,7 @@ import { FleetBoardRenderer } from "./fleet-board";
 import { FirstConnectionAnnouncer, installPairedMachine } from "./first-connection";
 import { isEditableElement, renderDecision, shellSignature } from "./render-model";
 import { operatorThreadMarkup } from "./operator-thread";
-import { applyMicState, composerMarkup } from "./composer-markup";
+import { applyDraftNote, applyMicState, composerMarkup } from "./composer-markup";
 import { pairDialogMarkup as renderPairDialogMarkup } from "./pair-dialog-markup";
 import type { AttentionItem, ConversationHistoryPage, HubSession, LeaseState, OperatorReply, PaneInfo, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
@@ -2439,12 +2439,26 @@ function persistArrivals(): void {
   }
 }
 
+/**
+ * cas-adfc: conversations whose draft is over the store's bound, so it lives
+ * only in this page; the composer says so while it shows that conversation.
+ */
+const draftsTooLongToKeep = new Set<string>();
+
+/** The composer's too-long note, for the conversation it is showing. */
+function paintDraftNote(): void {
+  const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
+  const key = composer?.dataset.threadKey;
+  applyDraftNote(document, !!key && draftsTooLongToKeep.has(key));
+}
+
 /** Record (or, with no draft, forget) a conversation's draft, in memory and in storage. */
 function rememberDraft(key: string, draft: Draft | undefined): void {
   if (draft) conversationDrafts.set(key, draft); else conversationDrafts.delete(key);
   const machineId = key.slice(0, key.indexOf(":"));
-  if (conversationPersistenceBlocked.has(machineId)) drafts.save(key, undefined);
-  else drafts.save(key, draft);
+  const saved = drafts.save(key, conversationPersistenceBlocked.has(machineId) ? undefined : draft);
+  if (saved === "too-long") draftsTooLongToKeep.add(key); else draftsTooLongToKeep.delete(key);
+  paintDraftNote();
 }
 
 /**
@@ -2459,6 +2473,7 @@ function purgeMachineConversations(machineId: string, options: { forgetInMemory:
   for (const key of [...storedArrivals.keys()]) if (key.startsWith(`${machineId}:`)) storedArrivals.delete(key);
   if (options.forgetInMemory) {
     for (const key of [...conversationDrafts.keys()]) if (key.startsWith(`${machineId}:`)) conversationDrafts.delete(key);
+    for (const key of [...draftsTooLongToKeep]) if (key.startsWith(`${machineId}:`)) draftsTooLongToKeep.delete(key);
   }
 }
 
@@ -2487,6 +2502,7 @@ function restoreMessageDraft(): void {
   composer.value = messageDraft;
   const caret = Math.min(messageDraftSelection, messageDraft.length);
   composer.setSelectionRange(caret, caret);
+  paintDraftNote();
 }
 
 /** A click made with a mouse (fine pointer). Browsers that do not report

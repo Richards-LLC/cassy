@@ -49,18 +49,21 @@ export class ConversationStore<T> {
     return this.read().get(conversation)?.value;
   }
 
-  /** Store one conversation's value, evicting the least recently written beyond the bound. */
-  set(conversation: string, value: T): void {
+  /**
+   * Store one conversation's value, evicting the least recently written beyond
+   * the bound. A value over the per-conversation bound is not stored (and any
+   * older copy is removed): false says so, so the caller can tell the operator
+   * it will not survive a reload (cas-adfc).
+   */
+  set(conversation: string, value: T): boolean {
     const records = this.read();
-    if (JSON.stringify(value).length > this.maxValueChars) {
-      records.delete(conversation);
-    } else {
-      records.delete(conversation);
-      records.set(conversation, { value, updatedAt: this.now() });
-    }
+    const fits = JSON.stringify(value).length <= this.maxValueChars;
+    records.delete(conversation);
+    if (fits) records.set(conversation, { value, updatedAt: this.now() });
     const ordered = [...records].sort(([, a], [, b]) => a.updatedAt - b.updatedAt);
     while (ordered.length > this.maxConversations) ordered.shift();
     this.write(new Map(ordered));
+    return fits;
   }
 
   delete(conversation: string): void {
@@ -144,17 +147,25 @@ export function validDraft(raw: unknown): Draft | undefined {
   return { text, caret: at };
 }
 
+/**
+ * What saving a draft did: `kept` is on disk for the next load, `cleared` was
+ * blank (or withheld) and is gone, `too-long` is over the store's bound, so it
+ * lives only in this page and a reload loses it (cas-adfc).
+ */
+export type DraftSave = "kept" | "cleared" | "too-long";
+
 /** The drafts store: a blank draft is a deletion, never a stored entry. */
-export function draftStore(storage: StorageLike | undefined): {
+export function draftStore(storage: StorageLike | undefined, options: ConversationStoreOptions = {}): {
   load(): Map<string, Draft>;
-  save(conversation: string, draft: Draft | undefined): void;
+  save(conversation: string, draft: Draft | undefined): DraftSave;
 } {
-  const store = new ConversationStore(storage, "drafts", validDraft);
+  const store = new ConversationStore(storage, "drafts", validDraft, options);
   return {
     load: () => store.entries(),
     save: (conversation, draft) => {
       const valid = draft && validDraft(draft);
-      if (valid) store.set(conversation, valid); else store.delete(conversation);
+      if (!valid) { store.delete(conversation); return "cleared"; }
+      return store.set(conversation, valid) ? "kept" : "too-long";
     },
   };
 }

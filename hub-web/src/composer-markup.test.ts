@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { CHECKING_VOICE_INPUT, LISTENING_PLACEHOLDER, VOICE_INPUT_UNSUPPORTED, applyMicState, composerMarkup, micPresentation, type MicState } from "./composer-markup";
+import { CHECKING_VOICE_INPUT, DRAFT_TOO_LONG_NOTE, LISTENING_PLACEHOLDER, VOICE_INPUT_UNSUPPORTED, applyDraftNote, applyMicState, composerMarkup, micPresentation, type MicState } from "./composer-markup";
 import { COMPOSER_ROLE_PLACEHOLDER, composerPlaceholder, composerPlaceholders, dressComposer, fitComposerPlaceholder, fittingPlaceholder } from "./conversation-shell";
 
 // WCAG 2.x contrast, the same arithmetic as machine-accent.test.ts.
@@ -195,3 +195,32 @@ describe("a long supervisor name keeps the composer one line (3.30.0 journey F9)
   });
 });
 
+
+describe("a draft too long to keep across a reload says so (cas-adfc)", () => {
+  it("is hidden and silent by default, under the cap nothing changes", () => {
+    composer();
+    const note = document.querySelector<HTMLElement>("#message-draft-note")!;
+    expect(note.hidden).toBe(true);
+    expect(note.getAttribute("role")).toBe("status");
+    applyDraftNote(document, false);
+    expect(note.hidden).toBe(true);
+    expect(note.textContent).toBe("");
+  });
+
+  it("shows the sentence once while over the cap, and clears it when the draft fits again", () => {
+    composer();
+    const note = document.querySelector<HTMLElement>("#message-draft-note")!;
+    const writes: string[] = [];
+    new MutationObserver((records) => { for (const record of records) for (const node of record.addedNodes) writes.push(node.textContent ?? ""); }).observe(note, { childList: true });
+    applyDraftNote(document, true);
+    expect(note.hidden).toBe(false);
+    expect(note.textContent).toBe(DRAFT_TOO_LONG_NOTE);
+    expect(DRAFT_TOO_LONG_NOTE).toMatch(/too long to keep if the page reloads/);
+    // Every further keystroke over the cap leaves the live region untouched.
+    for (let index = 0; index < 5; index += 1) applyDraftNote(document, true);
+    applyDraftNote(document, false);
+    expect(note.hidden).toBe(true);
+    expect(note.textContent).toBe("");
+    return Promise.resolve().then(() => expect(writes.filter((text) => text === DRAFT_TOO_LONG_NOTE)).toHaveLength(1));
+  });
+});

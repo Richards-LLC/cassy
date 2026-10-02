@@ -79,6 +79,32 @@ describe("drafts across a reload (cas-7752)", () => {
     expect(draftStore(storage).load().size).toBe(0);
   });
 
+  it("says whether a draft was kept: under the bound as before, a 70k draft is too long and an older copy goes (cas-adfc)", () => {
+    const storage = memoryStorage();
+    const drafts = draftStore(storage);
+    expect(drafts.save("atlas:pelican", { text: "short", caret: 5 })).toBe("kept");
+    expect(draftStore(storage).load().get("atlas:pelican")).toEqual({ text: "short", caret: 5 });
+    expect(drafts.save("atlas:pelican", { text: "z".repeat(70_000), caret: 70_000 })).toBe("too-long");
+    // The shorter copy is not restored in its place: a reload shows no stale draft.
+    expect(draftStore(storage).load().size).toBe(0);
+    expect(drafts.save("atlas:pelican", { text: "z".repeat(1_000), caret: 0 })).toBe("kept");
+    expect(draftStore(storage).load().get("atlas:pelican")?.text).toHaveLength(1_000);
+    expect(drafts.save("atlas:pelican", { text: "  ", caret: 0 })).toBe("cleared");
+    expect(drafts.save("atlas:pelican", undefined)).toBe("cleared");
+    expect(draftStore(storage).load().size).toBe(0);
+  });
+
+  it("measures the bound on the stored form, so the edge is exact (cas-adfc)", () => {
+    const storage = memoryStorage();
+    const fits = (n: number) => JSON.stringify({ text: "a".repeat(n), caret: 0 }).length;
+    const edge = 64_000 - fits(0);
+    expect(fits(edge)).toBe(64_000);
+    expect(draftStore(storage).save("a:s", { text: "a".repeat(edge), caret: 0 })).toBe("kept");
+    expect(draftStore(storage).save("a:s", { text: "a".repeat(edge + 1), caret: 0 })).toBe("too-long");
+    expect(new ConversationStore(storage, "t", text, { maxValueChars: 5 }).set("a:s", "abc")).toBe(true);
+    expect(new ConversationStore(storage, "t", text, { maxValueChars: 5 }).set("a:s", "abcd")).toBe(false);
+  });
+
   it("clamps a caret outside the text", () => {
     expect(validDraft({ text: "hi", caret: 99 })).toEqual({ text: "hi", caret: 2 });
     expect(validDraft({ text: "hi", caret: -3 })).toEqual({ text: "hi", caret: 0 });

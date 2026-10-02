@@ -1330,7 +1330,7 @@ async function pairMachine(form: HTMLFormElement): Promise<StoredMachine | false
   machines.set(machine.id, machine);
   // cas-0e14 F29: a code re-pair can't carry session launch. Say plainly that
   // starting sessions needs allowing again, rather than letting New session
-  // quietly turn back into "Allow new sessions".
+  // quietly open the permission view again (its label stays "New session", cas-865c).
   if (launchDropped(previousScopes, machine.scopes)) announceLaunchDropped(machine);
   else if (machine.scopes.includes("session-launch")) settleLaunchDropped(machine.id);
   // cas-7752: only a fresh pairing lets a revoked machine's drafts be stored

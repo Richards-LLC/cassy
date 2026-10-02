@@ -153,6 +153,6 @@ export function repairStatus(label: string, scopes: readonly Scope[], controller
 export function launchDroppedNotice(label: string): { headline: string; detail: string } {
   return {
     headline: "Starting sessions needs allowing again",
-    detail: `Re-pairing ${label} with a code didn't include starting sessions. Open Allow new sessions to allow it again.`,
+    detail: `Re-pairing ${label} with a code didn't include starting sessions. Open New session to allow it again.`,
   };
 }

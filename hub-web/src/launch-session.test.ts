@@ -455,7 +455,7 @@ describe("re-pairing and session launch (cas-0e14 F29)", () => {
   it("says plainly after a re-pair that starting sessions was not kept, and how to get it back", () => {
     expect(launchDroppedNotice("Atlas · Linux")).toEqual({
       headline: "Starting sessions needs allowing again",
-      detail: "Re-pairing Atlas · Linux with a code didn't include starting sessions. Open Allow new sessions to allow it again.",
+      detail: "Re-pairing Atlas · Linux with a code didn't include starting sessions. Open New session to allow it again.",
     });
   });
 

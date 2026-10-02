@@ -18,7 +18,7 @@ cd "$repo_root"
 failure_log_rel='cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md'
 readonly -a gate_check_ids=(
     scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config assemble-stale-base
-    version-literals ci-script-tests fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
+    version-literals ci-script-tests hub-web-tests fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
     snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
     procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene
 )
@@ -268,7 +268,7 @@ print(hashlib.sha256(material.encode()).hexdigest())'
 cache_input_hash() {
     local name="$1"
     case "$name" in
-        hub-web-visual-qa|hub-web-dist-drift)
+        hub-web-tests|hub-web-visual-qa|hub-web-dist-drift)
             git ls-tree -r HEAD -- hub-web scripts .github | sha256sum | cut -d' ' -f1
             ;;
         fixture-paths|workspace-tests|macos-check|nextest|doctests|archive-mode|snapshot-portability)
@@ -336,7 +336,7 @@ row_cache_key() {
     [[ -z "$(git ls-files --others --exclude-standard)" ]] || return 1
     local -a inputs=()
     case "$name" in
-        hub-web-visual-qa|hub-web-dist-drift) inputs=(hub-web scripts .github) ;;
+        hub-web-tests|hub-web-visual-qa|hub-web-dist-drift) inputs=(hub-web scripts .github) ;;
         fixture-paths|workspace-tests|macos-check|nextest|doctests|archive-mode|snapshot-portability)
             inputs=(.) ;;
         *) return 1 ;;
@@ -736,6 +736,18 @@ install_hub_web_dependencies() {
         NPM_CONFIG_CACHE="$tmp_dir/npm-cache" \
         "$npm_bin" ci --no-audit --no-fund) || return $?
     : >"$tmp_dir/hub-web-npm-installed"
+}
+
+check_hub_web_tests() {
+    local npm_bin="${NPM:-npm}"
+    if [[ ! -f hub-web/package.json ]]; then
+        printf 'hub-web-tests: hub-web/package.json is not present; row not applicable to this release\n'
+        return 0
+    fi
+    install_hub_web_dependencies || return $?
+    (cd hub-web && \
+        NPM_CONFIG_CACHE="$tmp_dir/npm-cache" "$npm_bin" run typecheck && \
+        NPM_CONFIG_CACHE="$tmp_dir/npm-cache" "$npm_bin" test)
 }
 
 check_hub_web_dist_drift() {
@@ -1310,6 +1322,13 @@ run_check ci-script-tests \
     'make -C cas-cli test-ci-tiers (factory identity scrubbed)' \
     check_ci_script_tests
 if row_selected ci-script-tests && [[ "${failures[*]}" == *ci-script-tests* ]]; then
+    printf 'RELEASE GATE FAILED: %s (aborted before build and Rust suite rows)\n' "${failures[*]}"
+    exit 1
+fi
+run_check hub-web-tests \
+    'npm ci --no-audit --no-fund && npm run typecheck && npm test' \
+    check_hub_web_tests
+if row_selected hub-web-tests && [[ "${failures[*]}" == *hub-web-tests* ]]; then
     printf 'RELEASE GATE FAILED: %s (aborted before build and Rust suite rows)\n' "${failures[*]}"
     exit 1
 fi

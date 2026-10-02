@@ -643,6 +643,14 @@ when requested. Rust re-exec helpers require the exact child name, one selected
 test, and one passing result; intentional signal/atexit children instead prove
 entry into the test body before their early exit.
 
+The full release gate's `hub-web-tests` row runs `npm ci`, `npm run typecheck`,
+and `npm test` before build and Rust suite rows. A failure prevents pipeline
+admission. Its cached PASS depends on `hub-web`, `scripts`, and `.github`,
+including the repo-level `scripts/visual-qa.mjs` that web tests import and read.
+Both scoped CI lanes use the same conservative paths for `web-check-needed`;
+Markdown fixtures beneath those paths still require web tests. The no-build
+fast gate keeps its cheap rows, while the scoped lane runs the npm checks.
+
 Closing a task that changes a committed `*.snap` or
 `opencode_projection.snapshot.json` requires a task decision note:
 `snapshot-approved: <relative file> — <actual +added or -removed line> — <why>`.

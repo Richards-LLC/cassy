@@ -308,7 +308,7 @@ assert_all_pass() {
     for name in scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config assemble-stale-base \
         version-literals fixture-paths workspace-tests macos-check nextest doctests archive-mode snapshot-portability \
         builtin-projections changelog-and-versions release-script release-notes-shell-injection procedure-guardrails working-tree test-targets markdown-lint test-shape test-env ci-script-tests builtin-doc-hygiene \
-        hub-web-dist-drift hub-web-visual-qa; do
+        hub-web-tests hub-web-dist-drift hub-web-visual-qa; do
         if ! grep -qF "PASS $name" <<<"$output"; then
             bad "passing fixture omitted PASS $name"
             return
@@ -1121,8 +1121,8 @@ else
     bad 'row timing or successful logs missing'
 fi
 run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --reuse >"$tmp/cache-second.log" 2>&1
-if [[ "$(awk -F '\t' '$7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 9 ]]; then
-    ok 'unchanged full gate reuses nine eligible PASS receipts'
+if [[ "$(awk -F '\t' '$7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 10 ]]; then
+    ok 'unchanged full gate reuses ten eligible PASS receipts'
 else
     bad "unchanged full gate did not reuse eligible rows: $(cat "$tmp/cache-second.log")"
 fi
@@ -1136,7 +1136,7 @@ printf 'release prose\n' >"$repo/docs/release-notes/cache.md"
 git -C "$repo" add docs/release-notes/cache.md
 git -C "$repo" commit -qm 'fixture release prose'
 run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 >"$tmp/cache-docs.log" 2>&1
-if [[ "$(awk -F '\t' '$7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 9 ]]; then
+if [[ "$(awk -F '\t' '$7 == "REUSED" {n++} END {print n+0}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 10 ]]; then
     ok 'train row cache automatically reuses unchanged code proof after a release-prose commit'
 else
     bad "release prose reran unchanged code rows: $(cat "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")"
@@ -1145,7 +1145,7 @@ printf '// Rust-only fix\n' >>"$repo/cas-cli/tests/smoke.rs"
 git -C "$repo" add .
 git -C "$repo" commit -qm 'fixture Rust fix'
 run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --reuse >"$tmp/cache-rust.log" 2>&1
-if [[ "$(awk -F '\t' '$7 == "REUSED" {print $1}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == $'hub-web-dist-drift\nhub-web-visual-qa' ]]; then
+if [[ "$(awk -F '\t' '$7 == "REUSED" {print $1}' "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == $'hub-web-tests\nhub-web-dist-drift\nhub-web-visual-qa' ]]; then
     ok 'Rust-only commit reuses web evidence and reruns all Rust-dependent rows'
 else
     bad "Rust change cache invalidation failed: $(cat "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")"

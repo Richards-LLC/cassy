@@ -116,7 +116,9 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     // QA F03: a heartbeat redraw (every 5 s) never moves the keyboard user.
     while (!(await focused()).startsWith("button.attention-dismiss-group")) await page.keyboard.press("Tab");
     const resting = await focused();
-    await page.waitForTimeout(6_000);
+    // A catalog refetch and redraw is driven by a machine event (cas-9772), not waited out.
+    await hub.announceCatalog("atlas");
+    await hub.announceCatalog("atlas");
     expect(await focused(), "focus stays put across a heartbeat").toBe(resting);
     // QA round 3 F02/F03: a minute rollover (the cards' ages change) is not a
     // redraw either. Open the notice's Details, rest on its Copy, cross a
@@ -126,7 +128,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await notice.getByRole("button", { name: "Copy" }).focus();
     const copy = await focused();
     await page.clock.fastForward(61_000);
-    await page.waitForTimeout(6_000);
+    await hub.announceCatalog("atlas");
     expect(await focused(), "focus stays on Copy across a minute").toBe(copy);
     await expect(notice.locator("details")).toHaveAttribute("open", "");
     await sheet.locator(".attention-dismiss-group").focus();
@@ -161,7 +163,8 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     // until its region shows it: focus must still land back on it.
     const sessions = hub.machine("atlas").sessions;
     sessions.push({ name: "Accounting-quiet-otter-3", supervisor: "quiet-otter-3", project_dir: "/projects/Ledger", workers: [], liveness: "live" });
-    await expect(page.getByRole("navigation", { name: "Choose a supervisor", includeHidden: true }).locator(".conversation-row")).toHaveCount(2, { timeout: 15_000 });
+    await hub.announceCatalog("atlas");
+    await expect(page.getByRole("navigation", { name: "Choose a supervisor", includeHidden: true }).locator(".conversation-row")).toHaveCount(2);
     sessions.pop();
     await expect(badge).toBeFocused();
     await expect(log).toContainText("The ledger import is red");

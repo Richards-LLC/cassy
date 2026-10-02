@@ -2,6 +2,7 @@ import { test, expect } from "./journey";
 import type { Machine } from "./hub-double";
 import { expectDraft, installDraftDiagnostic } from "./draft-diagnostic";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
+import { journeyNow } from "./clock";
 
 // A machine whose supervisor has a 64-character codename (cas-1334).
 const LONG_NAME = "an-extraordinarily-long-supervisor-name-for-truncation-checks-77";
@@ -126,11 +127,43 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     const bubble = page.locator('.conversation-turn[data-state="error"]');
     const take = bubble.getByRole("button", { name: "Take control of the session", exact: true });
     const lease = (url: URL) => /\/v1\/sessions\/[^/]+\/lease$/.test(url.pathname);
-    await page.route(lease, (route) => route.request().method() === "POST"
-      ? route.fulfill({ status: 409, json: { error: "lease held" } })
-      : route.fulfill({ json: { held_by_me: false, controller_label: "Studio iPad" } }));
+    const iPad = { held_by_me: false, controller_label: "Studio iPad" };
+    // cas-54ed: only the take that Enter sends is refused. The lease heartbeat
+    // POSTs the same URL; refused too, it invalidated the lease and redrew the
+    // bubble under the focused control, and the Enter went nowhere. So:
+    // - a lease POST the page issued before arming (a heartbeat, even one
+    //   still in flight) goes on to the hub double, unchanged;
+    // - the page clock is held from arming until the take is refused, so no
+    //   heartbeat can be issued in between: the first armed POST is the take;
+    // - after that, a heartbeat gets the iPad's state, never a 409.
+    let armed = false;
+    let refusals = 0;
+    const isLeasePost = (request: { method(): string; url(): string }) => request.method() === "POST" && lease(new URL(request.url()));
+    const beforeArming = new Set<unknown>();
+    const noteBeforeArming = (request: { method(): string; url(): string }) => { if (!armed && isLeasePost(request)) beforeArming.add(request); };
+    page.on("request", noteBeforeArming);
+    await page.route(lease, (route) => {
+      const request = route.request();
+      if (request.method() !== "POST") return route.fulfill({ json: iPad });
+      if (!armed || beforeArming.has(request)) return route.fallback();
+      if (refusals === 0) { refusals += 1; return route.fulfill({ status: 409, json: { error: "lease held" } }); }
+      return route.fulfill({ json: iPad });
+    });
     await take.focus();
+    // Just ahead of the page's clock, which started at the test's start instant.
+    await page.clock.pauseAt(journeyNow() + 1_000);
+    // A round trip after the hold: any heartbeat the jump fired has been issued.
+    await page.evaluate(() => 0);
+    armed = true;
+    page.off("request", noteBeforeArming);
+    const refusedTake = page.waitForResponse((response) => isLeasePost(response.request()) && response.status() === 409);
+    const holderRead = page.waitForResponse((response) => lease(new URL(response.url())) && response.request().method() === "GET");
     await page.keyboard.press("Enter");
+    await refusedTake;
+    // The take is refused; the clock runs again before the app reads who holds
+    // the lease (its request path uses timers).
+    await page.clock.resume();
+    await holderRead;
     // Journey F5: the reason is said once, on the message, in plain words; the
     // composer only points at it.
     await expect(page.locator("#message-status")).toHaveText("Not sent — see the message above.");
@@ -298,8 +331,13 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     // No receipt comes; the supervisor talks on, so the receipt is overdue (cas-1622).
     hub.supervisorSays(PELICAN, "Still running the release gate.");
     const bubble = page.locator('.conversation-turn[data-state="unconfirmed"]');
-    // It gives up 5 s after that turn arrived (cas-1185), not at once.
-    await expect(bubble.getByRole("status")).toHaveText(`Not confirmed · Cassy couldn't confirm delivery to ${PELICAN}. Retry sends it again.`, { timeout: 10_000 });
+    // It gives up 5 s after that turn arrived (cas-1185), not at once. The
+    // page clock is moved through those 5 s rather than waiting them out on a
+    // wall clock a loaded host stretches (cas-54ed).
+    await expect(page.getByRole("log")).toContainText("Still running the release gate.");
+    await expect(page.locator('.conversation-turn[data-state="sending"]').filter({ hasText: "Is the gate green yet?" })).toHaveCount(1);
+    await page.clock.fastForward(5_000);
+    await expect(bubble.getByRole("status")).toHaveText(`Not confirmed · Cassy couldn't confirm delivery to ${PELICAN}. Retry sends it again.`);
     await expect(page.locator('.conversation-turn[data-state="sending"]')).toHaveCount(0);
     await expect(page.getByText(`Sending to ${PELICAN}…`)).toBeHidden();
     const retried = hub.nextSend();
@@ -320,7 +358,9 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     expect((await unreceipted).text).toBe("Did the Mac tests start?");
     hub.supervisorSays(PELICAN, "Gate run 3 of 3 is going.");
     const bubble = page.locator('.conversation-turn[data-state="unconfirmed"]').filter({ hasText: "Did the Mac tests start?" });
-    await expect(bubble.getByRole("button", { name: "Retry sending" })).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByRole("log")).toContainText("Gate run 3 of 3 is going.");
+    await page.clock.fastForward(5_000);
+    await expect(bubble.getByRole("button", { name: "Retry sending" })).toBeVisible();
     hub.supervisorSays(PELICAN, "Tests are running on the Mac.");
     await expect(bubble.getByRole("status")).toHaveText("Not confirmed · The supervisor has replied since; send it again only if it missed this.");
     await expect(bubble).toHaveAttribute("data-settled", "true");
@@ -444,21 +484,26 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     const details = page.locator(".conversation-pane-slot .connection-details summary");
     await page.reload();
     await expect(list.getByRole("button", { name: /gabber-studio/ })).toBeVisible();
-    hub.delayAttach(OTTER, 3_000);
+    // cas-54ed: the attach is held until the card has focus, not for 3 s a
+    // loaded host can spend before the focus lands.
+    const releaseOtter = hub.holdAttach(OTTER);
     await list.getByRole("button", { name: /gabber-studio/ }).click();
     await expect(details).toBeVisible();
     await details.focus();
     await expect(details).toBeFocused();
+    releaseOtter();
     await expect(page.locator(".conversation-pane-slot .terminal-connecting")).toHaveCount(0, { timeout: 10_000 });
     await expect(composer).toBeFocused();
     // Focus outside the card (the list search) stays there when it is replaced.
     await page.reload();
     await expect(list.getByRole("button", { name: /cas-src/ })).toBeVisible();
-    hub.delayAttach(PELICAN, 3_000);
+    const releasePelican = hub.holdAttach(PELICAN);
     await list.getByRole("button", { name: /cas-src/ }).click();
     await expect(details).toBeVisible();
     const search = page.getByRole("searchbox", { name: "Search conversations" });
     await search.focus();
+    await expect(search).toBeFocused();
+    releasePelican();
     await expect(page.locator(".conversation-pane-slot .terminal-connecting")).toHaveCount(0, { timeout: 10_000 });
     await page.waitForTimeout(500);
     await expect(search).toBeFocused();

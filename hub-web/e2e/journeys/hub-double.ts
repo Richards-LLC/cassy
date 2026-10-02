@@ -123,6 +123,8 @@ export class HubDouble {
   readonly attaches: string[] = [];
   private readonly held = new Set<string>();
   private readonly attachDelays = new Map<string, number>();
+  /** Attaches held until the journey releases them (cas-54ed). */
+  private readonly attachGates = new Map<string, Promise<void>>();
   private polls = 0;
   private requestedScopes: string[] = [];
   private nextId = 1000;
@@ -499,6 +501,28 @@ export class HubDouble {
     this.attachDelays.set(session, ms);
   }
 
+  /**
+   * Hold the session's next attach until the returned release is called
+   * (cas-54ed): a step that must act while the opening card is up waits on
+   * the page, not on a delay a loaded host can outrun.
+   */
+  holdAttach(session: string): () => void {
+    let release!: () => void;
+    this.attachGates.set(session, new Promise<void>((ok) => { release = ok; }));
+    return () => release();
+  }
+
+  /** Send the welcome now, after a held attach is released, or after a set delay. */
+  private welcomeWhenReady(session: string, welcome: () => void): void {
+    const gate = this.attachGates.get(session);
+    this.attachGates.delete(session);
+    const delay = this.attachDelays.get(session);
+    this.attachDelays.delete(session);
+    if (gate) void gate.then(welcome);
+    else if (delay === undefined) welcome();
+    else this.delay(welcome, delay);
+  }
+
   hasSocket(session: string): boolean {
     return this.sockets.has(session);
   }
@@ -738,10 +762,7 @@ export class HubDouble {
       this.handleSessionFrame(machineId, session, ws, message, pages);
     });
     const welcome = () => ws.send(JSON.stringify(this.welcomeFor(session)));
-    const delay = this.attachDelays.get(session);
-    this.attachDelays.delete(session);
-    if (delay === undefined) welcome();
-    else this.delay(welcome, delay);
+    this.welcomeWhenReady(session, welcome);
     this.attaches.push(session);
     this.observed();
   }
@@ -794,9 +815,7 @@ export class HubDouble {
         // per-session viewer does.
         this.sockets.set(session, channel(session));
         const welcome = () => ws.send(JSON.stringify({ channel: `pty:${session}`, message: this.welcomeFor(session) }));
-        const delay = this.attachDelays.get(session);
-        this.attachDelays.delete(session);
-        if (delay === undefined) welcome(); else this.delay(welcome, delay);
+        this.welcomeWhenReady(session, welcome);
         this.attaches.push(session);
         this.observed();
         return;

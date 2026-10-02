@@ -444,10 +444,10 @@ fn all_projects_skips_later_phases_when_a_held_write_lock_blocks_migration() {
     assert!(column_exists(&conn, "entries", "origin_project"));
 }
 
-/// cas-3af4: a legacy store (rules and entries, no task table, no migration
-/// ledger) used to be called "not initialized", its migration phase reported
-/// ok, and the skills phase failed on "no such column: operator_authority".
-/// It is migrated first now, and the refresh succeeds.
+/// cas-3af4: a legacy store (rules and entries without a task table) used to
+/// be called "not initialized", its migration phase reported ok, and the
+/// skills phase failed on "no such column: operator_authority". It is
+/// migrated first now, and the refresh succeeds.
 #[test]
 fn all_projects_migrates_a_legacy_store_before_reading_its_rules() {
     let temp = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
@@ -459,13 +459,12 @@ fn all_projects_migrates_a_legacy_store_before_reading_its_rules() {
         let conn = open_project_db(&project);
         conn.execute_batch(
             "DROP TABLE tasks;
-             DROP TABLE cas_migrations;
+             DELETE FROM cas_migrations WHERE id >= 259;
              ALTER TABLE rules DROP COLUMN origin_project;
              ALTER TABLE rules DROP COLUMN operator_authority;
-             ALTER TABLE entries DROP COLUMN origin_project;
-             PRAGMA user_version = 0;",
+             ALTER TABLE entries DROP COLUMN origin_project;",
         )
-        .expect("rewind the store to a pre-ledger legacy shape");
+        .expect("rewind the store to a legacy shape without a task table");
         assert!(!column_exists(&conn, "rules", "operator_authority"));
     }
 

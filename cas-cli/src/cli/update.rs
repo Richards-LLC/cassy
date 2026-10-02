@@ -850,6 +850,18 @@ fn render_project_phase_details(
                 ));
             } else {
                 selected.push_str(output);
+                // cas-91a3: a failed phase's own words (the cause, who holds
+                // the store, what to do) are not always in what it printed.
+                if phase.failed() && !output.contains(phase.detail()) {
+                    if !output.ends_with('\n') {
+                        selected.push('\n');
+                    }
+                    selected.push_str(&format!(
+                        "{} {label}: {}\n",
+                        phase.status_label(),
+                        phase.detail()
+                    ));
+                }
             }
         }
     }

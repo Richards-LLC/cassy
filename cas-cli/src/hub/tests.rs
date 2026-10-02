@@ -54,11 +54,20 @@ fn private_tempdir() -> tempfile::TempDir {
 }
 
 // This fixture launches a second test binary, then waits for both its Tokio
-// runtime and the parent-side reaper/connector chain to receive CPU time. The
-// normal isolated run takes about 3 seconds, so the former 5-second deadline
-// flakes under full-suite build contention. Fifteen seconds keeps a bounded
-// failure while leaving enough scheduling headroom for a busy developer host.
-const H1_DEATH_REAL_PROCESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+// runtime and the parent-side reaper/connector chain to receive CPU time.
+//
+// cas-e207: do NOT "fix" a timeout here by raising this again. The slow step
+// was never scheduling: with a pipe `core_pattern` (systemd-coredump, apport)
+// and a non-zero `core_pipe_limit`, the kernel keeps the SIGILL'd child — and
+// the socket whose close is the disconnect this test waits for — alive until
+// the helper finishes symbolizing the ~1 GB debug test binary: 6.5 s idle on
+// the factory host, past 15 s under load. The fixture child now zeroes its
+// soft RLIMIT_CORE under a pipe pattern (see
+// `h1_death_05_fixture_process_entry`), which keeps WCOREDUMP but lets the
+// helper return at once. If this budget is ever hit again, find what the
+// child is waiting on instead of lengthening the wait. 30 s is headroom for a
+// saturated host, many times the post-fix idle runtime.
+const H1_DEATH_REAL_PROCESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[test]
 fn h1_origin_01_pre_auth_exposes_health_only_and_rejects_mutations() {
@@ -216,6 +225,32 @@ fn h1_death_05_fixture_process_entry() {
     let Ok(port_file) = std::env::var("CAS_H1_DEATH_FIXTURE_PORT_FILE") else {
         return;
     };
+    // cas-e207: under a pipe core_pattern the kernel holds this process (and
+    // its socket) open until the coredump helper finishes, and symbolizing
+    // this debug test binary takes seconds. A zero soft RLIMIT_CORE makes the
+    // helper skip the work while the kernel still reports WCOREDUMP, so the
+    // parent's `core_dumped: Some(true)` assertion holds. A file pattern (or
+    // macOS) is left unchanged: there a zero limit would suppress the dump
+    // and the core flag with it.
+    #[cfg(target_os = "linux")]
+    {
+        let pipe_pattern = std::fs::read_to_string("/proc/sys/kernel/core_pattern")
+            .is_ok_and(|pattern| pattern.trim_start().starts_with('|'));
+        if pipe_pattern {
+            let mut limit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            // SAFETY: plain getrlimit/setrlimit on this fixture process with a
+            // valid, initialised `rlimit`; only the soft core limit changes.
+            unsafe {
+                if libc::getrlimit(libc::RLIMIT_CORE, &mut limit) == 0 {
+                    limit.rlim_cur = 0;
+                    libc::setrlimit(libc::RLIMIT_CORE, &limit);
+                }
+            }
+        }
+    }
     std::fs::write(
         std::path::Path::new(&port_file).with_extension("started"),
         "hub::tests::h1_death_05_fixture_process_entry",

@@ -2,6 +2,7 @@
 //! branches merged into the target. A file touch alone cannot prove evolution.
 use std::path::Path;
 use std::process::Command;
+use super::epic_measurement::CommandExt as _;
 
 #[derive(Default)]
 struct Hunk {
@@ -14,10 +15,11 @@ struct Hunk {
 }
 
 fn text(repo: &Path, args: &[&str]) -> Result<String, String> {
+    super::epic_measurement::check()?;
     let output = Command::new("git")
         .args(args)
         .current_dir(repo)
-        .output()
+        .measurement_output()
         .map_err(|error| format!("failed to inspect delivery line history: {error}"))?;
     if !output.status.success() {
         return Err(format!(
@@ -850,7 +852,7 @@ fn line_content_presence_impl(
             let output = Command::new("git")
                 .args(["show", &format!("{prior}:{path}")])
                 .current_dir(repo)
-                .output()
+                .measurement_output()
                 .map_err(|error| error.to_string())?;
             if output.status.success() {
                 let contents = String::from_utf8(output.stdout)
@@ -966,7 +968,7 @@ fn line_content_presence_impl(
                 let output = Command::new("git")
                     .args(["show", &format!("{prior}:{path}")])
                     .current_dir(repo)
-                    .output()
+                    .measurement_output()
                     .map_err(|error| error.to_string())?;
                 if output.status.success() {
                     let contents = String::from_utf8(output.stdout)

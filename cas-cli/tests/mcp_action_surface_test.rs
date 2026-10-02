@@ -417,6 +417,7 @@ fn call_shape_action_lists() -> Vec<(&'static str, Vec<&'static str>)> {
             .concat(),
         ),
         ("artifact", accepted::ARTIFACT_ACTIONS.to_vec()),
+        ("jev", accepted::JEV_ACTIONS.to_vec()),
         ("knowledge", accepted::KNOWLEDGE_ACTIONS.to_vec()),
         ("team", accepted::TEAM_ACTIONS.to_vec()),
         ("pattern", accepted::PATTERN_ACTIONS.to_vec()),
@@ -1154,7 +1155,7 @@ fn published_action_enums_equal_their_dispatch_tables() {
         checked += 1;
     }
     assert_eq!(
-        checked, 14,
+        checked, 15,
         "every multi-action tool publishes an action enum"
     );
 }

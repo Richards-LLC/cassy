@@ -54,6 +54,7 @@ pub(crate) mod hook;
 mod init;
 pub mod integrate;
 pub mod interactive;
+pub(crate) mod jev;
 mod limits;
 mod list;
 mod mcp_cmd;
@@ -87,6 +88,7 @@ pub use factory::{AttachArgs, FactoryArgs, KillAllArgs, KillArgs};
 pub use hook::HookArgs;
 pub use hub::HubArgs;
 pub use init::InitArgs;
+pub use jev::JevCommands;
 pub use limits::LimitsArgs;
 pub use list::ListArgs;
 pub use mcp_cmd::McpCommands;
@@ -336,6 +338,10 @@ pub enum Commands {
     #[command(subcommand)]
     Cloud(cloud::CloudCommands),
 
+    /// Evaluate calibrated decisions with Jev (JSON output).
+    #[command(subcommand)]
+    Jev(JevCommands),
+
     /// Manage registered devices
     #[command(subcommand)]
     Device(device::DeviceCommands),
@@ -437,6 +443,7 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         | Commands::Open(_)
         | Commands::Doctor(_)
         | Commands::Viktor(_)
+        | Commands::Jev(_)
         | Commands::Update(_)
         | Commands::Changelog(_)
         | Commands::Release(_)
@@ -656,6 +663,7 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
         Commands::Serve => "serve".to_string(),
         Commands::Doctor(_) => "doctor".to_string(),
         Commands::Viktor(_) => "viktor".to_string(),
+        Commands::Jev(_) => "jev".to_string(),
         Commands::Config(_) => "config".to_string(),
         Commands::Status(_) => "status".to_string(),
         Commands::Limits(_) => "limits".to_string(),
@@ -740,6 +748,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Serve => serve_execute(),
         Commands::Doctor(args) => doctor::execute(args, cli, cas_root),
         Commands::Viktor(args) => viktor::execute(args, cli, cas_root),
+        Commands::Jev(cmd) => jev::execute(cmd, require_cas_root(cas_root)?),
         Commands::Config(cmd) => config::execute_subcommand(cmd, cli, require_cas_root(cas_root)?),
         Commands::Status(args) => status::execute(args, cli, require_cas_root(cas_root)?),
         Commands::Limits(args) => limits::execute(args, cli),

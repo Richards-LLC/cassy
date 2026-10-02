@@ -7,6 +7,103 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.45.0] - 2026-10-02
+
+### Added — Jev decision support
+
+- Jev is available through the live Cassy cloud proxy using Cassy-login
+  authentication. The upstream key stays on the server; team/user rate limits
+  and request-size caps bound calls. Live checks verified unauthorized requests
+  return 401 and authenticated requests return the pinned model and request id.
+- `cas jev ask` / `batch` and the `jev` MCP tool share one client with typed
+  answers, probabilities and confidence. Advisory callers receive an unavailable
+  result when evaluation cannot run; bounded retries honor rate-limit delays.
+  The local decision log records answers, request ids and a state hash, without
+  recording state content or credentials.
+- `cas jev files` and the MCP `files` action ask Jev about selected project files
+  and return answers without returning file contents. Selection respects ignore
+  rules and refuses secret paths, outside-project paths and symlinks before
+  reads; file/byte caps and explicit skipped reasons bound each batch.
+- The builtin `cas-jev` skill ships question-writing rules, confidence routing
+  and the evaluated triage question set across supported integrations. Triage
+  suggestions always require independent review, including at high confidence;
+  Jev alone never authorizes destructive actions.
+
+### Added — Jev evaluation
+
+- A reproducible, two-run Jev triage report compares 172 reviewed tasks.
+  Overall agreement is 119/172 (69.19%) before wording tuning and 121/172
+  (70.35%) afterward; the held-out subset falls from 98/138 (71.01%) to 97/138
+  (70.29%). Tuned high-confidence agreement is 28/32 (87.50%), covering only
+  32 tasks. Estimated API cost totals $0.27674; median request latency is
+  193.3 ms / 180.1 ms and p95 is 287.8 ms / 276.6 ms across the two runs.
+  The report includes confusion matrices, all confidence buckets, the final
+  question set and retrieval failures. Its recommendation is human-reviewed
+  suggestions; this result does not establish an automatic-action threshold
+  or a general benefit from wording tuning.
+
+- A reproducible 208-case Bash/Write risk study compares Jev, the existing hook
+  and a composite policy across two runs. At the prespecified default on the
+  158-case held-out subset, the composite detects 60/60 destructive cases versus
+  16/60 for the hook alone, while passing 71/78 trusted safe cases. The labels
+  are study-authored and sparse real-command coverage limits generalization.
+  This is shadow-only research: no Jev gate or runtime hook behavior changed.
+
+### Fixed — proposed 3.45.0 scope
+
+- PreToolUse denies parsed Bash writes to `.env` and configured credential files,
+  consistently with direct Write. Protection covers redirects, `tee`, `cp`/`mv`
+  destinations and recognized Python/Node file writes. Reads and quoted command
+  text are unaffected.
+
+- Visual QA redacts authorization and cookie headers and token values from
+  its logs, and scrubs authentication data from traces it creates. If an
+  existing runner owns tracing, QA continues without publishing a separate
+  trace and warns that the runner's trace has not been scrubbed (#1076).
+- Visual QA invoked through a symlink runs and produces its report instead of
+  silently exiting successfully. Missing inputs and zero-capture runs fail
+  with a diagnostic (#1050).
+- Completed no-code tasks whose delivery branch has been deleted can close
+  with valid external proof. Missing code-delivery evidence produces an
+  explicit missing-branch error; retained anchors still require integration.
+- Passed or waived QA remains valid after a squash merge when the integrated
+  change is proven to match the reviewed delivery. Close no longer reports
+  QA as both required and satisfied (#1045, #1052).
+- `cloud.team_only` is a registered, usable setting. Team-linked projects
+  opting in avoid personal-scope project calls during enqueue, push, pull,
+  background sync and MCP startup. `cas cloud queue --purge-team-owned`
+  removes only rejected personal queue rows marked `team_owned_project`,
+  preserving underlying local records and team rows.
+- Orphan recovery checks live process and terminal evidence before reopening
+  work with an expired lease. Live work keeps its assignment, Blocked work
+  keeps its blocker, and genuinely dead work remains recoverable (#1065).
+- Build-check log guidance uses Git-ignored `target/` or task artifacts.
+  The hook refuses unignored log destinations inside the checkout before
+  they can dirty the clean-commit check; source changes still require a commit.
+- CI impact selection recognizes directory-main integration suites. A hooks
+  test change selects `integration_contracts` with the `hooks_test::` filter;
+  malformed inventories still widen validation.
+- Task lists report query-filter, quarantine and foreign-origin exclusions
+  with counts, including empty results. Project/all scope is explained, and
+  the display limit remains after filtering (#1090).
+- Build previews resolve Zig from the configured path, PATH or the source
+  checkout, including the main checkout when using a worktree. Zig is required
+  only for projects using `ghostty_vt_sys`; a missing toolchain is named before
+  Cargo starts (PR #1091).
+- Large epic closes bound nested delivery checks and missing-reference fetches
+  to one shared deadline. Unchecked children stay unchecked and appear in the
+  decision audit; a supervisor override still cannot waive a measured blocker
+  (PR #1092).
+- Self-hosted release and Linux prebuild jobs serialize shared Rust toolchain
+  setup. Existing stable installations are reused rather than auto-updated by
+  concurrent jobs; incomplete installations fail with an all-slots-idle repair
+  instruction. Hosted toolchain setup remains unchanged.
+- Release-gate scripts work on macOS with portable timestamp parsing, native
+  Bash installer handling and exact-tree journey validation. Linux-only
+  behavior fixtures explicitly skip on Darwin; Linux runner implementations
+  are unchanged. The 27-script Mac cohort and the full Mac Make wrapper pass;
+  this does not claim Linux execution from Mac-only evidence.
+
 ## [3.44.0] - 2026-10-02
 
 ### Fixed

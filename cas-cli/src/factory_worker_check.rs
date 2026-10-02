@@ -1,5 +1,6 @@
 //! Capped compile and targeted-test evidence. The runner serializes admission
 //! and holds OS slot/lane locks until Cargo exits; descendants never inherit them.
+use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -203,6 +204,69 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8(output.stdout)?.trim().to_string())
 }
 
+fn executable(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn worker_zig(
+    repo: &Path,
+    configured: Option<&OsStr>,
+    search_path: Option<&OsStr>,
+) -> Result<Option<PathBuf>> {
+    let common = PathBuf::from(git(
+        repo,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?);
+    let source = common
+        .parent()
+        .context("Git common directory has no parent")?;
+    // The runner also serves projects which do not consume the Zig toolchain.
+    if !repo.join("crates/ghostty_vt_sys/build.rs").is_file()
+        && !source.join("crates/ghostty_vt_sys/build.rs").is_file()
+    {
+        return Ok(None);
+    }
+    let mut candidates = Vec::new();
+    if let Some(configured) = configured.filter(|value| !value.is_empty()) {
+        candidates.push(PathBuf::from(configured));
+    }
+    if let Some(search_path) = search_path {
+        candidates.extend(std::env::split_paths(search_path).map(|dir| dir.join("zig")));
+    }
+    candidates.extend([
+        repo.join(".context/zig/zig"),
+        source.join(".context/zig/zig"),
+    ]);
+    for candidate in candidates {
+        // Relative ZIG/PATH entries must be bound before Cargo changes cwd.
+        let candidate = if candidate.is_absolute() {
+            candidate
+        } else {
+            repo.join(candidate)
+        };
+        if executable(&candidate) {
+            return Ok(Some(candidate.canonicalize()?));
+        }
+    }
+    bail!(
+        "Missing Zig compiler in ZIG, PATH or source/main checkout .context.\nRun ./scripts/bootstrap-zig.sh in the source repo, or set an absolute ZIG."
+    )
+}
+
 fn clean_head(repo: &Path) -> Result<String> {
     if !git(repo, &["status", "--porcelain", "--untracked-files=all"])?.is_empty() {
         bail!("Commit the worker change before checking; worker PASS must name a clean commit");
@@ -339,6 +403,11 @@ fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Res
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
+    let zig = worker_zig(
+        &repo,
+        std::env::var_os("ZIG").as_deref(),
+        std::env::var_os("PATH").as_deref(),
+    )?;
     let admission = lock_file(&slots.join("admission.lock"))?;
     admission.lock_exclusive()?;
     let snapshot = crate::factory_build_guard::inspect(&cas_root, &config, 1);
@@ -369,6 +438,9 @@ fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Res
         command.arg("check");
         command
     };
+    if let Some(zig) = zig {
+        command.env("ZIG", zig);
+    }
     let mut cargo_args = args.to_vec();
     // An omitted harness means library tests; do not build every test binary.
     if test.as_ref().is_some_and(|test| test.harness.is_none())
@@ -664,6 +736,146 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn zig_resolution_precedence_and_unrelated_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo with spaces");
+        fixture_commit(&repo);
+        let repo = repo.canonicalize().unwrap();
+        let empty_path = OsStr::new("");
+        assert!(worker_zig(&repo, None, Some(empty_path)).unwrap().is_none());
+        let consumer = repo.join("crates/ghostty_vt_sys/build.rs");
+        std::fs::create_dir_all(consumer.parent().unwrap()).unwrap();
+        std::fs::write(consumer, "// Zig consumer").unwrap();
+        let fallback = repo.join(".context/zig/zig");
+        std::fs::create_dir_all(fallback.parent().unwrap()).unwrap();
+        fake_cargo(&fallback, "exit 0");
+        let configured = repo.join("configured-zig");
+        fake_cargo(&configured, "exit 0");
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let on_path = bin.join("zig");
+        fake_cargo(&on_path, "exit 0");
+        assert_eq!(
+            worker_zig(
+                &repo,
+                Some(OsStr::new("configured-zig")),
+                Some(bin.as_os_str())
+            )
+            .unwrap(),
+            Some(configured)
+        );
+        assert_eq!(
+            worker_zig(&repo, Some(OsStr::new("missing")), Some(bin.as_os_str())).unwrap(),
+            Some(on_path.canonicalize().unwrap())
+        );
+        assert_eq!(
+            worker_zig(&repo, None, Some(empty_path)).unwrap(),
+            Some(fallback.clone())
+        );
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fallback, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let error = worker_zig(&repo, None, Some(empty_path))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Missing Zig compiler"));
+        assert!(error.contains("bootstrap-zig.sh"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn zig_runner_exports_main_checkout_toolchain_and_refuses_before_cargo() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        fixture_commit(&source);
+        std::fs::write(source.join(".gitignore"), ".cas/\n.context/\ntarget/\n").unwrap();
+        let consumer = source.join("crates/ghostty_vt_sys/build.rs");
+        std::fs::create_dir_all(consumer.parent().unwrap()).unwrap();
+        std::fs::write(consumer, "// Zig consumer").unwrap();
+        git(&source, &["add", "."]).unwrap();
+        git(
+            &source,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-qm",
+                "consumer",
+            ],
+        )
+        .unwrap();
+        let zig = source.join(".context/zig/zig");
+        std::fs::create_dir_all(zig.parent().unwrap()).unwrap();
+        fake_cargo(&zig, "exit 0");
+        let zig = zig.canonicalize().unwrap();
+        let root = source.join(".cas");
+        let repo = root.join("worktrees/preview");
+        std::fs::create_dir_all(repo.parent().unwrap()).unwrap();
+        git(
+            &source,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                repo.to_str().unwrap(),
+                "HEAD",
+            ],
+        )
+        .unwrap();
+        assert!(!repo.join(".context/zig/zig").exists());
+        // Preserve the tools needed by Git and the zero-test guard, but omit Zig.
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let host_path = std::env::var_os("PATH").unwrap();
+        for tool in ["git", "bash", "rm", "mktemp", "tee", "sed", "grep", "awk"] {
+            let path = std::env::split_paths(&host_path)
+                .map(|dir| dir.join(tool))
+                .find(|path| executable(path))
+                .unwrap();
+            std::os::unix::fs::symlink(path, bin.join(tool)).unwrap();
+        }
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("CAS_FACTORY_BUILD_GUARD", "off"),
+            ("ZIG", ""),
+            ("PATH", bin.to_str().unwrap()),
+        ]);
+        let fake = dir.path().join("fake-cargo");
+        fake_cargo(
+            &fake,
+            r#"[ "$ZIG" = "$(cd "$PWD/../../.." && pwd)/.context/zig/zig" ] || exit 9
+printf 'called\n' >> "$PWD/target/called"
+printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#,
+        );
+        std::fs::create_dir(repo.join("target")).unwrap();
+        let args = vec!["-p".into(), "cas".into(), "--lib".into()];
+        execute_at(&root, &args, &repo, &fake).unwrap();
+        let test_args = vec![
+            "nextest".into(),
+            "run".into(),
+            "-p".into(),
+            "cas".into(),
+            "--lib".into(),
+            "-E".into(),
+            "test(worker)".into(),
+        ];
+        execute_at(&root, &test_args, &repo, &fake).unwrap();
+        let head = clean_head(&repo).unwrap();
+        assert!(passing_receipt(&root, &repo, &head).is_some());
+        std::fs::remove_file(zig).unwrap();
+        let error = execute_at(&root, &args, &repo, &fake)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Missing Zig compiler"), "{error}");
+        assert!(passing_receipt(&root, &repo, &head).is_none());
+        assert_eq!(
+            std::fs::read_to_string(repo.join("target/called")).unwrap(),
+            "called\ncalled\n"
+        );
     }
 
     #[cfg(unix)]

@@ -353,6 +353,18 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/mcp-integration/references/diagnosis.md"),
     },
     BuiltinFile {
+        path: "skills/cas-jev/SKILL.md",
+        content: include_str!("builtins/skills/cas-jev/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-jev/references/triage.md",
+        content: include_str!("builtins/skills/cas-jev/references/triage.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-jev/references/triage-questions.json",
+        content: include_str!("builtins/skills/cas-jev/references/triage-questions.json"),
+    },
+    BuiltinFile {
         path: "skills/cas-viktor/SKILL.md",
         content: include_str!("builtins/skills/cas-viktor/SKILL.md"),
     },
@@ -1005,6 +1017,18 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/mcp-integration/references/diagnosis.md"),
     },
     BuiltinFile {
+        path: "skills/cas-jev/SKILL.md",
+        content: include_str!("builtins/skills/cas-jev/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-jev/references/triage.md",
+        content: include_str!("builtins/skills/cas-jev/references/triage.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-jev/references/triage-questions.json",
+        content: include_str!("builtins/skills/cas-jev/references/triage-questions.json"),
+    },
+    BuiltinFile {
         path: "skills/cas-viktor/SKILL.md",
         content: include_str!("builtins/skills/cas-viktor/SKILL.md"),
     },
@@ -1649,6 +1673,18 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/mcp-integration/references/diagnosis.md"),
     },
     BuiltinFile {
+        path: "skills/cas-jev/SKILL.md",
+        content: include_str!("builtins/skills/cas-jev/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-jev/references/triage.md",
+        content: include_str!("builtins/skills/cas-jev/references/triage.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-jev/references/triage-questions.json",
+        content: include_str!("builtins/skills/cas-jev/references/triage-questions.json"),
+    },
+    BuiltinFile {
         path: "skills/cas-viktor/SKILL.md",
         content: include_str!("builtins/skills/cas-viktor/SKILL.md"),
     },
@@ -2264,6 +2300,13 @@ pub const GENERAL_PARITY_CAPABILITIES: &[RequiredCapability] = &[
         claude: Some("skills/cas-html-reports"),
         codex: Some("skills/cas-html-reports"),
         grok: Some("skills/cas-html-reports"),
+        note: "",
+    },
+    RequiredCapability {
+        id: "cas-jev",
+        claude: Some("skills/cas-jev"),
+        codex: Some("skills/cas-jev"),
+        grok: Some("skills/cas-jev"),
         note: "",
     },
     RequiredCapability {

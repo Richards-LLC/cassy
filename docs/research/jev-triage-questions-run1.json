@@ -1,0 +1,51 @@
+{
+  "model": "jev-1.13.0",
+  "questions": {
+    "verdict": {
+      "type": "choice",
+      "instructions": "Which triage verdict best fits the task using the supplied evidence? Judge the reported problem, not the task writing style.",
+      "criteria": {
+        "VALID": "Actionable work remains relevant and is not shown resolved.",
+        "FIXED": "An implementation or completed operational action resolves the requested work.",
+        "OBSOLETE": "The requested work is no longer relevant because the old feature, premise or workflow was removed or replaced.",
+        "DUPLICATE": "A supplied other task describes the same work and can carry it.",
+        "UNCLEAR": "The record does not establish a sufficiently concrete issue or present status."
+      }
+    },
+    "area": {
+      "type": "choice",
+      "instructions": "Which subsystem owns the primary requested change? Prefer the underlying component over incidental mentions of tests or review.",
+      "criteria": {
+        "hub-web": "Commander/hub-web frontend UI, browser journeys and accessibility",
+        "cloud": "Cloud identity, cloud sync and remote stores",
+        "ci": "CI workflows, runner infrastructure, build caches and test execution infrastructure",
+        "release": "Release train, install/update and publication procedures",
+        "qa": "QA verdicts, visual-QA checker, evidence bundles and review rounds",
+        "factory": "Factory daemon, worker lifecycle, spawning, coordination and terminal sessions",
+        "close-gate": "Task close, delivery ancestry, merge verification and receipt gates",
+        "hooks": "Harness hooks, permissions, workspace enforcement and initialization",
+        "memory-search": "Memory, knowledge, retrieval and search quality",
+        "slack": "Violet Slack transport and Slack publication policy",
+        "other": "Other area or area cannot be determined"
+      }
+    },
+    "severity": {
+      "type": "score",
+      "instructions": "Rate impact of the described problem if it still occurs. Judge impact, not whether it is fixed.",
+      "criteria": [
+        "Cosmetic or optional cleanup; no material workflow failure.",
+        "Small usability or maintenance issue with a straightforward workaround.",
+        "Blocks a normal workflow or causes repeatable incorrect behavior for some users.",
+        "Broad outage, lost data, credential exposure or isolation/authority breach."
+      ]
+    },
+    "candidate_resolves": {
+      "type": "noul",
+      "instructions": "Does the candidate commit implement the change requested by task? Use its subject and patch as evidence.",
+      "criteria": {
+        "true": "The candidate change directly resolves the reported failure or completes the requested work.",
+        "false": "It only shares a topic, is partial, is unrelated, or does not show a resolution."
+      }
+    }
+  }
+}

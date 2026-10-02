@@ -38,6 +38,16 @@ impl Config {
         };
 
         match key {
+            "jev.model" => self.jev.get_or_insert_with(Default::default).model = value.to_string(),
+            "jev.key_file" => {
+                self.jev.get_or_insert_with(Default::default).key_file =
+                    (!value.is_empty()).then(|| value.to_string())
+            }
+            "jev.enabled" => {
+                self.jev.get_or_insert_with(Default::default).enabled = value
+                    .parse()
+                    .map_err(|_| MemError::Parse("Invalid boolean for jev.enabled".into()))?
+            }
             "slack.transport" => {
                 self.slack
                     .get_or_insert_with(SlackConfig::default)

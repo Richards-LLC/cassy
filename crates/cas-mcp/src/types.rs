@@ -259,7 +259,9 @@ pub struct TaskRequest {
 
     /// Optional recorded-only reversibility declaration; no merge policy reads it.
     #[serde(default)]
-    #[schemars(description = "Recorded only: one-way or two-way; pass an empty string on update to clear. Does not affect merge policy.")]
+    #[schemars(
+        description = "Recorded only: one-way or two-way; pass an empty string on update to clear. Does not affect merge policy."
+    )]
     pub door: Option<String>,
 
     /// Test modules/targets required by blast-radius close proof.
@@ -1299,4 +1301,34 @@ mod worker_delivery_request_tests {
             Some("https://github.com/pippenz/cas/pull/242")
         );
     }
+}
+
+/// Calibrated Jev decision evaluation.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct JevRequest {
+    #[schemars(
+        schema_with = "crate::actions::jev_action_schema",
+        description = "Operation: ask, batch (1–50 states), or files (paths/globs without returning content)."
+    )]
+    pub action: String,
+    /// State for ask: text, object or array.
+    pub state: Option<serde_json::Value>,
+    /// Ordered states for batch (1–50 records).
+    pub records: Option<Vec<serde_json::Value>>,
+    /// Project-relative paths or directories for files.
+    pub paths: Option<Vec<String>>,
+    /// Project-relative globs for files; ** matches recursively.
+    pub globs: Option<Vec<String>>,
+    /// Recurse into directory paths; globs retain their own semantics.
+    #[serde(default)]
+    pub recursive: bool,
+    /// Selection cap for files: 1–50, default 50.
+    pub max_files: Option<usize>,
+    /// Per-file content byte cap: 1–131072, default 24576.
+    pub max_bytes: Option<usize>,
+    /// Map of question ids to typed noul, choice or score questions.
+    pub questions: serde_json::Value,
+    /// Return typed unavailable on transport failure; defaults to false.
+    #[serde(default)]
+    pub advisory: bool,
 }

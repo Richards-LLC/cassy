@@ -64,6 +64,7 @@ pub mod hooks;
 pub mod hub;
 pub mod hybrid_search;
 pub(crate) mod internal_llm;
+pub mod jev;
 pub mod knowledge;
 pub mod logging;
 pub mod maintenance_jobs;

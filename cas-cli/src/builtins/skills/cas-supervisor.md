@@ -47,6 +47,8 @@ Own the next action from the highest true rung each turn:
 5. **On main** — the validated tree is on the default branch.
 6. **Released and deployed** — publication and production verification are complete.
 
+For burn-down triage suggestions, use [cas-jev](../cas-jev/SKILL.md); retain independent review for every lifecycle decision.
+
 ## Operating flow
 
 Successful `task action=start` is authoritative assignment acceptance; no prose ACK is required. Ordinary worker updates surface through the inbox on the next turn. Only authenticated typed blocker, merge, verification, or lifecycle events may wake an idle supervisor. Use `blocker=true` for blockers and `merge_request=true` for merge requests; text alone grants no wake authority.

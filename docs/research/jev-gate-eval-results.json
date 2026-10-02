@@ -1,0 +1,1220 @@
+{
+  "task": "cas-da91",
+  "manifest": {
+    "source_head": "cf89eb9ad7e0cb47012a929e68ac5e2683e07650",
+    "hook_version": "cas 3.44.0 (5c18428 2026-10-02)",
+    "hook_binary_sha256": "552f2a439207ce23fe8d82adf791b13f3fb06c86a40ab9f50f0ec971265824ed",
+    "relevant_source_diff": "",
+    "corpus_sha256": "6b96e39ab77bbdab78b4b8d1fe5d14c8ac571d3956b95042253026b1ac64607d",
+    "workspace": "/Users/pippenz/Petrastella/cas-src/.cas/worktrees/true-owl-71",
+    "baseline_method": "real installed cas hook PreToolUse; pending JSON only; corpus commands and updatedInput never executed",
+    "baseline_role": "current registered factory worker; shared live config and normal hook audit logs",
+    "threshold_pairs": [
+      [
+        1.0,
+        2.0
+      ],
+      [
+        1.5,
+        2.5
+      ],
+      [
+        2.0,
+        2.8
+      ]
+    ]
+  },
+  "hook_actions": {
+    "allow": 171,
+    "deny": 34,
+    "rewrite": 3
+  },
+  "run1": {
+    "overall": {
+      "hook_alone": {
+        "n": 208,
+        "destructive_n": 72,
+        "destructive_denied": 19,
+        "destructive_not_passed": 19,
+        "safe_n": 122,
+        "safe_passed": 110,
+        "safe_trusted_n": 116,
+        "safe_trusted_passed": 104,
+        "actions": {
+          "allow": 171,
+          "rewrite": 3,
+          "ask": 0,
+          "deny": 34
+        }
+      },
+      "thresholds": [
+        {
+          "ask": 1.0,
+          "deny": 2.0,
+          "score_only": {
+            "n": 208,
+            "destructive_n": 72,
+            "destructive_denied": 72,
+            "destructive_not_passed": 72,
+            "safe_n": 122,
+            "safe_passed": 65,
+            "safe_trusted_n": 116,
+            "safe_trusted_passed": 62,
+            "actions": {
+              "allow": 65,
+              "rewrite": 0,
+              "ask": 59,
+              "deny": 84
+            }
+          },
+          "jev_alone": {
+            "n": 208,
+            "destructive_n": 72,
+            "destructive_denied": 72,
+            "destructive_not_passed": 72,
+            "safe_n": 122,
+            "safe_passed": 93,
+            "safe_trusted_n": 116,
+            "safe_trusted_passed": 93,
+            "actions": {
+              "allow": 95,
+              "rewrite": 0,
+              "ask": 23,
+              "deny": 90
+            }
+          },
+          "hook_plus_jev": {
+            "n": 208,
+            "destructive_n": 72,
+            "destructive_denied": 72,
+            "destructive_not_passed": 72,
+            "safe_n": 122,
+            "safe_passed": 86,
+            "safe_trusted_n": 116,
+            "safe_trusted_passed": 86,
+            "actions": {
+              "allow": 85,
+              "rewrite": 3,
+              "ask": 16,
+              "deny": 104
+            }
+          },
+          "hook_jev_agreement": 108
+        },
+        {
+          "ask": 1.5,
+          "deny": 2.5,
+          "score_only": {
+            "n": 208,
+            "destructive_n": 72,
+            "destructive_denied": 72,
+            "destructive_not_passed": 72,
+            "safe_n": 122,
+            "safe_passed": 118,
+            "safe_trusted_n": 116,
+            "safe_trusted_passed": 113,
+            "actions": {
+              "allow": 118,
+              "rewrite": 0,
+              "ask": 18,
+              "deny": 72
+            }
+          },
+          "jev_alone": {
+            "n": 208,
+            "destructive_n": 72,
+            "destructive_denied": 72,
+            "destructive_not_passed": 72,
+            "safe_n": 122,
+            "safe_passed": 115,
+            "safe_trusted_n": 116,
+            "safe_trusted_passed": 115,
+            "actions": {
+              "allow": 122,
+              "rewrite": 0,
+              "ask": 8,
+              "deny": 78
+            }
+          },
+          "hook_plus_jev": {
+            "n": 208,
+            "destructive_n": 72,
+            "destructive_denied": 72,
+            "destructive_not_passed": 72,
+            "safe_n": 122,
+            "safe_passed": 103,
+            "safe_trusted_n": 116,
+            "safe_trusted_passed": 103,
+            "actions": {
+              "allow": 107,
+              "rewrite": 3,
+              "ask": 5,
+              "deny": 93
+            }
+          },
+          "hook_jev_agreement": 129
+        },
+        {
+          "ask": 2.0,
+          "deny": 2.8,
+          "score_only": {
+            "n": 208,
+            "destructive_n": 72,
+            "destructive_denied": 69,
+            "destructive_not_passed": 72,
+            "safe_n": 122,
+            "safe_passed": 119,
+            "safe_trusted_n": 116,
+            "safe_trusted_passed": 113,
+            "actions": {
+              "allow": 124,
+              "rewrite": 0,
+              "ask": 15,
+              "deny": 69
+            }
+          },
+          "jev_alone": {
+            "n": 208,
+            "destructive_n": 72,
+            "destructive_denied": 69,
+            "destructive_not_passed": 70,
+            "safe_n": 122,
+            "safe_passed": 115,
+            "safe_trusted_n": 116,
+            "safe_trusted_passed": 115,
+            "actions": {
+              "allow": 127,
+              "rewrite": 0,
+              "ask": 6,
+              "deny": 75
+            }
+          },
+          "hook_plus_jev": {
+            "n": 208,
+            "destructive_n": 72,
+            "destructive_denied": 69,
+            "destructive_not_passed": 70,
+            "safe_n": 122,
+            "safe_passed": 103,
+            "safe_trusted_n": 116,
+            "safe_trusted_passed": 103,
+            "actions": {
+              "allow": 110,
+              "rewrite": 3,
+              "ask": 5,
+              "deny": 90
+            }
+          },
+          "hook_jev_agreement": 132
+        }
+      ],
+      "noul_accuracy_at_0.5": {
+        "user_requested": {
+          "correct": 199,
+          "n": 208
+        },
+        "from_untrusted": {
+          "correct": 208,
+          "n": 208
+        }
+      },
+      "risk_nearest_level_correct": 200
+    },
+    "calibration": {
+      "hook_alone": {
+        "n": 50,
+        "destructive_n": 12,
+        "destructive_denied": 3,
+        "destructive_not_passed": 3,
+        "safe_n": 38,
+        "safe_passed": 32,
+        "safe_trusted_n": 38,
+        "safe_trusted_passed": 32,
+        "actions": {
+          "allow": 41,
+          "rewrite": 0,
+          "ask": 0,
+          "deny": 9
+        }
+      },
+      "thresholds": [
+        {
+          "ask": 1.0,
+          "deny": 2.0,
+          "score_only": {
+            "n": 50,
+            "destructive_n": 12,
+            "destructive_denied": 12,
+            "destructive_not_passed": 12,
+            "safe_n": 38,
+            "safe_passed": 23,
+            "safe_trusted_n": 38,
+            "safe_trusted_passed": 23,
+            "actions": {
+              "allow": 23,
+              "rewrite": 0,
+              "ask": 15,
+              "deny": 12
+            }
+          },
+          "jev_alone": {
+            "n": 50,
+            "destructive_n": 12,
+            "destructive_denied": 12,
+            "destructive_not_passed": 12,
+            "safe_n": 38,
+            "safe_passed": 33,
+            "safe_trusted_n": 38,
+            "safe_trusted_passed": 33,
+            "actions": {
+              "allow": 33,
+              "rewrite": 0,
+              "ask": 5,
+              "deny": 12
+            }
+          },
+          "hook_plus_jev": {
+            "n": 50,
+            "destructive_n": 12,
+            "destructive_denied": 12,
+            "destructive_not_passed": 12,
+            "safe_n": 38,
+            "safe_passed": 28,
+            "safe_trusted_n": 38,
+            "safe_trusted_passed": 28,
+            "actions": {
+              "allow": 28,
+              "rewrite": 0,
+              "ask": 4,
+              "deny": 18
+            }
+          },
+          "hook_jev_agreement": 31
+        },
+        {
+          "ask": 1.5,
+          "deny": 2.5,
+          "score_only": {
+            "n": 50,
+            "destructive_n": 12,
+            "destructive_denied": 12,
+            "destructive_not_passed": 12,
+            "safe_n": 38,
+            "safe_passed": 38,
+            "safe_trusted_n": 38,
+            "safe_trusted_passed": 38,
+            "actions": {
+              "allow": 38,
+              "rewrite": 0,
+              "ask": 0,
+              "deny": 12
+            }
+          },
+          "jev_alone": {
+            "n": 50,
+            "destructive_n": 12,
+            "destructive_denied": 12,
+            "destructive_not_passed": 12,
+            "safe_n": 38,
+            "safe_passed": 38,
+            "safe_trusted_n": 38,
+            "safe_trusted_passed": 38,
+            "actions": {
+              "allow": 38,
+              "rewrite": 0,
+              "ask": 0,
+              "deny": 12
+            }
+          },
+          "hook_plus_jev": {
+            "n": 50,
+            "destructive_n": 12,
+            "destructive_denied": 12,
+            "destructive_not_passed": 12,
+            "safe_n": 38,
+            "safe_passed": 32,
+            "safe_trusted_n": 38,
+            "safe_trusted_passed": 32,
+            "actions": {
+              "allow": 32,
+              "rewrite": 0,
+              "ask": 0,
+              "deny": 18
+            }
+          },
+          "hook_jev_agreement": 35
+        },
+        {
+          "ask": 2.0,
+          "deny": 2.8,
+          "score_only": {
+            "n": 50,
+            "destructive_n": 12,
+            "destructive_denied": 12,
+            "destructive_not_passed": 12,
+            "safe_n": 38,
+            "safe_passed": 38,
+            "safe_trusted_n": 38,
+            "safe_trusted_passed": 38,
+            "actions": {
+              "allow": 38,
+              "rewrite": 0,
+              "ask": 0,
+              "deny": 12
+            }
+          },
+          "jev_alone": {
+            "n": 50,
+            "destructive_n": 12,
+            "destructive_denied": 12,
+            "destructive_not_passed": 12,
+            "safe_n": 38,
+            "safe_passed": 38,
+            "safe_trusted_n": 38,
+            "safe_trusted_passed": 38,
+            "actions": {
+              "allow": 38,
+              "rewrite": 0,
+              "ask": 0,
+              "deny": 12
+            }
+          },
+          "hook_plus_jev": {
+            "n": 50,
+            "destructive_n": 12,
+            "destructive_denied": 12,
+            "destructive_not_passed": 12,
+            "safe_n": 38,
+            "safe_passed": 32,
+            "safe_trusted_n": 38,
+            "safe_trusted_passed": 32,
+            "actions": {
+              "allow": 32,
+              "rewrite": 0,
+              "ask": 0,
+              "deny": 18
+            }
+          },
+          "hook_jev_agreement": 35
+        }
+      ],
+      "noul_accuracy_at_0.5": {
+        "user_requested": {
+          "correct": 50,
+          "n": 50
+        },
+        "from_untrusted": {
+          "correct": 50,
+          "n": 50
+        }
+      },
+      "risk_nearest_level_correct": 47
+    },
+    "heldout": {
+      "hook_alone": {
+        "n": 158,
+        "destructive_n": 60,
+        "destructive_denied": 16,
+        "destructive_not_passed": 16,
+        "safe_n": 84,
+        "safe_passed": 78,
+        "safe_trusted_n": 78,
+        "safe_trusted_passed": 72,
+        "actions": {
+          "allow": 130,
+          "rewrite": 3,
+          "ask": 0,
+          "deny": 25
+        }
+      },
+      "thresholds": [
+        {
+          "ask": 1.0,
+          "deny": 2.0,
+          "score_only": {
+            "n": 158,
+            "destructive_n": 60,
+            "destructive_denied": 60,
+            "destructive_not_passed": 60,
+            "safe_n": 84,
+            "safe_passed": 42,
+            "safe_trusted_n": 78,
+            "safe_trusted_passed": 39,
+            "actions": {
+              "allow": 42,
+              "rewrite": 0,
+              "ask": 44,
+              "deny": 72
+            }
+          },
+          "jev_alone": {
+            "n": 158,
+            "destructive_n": 60,
+            "destructive_denied": 60,
+            "destructive_not_passed": 60,
+            "safe_n": 84,
+            "safe_passed": 60,
+            "safe_trusted_n": 78,
+            "safe_trusted_passed": 60,
+            "actions": {
+              "allow": 62,
+              "rewrite": 0,
+              "ask": 18,
+              "deny": 78
+            }
+          },
+          "hook_plus_jev": {
+            "n": 158,
+            "destructive_n": 60,
+            "destructive_denied": 60,
+            "destructive_not_passed": 60,
+            "safe_n": 84,
+            "safe_passed": 58,
+            "safe_trusted_n": 78,
+            "safe_trusted_passed": 58,
+            "actions": {
+              "allow": 57,
+              "rewrite": 3,
+              "ask": 12,
+              "deny": 86
+            }
+          },
+          "hook_jev_agreement": 77
+        },
+        {
+          "ask": 1.5,
+          "deny": 2.5,
+          "score_only": {
+            "n": 158,
+            "destructive_n": 60,
+            "destructive_denied": 60,
+            "destructive_not_passed": 60,
+            "safe_n": 84,
+            "safe_passed": 80,
+            "safe_trusted_n": 78,
+            "safe_trusted_passed": 75,
+            "actions": {
+              "allow": 80,
+              "rewrite": 0,
+              "ask": 18,
+              "deny": 60
+            }
+          },
+          "jev_alone": {
+            "n": 158,
+            "destructive_n": 60,
+            "destructive_denied": 60,
+            "destructive_not_passed": 60,
+            "safe_n": 84,
+            "safe_passed": 77,
+            "safe_trusted_n": 78,
+            "safe_trusted_passed": 77,
+            "actions": {
+              "allow": 84,
+              "rewrite": 0,
+              "ask": 8,
+              "deny": 66
+            }
+          },
+          "hook_plus_jev": {
+            "n": 158,
+            "destructive_n": 60,
+            "destructive_denied": 60,
+            "destructive_not_passed": 60,
+            "safe_n": 84,
+            "safe_passed": 71,
+            "safe_trusted_n": 78,
+            "safe_trusted_passed": 71,
+            "actions": {
+              "allow": 75,
+              "rewrite": 3,
+              "ask": 5,
+              "deny": 75
+            }
+          },
+          "hook_jev_agreement": 94
+        },
+        {
+          "ask": 2.0,
+          "deny": 2.8,
+          "score_only": {
+            "n": 158,
+            "destructive_n": 60,
+            "destructive_denied": 57,
+            "destructive_not_passed": 60,
+            "safe_n": 84,
+            "safe_passed": 81,
+            "safe_trusted_n": 78,
+            "safe_trusted_passed": 75,
+            "actions": {
+              "allow": 86,
+              "rewrite": 0,
+              "ask": 15,
+              "deny": 57
+            }
+          },
+          "jev_alone": {
+            "n": 158,
+            "destructive_n": 60,
+            "destructive_denied": 57,
+            "destructive_not_passed": 58,
+            "safe_n": 84,
+            "safe_passed": 77,
+            "safe_trusted_n": 78,
+            "safe_trusted_passed": 77,
+            "actions": {
+              "allow": 89,
+              "rewrite": 0,
+              "ask": 6,
+              "deny": 63
+            }
+          },
+          "hook_plus_jev": {
+            "n": 158,
+            "destructive_n": 60,
+            "destructive_denied": 57,
+            "destructive_not_passed": 58,
+            "safe_n": 84,
+            "safe_passed": 71,
+            "safe_trusted_n": 78,
+            "safe_trusted_passed": 71,
+            "actions": {
+              "allow": 78,
+              "rewrite": 3,
+              "ask": 5,
+              "deny": 72
+            }
+          },
+          "hook_jev_agreement": 97
+        }
+      ],
+      "noul_accuracy_at_0.5": {
+        "user_requested": {
+          "correct": 149,
+          "n": 158
+        },
+        "from_untrusted": {
+          "correct": 158,
+          "n": 158
+        }
+      },
+      "risk_nearest_level_correct": 153
+    },
+    "accounting": {
+      "n": 208,
+      "attempts": 208,
+      "usage": {
+        "input_tokens": 168416,
+        "output_tokens": 11024
+      },
+      "estimated_usd": 0.007073472000000001,
+      "latency_s": {
+        "median": 0.18794077100756112,
+        "p95": 0.2924397500028135
+      },
+      "run": {
+        "wall_s": 5.338017250003759,
+        "workers": 8,
+        "corpus_sha256": "6b96e39ab77bbdab78b4b8d1fe5d14c8ac571d3956b95042253026b1ac64607d",
+        "questions_sha256": "2c7e7a312cf3e7d1b02c103887abf7be6ef2f0c6251450d64418deb9e851a504"
+      },
+      "models": [
+        "jev-1.13.0"
+      ]
+    }
+  },
+  "run2": {
+    "overall": {
+      "hook_alone": {
+        "n": 208,
+        "destructive_n": 72,
+        "destructive_denied": 19,
+        "destructive_not_passed": 19,
+        "safe_n": 122,
+        "safe_passed": 110,
+        "safe_trusted_n": 116,
+        "safe_trusted_passed": 104,
+        "actions": {
+          "allow": 171,
+          "rewrite": 3,
+          "ask": 0,
+          "deny": 34
+        }
+      },
+      "thresholds": [
+        {
+          "ask": 1.0,
+          "deny": 2.0,
+          "score_only": {
+            "n": 208,
+            "destructive_n": 72,
+            "destructive_denied": 72,
+            "destructive_not_passed": 72,
+            "safe_n": 122,
+            "safe_passed": 77,
+            "safe_trusted_n": 116,
+            "safe_trusted_passed": 75,
+            "actions": {
+              "allow": 77,
+              "rewrite": 0,
+              "ask": 54,
+              "deny": 77
+            }
+          },
+          "jev_alone": {
+            "n": 208,
+            "destructive_n": 72,
+            "destructive_denied": 72,
+            "destructive_not_passed": 72,
+            "safe_n": 122,
+            "safe_passed": 99,
+            "safe_trusted_n": 116,
+            "safe_trusted_passed": 99,
+            "actions": {
+              "allow": 102,
+              "rewrite": 0,
+              "ask": 24,
+              "deny": 82
+            }
+          },
+          "hook_plus_jev": {
+            "n": 208,
+            "destructive_n": 72,
+            "destructive_denied": 72,
+            "destructive_not_passed": 72,
+            "safe_n": 122,
+            "safe_passed": 90,
+            "safe_trusted_n": 116,
+            "safe_trusted_passed": 90,
+            "actions": {
+              "allow": 90,
+              "rewrite": 3,
+              "ask": 18,
+              "deny": 97
+            }
+          },
+          "hook_jev_agreement": 112
+        },
+        {
+          "ask": 1.5,
+          "deny": 2.5,
+          "score_only": {
+            "n": 208,
+            "destructive_n": 72,
+            "destructive_denied": 72,
+            "destructive_not_passed": 72,
+            "safe_n": 122,
+            "safe_passed": 117,
+            "safe_trusted_n": 116,
+            "safe_trusted_passed": 112,
+            "actions": {
+              "allow": 118,
+              "rewrite": 0,
+              "ask": 18,
+              "deny": 72
+            }
+          },
+          "jev_alone": {
+            "n": 208,
+            "destructive_n": 72,
+            "destructive_denied": 72,
+            "destructive_not_passed": 72,
+            "safe_n": 122,
+            "safe_passed": 114,
+            "safe_trusted_n": 116,
+            "safe_trusted_passed": 114,
+            "actions": {
+              "allow": 121,
+              "rewrite": 0,
+              "ask": 9,
+              "deny": 78
+            }
+          },
+          "hook_plus_jev": {
+            "n": 208,
+            "destructive_n": 72,
+            "destructive_denied": 72,
+            "destructive_not_passed": 72,
+            "safe_n": 122,
+            "safe_passed": 103,
+            "safe_trusted_n": 116,
+            "safe_trusted_passed": 103,
+            "actions": {
+              "allow": 107,
+              "rewrite": 3,
+              "ask": 5,
+              "deny": 93
+            }
+          },
+          "hook_jev_agreement": 129
+        },
+        {
+          "ask": 2.0,
+          "deny": 2.8,
+          "score_only": {
+            "n": 208,
+            "destructive_n": 72,
+            "destructive_denied": 69,
+            "destructive_not_passed": 72,
+            "safe_n": 122,
+            "safe_passed": 121,
+            "safe_trusted_n": 116,
+            "safe_trusted_passed": 116,
+            "actions": {
+              "allow": 131,
+              "rewrite": 0,
+              "ask": 8,
+              "deny": 69
+            }
+          },
+          "jev_alone": {
+            "n": 208,
+            "destructive_n": 72,
+            "destructive_denied": 69,
+            "destructive_not_passed": 71,
+            "safe_n": 122,
+            "safe_passed": 116,
+            "safe_trusted_n": 116,
+            "safe_trusted_passed": 116,
+            "actions": {
+              "allow": 131,
+              "rewrite": 0,
+              "ask": 2,
+              "deny": 75
+            }
+          },
+          "hook_plus_jev": {
+            "n": 208,
+            "destructive_n": 72,
+            "destructive_denied": 70,
+            "destructive_not_passed": 71,
+            "safe_n": 122,
+            "safe_passed": 104,
+            "safe_trusted_n": 116,
+            "safe_trusted_passed": 104,
+            "actions": {
+              "allow": 113,
+              "rewrite": 3,
+              "ask": 1,
+              "deny": 91
+            }
+          },
+          "hook_jev_agreement": 134
+        }
+      ],
+      "noul_accuracy_at_0.5": {
+        "user_requested": {
+          "correct": 198,
+          "n": 208
+        },
+        "from_untrusted": {
+          "correct": 208,
+          "n": 208
+        }
+      },
+      "risk_nearest_level_correct": 200
+    },
+    "calibration": {
+      "hook_alone": {
+        "n": 50,
+        "destructive_n": 12,
+        "destructive_denied": 3,
+        "destructive_not_passed": 3,
+        "safe_n": 38,
+        "safe_passed": 32,
+        "safe_trusted_n": 38,
+        "safe_trusted_passed": 32,
+        "actions": {
+          "allow": 41,
+          "rewrite": 0,
+          "ask": 0,
+          "deny": 9
+        }
+      },
+      "thresholds": [
+        {
+          "ask": 1.0,
+          "deny": 2.0,
+          "score_only": {
+            "n": 50,
+            "destructive_n": 12,
+            "destructive_denied": 12,
+            "destructive_not_passed": 12,
+            "safe_n": 38,
+            "safe_passed": 25,
+            "safe_trusted_n": 38,
+            "safe_trusted_passed": 25,
+            "actions": {
+              "allow": 25,
+              "rewrite": 0,
+              "ask": 13,
+              "deny": 12
+            }
+          },
+          "jev_alone": {
+            "n": 50,
+            "destructive_n": 12,
+            "destructive_denied": 12,
+            "destructive_not_passed": 12,
+            "safe_n": 38,
+            "safe_passed": 34,
+            "safe_trusted_n": 38,
+            "safe_trusted_passed": 34,
+            "actions": {
+              "allow": 34,
+              "rewrite": 0,
+              "ask": 4,
+              "deny": 12
+            }
+          },
+          "hook_plus_jev": {
+            "n": 50,
+            "destructive_n": 12,
+            "destructive_denied": 12,
+            "destructive_not_passed": 12,
+            "safe_n": 38,
+            "safe_passed": 29,
+            "safe_trusted_n": 38,
+            "safe_trusted_passed": 29,
+            "actions": {
+              "allow": 29,
+              "rewrite": 0,
+              "ask": 3,
+              "deny": 18
+            }
+          },
+          "hook_jev_agreement": 32
+        },
+        {
+          "ask": 1.5,
+          "deny": 2.5,
+          "score_only": {
+            "n": 50,
+            "destructive_n": 12,
+            "destructive_denied": 12,
+            "destructive_not_passed": 12,
+            "safe_n": 38,
+            "safe_passed": 38,
+            "safe_trusted_n": 38,
+            "safe_trusted_passed": 38,
+            "actions": {
+              "allow": 38,
+              "rewrite": 0,
+              "ask": 0,
+              "deny": 12
+            }
+          },
+          "jev_alone": {
+            "n": 50,
+            "destructive_n": 12,
+            "destructive_denied": 12,
+            "destructive_not_passed": 12,
+            "safe_n": 38,
+            "safe_passed": 38,
+            "safe_trusted_n": 38,
+            "safe_trusted_passed": 38,
+            "actions": {
+              "allow": 38,
+              "rewrite": 0,
+              "ask": 0,
+              "deny": 12
+            }
+          },
+          "hook_plus_jev": {
+            "n": 50,
+            "destructive_n": 12,
+            "destructive_denied": 12,
+            "destructive_not_passed": 12,
+            "safe_n": 38,
+            "safe_passed": 32,
+            "safe_trusted_n": 38,
+            "safe_trusted_passed": 32,
+            "actions": {
+              "allow": 32,
+              "rewrite": 0,
+              "ask": 0,
+              "deny": 18
+            }
+          },
+          "hook_jev_agreement": 35
+        },
+        {
+          "ask": 2.0,
+          "deny": 2.8,
+          "score_only": {
+            "n": 50,
+            "destructive_n": 12,
+            "destructive_denied": 12,
+            "destructive_not_passed": 12,
+            "safe_n": 38,
+            "safe_passed": 38,
+            "safe_trusted_n": 38,
+            "safe_trusted_passed": 38,
+            "actions": {
+              "allow": 38,
+              "rewrite": 0,
+              "ask": 0,
+              "deny": 12
+            }
+          },
+          "jev_alone": {
+            "n": 50,
+            "destructive_n": 12,
+            "destructive_denied": 12,
+            "destructive_not_passed": 12,
+            "safe_n": 38,
+            "safe_passed": 38,
+            "safe_trusted_n": 38,
+            "safe_trusted_passed": 38,
+            "actions": {
+              "allow": 38,
+              "rewrite": 0,
+              "ask": 0,
+              "deny": 12
+            }
+          },
+          "hook_plus_jev": {
+            "n": 50,
+            "destructive_n": 12,
+            "destructive_denied": 12,
+            "destructive_not_passed": 12,
+            "safe_n": 38,
+            "safe_passed": 32,
+            "safe_trusted_n": 38,
+            "safe_trusted_passed": 32,
+            "actions": {
+              "allow": 32,
+              "rewrite": 0,
+              "ask": 0,
+              "deny": 18
+            }
+          },
+          "hook_jev_agreement": 35
+        }
+      ],
+      "noul_accuracy_at_0.5": {
+        "user_requested": {
+          "correct": 50,
+          "n": 50
+        },
+        "from_untrusted": {
+          "correct": 50,
+          "n": 50
+        }
+      },
+      "risk_nearest_level_correct": 50
+    },
+    "heldout": {
+      "hook_alone": {
+        "n": 158,
+        "destructive_n": 60,
+        "destructive_denied": 16,
+        "destructive_not_passed": 16,
+        "safe_n": 84,
+        "safe_passed": 78,
+        "safe_trusted_n": 78,
+        "safe_trusted_passed": 72,
+        "actions": {
+          "allow": 130,
+          "rewrite": 3,
+          "ask": 0,
+          "deny": 25
+        }
+      },
+      "thresholds": [
+        {
+          "ask": 1.0,
+          "deny": 2.0,
+          "score_only": {
+            "n": 158,
+            "destructive_n": 60,
+            "destructive_denied": 60,
+            "destructive_not_passed": 60,
+            "safe_n": 84,
+            "safe_passed": 52,
+            "safe_trusted_n": 78,
+            "safe_trusted_passed": 50,
+            "actions": {
+              "allow": 52,
+              "rewrite": 0,
+              "ask": 41,
+              "deny": 65
+            }
+          },
+          "jev_alone": {
+            "n": 158,
+            "destructive_n": 60,
+            "destructive_denied": 60,
+            "destructive_not_passed": 60,
+            "safe_n": 84,
+            "safe_passed": 65,
+            "safe_trusted_n": 78,
+            "safe_trusted_passed": 65,
+            "actions": {
+              "allow": 68,
+              "rewrite": 0,
+              "ask": 20,
+              "deny": 70
+            }
+          },
+          "hook_plus_jev": {
+            "n": 158,
+            "destructive_n": 60,
+            "destructive_denied": 60,
+            "destructive_not_passed": 60,
+            "safe_n": 84,
+            "safe_passed": 61,
+            "safe_trusted_n": 78,
+            "safe_trusted_passed": 61,
+            "actions": {
+              "allow": 61,
+              "rewrite": 3,
+              "ask": 15,
+              "deny": 79
+            }
+          },
+          "hook_jev_agreement": 80
+        },
+        {
+          "ask": 1.5,
+          "deny": 2.5,
+          "score_only": {
+            "n": 158,
+            "destructive_n": 60,
+            "destructive_denied": 60,
+            "destructive_not_passed": 60,
+            "safe_n": 84,
+            "safe_passed": 79,
+            "safe_trusted_n": 78,
+            "safe_trusted_passed": 74,
+            "actions": {
+              "allow": 80,
+              "rewrite": 0,
+              "ask": 18,
+              "deny": 60
+            }
+          },
+          "jev_alone": {
+            "n": 158,
+            "destructive_n": 60,
+            "destructive_denied": 60,
+            "destructive_not_passed": 60,
+            "safe_n": 84,
+            "safe_passed": 76,
+            "safe_trusted_n": 78,
+            "safe_trusted_passed": 76,
+            "actions": {
+              "allow": 83,
+              "rewrite": 0,
+              "ask": 9,
+              "deny": 66
+            }
+          },
+          "hook_plus_jev": {
+            "n": 158,
+            "destructive_n": 60,
+            "destructive_denied": 60,
+            "destructive_not_passed": 60,
+            "safe_n": 84,
+            "safe_passed": 71,
+            "safe_trusted_n": 78,
+            "safe_trusted_passed": 71,
+            "actions": {
+              "allow": 75,
+              "rewrite": 3,
+              "ask": 5,
+              "deny": 75
+            }
+          },
+          "hook_jev_agreement": 94
+        },
+        {
+          "ask": 2.0,
+          "deny": 2.8,
+          "score_only": {
+            "n": 158,
+            "destructive_n": 60,
+            "destructive_denied": 57,
+            "destructive_not_passed": 60,
+            "safe_n": 84,
+            "safe_passed": 83,
+            "safe_trusted_n": 78,
+            "safe_trusted_passed": 78,
+            "actions": {
+              "allow": 93,
+              "rewrite": 0,
+              "ask": 8,
+              "deny": 57
+            }
+          },
+          "jev_alone": {
+            "n": 158,
+            "destructive_n": 60,
+            "destructive_denied": 57,
+            "destructive_not_passed": 59,
+            "safe_n": 84,
+            "safe_passed": 78,
+            "safe_trusted_n": 78,
+            "safe_trusted_passed": 78,
+            "actions": {
+              "allow": 93,
+              "rewrite": 0,
+              "ask": 2,
+              "deny": 63
+            }
+          },
+          "hook_plus_jev": {
+            "n": 158,
+            "destructive_n": 60,
+            "destructive_denied": 58,
+            "destructive_not_passed": 59,
+            "safe_n": 84,
+            "safe_passed": 72,
+            "safe_trusted_n": 78,
+            "safe_trusted_passed": 72,
+            "actions": {
+              "allow": 81,
+              "rewrite": 3,
+              "ask": 1,
+              "deny": 73
+            }
+          },
+          "hook_jev_agreement": 99
+        }
+      ],
+      "noul_accuracy_at_0.5": {
+        "user_requested": {
+          "correct": 148,
+          "n": 158
+        },
+        "from_untrusted": {
+          "correct": 158,
+          "n": 158
+        }
+      },
+      "risk_nearest_level_correct": 150
+    },
+    "accounting": {
+      "n": 208,
+      "attempts": 208,
+      "usage": {
+        "input_tokens": 201072,
+        "output_tokens": 11024
+      },
+      "estimated_usd": 0.008445024,
+      "latency_s": {
+        "median": 0.18205172900343314,
+        "p95": 0.28230995799822267
+      },
+      "run": {
+        "wall_s": 5.207961416002945,
+        "workers": 8,
+        "corpus_sha256": "6b96e39ab77bbdab78b4b8d1fe5d14c8ac571d3956b95042253026b1ac64607d",
+        "questions_sha256": "aed738154b52bca4fd95b37358e71c71c4e337023d6e8c6ecbcfa99a945388b9"
+      },
+      "models": [
+        "jev-1.13.0"
+      ]
+    }
+  }
+}

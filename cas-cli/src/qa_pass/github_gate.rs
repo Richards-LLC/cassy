@@ -76,10 +76,106 @@ fn is_gh(token: &str) -> bool {
     token == "gh" || token.ends_with("/gh")
 }
 
+/// Programs whose here-document is data, not code: text in their bodies is
+/// never executed, so it cannot be a merge. Shells, `ssh`, `sudo`,
+/// interpreters (`python3`, `node`, … run their body as a program) and
+/// anything unknown keep their bodies (fail closed).
+const HEREDOC_DATA_CONSUMERS: [&str; 13] = [
+    "cat", "tee", "git", "jq", "sed", "awk", "grep", "wc", "diff", "patch", "psql", "sqlite3",
+    "rustfmt",
+];
+
+/// The command with here-document bodies removed when the program reading
+/// them is a known data consumer (cas-0169: a file written through a heredoc
+/// whose body quoted a merge command was refused as a merge). A body whose
+/// terminator never appears is kept, because the shell may not read it as a
+/// heredoc.
+fn strip_data_heredoc_bodies(command: &str) -> String {
+    let lines: Vec<&str> = command.lines().collect();
+    let mut kept = Vec::with_capacity(lines.len());
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index];
+        kept.push(line);
+        index += 1;
+        for (delimiter, strip_tabs, data) in heredocs_opened_by(line) {
+            let terminator = lines[index..].iter().position(|body| {
+                let body = if strip_tabs {
+                    body.trim_start_matches('\t')
+                } else {
+                    body
+                };
+                body.trim_end() == delimiter
+            });
+            match terminator {
+                Some(offset) if data => {
+                    // Drop the body; keep the terminator line.
+                    index += offset;
+                }
+                Some(offset) => {
+                    kept.extend(&lines[index..index + offset]);
+                    index += offset;
+                }
+                None => break,
+            }
+            if index < lines.len() {
+                kept.push(lines[index]);
+                index += 1;
+            }
+        }
+    }
+    kept.join("\n")
+}
+
+/// `(delimiter, <<- strips tabs, body is data)` for each `<<WORD` on a line,
+/// in order. `<<<` here-strings open nothing.
+fn heredocs_opened_by(line: &str) -> Vec<(String, bool, bool)> {
+    let mut opened = Vec::new();
+    let mut rest = line;
+    let mut consumed = 0;
+    while let Some(at) = rest.find("<<") {
+        let before = &line[..consumed + at];
+        let after = &rest[at + 2..];
+        consumed += at + 2;
+        rest = after;
+        if after.starts_with('<') {
+            rest = &after[1..];
+            consumed += 1;
+            continue;
+        }
+        let (strip_tabs, after) = match after.strip_prefix('-') {
+            Some(after) => (true, after),
+            None => (false, after),
+        };
+        let word: String = after
+            .trim_start()
+            .chars()
+            .take_while(|ch| {
+                !ch.is_whitespace() && !matches!(ch, ';' | '|' | '&' | '<' | '>' | ')')
+            })
+            .filter(|ch| !matches!(ch, '\'' | '"' | '\\'))
+            .collect();
+        if word.is_empty() {
+            continue;
+        }
+        let program = before
+            .rsplit([';', '|', '&', '('])
+            .next()
+            .unwrap_or_default()
+            .split_whitespace()
+            .find(|token| !token.contains('='))
+            .map(|token| token.rsplit('/').next().unwrap_or(token))
+            .unwrap_or_default();
+        opened.push((word, strip_tabs, HEREDOC_DATA_CONSUMERS.contains(&program)));
+    }
+    opened
+}
+
 /// Raw GitHub merges a shell command would perform (cas-2ee2 pre-tool guard).
 /// `gh pr merge --disable-auto` merges nothing and is not reported.
 pub fn github_merges_in(command: &str) -> Vec<GithubMerge> {
     let mut merges = Vec::new();
+    let command = strip_data_heredoc_bodies(command);
     for statement in command.split(['\n', ';', '|', '&']) {
         let tokens: Vec<&str> = statement
             .split_whitespace()
@@ -234,29 +330,61 @@ fn put_pull_merge(tokens: &[&str]) -> Option<(u64, Option<String>)> {
 }
 
 /// Run a command with a hard deadline; stdout on success.
-fn run_bounded(mut command: Command, timeout: Duration) -> Option<Vec<u8>> {
+fn run_bounded(command: Command, timeout: Duration) -> Option<Vec<u8>> {
+    run_bounded_detailed(command, timeout).ok()
+}
+
+/// [`run_bounded`] that says why it produced nothing: the program could not
+/// start, it timed out, or it exited non-zero (with its first stderr line).
+fn run_bounded_detailed(mut command: Command, timeout: Duration) -> Result<Vec<u8>, String> {
+    let program = command.get_program().to_string_lossy().into_owned();
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
-        .ok()?;
+        .map_err(|error| format!("`{program}` could not be started: {error}"))?;
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
                 if !status.success() {
-                    return None;
+                    let mut stderr = String::new();
+                    if let Some(mut pipe) = child.stderr.take() {
+                        let _ = pipe.read_to_string(&mut stderr);
+                    }
+                    let detail: String = stderr
+                        .lines()
+                        .map(str::trim)
+                        .find(|line| !line.is_empty())
+                        .unwrap_or("no error output")
+                        .chars()
+                        .take(200)
+                        .collect();
+                    return Err(format!("`{program}` exited with {status}: {detail}"));
                 }
                 let mut stdout = Vec::new();
-                child.stdout.take()?.read_to_end(&mut stdout).ok()?;
-                return Some(stdout);
+                child
+                    .stdout
+                    .take()
+                    .ok_or_else(|| format!("`{program}` produced no output"))?
+                    .read_to_end(&mut stdout)
+                    .map_err(|error| format!("reading `{program}` output failed: {error}"))?;
+                return Ok(stdout);
             }
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(25)),
-            _ => {
+            Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return None;
+                return Err(format!(
+                    "`{program}` did not answer within {}s",
+                    timeout.as_secs()
+                ));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("waiting for `{program}` failed: {error}"));
             }
         }
     }
@@ -269,7 +397,8 @@ struct PrHead {
     sha: String,
 }
 
-fn gh_pr_head(cwd: &Path, repo: Option<&str>, selector: Option<&str>) -> Option<PrHead> {
+/// Look the PR up with `gh pr view`; the error says why it could not be.
+fn gh_pr_head(cwd: &Path, repo: Option<&str>, selector: Option<&str>) -> Result<PrHead, String> {
     let mut command = Command::new(gh_bin());
     command.args(["pr", "view"]);
     if let Some(selector) = selector {
@@ -281,11 +410,44 @@ fn gh_pr_head(cwd: &Path, repo: Option<&str>, selector: Option<&str>) -> Option<
     command
         .args(["--json", "headRefName,headRefOid"])
         .current_dir(cwd);
-    let stdout = run_bounded(command, GH_LOOKUP_TIMEOUT)?;
-    let value: serde_json::Value = serde_json::from_slice(&stdout).ok()?;
-    let branch = value.get("headRefName")?.as_str()?.trim().to_string();
-    let sha = value.get("headRefOid")?.as_str()?.trim().to_string();
-    (!branch.is_empty() && !sha.is_empty()).then_some(PrHead { branch, sha })
+    let stdout = run_bounded_detailed(command, GH_LOOKUP_TIMEOUT)?;
+    let value: serde_json::Value = serde_json::from_slice(&stdout)
+        .map_err(|error| format!("`gh pr view` returned unreadable JSON: {error}"))?;
+    let field = |name: &str| {
+        value
+            .get(name)
+            .and_then(|field| field.as_str())
+            .map(|field| field.trim().to_string())
+            .filter(|field| !field.is_empty())
+    };
+    match (field("headRefName"), field("headRefOid")) {
+        (Some(branch), Some(sha)) => Ok(PrHead { branch, sha }),
+        _ => Err("`gh pr view` returned no headRefName/headRefOid".to_string()),
+    }
+}
+
+/// `owner/repo`, lowercased, from `OWNER/REPO`, `HOST/OWNER/REPO`, or a remote
+/// URL (`https://…`, `git@host:…`). Local-path remotes have no slug.
+fn repo_slug(value: &str) -> Option<String> {
+    let normalized =
+        crate::cloud::normalize_git_remote_url(value).unwrap_or_else(|| value.trim().to_string());
+    let normalized = normalized.trim_end_matches('/');
+    let normalized = normalized.strip_suffix(".git").unwrap_or(normalized);
+    let parts: Vec<&str> = normalized
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    match parts.as_slice() {
+        [.., owner, repo] if !owner.contains(':') => {
+            Some(format!("{owner}/{repo}").to_ascii_lowercase())
+        }
+        _ => None,
+    }
+}
+
+/// The GitHub `owner/repo` of a checkout's `origin`, when it has one.
+fn origin_slug(dir: &Path) -> Option<String> {
+    repo_slug(&git_output(dir, &["remote", "get-url", "origin"])?)
 }
 
 fn git_output(cwd: &Path, args: &[&str]) -> Option<String> {
@@ -330,9 +492,35 @@ pub fn github_merge_refusal(cas_root: &Path, cwd: &Path, command: &str) -> Optio
     if gated.is_empty() {
         return None;
     }
+    // cas-0169: a round belongs to the repository its delivery lives in. A
+    // task whose repository has no GitHub origin stays in scope (fail closed).
+    let task_slugs: Vec<Option<String>> = gated
+        .iter()
+        .map(|(task, _)| origin_slug(&task_repo(cas_root, task)))
+        .collect();
     merges
         .iter()
-        .find_map(|merge| refusal_for_merge(cwd, &qa, &gated, merge))
+        .find_map(|merge| {
+            // `gh` merges in `--repo`, else in the repository it runs in.
+            let target = merge
+                .repo
+                .as_deref()
+                .and_then(repo_slug)
+                .or_else(|| origin_slug(cwd));
+            let scoped: Vec<(Task, Vec<QaPass>)> = gated
+                .iter()
+                .zip(&task_slugs)
+                .filter(|(_, slug)| match (&target, slug) {
+                    (Some(target), Some(slug)) => target == slug,
+                    _ => true,
+                })
+                .map(|(entry, _)| entry.clone())
+                .collect();
+            if scoped.is_empty() {
+                return None;
+            }
+            refusal_for_merge(cwd, &qa, &scoped, merge)
+        })
         .map(|refusal| format!("🚫 {refusal}"))
 }
 
@@ -343,14 +531,18 @@ fn refusal_for_merge(
     merge: &GithubMerge,
 ) -> Option<String> {
     let repo = merge.repo.as_deref();
-    let (pr_number, resolved) = match &merge.selector {
-        MergeSelector::Unresolvable(_) => (None, None),
+    let (pr_number, lookup) = match &merge.selector {
+        MergeSelector::Unresolvable(why) => (None, Err((*why).to_string())),
         MergeSelector::Number(number) => (
             Some(*number),
             gh_pr_head(cwd, repo, Some(&number.to_string())),
         ),
         MergeSelector::Branch(branch) => (None, gh_pr_head(cwd, repo, Some(branch))),
         MergeSelector::CurrentBranch => (None, gh_pr_head(cwd, repo, None)),
+    };
+    let (resolved, lookup_error) = match lookup {
+        Ok(head) => (Some(head), None),
+        Err(error) => (None, Some(error)),
     };
     let head_branch = resolved
         .as_ref()
@@ -400,17 +592,31 @@ fn refusal_for_merge(
         if open.is_empty() {
             return None;
         }
-        let why = match &merge.selector {
-            MergeSelector::Unresolvable(why) => (*why).to_string(),
-            _ => "GitHub could not be asked for the PR's head branch".to_string(),
-        };
+        if let MergeSelector::Unresolvable(why) = &merge.selector {
+            return Some(format!(
+                "INDEPENDENT QA REQUIRED: Cassy cannot tell which delivery `{}` merges ({why}), \
+                 and independent QA is still open for {}. Wait for the verdict, name the PR by number \
+                 or branch, or check with `{prefix}verification action=qa_status task_id=<task>`.",
+                merge.statement,
+                open.join(", "),
+                prefix = crate::mcp::tools::core::guidance::supervisor_prefix(),
+            ));
+        }
+        // cas-0169: the lookup failed, so nothing ties this PR to any open
+        // round. Name the failure; listing the open rounds would blame tasks
+        // the PR may have nothing to do with.
+        let failure = lookup_error
+            .as_deref()
+            .unwrap_or("no head branch was returned");
         return Some(format!(
-            "INDEPENDENT QA REQUIRED: Cassy cannot tell which delivery `{}` merges ({why}), \
-             and independent QA is still open for {}. Wait for the verdict, name the PR by number \
-             or branch, or check with `{prefix}verification action=qa_status task_id=<task>`.",
+            "INDEPENDENT QA REQUIRED: Cassy could not look up the head of the PR `{}` merges, \
+             so it cannot rule out a delivery whose independent QA is still open \
+             ({} open round(s) in this repository). Lookup failure: {failure}. \
+             Fix the lookup and retry, or name the PR by its head branch. The hook runs `gh` \
+             in its own environment: a login that exists only inside `bash -ic` is invisible \
+             to it, so export GH_TOKEN where the hook can see it.",
             merge.statement,
-            open.join(", "),
-            prefix = crate::mcp::tools::core::guidance::supervisor_prefix(),
+            open.len(),
         ));
     }
 
@@ -533,17 +739,23 @@ fn github_status_enabled(cas_root: &Path) -> bool {
 
 /// The checkout a task's delivery lives in, for `gh`'s `{owner}/{repo}`.
 fn delivery_repo(cas_root: &Path, task_id: &str) -> PathBuf {
-    let fallback = cas_root.parent().unwrap_or(cas_root).to_path_buf();
     crate::store::open_task_store(cas_root)
         .ok()
         .and_then(|store| store.get(task_id).ok())
-        .and_then(|task| task.deliverables.work_target)
+        .map(|task| task_repo(cas_root, &task))
+        .unwrap_or_else(|| cas_root.parent().unwrap_or(cas_root).to_path_buf())
+}
+
+/// [`delivery_repo`] for a task already in hand.
+fn task_repo(cas_root: &Path, task: &Task) -> PathBuf {
+    task.deliverables
+        .work_target
+        .as_ref()
         .and_then(|target| {
-            crate::mcp::tools::core::task::repo_context::resolve_repo_context(cas_root, &target)
-                .ok()
+            crate::mcp::tools::core::task::repo_context::resolve_repo_context(cas_root, target).ok()
         })
         .map(|repo| repo.repo_root)
-        .unwrap_or(fallback)
+        .unwrap_or_else(|| cas_root.parent().unwrap_or(cas_root).to_path_buf())
 }
 
 /// Publish `pass`'s status on its head when `qa.github_status` is on.
@@ -775,6 +987,96 @@ mod tests {
                 "-f",
                 "description=round open",
             ]
+        );
+    }
+
+    #[test]
+    fn data_heredoc_bodies_are_not_merges_but_shell_heredocs_are() {
+        // cas-0169: a file written through a data heredoc whose body quotes a
+        // merge command.
+        let edit =
+            "cat > fixture.rs <<'EOF'\nrefusal = run(\"gh pr merge 77 --squash\")\nEOF\necho done";
+        assert!(github_merges_in(edit).is_empty(), "{edit}");
+        let tabbed = "cat > notes.md <<-EOF\n\tgh pr merge 12 --squash\n\tEOF\n";
+        assert!(github_merges_in(tabbed).is_empty());
+        let two = "git commit -F - <<A && cat <<B\ngh pr merge 1\nA\ngh pr merge 2\nB\n";
+        assert!(github_merges_in(two).is_empty());
+
+        // A merge after the body, a shell-fed body, an interpreter's body
+        // (code, not data), an unknown consumer, and an unterminated body are
+        // still merges (fail closed).
+        let after = "cat > notes.md <<'EOF'\nnotes\nEOF\ngh pr merge 5 --squash";
+        assert_eq!(only(after).selector, MergeSelector::Number(5));
+        for command in [
+            "bash <<'EOF'\ngh pr merge 6 --squash\nEOF",
+            "ssh host <<EOF\ngh pr merge 6 --squash\nEOF",
+            "sudo tee x <<EOF\ngh pr merge 6 --squash\nEOF",
+            "python3 - <<'EOF'\nimport subprocess\nsubprocess.run([\"sh\", \"-c\", \"gh pr merge 6 --squash\"])\nEOF",
+            "python3 <<EOF\ncmd = \"gh pr merge 6 --squash\"\nEOF",
+            "node <<'EOF'\nconst merge = \"gh pr merge 6 --squash\";\nEOF",
+            "cat <<'EOF'\ngh pr merge 6 --squash\n",
+        ] {
+            assert_eq!(
+                only(command).selector,
+                MergeSelector::Number(6),
+                "{command}"
+            );
+        }
+        // A here-string opens no body.
+        assert_eq!(
+            only("cat <<< x\ngh pr merge 7").selector,
+            MergeSelector::Number(7)
+        );
+    }
+
+    #[test]
+    fn repo_slugs_compare_owner_and_name_across_spellings() {
+        for value in [
+            "Richards-LLC/cassy",
+            "github.com/richards-llc/cassy",
+            "https://github.com/Richards-LLC/cassy.git",
+            "git@github.com:Richards-LLC/cassy.git",
+            "ssh://git@github.com/Richards-LLC/cassy/",
+        ] {
+            assert_eq!(
+                repo_slug(value).as_deref(),
+                Some("richards-llc/cassy"),
+                "{value}"
+            );
+        }
+        assert_eq!(repo_slug("cassy"), None);
+        assert_eq!(repo_slug(""), None);
+        assert_ne!(
+            repo_slug("Richards-LLC/petra-stella-cloud"),
+            repo_slug("Richards-LLC/cassy")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_lookup_failures_say_why() {
+        let mut failing = Command::new("sh");
+        failing.args(["-c", "echo 'HTTP 401: Bad credentials' >&2; exit 4"]);
+        let error = run_bounded_detailed(failing, Duration::from_secs(5)).unwrap_err();
+        assert!(
+            error.contains("exited with") && error.contains("HTTP 401: Bad credentials"),
+            "{error}"
+        );
+
+        let missing = Command::new("/nonexistent/cas-0169-gh");
+        let error = run_bounded_detailed(missing, Duration::from_secs(5)).unwrap_err();
+        assert!(error.contains("could not be started"), "{error}");
+
+        let mut slow = Command::new("sh");
+        slow.args(["-c", "sleep 5"]);
+        let error = run_bounded_detailed(slow, Duration::from_millis(100)).unwrap_err();
+        assert!(error.contains("did not answer within"), "{error}");
+
+        let mut ok = Command::new("sh");
+        ok.args(["-c", "printf done"]);
+        assert_eq!(
+            run_bounded_detailed(ok, Duration::from_secs(5)).unwrap(),
+            b"done"
         );
     }
 }

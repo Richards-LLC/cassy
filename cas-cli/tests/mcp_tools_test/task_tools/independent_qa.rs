@@ -1321,6 +1321,16 @@ async fn raw_github_merges_wait_for_the_independent_verdict_cas_2ee2() {
     let body = std::fs::read_to_string(&config).unwrap();
     std::fs::write(&config, format!("{body}github_status = true\n")).unwrap();
     let head = git(&repo, &["rev-parse", "factory/test-agent"]);
+    // cas-0169: the project's own GitHub repository; rounds are scoped to it.
+    git(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/acme/gabber.git",
+        ],
+    );
     let stub_dir = repo.join("stub-bin");
     std::fs::create_dir_all(&stub_dir).unwrap();
     let (mut gh, gh_log) = GhStub::install(&mut test_env, &stub_dir, &head);
@@ -1363,17 +1373,50 @@ async fn raw_github_merges_wait_for_the_independent_verdict_cas_2ee2() {
         );
     }
 
-    // A PR Cassy cannot map, and a GraphQL merge by node id, are refused
-    // while a round is open rather than waved through.
+    // A GraphQL merge by node id is refused while a round is open, naming
+    // the open rounds, rather than waved through.
+    let command = "gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"PR_kw\"}) { clientMutationId } }'";
+    let refusal = cas::qa_pass::github_merge_refusal(&cas_dir, &repo, command)
+        .unwrap_or_else(|| panic!("unmapped merge allowed: {command}"));
+    assert!(
+        refusal.contains("cannot tell which delivery") && refusal.contains(&task_id),
+        "{command}: {refusal}"
+    );
+
+    // cas-0169: a PR in this repository whose head lookup fails is still
+    // refused, but the denial names the failure and blames no task.
     for command in [
         "gh pr merge 77 --squash",
-        "gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"PR_kw\"}) { clientMutationId } }'",
+        "gh pr merge 77 --repo acme/gabber --squash",
+        "gh pr merge 77 --repo github.com/ACME/gabber --squash",
     ] {
         let refusal = cas::qa_pass::github_merge_refusal(&cas_dir, &repo, command)
             .unwrap_or_else(|| panic!("unmapped merge allowed: {command}"));
         assert!(
-            refusal.contains("cannot tell which delivery") && refusal.contains(&task_id),
+            refusal.contains("could not look up the head")
+                && refusal.contains("Lookup failure: `")
+                && refusal.contains("exited with")
+                && refusal.contains("1 open round(s)"),
             "{command}: {refusal}"
+        );
+        assert!(
+            !refusal.contains(&task_id) && !refusal.contains(&qa_task),
+            "a failed lookup must not blame unrelated tasks: {refusal}"
+        );
+    }
+
+    // cas-0169: another repository's PR cannot belong to this project's QA
+    // round, so it is never held, whatever the lookup would say.
+    for command in [
+        "gh pr merge 120 --repo Richards-LLC/petra-stella-cloud --auto --squash",
+        "bash -ic 'gh pr merge 120 --repo Richards-LLC/petra-stella-cloud --auto --squash'",
+        "gh pr merge https://github.com/Richards-LLC/petra-stella-cloud/pull/120 --squash",
+        "gh api -X PUT repos/Richards-LLC/petra-stella-cloud/pulls/120/merge",
+        "gh pr merge 2546 -R other-owner/gabber --squash",
+    ] {
+        assert!(
+            cas::qa_pass::github_merge_refusal(&cas_dir, &repo, command).is_none(),
+            "another repository's merge was held by this project's round: {command}"
         );
     }
 

@@ -84,12 +84,12 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
 
   await journey.stage("Notice a new reply while away", async () => {
     await list.getByRole("button", { name: /cas-src/ }).click();
-    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     // The list is on screen beside the thread, so there is no back step (F17):
     // moving to another conversation is one click on its row.
     await expect(page.getByRole("button", { name: "‹ Conversations", exact: true })).toBeHidden();
     await list.getByRole("button", { name: /gabber-studio/ }).click();
-    await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true })).toBeVisible();
     hub.supervisorSays(PELICAN, "The staging deploy finished; nothing needs you yet.", { kind: "status" });
     await expect(list.getByRole("button", { name: /cas-src/ }).getByLabel("1 unread")).toBeVisible();
   });
@@ -121,7 +121,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(target).toContainText("gabber-studio");
     await expect(search).toHaveAttribute("aria-activedescendant", (await target.getAttribute("id"))!);
     await list.getByRole("button", { name: /gabber-studio/ }).click();
-    await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true })).toBeVisible();
     // The header names the project once; machine and codename sit beneath it.
     await expect(page.locator(".conversation-identity h1")).toHaveText("gabber-studio");
     await expect(page.locator(".conversation-host")).toContainText(`Studio Mac · macOS · ${OTTER}`);
@@ -154,7 +154,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await page.keyboard.type("cas-src");
     await expect(list.getByRole("button")).toHaveCount(1);
     await page.keyboard.press("Enter");
-    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     await expect(page.locator(".conversation-identity h1")).toHaveText("cas-src");
     await expect(page.getByRole("textbox", { name: "Your message" })).toBeFocused();
     await expect(search).toHaveValue("");
@@ -245,7 +245,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(page.getByRole("button", { name: /Appearance · Dark/ })).toBeHidden();
     await page.getByRole("button", { name: /Jump to gabber-studio/ }).click();
     await expect(page.locator("#command-palette")).toBeHidden();
-    await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true })).toBeVisible();
     await expect(page.locator(".conversation-identity h1")).toHaveText("gabber-studio");
     // A mouse jump lands in the opened conversation's composer too, and
     // landing there must not freeze the shell at its pre-load state: once
@@ -273,7 +273,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     // Enter in the filter picks the leading "Jump to" row; the palette must
     // close with it rather than keep the modal up over the opened session.
     await expect(page.locator("#command-palette")).toBeHidden();
-    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     await expect(page.locator(".conversation-identity h1")).toHaveText("cas-src");
     // Focus lands in the opened conversation's composer, so the next keystroke
     // is part of the reply; the other conversation's draft stays its own.
@@ -291,7 +291,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(filter).toHaveValue(OTTER);
     await page.keyboard.press("Enter");
     await expect(page.locator("#command-palette")).toBeHidden();
-    await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true })).toBeVisible();
     await expect(composer).toBeFocused();
     await expect(composer).toHaveValue("Half a thought");
   });
@@ -321,7 +321,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(row).toBeFocused();
     await page.keyboard.press("Enter");
     await expect(page.locator("#command-palette")).toBeHidden();
-    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     await expect(composer).toBeFocused();
   });
 
@@ -340,7 +340,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     // rebuild happens to replace the dialog on close and hide the bug.
     await page.goto("./");
     await expect(palette).toHaveCount(1);
-    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     // Close with ×, which does not rebuild the shell: the dialog comes back.
     await openPaletteFromKeyboard();
     // The full list is every command on screen, Advanced still collapsed.
@@ -357,11 +357,11 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(palette).toBeHidden();
     await reopen();
     // So does jumping to the conversation that is already open.
-    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     await filter.fill(PELICAN);
     await filter.press("Enter");
     await expect(palette).toBeHidden();
-    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     await reopen();
     // Typing after the reopen filters from scratch.
     await filter.pressSequentially(OTTER.slice(0, 6));
@@ -385,11 +385,11 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await page.locator("#paired-machines-close").click();
     await expect(paired).toBeHidden();
     await list.getByRole("button", { name: /gabber-studio/ }).click();
-    await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true })).toBeVisible();
     await expect(palette).toBeHidden();
     // And once more from the other conversation: still closed.
     await list.getByRole("button", { name: /cas-src/ }).click();
-    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     await expect(palette).toBeHidden();
   });
 
@@ -438,7 +438,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     // Its first frames are still: the pulse is scheduled about a second after the open.
     expect(parseInt(await dot.evaluate((element) => element.style.animationDelay), 10), "motion waits after the open").toBeGreaterThanOrEqual(500);
     expect(await dot.evaluate((element) => element.getAnimations().map((animation) => (animation as CSSAnimation).animationName)), "the quiet pulse that follows").toEqual(["opening-dots"]);
-    await expect(page.getByRole("button", { name: "Send to quiet-heron-7", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the lighthouse supervisor", exact: true })).toBeVisible();
     await expect(page.locator(".thread .empty b")).toHaveText("lighthouse", { timeout: 10_000 });
     const seen = await page.evaluate(() => {
       const { footer, pane, looks, centres, status, composer, details } = (window as unknown as { __attachSeen: Record<string, Set<string | number>> }).__attachSeen;

@@ -19,13 +19,18 @@ test("HUB-J6 reply by voice", async ({ page, journey }) => {
     await speak(page, "Hold the release until the Mac build is green");
     await expect(composer).toHaveValue("Hold the release until the Mac build is green");
     await expect(page.getByRole("button", { name: "Start listening" })).toBeVisible();
+    // cas-71f4 (journey F21): on a desktop, the reply box takes focus with the
+    // caret after the dictated words, ready to review without another click.
+    await expect(composer).toBeFocused();
+    const end = "Hold the release until the Mac build is green".length;
+    expect(await composer.evaluate((field: HTMLTextAreaElement) => [field.selectionStart, field.selectionEnd])).toEqual([end, end]);
   });
 
   await journey.stage("Review and send", async () => {
-    await composer.press("End");
-    await composer.pressSequentially(".");
+    // Straight from the keyboard: no click back into the field first.
+    await page.keyboard.type(".");
     const sent = hub.nextSend();
-    await page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true }).click();
+    await page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }).click();
     expect((await sent).text).toBe("Hold the release until the Mac build is green.");
     hub.answerLatest(PELICAN, "Holding. I will ping you when the Mac lane is green.");
     await expect(page.getByRole("log").getByText("Holding. I will ping you when the Mac lane is green.")).toBeVisible();

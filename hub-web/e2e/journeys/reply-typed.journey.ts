@@ -30,7 +30,7 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
   const hub = await journey.hub({ machines: [ATLAS, STUDIO, FORGE], paired: ["atlas", "studio", "forge"] });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
   const composer = page.getByRole("textbox", { name: "Your message" });
-  const send = page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true });
+  const send = page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true });
 
   await journey.stage("Open the conversation", async () => {
     await journey.open();
@@ -76,6 +76,10 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     expect((await sent).text).toBe("Please keep the release notes short this time.");
     await expect(page.locator('.conversation-turn[data-state="sending"]')).toBeVisible();
     await expect(composer).toHaveValue("");
+    // cas-71f4 (journey F20): one sending signal, the bubble's own "Sending…";
+    // no composer line naming the supervisor's codename.
+    await expect(page.getByText(/Sending/).filter({ visible: true })).toHaveCount(1);
+    await expect(page.locator(".conversation-composer")).not.toContainText(PELICAN);
   });
 
   let queued = 0;
@@ -83,7 +87,7 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     queued = hub.deliverLatest(PELICAN);
     const delivered = page.locator('.conversation-turn[data-state="acknowledged"]');
     await expect(delivered.getByRole("status")).toHaveText("Delivered");
-    await expect(page.getByText(`Sending to ${PELICAN}…`)).toBeHidden();
+    await expect(page.getByText(/Sending to /)).toHaveCount(0);
   });
 
   await journey.stage("See it answered", async () => {
@@ -344,9 +348,9 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     await expect(page.getByRole("log")).toContainText("Still running the release gate.");
     await expect(page.locator('.conversation-turn[data-state="sending"]').filter({ hasText: "Is the gate green yet?" })).toHaveCount(1);
     await page.clock.fastForward(5_000);
-    await expect(bubble.getByRole("status")).toHaveText(`Not confirmed · Cassy couldn't confirm delivery to ${PELICAN}. Retry sends it again.`);
+    await expect(bubble.getByRole("status")).toHaveText("Not confirmed · Cassy couldn't confirm delivery to the cas-src supervisor. Retry sends it again.");
     await expect(page.locator('.conversation-turn[data-state="sending"]')).toHaveCount(0);
-    await expect(page.getByText(`Sending to ${PELICAN}…`)).toBeHidden();
+    await expect(page.getByText(/Sending to /)).toHaveCount(0);
     const retried = hub.nextSend();
     await bubble.getByRole("button", { name: "Retry sending" }).click();
     expect((await retried).text).toBe("Is the gate green yet?");
@@ -391,7 +395,7 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
 
   await journey.stage("A long supervisor name leaves the message box usable", async () => {
     await list.getByRole("button", { name: /forge-tools/ }).click();
-    const longSend = page.getByRole("button", { name: `Send to ${LONG_NAME}`, exact: true });
+    const longSend = page.getByRole("button", { name: "Send to the forge-tools supervisor", exact: true });
     await expect(longSend).toBeVisible();
     const [field, button, row] = await Promise.all([composer.boundingBox(), longSend.boundingBox(), page.locator(".conversation-composer").boundingBox()]);
     // The field keeps about its usual share of the row; the button reads
@@ -465,8 +469,9 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     });
     const expected: Record<string, string[]> = {
       "cas-src": ["Message the cas-src supervisor"],
-      "gabber-studio": ["Message gabber-studio", "Message the gabber-studio supervisor"],
-      "forge-tools": ["Message the forge-tools supervisor", "Message forge-tools"],
+      // cas-71f4: never "Message <project>", which read as messaging a project.
+      "gabber-studio": ["Message the supervisor", "Message the gabber-studio supervisor"],
+      "forge-tools": ["Message the forge-tools supervisor", "Message the supervisor"],
     };
     await page.setViewportSize({ width: 390, height: 844 });
     for (const [project, wordings] of Object.entries(expected)) {

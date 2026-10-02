@@ -66,7 +66,7 @@ test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
   await journey.stage("Open the conversation", async () => {
     await journey.open();
     await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
-    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
   });
 
   await journey.stage("A question from an ended session does not wait", async () => {
@@ -253,7 +253,7 @@ test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
     const composer = page.getByRole("textbox", { name: "Your message" });
     await composer.fill("Thanks — ping me when it starts.");
     const sent = hub.nextSend();
-    await page.getByRole("button", { name: `Send to ${OTTER}`, exact: true }).click();
+    await page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true }).click();
     await sent;
     // cas-1f13: the machine's turn is not filed under tomorrow above Today. It
     // sits under Today at its arrival, marked "machine clock ahead", and the

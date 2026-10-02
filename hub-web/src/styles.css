@@ -3228,7 +3228,7 @@ dialog form > *,
 .conversation-supervisor { flex-basis: 100%; color: var(--ink-soft); font: var(--weight-regular) var(--fs-xs)/1.35 var(--font-mono); }
 .conversation-when { justify-self: end; font-size: var(--fs-xs); color: var(--ink-soft); white-space: nowrap; }
 .conversation-when.hot { color: var(--warn-text); font-weight: var(--weight-semibold); }
-.conversation-preview { grid-column: 2; min-width: 0; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; max-height: calc(2 * 1.35em); overflow: hidden; text-overflow: ellipsis; font-size: var(--fs-meta); line-height: 1.35; color: var(--ink-soft); overflow-wrap: anywhere; }
+.conversation-preview { grid-column: 2; min-width: 0; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; max-height: calc(2 * 1.4em); overflow: hidden; text-overflow: ellipsis; font-size: var(--fs-meta); line-height: 1.4; color: var(--ink-soft); overflow-wrap: anywhere; }
 .conversation-preview.bold { color: var(--ink); font-weight: var(--weight-medium); }
 .conversation-preview.unreachable { color: var(--warn-text); font-weight: var(--weight-medium); }
 .conversation-preview.interrupted { color: var(--warn-text); }

@@ -519,4 +519,20 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     await page.waitForTimeout(500);
     await expect(search).toBeFocused();
   });
+
+  await journey.stage("A draft too long to keep across a reload says so", async () => {
+    // cas-adfc: a draft over the store's 64k bound is not kept on disk; the
+    // composer says so instead of losing it silently on the next reload.
+    const note = page.locator("#message-draft-note");
+    await expect(note).toBeHidden();
+    await composer.fill("a".repeat(70_000));
+    await expect(note).toBeVisible();
+    await expect(note).toHaveText("This draft is too long to keep if the page reloads. Send it, or copy it somewhere safe, before you leave.");
+    await composer.fill("Short enough to keep.");
+    await expect(note).toBeHidden();
+    await page.reload();
+    await list.getByRole("button", { name: /cas-src/ }).click();
+    await expect(composer).toHaveValue("Short enough to keep.");
+    await expect(note).toBeHidden();
+  });
 });

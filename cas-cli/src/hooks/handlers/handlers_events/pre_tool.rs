@@ -860,7 +860,32 @@ pub fn handle_pre_tool_use(
     let protection = &stores.config().hooks().pre_tool_use.protection;
 
     if protection.enabled {
-        if let Some(path) = file_path {
+        // Bash has no file_path. Reuse the structural destination recognizer
+        // from workspace containment; credential reads and quoted command text
+        // do not name write targets. Resolve relative destinations as a direct
+        // Write would name them, including .env.local / .env.example paths.
+        let shell_targets: Vec<String> = if tool_name == "Bash" {
+            input
+                .tool_input
+                .as_ref()
+                .and_then(|ti| ti.get("command").and_then(|v| v.as_str()))
+                .map(bash_write_targets)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|target| {
+                    Path::new(&input.cwd)
+                        .join(target)
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for path in file_path
+            .into_iter()
+            .chain(shell_targets.iter().map(String::as_str))
+        {
             // Block access to protected files (e.g., .env files)
             for pattern in &protection.files {
                 if path.ends_with(pattern) || path.contains(&format!("/{pattern}")) {

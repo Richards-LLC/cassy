@@ -869,7 +869,12 @@ mod credential_write_tests {
         (root, cwd)
     }
 
-    fn call(root: &std::path::Path, cwd: &std::path::Path, tool: &str, data: serde_json::Value) -> cas_core::hooks::types::HookOutput {
+    fn call(
+        root: &std::path::Path,
+        cwd: &std::path::Path,
+        tool: &str,
+        data: serde_json::Value,
+    ) -> cas_core::hooks::types::HookOutput {
         let input = HookInput {
             session_id: "credential-write-cas-5c83".into(),
             cwd: cwd.to_string_lossy().into(),
@@ -882,11 +887,25 @@ mod credential_write_tests {
         handle_pre_tool_use(&input, Some(root)).expect("pending tool handler")
     }
 
-    fn assert_same_denial(root: &std::path::Path, cwd: &std::path::Path, command: &str, destination: &str) {
-        let direct = call(root, cwd, "Write", serde_json::json!({"file_path": cwd.join(destination), "content": "FIXTURE"}));
+    fn assert_same_denial(
+        root: &std::path::Path,
+        cwd: &std::path::Path,
+        command: &str,
+        destination: &str,
+    ) {
+        let direct = call(
+            root,
+            cwd,
+            "Write",
+            serde_json::json!({"file_path": cwd.join(destination), "content": "FIXTURE"}),
+        );
         let expected = deny_reason(&direct).expect("direct Write protects target");
         let shell = call(root, cwd, "Bash", serde_json::json!({"command": command}));
-        assert_eq!(deny_reason(&shell).as_deref(), Some(expected.as_str()), "{command}: {shell:?}");
+        assert_eq!(
+            deny_reason(&shell).as_deref(),
+            Some(expected.as_str()),
+            "{command}: {shell:?}"
+        );
     }
 
     #[test]
@@ -896,7 +915,10 @@ mod credential_write_tests {
         for (command, destination) in [
             ("printf 'REPLACEMENT' > .env", ".env"), // secret-shell-write-1
             ("printf 'REPLACEMENT' >> .env", ".env"),
-            ("printf 'REPLACEMENT' 2> credentials.json", "credentials.json"),
+            (
+                "printf 'REPLACEMENT' 2> credentials.json",
+                "credentials.json",
+            ),
             ("printf x > '.env.local'", ".env.local"),
             ("printf x > .env.example", ".env.example"), // direct policy: no fixture exemption
             ("DEST=.env; printf x > $DEST", ".env"),
@@ -914,11 +936,26 @@ mod credential_write_tests {
             ("printf x | tee -a .env", ".env"),
             ("cp replacement credentials.json", "credentials.json"),
             ("mv replacement secrets.yaml", "secrets.yaml"),
-            ("python3 -c 'from pathlib import Path; Path(\".env\").write_text(\"FIXTURE\")'", ".env"),
-            ("python3 - <<'PY'\nfrom pathlib import Path\np = Path('.env')\np.write_text('FIXTURE')\nPY", ".env"),
-            ("python3 -c 'open(\"id_rsa\", \"w\").write(\"FIXTURE\")'", "id_rsa"),
-            ("node -e 'require(\"fs\").writeFileSync(\"secrets.json\", \"FIXTURE\")'", "secrets.json"),
-            ("node - <<'JS'\nrequire('fs').appendFileSync('private.key', 'FIXTURE');\nJS", "private.key"),
+            (
+                "python3 -c 'from pathlib import Path; Path(\".env\").write_text(\"FIXTURE\")'",
+                ".env",
+            ),
+            (
+                "python3 - <<'PY'\nfrom pathlib import Path\np = Path('.env')\np.write_text('FIXTURE')\nPY",
+                ".env",
+            ),
+            (
+                "python3 -c 'open(\"id_rsa\", \"w\").write(\"FIXTURE\")'",
+                "id_rsa",
+            ),
+            (
+                "node -e 'require(\"fs\").writeFileSync(\"secrets.json\", \"FIXTURE\")'",
+                "secrets.json",
+            ),
+            (
+                "node - <<'JS'\nrequire('fs').appendFileSync('private.key', 'FIXTURE');\nJS",
+                "private.key",
+            ),
         ] {
             assert_same_denial(root.path(), cwd.path(), command, destination);
         }
@@ -940,8 +977,16 @@ mod credential_write_tests {
             "cp .env ordinary.txt",
             "printf '.env credentials.json' > ordinary.txt",
         ] {
-            let output = call(root.path(), cwd.path(), "Bash", serde_json::json!({"command": command}));
-            assert!(allow_reason(&output).is_some(), "read/text/safe destination must stay allowed: {command}: {output:?}");
+            let output = call(
+                root.path(),
+                cwd.path(),
+                "Bash",
+                serde_json::json!({"command": command}),
+            );
+            assert!(
+                allow_reason(&output).is_some(),
+                "read/text/safe destination must stay allowed: {command}: {output:?}"
+            );
         }
     }
 
@@ -956,15 +1001,33 @@ mod credential_write_tests {
         ] {
             assert_same_denial(root.path(), cwd.path(), command, destination);
         }
-        let ordinary = call(root.path(), cwd.path(), "Bash", serde_json::json!({"command": "printf x > .env"}));
-        assert!(allow_reason(&ordinary).is_some(), "custom lists replace defaults");
-        std::fs::write(root.path().join("config.toml"), "[hooks.pre_tool_use.protection]\nenabled = false\n").expect("disable fixture config");
+        let ordinary = call(
+            root.path(),
+            cwd.path(),
+            "Bash",
+            serde_json::json!({"command": "printf x > .env"}),
+        );
+        assert!(
+            allow_reason(&ordinary).is_some(),
+            "custom lists replace defaults"
+        );
+        std::fs::write(
+            root.path().join("config.toml"),
+            "[hooks.pre_tool_use.protection]\nenabled = false\n",
+        )
+        .expect("disable fixture config");
         for (tool, data) in [
             ("Bash", serde_json::json!({"command": "printf x > .env"})),
-            ("Write", serde_json::json!({"file_path": cwd.path().join(".env"), "content": "FIXTURE"})),
+            (
+                "Write",
+                serde_json::json!({"file_path": cwd.path().join(".env"), "content": "FIXTURE"}),
+            ),
         ] {
             let output = call(root.path(), cwd.path(), tool, data);
-            assert!(allow_reason(&output).is_some(), "operator-disabled protection: {output:?}");
+            assert!(
+                allow_reason(&output).is_some(),
+                "operator-disabled protection: {output:?}"
+            );
         }
     }
 }

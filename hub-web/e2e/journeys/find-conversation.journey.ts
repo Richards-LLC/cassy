@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { test, expect, RECEIPTS } from "./journey";
+import { journeyStamp } from "./clock";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
 import type { Machine } from "./hub-double";
 
@@ -8,7 +9,7 @@ import type { Machine } from "./hub-double";
 const FORGE: Machine = {
   id: "forge",
   label: "Forge build box with an unusual hostname · Linux",
-  sessions: [{ name: "quiet-heron-7", supervisor: "quiet-heron-7", project_dir: "/projects/lighthouse", workers: ["swift-lark-3"], liveness: "live" }],
+  sessions: [{ name: "quiet-heron-7", supervisor: "quiet-heron-7", project_dir: "/projects/lighthouse", workers: ["swift-lark-3"], liveness: "live", last_activity_at: journeyStamp(-3 * 3_600_000), last_activity: "supervisor → swift-lark-3" }],
 };
 
 test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => {
@@ -56,6 +57,24 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(list.locator(".conversation-supervisor")).toHaveText([PELICAN, "quiet-heron-7", OTTER]);
     await expect(search).toBeVisible();
     await expect(search).toHaveAttribute("placeholder", "Search conversations (Ctrl K)");
+  });
+
+  await journey.stage("Each row's time is its own session's activity", async () => {
+    // cas-6acf: a time comes only from the session's own activity, in words for
+    // assistive tech, and never the catalog check every poll refreshes to "now".
+    const lighthouse = list.getByRole("button", { name: /lighthouse/ });
+    await expect(lighthouse.locator(".conversation-when")).toHaveText("3h");
+    await expect(lighthouse).toHaveAccessibleName(/3 hours ago/);
+    await expect(lighthouse).not.toHaveAccessibleName(/\b3h\b/);
+    const times = () => list.locator(".conversation-row").evaluateAll((rows) => rows.map((node) => {
+      const time = node.querySelector<HTMLElement>(".conversation-when");
+      return time ? `${time.textContent}|${time.title}` : "none";
+    }));
+    const before = await times();
+    expect(before.some((entry) => entry.includes("Catalog checked")), before.join(", ")).toBe(false);
+    // Across a catalog poll nothing turns "now" and nothing runs backwards.
+    await page.waitForTimeout(5_500);
+    expect(await times()).toEqual(before);
   });
 
   await journey.stage("Notice a new reply while away", async () => {

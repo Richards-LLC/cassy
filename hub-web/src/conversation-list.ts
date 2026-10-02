@@ -15,6 +15,8 @@ export interface ConversationRow {
   connection: string;
   /** Short time at the right of the headline ("09:58", "Tue", "1m"). */
   when?: string;
+  /** The same time in words for assistive tech ("20 minutes ago"), when it differs from `when` (cas-6acf). */
+  whenSpoken?: string;
   /** Last turn in the thread, or the connection state when there is none. */
   preview?: string;
   /** The session left the catalog with an instruction still pending: the
@@ -31,6 +33,8 @@ export interface ConversationRow {
   selected: boolean;
   /** When the session last did anything (ms epoch), for grouping and its time (cas-55a4). */
   activityAt?: number;
+  /** When the session started (ms epoch): ranks Most recent when no session of a group has activity (cas-6acf). */
+  startedAt?: number;
   /**
    * One of several live sessions of a project on one machine (cas-55a4). The
    * rows sit together under one heading; the most recently active one is
@@ -61,11 +65,30 @@ export function groupConversationRows<T extends ConversationRow>(rows: readonly 
     placed.add(key);
     const group = members.get(key)!;
     if (group.length < 2) { out.push({ ...row, group: undefined }); continue; }
-    const ordered = [...group].sort((a, b) => (b.activityAt ?? -Infinity) - (a.activityAt ?? -Infinity));
+    // cas-6acf: the newest activity leads; with none in the group, the newest start does.
+    const anyActivity = group.some((member) => member.activityAt !== undefined);
+    const rank = (member: T): number => (anyActivity ? member.activityAt : member.startedAt) ?? -Infinity;
+    const ordered = [...group].sort((a, b) => rank(b) - rank(a));
     const label = `${projectTitle(row.projectDir) ?? row.supervisor} · ${group.length} sessions on ${machineName(row.host)}`;
-    ordered.forEach((member, index) => out.push({ ...member, group: { key, label, size: group.length, first: index === 0, active: index === 0 && member.activityAt !== undefined } }));
+    ordered.forEach((member, index) => out.push({ ...member, group: { key, label, size: group.length, first: index === 0, active: index === 0 && rank(member) !== -Infinity } }));
   }
   return out;
+}
+
+/**
+ * A row's time from the session's own activity (cas-6acf): "now" under a
+ * minute, then minutes, hours and days. Never a catalog-check time, and no
+ * ticking seconds that make the conversation just used look older than an
+ * idle one.
+ */
+export function activityTime(at: number, now: number = Date.now()): { short: string; spoken: string } {
+  const elapsed = Math.max(0, now - at);
+  const unit = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"} ago`;
+  if (elapsed < 60_000) return { short: "now", spoken: "just now" };
+  if (elapsed < 3_600_000) { const minutes = Math.floor(elapsed / 60_000); return { short: `${minutes}m`, spoken: unit(minutes, "minute") }; }
+  if (elapsed < 86_400_000) { const hours = Math.floor(elapsed / 3_600_000); return { short: `${hours}h`, spoken: unit(hours, "hour") }; }
+  const days = Math.floor(elapsed / 86_400_000);
+  return { short: `${days}d`, spoken: unit(days, "day") };
 }
 
 export const CONVERSATION_PREVIEW_MAX_CHARS = 160;
@@ -105,7 +128,11 @@ export function conversationRowMarkup(row: ConversationRow): string {
   const preview = truncateConversationPreview(plainTextMarkdown(row.unreachable || row.interrupted ? row.connection : row.preview || row.connection));
   // The time always holds the headline end; an unread count sits beneath it
   // with the waiting dot, so the most active row never loses its time (P13).
-  const time = row.when ? `<span class="conversation-when${waiting ? " hot" : ""}" title="${escapeHtml(row.freshness)}">${escapeHtml(row.when)}</span>` : "";
+  // cas-6acf: assistive tech hears the time in words ("20 minutes ago"), not "20m".
+  const time = row.when
+    ? `<span class="conversation-when${waiting ? " hot" : ""}" title="${escapeHtml(row.freshness)}"${row.whenSpoken ? ' aria-hidden="true"' : ""}>${escapeHtml(row.when)}</span>`
+    : "";
+  const spoken = row.when && row.whenSpoken ? `<span class="sr-only">, ${escapeHtml(row.whenSpoken)}</span>` : "";
   const count = unread > 0 ? `<span class="conversation-unread" aria-label="${unread} unread">${unread}</span>` : "";
   const flag = waiting ? `<span class="conversation-flag" role="img" aria-label="${row.attention === 1 ? "Waiting for you" : `${row.attention} waiting for you`}"></span>` : "";
   const marks = count || flag ? `<span class="conversation-marks">${count}${flag}</span>` : "";
@@ -124,7 +151,8 @@ export function conversationRowMarkup(row: ConversationRow): string {
     + `<span class="conversation-who"><span class="conversation-title"><strong class="conversation-project${project ? "" : " codename"}">${escapeHtml(project ?? row.supervisor)}</strong><span class="conversation-machine" title="${escapeHtml(machineName(row.host))}"><span class="conversation-sep" aria-hidden="true"></span><span class="conversation-machine-name">${escapeHtml(machineName(row.host))}</span></span></span>${project ? `<span class="conversation-supervisor codename">${escapeHtml(row.supervisor)}${mark}</span>` : mark}</span>`
     + time
     + `<span class="conversation-preview${row.unreachable ? " unreachable" : row.interrupted ? " interrupted" : waiting || unread > 0 ? " bold" : ""}">${escapeHtml(preview)}</span>`
-    + marks;
+    + marks
+    + spoken;
 }
 
 /**

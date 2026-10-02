@@ -44,6 +44,8 @@ export interface HubSession {
   last_activity_at?: string;
   /** Who that row was between, e.g. "supervisor → worker-1"; never its content. */
   last_activity?: string;
+  /** When the session started; ranks Most recent when no session of a project has activity (cas-6acf). */
+  started_at?: string;
 }
 
 export interface PaneInfo {

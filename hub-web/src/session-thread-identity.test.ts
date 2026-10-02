@@ -6,7 +6,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { ConversationHistory, sessionCodename } from "./conversation-history";
 import { ConversationView, earlierSessionLabel, emptyActivityText } from "./conversation-view";
-import { ConversationList, conversationRowMarkup, groupConversationRows, type ConversationRow } from "./conversation-list";
+import { activityTime, ConversationList, conversationRowMarkup, groupConversationRows, type ConversationRow } from "./conversation-list";
 import type { ConversationHistoryMessage, ConversationHistoryReply } from "./types";
 
 const at = (day: number, hh: number, mm: number) => new Date(2026, 8, day, hh, mm).toISOString();
@@ -221,6 +221,33 @@ describe("grouped project sessions (cas-55a4)", () => {
     expect((document.activeElement as HTMLElement).dataset.threadKey).toBe("atlas:calm-puma-34");
     expect(container.querySelector(".conversation-group-head")).toBeNull();
     expect(document.activeElement).not.toBe(document.body);
+  });
+
+  it("times a row from its own activity only: now under a minute, then words for assistive tech (cas-6acf)", () => {
+    const now = new Date(2026, 9, 1, 12, 0).getTime();
+    expect(activityTime(now - 20_000, now)).toEqual({ short: "now", spoken: "just now" });
+    expect(activityTime(now - 59_999, now)).toEqual({ short: "now", spoken: "just now" });
+    expect(activityTime(now - 60_000, now)).toEqual({ short: "1m", spoken: "1 minute ago" });
+    expect(activityTime(now - 20 * 60_000, now)).toEqual({ short: "20m", spoken: "20 minutes ago" });
+    expect(activityTime(now - 3 * 3_600_000, now)).toEqual({ short: "3h", spoken: "3 hours ago" });
+    expect(activityTime(now - 2 * 86_400_000, now)).toEqual({ short: "2d", spoken: "2 days ago" });
+    // A machine clock ahead never reads as the future.
+    expect(activityTime(now + 30_000, now).short).toBe("now");
+    const markup = conversationRowMarkup(row("calm-puma-34", 300, { when: "20m", whenSpoken: "20 minutes ago", freshness: "Last activity 20m ago" }));
+    expect(markup).toContain('<span class="conversation-when" title="Last activity 20m ago" aria-hidden="true">20m</span>');
+    expect(markup).toContain('<span class="sr-only">, 20 minutes ago</span>');
+    // No activity, no time: never a catalog-check "now".
+    expect(conversationRowMarkup(row("idle-otter-1"))).not.toContain("conversation-when");
+  });
+
+  it("marks the newest-started session Most recent when none has activity (cas-6acf)", () => {
+    const rows = groupConversationRows([row("old-owl-1", undefined, { startedAt: 100 }), row("new-newt-2", undefined, { startedAt: 300 }), row("mid-mole-3", undefined, { startedAt: 200 })]);
+    expect(rows.map((item) => [item.session, item.group?.active])).toEqual([["new-newt-2", true], ["mid-mole-3", false], ["old-owl-1", false]]);
+    // Any activity outranks start times.
+    const active = groupConversationRows([row("old-owl-1", 50, { startedAt: 100 }), row("new-newt-2", undefined, { startedAt: 300 })]);
+    expect(active[0]).toMatchObject({ session: "old-owl-1", group: { active: true } });
+    // Neither activity nor start: nothing is claimed.
+    expect(groupConversationRows([row("a-b-1"), row("c-d-2")]).some((item) => item.group?.active)).toBe(false);
   });
 
   it("offers no End session without the callback or the scope", () => {

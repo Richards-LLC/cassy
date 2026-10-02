@@ -2,7 +2,7 @@ import { cloudBrand, projectTitle } from "./cloud-brand";
 import { CANT_REACH_RETRYING, machineFooterMarkup, pairedMachinesDialogMarkup, renderPairedMachines, type PairedMachineRow } from "./paired-machines";
 import { retainPendingSessions, visibleCatalog } from "./worker-visibility";
 import "./styles.css";
-import { ConversationList, filterConversationRows, groupConversationRows, type ConversationRow } from "./conversation-list";
+import { activityTime, ConversationList, filterConversationRows, groupConversationRows, type ConversationRow } from "./conversation-list";
 import { controlCommandCopy, sessionJumpCommandMarkup } from "./palette-commands";
 import { ConversationHistory } from "./conversation-history";
 import { loadDismissedAsks, saveDismissedAsks, type DismissedAsksStorage } from "./dismissed-asks";
@@ -3396,13 +3396,14 @@ async function endConversationSession(row: ConversationRow): Promise<void> {
   render();
 }
 
+/** Each row's newest activity seen this visit, so its time never moves backwards (cas-6acf). */
+const rowActivityHighWater = new Map<string, number>();
 function renderConversationList(): void {
   renderMachineRegister();
   const container = document.querySelector<HTMLElement>("#conversation-list");
   if (!container) return;
   const rows: ConversationRow[] = [...machines.values()].flatMap((machine) => visibleSessions(machine.id).filter((session) => supervisorTarget(session)).map((session) => {
     const key = sessionKey(machine.id, session.name);
-    const updated = fleetCatalogUpdatedAt.get(machine.id);
     const selected = machine.id === selectedMachineId && session.name === selectedSession;
     // Preview is the last turn this page has seen; unread counts supervisor
     // turns that arrived while the thread was not open. Opening it reads them.
@@ -3416,10 +3417,16 @@ function renderConversationList(): void {
     // several sessions of one project never show one shared catalog time.
     const activity = sessionActivity(machine.id, session.name);
     const lastTurn = Math.max(-Infinity, ...events.flatMap((event) => event.at !== undefined && Number.isFinite(event.at) ? [event.at] : []));
-    const activityAt = Math.max(activity?.at ?? -Infinity, lastTurn);
+    // cas-6acf: a row's time never runs backwards without new activity.
+    const activityAt = Math.max(activity?.at ?? -Infinity, lastTurn, rowActivityHighWater.get(key) ?? -Infinity);
     const active = Number.isFinite(activityAt) ? activityAt : undefined;
+    if (active !== undefined) rowActivityHighWater.set(key, active);
+    // Only the session's own activity gives a row a time; the catalog check
+    // that every poll refreshes made idle rows read "now" forever.
+    const time = active === undefined ? undefined : activityTime(active);
+    const started = session.started_at === undefined ? NaN : Date.parse(session.started_at);
     const activityLabel = active === undefined ? undefined : emptyActivityText({ at: active, ...(active === activity?.at && activity?.label ? { label: activity.label } : {}) }, Date.now());
-    return { key, machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, canEnd: machine.scopes.includes("factory-manage"), freshness: activityLabel ?? (updated ? `Catalog checked ${relativeTimestamp(Date.parse(updated))}` : "Catalog not yet checked"), when: active !== undefined ? relativeTimestamp(active) : updated ? relativeTimestamp(Date.parse(updated)) : undefined, preview: conversationHistories.get(key)?.preview(), unreachable: Boolean(session.unreachable), connection: session.unreachable ? "Unreachable · message pending" : session.dormant ? "Dormant" : session.liveness === "live" ? fleetConnectionLabel(conversationConnection(machine.id, session.name), machine.id) : "Session unavailable", interrupted: session.liveness === "live" && INTERRUPTED_LABELS.has(fleetConnectionLabel(conversationConnection(machine.id, session.name), machine.id)), attention: waiting, unread: Math.max(0, replies - (readReplies.get(key) ?? 0)), selected };
+    return { key, machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: machine.scopes.includes("factory-manage"), freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), unreachable: Boolean(session.unreachable), connection: session.unreachable ? "Unreachable · message pending" : session.dormant ? "Dormant" : session.liveness === "live" ? fleetConnectionLabel(conversationConnection(machine.id, session.name), machine.id) : "Session unavailable", interrupted: session.liveness === "live" && INTERRUPTED_LABELS.has(fleetConnectionLabel(conversationConnection(machine.id, session.name), machine.id)), attention: waiting, unread: Math.max(0, replies - (readReplies.get(key) ?? 0)), selected };
   }));
   conversationRows = rows;
   // cas-55a4: a project's live sessions on one machine sit together, most

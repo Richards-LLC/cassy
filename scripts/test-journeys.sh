@@ -105,7 +105,15 @@ git -C "$fx" add -A && git -C "$fx" commit -q -m pair-change
 
 broken="$tmp/broken"
 cp -r "$fx" "$broken"
-sed -i '/\*\*Goal:\*\* paired/d; s/"Write and send"/"Type and send"/' "$broken/docs/qa/journeys.md" "$broken/hub-web/e2e/reply.journey.ts"
+python3 - "$broken/docs/qa/journeys.md" "$broken/hub-web/e2e/reply.journey.ts" <<'PY_MUTATION'
+from pathlib import Path
+import sys
+for name in sys.argv[1:]:
+    path = Path(name)
+    text = "".join(line for line in path.read_text().splitlines(keepends=True)
+                   if "**Goal:** paired" not in line)
+    path.write_text(text.replace('"Write and send"', '"Type and send"'))
+PY_MUTATION
 if out="$(cd "$broken" && python3 "$helper" --check 2>&1)"; then
     bad "--check accepted a broken catalog"
 else

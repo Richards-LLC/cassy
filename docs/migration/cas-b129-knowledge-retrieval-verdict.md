@@ -178,13 +178,13 @@ subcommand is ergonomics.
 
 ---
 
-# Addendum — 2026-08-07: conjunction fixed, re-measured at parity-or-better
+## Addendum — 2026-08-07: conjunction fixed, re-measured at parity-or-better
 
 **Task:** cas-461a. **Measured:** 2026-08-07, host `soundwave`.
 **Revised verdict: AT PARITY OR BETTER on the cas-d075 query set. The removal
 gate stated above is SATISFIED.**
 
-## What changed
+### What changed
 
 `SqliteKnowledgeStore::fts_query` now joins terms with `OR` instead of a space,
 so multi-term knowledge search is disjunctive and ranked by `bm25()` — matching
@@ -198,7 +198,7 @@ No separate "AND-preference" pass was needed: `search` already orders by
 more of the query's terms above pages carrying fewer. That is the behaviour the
 pre-fix section above anticipated, obtained for free.
 
-## Re-measurement
+### Re-measurement
 
 Same ten `search` cases from `fixtures/retrieval-parity/queryset.toml`, same
 legacy baseline (`fixtures/retrieval-parity/baseline-soundwave.json`), same
@@ -230,7 +230,7 @@ pre-fix binary (`cas 2.50.0`, `4132e03`) was run against the same scratch copy
 and reproduced 7 / 0 / 0 / 0 on the spot-checked rows, confirming the harness is
 measuring the same thing the original verdict measured.
 
-## What this measurement does and does not claim
+### What this measurement does and does not claim
 
 It claims **findability is restored**: every query that silently returned nothing
 now returns results, and none returns fewer than legacy.
@@ -243,7 +243,7 @@ cliff is gone, not that the *best* page ranks first. Ordering is BM25's job and
 is unchanged in kind from the legacy surface, but a rank-quality comparison is a
 different measurement than this one and is not asserted here.
 
-## Coverage
+### Coverage
 
 Unit tests on the constructed expression (`fts_query_is_disjunctive_and_
 preserves_explicit_phrases`) and on store behaviour
@@ -255,14 +255,14 @@ has not become "matches anything".
 
 ---
 
-# Addendum — 2026-10-03: project-only lexical ranking measured
+## Addendum — 2026-10-03: project-only lexical ranking measured
 
 **Task:** cas-2929. **Verdict:** ADEQUATE under the frozen, lexical-coverage
 heuristic for the **current project-only common corpus**. This closes the ranking
 question for that bounded sample; it does not establish global or historical
 soundwave ranking parity, human relevance, or answer correctness.
 
-## Method and corpus
+### Method and corpus
 
 The ten committed M4 `search` queries were used unchanged. Before either engine
 ran, `METHODOLOGY.md` fixed a query×entry relevance matrix: grade 2 requires a
@@ -313,7 +313,7 @@ grade-2 item under the frozen heuristic, though its grade-1 items made nDCG
 defined. Knowledge CLI does not expose scores; the saved artifact records its
 native order and Tantivy's exposed scores without inventing FTS5 scores.
 
-## Gate note and reproducibility
+### Gate note and reproducibility
 
 The cas-b129 legacy-removal gate has a **measured-adequate ranking leg only for
 this current project-only lexical sample**. The earlier findability result

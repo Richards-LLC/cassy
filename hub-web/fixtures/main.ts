@@ -56,6 +56,7 @@ export const FIXTURE_NAMES = [
   "launch-offline",
   "launch-account",
   "launch-account-unavailable",
+  "launch-account-default-out",
 ] as const;
 
 export type FixtureName = (typeof FIXTURE_NAMES)[number];
@@ -394,7 +395,7 @@ function appendOpenPairingDialog(view: PairingFixture): void {
   }
 }
 
-type LaunchFixture = "launch-form" | "launch-browse" | "launch-error" | "launch-starting" | "launch-grant" | "launch-offline" | "launch-account" | "launch-account-unavailable";
+type LaunchFixture = "launch-form" | "launch-browse" | "launch-error" | "launch-starting" | "launch-grant" | "launch-offline" | "launch-account" | "launch-account-unavailable" | "launch-account-default-out";
 
 /**
  * The production New session sheet (LaunchSheet, cas-0f51) driven through its
@@ -422,7 +423,9 @@ async function openLaunchSheet(view: LaunchFixture): Promise<void> {
     }),
     profiles: async () => ({
       claude: { installed: true, profiles: [
-        { name: "main", logged_in: true, is_default: true },
+        // cas-c107: the default account logged out, so one row shows the
+        // account's "Default" beside the logged-out Copy control.
+        { name: "main", logged_in: view !== "launch-account-default-out", is_default: true },
         { name: "support@petrastella.io", logged_in: true, is_default: false },
         { name: "customer-success-escalations@petrastella-international.example", logged_in: true, is_default: false },
         { name: "old@petrastella.io", logged_in: false, is_default: false },
@@ -453,7 +456,7 @@ async function openLaunchSheet(view: LaunchFixture): Promise<void> {
     dialog.querySelector<HTMLInputElement>('[data-launch-list="browse"] input[type=radio]')?.click();
     return;
   }
-  if (view === "launch-account" || view === "launch-account-unavailable") {
+  if (view === "launch-account" || view === "launch-account-unavailable" || view === "launch-account-default-out") {
     dialog.querySelector<HTMLInputElement>('[data-launch-list="known"] input[type=radio]')!.click();
     if (view === "launch-account-unavailable") dialog.querySelector<HTMLInputElement>('input[name="launch-cli"][value="codex"]')!.click();
     else dialog.querySelector<HTMLInputElement>('input[name="launch-account"][value^="customer-success"]')!.click();

@@ -1,4 +1,7 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   LaunchSheet, SessionLaunchGrantError, accountLoginCommand, accountStep, canLaunch, defaultAccount, defaultSupervisorCli, launchSheetMarkup, launchSummary,
@@ -558,5 +561,28 @@ describe("New session and a machine's connection (cas-0e14 F30)", () => {
     s.open();
     await flush();
     expect(loads).toEqual(["atlas"]);
+  });
+});
+
+describe("New session polish (cas-c107)", () => {
+  const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
+  const rule = (selector: string) => {
+    const at = css.indexOf(`${selector} {`);
+    return at < 0 ? "" : css.slice(at, css.indexOf("}", at) + 1);
+  };
+
+  it("gives the supervisor's and the account's \"Default\" one treatment: a plain sub-label, not a pill", () => {
+    const shared = /\.launch-cli-default,\s*\.launch-account-tag \{([^}]*)\}/.exec(css)?.[1] ?? "";
+    expect(shared).toContain("color: var(--text-mid)");
+    expect(shared).toContain("font-size: var(--fs-xs)");
+    expect(shared).toContain("font-weight: var(--weight-regular)");
+    // The shared rule is the account tag's only styling: no pill fill or radius elsewhere.
+    expect(css.match(/\.launch-account-tag\b/g)).toHaveLength(1);
+  });
+
+  it("bounds the logged-out row's Copy button, and keeps the boundary in forced colors", () => {
+    expect(rule(".launch-login button")).toContain("border: var(--line-width) solid var(--color-transparent)");
+    const forced = [...css.matchAll(/@media \(forced-colors: active\) \{([\s\S]*?)\n\}/g)].map((match) => match[1]).join("\n");
+    expect(forced).toContain(".launch-login button { border-color: ButtonBorder; }");
   });
 });

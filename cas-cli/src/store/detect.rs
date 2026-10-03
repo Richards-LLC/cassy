@@ -750,11 +750,27 @@ pub fn open_rule_store_local(cas_dir: &Path) -> Result<Arc<dyn RuleStore>> {
     open_rule_store_base(cas_dir, false)
 }
 
-/// Initialize a new .cas directory
+/// Whether `cas_dir` already holds the Cassy store (its `cas.db`).
+pub fn cas_store_present(cas_dir: &Path) -> bool {
+    cas_dir.join("cas.db").exists()
+}
+
+/// Whether `cas_dir` already holds a project configuration file.
+pub fn cas_config_present(cas_dir: &Path) -> bool {
+    cas_dir.join("config.toml").exists() || cas_dir.join("config.yaml").exists()
+}
+
+/// Initialize a .cas directory: create and migrate its store.
+///
+/// An already-initialized directory (one with `cas.db`) is returned as is. A
+/// `.cas` that exists without a store, for example one holding only a
+/// committed `config.toml`, gets its store created and migrated; an existing
+/// configuration is kept as written (cas-563f). Only a directory with no
+/// configuration at all gets the default one.
 pub fn init_cas_dir(path: &Path) -> Result<PathBuf> {
     let cas_dir = path.join(".cas");
 
-    if cas_dir.exists() {
+    if cas_store_present(&cas_dir) {
         return Ok(cas_dir);
     }
 
@@ -790,9 +806,11 @@ pub fn init_cas_dir(path: &Path) -> Result<PathBuf> {
     // Create verification store for task quality gates (auto-inits on open)
     let _verification_store = SqliteVerificationStore::open(&cas_dir)?;
 
-    // Create default config
-    let config = Config::default();
-    config.save(&cas_dir)?;
+    // Create the default config, unless the directory already carries one.
+    if !cas_config_present(&cas_dir) {
+        let config = Config::default();
+        config.save(&cas_dir)?;
+    }
 
     // Run migrations to create any additional tables (e.g., worktrees)
     // Fail init if migrations fail to avoid partial/unsafe schema state.
@@ -820,6 +838,52 @@ mod tests {
         assert!(cas_dir.join("cas.db").exists());
         // Config is now saved as TOML (preferred format)
         assert!(cas_dir.join("config.toml").exists());
+    }
+
+    #[test]
+    fn init_cas_dir_creates_the_store_in_a_config_only_cas_and_keeps_its_config() {
+        // cas-563f: a .cas holding only an intentional config.toml (no
+        // cas.db) used to be returned untouched, so `cas init --force`
+        // reported success with no store.
+        let temp = TempDir::new().unwrap();
+        let cas = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas).unwrap();
+        let config = "[sync]\nenabled = false\ntarget = \".claude/rules/custom\"\n";
+        std::fs::write(cas.join("config.toml"), config).unwrap();
+
+        let cas_dir = init_cas_dir(temp.path()).unwrap();
+
+        assert!(cas_dir.join("cas.db").exists(), "the store must be created");
+        let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        let tables: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('entries', 'tasks', 'rules')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 3, "the store must be initialized, not just touched");
+        assert_eq!(
+            std::fs::read_to_string(cas_dir.join("config.toml")).unwrap(),
+            config,
+            "an intentional config.toml must not be overwritten"
+        );
+    }
+
+    #[test]
+    fn init_cas_dir_leaves_an_initialized_cas_alone() {
+        let temp = TempDir::new().unwrap();
+        let cas_dir = init_cas_dir(temp.path()).unwrap();
+        std::fs::write(cas_dir.join("config.toml"), "# operator edits\n").unwrap();
+        let db_before = std::fs::read(cas_dir.join("cas.db")).unwrap();
+
+        init_cas_dir(temp.path()).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(cas_dir.join("config.toml")).unwrap(),
+            "# operator edits\n"
+        );
+        assert_eq!(std::fs::read(cas_dir.join("cas.db")).unwrap(), db_before);
     }
 
     #[test]

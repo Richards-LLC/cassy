@@ -20,7 +20,7 @@ use tracing::{error, info, warn};
 
 use crate::builtins::sync_all_builtins_for_project;
 use crate::config::{Config, HookConfig, SyncConfig, TasksConfig};
-use crate::store::detect::init_cas_dir;
+use crate::store::detect::{cas_config_present, cas_store_present, init_cas_dir};
 
 use crate::cli::Cli;
 use crate::cli::factory_tooling;
@@ -487,13 +487,17 @@ pub fn execute(args: &InitArgs, cli: &Cli) -> anyhow::Result<()> {
 fn execute_json(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
     let cas_dir_path = cwd.join(".cas");
 
-    if cas_dir_path.exists() && !args.force {
+    // cas-563f: only a .cas with its store counts as initialized. A .cas
+    // holding just a committed config gets its store created, and keeps that
+    // config, with or without --force.
+    if cas_store_present(&cas_dir_path) && !args.force {
         println!(
             r#"{{"status":"already_initialized","path":"{}"}}"#,
             cas_dir_path.display()
         );
         return Ok(());
     }
+    let keep_config = keeps_existing_config(&cas_dir_path);
 
     let cas_dir = init_cas_dir(cwd)?;
     register_initialized_repo(cwd);
@@ -555,7 +559,9 @@ fn execute_json(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
     // Setup factory tooling
     let factory_tooling_result = factory_tooling::setup_factory_tooling(cwd).unwrap_or_default();
 
-    config_data.save(&cas_dir)?;
+    if !keep_config {
+        config_data.save(&cas_dir)?;
+    }
 
     let steps = next_steps_needed(cwd);
 
@@ -588,7 +594,8 @@ fn execute_json(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
 fn execute_defaults(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
     let cas_dir_path = cwd.join(".cas");
 
-    if cas_dir_path.exists() && !args.force {
+    // cas-563f: a .cas without its store is not initialized yet (see execute_json).
+    if cas_store_present(&cas_dir_path) && !args.force {
         print_colored("", colors::WHITE)?;
         print_colored("  ● ", colors::CYAN)?;
         print_colored("Cassy already initialized at ", colors::WHITE)?;
@@ -606,16 +613,32 @@ fn execute_defaults(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
     print_cassy_wordmark("  ")?;
     print_colored("  Cassy init (using defaults)\n\n", colors::GRAY)?;
 
+    let keep_config = keeps_existing_config(&cas_dir_path);
     let cas_dir = init_cas_dir(cwd)?;
     register_initialized_repo(cwd);
 
     // Apply with animation
     let config = WizardConfig::with_detected_agents(cwd);
-    apply_configuration(&cas_dir, cwd, &config, false, &integration_flags_from(args))?;
+    apply_configuration(
+        &cas_dir,
+        cwd,
+        &config,
+        false,
+        keep_config,
+        &integration_flags_from(args),
+    )?;
 
     print_quick_start();
     print_next_steps(cwd);
     Ok(())
+}
+
+/// A .cas that carries its configuration but not its store (for example a
+/// committed `config.toml` in a fresh clone) keeps that configuration when
+/// init creates the store (cas-563f). A fully initialized .cas re-run with
+/// --force is reconfigured as before.
+fn keeps_existing_config(cas_dir: &Path) -> bool {
+    !cas_store_present(cas_dir) && cas_config_present(cas_dir)
 }
 
 /// Translate CLI args into the orchestration layer's [`IntegrationFlags`].
@@ -649,6 +672,13 @@ fn run_wizard(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
         let choice = interactive::select("What would you like to do", &options)?;
 
         if choice == 1 {
+            // cas-563f: keeping the configuration still creates a missing store.
+            if !cas_store_present(&cas_dir_path) {
+                init_cas_dir(cwd)?;
+                register_initialized_repo(cwd);
+                println!("\n  Created the Cassy store and kept the existing configuration.");
+                return Ok(());
+            }
             println!("\n  Keeping existing configuration.");
             return Ok(());
         }
@@ -928,7 +958,7 @@ fn confirm_and_apply(
     // Telemetry is opt-in; don't enable by default
 
     // Apply with animation
-    apply_configuration(cas_dir, cwd, config, true, integration_flags)?;
+    apply_configuration(cas_dir, cwd, config, true, false, integration_flags)?;
 
     Ok(true)
 }
@@ -953,16 +983,23 @@ fn apply_configuration(
     cwd: &Path,
     config: &WizardConfig,
     animate: bool,
+    keep_config: bool,
     integration_flags: &super::integrate::integrations::IntegrationFlags,
 ) -> anyhow::Result<()> {
     println!();
 
-    // Step 1: Save configuration
-    execute_step("Saving configuration", animate, || {
-        let cas_config = config.to_config();
-        cas_config.save(cas_dir)?;
-        Ok(".cas/config.toml".to_string())
-    })?;
+    // Step 1: Save configuration, unless an existing one is being kept.
+    if keep_config {
+        execute_step("Keeping existing configuration", animate, || {
+            Ok(".cas/config.toml".to_string())
+        })?;
+    } else {
+        execute_step("Saving configuration", animate, || {
+            let cas_config = config.to_config();
+            cas_config.save(cas_dir)?;
+            Ok(".cas/config.toml".to_string())
+        })?;
+    }
 
     // Step 2: Ensure .cas is in .gitignore
     execute_step("Updating .gitignore", animate, || ensure_gitignore(cwd))?;

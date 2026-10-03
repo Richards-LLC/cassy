@@ -73,6 +73,9 @@ describe("fleet actions send the brief's operations with their preconditions (ca
   it("says what changed when the hub answers stale", () => {
     expect(staleMessage(stopAction(lark), { generation: 3 })).toBe("swift-lark-3 already restarted.");
     expect(staleMessage(stopAction(lark), { exists: false })).toBe("swift-lark-3 is already gone.");
+    // The hub's own shape (ops::fleet::check_worker_generation): a null generation is a worker gone.
+    expect(staleMessage(stopAction(lark), { worker: "swift-lark-3", generation: null })).toBe("swift-lark-3 is already gone.");
+    expect(staleMessage(stopAction(lark), { worker: "swift-lark-3", generation: "agent-77" })).toBe("swift-lark-3 already restarted.");
     expect(staleMessage(holdAction(lark), { held: true })).toBe("swift-lark-3 is already paused.");
     expect(staleMessage(assignAction(ready, "quiet-owl-7"), { assignee: "brisk-wren-9" })).toBe("cas-2001 is already assigned to brisk-wren-9.");
     expect(staleMessage(requestMergeAction(parked), { status: "closed" })).toBe("cas-1999 is closed.");

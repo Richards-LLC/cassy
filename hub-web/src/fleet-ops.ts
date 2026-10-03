@@ -17,7 +17,7 @@ export interface FleetAgent {
   readonly name: string;
   readonly status?: string;
   readonly current_task?: string | null;
-  /** The worker's spawn generation; started_at stands in until the hub reports it. */
+  /** The worker's spawn generation (cas-9b08), compared by the hub as-is. */
   readonly generation?: string | number | null;
   readonly started_at?: string | null;
   readonly role?: string | null;
@@ -83,8 +83,12 @@ export function idleWorkers(agents: readonly FleetAgent[]): FleetAgent[] {
   return agents.filter((agent) => isWorker(agent) && !agent.current_task && !agentHeld(agent));
 }
 
+/**
+ * The worker's spawn generation as the status reported it (cas-9b08). Null
+ * when unreported: the hub compares it as-is, so nothing may stand in for it.
+ */
 function generation(agent: FleetAgent): string | number | null {
-  return agent.generation ?? agent.started_at ?? null;
+  return agent.generation ?? null;
 }
 
 export function awaitingMerge(task: FleetTask): boolean {
@@ -279,7 +283,8 @@ export function staleMessage(action: FleetAction, current: Readonly<Record<strin
     return `${String(op.task_id)} is ${status ?? "no longer awaiting merge"}.`;
   }
   if (worker) {
-    if (current?.exists === false) return `${worker} is already gone.`;
+    // The hub answers {worker, generation}; a null generation means no live worker by that name.
+    if (current?.exists === false || (current && "generation" in current && current.generation === null)) return `${worker} is already gone.`;
     if (op.kind === "set_worker_hold" && typeof current?.held === "boolean") return `${worker} is already ${current.held ? "paused" : "running"}.`;
     return `${worker} already restarted.`;
   }

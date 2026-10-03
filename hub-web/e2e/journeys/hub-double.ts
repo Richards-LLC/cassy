@@ -347,8 +347,9 @@ export class HubDouble {
     const agent = worker ? fleet.agents.find((item) => item.name === worker) : undefined;
     const stale = (current: Record<string, unknown>, detail: string) => answer(409, { error: "stale", detail, current });
     if (worker) {
-      if (!agent) return stale({ exists: false }, `${worker} is gone`);
-      if (body.expected.generation !== undefined && body.expected.generation !== agent.generation) return stale({ generation: agent.generation }, `${worker} restarted`);
+      // As ops::fleet::check_worker_generation answers: {worker, generation}, null when gone.
+      if (!agent) return stale({ worker, generation: null }, `${worker} is gone`);
+      if (body.expected.generation !== undefined && body.expected.generation !== agent.generation) return stale({ worker, generation: agent.generation }, `${worker} restarted`);
       if (kind === "set_worker_hold" && (agent.status === "held") === Boolean(body.op.hold)) return stale({ held: agent.status === "held" }, `${worker} already ${agent.status}`);
     }
     const task = typeof body.op.task_id === "string" ? fleet.tasks.find((item) => item.id === body.op.task_id) : undefined;

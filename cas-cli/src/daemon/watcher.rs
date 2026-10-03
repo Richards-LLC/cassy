@@ -418,6 +418,19 @@ impl CodeWatcher {
         self.initial_reconcile.swap(false, Ordering::AcqRel)
     }
 
+    /// Deterministic test entry to the same debounced-path emitter as the
+    /// native watcher, without relying on OS event coalescing or timing.
+    #[cfg(test)]
+    pub(crate) fn emit_test_path(&mut self, path: PathBuf) {
+        if self._event_tx.is_none() {
+            let (tx, rx) = channel();
+            self._event_tx = Some(tx);
+            self.event_rx = Some(rx);
+        }
+        emit_debounced_path(path, &self.pending_files, self._event_tx.as_ref().unwrap(),
+            &self.config.extensions, &self.config.ignore_patterns);
+    }
+
     /// Check if there are pending files
     pub fn has_pending(&self) -> bool {
         if let Ok(pending) = self.pending_files.lock() {

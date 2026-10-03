@@ -1381,10 +1381,14 @@ fn code_index_autofix(root: &Path) -> Option<Check> {
     let roots = vec![project];
     let mut files = crate::daemon::indexing::collect_source_files(&roots, &cfg.extensions, &cfg.exclude_patterns);
     files.sort();
-    match crate::daemon::indexing::reconcile_code_tree(&files, &roots, root, false) {
-        Ok(result) if result.errors.is_empty() => Some(Check::new("auto-fix", CheckStatus::Ok, format!("fixed: symbol index — indexed {} file(s), {} symbol(s), reconciled vector queue", result.files_indexed, result.symbols_indexed))),
-        Ok(result) => Some(Check::new("auto-fix", CheckStatus::Warning, format!("code index reconciliation had {} error(s)", result.errors.len()))),
-        Err(error) => Some(Check::new("auto-fix", CheckStatus::Warning, format!("code index reconciliation failed: {error}"))),
+    Some(code_index_autofix_outcome(crate::daemon::indexing::reconcile_code_tree(&files, &roots, root, false)))
+}
+
+fn code_index_autofix_outcome(outcome: Result<crate::daemon::CodeIndexResult, crate::error::CasError>) -> Check {
+    match outcome {
+        Ok(result) if result.errors.is_empty() => Check::new("auto-fix", CheckStatus::Ok, format!("fixed: symbol index — indexed {} file(s), {} symbol(s), reconciled vector queue", result.files_indexed, result.symbols_indexed)),
+        Ok(result) => Check::new("auto-fix", CheckStatus::Warning, format!("code index reconciliation had {} error(s)", result.errors.len())),
+        Err(error) => Check::new("auto-fix", CheckStatus::Warning, format!("code index reconciliation failed: {error}")),
     }
 }
 
@@ -9633,6 +9637,33 @@ mod tests {
             ..Default::default()
         });
         assert!(matches!(idle.status, CheckStatus::Ok));
+    }
+
+    #[test]
+    fn busy_retirement_doctor_autofix_warns_until_retry_cas_e4aa() {
+        let fixture = crate::daemon::worktree_index_tests::Worktrees::new();
+        assert!(fixture.scan(&fixture.main).errors.is_empty());
+        fs::remove_file(fixture.main.join("new.rs")).unwrap();
+        fs::remove_file(fixture.main.join("extra.rs")).unwrap();
+        let holder = cas_search::Bm25Index::open(&crate::daemon::indexing::code_index_dir(&fixture.cas_root)).unwrap();
+        holder.delete_batch(["lock-probe"]).unwrap();
+        let outcome = crate::daemon::indexing::reconcile_code_tree(&[], &[fixture.main.clone()], &fixture.cas_root, false);
+        let result = outcome.as_ref().unwrap();
+        assert!(result.errors.is_empty());
+        assert_eq!(result.files_deferred, 2);
+        let warning = code_index_autofix_outcome(outcome);
+        assert!(matches!(warning.status, CheckStatus::Warning), "{}", warning.message);
+        assert!(warning.message.contains("2 file retirement(s) deferred"), "{}", warning.message);
+        assert!(warning.message.contains("cas index code"), "{}", warning.message);
+        assert!(!warning.message.contains("fixed:"), "{}", warning.message);
+        let store = crate::store::open_code_store(&fixture.cas_root).unwrap();
+        assert_eq!(store.list_files("repo", None).unwrap().len(), 2, "retry manifest was lost");
+        drop(holder);
+        let retry = crate::daemon::indexing::reconcile_code_tree(&[], &[fixture.main.clone()], &fixture.cas_root, false);
+        let success = code_index_autofix_outcome(retry);
+        assert!(matches!(success.status, CheckStatus::Ok), "{}", success.message);
+        assert!(success.message.contains("fixed: symbol index"));
+        assert!(store.list_files("repo", None).unwrap().is_empty());
     }
 
     #[test]

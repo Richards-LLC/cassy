@@ -342,3 +342,91 @@ fn daemon_retries_a_deferred_retirement_without_new_events_cas_e4aa() {
     assert_eq!(retry.files_deferred, 0);
     assert!(retry.errors.is_empty(), "{:?}", retry.errors);
 }
+
+fn nested_watch_cycle(explicit_nested_root: bool) {
+    use super::{CodeWatcher, WatcherConfig};
+    let fixture = Worktrees::new();
+    let nested = fixture.main.join("nested/repo");
+    std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+    git(
+        &fixture.main,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            nested.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    assert!(fixture.scan(&fixture.main).errors.is_empty());
+    assert!(fixture.scan(&nested).errors.is_empty());
+    let scans = cas_store::SqliteCodeVectorStore::open(&fixture.cas_root).unwrap();
+    let key = super::indexing::code_scan_key(&nested);
+    let before = scans.index_state(&key).unwrap().unwrap();
+    std::fs::remove_file(fixture.main.join("extra.rs")).unwrap();
+    std::fs::remove_file(nested.join("extra.rs")).unwrap();
+    std::fs::write(nested.join("new.rs"), "pub fn nested_modified() {}\n").unwrap();
+    let mut roots = vec![fixture.main.clone()];
+    if explicit_nested_root {
+        roots.push(nested.clone());
+    }
+    let mut watcher = CodeWatcher::new(WatcherConfig {
+        watch_paths: roots,
+        extensions: vec!["rs".into()],
+        ..Default::default()
+    });
+    // Actual production path emitter accepts the recursive nested modified
+    // event and the outer deletion. The cycle must retain configured authority.
+    watcher.emit_test_path(nested.join("new.rs"));
+    watcher.emit_test_path(fixture.main.join("extra.rs"));
+    let cycle = super::indexing::run_code_index_cycle(&watcher, &fixture.cas_root).unwrap();
+    assert!(cycle.errors.is_empty(), "{:?}", cycle.errors);
+    assert_eq!(
+        cycle.files_deleted,
+        if explicit_nested_root { 2 } else { 1 }
+    );
+    let store = crate::store::open_code_store(&fixture.cas_root).unwrap();
+    let nested_manifest = store
+        .get_file_by_path("repo", &nested.join("extra.rs").to_string_lossy())
+        .unwrap();
+    let after = scans.index_state(&key).unwrap().unwrap();
+    if explicit_nested_root {
+        assert!(nested_manifest.is_none());
+        assert_eq!(
+            (
+                after.eligible_files,
+                after.indexed_files,
+                after.failed_files
+            ),
+            (1, 1, 0)
+        );
+        assert_eq!(
+            cycle.files_indexed, 1,
+            "configured nested modification was ignored"
+        );
+    } else {
+        assert!(
+            nested_manifest.is_some(),
+            "outer cycle retired another checkout's manifest"
+        );
+        assert_eq!(
+            after.last_scan_at, before.last_scan_at,
+            "incidental event overwrote a full scan receipt"
+        );
+        assert_eq!((after.eligible_files, after.indexed_files), (2, 2));
+        assert_eq!(
+            cycle.files_indexed, 0,
+            "unconfigured nested event widened the scan"
+        );
+    }
+}
+
+#[test]
+fn nested_watch_event_cannot_expand_outer_fullscan_authority_cas_e4aa() {
+    nested_watch_cycle(false);
+}
+
+#[test]
+fn explicitly_configured_nested_watch_root_still_reconciles_cas_e4aa() {
+    nested_watch_cycle(true);
+}

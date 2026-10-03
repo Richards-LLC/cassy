@@ -913,6 +913,13 @@ impl CasCore {
             });
         }
 
+        // cas-1638: notes and the receipt name the worker; an id given as
+        // `to_agent` stays visible beside the name it resolved to.
+        let target_label = if target_agent.name == req.to_agent.trim() {
+            target_agent.name.clone()
+        } else {
+            format!("{} (given as {})", target_agent.name, req.to_agent.trim())
+        };
         // Add handoff note (plus supervisor-override audit entry when applicable) to task
         let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M");
         let handoff_note = if let Some(prior_holder) = &prior_lease_holder {
@@ -925,7 +932,7 @@ impl CasCore {
             format!(
                 "[{timestamp}] SUPERVISOR FORCE-TRANSFER by {agent_id}: \
                  released live lease from '{prior_holder}', reassigned to '{}'{}",
-                req.to_agent, note_suffix
+                target_label, note_suffix
             )
         } else if transferred_without_lease {
             let note_suffix = req
@@ -936,15 +943,15 @@ impl CasCore {
             format!(
                 "[{timestamp}] TRANSFER WITHOUT LEASE by {agent_id} (task status: {}), \
                  reassigned to '{}'{}",
-                task.status, req.to_agent, note_suffix
+                task.status, target_label, note_suffix
             )
         } else if let Some(note) = &req.note {
             format!(
                 "[{timestamp}] Handoff from {agent_id} to {}: {note}",
-                req.to_agent
+                target_label
             )
         } else {
-            format!("[{timestamp}] Handoff from {agent_id} to {}", req.to_agent)
+            format!("[{timestamp}] Handoff from {agent_id} to {}", target_label)
         };
 
         if task.notes.is_empty() {
@@ -952,15 +959,19 @@ impl CasCore {
         } else {
             task.notes = format!("{}\n\n{}", task.notes, handoff_note);
         }
+        // cas-1638: assignees are display names (cas-dbbb). Close builds
+        // factory/<assignee>-<task> and factory/<assignee>, so a session or
+        // agent id stored here names a branch that never exists.
+        let target_name = target_agent.name.clone();
         // cas-e33f (GH #1004): the task's commits stay on the handing-off
         // agent's factory branch. Record it so a close by the new assignee
         // measures that branch instead of a non-existent factory/<to_agent>.
-        if let Some(prior) = task.assignee.clone().filter(|prior| *prior != req.to_agent) {
+        if let Some(prior) = task.assignee.clone().filter(|prior| *prior != target_name) {
             task.deliverables
                 .record_handoff_branch(&format!("factory/{prior}"));
         }
         // Update assignee to the target agent
-        task.assignee = Some(req.to_agent.clone());
+        task.assignee = Some(target_name);
         task.updated_at = chrono::Utc::now();
 
         task_store.update(&task).map_err(|e| McpError {
@@ -994,12 +1005,12 @@ impl CasCore {
             Ok(ClaimResult::Success(_)) => {
                 format!(
                     "Task claimed for {} - they can start immediately",
-                    req.to_agent
+                    target_label
                 )
             }
             _ => format!(
                 "Task released - {} will need to claim it manually",
-                req.to_agent
+                target_label
             ),
         };
 
@@ -1013,7 +1024,7 @@ impl CasCore {
             "Transferred task {} from {} to {}\n{}\nNote: {}{}",
             req.task_id,
             agent_id,
-            req.to_agent,
+            target_label,
             claim_msg,
             req.note.as_deref().unwrap_or("(none)"),
             override_note
@@ -1181,10 +1192,14 @@ fn resolve_transfer_target(
     if let Ok(agent) = agent_store.get(token) {
         return Some(agent);
     }
+    // A name, or (cas-1638) the harness session id a registration now
+    // carries after a context reset moved it off its registration id.
     agent_store
         .list(None)
         .ok()?
         .into_iter()
-        .filter(|agent| agent.name.eq_ignore_ascii_case(token))
+        .filter(|agent| {
+            agent.name.eq_ignore_ascii_case(token) || agent.cc_session_id.as_deref() == Some(token)
+        })
         .max_by_key(|agent| (agent.is_alive(), agent.last_heartbeat, agent.registered_at))
 }

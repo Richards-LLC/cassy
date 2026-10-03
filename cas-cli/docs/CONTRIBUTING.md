@@ -288,6 +288,25 @@ and `CAS_RELEASE_RECEIPTS_RUN_DIR` are output locations and do not invalidate
 proof. Compiler flags, HOME, PATH, local environment/config files and the
 resolved Zig binary remain inputs.
 
+The environment fingerprint includes every variable passed to the test rows by
+default, including unknown `CAS_*` variables. Assembly first removes the exact
+harness/session names in `scripts/assembly-proof.py`'s `IDENTITY` set from both
+the test environment and the fingerprint: factory/agent/session identity,
+`CAS_ROOT`, `CAS_CLONE_PATH`, `AI_AGENT`, `CLAUDECODE`,
+`CLAUDE_CODE_CHILD_SESSION`, `CAS_FACTORY_MODE`, `CAS_FACTORY_SUPERVISOR_CLI`
+and `CAS_FACTORY_WORKER_CLI`. A factory shell and a scrubbed release shell can
+therefore share the same proof without passing harness context to test children.
+There is no blanket `CAS_FACTORY_*` exclusion: build controls such as
+`CAS_FACTORY_CARGO_BUILD_JOBS`, test safety controls such as
+`CAS_TEST_PROTECTED_DBS`, and compiler flags such as `RUSTFLAGS` remain inputs.
+The explicit `VOLATILE` set excludes shell bookkeeping, build/output locations
+and `CAS_RELEASE_ENV_FILE` (the publisher's env-file locator); values loaded
+from that file still count under their own names. Release gate/train
+orchestration variables are also excluded. Zig is keyed by binary contents
+instead of its worktree path; ignored local environment/config files are keyed
+by contents too. New exclusions require confirming that they cannot change the
+compiled candidate or test behavior.
+
 For daemon-initiated sweeps, persist the scratch base with
 `cas config set factory.release_gate_home_dir /home/cas-release-gate/base`
 in the project's `.cas/config.toml`. The daemon passes this key to assembly

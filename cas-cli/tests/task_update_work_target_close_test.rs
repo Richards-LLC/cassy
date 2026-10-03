@@ -442,33 +442,60 @@ async fn combined_work_target_update_and_close_uses_the_updated_branch() {
     task.deliverables.factory_branch_anchor = Some(worker_commit.clone());
     task_store.add(&task).expect("add task");
 
-    let before = durable_snapshot(&cas_root);
     let service = CasService::new(CasCore::with_daemon(cas_root.clone(), None, None), None);
-    let error = service
-        .task(Parameters(task_request(serde_json::json!({
+    let combined_close = || {
+        service.task(Parameters(task_request(serde_json::json!({
             "action": "update",
             "id": task.id,
             "target_branch": "alternate",
             "status": "closed"
         }))))
+    };
+    let assert_unchanged = |before: &Vec<(String, Vec<Vec<String>>)>, case: &str| {
+        assert_eq!(
+            &durable_snapshot(&cas_root),
+            before,
+            "{case}: a rejected combined target update and close must have zero durable mutation"
+        );
+        let unchanged = task_store.get(&task.id).unwrap();
+        assert_eq!(unchanged.status, TaskStatus::InProgress, "{case}");
+        assert_eq!(
+            unchanged.deliverables.work_target.unwrap().target_branch,
+            "main",
+            "{case}"
+        );
+    };
+
+    // The task's delivery branch factory/alice carries the anchor, so the
+    // pre-close hook accepts it (cas-f1f4, GH #1087) and the merge gate
+    // refuses the close against the updated branch, not the stored `main`.
+    let before = durable_snapshot(&cas_root);
+    let refused = combined_close()
+        .await
+        .expect("the merge gate refuses with a tool error");
+    assert_eq!(refused.is_error, Some(true));
+    let text = result_text(&refused);
+    assert!(text.contains("MERGE REQUIRED"), "{text}");
+    assert!(text.contains("not on alternate"), "{text}");
+    assert!(text.contains("targets=alternate@"), "{text}");
+    assert!(text.contains(&format!("unreachable=[{worker_commit}]")), "{text}");
+    assert!(!text.contains("not on main"), "{text}");
+    assert_unchanged(&before, "delivery branch carries the anchor");
+
+    // With no delivery branch carrying the anchor, the pre-close hook itself
+    // refuses, again measured against the updated branch.
+    run_git(&repo.root, &["branch", "-D", "factory/alice"]);
+    let before = durable_snapshot(&cas_root);
+    let error = combined_close()
         .await
         .expect_err("updated target must reject the close");
     let text = error.message.to_string();
-    assert!(text.contains("PRE-CLOSE HOOK CONTEXT REJECTED"));
+    assert!(text.contains("PRE-CLOSE HOOK CONTEXT REJECTED"), "{text}");
     assert!(text.contains(&worker_commit));
     assert!(text.contains("live target_branch `alternate`"));
     assert!(text.contains("(local)"));
-    assert_eq!(
-        durable_snapshot(&cas_root),
-        before,
-        "a rejected combined target update and close must have zero durable mutation"
-    );
-    let unchanged = task_store.get(&task.id).unwrap();
-    assert_eq!(unchanged.status, TaskStatus::InProgress);
-    assert_eq!(
-        unchanged.deliverables.work_target.unwrap().target_branch,
-        "main"
-    );
+    assert_unchanged(&before, "no delivery branch carries the anchor");
+    run_git(&repo.root, &["branch", "factory/alice", &worker_commit]);
 
     let wrong_repo = TempDir::new().expect("explicit wrong repository path");
     let before_wrong_repo = durable_snapshot(&cas_root);

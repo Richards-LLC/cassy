@@ -671,9 +671,12 @@ main {
   /* It keeps its width while the codename has any to give (a proportional
      shrink took a fraction of a pixel from it too, enough to show "cas-s…"
      beside a truncated codename, cas-3400), and is capped short of the caret
-     when the project name alone is too long. */
+     when the project name alone is too long. The cap reserves exactly the
+     gap and the caret's fixed box: a larger reserve cut "Fleet overview" to
+     "Fleet overvi…" with 200px of header to spare, because the toggle sizes
+     to its content and the percentage is taken from that (journey F24). */
   flex: 0 0 auto;
-  max-width: calc(100% - var(--space-4));
+  max-width: calc(100% - var(--space-1) - var(--space-3));
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -692,8 +695,10 @@ main {
   text-overflow: ellipsis;
 }
 
+/* A fixed box (the name's cap above reserves exactly this and the gap). */
 .session-picker-caret {
-  flex: 0 0 auto;
+  flex: 0 0 var(--space-3);
+  text-align: center;
   color: var(--text-mid);
   font-family: var(--font-ui);
   font-size: var(--fs-xs);
@@ -3620,7 +3625,11 @@ button.chip:disabled { cursor: default; }
 .thread .conversation-dismiss svg.close { width: 16px; height: 16px; }
 .thread .conversation-dismiss:hover { color: var(--ink); background: var(--bg-hover); }
 /* "1 unsent message · Show": the way back, dashed like the card it restores. */
-.conversation-unsent { display: flex; align-items: center; gap: 6px; min-height: 32px; margin: var(--space-2) auto 0; padding: 0 14px; border: 1.5px dashed var(--crit-bg); border-radius: 999px; background: var(--canvas); color: var(--ink); font: var(--weight-medium) 13px/1.2 var(--font-ui); cursor: pointer; }
+/* Its focus ring (2px, offset 2px) reaches 4px below the chip, where the
+   composer, positioned and opaque, painted over it and cut the ring flat
+   (journey F22). The bottom margin leaves the ring its room and the chip
+   paints above the composer. */
+.conversation-unsent { position: relative; z-index: 1; display: flex; align-items: center; gap: 6px; min-height: 32px; margin: var(--space-2) auto var(--space-1); padding: 0 14px; border: 1.5px dashed var(--crit-bg); border-radius: 999px; background: var(--canvas); color: var(--ink); font: var(--weight-medium) 13px/1.2 var(--font-ui); cursor: pointer; }
 .conversation-unsent[hidden] { display: none; }
 .conversation-unsent svg.warn { width: 14px; height: 14px; flex: none; color: var(--crit-bg); }
 .conversation-unsent-show { color: var(--color-action); font-weight: var(--weight-semibold); }
@@ -3814,11 +3823,17 @@ button.chip:disabled { cursor: default; }
   .conversation-sidebar #paired-machines-toggle { position: relative; flex-wrap: nowrap; min-width: 0; min-height: 32px; padding: 0 var(--space-2); background: var(--color-transparent); }
   .conversation-sidebar #paired-machines-toggle:hover:not(:disabled) { background: var(--bg-hover); }
   .conversation-sidebar #paired-machines-toggle::before { content: ""; position: absolute; inset: -4px 0; }
-  .conversation-sidebar #paired-machines-toggle > span:nth-child(2) { flex: none; overflow-wrap: normal; white-space: nowrap; }
+  /* cas-c19d: the label shrinks too, ellipsised, once the state has given
+     all its room: a 691px name used to run past the button and over its
+     state. The button's 8px gap then always separates the two. */
+  .conversation-sidebar #paired-machines-toggle > span:nth-child(2) { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; white-space: nowrap; }
   /* cas-0739 QA F01: on the one-line phone footer the state yields to the
      label, ellipsised; the full words are its title, the button's spoken
-     name, and the open dialog's first row. */
-  .conversation-sidebar #paired-machines-toggle .machine-badge-state { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
+     name, and the open dialog's first row. Its shrink weight makes it give
+     way first (cas-c19d), so an ordinary long name still reads whole; it
+     keeps a 4em stub ("Conne…", its full words in the title), so an
+     overlong name never hides it entirely. */
+  .conversation-sidebar #paired-machines-toggle .machine-badge-state { flex: 1 1000 auto; min-width: 4em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
   .conversation-sidebar .hub-footer-badges > #paired-machines-toggle { flex: 1 1 auto; }
   .conversation-sidebar .hub-footer-meta { display: none; }
   .conversation-shell:not(.thread-open) .compose-fab { display: flex; }

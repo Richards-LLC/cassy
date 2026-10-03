@@ -456,6 +456,29 @@ mod tests {
         .expect("an attributed merge-only delivery has no UI change");
     }
 
+    /// cas-e86b: the evidence gate reads the same shared reasons, so a
+    /// fixture-only HTML diff needs no evidence while a product page beside
+    /// it still needs the bundle.
+    #[test]
+    fn fixture_html_needs_no_evidence_but_product_html_needs_the_bundle_cas_e86b() {
+        let qa = crate::config::QaConfig::default();
+        let task = Task::new("cas-e86b-fixture".into(), "checker fixtures".into());
+        let fixtures: Vec<String> = [
+            "scripts/visual-qa.mjs",
+            "scripts/visual-qa-fixtures/clip-box.html",
+            "scripts/visual-qa-fixtures/clip-overflow.html",
+        ]
+        .map(String::from)
+        .to_vec();
+        let reasons = user_facing_reasons(&task, &qa, Some(&fixtures), &[]).reasons;
+        assert_eq!(evidence_tier(&reasons, false), EvidenceTier::None, "{reasons:?}");
+
+        let mut mixed = fixtures.clone();
+        mixed.push("hub-web/src/styles.css".into());
+        let reasons = user_facing_reasons(&task, &qa, Some(&mixed), &[]).reasons;
+        assert_eq!(evidence_tier(&reasons, false), EvidenceTier::Bundle, "{reasons:?}");
+    }
+
     #[test]
     fn web_surface_reasons_need_the_bundle_and_demo_only_needs_the_ledger() {
         assert_eq!(evidence_tier(&[], true), EvidenceTier::None);

@@ -57,8 +57,8 @@ Cassy stores agent-facing knowledge in seven distinct surfaces. They are not tie
 | **Skills** | Procedural playbooks — a `SKILL.md` body plus references. | `skills` table; synced to `.claude/skills/`. Builtins ship from `cas-cli/src/builtins/skills/` in three harness flavors (claude / codex / grok). | `skill` MCP tool, `cas skill`, builtin sync on `cas init` | The harness loads them as Agent Skills; also BM25-searchable |
 | **Entities** | Extracted proper nouns (person, project, technology, file, concept, …) and their mentions — the join layer between prose and code. | `entities`, `entity_mentions`, `relationships` | `search action=entity_extract`, background extraction | `search action=entity_list` / `entity_show` |
 | **Code index** | Symbols and files parsed by tree-sitter, plus code↔memory links. | `code_symbols`, `code_files`, `code_relationships`, `code_memory_links` | Daemon code-index cycle (60s), `cas index` | `search action=code_search` / `code_show` / `grep` |
-| **Knowledge pages** | The distilled project wiki: LLM-written prose about *this repo*, with source provenance and a user-sovereignty lock. | Index rows in `knowledge_pages` + `knowledge_sources`; **bodies are markdown files on disk** under `.cas/knowledge/<type>/<title>.md` | `cas knowledge build` (distillation), `knowledge action=write` (hand-authored, always `locked=1`) | `knowledge` MCP tool (`search`/`read`/`list`), `cas knowledge search|read` |
-| **Artifacts** | Files a task published — a PDF report, a capture, a log bundle — with the digest and size measured locally before upload. The pre-signed upload URL is never stored; `cloud_url` is the durable location the server returns at complete. | `artifacts` table; bytes live at their original path and, once uploaded, in Cloud storage | `artifact` MCP tool, `cas artifact publish` | `artifact action=show`/`list`, `cas artifact show|list` |
+| **Knowledge pages** | The distilled project wiki: LLM-written prose about *this repo*, with source provenance and a user-sovereignty lock. | Index rows in `knowledge_pages` + `knowledge_sources`; **bodies are markdown files on disk** under `.cas/knowledge/<type>/<title>.md` | `cas knowledge build` (distillation), `knowledge action=write` (hand-authored, always `locked=1`) | `knowledge` MCP tool (`search`/`read`/`list`), `cas knowledge search\|read` |
+| **Artifacts** | Files a task published — a PDF report, a capture, a log bundle — with the digest and size measured locally before upload. The pre-signed upload URL is never stored; `cloud_url` is the durable location the server returns at complete. | `artifacts` table; bytes live at their original path and, once uploaded, in Cloud storage | `artifact` MCP tool, `cas artifact publish` | `artifact action=show`/`list`, `cas artifact show\|list` |
 | **Patterns** | Cross-project personal/team conventions. | **Not local** — Cassy Cloud, reached over the `/api/patterns` HTTP surface | `pattern` MCP tool | `pattern` MCP tool (requires login) |
 
 Two properties of the knowledge surface are load-bearing and easy to get wrong:
@@ -141,5 +141,19 @@ and never captures transcript text into attribution or memory stores.
 `cas doctor` reports recent observed prompt-hook misses from these receipts;
 missing attribution rows alone are not evidence because supervisors omit them
 intentionally. Recovery needs a readable Claude transcript; missing or foreign
-transcripts do not authorize context delivery. Explicit PostToolUse matcher
+transcripts do not authorize context delivery. Custom PostToolUse matcher
 filters still apply, while the generated default covers all tools.
+
+Project matcher defaults and their compatibility projection live in
+`config/hooks.rs`. The hook writer used by `cas init`, `cas hook configure`
+and `cas update --sync` recognizes saved legacy default sets and emits the
+current defaults in canonical order, without rewriting `.cas/config.toml`.
+The old PostToolUse set (`Write`, `Edit`, `Bash`) becomes `*` so the first
+Read or MCP result can recover context (cas-b8f6). The old PreToolUse defaults
+gain Slack policy, `AskUserQuestion` and `Agent`: their factory guards in
+`handlers_events/pre_tool.rs` must still receive calls (cas-afe9 and the
+supervisor worktree-spawn guard). Sets that differ from those historical
+defaults retain their custom filters. Disabled hooks retain their behavior;
+Slack policy remains independent of ordinary PreToolUse enablement. Factory
+role settings and Codex's Bash-only tool-hook projection keep their own
+harness-specific coverage.

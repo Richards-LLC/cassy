@@ -46,6 +46,7 @@ pub fn is_non_surface_path(path: &str) -> bool {
     ["docs", "doc", "tests", "test", "__tests__", "e2e", "fixtures", "testdata", ".github", ".circleci", ".gitlab", ".buildkite"]
         .iter()
         .any(|dir| in_dir(dir))
+        || fixture_directory(&lower)
         || [".md", ".mdx", ".rst", ".adoc"].iter().any(|ext| file.ends_with(ext))
         || file.contains(".test.")
         || file.contains(".spec.")
@@ -58,6 +59,22 @@ pub fn is_non_surface_path(path: &str) -> bool {
         || file.starts_with("jest.config.")
         || file == ".gitlab-ci.yml"
         || lower.starts_with("scripts/test-")
+}
+
+/// cas-e86b: whether a path sits under a test-fixture directory named by a
+/// suffix or a JavaScript convention: `scripts/visual-qa-fixtures/`,
+/// `golden_fixtures/`, `__fixtures__/`, `fixture/`. A fixture page is input to
+/// a checker, not a product surface: `scripts/visual-qa-fixtures/clip-box.html`
+/// matched `**/*.html` and gated cas-0d16 behind a QA bundle and an
+/// independent round. Only directory segments count, never the file name.
+fn fixture_directory(lower: &str) -> bool {
+    let mut segments: Vec<&str> = lower.split('/').collect();
+    segments.pop();
+    segments.iter().any(|segment| {
+        matches!(*segment, "__fixtures__" | "fixture" | "__mocks__")
+            || segment.ends_with("-fixtures")
+            || segment.ends_with("_fixtures")
+    })
 }
 
 /// Decide whether a parked delivery needs an independent QA pass.
@@ -989,6 +1006,48 @@ mod tests {
 
     fn paths(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| item.to_string()).collect()
+    }
+
+    /// cas-e86b: the cas-0d16 delivery (checker, two fixture pages, tests)
+    /// is not user-facing; the same diff plus a product page still is.
+    #[test]
+    fn fixture_directory_html_is_not_user_facing_but_product_html_still_is_cas_e86b() {
+        for fixture in [
+            "scripts/visual-qa-fixtures/clip-box.html",
+            "scripts/visual-qa-fixtures/nested/page.css",
+            "web/src/__fixtures__/card.html",
+            "golden_fixtures/report.html",
+            "hub-web/src/fixture/layout.css",
+            "src/__mocks__/view.tsx",
+        ] {
+            assert!(is_non_surface_path(fixture), "{fixture}");
+        }
+        for product in [
+            "hub-web/src/styles.css",
+            "hub-web/dist/index.html",
+            "web/fixtures-page.html",
+            "web/src/fixtures-panel/view.tsx",
+            "scripts/visual-qa.mjs",
+        ] {
+            assert!(!is_non_surface_path(product), "{product}");
+        }
+
+        let qa = QaConfig::default();
+        let cas_0d16 = paths(&[
+            "scripts/visual-qa.mjs",
+            "scripts/visual-qa-fixtures/clip-box.html",
+            "scripts/visual-qa-fixtures/clip-overflow.html",
+            "scripts/test-visual-qa.mjs",
+        ]);
+        let reasons = user_facing_reasons(&task(), &qa, Some(&cas_0d16), &[]);
+        assert!(!reasons.reasons.iter().any(|reason| reason.starts_with("path:")), "{reasons:?}");
+        assert!(!delivery_eligibility(&task(), &qa, Some(&cas_0d16), &[]).is_eligible());
+
+        let mut mixed = cas_0d16.clone();
+        mixed.push("hub-web/src/styles.css".to_string());
+        let reasons = user_facing_reasons(&task(), &qa, Some(&mixed), &[]);
+        assert_eq!(reasons.reasons, vec!["path:hub-web/src/styles.css (**/*.css)".to_string()]);
+        assert!(delivery_eligibility(&task(), &qa, Some(&mixed), &[]).is_eligible());
     }
 
     #[test]

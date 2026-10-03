@@ -30,8 +30,8 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
    to the supervisor; quote it in `need:`.
 5. For MERGE REQUIRED, drain `inbox_poll` of unread supervisor messages, capture
    the current factory-branch tip SHA, and request merge with `merge_request=true`;
-   re-close after it lands. Read [recovery.md](references/recovery.md) for rejection
-   or crossed-message handling before amending a parked delivery.
+   re-close after it lands; don't poll for it. Read [recovery.md](references/recovery.md)
+   for the waiting rule and for rejection or crossed-message handling.
 
 Finish or hand off this task before starting another. Stay available after
 handoff; injected `Message from …` turns are instructions. Start only assignments

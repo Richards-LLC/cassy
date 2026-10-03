@@ -157,15 +157,27 @@ impl ServerHandler for CasService {
             // `ToolCallContext` consumes `request` below.
             let timeout_arguments = request.arguments.clone();
             info!(method = "tools/call", tool = %tool_name, id = %request_id, "MCP call_tool START");
-            let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+            // cas-b1dd: the handler owns its service clone so it can outlive an
+            // early answer; a deadline never drops work past its commit.
+            let service = self.clone();
+            let handler = tracing::Instrument::instrument(
+                async move {
+                    let tcc = rmcp::handler::server::tool::ToolCallContext::new(
+                        &service, request, context,
+                    );
+                    service.tool_router.call(tcc).await
+                },
+                tracing::Span::current(),
+            );
 
             let budget = std::time::Duration::from_secs(55);
             let result = self
-                .call_with_deadline(
+                .call_with_deadline_and_grace(
                     &tool_name,
                     timeout_arguments.as_ref(),
                     budget,
-                    self.tool_router.call(tcc),
+                    POST_COMMIT_GRACE,
+                    handler,
                 )
                 .await;
             let remaining = budget.saturating_sub(start.elapsed());
@@ -204,16 +216,65 @@ fn caller_transcript_path(agent: &crate::types::Agent) -> Option<std::path::Path
     path.is_file().then_some(path)
 }
 
+/// cas-b1dd: once a request's terminal task mutation has committed (a close's
+/// Closed write, a note append), the caller is answered after at most this
+/// much more post-commit work; the rest finishes in the background.
+const POST_COMMIT_GRACE: std::time::Duration = std::time::Duration::from_secs(15);
+
+type ToolResult = Result<rmcp::model::CallToolResult, rmcp::ErrorData>;
+
+/// Post-commit duration of a request, logged when it is long enough to matter
+/// (cas-b1dd): the stage the 55s deadline used to hide.
+fn log_post_commit(tool: &str, receipt: &super::mutation_receipt::Receipt, how: &str) {
+    if let Some(at) = receipt.terminal.get() {
+        let post_commit = at.elapsed();
+        if post_commit.as_millis() >= 1_000 {
+            info!(tool, action = receipt.action(), task_id = receipt.task_id().unwrap_or_default(), post_commit_ms = post_commit.as_millis() as u64, how, "MCP post-commit work");
+        }
+    }
+}
+
 impl CasService {
+    /// The deadline alone, with no early post-commit answer.
+    #[cfg(test)]
     async fn call_with_deadline<F>(
         &self,
         tool_name: &str,
         arguments: Option<&serde_json::Map<String, serde_json::Value>>,
         budget: std::time::Duration,
         future: F,
-    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData>
+    ) -> ToolResult
     where
-        F: std::future::Future<Output = Result<rmcp::model::CallToolResult, rmcp::ErrorData>>,
+        F: std::future::Future<Output = ToolResult> + Send + 'static,
+    {
+        let no_grace = budget.saturating_add(std::time::Duration::from_secs(3600));
+        self.call_with_deadline_and_grace(tool_name, arguments, budget, no_grace, future)
+            .await
+    }
+
+    /// Run a tool handler under the response budget (cas-b1dd).
+    ///
+    /// The handler runs as its own task. The close path's post-commit stages
+    /// (search indexing, reminders, the lifecycle outbox, dependents, leases,
+    /// DB-branch teardown) can each block on a cross-process lock or the
+    /// network; the response used to wait for all of them, and the 55s
+    /// deadline then dropped that work half-done. Now:
+    /// - the handler finishing first returns its result, as before;
+    /// - once the request's terminal mutation has committed, post-commit work
+    ///   that outlives `grace` gets a COMMITTED success answer, and the work
+    ///   keeps running to completion (one mutation, no retry invited);
+    /// - the budget elapsing first returns the error it always did (COMMITTED
+    ///   or UNKNOWN) and cancels the handler only when nothing committed.
+    async fn call_with_deadline_and_grace<F>(
+        &self,
+        tool_name: &str,
+        arguments: Option<&serde_json::Map<String, serde_json::Value>>,
+        budget: std::time::Duration,
+        grace: std::time::Duration,
+        future: F,
+    ) -> ToolResult
+    where
+        F: std::future::Future<Output = ToolResult> + Send + 'static,
     {
         let action = arguments
             .and_then(|args| args.get("action"))
@@ -224,22 +285,80 @@ impl CasService {
             .and_then(serde_json::Value::as_str);
         let receipt = super::mutation_receipt::Receipt::new(tool_name, action, task_id);
         let start = std::time::Instant::now();
-        match tokio::time::timeout(
-            budget,
-            super::mutation_receipt::scope(receipt.clone(), future),
-        )
-        .await
-        {
-            Ok(result) => {
+        let mut handle = tokio::spawn(super::mutation_receipt::scope(receipt.clone(), future));
+        let deadline = tokio::time::Instant::from_std(start + budget);
+        let post_commit_grace = {
+            let receipt = receipt.clone();
+            async move {
+                loop {
+                    if let Some(at) = receipt.terminal.get() {
+                        tokio::time::sleep_until(tokio::time::Instant::from_std(*at + grace)).await;
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            }
+        };
+        enum Won {
+            Handler(Result<ToolResult, tokio::task::JoinError>),
+            Grace,
+            Deadline,
+        }
+        let won = tokio::select! {
+            biased;
+            joined = &mut handle => Won::Handler(joined),
+            // The budget outranks the grace when both are due in one tick.
+            () = tokio::time::sleep_until(deadline) => Won::Deadline,
+            () = post_commit_grace => Won::Grace,
+        };
+        match won {
+            Won::Handler(joined) => {
                 let elapsed = start.elapsed();
                 if elapsed.as_secs() >= 5 {
                     info!(tool = tool_name, elapsed_ms = elapsed.as_millis() as u64, "MCP slow request");
                 }
-                result
+                log_post_commit(tool_name, &receipt, "returned");
+                match joined {
+                    Ok(result) => result,
+                    Err(error) => Err(rmcp::ErrorData {
+                        code: rmcp::model::ErrorCode::INTERNAL_ERROR,
+                        message: format!("Tool '{tool_name}' handler ended abnormally: {error}").into(),
+                        data: None,
+                    }),
+                }
             }
-            Err(_) => {
+            Won::Grace => {
+                let elapsed = start.elapsed();
+                let description = receipt
+                    .commit
+                    .get()
+                    .map(|commit| commit.description.clone())
+                    .unwrap_or_else(|| "write committed".to_string());
+                warn!(tool = tool_name, action = receipt.action(), task_id = receipt.task_id().unwrap_or_default(), elapsed_ms = elapsed.as_millis() as u64, grace_ms = grace.as_millis() as u64, "MCP answered after commit; post-commit work continues");
+                let watcher_receipt = receipt.clone();
+                let tool = tool_name.to_string();
+                tokio::spawn(async move {
+                    let _ = handle.await;
+                    log_post_commit(&tool, &watcher_receipt, "finished in the background");
+                });
+                let task = receipt.task_id().map(|id| format!(" `{id}`")).unwrap_or_default();
+                Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(format!(
+                    "COMMITTED: task{task} {action} is done ({description}). Its post-commit work \
+                     (search index, reminders, the lifecycle outbox, dependents, leases) was still \
+                     running {grace_s:.1}s after the commit and finishes in the background. Do not \
+                     retry; `task action=show` reflects the committed state.",
+                    action = receipt.action(),
+                    grace_s = grace.as_secs_f64(),
+                ))]))
+            }
+            Won::Deadline => {
                 let elapsed = start.elapsed();
                 let commit = receipt.commit.get();
+                if commit.is_none() {
+                    // Nothing committed: cancel as before, so an UNKNOWN answer
+                    // is not followed by a late write the caller never sees.
+                    handle.abort();
+                }
                 let outcome = self.mutation_timeout_outcome(tool_name, arguments, commit);
                 warn!(tool = tool_name, elapsed_ms = elapsed.as_millis() as u64, budget_ms = budget.as_millis() as u64, mutation_outcome = %outcome, "MCP response deadline elapsed");
                 Err(rmcp::ErrorData {
@@ -388,6 +507,131 @@ fn potentially_mutating_call(tool_name: &str, action: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::potentially_mutating_call;
+
+    fn result_text(result: &rmcp::model::CallToolResult) -> String {
+        serde_json::to_string(result).unwrap()
+    }
+
+    /// cas-b1dd: a note append commits, then post-commit work stalls. The
+    /// caller is answered COMMITTED (a success, no retry invited) once the
+    /// grace elapses, well inside the budget; the stalled work is not dropped
+    /// and finishes in the background; the note exists exactly once.
+    #[tokio::test]
+    async fn stalled_post_commit_work_after_a_note_answers_committed_and_keeps_running_cas_b1dd() {
+        use crate::mcp::server::CasCore;
+        use crate::mcp::tools::service::CasService;
+        use rmcp::handler::server::wrapper::Parameters;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let temp = tempfile::tempdir().unwrap();
+        let core = CasCore::with_daemon(temp.path().join(".cas"), None, None);
+        std::fs::create_dir_all(&core.cas_root).unwrap();
+        let tasks = core.open_task_store().unwrap();
+        tasks
+            .add(&crate::types::Task::new("cas-note".into(), "existing".into()))
+            .unwrap();
+        let service = CasService::new(
+            core,
+            #[cfg(feature = "mcp-proxy")]
+            None,
+        );
+        let arguments = serde_json::json!({"action":"notes", "id":"cas-note", "notes":"progress after the commit"});
+        let finished = std::sync::Arc::new(AtomicBool::new(false));
+        let sender = service.clone();
+        let request = serde_json::from_value(arguments.clone()).unwrap();
+        let done = finished.clone();
+        let call = async move {
+            let result = sender.task(Parameters(request)).await;
+            // Post-commit work that outlives the grace (a blocked lock, the network).
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            done.store(true, Ordering::SeqCst);
+            result
+        };
+        let started = std::time::Instant::now();
+        let answered = service
+            .call_with_deadline_and_grace(
+                "task",
+                arguments.as_object(),
+                std::time::Duration::from_secs(10),
+                std::time::Duration::from_millis(50),
+                call,
+            )
+            .await
+            .expect("a committed note is a success, not a tool error");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "answered within the grace, not the 10s budget");
+        let text = result_text(&answered);
+        assert!(text.contains("COMMITTED") && text.contains("cas-note") && text.contains("Do not") && text.contains("retry"), "{text}");
+        assert!(!finished.load(Ordering::SeqCst), "answered while post-commit work was still running");
+        for _ in 0..50 {
+            if finished.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(finished.load(Ordering::SeqCst), "post-commit work kept running after the answer");
+        let notes = tasks.get("cas-note").unwrap().notes;
+        assert_eq!(notes.matches("progress after the commit").count(), 1, "{notes}");
+    }
+
+    /// cas-b1dd: the terminal mark belongs to the close's Closed write. A
+    /// close that commits and then stalls is answered COMMITTED within the
+    /// grace, and the task is Closed exactly once.
+    #[tokio::test]
+    async fn stalled_post_commit_work_after_a_close_answers_committed_once_cas_b1dd() {
+        use crate::mcp::server::CasCore;
+        use crate::mcp::tools::service::CasService;
+        use rmcp::handler::server::wrapper::Parameters;
+        let temp = tempfile::tempdir().unwrap();
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        std::fs::write(cas_root.join("config.toml"), "[verification]\nenabled = false\n").unwrap();
+        let core = CasCore::with_daemon(cas_root, None, None);
+        let tasks = core.open_task_store().unwrap();
+        let mut task = crate::types::Task::new("cas-done".into(), "planning chore".into());
+        task.task_type = crate::types::TaskType::Chore;
+        task.status = crate::types::TaskStatus::InProgress;
+        task.execution_note = Some("no-code".into());
+        task.external_ref = Some("https://example.com/runbook".into());
+        tasks.add(&task).unwrap();
+        let service = CasService::new(
+            core,
+            #[cfg(feature = "mcp-proxy")]
+            None,
+        );
+
+        // The close commits its Closed write, then its post-commit work stalls past the grace.
+        let arguments = serde_json::json!({"action":"close", "id":"cas-done", "reason":"runbook updated"});
+        let sender = service.clone();
+        let request = serde_json::from_value(arguments.clone()).unwrap();
+        let close = async move {
+            let result = sender.task(Parameters(request)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            result
+        };
+        let answered = service
+            .call_with_deadline_and_grace(
+                "task",
+                arguments.as_object(),
+                std::time::Duration::from_secs(10),
+                std::time::Duration::from_millis(50),
+                close,
+            )
+            .await;
+        let closed = tasks.get("cas-done").unwrap();
+        if closed.status == crate::types::TaskStatus::Closed {
+            let text = result_text(&answered.expect("a committed close is a success"));
+            assert!(text.contains("COMMITTED") && text.contains("cas-done") && text.contains("close"), "{text}");
+            assert_eq!(closed.notes.matches("Closed: runbook updated").count(), 1, "{}", closed.notes);
+        } else {
+            // A close the gates refused never committed its Closed write, so
+            // nothing may claim COMMITTED.
+            let text = match &answered {
+                Ok(result) => result_text(result),
+                Err(error) => error.message.to_string(),
+            };
+            assert!(!text.contains("COMMITTED"), "{text}");
+            panic!("fixture close was refused, so the close path was not exercised: {text}");
+        }
+    }
 
     #[tokio::test]
     async fn message_timeout_after_commit_reports_notification_id_cas_e4a8() {

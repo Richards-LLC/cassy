@@ -18,6 +18,20 @@ A squash/cherry-pick mismatch may need `commit_receipt`; transactional
 for receipt fields. If rejected, forward the exact error and receipt identity;
 never bypass close with `status=closed` or an invented verification record.
 
+### While the merge is pending
+
+The supervisor owns the landing signal. Queue attempts take minutes, it sees
+landing and ejection events you cannot, and every poll spends your context,
+which is scarcest late in a lane.
+
+- Check ancestry (`git merge-base --is-ancestor <tip> <target>`) once per
+  supervisor message you receive, never in a self-reminder loop.
+- Set a reminder for that check only while the supervisor has not acknowledged
+  your merge request, and never sooner than 300 seconds.
+- When the supervisor says it owns the merge or the close, or asks you to stop
+  polling, cancel those reminders (`coordination action=remind_cancel`) and
+  stay idle until it messages you.
+
 ## Verification-required close
 
 Forward the exact task-scoped guidance once with delivery SHA and proof ownership.

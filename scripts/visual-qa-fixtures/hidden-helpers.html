@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="color-scheme" content="light dark">
+    <style>
+      :root { color-scheme: light dark; }
+      body { margin: 0; font: 16px/1.4 Arial, sans-serif; color: #172033; background: #fff; }
+      .card { box-sizing: border-box; width: min(100% - 32px, 640px); margin: 16px; padding: 16px; background: #f4f7fb; border: 1px solid #172033; }
+      @media (prefers-color-scheme: dark) {
+        body { color: #f4f7fb; background: #172033; }
+        .card { background: #253452; border-color: #8aa4d6; }
+      }
+      /* GH #1081: helpers that are visually hidden on purpose. None is lost text. */
+      .clip-helper { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+      .focus-target { position: absolute; width: 1px; height: 1px; padding: 0; border: 0; overflow: hidden; opacity: 1; }
+      .label { width: 9rem; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+      .drawer { position: fixed; top: 0; left: 0; width: 280px; height: 100vh; transform: translateX(-100%); background: #f4f7fb; }
+      .drawer-left { position: fixed; top: 0; left: -320px; width: 280px; height: 100vh; background: #f4f7fb; }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>Account</h1>
+      <span class="clip-helper">Opens in a new window</span>
+      <div><span class="nuxt-route-announcer" style="position:absolute"><span role="alert" aria-live="polite" style="position:absolute;width:1px;height:1px;padding:0;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0">Navigation update to the account page</span></span></div>
+      <input class="focus-target" aria-label="Choose a team" value="Platform engineering team">
+      <p class="label">daniel.villafranca@petrastella.example</p>
+    </main>
+    <aside class="drawer" inert>
+      <a href="#teams">Teams</a>
+      <p>The closed drawer holds the team list.</p>
+    </aside>
+    <aside class="drawer-left">
+      <p>A closed drawer with nothing to focus.</p>
+    </aside>
+  </body>
+</html>

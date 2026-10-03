@@ -81,6 +81,23 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
     });
 
     registry.register(ConfigMeta {
+        key: "factory.prompt_retention_days",
+        section: "factory",
+        name: "Prompt Queue Retention (days)",
+        description: "Days a terminal prompt-queue row (delivered, acknowledged, suppressed or abandoned) is kept before the maintenance sweep deletes it with its delivery receipts. Pending rows and rows that carry a relay episode key are never deleted by retention. gc_cleanup force=true uses the same window. 0 disables the sweep.",
+        value_type: ConfigType::Int,
+        default: "7",
+        constraint: Constraint::Range(0, 3650),
+        advanced: true,
+        requires_feature: None,
+        keywords: &["factory", "prompt", "queue", "retention", "gc", "cleanup", "messages"],
+        use_cases: &[
+            "Keep a week of message forensics while bounding queue growth",
+            "Set 0 to keep every terminal prompt row",
+        ],
+    });
+
+    registry.register(ConfigMeta {
         key: "factory.worker_build_jobs",
         section: "factory",
         name: "Worker Cargo Build Jobs",

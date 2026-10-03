@@ -425,6 +425,49 @@ async fn demo_only_terminal_rendering_change_also_needs_a_terminal_qa_receipt() 
 }
 
 #[tokio::test]
+async fn factory_input_and_pty_geometry_accept_real_build_ledger_cas_266e() {
+    let mut test_env = TestEnvGuard::temp_home();
+    // Historical input and winsize changes share these mixed-purpose files;
+    // a stdout capture cannot exercise their interactive pane transitions.
+    for paths in [
+        vec!["cas-cli/src/ui/factory/app/sidecar_and_selection.rs", "cas-cli/src/ui/factory/daemon/runtime/client_input.rs", "crates/cas-mux/src/pane/mod.rs"],
+        vec!["cas-cli/src/ui/factory/app/mod.rs", "cas-cli/src/ui/factory/daemon/runtime/output.rs", "crates/cas-pty/src/pty.rs"],
+    ] {
+        let delivered: Vec<_> = paths.iter().map(|path| (*path, "pub fn interaction() {}\n")).collect();
+        let fx = fixture(&mut test_env, &delivered, "Run the real factory; click and resize a pane");
+        let task_dir = fx.artifacts.join(TASK);
+        std::fs::create_dir_all(&task_dir).unwrap();
+        let ledger = task_dir.join("LEDGER.md");
+        std::fs::write(&ledger, "| M01 | pane | forwards | forwards | PASS | fixture | capture.txt | - |\n").unwrap();
+        let refused = close_text(&fx.core, TASK).await;
+        assert!(refused.contains("no row with verdict PASS and label real-build"), "{refused}");
+        std::fs::write(&ledger, "| M01 | pane | forwards | forwards | PASS | real-build | capture.txt | - |\n").unwrap();
+        let parked = close_text(&fx.core, TASK).await;
+        assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+        assert!(fx.notes().contains("QA evidence ledger accepted"));
+        assert!(!fx.notes().contains("terminal-qa receipt accepted"));
+    }
+}
+
+#[tokio::test]
+async fn mixed_factory_and_cli_output_still_requires_terminal_qa_cas_266e() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut test_env, &[
+        ("cas-cli/src/ui/factory/daemon/runtime/client_input.rs", "pub fn click() {}\n"),
+        ("cas-cli/src/cli/status.rs", "pub fn status() { println!(\"Ready\"); }\n"),
+    ], "Run the factory and cas status");
+    let task_dir = fx.artifacts.join(TASK);
+    std::fs::create_dir_all(&task_dir).unwrap();
+    std::fs::write(task_dir.join("LEDGER.md"), "| M01 | status | Ready | Ready | PASS | real-build | capture.txt | - |\n").unwrap();
+    let refused = close_text(&fx.core, TASK).await;
+    assert!(refused.contains("terminal-qa receipt is missing"), "{refused}");
+    let report = task_dir.join("terminal-qa/cas-status/report.md");
+    std::fs::create_dir_all(report.parent().unwrap()).unwrap();
+    std::fs::write(&report, "terminal-qa: PASS cas-status · 11 runs · 0 fail\n").unwrap();
+    assert!(close_text(&fx.core, TASK).await.contains("MERGE REQUIRED"));
+}
+
+#[tokio::test]
 async fn supervisor_override_waives_the_gate_with_a_logged_decision() {
     let mut test_env = TestEnvGuard::temp_home();
     let fx = fixture(&mut test_env,

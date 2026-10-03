@@ -313,10 +313,18 @@ pub struct QaConfig {
     pub evidence_gate: bool,
 
     /// cas-0cd5: repo-relative globs whose change means a delivery alters
-    /// terminal rendering. A demo-only (non-web) delivery touching one needs a
-    /// cas-cli-craft terminal-qa PASS receipt as well as its evidence ledger.
+    /// terminal output. A demo-only (non-web) delivery touching one needs a
+    /// cas-cli-craft terminal-qa PASS receipt as well as its evidence ledger,
+    /// unless it is an interactive surface in `terminal_interaction_paths`.
     #[serde(default = "default_terminal_render_paths")]
     pub terminal_render_paths: Vec<String>,
+
+    /// Interactive terminal surfaces exercised through the real-build ledger,
+    /// rather than a command's stdout capture. Other output paths in the same
+    /// delivery still require terminal-qa; CLI command paths always do when
+    /// output checks are enabled (terminal_render_paths is non-empty).
+    #[serde(default = "default_terminal_interaction_paths")]
+    pub terminal_interaction_paths: Vec<String>,
 
     /// cas-619f: repo-relative globs whose change makes a delivery
     /// user-facing even without a label or demo_statement.
@@ -383,6 +391,7 @@ pub fn default_evidence_gate() -> bool {
 
 pub fn default_terminal_render_paths() -> Vec<String> {
     [
+        "**/cli/**",
         "**/ui/**",
         "**/tui/**",
         "**/*render*",
@@ -393,6 +402,13 @@ pub fn default_terminal_render_paths() -> Vec<String> {
     .into_iter()
     .map(ToOwned::to_owned)
     .collect()
+}
+
+pub fn default_terminal_interaction_paths() -> Vec<String> {
+    ["**/ui/factory/**", "**/cas-pty/**", "**/cas-mux/**"]
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 pub fn default_user_facing_paths() -> Vec<String> {
@@ -435,6 +451,7 @@ impl Default for QaConfig {
             independent_pass: default_independent_pass(),
             evidence_gate: default_evidence_gate(),
             terminal_render_paths: default_terminal_render_paths(),
+            terminal_interaction_paths: default_terminal_interaction_paths(),
             user_facing_paths: default_user_facing_paths(),
             pass_timeout_mins: default_pass_timeout_mins(),
             max_rounds: default_max_rounds(),

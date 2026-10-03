@@ -77,7 +77,7 @@ pub(crate) fn delivered_head(
 }
 
 /// Which evidence the shared user-facing reasons demand. `terminal_render`
-/// says the diff touches a `qa.terminal_render_paths` glob.
+/// says the diff touches command output rather than only interactive surfaces.
 pub(crate) fn evidence_tier(reasons: &[String], terminal_render: bool) -> EvidenceTier {
     if reasons.is_empty() {
         EvidenceTier::None
@@ -91,6 +91,24 @@ pub(crate) fn evidence_tier(reasons: &[String], terminal_render: bool) -> Eviden
             terminal_qa: terminal_render,
         }
     }
+}
+
+/// A command's stdout capture cannot exercise a factory mouse event or PTY
+/// resize. Those surfaces keep the real-build ledger requirement. Examine
+/// every path so an interactive change cannot hide a command-output change.
+fn requires_terminal_qa(paths: &[String], qa: &crate::config::QaConfig) -> bool {
+    if qa.terminal_render_paths.is_empty() {
+        return false;
+    }
+    let cli = ["**/cli/**".to_string()];
+    paths.iter().filter(|path| !is_non_surface_path(path)).any(|path| {
+        let one = std::slice::from_ref(path);
+        // Existing config files can retain the older default output globs,
+        // without **/cli/**. Do not let an input exemption hide CLI output.
+        first_user_facing_path(one, &cli).is_some()
+            || (first_user_facing_path(one, &qa.terminal_render_paths).is_some()
+                && first_user_facing_path(one, &qa.terminal_interaction_paths).is_none())
+    })
 }
 
 /// Run the gate. `Ok(notes)` carries decision-note lines to record on close;
@@ -188,14 +206,7 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
         .map(|paths| catalog_journeys_for(repo, paths))
         .unwrap_or_default();
     let reasons = user_facing_reasons(task, &qa, changed.as_deref(), &journeys).reasons;
-    let terminal_render = changed.as_deref().is_some_and(|paths| {
-        let surface: Vec<String> = paths
-            .iter()
-            .filter(|path| !is_non_surface_path(path))
-            .cloned()
-            .collect();
-        first_user_facing_path(&surface, &qa.terminal_render_paths).is_some()
-    });
+    let terminal_render = changed.as_deref().is_some_and(|paths| requires_terminal_qa(paths, &qa));
     let markers: Vec<SkipMarker> = match (range.as_ref(), changed.as_deref()) {
         (Some((from, to)), Some(paths)) => delivery_test_diff(repo, from, to, paths)
             .map(|diff| added_skip_markers(&diff))
@@ -228,6 +239,25 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interaction_classification_is_conservative_and_configurable_cas_266e() {
+        let mut qa = crate::config::QaConfig::default();
+        let factory = vec!["cas-cli/src/ui/factory/daemon/runtime/output.rs".into()];
+        assert!(!requires_terminal_qa(&factory, &qa));
+        assert!(requires_terminal_qa(&["src/ui/status.rs".into()], &qa));
+        assert!(requires_terminal_qa(&["src/theme.rs".into()], &qa));
+        qa.terminal_interaction_paths.clear();
+        assert!(requires_terminal_qa(&factory, &qa));
+        qa.terminal_interaction_paths = vec!["**/tui/**".into()];
+        assert!(!requires_terminal_qa(&["src/tui/input.rs".into()], &qa));
+        qa.terminal_render_paths = vec!["**/ui/**".into()];
+        qa.terminal_interaction_paths = vec!["**".into()];
+        assert!(requires_terminal_qa(&["src/cli/status.rs".into()], &qa));
+        assert!(!requires_terminal_qa(&["tests/cli/output_test.rs".into()], &qa));
+        qa.terminal_render_paths.clear();
+        assert!(!requires_terminal_qa(&["src/cli/status.rs".into()], &qa));
+    }
 
     fn git(repo: &Path, args: &[&str]) -> String {
         let output = Command::new("git")

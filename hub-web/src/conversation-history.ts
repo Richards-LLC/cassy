@@ -67,8 +67,8 @@ export type AskRetirement = "dismissed" | "session-ended";
 /** `at` is when this client saw the event (ms epoch); it stamps the thread's
  * day separators and group timestamps and is never a delivery receipt. */
 /** `at` is the sort key. `shownAt`, when set, is the time to display: a live
- * event sorted after a turn stamped by a clock that runs ahead keeps its own
- * time on screen (cas-ac1f). */
+ * event keeps its own time (cas-ac1f), and a reloaded turn keeps the time this
+ * browser recorded even if the machine's stamp changed (cas-940f). */
 /** `clockAhead` marks a live supervisor turn from a machine whose clock this
  * thread has seen running ahead: its time is the arrival time, as a reloaded
  * copy of it would show, and says so the same way (cas-1f13). */
@@ -204,8 +204,9 @@ export class ConversationHistory {
       return Math.min(seen, now);
     }
     const shown = stamped !== undefined && this.skewMs !== undefined ? Math.min(stamped - this.skewMs, now) : now;
-    // The time this visit shows it is the time the next visit shows it.
-    this.arrivals.set(key, shown);
+    // Keep the time actually displayed, not a later history-page hydration
+    // time: that record becomes authoritative on reload (cas-940f).
+    this.arrivals.set(key, Math.min(stamped ?? shown, shown));
     return shown;
   }
   private insert(event: ConversationEvent): void {
@@ -434,6 +435,7 @@ export class ConversationHistory {
       return;
     }
     this.observeStamp(at, now);
+    const shownAt = this.arrivals.get(`s:${message.notification_id}`);
     this.insertDurable({
       kind: "send",
       value: {
@@ -447,6 +449,7 @@ export class ConversationHistory {
         ...(message.reply_to === undefined ? {} : { replyTo: message.reply_to }),
       },
       at,
+      ...(shownAt === undefined ? {} : { shownAt }),
       arrivedAt: this.arrivalFor(`s:${message.notification_id}`, at, now),
       session: message.session,
     });
@@ -743,7 +746,8 @@ export class ConversationHistory {
     this.observeStamp(stamped, now);
     // cas-9e33: a turn a visit saw arrive live keeps the mark that visit gave it.
     const marked = this.liveMarks.get(`r:${reply.notification_id}`);
-    this.reply(live, stamped, reply.session, undefined, this.arrivalFor(`r:${reply.notification_id}`, stamped, now), "durable", marked === true, marked !== undefined);
+    const shownAt = this.arrivals.get(`r:${reply.notification_id}`);
+    this.reply(live, stamped, reply.session, shownAt, this.arrivalFor(`r:${reply.notification_id}`, stamped, now), "durable", marked === true, marked !== undefined);
   }
 }
 

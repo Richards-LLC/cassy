@@ -71,6 +71,91 @@ class ReceiptTests(unittest.TestCase):
         self.assertNotEqual(self.expected["code_input"], changed["code_input"])
         self.assertIsNone(proof.matching(self.root, changed))
 
+    def inputs_for_environment(self, env):
+        # Exercise the real projection and environment scrub, faking only tool
+        # version probes so this script harness never starts Cargo or rustc.
+        check_output = proof.subprocess.check_output
+
+        def probe(command, **kwargs):
+            if command[0] == "git":
+                return check_output(command, **kwargs)
+            self.assertIn(command, (["cargo", "--version"],
+                                    ["cargo", "nextest", "--version"], ["rustc", "-Vv"]))
+            return b"fixture tool version\n"
+
+        with mock.patch.dict(proof.os.environ, env, clear=True), \
+                mock.patch.object(proof.subprocess, "check_output", side_effect=probe):
+            return proof.inputs(self.root)
+
+    def harness_environment(self, base):
+        return dict(base, AI_AGENT="claude", CLAUDECODE="1",
+                    CLAUDE_CODE_CHILD_SESSION="fixture-child-session",
+                    CAS_FACTORY_SESSION="fixture-factory", CAS_AGENT_ROLE="supervisor",
+                    CAS_AGENT_NAME="fixture-agent", CAS_SUPERVISOR_NAME="fixture-supervisor",
+                    CAS_AGENT_ID="fixture-agent-id", CAS_SESSION_ID="fixture-session",
+                    CAS_ROOT="/fixture/operator/.cas", CAS_CLONE_PATH="/fixture/worktree",
+                    CAS_FACTORY_MODE="1", CAS_FACTORY_SUPERVISOR_CLI="claude",
+                    CAS_FACTORY_WORKER_CLI="codex", CAS_RELEASE_ENV_FILE="/fixture/release.env")
+
+    def test_harness_sessions_share_fingerprint_and_scrubbed_test_environment(self):
+        base = {"RUSTFLAGS": "-C debuginfo=1", "HOME": str(self.root), "PATH": "/usr/bin:/bin"}
+        expected, baseline_env = self.inputs_for_environment(base)
+        factory = self.harness_environment(base)
+        other_session = dict(factory, AI_AGENT="codex", CAS_SESSION_ID="another-session",
+                             CAS_CLONE_PATH="/another/worktree",
+                             CAS_FACTORY_SUPERVISOR_CLI="codex",
+                             CAS_RELEASE_ENV_FILE="/another/release.env")
+        for ambient in (factory, other_session):
+            with self.subTest(session=ambient["CAS_SESSION_ID"]):
+                actual, test_env = self.inputs_for_environment(ambient)
+                self.assertEqual(expected, actual)
+                self.assertEqual(proof.receipt_path(self.root, expected),
+                                 proof.receipt_path(self.root, actual))
+                # Session context must not affect the actual test processes
+                # either. The publish-only env-file locator may remain.
+                self.assertEqual(baseline_env,
+                                 {key: value for key, value in test_env.items()
+                                  if key != "CAS_RELEASE_ENV_FILE"})
+
+    def test_build_test_and_unknown_variables_still_invalidate_fingerprint(self):
+        base = {"HOME": str(self.root), "PATH": "/usr/bin:/bin"}
+        expected, _ = self.inputs_for_environment(base)
+        variables = {
+            "RUSTFLAGS": "-C debuginfo=2", "CARGO_ENCODED_RUSTFLAGS": "-C\x1fdebuginfo=2",
+            "HOME": str(self.root / "other-home"), "PATH": "/other/bin:/usr/bin:/bin",
+            "TMPDIR": "/other/tmp", "CAS_INIT_TIMEOUT_SECS": "30",
+            "CAS_TEST_PROTECTED_DBS": "/fixture/operator.db",
+            "CAS_TEST_PROTECTED_HOME": "/fixture/operator",
+            "CAS_FACTORY_CARGO_BUILD_JOBS": "2", "CAS_FACTORY_BUILD_GUARD": "off",
+            "CAS_FUTURE_TEST_INPUT": "enabled",
+        }
+        for name, value in variables.items():
+            with self.subTest(variable=name):
+                actual, test_env = self.inputs_for_environment(dict(base, **{name: value}))
+                self.assertEqual(test_env[name], value)
+                self.assertNotEqual(expected["environment"], actual["environment"])
+                self.assertNotEqual(proof.receipt_path(self.root, expected),
+                                    proof.receipt_path(self.root, actual))
+
+    def test_scrubbed_train_reuses_factory_receipt_without_running_rows(self):
+        base = {"HOME": str(self.root), "PATH": "/usr/bin:/bin"}
+        expected, _ = self.inputs_for_environment(self.harness_environment(base))
+        self.record["inputs"] = expected
+        self.path = proof.receipt_path(self.root, expected)
+        self.save()
+        train_inputs = self.inputs_for_environment(base)
+        stream = io.StringIO()
+        with mock.patch.dict(proof.os.environ, base, clear=True), \
+                mock.patch.object(proof, "inputs", return_value=train_inputs), \
+                mock.patch.object(proof, "clone_scratch", return_value=self.root / "scratch"), \
+                mock.patch.object(proof, "run_row") as rows, \
+                mock.patch.object(proof.sys, "argv", ["assembly-proof.py", "prove", str(self.root)]), \
+                contextlib.redirect_stdout(stream):
+            self.assertEqual(proof.main(), 0)
+        rows.assert_not_called()
+        self.assertIn("PASS assembly receipt=" + str(self.path), stream.getvalue())
+        self.assertIn("source_sha=" + self.record["head"], stream.getvalue())
+
     def test_train_output_locations_do_not_change_environment_fingerprint(self):
         base = {"RUSTFLAGS": "-C debuginfo=1", "HOME": "/home/fixture", "PATH": "/bin"}
         output = dict(base, CAS_RELEASE_ARTIFACTS_ROOT="/output/train",

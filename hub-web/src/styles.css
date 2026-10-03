@@ -3850,7 +3850,7 @@ button.chip:disabled { cursor: default; }
      list is the count here). The toggle's hit area still reaches 40px. */
   .conversation-shell .conversation-sidebar > footer { padding-top: var(--space-1); padding-bottom: max(var(--space-1), env(safe-area-inset-bottom)); }
   .conversation-sidebar .hub-footer-badges { display: flex; flex-wrap: nowrap; align-items: center; gap: var(--space-3); min-height: 32px; margin: 0; }
-  .conversation-sidebar #paired-machines-toggle { display: flex; position: relative; flex-wrap: nowrap; min-width: 0; min-height: 32px; padding: 0 var(--space-2); background: var(--color-transparent); }
+  .conversation-sidebar #paired-machines-toggle { display: flex; align-items: center; position: relative; flex-wrap: nowrap; min-width: 0; min-height: 32px; padding: 0 var(--space-2); background: var(--color-transparent); }
   .conversation-sidebar #paired-machines-toggle:hover:not(:disabled) { background: var(--bg-hover); }
   .conversation-sidebar #paired-machines-toggle::before { content: ""; position: absolute; inset: -4px 0; }
   /* cas-c19d: the label shrinks too, ellipsised, once the state has given

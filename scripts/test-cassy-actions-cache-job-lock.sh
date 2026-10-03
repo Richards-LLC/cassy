@@ -6,6 +6,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 job_lock="$script_dir/cassy-actions-cache-job-lock.sh"
 pruner="$script_dir/prune-cassy-actions-cache.sh"
 "$script_dir/test-cassy-actions-process-identity.sh"
+source "$script_dir/cassy-actions-process-identity.sh"
 if [[ "$(uname -s)" != Linux ]]; then
     printf 'SKIP job lock integration: Linux /proc and util-linux flock required; owner comparison tested above\n'
     exit 0
@@ -182,6 +183,55 @@ run_completed
 holder_started=0
 run_pruner --now >/dev/null
 printf 'PASS crashed Runner.Worker lock recovery with real /proc and flock\n'
+
+# A recycled owner PID must not keep a dead job alive, even if that PID exists.
+run_started >/dev/null
+holder_started=1
+read -r old_holder token holder_start owner_pid owner_start <"$state_root/slot-1.pid"
+printf '%s %s %s %s %s\n' "$old_holder" "$token" "$holder_start" "$owner_pid" \
+    "$((owner_start + 1))" >"$state_root/slot-1.pid"
+run_started >/dev/null
+read -r new_holder _ <"$state_root/slot-1.pid"
+[[ "$new_holder" != "$old_holder" ]]
+run_completed
+holder_started=0
+printf 'ok   owner PID reuse is detected by process start identity\n'
+
+# A stale detailed record naming an unrelated reused PID can be discarded,
+# but must never signal the new process at that PID.
+sleep 30 &
+reused_pid=$!
+snapshot="$(process_snapshot "$reused_pid")"
+read -r _ reused_start _ <<<"$snapshot"
+printf '%s %s %s %s %s\n' "$reused_pid" stale-token "$((reused_start + 1))" \
+    "$worker_pid" 1 >"$state_root/slot-1.pid"
+run_started >/dev/null
+holder_started=1
+kill -0 "$reused_pid"
+run_completed
+holder_started=0
+kill -TERM "$reused_pid"
+wait "$reused_pid" 2>/dev/null || true
+printf 'ok   holder PID reuse never signals an unrelated live process\n'
+
+# A mount guard descendant deliberately retains the shared open description.
+# Completing the job must LOCK_UN, rather than relying on fd close or exit.
+kill -TERM "$worker_pid"
+wait "$worker_pid" 2>/dev/null || true
+TEST_INHERIT_LOCK=1 TEST_INHERITED_PID="$fixture_root/inherited-pid" start_worker
+run_started >/dev/null
+holder_started=1
+inherited_pid="$(cat "$fixture_root/inherited-pid")"
+run_completed
+holder_started=0
+kill -0 "$inherited_pid"
+run_pruner --now >/dev/null
+kill -TERM "$inherited_pid"
+inherited_pid=''
+kill -TERM "$worker_pid"
+wait "$worker_pid" 2>/dev/null || true
+start_worker
+printf 'ok   explicit unlock releases the cache barrier across inherited descriptors\n'
 
 run_started >/dev/null
 holder_started=1

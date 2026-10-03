@@ -13,7 +13,7 @@ process_snapshot() {
     local pid="$1" stat_line
     local -a fields=()
     [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
-    IFS= read -r stat_line <"/proc/$pid/stat" 2>/dev/null || return 1
+    IFS= read -r stat_line 2>/dev/null <"/proc/$pid/stat" || return 1
     read -r -a fields <<<"${stat_line##*) }"
     [[ ${#fields[@]} -ge 20 && "${fields[19]}" =~ ^[0-9]+$ ]] || return 1
     printf '%s %s %s %s\n' "$pid" "${fields[19]}" "${fields[0]}" "${fields[1]}"

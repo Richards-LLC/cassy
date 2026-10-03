@@ -20,6 +20,7 @@ mount_guard_bin="${CASSY_ACTIONS_MOUNT_GUARD_BIN:-$production_guard}"
 lock_wait_seconds="${CASSY_ACTIONS_LOCK_WAIT_SECONDS:-300}"
 slot="${CASSY_ACTIONS_RUNNER_SLOT:-}"
 self="$(realpath -e -- "$0")"
+source "$(dirname -- "$self")/cassy-actions-process-identity.sh"
 
 case "${1:-}" in
     --job-started|--job-completed|--hold) mode="$1" ;;
@@ -34,9 +35,11 @@ case "${1:-}" in
 esac
 
 if [[ "$mode" == --hold ]]; then
-    [[ $# == 3 ]] || fail 'internal holder requires slot and token'
+    [[ $# == 5 ]] || fail 'internal holder requires slot, token and worker identity'
     slot="$2"
     token="$3"
+    owner_pid="$4"
+    owner_start="$5"
 else
     [[ $# -le 1 ]] || fail "$mode accepts no positional arguments"
 fi
@@ -56,15 +59,33 @@ lock_file="$cache_root/.cassy-actions-cache-job.lock"
 pid_file="$state_root/slot-$slot.pid"
 
 read_record() {
-    local record_pid record_token extra
+    local record_pid record_token holder_start owner_pid owner_start extra
     [[ -f "$pid_file" && ! -L "$pid_file" ]] || return 1
-    read -r record_pid record_token extra <"$pid_file" || return 1
+    read -r record_pid record_token holder_start owner_pid owner_start extra <"$pid_file" || return 1
     [[ "$record_pid" =~ ^[1-9][0-9]*$ && -n "$record_token" && -z "${extra:-}" ]] || return 1
-    printf '%s %s\n' "$record_pid" "$record_token"
+    if [[ -z "$holder_start$owner_pid$owner_start" ]]; then
+        # Old records have no owner identity. A live legacy holder remains
+        # fail-closed until its completed hook retires it.
+        printf '%s %s\n' "$record_pid" "$record_token"
+    else
+        [[ "$holder_start" =~ ^[0-9]+$ && "$owner_pid" =~ ^[1-9][0-9]*$ &&
+           "$owner_start" =~ ^[0-9]+$ ]] || return 1
+        printf '%s %s %s %s %s\n' "$record_pid" "$record_token" \
+            "$holder_start" "$owner_pid" "$owner_start"
+    fi
+}
+
+lock_slot() {
+    # Serialize start/completion metadata separately from the shared cache
+    # barrier. Children must not inherit this per-slot coordination lock.
+    exec 8>>"$state_root/slot-$slot.guard"
+    flock -x -w "$lock_wait_seconds" 8 || fail "timed out waiting for slot $slot lifecycle guard"
+    trap 'flock -u 8' EXIT
 }
 
 holder_matches() {
-    local holder_pid="$1" holder_token="$2" arg
+    local holder_pid="$1" holder_token="$2" holder_start="${3:-}" arg
+    [[ -z "$holder_start" ]] || process_matches "$holder_pid" "$holder_start" || return 1
     local -a argv=()
     [[ -r "/proc/$holder_pid/cmdline" ]] || return 1
     [[ "$(stat -c %u -- "/proc/$holder_pid")" == "$(id -u)" ]] || return 1
@@ -78,21 +99,72 @@ holder_matches() {
     return 1
 }
 
+stop_holder() {
+    local holder_pid="$1" holder_start="$2" holder_token="$3"
+    # Bind the signal to this process before rechecking its identity. A PID
+    # reused between verification and signalling must never receive SIGTERM.
+    python3 - "$holder_pid" "$holder_start" "$self" "$slot" "$holder_token" <<'PYSIGNAL'
+import os
+import pathlib
+import signal
+import sys
+pid, start, script, slot, token = sys.argv[1:]
+try:
+    fd = os.pidfd_open(int(pid))
+    try:
+        root = pathlib.Path("/proc") / pid
+        fields = (root / "stat").read_text().rsplit(") ", 1)[1].split()
+        argv = (root / "cmdline").read_bytes().split(b"\0")
+        expected = [value.encode() for value in (script, "--hold", slot, token)]
+        if (fields[19] == start and fields[0] not in ("Z", "X")
+                and root.stat().st_uid == os.getuid()
+                and any(argv[i:i + 4] == expected for i in range(len(argv) - 3))):
+            signal.pidfd_send_signal(fd, signal.SIGTERM)
+    finally:
+        os.close(fd)
+except (ProcessLookupError, FileNotFoundError):
+    pass
+PYSIGNAL
+}
+
+retire_holder() {
+    local holder_pid="$1" holder_token="$2" holder_start="$3" attempt
+    stop_holder "$holder_pid" "$holder_start" "$holder_token" || fail "could not stop slot $slot cache lock holder"
+    for attempt in $(seq 1 100); do
+        if ! process_matches "$holder_pid" "$holder_start"; then
+            # A killed holder may not run its trap. The caller holds the slot
+            # guard, and no new holder can publish a record yet.
+            rm -f -- "$pid_file"
+            return 0
+        fi
+        sleep 0.05
+    done
+    fail "slot $slot cache lock holder did not exit"
+}
+
 holder_main() {
-    local current sleep_pid=''
+    local current current_pid current_token current_start snapshot holder_start sleep_pid=''
     [[ -e /proc/self/fd/9 ]] || fail 'holder did not inherit the shared lock descriptor'
     [[ "$(readlink -f -- /proc/self/fd/9)" == "$lock_file" ]] ||
         fail 'holder inherited the wrong lock descriptor'
     flock -n -s 9 || fail 'holder did not inherit the shared cache lock'
+    process_matches "$owner_pid" "$owner_start" || fail 'owning Runner.Worker exited before holder startup'
+    snapshot="$(process_snapshot "$$")" || fail 'cannot read holder process identity'
+    read -r _ holder_start _ <<<"$snapshot"
     [[ ! -e "$pid_file" && ! -L "$pid_file" ]] || fail "job lock state already exists: $pid_file"
     umask 077
-    printf '%s %s\n' "$$" "$token" >"$pid_file.tmp.$$"
+    printf '%s %s %s %s %s\n' "$$" "$token" "$holder_start" "$owner_pid" "$owner_start" >"$pid_file.tmp.$$"
     mv -T -- "$pid_file.tmp.$$" "$pid_file"
     cleanup_holder() {
         trap - EXIT INT TERM HUP
         [[ -n "$sleep_pid" ]] && kill -TERM "$sleep_pid" 2>/dev/null || true
         current="$(read_record 2>/dev/null || true)"
-        [[ "$current" == "$$ $token" ]] && rm -f -- "$pid_file"
+        read -r current_pid current_token current_start _ <<<"$current"
+        if [[ "$current_pid $current_token $current_start" == "$$ $token $holder_start" ]]; then
+            rm -f -- "$pid_file"
+        fi
+        # Closing fd9 is insufficient if a descendant holds a duplicated fd.
+        flock -u 9
         exit 0
     }
     trap cleanup_holder EXIT INT TERM HUP
@@ -105,56 +177,75 @@ holder_main() {
 }
 
 start_job() {
-    local stale holder_pid token record attempt
+    local stale holder_pid token holder_start owner_pid owner_start owner record attempt
+    lock_slot
+    owner="$(worker_identity)" || fail 'job hook has no live owning Runner.Worker'
+    read -r owner_pid owner_start <<<"$owner"
     exec 9>>"$lock_file"
     flock -s -w "$lock_wait_seconds" 9 ||
         fail "timed out waiting for the cache prune barrier after $lock_wait_seconds seconds"
-    "$mount_guard_bin" || fail 'runner cache mount guard rejected job start'
+    "$mount_guard_bin" 8>&- || fail 'runner cache mount guard rejected job start'
     if [[ -e "$pid_file" || -L "$pid_file" ]]; then
         stale="$(read_record)" || fail "invalid or unsafe existing job lock state: $pid_file"
-        read -r holder_pid token <<<"$stale"
-        if holder_matches "$holder_pid" "$token"; then
-            fail "slot $slot already has a live job lock holder"
+        local stale_owner_pid stale_owner_start
+        read -r holder_pid token holder_start stale_owner_pid stale_owner_start <<<"$stale"
+        if holder_matches "$holder_pid" "$token" "$holder_start"; then
+            if [[ -z "$holder_start" ]] || process_matches "$stale_owner_pid" "$stale_owner_start"; then
+                fail "slot $slot already has a live job lock holder"
+            fi
+            retire_holder "$holder_pid" "$token" "$holder_start"
+            printf 'runner slot %s reclaimed a lock from an exited Runner.Worker\n' "$slot"
+        elif [[ -n "$holder_start" ]]; then
+            process_matches "$holder_pid" "$holder_start" &&
+                fail "slot $slot job lock state names an unrelated live process"
+            rm -f -- "$pid_file"
+        else
+            kill -0 "$holder_pid" 2>/dev/null &&
+                fail "slot $slot job lock state names an unrelated live process"
+            rm -f -- "$pid_file"
         fi
-        kill -0 "$holder_pid" 2>/dev/null &&
-            fail "slot $slot job lock state names an unrelated live process"
-        rm -f -- "$pid_file"
     fi
 
     token="$(printf '%s-%s-%s\n' "$$" "$(date +%s%N)" "$RANDOM" | sha256sum | awk '{print $1}')"
-    RUNNER_TRACKING_ID= nohup "$self" --hold "$slot" "$token" 9>&9 \
+    RUNNER_TRACKING_ID= nohup "$self" --hold "$slot" "$token" "$owner_pid" "$owner_start" 8>&- 9>&9 \
         >>"$state_root/slot-$slot.log" 2>&1 &
     holder_pid=$!
     for attempt in $(seq 1 100); do
         record="$(read_record 2>/dev/null || true)"
-        if [[ "$record" == "$holder_pid $token" ]] && holder_matches "$holder_pid" "$token"; then
+        read -r _ _ holder_start _ <<<"$record"
+        if [[ "$record" == "$holder_pid $token $holder_start $owner_pid $owner_start" ]] &&
+            holder_matches "$holder_pid" "$token" "$holder_start"; then
+            # fd9 deliberately transfers its shared open description to the
+            # holder. LOCK_UN here would also unlock the holder's barrier.
+            exec 9>&-
             printf 'runner slot %s acquired the shared cache lock (pid %s)\n' "$slot" "$holder_pid"
             return 0
         fi
         kill -0 "$holder_pid" 2>/dev/null || break
         sleep 0.05
     done
-    kill -TERM "$holder_pid" 2>/dev/null || true
+    if [[ -n "$holder_start" ]]; then
+        stop_holder "$holder_pid" "$holder_start" "$token" || true
+    fi
     fail "slot $slot cache lock holder did not become ready"
 }
 
 complete_job() {
-    local record holder_pid holder_token attempt
+    local record holder_pid holder_token holder_start owner_pid owner_start snapshot owner
+    lock_slot
     record="$(read_record)" || fail "missing or invalid job lock state for slot $slot"
-    read -r holder_pid holder_token <<<"$record"
-    holder_matches "$holder_pid" "$holder_token" ||
+    read -r holder_pid holder_token holder_start owner_pid owner_start <<<"$record"
+    holder_matches "$holder_pid" "$holder_token" "$holder_start" ||
         fail "slot $slot job lock state does not name its verified holder"
-    kill -TERM "$holder_pid" || fail "could not stop slot $slot cache lock holder"
-    for attempt in $(seq 1 100); do
-        if ! kill -0 "$holder_pid" 2>/dev/null; then
-            [[ ! -e "$pid_file" && ! -L "$pid_file" ]] ||
-                fail "slot $slot holder exited without retiring its state"
-            printf 'runner slot %s released the shared cache lock\n' "$slot"
-            return 0
-        fi
-        sleep 0.05
-    done
-    fail "slot $slot cache lock holder did not exit"
+    if [[ -n "$holder_start" ]]; then
+        owner="$(worker_identity)" || fail 'job completion has no live owning Runner.Worker'
+        [[ "$owner" == "$owner_pid $owner_start" ]] || fail 'job completion belongs to another Runner.Worker'
+    else
+        snapshot="$(process_snapshot "$holder_pid")" || fail 'cannot read holder process identity'
+        read -r _ holder_start _ <<<"$snapshot"
+    fi
+    retire_holder "$holder_pid" "$holder_token" "$holder_start"
+    printf 'runner slot %s released the shared cache lock\n' "$slot"
 }
 
 case "$mode" in

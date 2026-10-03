@@ -108,7 +108,7 @@ test("HUB-J17 run the fleet from a conversation", async ({ page, journey }) => {
   await journey.stage("Ask the supervisor to merge, after seeing the exact message", async () => {
     await task("cas-1999").getByRole("button", { name: "Ask supervisor to merge" }).click();
     const preview = task("cas-1999").locator(".fleet-ops-preview");
-    await expect(preview.locator(".fleet-ops-preview-text")).toHaveText("Please merge cas-1999 (Pairing wording). It is awaiting merge at branch factory/wren-cas-1999, tip 9ffb3897.");
+    await expect(preview.locator(".fleet-ops-preview-text")).toHaveText("Operator request from Commander: please merge cas-1999 (Pairing wording).\nBranch: factory/wren-cas-1999\nTip: 9ffb3897\nIt is awaiting merge. Merge it into its epic, or reply with what blocks it.");
     await expect(preview.getByRole("button", { name: "Cancel" })).toBeFocused();
     await preview.getByRole("button", { name: "Send" }).click();
     await expect(announcer).toHaveText("Asked the supervisor to merge cas-1999.");

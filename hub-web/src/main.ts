@@ -4623,8 +4623,8 @@ async function runFleetAction(rowKey: string, action: FleetAction): Promise<void
   fleetFocusNext = `${rowKey}:progress`;
   renderStatus(statuses.get(sessionKey(machineId, session)));
   try {
-    await connection.operation(session, { op_id: newOperationId(), op: { ...action.request.op }, expected: { ...action.request.expected } });
-    fleetOps.succeeded(rowKey, action, Date.now());
+    const answer = await connection.operation(session, { op_id: newOperationId(), op: { ...action.request.op }, expected: { ...action.request.expected } });
+    fleetOps.succeeded(rowKey, action, Date.now(), answer?.outcome);
     if (action.request.op.kind === "request_merge") fleetAsked.set(String(action.request.op.task_id), Date.now());
     fleetFocusNext = action.inverse ? "undo" : rowKey.startsWith("agent:") ? `${rowKey}:trigger` : undefined;
     window.clearTimeout(fleetUndoTimer);
@@ -4679,7 +4679,7 @@ function fleetOpsContext(status: Record<string, unknown>): FleetOpsViewContext |
       closePanels: () => { const rowKey = fleetOps.preview?.rowKey ?? fleetOps.assignFor; fleetOps.closeMenus(); fleetHeaderPanel = undefined; rerender(rowKey ? `${rowKey}:ask` : undefined); },
       toggleAssign: (rowKey) => { const opening = fleetOps.assignFor !== rowKey; fleetOps.closeMenus(); fleetOps.assignFor = opening ? rowKey : undefined; rerender(opening ? `${rowKey}:first-item` : `${rowKey}:assign`); },
       toggleHeader: (panel) => { fleetOps.closeMenus(); fleetHeaderPanel = fleetHeaderPanel === panel ? undefined : panel; rerender(fleetHeaderPanel === "focus" ? "header:first-item" : fleetHeaderPanel === "add" ? "header:add-go" : `header:${panel}`); },
-      undo: () => { const run = fleetOps.takeUndo(Date.now()); if (run) void runFleetAction(run.id.startsWith("assign:") ? `task:${String(run.request.op.task_id)}` : run.id.startsWith("focus:") ? "header" : `agent:${String(run.request.op.worker)}`, run); },
+      undo: () => { const run = fleetOps.takeUndo(Date.now()); if (run) void runFleetAction(run.request.op.kind === "assign_task" ? `task:${String(run.request.op.task_id)}` : run.request.op.kind === "focus_epic" ? "header" : `agent:${String(run.request.op.worker)}`, run); },
     },
   };
 }

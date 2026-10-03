@@ -169,7 +169,42 @@ export function focusEpicAction(epicId: string, current: string | null): FleetAc
     request: { op: { kind: "focus_epic", epic_id: epicId }, expected: { epic_id: current } },
     progress: `Focusing ${epicId}…`,
     done: `Focused on ${epicId}.`,
-    ...(current ? { inverse: () => focusEpicAction(current, epicId) } : {}),
+    // Undo restores the previous focus, or clears it when there was none.
+    inverse: () => (current ? focusEpicAction(current, epicId) : clearFocusAction(epicId)),
+  };
+}
+
+/** Clear the factory's epic focus: focus_epic with clear=true (cas-566b). */
+export function clearFocusAction(current: string): FleetAction {
+  return {
+    id: "focus:clear",
+    operation: "focus-epic",
+    label: "Clear focus",
+    destructive: false,
+    request: { op: { kind: "focus_epic", clear: true }, expected: { epic_id: current } },
+    progress: "Clearing the epic focus…",
+    done: "Epic focus cleared.",
+    inverse: () => focusEpicAction(current, null),
+  };
+}
+
+/**
+ * The hub's own inverse for Undo (cas-31f0): `outcome.inverse` is {op,
+ * expected} preconditioned on the state the operation left. It replaces the
+ * locally derived one when present; a late Undo comes back stale.
+ */
+export function hubInverse(action: FleetAction, outcome: Readonly<Record<string, unknown>> | undefined): FleetAction | undefined {
+  const inverse = outcome?.inverse as { op?: Record<string, unknown>; expected?: Record<string, unknown> } | undefined;
+  const local = action.inverse?.();
+  if (!inverse?.op || typeof inverse.op.kind !== "string") return local;
+  return {
+    id: local?.id ?? `undo:${action.id}`,
+    operation: action.operation,
+    label: local?.label ?? "Undo",
+    destructive: false,
+    request: { op: inverse.op as OperationRequest["op"], expected: inverse.expected ?? {} },
+    progress: local?.progress ?? "Undoing…",
+    done: local?.done ?? "Undone.",
   };
 }
 
@@ -188,12 +223,12 @@ export function spawnAction(count: number, taskId?: string): FleetAction {
 }
 
 /**
- * The exact message O1 sends the supervisor, generated from the task and
- * shown before it is sent: an explicit operator turn, not a hidden command.
+ * The exact message O1 sends the supervisor, shown before it is sent: the hub
+ * generates it with the same template (cas-cli ops::fleet::request_merge_text,
+ * cas-566b), so the preview is what the supervisor receives.
  */
 export function mergeRequestMessage(task: FleetTask): string {
-  const where = [task.branch ? `branch ${task.branch}` : "", task.tip ? `tip ${task.tip}` : ""].filter(Boolean).join(", ");
-  return `Please merge ${task.id}${task.title ? ` (${task.title})` : ""}. It is awaiting merge${where ? ` at ${where}` : ""}.`;
+  return `Operator request from Commander: please merge ${task.id} (${task.title ?? ""}).\nBranch: ${task.branch ?? "<not recorded>"}\nTip: ${task.tip ?? "<not recorded>"}\nIt is awaiting merge. Merge it into its epic, or reply with what blocks it.`;
 }
 
 /** Ask the supervisor to merge (O1). A message, not a mutation: no Undo, no confirm. */
@@ -322,11 +357,12 @@ export class FleetOpsState {
     this.announcement = action.progress;
   }
 
-  succeeded(rowKey: string, action: FleetAction, now: number): void {
+  succeeded(rowKey: string, action: FleetAction, now: number, outcome?: Readonly<Record<string, unknown>>): void {
     this.pending.delete(rowKey);
     this.notes.delete(rowKey);
     this.announcement = action.done;
-    this.undo = action.inverse ? { action: action.inverse(), label: action.done, expiresAt: now + UNDO_WINDOW_MS } : undefined;
+    const inverse = action.inverse || outcome?.inverse ? hubInverse(action, outcome) : undefined;
+    this.undo = inverse ? { action: inverse, label: action.done, expiresAt: now + UNDO_WINDOW_MS } : undefined;
   }
 
   failed(rowKey: string, action: FleetAction, failure: { stale?: boolean; current?: Readonly<Record<string, unknown>>; detail?: string }): void {

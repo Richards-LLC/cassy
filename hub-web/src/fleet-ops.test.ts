@@ -57,13 +57,16 @@ describe("fleet actions send the brief's operations with their preconditions (ca
   it("focuses an epic with Undo back to the previous one, and adds 1-4 workers optionally on a ready task", () => {
     expect(focusEpicAction("cas-f29b", "cas-c4d3").request).toEqual({ op: { kind: "focus_epic", epic_id: "cas-f29b" }, expected: { epic_id: "cas-c4d3" } });
     expect(focusEpicAction("cas-f29b", "cas-c4d3").inverse!().request.op).toEqual({ kind: "focus_epic", epic_id: "cas-c4d3" });
-    expect(focusEpicAction("cas-f29b", null).inverse).toBeUndefined();
+    // With no focus before, Undo clears it (focus_epic clear=true, cas-566b).
+    expect(focusEpicAction("cas-f29b", null).inverse!().request).toEqual({ op: { kind: "focus_epic", clear: true }, expected: { epic_id: "cas-f29b" } });
     expect(spawnAction(9, "cas-2001").request.op).toEqual({ kind: "spawn_workers", count: 4, task_id: "cas-2001" });
     expect(spawnAction(1).inverse).toBeUndefined();
   });
 
   it("shows the exact merge message before it is sent, generated from the task", () => {
-    expect(mergeRequestMessage(parked)).toBe("Please merge cas-1999 (Footer copy). It is awaiting merge at branch factory/owl-cas-1999, tip 9ffb3897.");
+    // The hub's own template (ops::fleet::request_merge_text), so the preview is what is sent.
+    expect(mergeRequestMessage(parked)).toBe("Operator request from Commander: please merge cas-1999 (Footer copy).\nBranch: factory/owl-cas-1999\nTip: 9ffb3897\nIt is awaiting merge. Merge it into its epic, or reply with what blocks it.");
+    expect(mergeRequestMessage({ id: "cas-1", title: "T" })).toContain("Branch: <not recorded>\nTip: <not recorded>");
     expect(requestMergeAction(parked).request).toEqual({ op: { kind: "request_merge", task_id: "cas-1999" }, expected: { status: "awaiting_merge", tip: "9ffb3897" } });
   });
 
@@ -93,6 +96,14 @@ describe("menu, confirm and undo state (cas-a474)", () => {
     expect(state.confirmed()).toBeUndefined();
     // A reversible choice runs at once.
     expect(state.choose("agent:swift-lark-3", holdAction(lark))?.id).toBe("pause:swift-lark-3");
+  });
+
+  it("uses the hub's outcome.inverse for Undo when it sends one (cas-31f0)", () => {
+    const state = new FleetOpsState();
+    const assign = assignAction(ready, "quiet-owl-7");
+    state.succeeded("task:cas-2001", assign, 0, { kind: "assign_task", inverse: { op: { kind: "assign_task", task_id: "cas-2001", assignee: null }, expected: { assignee: "quiet-owl-7", updated_at: "2026-10-03T12:05:00Z" } } });
+    expect(state.currentUndo(1)?.action.request).toEqual({ op: { kind: "assign_task", task_id: "cas-2001", assignee: null }, expected: { assignee: "quiet-owl-7", updated_at: "2026-10-03T12:05:00Z" } });
+    expect(state.currentUndo(1)?.action.label).toBe("Unassign");
   });
 
   it("offers Undo for 8 s after a reversible action, none after a destructive or additive one, and announces each step", () => {

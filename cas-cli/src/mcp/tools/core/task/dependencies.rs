@@ -38,10 +38,35 @@ impl CasCore {
         // Parent-linking an existing task must establish the same durable
         // target that worktree_merge will use.  Otherwise merge lands on the
         // epic branch while close still checks the child's stale trunk target.
-        let inherited_target = (dep_type == DependencyType::ParentChild
-            && to_task.task_type == TaskType::Epic)
-            .then(|| super::repo_context::default_child_work_target_from_epic(&from_task, &to_task))
-            .flatten();
+        //
+        // cas-6fb6: use the same rule as `task update epic=`, so a task on the
+        // trunk fallback or on another epic's lane follows an epic whose own
+        // target is its lane (cas-940f), and a parked delivery is refused
+        // rather than silently retargeted.
+        let inherited_target = if dep_type == DependencyType::ParentChild
+            && to_task.task_type == TaskType::Epic
+        {
+            let previous_parents: Vec<Task> = task_store
+                .get_dependencies(&from_task.id)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|dep| dep.dep_type == DependencyType::ParentChild && dep.to_id != to_task.id)
+                .filter_map(|dep| task_store.get(&dep.to_id).ok())
+                .collect();
+            super::repo_context::work_target_for_task_moved_into_epic(
+                &self.cas_root,
+                &from_task,
+                &to_task,
+                &previous_parents,
+                || super::update::known_epics(task_store.as_ref()),
+            )
+            .filter(|target| from_task.deliverables.work_target.as_ref() != Some(target))
+        } else {
+            None
+        };
+        if let Some(target) = inherited_target.as_ref() {
+            super::update::refuse_retarget_of_parked_delivery(&from_task, &to_task.id, target)?;
+        }
         if inherited_target.is_some() {
             super::lifecycle::proof_scope::guard_task_proof_scope(
                 &self.cas_root,

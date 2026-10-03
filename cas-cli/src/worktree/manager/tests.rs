@@ -2287,3 +2287,27 @@ fn lane_fast_rows_refuse_if_target_moves_during_policy_check_cas_6029() {
     assert!(worktree.path.exists());
     assert!(!manager.git.merge_in_progress());
 }
+
+#[test]
+fn lane_fast_rows_refuse_if_source_moves_during_policy_check_cas_6029() {
+    let (_temp, repo_path) = create_test_repo();
+    let config = WorktreeConfig {
+        auto_merge: true,
+        ..Default::default()
+    };
+    let mut manager = WorktreeManager::new(&repo_path, config).unwrap();
+    let epic = manager.create_epic_branch("Moving Source cas 6029").unwrap();
+    let worktree = manager
+        .create_for_worker_from("moving-source-worker", &epic)
+        .unwrap();
+    let target_before = manager.git.resolve_commit(&epic).unwrap();
+    let source_before = manager.git.resolve_commit(&worktree.branch).unwrap();
+    commit_file(&worktree.path, "worker.txt", "new source tip", "worker moved");
+    let error = manager
+        .require_lane_refs(&worktree, &target_before, &source_before)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("source or target moved during lane fast rows"), "{error}");
+    assert_eq!(manager.git.resolve_commit(&epic).unwrap(), target_before);
+    assert_ne!(manager.git.resolve_commit(&worktree.branch).unwrap(), source_before);
+}

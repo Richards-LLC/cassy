@@ -1334,7 +1334,10 @@ mod tests {
         // skip_serializing_if must still be omitted (not null) inside a
         // tagged-enum variant. Old flat-struct code had this behavior;
         // regressing would introduce stray null keys that validators reject.
-        let with_input = HookOutput::with_pre_tool_updated_input(serde_json::json!({"x": 1}));
+        let with_input = HookOutput::with_pre_tool_updated_input_for_harness(
+            PreToolUseHarness::ClaudeCode,
+            serde_json::json!({"x": 1}),
+        );
         let json = serde_json::to_string(&with_input).unwrap();
         assert!(
             !json.contains("null"),
@@ -1344,6 +1347,44 @@ mod tests {
             !json.contains("permissionDecision"),
             "with_pre_tool_updated_input must not emit permissionDecision key: {json}"
         );
+    }
+
+    /// cas-980d: Codex applies `updatedInput` only with
+    /// `permissionDecision: "allow"`, and fails open otherwise. A rewrite in
+    /// the Codex shape carries allow; Claude's carries no decision; a deny is
+    /// never turned into a rewrite.
+    #[test]
+    fn a_rewrite_takes_the_shape_its_harness_applies_cas_980d() {
+        let input = serde_json::json!({"command": "cas factory worker-check -- -p cas --lib"});
+        let codex = serde_json::to_value(HookOutput::with_pre_tool_updated_input_for_harness(
+            PreToolUseHarness::Codex,
+            input.clone(),
+        ))
+        .unwrap();
+        assert_eq!(
+            codex,
+            serde_json::json!({"hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "updatedInput": input,
+            }})
+        );
+
+        // Codex's plain allow is an empty response; the rewrite fills it in.
+        let mut empty = HookOutput::empty();
+        assert!(empty.rewrite_pre_tool_input_for_harness(PreToolUseHarness::Codex, input.clone()));
+        assert_eq!(serde_json::to_value(&empty).unwrap(), codex);
+
+        let mut denied = HookOutput::with_pre_tool_permission_for_harness(
+            PreToolUseHarness::Codex,
+            "deny",
+            "workspace contract",
+            None,
+        );
+        assert!(!denied.rewrite_pre_tool_input_for_harness(PreToolUseHarness::Codex, input.clone()));
+        let denied = serde_json::to_value(&denied).unwrap();
+        assert_eq!(denied["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(denied["hookSpecificOutput"].get("updatedInput").is_none());
     }
 
     #[test]

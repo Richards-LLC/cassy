@@ -11331,7 +11331,10 @@ mod tests {
         let conn_ids = |table: &str, column: &str| -> Vec<i64> {
             let conn = store.conn.lock().unwrap();
             let mut stmt = conn.prepare(&format!("SELECT {column} FROM {table} ORDER BY {column}")).unwrap();
-            stmt.query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect()
+            stmt.query_map([], |row| row.get::<_, i64>(0))
+                .unwrap()
+                .map(|id| id.unwrap())
+                .collect()
         };
         assert_eq!(conn_ids("prompt_queue", "id"), vec![recent_terminal, old_pending, episode]);
         for table in ["prompt_queue_recipient_seen", "prompt_queue_recipient_transport"] {

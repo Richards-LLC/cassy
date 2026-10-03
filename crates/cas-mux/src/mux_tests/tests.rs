@@ -124,7 +124,7 @@ fn worker_resource_policy_uses_effective_command_for_nice_wrappers_gh_1047() {
                 command: "nice".into(),
                 args: prefix.into_iter().chain([cli, "--model", "claude"])
                     .map(str::to_owned).collect(),
-                cwd: project.path().into(),
+                cwd: Some(project.path().to_path_buf()),
                 ..Default::default()
             };
             crate::backend::finish_worker_config(

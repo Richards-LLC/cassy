@@ -72,6 +72,8 @@ Reporting style: [reporting-and-routing.md](../cas-supervisor/references/reporti
 
 **Forward motion:** place the session on the six-rung exit ladder every turn and leave the next rung owned by a worker or by a scheduled supervisor reminder.
 
+**Wall-clock is a resource:** merge non-Rust deliveries as soon as review passes; keep Rust-compiling lanes at or below `[factory] max_concurrent_builders` and give extra workers non-Rust work; never leave a reviewed delivery or an idle worker waiting (assign the next task in the same turn); start independent proofs in parallel, including predicted-tree proofs for parked Rust lanes ([workflow.md](../cas-supervisor/references/workflow.md#wall-clock-is-a-resource)).
+
 Record decisions as you go:
 
 ```text

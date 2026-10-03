@@ -1612,3 +1612,109 @@ fn deployed_origins_config_accepts_remote_origins_only() {
     );
     assert!(config.set("qa.deployed_origins", "not a url").is_err());
 }
+
+/// cas-7c15 (GH #1078): a Quasar focus input, whose `f_<uuid>` id is minted
+/// on every render.
+fn quasar_focus_finding(origin: &str, uuid: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "tiny-target",
+        "selector": format!("#f_{uuid}"),
+        "elementPath": format!("div.q-field > input#f_{uuid}"),
+        "otherElementPath": format!("label[for=f_{uuid}]"),
+        "url": format!("{origin}/?fixture=home"),
+        "scheme": "dark",
+        "viewport": {"name": "desktop", "width": 1280, "height": 800}
+    })
+}
+
+#[test]
+fn normalize_random_ids_replaces_only_uuid_shaped_fragments_cas_7c15() {
+    assert_eq!(
+        normalize_random_ids("#f_4cedc84f-1b2a-4c3d-9e8f-0123456789ab"),
+        "#f_<uuid>"
+    );
+    assert_eq!(
+        normalize_random_ids("label[for=f_4CEDC84F-1B2A-4C3D-9E8F-0123456789AB] > x"),
+        "label[for=f_<uuid>] > x"
+    );
+    assert_eq!(
+        normalize_random_ids(
+            "a#00000000-0000-0000-0000-000000000000 b#ffffffff-ffff-ffff-ffff-ffffffffffff"
+        ),
+        "a#<uuid> b#<uuid>"
+    );
+    // Not UUID-shaped: stable ids, short hex, glued hex, wrong grouping.
+    for stable in [
+        "#send",
+        "#f_4cedc84f",
+        "#f_a4cedc84f-1b2a-4c3d-9e8f-0123456789ab",
+        "#f_4cedc84f-1b2a-4c3d-9e8f-0123456789abc",
+        "#f_4cedc84f1b2a-4c3d-9e8f-0123456789ab",
+        "#f_4cedc84g-1b2a-4c3d-9e8f-0123456789ab",
+        "",
+    ] {
+        assert_eq!(normalize_random_ids(stable), stable, "{stable}");
+    }
+}
+
+#[test]
+fn scoped_visual_qa_ignores_per_render_random_ids_but_still_reports_new_findings_cas_7c15() {
+    let fx = scoped_fixture();
+    let dir = fx.bundle_dir();
+    let tip_ids = [
+        "4cedc84f-1b2a-4c3d-9e8f-0123456789ab",
+        "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d",
+    ];
+    let base_ids = [
+        "0f1e2d3c-4b5a-4968-8776-655443322110",
+        "AABBCCDD-EEFF-4011-8233-445566778899",
+    ];
+    scoped_report(
+        &dir.join("visual-qa-baseline/visual-qa.json"),
+        "FAIL",
+        chrono::Utc::now() - chrono::Duration::days(3),
+        &[&format!("{BASE}/?fixture=home")],
+        serde_json::json!([
+            backlog_finding(BASE, "footer a"),
+            quasar_focus_finding(BASE, base_ids[0]),
+            quasar_focus_finding(BASE, base_ids[1]),
+        ]),
+    );
+    // Same findings, only the random ids differ: nothing is new.
+    scoped_report(
+        &dir.join("visual-qa/visual-qa.json"),
+        "FAIL",
+        chrono::Utc::now(),
+        &[&format!("{TIP}/?fixture=home")],
+        serde_json::json!([
+            backlog_finding(TIP, "footer a"),
+            quasar_focus_finding(TIP, tip_ids[0]),
+            quasar_focus_finding(TIP, tip_ids[1]),
+        ]),
+    );
+    fx.validate(&fx.notes())
+        .expect("findings that differ only in per-render random ids are the base's backlog");
+
+    // A genuinely new finding, and a third random-id input the base has only
+    // two of, are still reported.
+    scoped_report(
+        &dir.join("visual-qa/visual-qa.json"),
+        "FAIL",
+        chrono::Utc::now(),
+        &[&format!("{TIP}/?fixture=home")],
+        serde_json::json!([
+            backlog_finding(TIP, "footer a"),
+            backlog_finding(TIP, "#send"),
+            quasar_focus_finding(TIP, tip_ids[0]),
+            quasar_focus_finding(TIP, tip_ids[1]),
+            quasar_focus_finding(TIP, "11111111-2222-4333-8444-555555555555"),
+        ]),
+    );
+    let refusal = fx.validate(&fx.notes()).unwrap_err();
+    assert!(
+        refusal.problem.contains("introduced 2 visual-QA finding")
+            && refusal.problem.contains("#send")
+            && refusal.problem.contains("#f_<uuid>"),
+        "{refusal:?}"
+    );
+}

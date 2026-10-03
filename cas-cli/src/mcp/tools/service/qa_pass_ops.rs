@@ -8,7 +8,7 @@
 
 use crate::mcp::tools::service::imports::*;
 use crate::qa_pass::PreExistingIssue;
-use cas_types::{Dependency, DependencyType, QaPass, QaVerdict, Task, TaskRisk, TaskStatus, TaskType};
+use cas_types::{Dependency, DependencyType, QaPass, QaVerdict, TaskStatus};
 
 impl CasService {
     pub(super) async fn verification_qa_record(
@@ -406,6 +406,9 @@ impl CasService {
         };
         let mut filed = Vec::new();
         let mut failed = Vec::new();
+        // cas-1980: follow-ups join the delivery's epic, so their closes
+        // target its branch instead of main.
+        let epic = crate::qa_pass::follow_up_epic(store.as_ref(), &delivery.id);
         for issue in issues {
             let id = match store.generate_id() {
                 Ok(id) => id,
@@ -414,16 +417,14 @@ impl CasService {
                     continue;
                 }
             };
-            let mut task = Task::new(id.clone(), crate::qa_pass::follow_up_title(&delivery, issue));
-            task.task_type = TaskType::Bug;
-            task.scope = crate::types::Scope::Project;
-            task.origin_project = delivery.origin_project.clone();
-            task.description = crate::qa_pass::follow_up_description(&delivery, pass, issue, ledger_path);
-            task.priority = crate::qa_pass::follow_up_priority(&issue.severity);
-            task.risk = vec![TaskRisk::None];
-            task.labels = vec!["qa-follow-up".to_string(), "pre-existing".to_string()];
-            task.external_ref = Some(ledger_path.to_string());
-            if let Err(error) = store.create_atomic(&task, &[], None, Some("cas-qa-record")) {
+            let task =
+                crate::qa_pass::follow_up_task(&id, &delivery, pass, issue, ledger_path, epic.as_ref());
+            if let Err(error) = store.create_atomic(
+                &task,
+                &[],
+                epic.as_ref().map(|epic| epic.id.as_str()),
+                Some("cas-qa-record"),
+            ) {
                 failed.push(format!("{} ({error})", issue.problem));
                 continue;
             }

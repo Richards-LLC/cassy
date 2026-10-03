@@ -10,7 +10,7 @@ const noon = new Date(2026, 8, 30, 12).getTime();
 const session = "patient-pelican-9";
 const key = `atlas:${session}`;
 const reply = (id: number, parent: number): OperatorReply => ({ notification_id: id, reply_to: parent, message: `answer ${id}`, summary: "", device_id: "fixture", kind: "answer", attachments: [] });
-const message = (id: number, at: number): Parameters<ConversationHistory["hydrateSend"]>[0] => ({ notification_id: id, target: "supervisor", text: `message ${id}`, state: "acknowledged", stamped: true, session, at: new Date(at).toISOString() });
+const message = (id: number, at: number): Parameters<ConversationHistory["hydrateSend"]>[0] => ({ notification_id: id, target: "supervisor", text: `message ${id}`, state: "acknowledged", stamped: true, device_id: "fixture", session, at: new Date(at).toISOString() });
 const stampedReply = (id: number, parent: number, at: number): Parameters<ConversationHistory["hydrateReply"]>[0] => ({ ...reply(id, parent), session, at: new Date(at).toISOString() });
 
 describe("observed turn times survive repeated reloads (cas-940f)", () => {

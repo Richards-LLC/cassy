@@ -551,14 +551,20 @@ test("HUB-J12 network switch: in control, Tab is the terminal's and Ctrl+Alt+M o
     await page.locator("#conversation-terminal").click();
     await expect(page.locator(".mode-badge")).toHaveText("CONTROL");
     await input.focus();
-    // QA round 1 F09: nothing is drawn over the terminal. Along its last
-    // program row the topmost element is the terminal's own canvas.
+    // QA round 1 F09: nothing is drawn over the terminal. No visible element
+    // other than the canvas (and what contains it) overlaps the band that
+    // holds its last program rows, the bottom 48px with its padding. Measured
+    // by geometry, not hit-testing: the round-1 hint ignored the pointer.
     const covered = await input.evaluate((field) => {
       const canvas = field.parentElement!.querySelector<HTMLCanvasElement>(".t3-ghostty-canvas")!;
       const box = canvas.getBoundingClientRect();
-      const y = box.bottom - 4;
-      return [0.03, 0.25, 0.5, 0.75, 0.97].map((at) => document.elementFromPoint(box.left + box.width * at, y))
-        .filter((element) => element !== canvas).map((element) => `${element?.tagName}.${element?.className}`);
+      const band = { top: box.bottom - 48, bottom: box.bottom, left: box.left, right: box.right };
+      return [...document.querySelectorAll<HTMLElement>("body *")].filter((element) => {
+        if (element === canvas || element.contains(canvas)) return false;
+        if (!element.checkVisibility({ opacityProperty: true, visibilityProperty: true })) return false;
+        const rect = element.getBoundingClientRect();
+        return rect.width > 1 && rect.height > 1 && rect.left < band.right && rect.right > band.left && rect.top < band.bottom && rect.bottom > band.top;
+      }).map((element) => `${element.tagName}.${element.className}`);
     });
     expect(covered, "no element covers the terminal's last row").toEqual([]);
     await expect(leave).toBeVisible();

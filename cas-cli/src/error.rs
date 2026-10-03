@@ -252,7 +252,9 @@ mod tests {
 
     #[test]
     fn search_recovery_guidance_names_a_registered_request_cas_a957() {
-        let error = CasError::Search("index unavailable".into());
+        let error = CasError::Search(tantivy::TantivyError::InvalidArgument(
+            "index unavailable".into(),
+        ));
         let suggestion = error.suggestion().unwrap();
         let invocation = suggestion
             .split('`')

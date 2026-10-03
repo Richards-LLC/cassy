@@ -666,7 +666,7 @@ mod tests {
             .unwrap();
         assert!(rewritten.contains("factory worker-check"));
         assert!(rewritten.ends_with("> target/worker-check.log 2>&1 &"));
-        let head = clean_head(&repo).unwrap();
+        let head = fixture_head(&repo);
         // Execute the admitted shell suffix before invoking the real runner
         // boundary. The Cargo stand-in exits zero and compiles nothing.
         let suffix = rewritten.split_once('>').unwrap().1;
@@ -817,6 +817,24 @@ mod tests {
     }
 
     #[cfg(unix)]
+    /// cas-84b3: the fixture's HEAD, measured without the runner's own
+    /// `clean_head`. Expectations built with `clean_head` agreed with any
+    /// receipt it wrote, even one naming a short or wrong commit.
+    fn fixture_head(repo: &Path) -> String {
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git rev-parse HEAD failed");
+        let head = String::from_utf8(out.stdout).unwrap().trim().to_string();
+        assert!(
+            head.len() == 40 && head.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "fixture HEAD must be a full commit id: {head}"
+        );
+        head
+    }
+
     fn fixture_commit(repo: &Path) {
         std::fs::create_dir_all(repo).unwrap();
         git(repo, &["init", "-q"]).unwrap();
@@ -971,7 +989,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#,
             "test(worker)".into(),
         ];
         execute_at(&root, &test_args, &repo, &fake).unwrap();
-        let head = clean_head(&repo).unwrap();
+        let head = fixture_head(&repo);
         assert!(passing_receipt(&root, &repo, &head).is_some());
         std::fs::remove_file(zig).unwrap();
         let error = execute_at(&root, &args, &repo, &fake)
@@ -1009,7 +1027,7 @@ printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#,
             "-E".into(),
             "test(worker)".into(),
         ];
-        let head = clean_head(&repo).unwrap();
+        let head = fixture_head(&repo);
         execute_at(&root, &args, &repo, &fake).unwrap();
         assert_eq!(
             passing_test_receipts(&root, &repo, &head),
@@ -1276,7 +1294,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#,
         std::fs::write(&fake, "#!/bin/sh\ncase \"$*\" in 'check -p cas --tests'|'check -p cas --lib') ;; *) exit 2 ;; esac\n[ \"$CARGO_TARGET_DIR\" = \"$PWD/target\" ] || exit 3\n").unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         let args = vec!["-p".into(), "cas".into(), "--tests".into()];
-        let head = clean_head(&repo).unwrap();
+        let head = fixture_head(&repo);
         for target in ["--lib", "--tests"] {
             let args = vec!["-p".into(), "cas".into(), target.into()];
             execute_at(&root, &args, &repo, &fake).unwrap();

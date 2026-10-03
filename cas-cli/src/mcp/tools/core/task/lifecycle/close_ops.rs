@@ -23013,8 +23013,8 @@ mod merge_state_gate_tests {
         std::fs::write(dir.path().join("b.rs"), "// b\n").unwrap();
         git(dir.path(), &["add", "b.rs"]);
         git(dir.path(), &["commit", "-q", "-m", "feat: b"]);
-        let target_tip = resolve_branch_sha(dir.path(), "main").unwrap();
-        let unreachable_tip = resolve_branch_sha(dir.path(), "factory/worker").unwrap();
+        let target_tip = rev_parse_local(dir.path(), "main");
+        let unreachable_tip = rev_parse_local(dir.path(), "factory/worker");
 
         let task = worker_task("worker");
         let req = base_req(&task.id);
@@ -23499,8 +23499,7 @@ mod merge_state_gate_tests {
         std::fs::write(dir.path().join("a.rs"), "// a\n").unwrap();
         git(dir.path(), &["add", "a.rs"]);
         git(dir.path(), &["commit", "-q", "-m", "feat: a"]);
-        let expected_tip = resolve_branch_sha(dir.path(), "factory/worker")
-            .expect("factory branch tip should resolve");
+        let expected_tip = rev_parse_local(dir.path(), "factory/worker");
 
         let task = worker_task("worker");
         let req = base_req(&task.id);
@@ -23741,8 +23740,8 @@ mod merge_state_gate_tests {
         std::fs::write(p.join("stranded.rs"), "// not merged\n").unwrap();
         git(p, &["add", "stranded.rs"]);
         git(p, &["commit", "-q", "-m", "feat: stranded work"]);
-        let target_tip = resolve_branch_sha(p, parent).unwrap();
-        let unreachable_tip = resolve_branch_sha(p, "factory/worker").unwrap();
+        let target_tip = rev_parse_local(p, parent);
+        let unreachable_tip = rev_parse_local(p, "factory/worker");
 
         let task = worker_task("worker");
         let req = base_req(&task.id);
@@ -29043,7 +29042,11 @@ mod merge_state_gate_tests {
             .output()
             .expect("git rev-parse");
         assert!(out.status.success(), "rev-parse {refname} failed");
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
+        let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        // cas-84b3: callers compare receipts against this independently
+        // measured id; a short id would let a truncated receipt pass.
+        assert_eq!(sha.len(), 40, "rev-parse {refname} must yield a full commit id: {sha}");
+        sha
     }
 
     /// Reproduces BUG-awaitingmerge-anchor-squash-merge-2026-07-09.md:

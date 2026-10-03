@@ -1045,3 +1045,42 @@ fn proof_targets_roundtrip_json_and_read_legacy_fragments() {
         read.proof_targets
     );
 }
+
+/// cas-1980 (cas-9ebd): a task can hold two parent edges after a re-parent.
+/// The parent epic readers (worktree_merge, close, QA follow-ups) must see the
+/// open epic, not the closed one that happens to sort first.
+#[test]
+fn parent_epic_prefers_the_open_epic_over_a_closed_one_cas_1980() {
+    let (_temp, store) = create_test_store();
+    let mut closed = Task::new("cas-c10d".to_string(), "Finished epic".to_string());
+    closed.task_type = TaskType::Epic;
+    closed.status = TaskStatus::Closed;
+    store.add(&closed).unwrap();
+    let mut live = Task::new("cas-e9e1".to_string(), "Live epic".to_string());
+    live.task_type = TaskType::Epic;
+    store.add(&live).unwrap();
+    let child = Task::new("cas-9ebd".to_string(), "Re-parented child".to_string());
+    store.add(&child).unwrap();
+    for parent in [&closed.id, &live.id] {
+        store
+            .add_dependency(&Dependency::new(
+                child.id.clone(),
+                parent.clone(),
+                DependencyType::ParentChild,
+            ))
+            .unwrap();
+    }
+    assert_eq!(
+        store.get_parent_epic(&child.id).unwrap().map(|epic| epic.id),
+        Some(live.id.clone())
+    );
+
+    // With only the closed parent left, it is still reported (callers refuse it).
+    store
+        .remove_dependency(&child.id, &live.id)
+        .unwrap();
+    assert_eq!(
+        store.get_parent_epic(&child.id).unwrap().map(|epic| epic.id),
+        Some(closed.id.clone())
+    );
+}

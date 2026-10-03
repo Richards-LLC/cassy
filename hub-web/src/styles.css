@@ -3856,7 +3856,7 @@ button.chip:disabled { cursor: default; }
   /* cas-c19d: the label shrinks too, ellipsised, once the state has given
      all its room: a 691px name used to run past the button and over its
      state. The button's 8px gap then always separates the two. */
-  .conversation-sidebar #paired-machines-toggle > span:nth-child(2) { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; white-space: nowrap; }
+  .conversation-sidebar #paired-machines-toggle > span:nth-child(2) { flex: 0 1 auto; min-width: 0; max-width: none; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; white-space: nowrap; }
   /* cas-0739 QA F01: on the one-line phone footer the state yields to the
      label, ellipsised; the full words are its title, the button's spoken
      name, and the open dialog's first row. Its outage words lead ("Can't
@@ -3957,12 +3957,12 @@ button.chip:disabled { cursor: default; }
 
 /* Machine evidence stays beneath the conversations, outside the phone composer. */
 .hub-footer-badges { display: grid; gap: var(--space-2); margin-bottom: var(--space-3); }
-#paired-machines-toggle { display: grid; grid-template-columns: var(--space-2) minmax(0, 1fr); align-items: baseline; gap: var(--space-2); text-align: left; padding: var(--space-2); color: var(--text-hi); background: var(--bg-raised); }
-/* cas-94eb: the dot shares the label's first line even when the full name
-   wraps. The state keeps its own row beneath the label. The phone's existing
-   one-line flex layout above still lets the state yield before the name. */
-#paired-machines-toggle > span:nth-child(2) { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
-.machine-badge-state { grid-column: 2; flex: 0 1 auto; min-width: 0; color: var(--text-mid); font-size: var(--fs-xs); overflow-wrap: anywhere; }
+#paired-machines-toggle { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2); text-align: left; padding: var(--space-2); color: var(--text-hi); background: var(--bg-raised); }
+/* cas-94eb: reserve the dot and its gap when wrapping the full desktop name,
+   so both fit on the first flex line. Short names still share a row with the
+   state; long states wrap without squeezing the name (cas-0739 QA F02). */
+#paired-machines-toggle > span:nth-child(2) { flex: 1 1 auto; min-width: 0; max-width: calc(100% - var(--space-2) * 2); overflow-wrap: anywhere; }
+.machine-badge-state { flex: 0 1 auto; min-width: 0; color: var(--text-mid); font-size: var(--fs-xs); overflow-wrap: anywhere; }
 .pairing-dot { width: var(--space-2); height: var(--space-2); border-radius: var(--radius-pill); background: var(--color-series-neutral); flex: none; }
 .pairing-dot.connected { background: var(--state-ok); }
 /* cas-b789: some machines connected, some down — not all-clear. */

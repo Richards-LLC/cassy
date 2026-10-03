@@ -12,12 +12,12 @@ const FORGE: Machine = {
   sessions: [{ name: "quiet-heron-7", supervisor: "quiet-heron-7", project_dir: "/projects/lighthouse", workers: ["swift-lark-3"], liveness: "live", last_activity_at: journeyStamp(-3 * 3_600_000), last_activity: "supervisor → swift-lark-3" }],
 };
 
-for (const width of [1280, 390]) {
-  test(`HUB-J3 a wrapped footer name keeps its status dot on the first line at ${width} (cas-94eb)`, journeyPart, async ({ page, journey }) => {
-    const label = "soundwave — a very long personal workstation name with several extra words and anunbrokentailthatneedstowrap";
+for (const width of [1280, 390]) for (const long of [true, false]) {
+  test(`HUB-J3 a ${long ? "wrapped" : "short"} footer name keeps its status dot on the first line at ${width} (cas-94eb)`, journeyPart, async ({ page, journey }) => {
+    const label = long ? "soundwave — a very long personal workstation name with several extra words and anunbrokentailthatneedstowrap" : "Atlas · Linux";
     await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
     await journey.hub({ machines: [{ ...ATLAS, label }], paired: [ATLAS.id] });
-    await journey.stage("Read the long machine name and its connection together", async () => {
+    await journey.stage("Read the machine name and its connection together", async () => {
       await journey.open();
       const footer = page.locator("#paired-machines-toggle");
       await expect(footer.locator(".machine-badge-state")).toHaveText("Connected");
@@ -31,16 +31,20 @@ for (const width of [1280, 390]) {
         const state = button.children[2]!.getBoundingClientRect();
         const bounds = button.getBoundingClientRect();
         return { firstTop: first.top, firstBottom: first.bottom, nameHeight: name.getBoundingClientRect().height,
-          dotCentre: dot.top + dot.height / 2, dotRight: dot.right, nameLeft: first.left,
+          dotCentre: dot.top + dot.height / 2, dotRight: dot.right, nameLeft: first.left, stateCentre: state.top + state.height / 2,
           stateRight: state.right, right: bounds.right, textFits: name.scrollWidth <= name.clientWidth + 1 };
       });
       expect(geometry.dotCentre, "status dot belongs to the label's first line").toBeGreaterThanOrEqual(geometry.firstTop);
       expect(geometry.dotCentre, "status dot belongs to the label's first line").toBeLessThanOrEqual(geometry.firstBottom);
       expect(geometry.dotRight).toBeLessThan(geometry.nameLeft);
       expect(geometry.stateRight).toBeLessThanOrEqual(geometry.right);
-      if (width === 1280) {
+      if (width === 1280 && long) {
         expect(geometry.nameHeight).toBeGreaterThan(geometry.firstBottom - geometry.firstTop);
         expect(geometry.textFits, "the full desktop machine name wraps inside the footer").toBe(true);
+      }
+      if (!long) {
+        expect(geometry.stateCentre, "short names keep their state on the same row").toBeGreaterThanOrEqual(geometry.firstTop);
+        expect(geometry.stateCentre).toBeLessThanOrEqual(geometry.firstBottom);
       }
       await footer.focus(); await page.keyboard.press("Enter");
       await expect(page.locator("#paired-machines-list h3")).toHaveText(label);

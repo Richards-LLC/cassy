@@ -53,7 +53,7 @@ pub(crate) fn request_merge(
     factory_session: &str,
     task_id: &str,
     expected: &RequestMergeExpected,
-    attribution: &crate::ui::factory::protocol::MessageAttribution,
+    attribution: &crate::ui::factory::MessageAttribution,
 ) -> Result<i64, OperationError> {
     let store = crate::store::open_task_store(cas_dir)
         .map_err(|error| OperationError::Failed(format!("task store unavailable: {error}")))?;
@@ -134,7 +134,7 @@ pub(crate) fn enqueue_commander_message(
     summary: Option<&str>,
     urgent: bool,
     in_reply_to: Option<i64>,
-    attribution: &crate::ui::factory::protocol::MessageAttribution,
+    attribution: &crate::ui::factory::MessageAttribution,
 ) -> anyhow::Result<cas_store::EnqueueOutcome> {
     use anyhow::Context as _;
 
@@ -207,7 +207,7 @@ pub(crate) fn commander_reply_text(notification_id: i64, text: &str) -> String {
 /// its credential; a frame that claims verification without a principal is
 /// treated as a client claim, and the row's origin becomes `Unattributed`.
 pub(crate) fn operator_stamp(
-    attribution: &crate::ui::factory::protocol::MessageAttribution,
+    attribution: &crate::ui::factory::MessageAttribution,
 ) -> cas_store::OperatorStamp {
     let verified = attribution.operator_verified
         && attribution.device_id.as_deref().is_some_and(|id| !id.is_empty())

@@ -4078,7 +4078,12 @@ button.chip:disabled { cursor: default; }
 .launch-actions .primary { min-width: 7rem; }
 .launch-grant-command { flex-wrap: wrap; justify-content: flex-start; align-items: center; gap: var(--space-2); padding: var(--space-3); background: var(--panel); border-radius: var(--radius-card); }
 .launch-grant-command[hidden], .launch-grant-invite[hidden], .launch-grant-note[hidden], .launch-grant-error[hidden], .launch-grant [data-launch-action="allow"][hidden] { display: none; }
-.launch-grant-command code { min-width: 0; overflow-wrap: anywhere; color: var(--text-hi); font-size: var(--fs-meta); }
+.launch-grant-command code { min-width: 0; overflow-wrap: break-word; color: var(--text-hi); font-size: var(--fs-meta); }
+/* cas-cee5 (journey F31): it wraps between whole tokens only. */
+.launch-command-piece { white-space: nowrap; }
+/* The refusal's login command, as a logged-out account row shows it. */
+.launch-error-command { padding-inline-start: 0; margin-top: var(--space-2); }
+.launch-error-command[hidden] { display: none; }
 .launch-grant .launch-lead { color: var(--text-hi); font-size: var(--fs-md); }
 .launch-grant .launch-lead, .launch-confirm-copy { overflow-wrap: anywhere; }
 .launch-grant .dialog-actions, .launch-confirm .dialog-actions { min-width: 0; }

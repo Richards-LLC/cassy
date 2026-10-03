@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   LaunchSheet, SessionLaunchGrantError, accountLoginCommand, accountStep, canLaunch, defaultAccount, defaultSupervisorCli, launchSheetMarkup, launchSummary,
-  type LaunchProfiles, filterProjects, launchErrorCopy, parseWorkers, sortProjects,
+  type LaunchProfiles, commandTokensMarkup, filterProjects, launchErrorCopy, parseWorkers, sortProjects,
   type BrowseListing, type LaunchHost, type LaunchMachine, type LaunchProject, type LaunchRequest, type LaunchResult, type ProjectCatalog,
 } from "./launch-session";
 import { canEnableSessionLaunch, launchDropped, launchDroppedNotice, launchGrantCommand, parseGrantedScopes, repairCommand, repairStatus, scopeChoices, scopeSummary } from "./pairing-scopes";
@@ -380,7 +380,9 @@ describe("accounts (cas-9666)", () => {
     expect(launchErrorCopy({ status: 400, code: "invalid_profile" }, "claude", "Atlas").title).toBe("That Claude account isn't on Atlas any more.");
     const out = launchErrorCopy({ status: 422, code: "not_logged_in" }, "claude", "Atlas", "old@petrastella.io");
     expect(out.title).toBe("The Claude account old@petrastella.io isn't logged in on Atlas.");
-    expect(out.advice).toContain("cas claude login old@petrastella.io");
+    // cas-cee5 (journey F32): the command is its own copyable code, not prose.
+    expect(out.advice).toBe("Run this on Atlas, or pick another account, then start again.");
+    expect(out.command).toBe("cas claude login old@petrastella.io");
   });
 
   const pick = (dialog: HTMLDialogElement, selector: string) => {
@@ -584,5 +586,31 @@ describe("New session polish (cas-c107)", () => {
     expect(rule(".launch-login button")).toContain("border: var(--line-width) solid var(--color-transparent)");
     const forced = [...css.matchAll(/@media \(forced-colors: active\) \{([\s\S]*?)\n\}/g)].map((match) => match[1]).join("\n");
     expect(forced).toContain(".launch-login button { border-color: ButtonBorder; }");
+  });
+});
+
+describe("New session sheet copy (cas-cee5, journey F31-F34)", () => {
+  it("renders a command as whole tokens: breaks only at spaces and after a scope's comma", () => {
+    const code = document.createElement("code");
+    code.innerHTML = commandTokensMarkup("cas hub pair --origin https://hub.example --scopes machine:read,pane:input,session:launch");
+    const pieces = [...code.querySelectorAll(".launch-command-piece")].map((piece) => piece.textContent);
+    expect(pieces).toEqual(["cas", "hub", "pair", "--origin", "https://hub.example", "--scopes", "machine:read,", "pane:input,", "session:launch"]);
+    expect(code.textContent).toBe("cas hub pair --origin https://hub.example --scopes machine:read,pane:input,session:launch");
+    expect(code.querySelectorAll("wbr")).toHaveLength(2);
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
+    expect(css).toContain(".launch-command-piece { white-space: nowrap; }");
+    expect(css).not.toMatch(/\.launch-grant-command code \{[^}]*overflow-wrap: anywhere/);
+  });
+
+  it("explains the Supervisor and Workers fields in words that agree with the field", () => {
+    const dialog = document.createElement("div");
+    dialog.innerHTML = launchSheetMarkup();
+    expect(dialog.querySelector("#launch-cli-hint")!.textContent).toBe("Which assistant runs the supervisor.");
+    const workers = dialog.querySelector<HTMLInputElement>("input[name=launch-workers]")!;
+    expect(workers.placeholder).toBe("None");
+    expect(dialog.querySelector("#launch-workers-hint")!.textContent).toBe("Up to 16. None starts the supervisor alone.");
+    // The grant view says once what opening the link does.
+    expect(dialog.querySelector(".launch-grant-invite")!.textContent).not.toContain("kept");
+    expect(dialog.querySelector(".launch-grant-note")!.textContent).toBe("The link re-pairs this browser with the machine: what it can do now is kept, and starting sessions is added.");
   });
 });

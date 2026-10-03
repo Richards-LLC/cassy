@@ -81,10 +81,49 @@ test("HUB-J16 end a session from my phone", async ({ page, journey }) => {
       if (route.request().method() !== "DELETE") return route.fallback();
       await route.fulfill({ status: 500, json: { error: "internal_error" } });
     }, { times: 1 });
+    // cas-9ae6: what a screen reader says. Each change of text is attributed
+    // to its nearest live region (role status/alert/log or aria-live, an
+    // aria-live="off" ancestor silencing it); the control focus lands on is
+    // read with its description.
+    await page.evaluate(() => {
+      const w = window as unknown as { __heard: string[] };
+      w.__heard = [];
+      const region = (node: Node): Element | null => {
+        for (let element = node instanceof Element ? node : node.parentElement; element; element = element.parentElement) {
+          const live = element.getAttribute("aria-live");
+          if (live === "off") return null;
+          if (live || ["status", "alert", "log"].includes(element.getAttribute("role") ?? "")) return element;
+        }
+        return null;
+      };
+      new MutationObserver((records) => {
+        const seen = new Map<Element, string>();
+        for (const record of records) {
+          for (const node of record.type === "characterData" ? [record.target] : [...record.addedNodes]) {
+            const speaker = region(node);
+            const words = node.textContent?.trim() ?? "";
+            if (!speaker || !words || seen.get(speaker) === words) continue;
+            seen.set(speaker, words);
+            w.__heard.push(words);
+          }
+        }
+      }).observe(document.body, { subtree: true, childList: true, characterData: true });
+      document.addEventListener("focusin", (event) => {
+        const target = event.target as HTMLElement;
+        const described = (target.getAttribute("aria-describedby") ?? "").split(/\s+/).filter(Boolean).map((id) => document.getElementById(id)?.textContent?.trim() ?? "").join(" ");
+        if (described) w.__heard.push(described);
+      });
+    });
     await page.keyboard.press("Tab");
     await page.keyboard.press("Enter");
-    await expect(last.locator(".conversation-end-error")).toHaveText("Could not end amber-fox-29 on Atlas. Try End session again. If it still fails, check the session on Atlas.");
+    const failure = "Could not end amber-fox-29 on Atlas. Try End session again. If it still fails, check the session on Atlas.";
+    await expect(last.locator(".conversation-end-error")).toHaveText(failure);
     await expect(last.getByRole("button", { name: "End session amber-fox-29 on Atlas" })).toBeFocused();
+    // Focus came back to End session, which reads the failure as its
+    // description, so the failure is not also an alert: said once (cas-9ae6).
+    await page.waitForTimeout(500);
+    const heard = await page.evaluate(() => (window as unknown as { __heard: string[] }).__heard);
+    expect(heard.filter((words) => words.includes("Could not end")), "the failure is said once").toEqual([failure]);
     await expect(row("amber-fox-29")).toHaveCount(1);
     await expect(list.locator(".conversation-row")).toHaveCount(7);
     expect(hub.ends).toEqual([]);

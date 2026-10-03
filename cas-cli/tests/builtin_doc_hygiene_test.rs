@@ -677,6 +677,11 @@ const AI_VOCABULARY_ALLOWLIST: &[(&str, &str, &str)] = &[
         "Names the journey-eval QA command and required release evidence.",
     ),
     (
+        "skills/cas-cut-release/references/failure-log.md",
+        "journey",
+        "Names the required journey-evaluation report and its Markdown files carried on a release branch.",
+    ),
+    (
         "skills/cas-frontend-engineering/SKILL.md",
         "journey",
         "A Playwright journey is a concrete end-to-end test scenario.",

@@ -1377,7 +1377,8 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(premount).toBeGreaterThan(-1);
     expect(premount).toBeLessThan(main.indexOf("const surface = await createTerminalSurface(mount, {"));
     // The surface keeps a reading overlay in place instead of wiping the mount.
-    expect(surface).toContain("mount.replaceChildren(canvas, input, scrollbar, ...overlays);");
+    // cas-d1fa: the escape hint mounts with the input; overlays still survive.
+    expect(surface).toContain("mount.replaceChildren(canvas, input, scrollbar, escapeHint, ...overlays);");
   });
 
   // Contract: requests an authoritative supervisor keyframe before lazily mounted workers.

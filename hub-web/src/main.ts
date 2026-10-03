@@ -2101,6 +2101,8 @@ async function renderSessionState(machineId: string, session: string, state: Ses
       const button = (label: string, className: string, action: () => void) => {
         const control = document.createElement("button"); control.type = "button"; control.className = className; control.textContent = label;
         control.setAttribute("aria-label", label);
+        // cas-2072: a short header shows these as glyphs; the tooltip names them.
+        control.title = label;
         control.onclick = (event) => { event.stopPropagation(); action(); };
         return control;
       };

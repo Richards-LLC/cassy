@@ -959,16 +959,23 @@ main {
 }
 
 .pane-last-activity {
-  /* cas-7d25: when the header is short, the activity line gives way before
-     the pane's own name. */
-  flex: 0 1000 auto;
+  /* cas-2072: the activity line takes only the room the name, role and
+     controls leave, so it never trims the name (twin codenames differ in
+     their tail digits). It shows whole or not at all: words that do not fit
+     wrap past the zero-width first item onto a clipped second line instead
+     of trimming to a stub. */
+  display: flex;
+  flex: 1 1 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   min-width: 0;
-  margin-left: auto;
+  height: 1lh;
   overflow: hidden;
   color: var(--text-mid);
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* The first line's full height, so words that wrap past it fall below the clip. */
+.pane-last-activity::before { content: ""; height: 100%; }
 
 .pane-layout-controls {
   display: flex;
@@ -1000,6 +1007,20 @@ main {
   .pane-layout-controls .pane-leave .pane-leave-word { display: none; }
   .pane-layout-controls .pane-leave::before { content: "⇥"; font-size: var(--fs-md); }
   .pane-layout-controls .pane-leave kbd { margin-left: var(--space-1); }
+}
+/* cas-2072: a short header (a 1280 window with the drawer open) keeps the
+   pane's whole name and Leave's key by turning the other controls into the
+   glyphs a phone uses; each keeps its name and its tooltip. Kept at the
+   specificity of the desktop rules so the phone block still governs a phone. */
+@container pane-header (max-width: 720px) {
+  .pane-layout-controls button { display: grid; place-items: center; min-width: var(--space-8); padding: 0; font-size: 0; }
+  .pane-layout-controls .pane-leave:not([hidden]) { display: inline-flex; align-items: center; padding: 0 var(--space-1); }
+  .pane-layout-controls .pane-view-toggle[data-view="transcript"]::after { content: "▦"; font-size: var(--fs-md); }
+  .pane-layout-controls .pane-view-toggle[data-view="terminal"]::after { content: "≡"; font-size: var(--fs-md); }
+  .pane-layout-controls .pane-search::after { content: "⌕"; font-size: var(--fs-md); }
+  .pane-layout-controls .make-primary::after { content: "★"; font-size: var(--fs-meta); }
+  .pane-layout-controls .move-earlier::after { content: "←"; font-size: var(--fs-md); }
+  .pane-layout-controls .move-later::after { content: "→"; font-size: var(--fs-md); }
 }
 .pane-layout-controls button:hover:not(:disabled),
 .pane-layout-controls button:focus-visible { color: var(--text-hi); background: var(--bg-hover); }

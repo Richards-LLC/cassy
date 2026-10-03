@@ -505,7 +505,8 @@ test("HUB-J12 network switch: in Terminal view a refused pairing leaves no 'conn
 // cas-d1fa (WCAG 2.1.2): the terminal input took every Tab, so a keyboard
 // user who landed in it could never leave. Without control the terminal
 // cannot use Tab at all, so Tab and Shift+Tab move focus on; in control, Tab
-// is the program's, and Ctrl+M leaves, as the visible hint says.
+// is the program's, and Ctrl+Alt+M (or the header's Leave terminal) leaves,
+// as the header says, outside the terminal, so no program row is covered.
 const offBody = (page: Page) => page.evaluate(() => document.activeElement !== null && document.activeElement !== document.body);
 const terminalInput = (page: Page) => page.locator(".t3-ghostty-input");
 
@@ -541,28 +542,43 @@ test("HUB-J12 network switch: without control, Tab and Shift+Tab leave the termi
   });
 });
 
-test("HUB-J12 network switch: in control, Tab is the terminal's and Ctrl+M leaves it, as the visible hint says (cas-d1fa)", journeyPart, async ({ page, journey }) => {
-  await journey.stage("In control, the terminal says how the keyboard leaves it", async () => {
+test("HUB-J12 network switch: in control, Tab is the terminal's and Ctrl+Alt+M or Leave terminal leaves it, with no program row covered (cas-d1fa)", journeyPart, async ({ page, journey }) => {
+  const input = terminalInput(page);
+  const leave = page.getByRole("button", { name: "Leave terminal", exact: true });
+  const hintText = "Tab goes to the terminal. Ctrl+Alt+M leaves it.";
+  await journey.stage("In control, the header says how the keyboard leaves the terminal, covering no program row", async () => {
     await connected(page, true);
     await page.locator("#conversation-terminal").click();
     await expect(page.locator(".mode-badge")).toHaveText("CONTROL");
-    const input = terminalInput(page);
     await input.focus();
-    // The focused terminal's own hint: other panes' terminals keep theirs hidden.
-    const hint = page.locator(".t3-ghostty-escape-hint").filter({ visible: true });
-    await expect(hint).toHaveCount(1);
-    await expect(hint).toHaveText("Tab goes to the terminal. Ctrl+M leaves it.");
-    await expect(input).toHaveAccessibleDescription("Tab goes to the terminal. Ctrl+M leaves it.");
+    await expect(leave).toBeVisible();
+    await expect(leave).toHaveAttribute("aria-keyshortcuts", "Control+Alt+M");
+    await expect(leave.locator("kbd")).toHaveText("Ctrl+Alt+M");
+    await expect(input).toHaveAccessibleDescription(hintText);
+    // QA round 1 F09: nothing is drawn over the terminal. Along its last
+    // program row the topmost element is the terminal's own canvas.
+    const covered = await input.evaluate((field) => {
+      const canvas = field.parentElement!.querySelector<HTMLCanvasElement>(".t3-ghostty-canvas")!;
+      const box = canvas.getBoundingClientRect();
+      const y = box.bottom - 4;
+      return [0.03, 0.25, 0.5, 0.75, 0.97].map((at) => document.elementFromPoint(box.left + box.width * at, y))
+        .filter((element) => element !== canvas).map((element) => `${element?.tagName}.${element?.className}`);
+    });
+    expect(covered, "no element covers the terminal's last row").toEqual([]);
   });
-  await journey.stage("Tab stays in the terminal; Ctrl+M leaves it for the next control", async () => {
-    const input = terminalInput(page);
-    const hint = page.locator(".t3-ghostty-escape-hint").filter({ visible: true });
+  await journey.stage("Tab stays in the terminal; Ctrl+Alt+M leaves it for the next control", async () => {
+    await input.focus();
     await page.keyboard.press("Tab");
     await expect(input).toBeFocused();
-    await page.keyboard.press("Control+m");
+    await page.keyboard.press("Control+Alt+m");
     await expect(input).not.toBeFocused();
-    expect(await offBody(page), "Ctrl+M lands on a real control, not the page").toBe(true);
-    await expect(hint).toHaveCount(0);
+    expect(await offBody(page), "Ctrl+Alt+M lands on a real control, not the page").toBe(true);
+  });
+  await journey.stage("The header's Leave terminal takes focus out of the terminal too", async () => {
+    await input.focus();
+    await leave.click();
+    await expect(input).not.toBeFocused();
+    await expect(leave).toBeFocused();
   });
 });
 

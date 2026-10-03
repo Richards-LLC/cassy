@@ -1887,7 +1887,7 @@ mod tests {
         );
     }
 
-    const D1FA_LEDGER: &str = include_str!("../tests/data/qa-ledgers/cas-d1fa-round-1-LEDGER.md");
+    const D1FA_LEDGER: &str = include_str!("../tests/data/qa-ledgers/cas-d1fa-round-1-LEDGER.ledger.txt");
     const D1FA_ISSUES: &str = include_str!("../tests/data/qa-ledgers/cas-d1fa-round-1-issues.json");
 
     /// cas-2849, the real cas-d1fa round 1: its pre-existing section is free

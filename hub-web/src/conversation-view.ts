@@ -572,6 +572,7 @@ export class ConversationView {
         // focus is the place now.
         if (!this.shows(target) || (this.following && this.hiddenAtTail(target))) {
           this.following = false;
+          this.jump.hidden = false;
           this.placePending = false;
           this.place = undefined;
         }
@@ -1548,7 +1549,9 @@ export class ConversationView {
     this.pinPending = true;
     requestAnimationFrame(() => {
       if (this.disposed) return;
-      this.element.scrollTop = this.element.scrollHeight;
+      // cas-c2cb: a reader who moved focus off the tail meanwhile stopped
+      // following it; the frame-late re-pin leaves them where they went.
+      if (this.following) this.element.scrollTop = this.element.scrollHeight;
       requestAnimationFrame(() => { this.pinPending = false; });
     });
   }

@@ -1736,6 +1736,13 @@ main {
   word-break: break-word;
 }
 
+/* cas-b56b: a closed notice's Copy is not laid out at all. Chromium hides a
+   closed <details>' content with content-visibility, which still gives the
+   button a box below the rail's scroll range, where a layout check (and
+   anything else that measures it) finds a "Copy" no one can reach. It
+   appears with the payload when Details opens. */
+.attention-payload:not([open]) .attention-copy { display: none; }
+
 .attention-copy {
   align-self: flex-end;
   /* Keep the outer focus ring inside the Attention tab's scroll boundary. */

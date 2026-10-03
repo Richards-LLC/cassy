@@ -129,6 +129,10 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     // redraw either. Open the notice's Details, rest on its Copy, cross a
     // minute on the page clock: the same element keeps focus, Details stays open.
     const notice = sheet.locator("article.attention-item").first();
+    // cas-b56b: while Details is closed its Copy is not laid out at all, so
+    // no "Copy" box sits below the rail's scroll range for a layout check
+    // (the strict visual inspector) to find. Opening Details brings it back.
+    expect(await notice.locator(".attention-copy").evaluate((node) => node.getBoundingClientRect().height), "a closed notice's Copy has no box").toBe(0);
     await notice.locator("summary").click();
     const payloadBox = await notice.locator("pre").boundingBox();
     const copyBox = await notice.getByRole("button", { name: "Copy" }).boundingBox();

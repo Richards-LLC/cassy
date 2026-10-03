@@ -13,6 +13,11 @@ pub(crate) struct Receipt {
     action: String,
     task_id: Option<String>,
     pub commit: OnceLock<Commit>,
+    /// cas-b1dd: when the request's own terminal mutation committed (a
+    /// task's Closed write, a note append). An intermediate write (a gate
+    /// note, a parked anchor) sets `commit` but never this, so an early
+    /// answer can only ever describe the mutation the caller asked for.
+    pub terminal: OnceLock<std::time::Instant>,
 }
 
 tokio::task_local! { static CURRENT: Arc<Receipt>; }
@@ -24,6 +29,7 @@ impl Receipt {
             action: action.into(),
             task_id: task_id.map(str::to_string),
             commit: OnceLock::new(),
+            terminal: OnceLock::new(),
         })
     }
 }
@@ -57,5 +63,32 @@ pub(crate) fn task_committed(id: &str) {
             description: format!("task `{id}` {} write committed; post-commit work may be incomplete; re-query before retrying", receipt.action),
             notification_id: None,
         });
+    }
+}
+
+/// cas-b1dd: the request's terminal task mutation (close's Closed write, a
+/// note append) committed. Marks the commit too, so a deadline after it
+/// reports COMMITTED, and lets the dispatch answer once post-commit work
+/// overruns its grace instead of holding the response hostage.
+pub(crate) fn task_terminal_committed(id: &str) {
+    task_committed(id);
+    if let Some(receipt) = current()
+        && receipt.tool == "task"
+        && receipt
+            .task_id
+            .as_deref()
+            .is_none_or(|expected| expected == id)
+    {
+        let _ = receipt.terminal.set(std::time::Instant::now());
+    }
+}
+
+impl Receipt {
+    pub(crate) fn action(&self) -> &str {
+        &self.action
+    }
+
+    pub(crate) fn task_id(&self) -> Option<&str> {
+        self.task_id.as_deref()
     }
 }

@@ -9323,6 +9323,11 @@ impl CasCore {
             message: Cow::from(format!("Failed to update: {e}")),
             data: None,
         })?;
+        // cas-b1dd: the Closed write is this request's terminal mutation.
+        // Everything below is post-commit work (indexing, reminders, the
+        // lifecycle outbox, dependents, leases); the dispatch may answer
+        // the caller while it finishes.
+        crate::mcp::tools::service::mutation_receipt::task_terminal_committed(&req.id);
 
         let epic_override_note_pending = deferred_epic_override_note.is_some();
         if let Some(note) = deferred_epic_override_note {

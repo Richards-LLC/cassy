@@ -398,6 +398,25 @@ pub(crate) fn passing_test_receipts(cas_root: &Path, repo: &Path, head: &str) ->
     receipts
 }
 
+// Shared with parked-cache eviction: a cache cannot be evicted while its
+// capped builder owns the lane, even between process inspection and spawn.
+pub(crate) struct LaneLock(File);
+impl Drop for LaneLock {
+    fn drop(&mut self) { let _ = FileExt::unlock(&self.0); }
+}
+pub(crate) fn try_lock_lane(cas_root: &Path, repo: &Path) -> std::io::Result<Option<LaneLock>> {
+    let slots = cas_root.join("worker-check-slots");
+    std::fs::create_dir_all(&slots)?;
+    let key = hex::encode(Sha256::digest(repo.as_os_str().as_encoded_bytes()));
+    let lock = lock_file(&slots.join(format!("lane-{key}.lock")))
+        .map_err(std::io::Error::other)?;
+    match lock.try_lock_exclusive() {
+        Ok(()) => Ok(Some(LaneLock(lock))),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 pub(crate) fn execute(cas_root: &Path, args: &[String]) -> Result<()> {
     execute_at(
         cas_root,
@@ -432,9 +451,9 @@ fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Res
     // One check per lane also prevents concurrent PASS/FAIL receipts at the
     // same commit from overwriting one another.
     let lane_key = hex::encode(Sha256::digest(repo.as_os_str().as_encoded_bytes()));
-    let lane = lock_file(&slots.join(format!("lane-{lane_key}.lock")))?;
-    lane.try_lock_exclusive()
+    let _lane = try_lock_lane(&cas_root, &repo)?
         .context("This worktree already has a worker check; retry later")?;
+    crate::factory_target_cache::parked::resume(&cas_root, &repo)?;
     let receipt = match &test {
         Some(test) => test_receipt_path(&cas_root, &repo, &head, test),
         None => receipt_path(&cas_root, &repo, &head),
@@ -470,6 +489,11 @@ fn execute_at(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path) -> Res
     // OS locks close the snapshot-to-spawn race, even when the soft guard's
     // environment override is set. No force/disable option bypasses the cap.
     let slot = acquire_slot(&slots, config.max_concurrent_builders)?;
+    // A parked target may contain proof logs but no debug artifacts. Seed only
+    // missing children from the published immutable baseline under the lane lock.
+    if let Err(error) = crate::ui::factory::app::seed_worker_target_from_baseline(&cas_root, &repo) {
+        tracing::warn!(%error, "worker target re-seed skipped; Cargo will rebuild privately");
+    }
     let count_file = slots.join(format!("count-{lane_key}"));
     let mut command = if test.is_some() {
         // Embed the shared zero-test guard so projects need no cas-src scripts.

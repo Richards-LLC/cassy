@@ -19,6 +19,10 @@ use walkdir::WalkDir;
 
 use crate::config::FactoryConfig;
 
+pub(crate) mod parked;
+mod lane;
+pub use lane::LanePreviewRecord;
+
 const QUARANTINE_PREFIX: &str = ".cas-target-gc-";
 const MANAGED_BRANCH_PREFIXES: [&str; 2] = ["epic/", "release/"];
 const MANAGED_WORKTREE_PREFIXES: [&str; 2] = ["epic-", "release-"];
@@ -106,6 +110,8 @@ pub struct TargetCacheReport {
     pub dry_run: bool,
     pub remediation: String,
     pub caches: Vec<TargetCacheRecord>,
+    #[serde(default)]
+    pub lane_previews: Vec<LanePreviewRecord>,
 }
 
 impl TargetCacheReport {
@@ -234,11 +240,14 @@ pub fn inspect(
 
     plan_records(&mut records, &capacity, policy);
     let candidate_bytes = records.iter().map(|record| record.bytes).sum();
+    let lane_previews = lane::inspect(cas_root, policy, live_worktree_roots);
     let selected_bytes = records
         .iter()
         .filter(|record| record.disposition == CacheDisposition::Selected)
         .map(|record| record.bytes)
-        .sum();
+        .sum::<u64>()
+        .saturating_add(lane_previews.iter().filter(|preview| preview.disposition == CacheDisposition::Selected)
+            .map(|preview| preview.bytes).sum::<u64>());
     Ok(TargetCacheReport {
         schema_version: 1,
         filesystem: capacity,
@@ -248,6 +257,7 @@ pub fn inspect(
         dry_run,
         remediation: "Review gc_report, then run gc_cleanup force=true dry_run=false; Cassy revalidates ownership, liveness, recency, and path containment immediately before each rename.".to_string(),
         caches: records,
+        lane_previews,
     })
 }
 
@@ -371,6 +381,13 @@ pub fn cleanup_selected(
     }
     // cas-cef2: File close alone cannot release a flock inherited by a
     // concurrently forked child; make the operation boundary explicit.
+    let previously_reclaimed = report.lane_previews.iter()
+        .filter(|preview| preview.disposition == CacheDisposition::Reclaimed)
+        .map(|preview| preview.bytes).sum::<u64>();
+    lane::cleanup(cas_root, &mut report.lane_previews, policy, live_worktree_roots);
+    report.reclaimed_bytes = report.reclaimed_bytes.saturating_add(report.lane_previews.iter()
+        .filter(|preview| preview.disposition == CacheDisposition::Reclaimed)
+        .map(|preview| preview.bytes).sum::<u64>().saturating_sub(previously_reclaimed));
     FileExt::unlock(&lock)?;
     Ok(())
 }
@@ -454,7 +471,10 @@ fn discover_caches(
                 .iter()
                 .any(|prefix| branch.starts_with(prefix))
         }) || managed_worktree_path(&worktree.path, cas_root)
+            || lane::is_preview_path(cas_root, &worktree.path)
     }) {
+        // Lane targets are reportable even without provenance, but their
+        // checkout lifecycle belongs to the independently locked preview GC.
         let ownership = if managed_worktree_path(&worktree.path, cas_root) {
             CacheOwnership::Durable
         } else {
@@ -780,6 +800,47 @@ fn scan_cache(worktree: &Path, path: &Path, interrupted_cleanup: bool) -> io::Re
 }
 
 fn live_process_uses(worktree: &Path, cache: &Path) -> bool {
+    process_uses(worktree, cache, false)
+}
+
+fn output_in_use(cache: &Path) -> bool {
+    process_uses(cache, cache, true)
+}
+
+#[cfg(target_os = "macos")]
+fn process_uses(worktree: &Path, cache: &Path, ignore_self: bool) -> bool {
+    // macOS has no /proc. Field output is NUL-delimited, so paths with spaces
+    // or newlines cannot evade an open-output check. Unknown evidence is live.
+    let Ok(output) = std::process::Command::new("/usr/sbin/lsof")
+        .args(["-nP", "-F0pn"]).output() else { return true; };
+    if !output.status.success() || !output.stderr.is_empty() { return true; }
+    lsof_uses(&output.stdout, worktree, cache, ignore_self)
+}
+
+#[cfg(all(unix, any(target_os = "macos", test)))]
+fn lsof_uses(output: &[u8], worktree: &Path, cache: &Path, ignore_self: bool) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let mut pid = None;
+    for field in output.split(|byte| *byte == 0) {
+        let field = field.strip_prefix(b"\n").unwrap_or(field);
+        match field.first() {
+            Some(b'p') => {
+                pid = std::str::from_utf8(&field[1..]).ok().and_then(|value| value.parse::<u32>().ok());
+                if pid.is_none() { return true; }
+            }
+            Some(b'n') if !(ignore_self && pid == Some(std::process::id())) => {
+                let path = Path::new(std::ffi::OsStr::from_bytes(&field[1..]));
+                if path.starts_with(worktree) || path.starts_with(cache) { return true; }
+            }
+            _ => {}
+        }
+    }
+    // Empty/malformed output must never authorize deletion.
+    pid.is_none()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn process_uses(worktree: &Path, cache: &Path, ignore_self: bool) -> bool {
     let Ok(processes) = fs::read_dir("/proc") else {
         // On platforms without a process table, fail closed: target-cache GC
         // remains report-only instead of guessing that a cache is idle.
@@ -793,6 +854,7 @@ fn live_process_uses(worktree: &Path, cache: &Path) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_digit())
     }) {
+        if ignore_self && process.file_name() == std::process::id().to_string().as_str() { continue; }
         let proc_path = process.path();
         if fs::read_link(proc_path.join("cwd"))
             .ok()
@@ -864,7 +926,7 @@ fn filesystem_capacity(_path: &Path) -> io::Result<(u64, u64)> {
 mod tests {
     use super::*;
 
-    fn git(repo: &Path, args: &[&str]) {
+    pub(super) fn git(repo: &Path, args: &[&str]) {
         let output = std::process::Command::new("git")
             .args(args)
             .current_dir(repo)
@@ -900,6 +962,19 @@ mod tests {
             git_branch: None,
             git_commit: None,
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lsof_output_handles_paths_process_identity_and_unknown_evidence_cas_29b0() {
+        let cache = Path::new("/repo with spaces/target/debug");
+        assert!(lsof_uses(b"p42\0\nn/repo with spaces/target/debug/output\0", cache, cache, true));
+        assert!(!lsof_uses(b"p42\0\nn/repo with spaces/target/debugger/unrelated\0", cache, cache, true));
+        let own = format!("p{}\0\nn/repo with spaces/target/debug/.cargo-lock\0", std::process::id());
+        assert!(!lsof_uses(own.as_bytes(), cache, cache, true));
+        assert!(lsof_uses(own.as_bytes(), cache, cache, false));
+        assert!(lsof_uses(b"", cache, cache, true));
+        assert!(lsof_uses(b"pinvalid\0", cache, cache, true));
     }
 
     #[test]
@@ -1147,7 +1222,7 @@ mod tests {
             true,
         )
         .unwrap();
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             assert!(report.caches.iter().any(|cache| {
                 cache.worktree == epic.canonicalize().unwrap()
@@ -1163,9 +1238,9 @@ mod tests {
             }));
             assert_eq!(report.selected_bytes, 7);
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
-            // Without /proc liveness evidence, GC deliberately stays report-only.
+            // Without process liveness evidence, GC stays report-only.
             assert!(
                 report
                     .caches

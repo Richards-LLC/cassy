@@ -904,6 +904,37 @@ async function runStep(page, context, step, timeout) {
 }
 
 /**
+ * Settle the page before it is measured. A fixed wait captures colours
+ * mid-transition, so contrast findings vary between runs. Every finite CSS
+ * transition and animation (and any Web Animation) is finished at its end
+ * state; an infinite one is paused at its start so every run reads the same
+ * frame. Repeats until no finite animation is left, then waits two frames so
+ * the settled styles are painted.
+ */
+async function settlePage(page) {
+  await page.evaluate(async () => {
+    const frame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
+    for (let round = 0; round < 10; round += 1) {
+      await frame();
+      let running = 0;
+      for (const animation of document.getAnimations()) {
+        if (animation.playState === 'finished') continue;
+        try {
+          animation.finish();
+          running += 1;
+        } catch {
+          if (animation.playState !== 'paused') animation.pause();
+          animation.currentTime = 0;
+        }
+      }
+      if (!running) break;
+    }
+    await frame();
+    await frame();
+  });
+}
+
+/**
  * Render and inspect one or more HTML URLs.
  * With `journey` (a journey file path or object, see loadJourney), its
  * declared states are rendered and inspected after the resting pages.
@@ -949,7 +980,7 @@ async function inspectVisualQa(options) {
           const page = await context.newPage();
           try {
             await page.goto(url, { waitUntil: 'load' });
-            await page.waitForTimeout(50);
+            await settlePage(page);
             const recordFinding = (finding, informational = false) => {
               const enriched = { ...finding, url: source, scheme, viewport };
               const key = [informational ? 'info' : 'finding', 'rest', enriched.type, enriched.selector || enriched.elementPath, enriched.otherElementPath || '', scheme, viewport.name].join('|');
@@ -1062,7 +1093,7 @@ async function inspectVisualQa(options) {
                 }
                 entry.ms = Date.now() - started;
               }
-              await page.waitForTimeout(50);
+              await settlePage(page);
               const inspection = await page.evaluate(PAGE_INSPECTION, { colorScheme: scheme, contrastLimit: CONTRAST_LIMIT, largeTextLimit: LARGE_TEXT_LIMIT, boxTolerance: BOX_TOLERANCE, allowlistEntries: allowlist });
               for (const invalid of inspection.invalidAllowlistSelectors) recordFinding(invalid, true);
               for (const finding of inspection.findings) recordFinding(finding);

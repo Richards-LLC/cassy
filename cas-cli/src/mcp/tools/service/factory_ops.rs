@@ -2919,6 +2919,9 @@ impl CasService {
             let limit = req.count.unwrap_or(0) as usize;
             known_workers
                 .iter()
+                // Already-retired rows are explicit/all cleanup targets, but
+                // must not consume a request to stop N nonterminal workers.
+                .filter(|worker| limit == 0 || worker.status != AgentStatus::Shutdown)
                 .take(if limit == 0 {
                     known_workers.len()
                 } else {
@@ -11607,8 +11610,9 @@ mod tests {
             worker.factory_session = Some("shutdown-c653".into());
             worker.status = status;
             worker.cc_session_id = Some(format!("session-{name}"));
-            worker.pid = Some(u32::MAX);
+            worker.pid = Some(i32::MAX as u32);
             worker.last_heartbeat = chrono::Utc::now() - chrono::Duration::minutes(10);
+            assert!(!agent_process_is_alive(&worker), "fixture PID must be dead");
             agents.register(&worker).expect("register dead worker");
             for target in [
                 name,
@@ -11681,7 +11685,7 @@ mod tests {
             assert_eq!(report.stage, cas_store::DeliveryStage::Suppressed);
             assert_eq!(
                 report.pending_reason,
-                Some(cas_store::PendingReason::SupersededStale)
+                Some(cas_store::PendingReason::ShutdownCancelled)
             );
             assert!(
                 report
@@ -11721,7 +11725,7 @@ mod tests {
         let mut worker = worker_named("dead-guard-worker", "dead-guard-id");
         worker.factory_session = Some("shutdown-guards".into());
         worker.status = AgentStatus::Stale;
-        worker.pid = Some(u32::MAX);
+        worker.pid = Some(i32::MAX as u32);
         agents.register(&worker).unwrap();
         let mut foreign = worker_named("foreign-worker", "foreign-id");
         foreign.factory_session = Some("foreign-session".into());
@@ -11812,7 +11816,7 @@ mod tests {
         let mut dead = worker_named("recycled-worker", "dead-generation");
         dead.factory_session = live.factory_session.clone();
         dead.status = AgentStatus::Shutdown;
-        dead.pid = Some(u32::MAX);
+        dead.pid = Some(i32::MAX as u32);
         // Make the dead row win the display dedupe. Retirement must inspect
         // all registrations, including the older still-running successor.
         dead.last_heartbeat = chrono::Utc::now() + chrono::Duration::seconds(1);

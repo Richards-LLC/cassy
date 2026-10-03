@@ -141,9 +141,12 @@ only if none is supervision-live (fresh Active/Idle heartbeat or live process).
 Dead registrations need no pane. Outstanding direct notifications to their name,
 agent IDs and harness session IDs are cancelled with a shutdown reason; shared
 broadcasts, other sessions and recipient-read/acknowledged messages remain intact.
-Cancellation preserves prior transport evidence and never fabricates an ack.
+Cancellation stamps the typed `shutdown_cancelled` reason, preserves prior
+transport evidence and never fabricates an ack.
 This explicit withdrawal can move a transported-but-unread row to `suppressed`;
-the generic monotonic delivery-stage API keeps its existing transition rules.
+the generic monotonic delivery-stage API keeps its existing transition rules
+and late callbacks cannot revive cancelled mail. Positive stop-N requests skip
+already-shutdown registrations; explicit and all-worker requests can clean them.
 The daemon uses the same retirement path if a pane disappeared before consuming
 the queued request. This path preserves worktrees and uses existing orphan
 recovery for any held tasks; live worker termination stays with the daemon.

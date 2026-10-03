@@ -940,6 +940,10 @@ pub enum PendingReason {
     /// decision someone made about a payload; it must not share a name with
     /// noise reduction.
     SupersededStale,
+    /// Explicit worker shutdown withdrew outstanding direct mail, including
+    /// transported-but-unread rows. Prior transport receipts remain forensic
+    /// evidence; cancellation never claims recipient acknowledgement.
+    ShutdownCancelled,
     /// Terminal non-delivery: unknown/stale target abandoned.
     AbandonedUnknownTarget,
     /// Terminal non-delivery of a supervisor lifecycle WAKE relay that was
@@ -974,6 +978,7 @@ impl PendingReason {
             Self::DroppedDeadSource => "dropped_dead_source",
             Self::SuppressedIdle => "suppressed_idle",
             Self::SupersededStale => "superseded_stale",
+            Self::ShutdownCancelled => "shutdown_cancelled",
             Self::AbandonedUnknownTarget => "abandoned_unknown_target",
             Self::UndeliveredLifecycleRelay => "undelivered_lifecycle_relay",
             Self::PartialBroadcast => "partial_broadcast",
@@ -993,6 +998,7 @@ impl PendingReason {
             "dropped_dead_source" => Some(Self::DroppedDeadSource),
             "suppressed_idle" => Some(Self::SuppressedIdle),
             "superseded_stale" => Some(Self::SupersededStale),
+            "shutdown_cancelled" => Some(Self::ShutdownCancelled),
             "abandoned_unknown_target" => Some(Self::AbandonedUnknownTarget),
             "undelivered_lifecycle_relay" => Some(Self::UndeliveredLifecycleRelay),
             "partial_broadcast" => Some(Self::PartialBroadcast),
@@ -1006,7 +1012,9 @@ impl PendingReason {
         match self {
             Self::GatedNotReady | Self::TargetUnavailable => DeliveryStage::Gated,
             Self::DroppedDeadSource => DeliveryStage::Dropped,
-            Self::SuppressedIdle | Self::SupersededStale => DeliveryStage::Suppressed,
+            Self::SuppressedIdle | Self::SupersededStale | Self::ShutdownCancelled => {
+                DeliveryStage::Suppressed
+            }
             Self::AbandonedUnknownTarget
             | Self::UndeliveredLifecycleRelay
             | Self::UndeliveredAfterWakeDeclines => {
@@ -1059,6 +1067,7 @@ impl PendingReason {
             Self::DroppedDeadSource
             | Self::SuppressedIdle
             | Self::SupersededStale
+            | Self::ShutdownCancelled
             | Self::AbandonedUnknownTarget
             | Self::UndeliveredLifecycleRelay
             | Self::UndeliveredAfterWakeDeclines
@@ -2766,6 +2775,18 @@ impl SqlitePromptQueueStore {
         opts: AtomicStampOpts<'_>,
     ) -> Result<()> {
         let current = Self::read_highest_stage(tx, prompt_id)?;
+        if current == DeliveryStage::Suppressed && proposed != DeliveryStage::Confirmed {
+            let reason: Option<String> = tx.query_row(
+                "SELECT last_pending_reason FROM prompt_queue WHERE id = ?",
+                params![prompt_id], |row| row.get(0),
+            )?;
+            if reason.as_deref() == Some(PendingReason::ShutdownCancelled.as_str()) {
+                // A late in-flight delivery/retry cannot revive explicitly
+                // cancelled mail or erase its reason. A real ack may still
+                // advance to Confirmed through the existing ack API.
+                return Ok(());
+            }
+        }
         let next = Self::resolve_stage_transition(current, proposed, prompt_id)?;
         let now = Utc::now().to_rfc3339();
 
@@ -4446,6 +4467,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                  FROM prompt_queue
                  WHERE acked_at IS NULL
                    AND transport_delivered_at IS NOT NULL
+                   AND COALESCE(highest_stage, 'enqueued') NOT IN ('dropped', 'suppressed', 'abandoned')
                    AND target IN ({})
                    AND source IN ({})
                    {session_clause}",
@@ -4738,7 +4760,12 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 "prompt_queue id={id}: invariant violated: stage=delivered without transport_delivered_at"
             )));
         }
-        if stage.is_terminal_non_delivery() && delivered_at.is_some() {
+        // Shutdown cancellation is an explicit withdrawal after handoff.
+        // Only its typed reason may retain prior transport evidence while
+        // reporting Suppressed; ordinary non-delivery invariants stay strict.
+        let shutdown_cancelled = stage == DeliveryStage::Suppressed
+            && stored_reason.as_deref() == Some(PendingReason::ShutdownCancelled.as_str());
+        if stage.is_terminal_non_delivery() && delivered_at.is_some() && !shutdown_cancelled {
             return Err(crate::error::StoreError::Parse(format!(
                 "prompt_queue id={id}: invariant violated: stage={stage} with transport_delivered_at"
             )));
@@ -5356,7 +5383,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                          processed_at = COALESCE(processed_at, ?1),
                          last_pending_reason = ?2, last_pending_detail = ?3
                      WHERE id = ?4",
-                    params![now, PendingReason::SupersededStale.as_str(), detail, id],
+                    params![now, PendingReason::ShutdownCancelled.as_str(), detail, id],
                 )?;
             }
             tx.commit()?;
@@ -6169,11 +6196,37 @@ mod tests {
         for id in [unread, legacy, old] {
             let report = store.message_delivery_report(id).unwrap().unwrap();
             assert_eq!(report.stage, DeliveryStage::Suppressed);
-            assert_eq!(report.pending_reason, Some(PendingReason::SupersededStale));
+            assert_eq!(
+                report.pending_reason,
+                Some(PendingReason::ShutdownCancelled)
+            );
             assert_eq!(report.pending_detail.as_deref(), Some(detail));
             assert!(store.queued_prompt(id).unwrap().unwrap().acked_at.is_none());
         }
+        // Late transport/retry callbacks and a new turn after name reuse must
+        // neither revive cancellation nor replace its forensic reason.
+        store.mark_transport_delivered(unread).unwrap();
+        store
+            .record_pending_reason(
+                unread,
+                PendingReason::AdapterRetryable,
+                Some("late callback"),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .ack_delivered_for_recipient(
+                    &["worker"],
+                    &["sup"],
+                    Some(session),
+                    Utc::now() + chrono::Duration::seconds(1)
+                )
+                .unwrap(),
+            0
+        );
         let after = store.message_delivery_report(unread).unwrap().unwrap();
+        assert_eq!(after.stage, DeliveryStage::Suppressed);
+        assert_eq!(after.pending_reason, Some(PendingReason::ShutdownCancelled));
         assert_eq!(after.delivered_at, transport.delivered_at);
         assert_eq!(
             after.recipient_transport_at,
@@ -6234,6 +6287,18 @@ mod tests {
                 .unwrap()
                 .processed_at
                 .is_none()
+        );
+        let transported = store
+            .enqueue("sup", "different-worker", "transport")
+            .unwrap();
+        store.mark_transport_delivered(transported).unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute("UPDATE prompt_queue SET highest_stage = 'suppressed', last_pending_reason = 'superseded_stale' WHERE id = ?", params![transported]).unwrap();
+        }
+        assert!(
+            store.message_delivery_report(transported).is_err(),
+            "ordinary suppressed rows with delivery evidence stay invalid"
         );
     }
 

@@ -24,6 +24,7 @@ export const FIXTURE_NAMES = [
   "transcript",
   "attention-0",
   "attention-12",
+  "attention-notice-details",
   "drawer-attention-open",
   "operator-thread",
   "connection-failed-retry",

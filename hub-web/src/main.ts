@@ -3,7 +3,7 @@ import { CANT_REACH_RETRYING, machineFooterMarkup, orderPairedMachines, pairedMa
 import { retainPendingSessions, visibleCatalog } from "./worker-visibility";
 import "./styles.css";
 import { activityTime, ConversationList, filterConversationRows, groupConversationRows, machineActivityAt, plainActivity, type ConversationRow } from "./conversation-list";
-import { controlCommandCopy, sessionJumpCommandMarkup } from "./palette-commands";
+import { controlCommandCopy, paletteEnterTarget, sessionJumpCommandMarkup } from "./palette-commands";
 import { applyHistoryCursor, ConversationHistory, supervisorWorking } from "./conversation-history";
 import { gridPlaceholder, threadBeforePanes } from "./early-thread";
 import { arrivalStore, draftStore, pendingSendStore, purgeConversations, type Arrivals, type Draft, type PendingSend } from "./conversation-store";
@@ -3515,8 +3515,12 @@ function render(captureDraft = true): void {
     controller: lease?.controller_label ?? undefined,
     disabledReason: controlActionDisabled ? takeControlReason ?? "Control unavailable" : undefined,
   });
-  const sessionCommands = [...machines.values()].flatMap((machine) => visibleSessions(machine.id).map((session) =>
-    sessionJumpCommandMarkup(machine, session, sessionSummaries.get(sessionKey(machine.id, session.name))))).join("");
+  const sessionCommands = [...machines.values()].flatMap((machine) => visibleSessions(machine.id).map((session) => {
+    // cas-786a (journey F30): the open conversation and those that need the
+    // operator are marked, so palette Enter moves on to the next one that does.
+    const current = machine.id === selectedMachineId && session.name === selectedSession;
+    return sessionJumpCommandMarkup(machine, session, sessionSummaries.get(sessionKey(machine.id, session.name)), { current, needsYou: conversationNeedsYou(machine.id, session.name) });
+  })).join("");
   const backTarget = previousSelection(selection);
   const backText = backLabel(backTarget, (machineId) => machines.get(machineId)?.label);
   // The session name is the switch: on a phone it is the only always-visible
@@ -3922,6 +3926,23 @@ function clearConversationSearch(): void {
  * while there is a query. It is marked for the eye (data-enter-target) and
  * named to assistive tech as the field's active descendant.
  */
+/** Re-picks the palette's Enter target from the live list; set while a palette is bound (cas-786a). */
+let refreshPaletteEnterTarget: (() => void) | undefined;
+
+/**
+ * The conversation's list row shows an unread count or the waiting dot
+ * (cas-786a). The rendered row is read, not a cached row model: an unread
+ * reply updates the row in place, and the palette must agree with what the
+ * list shows.
+ */
+function conversationNeedsYou(machineId: string, session: string): boolean {
+  const key = sessionKey(machineId, session);
+  const row = [...document.querySelectorAll<HTMLElement>(".conversation-row")].find((node) => node.dataset.threadKey === key);
+  if (row) return row.dataset.waiting === "true" || Number(row.dataset.unread ?? 0) > 0;
+  const model = conversationRows.find((candidate) => candidate.key === key);
+  return Boolean(model && (model.attention > 0 || (model.unread ?? 0) > 0));
+}
+
 function markConversationEnterTarget(container: HTMLElement): HTMLButtonElement | undefined {
   const search = document.querySelector<HTMLInputElement>("#conversation-search");
   const target = conversationSearchQuery.trim() ? container.querySelector<HTMLButtonElement>(".conversation-row") ?? undefined : undefined;
@@ -4018,6 +4039,8 @@ function renderConversationList(): void {
   }, endConversationSession);
   keepConversationListPlace(container, shown.find((row) => row.selected)?.key);
   markConversationEnterTarget(container);
+  // cas-786a: an unread reply or a new wait changes what palette Enter picks.
+  refreshPaletteEnterTarget?.();
   const empty = document.querySelector<HTMLElement>("#conversation-empty");
   if (empty) {
     empty.hidden = shown.length > 0;
@@ -4216,7 +4239,9 @@ function openSessionPicker(): void {
   // show every session, so the two disagree (cas-6f39e). A fresh open starts
   // from an empty filter and the full list, as the command palette does.
   const query = document.querySelector<HTMLInputElement>("#session-picker-query");
-  if (query && !wasOpen && query.value) {
+  // Every fresh open also re-picks what Enter runs (cas-786a): a conversation
+  // that started waiting since the dialog was built leads it.
+  if (query && !wasOpen) {
     query.value = "";
     query.dispatchEvent(new Event("input"));
   }
@@ -4787,13 +4812,22 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
     }
   };
   /**
-   * The command Enter in the filter runs (cas-537f): the first one on screen.
-   * It is marked for the eye and named as the filter's active descendant, so
-   * "light" visibly lands on "Jump to lighthouse", not "Appearance · Light".
+   * The command Enter in the filter runs (cas-537f): the first one on screen,
+   * or with no filter the next conversation that needs the operator, never
+   * the one already open (cas-786a; see paletteEnterTarget). It is marked for
+   * the eye and named as the filter's active descendant, so "light" visibly
+   * lands on "Jump to lighthouse", not "Appearance · Light".
    */
   const markPaletteEnterTarget = (): HTMLButtonElement | undefined => {
     const commands = [...palette.querySelectorAll<HTMLButtonElement>(".palette-command")];
-    const first = commands.find((command) => paletteRowShown(command) && !command.disabled);
+    // An unread reply or a new wait does not rebuild the shell, so the palette
+    // re-reads them from the live list each time it picks (cas-786a).
+    for (const command of commands) {
+      const { paletteMachine, paletteSession } = command.dataset;
+      if (paletteMachine === undefined || paletteSession === undefined) continue;
+      if (conversationNeedsYou(paletteMachine, paletteSession)) command.dataset.paletteNeedsYou = "true"; else delete command.dataset.paletteNeedsYou;
+    }
+    const first = paletteEnterTarget(commands.filter((command) => paletteRowShown(command) && !command.disabled), paletteQuery.value);
     commands.forEach((command, index) => {
       if (!command.id) command.id = `palette-command-${index}`;
       if (command === first) command.dataset.enterTarget = "true"; else delete command.dataset.enterTarget;
@@ -4802,6 +4836,7 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
     return first;
   };
   markPaletteEnterTarget();
+  refreshPaletteEnterTarget = () => { if (palette.isConnected) markPaletteEnterTarget(); };
   if (paletteAdvanced) paletteAdvanced.ontoggle = () => { if (!paletteAdvanced.open) delete paletteAdvanced.dataset.autoOpened; markPaletteEnterTarget(); };
   paletteQuery.onkeydown = (event) => {
     if (event.key !== "ArrowDown" && event.key !== "Enter") return;

@@ -3970,8 +3970,8 @@ async fn operations_request_merge_reuses_message_send() {
             "expected": {},
         }))
         .await;
-    assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{body}");
-    assert_eq!(body["error"], "not_implemented");
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["required_scope"], "factory:operate", "assign_task needs factory:operate");
 }
 
 /// A retried `op_id` returns the first outcome and sends nothing twice.
@@ -4164,6 +4164,17 @@ async fn operations_spawn_uses_factory_spawn_workers_queue() {
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(fixture.spawn_queue().len(), 1, "a refused spawn queues nothing");
+
+    // assign_task arrives with S3: authorized, then a JSON 501.
+    let (status, body) = fixture
+        .operate(serde_json::json!({
+            "op_id": "9b080000-0000-4000-8000-000000000003",
+            "op": {"kind": "assign_task", "task_id": OPS_TASK, "assignee": null},
+            "expected": {},
+        }))
+        .await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{body}");
+    assert_eq!(body["error"], "not_implemented");
 }
 
 /// O6 and O7 are destructive: factory:operate is refused with the scope that

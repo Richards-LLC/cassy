@@ -351,6 +351,7 @@ pub(crate) fn handle_session_routes(
                 tasks_ready: data.ready_tasks.into_iter().map(to_task).collect(),
                 tasks_in_progress: data.in_progress_tasks.into_iter().map(to_task).collect(),
                 epics: data.epic_tasks.into_iter().map(to_task).collect(),
+                focused_epic: crate::ops::fleet::pinned_epic(&session.name),
             };
 
             let bytes = serde_json::to_vec_pretty(&body).unwrap_or_else(|_| b"{}".to_vec());

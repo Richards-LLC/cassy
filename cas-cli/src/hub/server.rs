@@ -856,7 +856,8 @@ struct OperationRequest {
     expected: serde_json::Value,
 }
 
-/// Operation kinds the wire contract names for a later slice (S3).
+/// Operation kinds the wire contract names for a later slice (S3); each
+/// needs `factory:operate`.
 const LATER_FLEET_OPERATIONS: &[&str] = &["assign_task"];
 
 enum ParsedOperation {
@@ -967,11 +968,22 @@ async fn session_operation<R: SessionReadModel>(
     let operation = match parse_fleet_operation(request.op) {
         ParsedOperation::Ready(operation) => operation,
         ParsedOperation::NotYet(kind) => {
-            // Authenticated first, so the reply discloses nothing to a stranger.
-            if let Err(error) =
-                authorize(&state, HubAction::Mutation, Scope::SessionRead, &headers, "POST", &uri)
-            {
-                return with_cors(unauthorized_for(&error), &headers);
+            // Authorized with the scope the operation will need, so a device
+            // learns what it lacks now rather than when the slice lands.
+            let scope = Scope::FactoryOperate;
+            match authorize(&state, HubAction::Mutation, scope, &headers, "POST", &uri) {
+                Ok(_) => {}
+                Err(error) if error.to_string() == "scope denied" => {
+                    return with_cors(
+                        (
+                            StatusCode::FORBIDDEN,
+                            Json(serde_json::json!({"error":"scope_denied", "required_scope":scope.as_str()})),
+                        )
+                            .into_response(),
+                        &headers,
+                    );
+                }
+                Err(error) => return with_cors(unauthorized_for(&error), &headers),
             }
             return with_cors(
                 launch_error(

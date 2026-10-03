@@ -186,6 +186,9 @@ pub(crate) struct StatusJson {
     pub(crate) tasks_ready: Vec<TaskSummaryJson>,
     pub(crate) tasks_in_progress: Vec<TaskSummaryJson>,
     pub(crate) epics: Vec<TaskSummaryJson>,
+    /// The epic this session is pinned to, `null` when unpinned (cas-9b08):
+    /// what a Commander `focus_epic` operation names as its precondition.
+    pub(crate) focused_epic: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
